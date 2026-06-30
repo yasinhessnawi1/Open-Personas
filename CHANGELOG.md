@@ -11,6 +11,24 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Per-Request Scoping for the Builtin Filesystem MCP Server (2026-06-30)
+
+> Closes the last cross-context file-visibility leak. The opt-in builtin `filesystem` MCP server
+> runs as a separate subprocess, so it could not use the per-request `ContextVar` the in-process
+> `file_read`/`file_write` tools were scoped with — it still read the process-wide
+> `tools_sandbox_root`. It is now scoped to the request's **owner+persona**
+> (`<workspace_root>/<owner>/<persona>`, identical to the in-process tools + `code_execution`):
+> the supervisor spawns **one filesystem subprocess per (owner, persona)** and threads the
+> pre-resolved scoped root in at spawn over a dedicated `PERSONA_FILESYSTEM_SCOPE_ROOT` env var.
+> No scope ⇒ the child **fails closed** (serve-and-deny) — it never falls back to the shared root.
+> The scope is computed server-side from the same source of truth as the in-process tools (so the
+> two can never disagree), and bound for the request at loop-build time. The path-traversal guard,
+> `O_NOFOLLOW` opener, and structured-error envelope are reused unchanged (one fail-closed contract,
+> not two). The stateless builtins (`time`/`calculator`/`weather`) are unaffected — they stay
+> process-wide singletons. Off-process behaviour only; no public API or operator-config surface
+> changes. Proven with real-subprocess integration tests (cross-owner + single-owner-multi-persona
+> isolation, distinct-child-per-scope + reaping, end-to-end serve-and-deny).
+
 ### Persona MCP Self-Extension — the setup form (Spec N4 Group D, 2026-06-30)
 
 > The user-facing half of the credential-isolation mechanism, completing N4. A

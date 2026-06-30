@@ -131,6 +131,45 @@ def _parse(frames: list[bytes]) -> list[tuple[str, dict[str, Any]]]:
 
 
 @pytest.mark.asyncio
+async def test_start_chat_turn_binds_scope_during_build_and_resets_after(engine: Engine) -> None:
+    # Spec P4-D-3 caution #1: the early sandbox-context bind around the loop build
+    # is tightly scoped — present DURING the build (so the filesystem MCP child can
+    # be scoped at spawn) and reset AFTER (no leak into the rest of the task / next
+    # request). The loop_builder records the context it observed at build time.
+    from persona_api.sandbox import get_sandbox_request_context
+
+    observed: dict[str, object] = {}
+
+    async def _recording_builder(_persona_id: str) -> object:
+        ctx = get_sandbox_request_context()
+        observed["owner_id"] = ctx.owner_id if ctx else None
+        observed["conversation_id"] = ctx.conversation_id if ctx else None
+        return _ScriptedLoop(["Hi"])
+
+    # No context bound before the call.
+    assert get_sandbox_request_context() is None
+
+    sink = MessagesTurnSink(engine)
+    registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
+    handle = await chat_service.start_chat_turn(
+        rls_engine=engine,
+        sink=sink,
+        registry=registry,
+        loop_builder=_recording_builder,  # type: ignore[arg-type]
+        owner_id=_OWNER,
+        conversation_id=_CONV,
+        user_message="hello",
+        channel=None,
+    )
+    # Bound to THIS request during the build…
+    assert observed == {"owner_id": _OWNER, "conversation_id": _CONV}
+    # …and reset immediately after (no leak).
+    assert get_sandbox_request_context() is None
+    await handle.task
+    assert get_sandbox_request_context() is None
+
+
+@pytest.mark.asyncio
 async def test_start_persists_user_and_in_progress_assistant_immediately(engine: Engine) -> None:
     # The registry must share the sink that opened the turn, so checkpoint/finalize
     # target the same row. Build them together.

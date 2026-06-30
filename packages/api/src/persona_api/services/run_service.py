@@ -72,7 +72,24 @@ async def start_run(
                 started_at=datetime.now(UTC),
             )
         )
-    loop = await loop_builder(persona_id)
+    # Spec P4-D-3 — bind the run's sandbox context for the loop build only, so the
+    # builtin ``filesystem`` MCP subprocess is scoped at SPAWN from the same source
+    # as the in-process file tools. The run uses ``run_id`` as the conversation_id
+    # slot, EXACTLY as run_worker re-binds it for execution (owner_id:run_id), so
+    # spawn-time and turn-time scope agree. Tight set→try→reset; no leak past build.
+    from persona_api.sandbox import (  # noqa: PLC0415
+        SandboxRequestContext,
+        reset_sandbox_request_context,
+        set_sandbox_request_context,
+    )
+
+    _scope_token = set_sandbox_request_context(
+        SandboxRequestContext(owner_id=owner_id, conversation_id=run_id)
+    )
+    try:
+        loop = await loop_builder(persona_id)
+    finally:
+        reset_sandbox_request_context(_scope_token)
     registry.start(run_id=run_id, owner_id=owner_id, loop=loop, task_text=task)
     return run_id
 

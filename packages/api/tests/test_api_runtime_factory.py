@@ -139,3 +139,54 @@ def test_file_sandbox_provider_absent_without_workspace_root() -> None:
     # falls back to the (single-tenant) config.tools_sandbox_root.
     factory = _factory()
     assert factory._build_file_sandbox_root_provider("personaA") is None
+
+
+# --- Spec P4: the filesystem MCP subprocess scope root --------------------------
+# `_resolve_filesystem_scope_root` is the value threaded into the builtin
+# `filesystem` MCP child at spawn. It MUST be the same source of truth as the
+# in-process file tools (it delegates to `_build_file_sandbox_root_provider`), so
+# the subprocess and the in-process tools can never disagree for a request.
+
+
+def test_filesystem_scope_root_matches_in_process_provider_when_bound(tmp_path: Path) -> None:
+    # Caution #2 (spawn-time == turn-time scope): under a bound request context the
+    # subprocess scope root is byte-identical to what the in-process file tools
+    # resolve — same owner/persona root, no divergence.
+    from persona_api.sandbox import (
+        SandboxRequestContext,
+        reset_sandbox_request_context,
+        set_sandbox_request_context,
+    )
+
+    factory = _scoped_factory(tmp_path)
+    provider = factory._build_file_sandbox_root_provider("personaA")
+    assert provider is not None
+
+    token = set_sandbox_request_context(
+        SandboxRequestContext(owner_id="ownerA", conversation_id="conv1")
+    )
+    try:
+        in_process_root = provider()
+        subprocess_root = factory._resolve_filesystem_scope_root("personaA")
+        assert subprocess_root == in_process_root == tmp_path / "ownerA" / "personaA"
+    finally:
+        reset_sandbox_request_context(token)
+
+
+def test_filesystem_scope_root_none_when_hosted_but_unbound(tmp_path: Path) -> None:
+    # Caution #3 (the safety net under the implicit contextvar): hosted (workspace_root
+    # configured) but NO request context bound ⇒ None ⇒ the child is spawned without a
+    # scope and fails closed (serve-and-deny). NEVER the shared root (which here would
+    # be a cross-tenant leak).
+    factory = _scoped_factory(tmp_path)
+    assert factory._resolve_filesystem_scope_root("personaA") is None
+
+
+def test_filesystem_scope_root_falls_back_to_flat_root_on_cli_path() -> None:
+    # CLI / single-tenant path (no workspace_root): the legitimate flat root, mirroring
+    # the in-process fallback — there is no owner/persona to scope to and no other
+    # tenant to leak across. Fail-closed is the HOSTED rule, not the CLI rule.
+    factory = _factory()
+    assert factory._resolve_filesystem_scope_root("personaA") == (
+        factory._core_config.tools_sandbox_root
+    )

@@ -31,6 +31,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from persona.logging import get_logger
 from persona.tools.mcp.builtin import DEFAULT_BIND_HOST
@@ -42,6 +43,21 @@ _logger = get_logger("api.mcp.builtin_launcher")
 
 #: The persona allow-list prefix a built-in server tool carries: ``mcp:<name>:``.
 _MCP_PREFIX = "mcp:"
+
+#: The one built-in that holds per-(owner, persona) state and so is spawned
+#: scope-keyed rather than as a process-wide singleton (Spec P4-D-5). The
+#: stateless servers (``time`` / ``calculator`` / ``weather``) stay D-27-3
+#: singletons.
+_FILESYSTEM = "filesystem"
+
+#: Dedicated env channel carrying the supervisor-computed, pre-resolved scoped
+#: root into a filesystem child at spawn (Spec P4-D-2). The child reads ONLY this
+#: var; absent ⇒ it fails closed (serve-and-deny, P4-D-4) — never the shared root.
+_FILESYSTEM_SCOPE_ROOT_ENV = "PERSONA_FILESYSTEM_SCOPE_ROOT"
+
+#: Scope-cache key for a filesystem child spawned WITHOUT a bound scope (the
+#: hosted-but-unbound defense-in-depth path). One denying child is reused for it.
+_NO_SCOPE_KEY = "\x00no-scope"
 
 
 @dataclass
@@ -94,9 +110,21 @@ class BuiltinMCPSupervisor:
         self._spawn_timeout_s = spawn_timeout_s
         authored = authored_server_names()
         # Preserve declared order; keep only authored (launchable) names.
+        # ``filesystem`` stays in this dict as an *enabled marker* (enabled_servers
+        # / needed_builtins read it) but is NEVER spawned into — its live children
+        # live in ``_fs_states`` below, keyed by (owner, persona) scope (P4-D-1).
         self._states: dict[str, _ServerState] = {
             name: _ServerState() for name in enabled if name in authored
         }
+        #: Per-scope filesystem children (Spec P4-D-1): one child per resolved
+        #: scoped root. Reaping trigger = ``aclose()`` (supervisor shutdown) only —
+        #: there is no per-turn/session reap (the cache amortizes the cold spawn),
+        #: so this dict GROWS MONOTONICALLY within a process lifetime, bounded by
+        #: distinct enabling (owner, persona) pairs. That grow-only shape is the
+        #: cost option (a) pays; an idle-eviction cap (option c) is the additive
+        #: upgrade if child-count growth is ever observed unbounded (the P4-D-1
+        #: tripwire). Guarded by ``_lock`` like the singleton states.
+        self._fs_states: dict[str, _ServerState] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -106,8 +134,14 @@ class BuiltinMCPSupervisor:
 
     @property
     def running_server_count(self) -> int:
-        """How many servers currently have a live subprocess (lazy-spawn proof)."""
-        return sum(1 for s in self._states.values() if s.is_running())
+        """How many servers currently have a live subprocess (lazy-spawn proof).
+
+        Counts the singleton servers (``_states``, where the ``filesystem`` marker
+        never runs) plus every live per-scope filesystem child (``_fs_states``).
+        """
+        singletons = sum(1 for s in self._states.values() if s.is_running())
+        filesystem = sum(1 for s in self._fs_states.values() if s.is_running())
+        return singletons + filesystem
 
     def needed_builtins(self, declared_tools: list[str] | tuple[str, ...]) -> set[str]:
         """Built-in servers a persona's allow-list actually references.
@@ -126,16 +160,35 @@ class BuiltinMCPSupervisor:
                 needed.add(name)
         return needed
 
-    async def resolve(self, declared_tools: list[str] | tuple[str, ...]) -> dict[str, str]:
+    async def resolve(
+        self,
+        declared_tools: list[str] | tuple[str, ...],
+        *,
+        filesystem_scope_root: Path | None = None,
+    ) -> dict[str, str]:
         """Ensure every needed built-in is up; return ``{name: url}`` for the live ones.
 
         Servers that fail to spawn are omitted (graceful degradation per D-03-20)
         — ``build_default_toolbox`` connects ``strict=False`` so an omitted server
         simply advertises no tools and the persona is unaffected.
+
+        Args:
+            declared_tools: The persona's ``tools`` allow-list; only ``mcp:<name>:``
+                entries select a built-in.
+            filesystem_scope_root: The supervisor-computed, pre-resolved scoped root
+                for THIS request's (owner, persona) — ``<workspace_root>/<owner>/<persona>``
+                on the hosted path, ``config.tools_sandbox_root`` on the single-tenant
+                CLI path, or ``None`` when hosted-but-unbound (Spec P4-D-3). It is
+                threaded into the ``filesystem`` child at spawn (P4-D-2); ``None`` ⇒
+                the child is spawned without a scope and fails closed (serve-and-deny,
+                P4-D-4). Ignored for the stateless built-ins.
         """
         urls: dict[str, str] = {}
         for name in self.needed_builtins(declared_tools):
-            url = await self.ensure(name)
+            if name == _FILESYSTEM:
+                url = await self._ensure_filesystem(filesystem_scope_root)
+            else:
+                url = await self.ensure(name)
             if url is not None:
                 urls[name] = url
         return urls
@@ -147,6 +200,11 @@ class BuiltinMCPSupervisor:
         a dead one is re-spawned (D-27-3 restart-on-resolution). Returns ``None``
         when ``name`` is not enabled or the spawn/health-probe failed.
         """
+        if name == _FILESYSTEM:
+            # filesystem is scope-keyed (P4-D-1); a bare ensure has no scope ⇒
+            # route to the fail-closed (serve-and-deny) child, never an unscoped
+            # singleton in ``_states``.
+            return await self._ensure_filesystem(None)
         state = self._states.get(name)
         if state is None:
             return None
@@ -159,7 +217,41 @@ class BuiltinMCPSupervisor:
                 await self._terminate(state)
             return await self._spawn(name, state)
 
-    async def _spawn(self, name: str, state: _ServerState) -> str | None:
+    async def _ensure_filesystem(self, scope_root: Path | None) -> str | None:
+        """Ensure a filesystem child scoped to ``scope_root`` is running; return its URL.
+
+        One child per (owner, persona) scope (Spec P4-D-1): keyed by the resolved
+        scoped root so concurrent owners never share a child. ``scope_root`` is
+        threaded in over :data:`_FILESYSTEM_SCOPE_ROOT_ENV`; ``None`` (hosted-but-
+        unbound) spawns a child with the scope var SCRUBBED so it fails closed
+        (serve-and-deny, P4-D-4) — never inheriting a stray value or the shared
+        root. Idempotent + restart-on-death, mirroring :meth:`ensure`.
+        """
+        if _FILESYSTEM not in self._states:
+            return None  # filesystem not enabled
+        key = str(scope_root) if scope_root is not None else _NO_SCOPE_KEY
+        async with self._lock:
+            state = self._fs_states.get(key)
+            if state is not None and state.is_running() and state.port is not None:
+                return self._url(state.port)
+            if state is not None and state.proc is not None and not state.is_running():
+                _logger.warning("filesystem MCP child died; re-spawning", scope=key)
+                await self._terminate(state)
+            if state is None:
+                state = _ServerState()
+                self._fs_states[key] = state
+            # Thread the pre-resolved scope in; scrub it when unscoped so the child
+            # cannot inherit a stray value from the parent and must fail closed.
+            env = dict(os.environ)
+            if scope_root is not None:
+                env[_FILESYSTEM_SCOPE_ROOT_ENV] = str(scope_root)
+            else:
+                env.pop(_FILESYSTEM_SCOPE_ROOT_ENV, None)
+            return await self._spawn(_FILESYSTEM, state, env=env)
+
+    async def _spawn(
+        self, name: str, state: _ServerState, *, env: dict[str, str] | None = None
+    ) -> str | None:
         port = _free_port()
         argv = [
             self._python,
@@ -177,6 +269,7 @@ class BuiltinMCPSupervisor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=self._preexec(),  # noqa: PLW1509 — intentional privilege drop (POSIX)
+                env=env,  # None ⇒ inherit parent env (singletons); dict ⇒ scoped child
             )
         except OSError as exc:
             _logger.warning("built-in MCP server spawn failed", server=name, error=str(exc))
@@ -216,10 +309,19 @@ class BuiltinMCPSupervisor:
         return f"http://{self._host}:{port}/mcp"
 
     async def aclose(self) -> None:
-        """Reap every spawned built-in server subprocess (SIGTERM → wait → SIGKILL)."""
+        """Reap every spawned built-in server subprocess (SIGTERM → wait → SIGKILL).
+
+        This is the ONLY reaping trigger for the per-scope filesystem children
+        (Spec P4-D-1) — there is no per-turn/session reap — so shutdown is where the
+        monotonically-grown ``_fs_states`` cache is released.
+        """
         for name, state in self._states.items():
             if state.proc is not None:
                 _logger.info("stopping built-in MCP server", server=name)
+                await self._terminate(state)
+        for scope_key, state in self._fs_states.items():
+            if state.proc is not None:
+                _logger.info("stopping filesystem MCP child", scope=scope_key)
                 await self._terminate(state)
 
     @staticmethod

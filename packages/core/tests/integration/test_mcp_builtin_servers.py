@@ -42,7 +42,9 @@ async def test_calculator_server_dispatches_calculate() -> None:
 
 
 async def test_filesystem_server_write_read_and_rejects_escape(tmp_path: Path) -> None:
-    env = {"PERSONA_TOOLS_SANDBOX_ROOT": str(tmp_path)}
+    # Spec P4: the server roots at the per-spawn scoped root threaded in over
+    # PERSONA_FILESYSTEM_SCOPE_ROOT (not the process-wide PERSONA_TOOLS_SANDBOX_ROOT).
+    env = {"PERSONA_FILESYSTEM_SCOPE_ROOT": str(tmp_path)}
     async with connected_builtin("filesystem", extra_env=env) as client:
         tools = {t.name: t for t in client.get_tools()}
         assert {"mcp:filesystem:read_file", "mcp:filesystem:write_file"} <= set(tools)

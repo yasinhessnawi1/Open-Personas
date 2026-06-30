@@ -403,7 +403,27 @@ async def start_chat_turn(
         documents=turn_documents,
     )
 
-    loop = await loop_builder(persona_id)
+    # Spec P4-D-3 — bind the request's sandbox context for the DURATION of the loop
+    # build only (tight set→try→reset). The builtin ``filesystem`` MCP subprocess is
+    # scoped at SPAWN, which happens inside this build; the supervisor resolves its
+    # scoped root from this contextvar (same source as the in-process file tools).
+    # The detached worker re-binds the SAME (owner, conversation) context for turn
+    # execution (chat_turn_worker), so spawn-time and turn-time scope agree.
+    # Contextvars don't propagate into the worker's task, so this bind cannot leak
+    # past the build; unbound at build ⇒ the child fails closed (serve-and-deny).
+    from persona_api.sandbox import (  # noqa: PLC0415
+        SandboxRequestContext,
+        reset_sandbox_request_context,
+        set_sandbox_request_context,
+    )
+
+    _scope_token = set_sandbox_request_context(
+        SandboxRequestContext(owner_id=owner_id, conversation_id=conversation_id)
+    )
+    try:
+        loop = await loop_builder(persona_id)
+    finally:
+        reset_sandbox_request_context(_scope_token)
     assistant_message_id = sink.open_turn(
         conversation_id=conversation_id, user_message=user_message, channel=channel, images=images
     )

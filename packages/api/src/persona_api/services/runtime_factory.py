@@ -526,7 +526,19 @@ class RuntimeFactory:
         # Spec 27 (D-27-3) — lazily spawn the built-in MCP servers THIS persona
         # references (mcp:<server>:) and hand their loopback URLs to the factory.
         # A persona that uses no built-in MCP spawns nothing.
-        builtin_mcp_servers = await self._builtin_mcp.resolve(list(persona.tools))
+        #
+        # Spec P4 — the builtin ``filesystem`` server runs out-of-process and can't
+        # read the request ContextVar, so its per-(owner, persona) scope is threaded
+        # in at SPAWN. The scoped root is resolved HERE, from the SAME source of
+        # truth the in-process file tools use (``_resolve_filesystem_scope_root``
+        # delegates to ``_build_file_sandbox_root_provider``) so the subprocess and
+        # the in-process tools can never disagree about hosted-vs-CLI or the scope
+        # for a given request (P4-D-3/D-7). Resolution reads the request context,
+        # which the loop-build sites bind early (chat_service / run_service).
+        filesystem_scope_root = self._resolve_filesystem_scope_root(persona.persona_id)
+        builtin_mcp_servers = await self._builtin_mcp.resolve(
+            list(persona.tools), filesystem_scope_root=filesystem_scope_root
+        )
         # Spec 30 (D-30-4/6) — the persona's ASSIGNED bring-your-own MCP servers,
         # built as SSRF-pinned clients (the LIVE connect path: resolve-then-pin
         # + auth header from the decrypted credential). Empty when no servers are
@@ -599,6 +611,36 @@ class RuntimeFactory:
             return workspace_root / ctx.owner_id / persona_id
 
         return _resolve
+
+    def _resolve_filesystem_scope_root(self, persona_id: str | None) -> Path | None:
+        """Resolve the builtin ``filesystem`` MCP subprocess's scoped root (Spec P4).
+
+        SINGLE SOURCE OF TRUTH with the in-process file tools (P4-D-3/D-7): this
+        delegates to :meth:`_build_file_sandbox_root_provider` so the subprocess and
+        the in-process ``file_read`` / ``file_write`` tools can never disagree about
+        whether a request is hosted-or-CLI, nor about the scoped root for that
+        request. The three cases mirror the in-process semantics exactly:
+
+        - **provider present (hosted) + context bound** → ``provider()`` returns
+          ``<workspace_root>/<owner>/<persona>`` — the scoped root baked into the
+          child at spawn.
+        - **provider present (hosted) + context unbound** → ``provider()`` returns
+          ``None`` ⇒ the child is spawned WITHOUT a scope and fails closed
+          (serve-and-deny, P4-D-4). Never the shared root (which here would be a
+          cross-tenant leak).
+        - **provider absent (CLI / no workspace_root / no persona_id)** → the
+          single-tenant ``config.tools_sandbox_root`` — the legitimate flat root,
+          mirroring ``build_default_toolbox``'s in-process fallback (there is no
+          owner/persona to scope to, and no other tenant to leak across).
+
+        Returns the ``Path`` to thread into the spawn, or ``None`` to fail closed.
+        """
+        provider = self._build_file_sandbox_root_provider(persona_id)
+        if provider is None:
+            # CLI / test path — single-tenant flat root (the in-process fallback).
+            return self._core_config.tools_sandbox_root
+        # Hosted path — resolve from the bound request context (None ⇒ deny).
+        return provider()
 
     def _build_byo_mcp_clients(self, persona: Persona) -> list[MCPClient]:
         """Build SSRF-pinned MCP clients for the persona's assigned BYO servers (D-30-4/6).
