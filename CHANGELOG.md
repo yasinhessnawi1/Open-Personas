@@ -11,6 +11,56 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### External Skill Sources + Catalog — sourcing skills from external stores, tier-tagged (2026-07-01)
+
+> Close-out of `external-skill-sources` (Spec S2, `persona-core` + `persona-api`). The skill
+> library is no longer just the four built-ins: skills can now be **sourced from external
+> catalogs** — the **Anthropic skill store**, **OpenClaw community**, and **arbitrary GitHub
+> repos** — each tagged with its S1 **trust tier** + provenance and kept fresh by a leader-gated
+> auto-sync. The on-disk format already **is** the Anthropic `SKILL.md` format, so ingest is
+> **native** (validate + tier + mirror; no conversion).
+>
+> Three rules are load-bearing and proven, not asserted: **trust is source-assigned, never
+> self-declared** (a skill declaring `trust: builtin` still rides at its source tier);
+> **availability ≠ enablement** (a sync makes a skill available, never auto-enables it on a
+> persona); and the untrusted-ingest surface is **hardened where it lives — the fetch** (not
+> only downstream at the tier). Untrusted-source safety rests entirely on S1's
+> subordination-guard + consent gate, so S2 is sequenced strictly after it.
+
+#### Added
+- **Native external-skill ingest** (`persona-core`) — reuses the existing `SkillScanner` parse +
+  `SkillSpec` validation, but **assigns** trust + provenance at the source boundary and
+  recomputes the body `content_hash`; any self-declared `trust`/`source`/`allowed-tools` in the
+  front matter is deliberately ignored. Malformed skills warn-and-skip (one bad skill never
+  darkens a source).
+- **Per-source adapters** — Anthropic (→ `vetted`), OpenClaw (→ `community`, legacy `skill.md`
+  casing accepted), and an arbitrary-GitHub `owner/repo` discoverer (→ `third_party`).
+- **Vetted-source authenticity** — the Anthropic adapter binds `vetted` (the consent-bypass
+  tier) to a **hard-coded canonical coordinate + a pinned commit SHA** over TLS, refusing to
+  stamp `vetted` on any mismatch (a sync error, never a silent downgrade). The pin is a **code
+  constant the auto-sync cannot advance** — advancing it is a deliberate, reviewed commit.
+- **Curated v1 library** — a default-deny **allowlist** of instructional Anthropic skills at the
+  pinned commit (script-dependent + builtin-duplicating skills excluded); OpenClaw is opt-in via
+  a configured curated repo; arbitrary GitHub is zero-by-default (bring-your-own).
+- **File-on-volume skill mirror + leader-gated auto-sync** (`persona-core` + `persona-api`) — a
+  second mirror on N2's proven substrate: reconcile (added/updated/removed, `content_hash`-keyed,
+  atomic write, fail-soft last-good) + a worker periodic gated by a **distinct** advisory-lock
+  key. `PERSONA_SKILL_SYNC_ENABLED` (off by default).
+- **Untrusted-ingest hardening** (the arbitrary-GitHub fetch) — no symlink-escape (no following
+  dir symlinks; symlinked / out-of-root manifests refused), resource bounds (per-file / total /
+  file-count, skip-with-reason), and an ephemeral, cleaned clone (the raw checkout never
+  persists).
+- **Supplements normalization** — at fetch, `references/*.md` (text) are folded into the mirror
+  skill's `supplements/` so the runtime's existing `collect_skill_supplements` covers them
+  **unchanged** (no new ingress); `scripts/` and executables are **dropped + logged-with-reason**
+  (a curator sees a skill was partially ingested; the boundary stays text-`.md`-only).
+
+#### Changed
+- `RuntimeFactory._scan_skills` merges declared external skills from the mirror (availability ≠
+  enablement: only skills a persona *declared* are loaded; an undeclared mirror skill never is).
+- New domain exception `VettedSourceAuthenticityError`; new config knobs `PERSONA_SKILL_SYNC_*`
+  (api) + `skill_mirror_path` (core). **No migration** — the mirror is file-on-volume; consent
+  persistence stays in S1/S3 (S2 only recomputes `content_hash` so a body change re-gates).
 ### Persona Voice & Character — talk-style + character adherence (2026-07-01)
 
 > Close-out of `persona-voice-and-character` (Spec V11, `persona-runtime` + `persona-voice`).

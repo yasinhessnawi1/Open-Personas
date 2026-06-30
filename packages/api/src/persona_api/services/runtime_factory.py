@@ -59,7 +59,7 @@ from persona_api.sandbox import make_pool_code_execution_tool
 from persona_api.services.workspace_persister import WorkspaceDirPersister
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from persona.graph.protocol import GraphStore
@@ -695,7 +695,39 @@ class RuntimeFactory:
             declared_skills=persona.skills,
             tool_allow_list=list(persona.tools) if persona.tools else None,
         )
-        return scanner, list(scanned)
+        # Spec S2 (C1): merge in declared EXTERNAL skills from the file-on-volume mirror.
+        # Availability ≠ enablement (S2-R-3 / the N2 boundary): the mirror makes external
+        # skills *available*, but only the names the persona DECLARED are loaded here — the
+        # auto-sync never enables a skill on a persona. Trust + provenance ride from the
+        # mirror snapshot (source-assigned, never re-derived). Fail-soft: an absent/corrupt
+        # mirror yields an empty external set, so builtins are unaffected.
+        merged: list[object] = list(scanned)
+        merged.extend(self._declared_mirror_skills(persona, merged))
+        return scanner, merged
+
+    def _declared_mirror_skills(
+        self, persona: Persona, scanned: Sequence[object]
+    ) -> list[object]:
+        """Resolve a persona's declared external skills against the skill mirror (S2 C1)."""
+        from persona.config import PersonaCoreConfig
+        from persona.skills.aliases import resolve_skill_aliases
+        from persona.skills.catalog import expand_collections
+        from persona.skills.skill_mirror import (
+            declared_mirror_skills,
+            load_skill_mirror,
+            resolve_skill_mirror_write_path,
+        )
+
+        expanded = resolve_skill_aliases(expand_collections(list(persona.skills)))
+        resolved_names = {getattr(s, "name", "") for s in scanned}
+        mirror_specs = load_skill_mirror(
+            resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+        )
+        return list(
+            declared_mirror_skills(
+                expanded, resolved_names=resolved_names, mirror_specs=mirror_specs
+            )
+        )
 
     # -- the closures the routes call ---------------------------------------
 

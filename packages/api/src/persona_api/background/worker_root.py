@@ -37,6 +37,7 @@ from persona_runtime.extraction.synthesizer import build_synthesizer
 
 from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
+from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
 from persona_api.jobs.worker import build_worker
 from persona_api.schedules.tick import build_scheduler_tick
 
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
     from persona_api.config import APIConfig
     from persona_api.jobs.catalog_sync import CatalogSyncTask
+    from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
     from persona_api.jobs.worker import Worker
     from persona_api.schedules.tick import SchedulerTick
 
@@ -169,11 +171,17 @@ def start_in_process_worker(
     def _catalog_sync_builder(dispatch_engine: Engine) -> CatalogSyncTask | None:
         return build_catalog_sync(config, dispatch_engine=dispatch_engine)
 
+    # S2 skill-catalog auto-sync — same additive, leader-gated shape (distinct key).
+    # ``build_skill_catalog_sync`` returns None when disabled (PERSONA_SKILL_SYNC_ENABLED=false).
+    def _skill_catalog_sync_builder(dispatch_engine: Engine) -> SkillCatalogSyncTask | None:
+        return build_skill_catalog_sync(config, dispatch_engine=dispatch_engine)
+
     worker = build_worker(
         config,
         registry,
         scheduler_tick_builder=_tick_builder,
         catalog_sync_builder=_catalog_sync_builder,
+        skill_catalog_sync_builder=_skill_catalog_sync_builder,
     )
     handle = InProcessWorker(worker)
     handle.start()

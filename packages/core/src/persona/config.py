@@ -140,6 +140,14 @@ class PersonaCoreConfig(BaseSettings):
     # (dev / local) → the bundled snapshot is used and is also the sync's write target.
     mcp_mirror_path: Path | None = None
 
+    # Spec S2 (S2-D-1) — the writable, reader-visible location of the auto-synced external
+    # skill mirror (a second mirror on N2's substrate, parallel to ``mcp_mirror_path``). On a
+    # deployed image the bundled package-data ``skill_mirror.json`` is root-owned + lost on
+    # redeploy, so the auto-sync writes here — a path on the mounted volume (e.g.
+    # ``/var/lib/persona/skill_mirror/skill_mirror.json``). Unset (dev / local) → the bundled
+    # path is used. Fail-soft: absent/corrupt → empty external set (builtins unaffected).
+    skill_mirror_path: Path | None = None
+
     # Spec 27 (D-27-4) — which built-in MCP servers an operator opts into. Stored
     # as a raw string so the "unset" case (None → catalog safe-subset) is
     # distinguishable from the "explicit empty" case ("" → opt out of all). The

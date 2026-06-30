@@ -57,6 +57,7 @@ __all__ = [
     "UnknownDocumentFormatError",
     "UnknownDocumentTemplateError",
     "UnknownJobTypeError",
+    "VettedSourceAuthenticityError",
 ]
 
 
@@ -289,6 +290,20 @@ class SkillManifestError(PersonaError):
     underlying problem was a YAML parse failure. The scanner's per-skill
     envelope (D-04-4) catches this exception and logs a structured warning;
     the persona keeps loading with the offending skill omitted.
+    """
+
+
+class VettedSourceAuthenticityError(PersonaError):
+    """Raised when a ``vetted``-tier external source fails provenance verification.
+
+    Spec S2 (S2-D-4, the B1 carve-out). ``vetted`` is the consent-bypass tier
+    (``SkillTrust.requires_consent`` is ``False``), so it has **no downstream
+    backstop** — its integrity rests entirely on the source being *genuinely* the
+    pinned canonical coordinate. If the fetched checkout is not the canonical repo
+    or is not at the pinned commit (S2-D-5's code-constant pin), the adapter
+    **refuses to stamp ``vetted``** and raises this — a vetted-source failure is a
+    **sync error, never a silent downgrade** to a consent-gated tier (fail-closed,
+    not fail-quiet). ``context`` carries the expected vs. fetched coordinate.
     """
 
 

@@ -203,6 +203,20 @@ class APIConfig(BaseSettings):
     mcp_catalog_sync_interval_seconds: float = Field(
         default=86_400.0, gt=0, validation_alias="PERSONA_MCP_SYNC_INTERVAL_SECONDS"
     )
+    # Spec S2 — the external skill-catalog auto-sync (a second mirror on N2's substrate).
+    # Disabled by default: availability stays at the last-synced snapshot (fail-soft); enable
+    # to keep the external skill mirror fresh. The Anthropic source is the pinned code constant
+    # (no config); OpenClaw is opt-in via its curated repo URL (empty ⇒ OpenClaw not synced).
+    skill_catalog_sync_enabled: bool = Field(
+        default=False, validation_alias="PERSONA_SKILL_SYNC_ENABLED"
+    )
+    skill_catalog_sync_interval_seconds: float = Field(
+        default=86_400.0, gt=0, validation_alias="PERSONA_SKILL_SYNC_INTERVAL_SECONDS"
+    )
+    skill_openclaw_repo_url: str = Field(
+        default="", validation_alias="PERSONA_SKILL_OPENCLAW_REPO_URL"
+    )
+    skill_openclaw_ref: str = Field(default="", validation_alias="PERSONA_SKILL_OPENCLAW_REF")
     # A0 T9 enqueue→worker cutover flag. OFF (default) → avatar generation runs the
     # legacy in-process BackgroundTasks path (contract unchanged). ON → the create
     # path ENQUEUES a durable avatar job for the worker (survives an api restart).
