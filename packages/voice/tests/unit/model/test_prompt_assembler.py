@@ -127,6 +127,19 @@ class TestFullConditioning:
         assert msgs[-1].role == "user"
         assert msgs[-1].content == "hi"
 
+    def test_voice_assembler_builds_in_voice_mode(self) -> None:
+        """The voice path renders the voice-mode register (Spec V11, V11-D-1).
+
+        The shared ``PromptBuilder`` is the one source, but the voice assembler
+        passes ``mode=VOICE`` so the spoken-delivery register is present — the
+        whole point of V11 (voice ≠ chat, no longer a mirror).
+        """
+        ctx, _ = _context()
+        assembler = VoicePromptAssembler(ctx)
+        system = assembler.build("What are my rights?", history=[], max_tokens=8000)[0].content
+        assert isinstance(system, str)
+        assert "read aloud" in system  # the voice-register marker
+
 
 class TestConstantBlockCaching:
     def test_identity_store_read_once_across_turns(self) -> None:

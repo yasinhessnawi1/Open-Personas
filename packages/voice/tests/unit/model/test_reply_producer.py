@@ -686,3 +686,41 @@ class TestAsyncArtifactRealChain:
         assert "tool_result" in types  # the artifact render frame (panel)
         assert orch.state is ConversationalState.PROCESSING  # real edge, not forced
         assert len(actions.invoked) == 1  # the coalesced narration turn
+
+
+class TestR1HardBypass:
+    """B3: R1-hard out-of-band bypass on the VOICE path (Spec V11, V11-D-5).
+
+    Driven by the REAL trigger — a planted crisis transcript enters through the
+    producer and must speak the SHORT spoken safe-completion variant (Group-B
+    note 2), with NO model call (the persona is out of the loop).
+    """
+
+    @pytest.mark.asyncio
+    async def test_acute_crisis_speaks_spoken_variant_without_calling_model(self) -> None:
+        from persona_runtime.safety_intercept import safe_completion
+
+        # A delta the model would stream — it must NOT be spoken on a HARD turn.
+        backend = _ScriptedBackend([StreamChunk(delta="MODEL_MUST_NOT_SPEAK"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        tokens = await _drain(producer, text="i want to kill myself tonight")
+        spoken = "".join(tokens)
+
+        # The SHORT spoken variant was emitted (not the chat resource block), AI
+        # disclosed, and the model output never appears.
+        assert spoken == safe_completion(None).voice_text
+        assert "an AI" in spoken
+        assert "MODEL_MUST_NOT_SPEAK" not in spoken
+        # The persona / model was taken out of the loop entirely (never called).
+        assert backend.captured_prompt is None
+
+    @pytest.mark.asyncio
+    async def test_benign_transcript_still_calls_the_model(self) -> None:
+        # Non-vacuity control: a benign transcript does NOT bypass — the model runs.
+        backend = _ScriptedBackend([StreamChunk(delta="Hello"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        await _drain(producer, text="what are my rights as a tenant?")
+
+        assert backend.captured_prompt is not None  # the model was called

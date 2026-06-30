@@ -230,7 +230,11 @@ with unified memory.
 - **`persona-runtime`** — conversation loop, prompt builder with skill-token
   budgeting, summarise-and-compact history manager, tier router with
   multi-model-per-tier cross-provider fallback, optional deterministic intelligent
-  routing, agentic plan-act-reflect loop. **Shipped.**
+  routing, agentic plan-act-reflect loop, **character adherence** (a never-break
+  rule with researched AI-disclosure + wellbeing carve-outs) and a **turn-time
+  crisis safety gate** that takes the persona out of the loop on an acute, explicit
+  signal (reliable for explicit-acute; euphemistic/non-English are owned residuals,
+  not a comprehensive-detection claim). **Shipped.**
 - **`persona-api`** — FastAPI service with edition-gated auth/credits/RLS, persona
   CRUD, SSE-streaming chat, agentic runs, LLM-assisted authoring, voice token
   issuance. **Shipped.**
@@ -238,8 +242,9 @@ with unified memory.
   client. **Shipped** (a UI redesign is in flight).
 - **`persona-voice`** — LiveKit substrate, streaming STT, streaming TTS,
   turn-taking + barge-in, and the persona-conditioned reply producer writing voice
-  turns to the same episodic store as text. The frontend voice client is the
-  remaining piece.
+  turns to the same episodic store as text. Voice now talks in its **own spoken
+  register** (short, plain, prosody-friendly) distinct from chat rather than
+  mirroring it. The frontend voice client is the remaining piece.
 - **`persona-connectors`** — the framework that makes a persona reachable on
   messaging platforms, plus the **chat-app adapters: Telegram, Discord, Slack**.
   Link your account from the web (Telegram via a deep link, Discord/Slack via

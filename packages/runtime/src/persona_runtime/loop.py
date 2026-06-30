@@ -83,6 +83,7 @@ from persona_runtime.routing import (
     classifiers,
     reorder_primary,
 )
+from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -502,6 +503,33 @@ class ConversationLoop:
         started = time.perf_counter()
         self.deferred_input_files.clear()  # M1a per-turn reset (D-16-2)
 
+        # R1 turn-time safety gate (Spec V11, V11-D-5). Classify the user message
+        # ONCE per turn (sub-ms, no model call). R1-hard (acute, explicit W1) is the
+        # OUT-OF-BAND BYPASS: the persona — and the lock that is adversarially biased
+        # against noticing crisis — is taken out of the loop entirely. We emit the
+        # deterministic safe completion INSTEAD of generating, persist it as the
+        # turn's response, and return. One acute path: bypass (never inject AND
+        # generate). A SOFT verdict instead injects the override directive below
+        # (path-independent with the voice path); NONE leaves the always-on R0 floor.
+        safety_verdict = classify_user_message(
+            user_message, locale=self._persona.identity.language_default
+        )
+        if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
+            completion_text = safety_verdict.completion.chat_text
+            yield _text_chunk(completion_text)
+            now_hard = datetime.now(UTC)
+            conversation.messages.append(
+                ConversationMessage(role="user", content=user_message, created_at=now_hard)
+            )
+            conversation.messages.append(
+                ConversationMessage(role="assistant", content=completion_text, created_at=now_hard)
+            )
+            # Persist to episodic so history + recall reflect the exchange. No
+            # TurnLog: no model ran, so there is no usage/tier telemetry to record.
+            self._write_episodic(persona_id, user_message, completion_text)
+            yield _final_chunk(None)
+            return
+
         # Image-workspace cascade (Parts 1/2/4): when the turn carries uploaded
         # images, fold them into BOTH destinations up front.
         #   (a) Model — ``user_prompt_content`` becomes a multimodal
@@ -663,6 +691,11 @@ class ConversationLoop:
         # write-back — never persisted.
         reasoning_buffer = ""
 
+        # The R1-soft override directive for this turn (from the single classify
+        # above). HARD already returned via the bypass, so only SOFT carries a
+        # directive here and NONE is ``None`` — byte-identical, R0 floor intact.
+        safety_directive = safety_verdict.soft_directive
+
         while True:
             prompt_messages = [
                 *self._builder.build(
@@ -675,6 +708,7 @@ class ConversationLoop:
                     matched_skill_content=matched_skill_content,
                     document_context=document_context,
                     graph_surfacing_guidance=self._graph_surfacing_guidance,
+                    safety_directive=safety_directive,
                 ),
                 *tool_messages,
             ]

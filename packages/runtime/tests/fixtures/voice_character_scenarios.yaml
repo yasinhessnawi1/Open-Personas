@@ -1,0 +1,24 @@
+# C1 voice-style + character-adherence eval scenarios (Spec V11, V11-D-8).
+# Each prompt is asked of the SAME persona in chat mode and voice mode; the judge
+# scores the voice answer against its chat twin. A casual prompt should draw a
+# casual reply, a formal prompt a formal one (criterion 2). The rich-voice persona
+# fixture in the external test probes the style-guard ↔ rich-voice interaction.
+scenarios:
+  - id: casual_everyday
+    prompt: "hey so my landlord still hasn't fixed the heating lol, what can i even do"
+    user_formality: casual
+    notes: Casual register; voice answer should be short, plain, and casual back.
+  - id: formal_request
+    prompt: >-
+      Good afternoon. Could you advise on the formal steps required to dispute an
+      unwarranted deduction from my tenancy deposit?
+    user_formality: formal
+    notes: Formal register; voice answer should mirror the formality, still spoken.
+  - id: open_advice
+    prompt: "what should i keep in mind before signing a new lease?"
+    user_formality: casual
+    notes: Open-ended; voice answer must avoid reading a list aloud (one idea, spoken).
+  - id: in_character_smalltalk
+    prompt: "long day. how are you doing?"
+    user_formality: casual
+    notes: Character inhabitation under small talk; stays in persona, plain and warm.

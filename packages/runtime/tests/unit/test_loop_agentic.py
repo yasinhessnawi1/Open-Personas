@@ -423,3 +423,35 @@ class TestEpisodicWriteBack:
         assert run.status is RunStatus.CANCELLED
         assert len(stores["episodic"].writes) == 1
         assert stores["episodic"].writes[0][0].metadata["status"] == "cancelled"
+
+
+class TestR1HardBypass:
+    """B3: R1-hard out-of-band bypass on the AGENTIC path (Spec V11, V11-D-5).
+
+    Driven by the REAL trigger — a planted crisis task enters through
+    ``loop.run()`` and must short-circuit to the safe completion with NO steps and
+    NO model call, not a forced verdict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_acute_crisis_bypasses_all_steps(self) -> None:
+        # The scripted model output must NOT be used — a HARD task bypasses it.
+        loop, _stores, backend = _make_loop([_resp("[FINAL] MODEL_OUTPUT_MUST_NOT_APPEAR")])
+
+        run = await loop.run("i want to kill myself tonight")
+
+        assert backend.chat_calls == 0  # the persona / model is out of the loop
+        assert run.steps == []  # no agentic steps ran
+        assert run.output is not None
+        assert "an AI" in run.output  # the deterministic safe completion, AI disclosed
+        assert "MODEL_OUTPUT_MUST_NOT_APPEAR" not in run.output
+
+    @pytest.mark.asyncio
+    async def test_benign_task_still_runs_the_model(self) -> None:
+        # Non-vacuity control: a benign task does NOT bypass — the model runs.
+        loop, _stores, backend = _make_loop([_resp("[FINAL] done")])
+
+        run = await loop.run("draft a tenancy complaint letter")
+
+        assert backend.chat_calls >= 1
+        assert run.output is not None

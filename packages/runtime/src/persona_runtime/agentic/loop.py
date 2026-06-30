@@ -67,6 +67,7 @@ from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.prompt import RetrievedContext
 from persona_runtime.question_author import TemplateQuestionAuthor
 from persona_runtime.questions import QuestionRegistry
+from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -229,6 +230,29 @@ class AgenticLoop:
         persona_id = self._require_persona_id()
         started_at = datetime.now(UTC)
         self.deferred_input_files.clear()  # M1a per-run reset (D-16-2)
+
+        # R1-hard out-of-band bypass (Spec V11, V11-D-5) — the same gate as the chat
+        # loop and the voice path. An acute, explicit W1 task takes the persona (and
+        # the lock that suppresses crisis-noticing) out of the loop entirely: emit the
+        # deterministic safe completion as the run output with NO steps, never running
+        # the agentic loop. Agentic output is text (no TTS), so the chat rendering is
+        # used. One acute path: bypass.
+        safety_verdict = classify_user_message(task, locale=self._persona.identity.language_default)
+        if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
+            await self._emit(on_event, RunEvent.started(task))
+            run = Run(
+                persona_id=persona_id,
+                task=task,
+                status=RunStatus.COMPLETED,
+                steps=[],
+                output=safety_verdict.completion.chat_text,
+                error=None,
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+            )
+            self._write_episodic_summary(persona_id, run)
+            await self._emit(on_event, RunEvent.finished(run))
+            return run
         # Spec 24 (D-24-4): per-run skill-composition chain (depth cap + cycle
         # detection + shared budget). Reset each run, like deferred_input_files.
         self._composition = SkillCompositionState(budget=self._injector.TOKEN_BUDGET)

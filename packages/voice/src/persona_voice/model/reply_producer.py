@@ -54,6 +54,7 @@ from persona_runtime.graph_voice import start_graph_retrieval, take_graph_if_rea
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.routing import RoutingContext, classifiers
 from persona_runtime.routing.model_selection import reorder_primary
+from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 from persona_voice.model.history import VoiceHistoryCompactor
 from persona_voice.model.prompt_assembler import VoicePromptAssembler
@@ -179,6 +180,24 @@ class VoiceModelReplyProducer:
         """Stream the persona-conditioned reply token-by-token (spoken text only)."""
         ctx = self._ctx
         user_message = final_transcript.text
+
+        # R1-hard out-of-band bypass (Spec V11, V11-D-5) — the same gate as the chat
+        # and agentic loops. An acute, explicit W1 transcript takes the persona (and
+        # the lock that suppresses crisis-noticing) out of the loop entirely: speak
+        # the deterministic SHORT spoken safe-completion variant (Group-B note 2),
+        # never the chat resource block, and never call the model. Classified before
+        # any routing/retrieval so the bypass skips all of it. The user turn is noted
+        # for the unified-memory write; V4's commit path records what was spoken. One
+        # acute path: bypass (never inject-and-generate).
+        safety_verdict = classify_user_message(
+            user_message, locale=ctx.persona.identity.language_default
+        )
+        if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
+            if self._turn_recorder is not None:
+                self._turn_recorder.note_user_message(user_message)
+            yield safety_verdict.completion.voice_text
+            return
+
         # K4 (K4-D-2): publish this turn's recent-conversation window BEFORE the graph
         # query is kicked off, so the gate reads the conversation (not the bare query) and
         # never evades a topic the caller just raised mid-call — the worst failure on a
@@ -223,6 +242,10 @@ class VoiceModelReplyProducer:
         context = await asyncio.to_thread(
             self._assembler.retrieve, user_message, history_turns=len(history)
         )
+        # The R1-soft override directive for this turn (from the single classify
+        # above). HARD already returned via the bypass, so only SOFT carries a
+        # directive here and NONE is ``None`` — byte-identical, R0 floor intact.
+        safety_directive = safety_verdict.soft_directive
         if graph_task is not None:
             # K3-D-6 — GENUINE overlap: the off-thread retrieval above gave the
             # concurrently-running graph query a window to finish in. We take the
@@ -230,11 +253,20 @@ class VoiceModelReplyProducer:
             # graph-off (additive). Zero NEW serial work on the TTFT path.
             graph = take_graph_if_ready(graph_task)
             prompt = self._assembler.build(
-                user_message, history=history, max_tokens=max_tokens, graph=graph, context=context
+                user_message,
+                history=history,
+                max_tokens=max_tokens,
+                graph=graph,
+                context=context,
+                safety_directive=safety_directive,
             )
         else:
             prompt = self._assembler.build(
-                user_message, history=history, max_tokens=max_tokens, context=context
+                user_message,
+                history=history,
+                max_tokens=max_tokens,
+                context=context,
+                safety_directive=safety_directive,
             )
 
         timing = _RoundTiming(t_start=time.perf_counter())

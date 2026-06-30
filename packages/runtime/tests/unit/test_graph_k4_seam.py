@@ -238,9 +238,14 @@ class TestSurfacingSlotReserved:
 
     def test_slot_is_a_noop_stub_without_a_provider(self) -> None:
         # Reserved-never-built: no provider → no care text, no leak, content used.
+        # The category value is a distinctive sentinel so the no-leak assertion tests
+        # exactly that the K4 category label never reaches the prompt, immune to
+        # legitimate prompt vocabulary (V11's character-lock wellbeing carve-out, for
+        # one, properly speaks of "crisis"/"distress" — that is not a K4 tag leak).
+        sentinel_category = "wb_cat_sentinel"
         retrieve = make_graph_retrieval(
             retriever=_AllowlistHonouringRetriever(
-                [_node("n", "A matter.", wellbeing_category="crisis")]
+                [_node("n", "A matter.", wellbeing_category=sentinel_category)]
             ),
             owner_provider=lambda: "user-A",
             settings=_settings(),
@@ -251,5 +256,5 @@ class TestSurfacingSlotReserved:
             _persona(), ctx, history=[], skill_index="", user_message="q", max_tokens=8000
         )
         system = msgs[0].content
-        assert "crisis" not in system
+        assert sentinel_category not in system
         assert "A matter." in system

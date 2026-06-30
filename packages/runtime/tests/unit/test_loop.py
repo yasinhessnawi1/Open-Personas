@@ -730,3 +730,46 @@ class TestK4WindowWiring:
         assert seen, "the gate never ran (graph retrieval was not invoked on the turn)"
         assert seen[0], "the window was EMPTY — the loop did not publish the recent conversation"
         assert any("panic attacks" in m for m in seen[0])
+
+
+class TestR1HardBypass:
+    """B3: R1-hard out-of-band bypass on the CHAT path (Spec V11, V11-D-5).
+
+    Driven by the REAL trigger — a planted crisis message enters through
+    ``loop.turn()`` and must produce an ACTUAL generation short-circuit (the
+    model is never called), not a forced verdict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_acute_crisis_bypasses_generation_and_persists(self) -> None:
+        # The scripted model output must NOT be used — a HARD turn bypasses it.
+        backend = ScriptedBackend([ScriptedRound(text="MODEL_OUTPUT_MUST_NOT_APPEAR")])
+        loop, _stores, _writer = _make_loop(backend)
+        conv = _conv(0)
+
+        chunks = [c async for c in loop.turn(conv, "i want to kill myself tonight")]
+        accumulated = "".join(c.delta for c in chunks)
+
+        # The deterministic safe completion was emitted, discloses AI-ness, and the
+        # model output never appears.
+        assert "an AI" in accumulated
+        assert "MODEL_OUTPUT_MUST_NOT_APPEAR" not in accumulated
+        # The persona / model was taken out of the loop ENTIRELY (the real bypass).
+        assert backend.chat_stream_calls == 0
+        # The exchange is persisted so history reflects the safe completion.
+        assert conv.messages[-2].role == "user"
+        assert conv.messages[-1].role == "assistant"
+        assert "an AI" in conv.messages[-1].content
+        assert chunks[-1].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_benign_turn_still_calls_the_model(self) -> None:
+        # Non-vacuity control: a benign message does NOT bypass — the model runs,
+        # so the bypass fires on the real trigger only (the transition, not forced).
+        backend = ScriptedBackend([ScriptedRound(text="Hello, I'm Astrid.")])
+        loop, _stores, _writer = _make_loop(backend)
+
+        chunks = [c async for c in loop.turn(_conv(0), "what are my rights as a tenant?")]
+
+        assert backend.chat_stream_calls == 1
+        assert "Hello, I'm Astrid." in "".join(c.delta for c in chunks)

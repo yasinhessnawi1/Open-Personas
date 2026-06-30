@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona_runtime.prompt import PromptMode
 from persona_runtime.retrieval import DEFAULT_RETRIEVE_TOP_K, retrieve_context
 
 if TYPE_CHECKING:
@@ -91,6 +92,7 @@ class VoicePromptAssembler:
         document_context: DocumentContext | None = None,
         graph: GraphContext | None = None,
         context: RetrievedContext | None = None,
+        safety_directive: str | None = None,
     ) -> list[ConversationMessage]:
         """Assemble the full persona-conditioned prompt for one voice turn.
 
@@ -142,4 +144,12 @@ class VoicePromptAssembler:
             document_context=document_context,
             reply_language=reply_language,
             graph_surfacing_guidance=self._ctx.graph_surfacing_guidance,
+            # V11-D-1: the voice path builds in VOICE mode so the spoken-delivery
+            # register (V11-D-2) is present — voice ≠ chat, no longer a mirror.
+            # Still the one shared PromptBuilder (D-V5-1, never a thinner prompt);
+            # mode gates sections inside it, it does not fork the path.
+            mode=PromptMode.VOICE,
+            # V11-D-5: the R1-soft override directive (path-independent with the chat
+            # loop). ``None`` ⇒ byte-identical, R0 floor intact.
+            safety_directive=safety_directive,
         )

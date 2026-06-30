@@ -11,6 +11,49 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Persona Voice & Character — talk-style + character adherence (2026-07-01)
+
+> Close-out of `persona-voice-and-character` (Spec V11, `persona-runtime` + `persona-voice`).
+> Today a persona's voice answer was nearly identical to its chat answer — voice was chat
+> mirrored, with no spoken register — and an "you're just an AI" probe could thin its
+> character. V11 gives the persona a **voice-mode talking style** distinct from chat and
+> **strong character adherence** in both modes, with a **never-break-character rule that has a
+> researched safety boundary**. It is prompt-engineering on the shared prompt builder (no
+> schema change, no migration): the chat surface stays **byte-identical** under a literal
+> snapshot, so the entire change is contained to the voice register plus the new both-modes
+> character/style blocks.
+
+**Added**
+- **Voice-mode talking register** (`VOICE_REGISTER_VERSION`) — rendered only in voice mode:
+  short spoken turns, plain words, no spoken lists/markdown, numbers said as words, no
+  parenthetical asides, varied acknowledgements. Voice ≠ chat, measurably (criterion 1).
+- **Character contract** (`CHARACTER_LOCK_VERSION`, both modes) — one inseparable artifact:
+  inhabit-your-character adoption + a never-break lock that resists identity bait, with **two
+  co-equal carve-outs** that always take priority — honest **AI-disclosure** (a sincere or
+  legal "are you an AI?" is answered truthfully, even as bait; the gate fails open toward
+  disclosure) and **wellbeing** (step out and point to real human support in genuine crisis).
+- **R1 turn-time safety gate** (`SAFETY_INTERCEPT_VERSION`) — a path-independent lexical
+  detector over the user message (sub-ms, no model call, no network → no voice-latency hit),
+  identical in chat, agentic, and voice. Acute, explicit crisis takes the persona **out of the
+  loop entirely**: a deterministic, locale-aware, voice-aware safe completion is emitted
+  **instead of** generating (the lock that suppresses crisis-noticing is bypassed). Gated by
+  `PERSONA_SAFETY_ENABLED` (default on); fail-soft degrades to the always-on character-lock
+  floor, never to nothing.
+- **Evaluation** (V4 "feels-natural" tradition) — a voice-style + character-adherence judge
+  (penalising **both** stilted convergence **and** persona-flattening) and an **adversarial
+  non-vacuity** slice (identity bait holds character; crisis fires the real yield).
+
+**Changed**
+- The shared prompt builder gains a `mode` (chat/voice) parameter and a `safety_directive`
+  slot; both default to the pre-V11 behaviour, so existing chat callers are byte-identical.
+
+> **Honest coverage — V11 does NOT claim comprehensive crisis detection.** The reliable v1
+> claim is **explicit-acute** crisis (the lexical gate fires 100% on the explicit probe set).
+> **Euphemistic / indirect and non-English** distress are **owned residuals**, measured rather
+> than hidden: the lexical detector catches some euphemistic phrasing and **0% of non-English
+> (Norwegian)** crisis signals; those misses fall to the always-on character-lock wellbeing
+> floor (which a model can still discount) and to a **future fine-tuned / multilingual
+> classifier** (the named fix). The measured residuals are recorded, not papered over.
 ### Per-Request Scoping for the Builtin Filesystem MCP Server (2026-06-30)
 
 > Closes the last cross-context file-visibility leak. The opt-in builtin `filesystem` MCP server
