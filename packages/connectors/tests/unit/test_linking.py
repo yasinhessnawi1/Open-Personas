@@ -101,6 +101,36 @@ def test_token_is_stored_hashed_never_plaintext() -> None:
     assert store.tokens[hash_token(plaintext)].owner_id == "u1"
 
 
+def test_issue_uses_injected_code_generator() -> None:
+    """C4 D-C4-X-c1-issue-codegen: a carrier may inject the code FORMAT (a short
+    textable OTP for SMS/WhatsApp); the lifecycle (hash-at-rest, single-use, the
+    redeem path) is unchanged — only the generated string differs."""
+    svc, store = _service()
+    plaintext = svc.issue(
+        owner_id="u1", platform="whatsapp", now=_NOW, ttl=_TTL, generate_code=lambda: "ABCD2345"
+    )
+    assert plaintext == "ABCD2345"  # the injected code is handed back verbatim
+    assert "ABCD2345" not in store.tokens  # still keyed by the hash, never plaintext
+    assert hash_token("ABCD2345") in store.tokens
+    # and it redeems through the unchanged mechanism-agnostic path
+    owner = svc.redeem_and_bind(
+        plaintext_token="ABCD2345",
+        platform="whatsapp",
+        platform_identity="+15551230000",
+        now=_NOW,
+    )
+    assert owner == "u1"
+
+
+def test_issue_default_generator_is_the_unchanged_urlsafe_token() -> None:
+    """The additive proof: with NO generate_code, issue() is byte-for-byte the prior
+    behaviour — a high-entropy token_urlsafe(32) (~43 url-safe chars)."""
+    svc, store = _service()
+    plaintext = svc.issue(owner_id="u1", platform="telegram", now=_NOW, ttl=_TTL)
+    assert len(plaintext) >= 40  # token_urlsafe(32) → ~43 chars; never a short code by default
+    assert hash_token(plaintext) in store.tokens
+
+
 def test_redeem_binds_identity_and_returns_owner() -> None:
     """A platform identity redeems the token → bound to the issuing owner."""
     svc, _ = _service()

@@ -105,3 +105,85 @@ def test_telegram_api_base_url_default() -> None:
     """The Bot API base defaults to the public host (overridable for tests/local server)."""
     config = ConnectorConfig()
     assert config.telegram_api_base_url == "https://api.telegram.org"
+
+
+# --- Twilio WhatsApp + SMS adapters (Spec C4 T1, D-C4-1) ---
+
+
+def test_twilio_credentials_default_to_none_or_empty() -> None:
+    """No Twilio configured by default — auth token absent, addresses empty (D-C4-1)."""
+    config = ConnectorConfig()
+    assert config.twilio_account_sid == ""
+    assert config.twilio_auth_token is None
+    assert config.twilio_webhook_auth_token is None
+    assert config.twilio_whatsapp_from == ""
+    assert config.twilio_sms_from == ""
+
+
+def test_twilio_account_sid_is_not_a_secret() -> None:
+    """The Account SID is a public identifier (not a credential) — a plain str."""
+    config = ConnectorConfig(twilio_account_sid="AC0123456789abcdef")
+    assert config.twilio_account_sid == "AC0123456789abcdef"
+
+
+def test_twilio_auth_token_is_a_secret() -> None:
+    """The auth token is a SecretStr — never rendered in repr/str/logs (D-C4-1 credential)."""
+    config = ConnectorConfig(twilio_auth_token="SUPER-SECRET-AUTH-TOKEN")  # noqa: S106 — test literal
+    assert config.twilio_auth_token is not None
+    assert "SUPER-SECRET-AUTH-TOKEN" not in repr(config.twilio_auth_token)
+    assert "SUPER-SECRET-AUTH-TOKEN" not in str(config)
+    assert config.twilio_auth_token.get_secret_value() == "SUPER-SECRET-AUTH-TOKEN"
+
+
+def test_twilio_webhook_auth_token_is_a_secret() -> None:
+    """The webhook signature-validation token is a SecretStr too (T3 fail-closed)."""
+    config = ConnectorConfig(twilio_webhook_auth_token="HOOK-VALIDATE-TOKEN")  # noqa: S106 — test literal
+    assert config.twilio_webhook_auth_token is not None
+    assert "HOOK-VALIDATE-TOKEN" not in str(config)
+    assert config.twilio_webhook_auth_token.get_secret_value() == "HOOK-VALIDATE-TOKEN"
+
+
+def test_twilio_addresses_load_from_kwargs() -> None:
+    """The WhatsApp + SMS from-addresses load (whatsapp:+E164 vs bare E.164)."""
+    config = ConnectorConfig(
+        twilio_whatsapp_from="whatsapp:+14155238886",
+        twilio_sms_from="+14155238886",
+    )
+    assert config.twilio_whatsapp_from == "whatsapp:+14155238886"
+    assert config.twilio_sms_from == "+14155238886"
+
+
+def test_whatsapp_reengagement_template_sid_defaults_empty() -> None:
+    """The 24h-window re-engagement template SID is empty until configured (T9/T13)."""
+    config = ConnectorConfig()
+    assert config.whatsapp_reengagement_template_sid == ""
+
+
+def test_twilio_api_base_url_default() -> None:
+    """The Twilio API base defaults to the public host (overridable for tests)."""
+    config = ConnectorConfig()
+    assert config.twilio_api_base_url == "https://api.twilio.com"
+
+
+def test_phone_link_token_ttl_default_is_10_minutes() -> None:
+    """The phone-link token TTL defaults to 10 minutes (short-lived, C1-D-5)."""
+    config = ConnectorConfig()
+    assert config.phone_link_token_ttl_minutes == 10
+
+
+def test_phone_link_token_ttl_must_be_positive() -> None:
+    """A non-positive link-token TTL is a misconfiguration — fail fast at the boundary."""
+    with pytest.raises(ValueError):  # noqa: PT011 — pydantic raises ValidationError (a ValueError)
+        ConnectorConfig(phone_link_token_ttl_minutes=0)
+
+
+def test_sms_max_segments_default_is_3() -> None:
+    """SMS multi-segment budget defaults to 3 (the splitter's concatenation cap, T12)."""
+    config = ConnectorConfig()
+    assert config.sms_max_segments == 3
+
+
+def test_sms_max_segments_must_be_positive() -> None:
+    """A non-positive segment budget is a misconfiguration — fail fast at the boundary."""
+    with pytest.raises(ValueError):  # noqa: PT011 — pydantic raises ValidationError (a ValueError)
+        ConnectorConfig(sms_max_segments=0)

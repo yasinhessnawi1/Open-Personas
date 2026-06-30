@@ -175,3 +175,34 @@ class ConnectorConfig(BaseSettings):
     slack_transport: SlackTransport = Field(default="socket")
     # The OAuth ``state`` (= C1 LinkToken) TTL — short-lived + single-use (C1-D-5).
     slack_link_token_ttl_minutes: int = Field(default=15, gt=0)
+
+    # --- Twilio WhatsApp + SMS adapters (Spec C4, D-C4-1) ---
+    # ONE Twilio account drives BOTH channels (D-C4-1); the channel is chosen by the
+    # from-address prefix (``whatsapp:+E164`` vs a bare E.164). The Account SID is a
+    # PUBLIC identifier (it rides in the request URL path and Twilio prints it openly)
+    # — a plain ``str``, not a credential. The auth token is the CREDENTIAL
+    # (D-C2-X-credential carried forward): ``SecretStr``, never logged, unwrapped only
+    # at the HTTP-Basic-auth call site. Both ``None``/empty until configured (the
+    # service fails fast at startup if a Twilio channel is requested without them).
+    twilio_account_sid: str = Field(default="")
+    twilio_auth_token: SecretStr | None = Field(default=None)
+    # The WhatsApp + SMS sender addresses (the Twilio ``From``): ``whatsapp:+E164`` for
+    # WhatsApp, a bare ``+E164`` for SMS. Empty until the respective channel is configured.
+    twilio_whatsapp_from: str = Field(default="")
+    twilio_sms_from: str = Field(default="")
+    # The token Twilio signs inbound + status webhooks with (T3 signature validation —
+    # usually the same value as ``twilio_auth_token``, but a SEPARATE field so signing
+    # vs API auth is explicit). ``SecretStr``; fail-closed when unset (D-C2-2 posture).
+    twilio_webhook_auth_token: SecretStr | None = Field(default=None)
+    # The approved WhatsApp re-engagement template content SID (``HX…``) used to reopen
+    # a closed 24h customer-care window (T9/T13). Empty until a template is approved.
+    whatsapp_reengagement_template_sid: str = Field(default="")
+    # The Twilio API base (overridable for a faithful stub in tests / a local proxy).
+    twilio_api_base_url: str = Field(default="https://api.twilio.com")
+    # The phone-link token TTL (the SMS/WhatsApp account-linking flow, a later task).
+    # Short-lived + single-use (C1-D-5); a stale link fails closed (regenerate).
+    phone_link_token_ttl_minutes: int = Field(default=10, gt=0)
+    # The SMS multi-segment concatenation budget (T12 splitter): how many 153-char
+    # GSM-7 / 67-char UCS-2 parts a single reply may span before it is split into
+    # separate messages. A tight default keeps replies cheap + readable.
+    sms_max_segments: int = Field(default=3, gt=0)

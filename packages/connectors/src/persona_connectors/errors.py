@@ -26,6 +26,8 @@ __all__ = [
     "SlackRateLimitError",
     "TelegramApiError",
     "TelegramRateLimitError",
+    "TwilioApiError",
+    "TwilioRateLimitError",
 ]
 
 
@@ -93,6 +95,36 @@ class TelegramRateLimitError(TelegramApiError):
         merged = {**(context or {}), "retry_after": str(retry_after)}
         super().__init__(message, context=merged)
         self.retry_after = retry_after
+
+
+class TwilioApiError(ConnectorError):
+    """A Twilio Messages API call failed (Spec C4 — the adapter-boundary domain error).
+
+    Twilio's transport faults (HTTP errors, network failures) and logical rejections
+    (a non-2xx with a JSON ``{"code", "message"}`` body) are caught at the client
+    boundary and re-raised as this domain error (the ENG-STD catch-at-the-boundary
+    rule). The auth token rides in the HTTP-**Basic** auth header (never the URL), and
+    the underlying ``httpx`` exception is **never chained or quoted** (D-C4-1 /
+    D-C2-X-credential): the ``context`` carries only the method + status + the Twilio
+    ``error_code`` — never the token or the URL.
+
+    **The 24h-window signal (63016) is NOT interpreted here.** An out-of-window
+    WhatsApp send surfaces as ``error_code`` on the create response (``status=failed``)
+    or later via a status callback; the client only EXPOSES ``error_code`` (on
+    :class:`~persona_connectors._twilio.client.TwilioMessageResult` / in this error's
+    ``context``) so the delivery mapping (T9/T12) can act on it — the boundary stays thin.
+    """
+
+
+class TwilioRateLimitError(TwilioApiError):
+    """Twilio throttled the account (HTTP 429) — back off and retry (Spec C4).
+
+    Twilio returns ``429`` (with code ``20429``) when sends exceed the account's
+    per-second message limits. The send path maps this to a
+    :class:`~persona.delivery.DeliveryResult` ``pending`` (retryable —
+    D-C1-X-platform-rejection), never a silent drop. A subclass of
+    :class:`TwilioApiError` so a generic catch still maps a rejection to a result.
+    """
 
 
 class DiscordApiError(ConnectorError):

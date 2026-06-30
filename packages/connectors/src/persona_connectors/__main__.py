@@ -40,6 +40,13 @@ from websockets.asyncio.client import connect as ws_connect
 
 from persona_connectors import discord as discord_adapter
 from persona_connectors import slack as slack_adapter
+from persona_connectors import sms as sms_adapter
+from persona_connectors import whatsapp as whatsapp_adapter
+from persona_connectors._phone.flow import PhoneInboundFlow
+from persona_connectors._phone.linking import PhoneLinkingService
+from persona_connectors._twilio.app import build_twilio_app
+from persona_connectors._twilio.client import TwilioClient
+from persona_connectors._twilio.status import map_delivery, parse_status_callback
 from persona_connectors.composition import (
     ConnectorComposition,
     build_delivery_router,
@@ -47,10 +54,12 @@ from persona_connectors.composition import (
     build_reply_runner,
 )
 from persona_connectors.config import ConnectorConfig
+from persona_connectors.domain.flow import SharedInboundFlow
 from persona_connectors.domain.linking import LinkingService
 from persona_connectors.domain.resolution import InboundIdentityResolver
 from persona_connectors.errors import ConnectorError
 from persona_connectors.infra import PostgresConversationStateStore, PostgresLinkStore
+from persona_connectors.sms.cost import record_sms_cost
 from persona_connectors.telegram import (
     InboundFlow as TelegramInboundFlow,
 )
@@ -281,6 +290,165 @@ async def _setup_slack(
     return connector, _serve_app(events_app, port=_HTTP_PORT)
 
 
+def _build_twilio_client(config: ConnectorConfig, http: httpx.AsyncClient) -> TwilioClient:
+    """Build the shared Twilio client (one account drives BOTH channels — D-C4-1)."""
+    if config.twilio_auth_token is None or not config.twilio_account_sid:
+        raise ConnectorError(
+            "a Twilio channel is configured but "
+            "PERSONA_CONNECTORS_TWILIO_ACCOUNT_SID / _AUTH_TOKEN are not set"
+        )
+    return TwilioClient(
+        account_sid=config.twilio_account_sid,
+        auth_token=config.twilio_auth_token,
+        http=http,
+        api_base_url=config.twilio_api_base_url,
+    )
+
+
+async def _setup_whatsapp(
+    *,
+    config: ConnectorConfig,
+    twilio_client: TwilioClient,
+    linking_service: LinkingService,
+    resolver: InboundIdentityResolver,
+    conversation_store: ConversationStateStore,
+    list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
+    run_turn: Callable[[TurnRequest], Awaitable[str]],
+    owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+) -> tuple[MessageDeliverer, FastAPI]:
+    """Assemble the WhatsApp adapter → (deliverer, the Twilio webhook/status/issue app)."""
+    connector = whatsapp_adapter.WhatsAppConnector(
+        client=twilio_client,
+        from_address=config.twilio_whatsapp_from,
+        conversation_store=conversation_store,
+        owner_scope=owner_scope,
+        reengagement_template_sid=config.whatsapp_reengagement_template_sid,
+    )
+    transport = whatsapp_adapter.WhatsAppFlowTransport(
+        client=twilio_client, connector=connector, from_address=config.twilio_whatsapp_from
+    )
+    phone_linking = PhoneLinkingService(linking=linking_service, platform=whatsapp_adapter.PLATFORM)
+    shared = SharedInboundFlow(
+        resolver=resolver,
+        conversation_store=conversation_store,
+        list_persona_names=list_persona_names,
+        run_turn=run_turn,
+    )
+    flow = PhoneInboundFlow(
+        platform=whatsapp_adapter.PLATFORM,
+        classify_inbound=whatsapp_adapter.classify_inbound,
+        inbound_text_type=whatsapp_adapter.InboundText,
+        inbound_non_text_type=whatsapp_adapter.InboundNonText,
+        decline_message=whatsapp_adapter.decline_message,
+        linking=phone_linking,
+        shared=shared,
+        transport=transport,
+        now=_now,
+    )
+
+    async def on_status(params: Mapping[str, str]) -> None:
+        # WhatsApp carries no per-segment cost; map the delivery signal for observability.
+        callback = parse_status_callback(params)
+        result = map_delivery(
+            channel=whatsapp_adapter.PLATFORM,
+            status=callback.status,
+            error_code=callback.error_code,
+        )
+        _log.info(
+            "whatsapp delivery (sid={sid} outcome={outcome} detail={detail})",
+            sid=callback.message_sid,
+            outcome=result.outcome,
+            detail=result.detail,
+        )
+
+    return connector, _build_phone_app(
+        config=config,
+        platform=whatsapp_adapter.PLATFORM,
+        phone_linking=phone_linking,
+        on_inbound=flow.handle,
+        on_status=on_status,
+    )
+
+
+async def _setup_sms(
+    *,
+    config: ConnectorConfig,
+    twilio_client: TwilioClient,
+    linking_service: LinkingService,
+    resolver: InboundIdentityResolver,
+    conversation_store: ConversationStateStore,
+    list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
+    run_turn: Callable[[TurnRequest], Awaitable[str]],
+    owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+) -> tuple[MessageDeliverer, FastAPI]:
+    """Assemble the SMS adapter → (deliverer, the Twilio webhook/status/issue app)."""
+    connector = sms_adapter.SmsConnector(
+        client=twilio_client,
+        from_address=config.twilio_sms_from,
+        conversation_store=conversation_store,
+        owner_scope=owner_scope,
+        max_segments=config.sms_max_segments,
+    )
+    transport = sms_adapter.SmsFlowTransport(
+        client=twilio_client, connector=connector, from_address=config.twilio_sms_from
+    )
+    phone_linking = PhoneLinkingService(linking=linking_service, platform=sms_adapter.PLATFORM)
+    shared = SharedInboundFlow(
+        resolver=resolver,
+        conversation_store=conversation_store,
+        list_persona_names=list_persona_names,
+        run_turn=run_turn,
+    )
+    flow = PhoneInboundFlow(
+        platform=sms_adapter.PLATFORM,
+        classify_inbound=sms_adapter.classify_inbound,
+        inbound_text_type=sms_adapter.InboundText,
+        inbound_non_text_type=sms_adapter.InboundNonText,
+        decline_message=sms_adapter.decline_message,
+        linking=phone_linking,
+        shared=shared,
+        transport=transport,
+        now=_now,
+    )
+
+    async def on_status(params: Mapping[str, str]) -> None:
+        # SMS is the one channel where verbosity costs money — record the per-segment cost
+        # from the same status callback (the T12 single-ingestion seam).
+        record_sms_cost(params)
+
+    return connector, _build_phone_app(
+        config=config,
+        platform=sms_adapter.PLATFORM,
+        phone_linking=phone_linking,
+        on_inbound=flow.handle,
+        on_status=on_status,
+    )
+
+
+def _build_phone_app(
+    *,
+    config: ConnectorConfig,
+    platform: str,
+    phone_linking: PhoneLinkingService,
+    on_inbound: Callable[[Mapping[str, str]], Awaitable[None]],
+    on_status: Callable[[Mapping[str, str]], Awaitable[None]],
+) -> FastAPI:
+    """Build a phone channel's Twilio app: bind ``issue_code`` + the JWT verifier (api-free)."""
+    ttl = timedelta(minutes=config.phone_link_token_ttl_minutes)
+
+    async def issue_code(owner_id: str) -> str:
+        return phone_linking.issue_code(owner_id=owner_id, now=_now(), ttl=ttl)
+
+    return build_twilio_app(
+        platform=platform,
+        auth_token=config.twilio_webhook_auth_token,
+        on_inbound=on_inbound,
+        on_status=on_status,
+        issue_code=issue_code,
+        verify_jwt=make_jwt_verifier(config),
+    )
+
+
 async def _gateway_connect(url: str) -> discord_adapter.GatewayConnection:
     """Open a Discord gateway WebSocket (the injected connect factory).
 
@@ -324,6 +492,7 @@ async def _amain() -> None:
 
     deliverers: dict[str, MessageDeliverer] = {}
     runners: list[Coroutine[object, object, None]] = []
+    http_apps: dict[str, FastAPI] = {}  # platform → ASGI app, mounted + served once below
 
     if config.telegram_bot_token is not None:
         connector, runner = await _setup_telegram(
@@ -366,11 +535,58 @@ async def _amain() -> None:
         deliverers["slack"] = connector
         runners.append(runner)
 
+    # The two Twilio phone channels share ONE client (one account, channel by the From
+    # prefix — D-C4-1); built once, only when at least one phone channel is configured.
+    if config.twilio_whatsapp_from or config.twilio_sms_from:
+        twilio_client = _build_twilio_client(config, http)
+        if config.twilio_whatsapp_from:
+            connector, app = await _setup_whatsapp(
+                config=config,
+                twilio_client=twilio_client,
+                linking_service=linking_service,
+                resolver=resolver,
+                conversation_store=conversation_store,
+                list_persona_names=list_persona_names,
+                run_turn=run_turn,
+                owner_scope=composition.owner_scope,
+            )
+            deliverers["whatsapp"] = connector
+            http_apps["whatsapp"] = app
+        if config.twilio_sms_from:
+            connector, app = await _setup_sms(
+                config=config,
+                twilio_client=twilio_client,
+                linking_service=linking_service,
+                resolver=resolver,
+                conversation_store=conversation_store,
+                list_persona_names=list_persona_names,
+                run_turn=run_turn,
+                owner_scope=composition.owner_scope,
+            )
+            deliverers["sms"] = connector
+            http_apps["sms"] = app
+
     if not deliverers:
         raise ConnectorError(
             "no connector configured — set at least one platform's bot token "
-            "(PERSONA_CONNECTORS_{TELEGRAM,DISCORD,SLACK}_BOT_TOKEN)"
+            "(PERSONA_CONNECTORS_{TELEGRAM,DISCORD,SLACK}_BOT_TOKEN) or a Twilio "
+            "channel (PERSONA_CONNECTORS_TWILIO_{WHATSAPP,SMS}_FROM)"
         )
+
+    # The phone channels serve HTTP (webhook/status/issue routes). Each Twilio app already
+    # namespaces ALL its routes by ``/{platform}/…`` (e.g. ``/whatsapp/webhook`` vs
+    # ``/sms/webhook``), so they never collide; collect them onto ONE parent app served
+    # once on the HTTP port (mirror Slack's events app being served on ``_HTTP_PORT``).
+    if http_apps:
+        from fastapi import FastAPI as _FastAPI
+
+        if len(http_apps) == 1:
+            parent = next(iter(http_apps.values()))
+        else:
+            parent = _FastAPI(title="persona-connectors (twilio)")
+            for app in http_apps.values():
+                parent.router.routes.extend(app.router.routes)
+        runners.append(_serve_app(parent, port=_HTTP_PORT))
 
     # Register every configured connector as a C0 MessageDeliverer (criterion 6 / 8).
     build_delivery_router(

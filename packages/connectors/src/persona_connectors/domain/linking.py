@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from persona_connectors.errors import IdentityNotLinkedError, LinkTokenInvalidError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import timedelta
 
 __all__ = [
@@ -153,15 +154,33 @@ class LinkingService:
     def __init__(self, store: LinkStore) -> None:
         self._store = store
 
-    def issue(self, *, owner_id: str, platform: str, now: datetime, ttl: timedelta) -> str:
+    def issue(
+        self,
+        *,
+        owner_id: str,
+        platform: str,
+        now: datetime,
+        ttl: timedelta,
+        generate_code: Callable[[], str] | None = None,
+    ) -> str:
         """Issue a one-time link token for ``owner_id`` on ``platform``.
 
         Generates an opaque bearer token, stores only its hash (pending, TTL'd),
         and returns the **plaintext** for the caller to hand to the user. The
         plaintext is never persisted (CQS: the write returns only the capability
         the caller must deliver, not stored data).
+
+        ``generate_code`` lets a per-platform carrier inject the code **format**
+        (C4 D-C4-X-c1-issue-codegen — the OTP carrier injects a short textable
+        base32 code; the URL/OAuth-state carriers pass nothing). It is the *only*
+        per-carrier variance: the hash-at-rest, single-use, TTL, and redeem
+        lifecycle stay framework-owned. **Default (``None``) is byte-unchanged**:
+        the prior high-entropy ``secrets.token_urlsafe(32)`` — Telegram/Discord/
+        Slack are untouched.
         """
-        plaintext = secrets.token_urlsafe(_TOKEN_BYTES)
+        plaintext = (
+            secrets.token_urlsafe(_TOKEN_BYTES) if generate_code is None else generate_code()
+        )
         self._store.create_token(
             LinkToken(
                 token_hash=hash_token(plaintext),
