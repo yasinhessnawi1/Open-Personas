@@ -26,7 +26,7 @@ from __future__ import annotations
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["SandboxPoolConfig", "SandboxWallClockConfig"]
+__all__ = ["SandboxPoolConfig", "SandboxTemplateConfig", "SandboxWallClockConfig"]
 
 
 class SandboxWallClockConfig(BaseSettings):
@@ -80,6 +80,56 @@ class SandboxWallClockConfig(BaseSettings):
             msg = f"wall-clock cap must be > 0; got {v}"
             raise ValueError(msg)
         return v
+
+
+class SandboxTemplateConfig(BaseSettings):
+    """The custom-template selection for the hosted sandbox (Spec P5, P5-D-3).
+
+    ``PERSONA_SANDBOX_TEMPLATE`` (sandbox-scope, beside the pool/wall-clock config)
+    names the **E2B template alias** to run — the owner's custom
+    ``persona-docgen-interpreter`` (reportlab + python-pptx baked in, egress still
+    off, D-12-4). **Unset ⇒ ``None`` ⇒ the SDK default ``code-interpreter-v1``**, so
+    community/OSS deploys without the custom template keep working unchanged
+    (P5-D-6). The alias (not an immutable build id) is stored so the owner can
+    rebuild the template for a lib security patch without changing the secret.
+
+    ``docgen_full_fidelity`` is the **single source of truth** (P5-D-4) derived from
+    this one value: a custom template being configured means the doc-gen libs are
+    present, so ``document_generation`` may produce ``.pdf`` via reportlab and offer
+    ``.pptx`` via python-pptx up-front. Unset ⇒ the spec-A offline-degrade fallback.
+    The composition root computes this and hands it to the (core-side) skill
+    assembly; **persona-core never reads ``PERSONA_SANDBOX_*``** — the api→core
+    decoupling guard holds. A template that is set but lacks the libs is covered by
+    the skill's runtime try-import belt-and-braces (P5-D-4), not by this flag.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="PERSONA_SANDBOX_", extra="ignore", populate_by_name=True
+    )
+
+    template: str | None = Field(
+        default=None,
+        description=(
+            "E2B sandbox template alias (PERSONA_SANDBOX_TEMPLATE). None ⇒ the SDK "
+            "default code-interpreter-v1 (community/OSS path). Set to the owner's "
+            "custom doc-gen template alias in cloud deploys."
+        ),
+    )
+
+    @field_validator("template")
+    @classmethod
+    def _blank_is_unset(cls, v: str | None) -> str | None:
+        """Treat an empty / whitespace-only value as unset (a blank Fly secret must
+        degrade to the SDK default, never select an empty template name)."""
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
+
+    @property
+    def docgen_full_fidelity(self) -> bool:
+        """True ⇒ a custom template is configured ⇒ full pdf/pptx fidelity (P5-D-4)."""
+        return self.template is not None
 
 
 class SandboxPoolConfig(BaseSettings):

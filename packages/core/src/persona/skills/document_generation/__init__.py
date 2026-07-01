@@ -16,6 +16,11 @@ skill directory.
 
 from __future__ import annotations
 
+from persona.skills.document_generation.fidelity import (
+    DOCGEN_SKILL_NAME,
+    apply_docgen_fidelity,
+    resolve_fidelity_markers,
+)
 from persona.skills.document_generation.protocol import DocumentHandler, FormatHandler
 from persona.skills.document_generation.registry import (
     FORMAT_HANDLERS,
@@ -27,10 +32,13 @@ from persona.skills.document_generation.registry import (
 )
 
 __all__ = [
+    "DOCGEN_SKILL_NAME",
     "FORMAT_HANDLERS",
     "TEMPLATES",
     "DocumentHandler",
     "FormatHandler",
+    "apply_docgen_fidelity",
+    "resolve_fidelity_markers",
     "resolve_format",
     "resolve_template",
     "supported_formats",

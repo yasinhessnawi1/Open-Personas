@@ -63,3 +63,42 @@ def test_text_formats_bundle_no_supplements() -> None:
     stray = [p.name for p in supplements.glob("md-*.md")]
     stray += [p.name for p in supplements.glob("txt-*.md")]
     assert stray == []
+
+
+# -- Spec P5 A3a: pdf try-import fidelity (template-agnostic) ----------------
+
+
+def test_pdf_section_teaches_reportlab_with_matplotlib_fallback() -> None:
+    """The pdf section must teach BOTH branches (P5-D-4): prefer reportlab, fall
+    back to matplotlib on ModuleNotFoundError — a static try-import that produces
+    a real .pdf whether or not the custom template baked reportlab in."""
+    body = (_SKILL_DIR / "SKILL.md").read_text()
+    pdf_section = body.split("### `pdf`", 1)[1].split("### `pptx`", 1)[0]
+    # full-fidelity branch (reportlab platypus)
+    assert "reportlab" in pdf_section
+    assert "SimpleDocTemplate" in pdf_section
+    # the fallback branch, reached only on a template without reportlab
+    assert "except ModuleNotFoundError" in pdf_section
+    assert "PdfPages" in pdf_section
+
+
+def test_pdf_descriptor_documents_both_libraries() -> None:
+    from persona.skills.document_generation import FORMAT_HANDLERS
+
+    lib = FORMAT_HANDLERS["pdf"].library
+    assert "reportlab" in lib
+    assert "matplotlib" in lib
+
+
+def test_skill_never_instructs_a_runtime_install() -> None:
+    """Content-level egress/no-pip guard (D-12-4): the model-facing instructions
+    must never teach a runtime install; every mention of installing is a *negative*
+    ('never install'). Complements the structural sandbox invariant (A3b)."""
+    body = (_SKILL_DIR / "SKILL.md").read_text().lower()
+    # No imperative install lines. Any occurrence of "pip install" / "apt" must sit
+    # in a forbidding clause, so assert the affirmative-install command shapes are absent.
+    for forbidden in ("pip install", "!pip", "subprocess.run(['pip'", "os.system('pip"):
+        assert forbidden not in body, f"SKILL.md must not teach `{forbidden}`"
+    # And the never-install rule is present + explicit.
+    assert "never" in body
+    assert "install" in body

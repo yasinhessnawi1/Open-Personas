@@ -31,6 +31,7 @@ from persona.imagegen import make_generate_image_tool
 from persona.logging import get_logger
 from persona.schema.persona import Persona
 from persona.skills import BUILTIN_ROOT, SkillInjector, SkillScanner, make_use_skill_tool
+from persona.skills.document_generation import apply_docgen_fidelity
 from persona.stores import (
     EpisodicStore,
     IdentityStore,
@@ -107,6 +108,7 @@ class RuntimeFactory:
         api_config: APIConfig | None = None,
         credits_policy: CreditsPolicy | None = None,
         memory_backend: Backend | None = None,
+        docgen_full_fidelity: bool = False,
     ) -> None:
         """Composition root for per-request loops.
 
@@ -149,6 +151,13 @@ class RuntimeFactory:
         # ``code_execution`` tool is absent from the toolbox in that case
         # and surfaces ``SandboxUnavailableError`` if the model still calls it.
         self._sandbox_pool = sandbox_pool
+        # Spec P5 (P5-D-4) — whether the hosted sandbox runs the custom doc-gen
+        # template (reportlab + python-pptx baked in). Computed by the composition
+        # root from PERSONA_SANDBOX_TEMPLATE and passed in; persona-core never reads
+        # the env. Consumed when composing the ``document_generation`` skill so it
+        # teaches full pdf/pptx fidelity vs the spec-A offline-degrade fallback.
+        # Default False ⇒ the safe degrade path (community/default, or no template).
+        self._docgen_full_fidelity = docgen_full_fidelity
         # Spec 17 D-17-X-bytes-persistence — workspace root for produced-file
         # persist + intermediate/* cross-turn staging. Threaded through to
         # ``make_pool_code_execution_tool``. None (test / CLI path) ⇒ no
@@ -695,13 +704,25 @@ class RuntimeFactory:
             declared_skills=persona.skills,
             tool_allow_list=list(persona.tools) if persona.tools else None,
         )
-        # Spec S2 (C1): merge in declared EXTERNAL skills from the file-on-volume mirror.
-        # Availability ≠ enablement (S2-R-3 / the N2 boundary): the mirror makes external
-        # skills *available*, but only the names the persona DECLARED are loaded here — the
-        # auto-sync never enables a skill on a persona. Trust + provenance ride from the
-        # mirror snapshot (source-assigned, never re-derived). Fail-soft: an absent/corrupt
-        # mirror yields an empty external set, so builtins are unaffected.
-        merged: list[object] = list(scanned)
+        # Spec P5 (P5-D-4): resolve the document_generation SKILL.md's fidelity fence to
+        # the variant matching this deployment's sandbox template, applied to the builtin
+        # scan (doc-gen is a builtin). The flag is computed by the composition root from
+        # PERSONA_SANDBOX_TEMPLATE and stored on the factory; core consumes it here via
+        # the pure ``apply_docgen_fidelity``. A no-op for every other skill — the single
+        # consumption point of the flag, riding the existing skill path.
+        resolved_builtins = [
+            apply_docgen_fidelity(spec, full_fidelity=self._docgen_full_fidelity)
+            for spec in scanned
+        ]
+        # Spec S2 (C1): merge in declared EXTERNAL skills from the file-on-volume mirror,
+        # after fidelity resolution (external skills carry no doc-gen fence, so ordering
+        # is immaterial to behaviour). Availability ≠ enablement (S2-R-3 / the N2
+        # boundary): the mirror makes external skills *available*, but only the names the
+        # persona DECLARED are loaded here — the auto-sync never enables a skill on a
+        # persona. Trust + provenance ride from the mirror snapshot (source-assigned,
+        # never re-derived). Fail-soft: an absent/corrupt mirror yields an empty external
+        # set, so builtins are unaffected.
+        merged: list[object] = list(resolved_builtins)
         merged.extend(self._declared_mirror_skills(persona, merged))
         return scanner, merged
 

@@ -9,7 +9,7 @@ via the Protocol design.
 
 from __future__ import annotations
 
-from persona_api.sandbox.config import SandboxPoolConfig
+from persona_api.sandbox.config import SandboxPoolConfig, SandboxTemplateConfig
 from persona_api.sandbox.context import (
     SandboxRequestContext,
     get_sandbox_request_context,
@@ -25,6 +25,7 @@ __all__ = [
     "SandboxHandle",
     "SandboxPool",
     "SandboxPoolConfig",
+    "SandboxTemplateConfig",
     "SandboxRequestContext",
     "get_sandbox_request_context",
     "make_pool_code_execution_tool",

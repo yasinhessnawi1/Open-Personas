@@ -62,13 +62,16 @@ improvising an unsupported one.
 - **The sandbox has NO internet — use ONLY pre-installed libraries.** Egress is
   disabled by design, so any runtime package install ALWAYS fails (it hangs
   until the setup timeout). NEVER shell out to a package manager, probe-then-
-  install a module, or make any network call from your code. Pre-installed and
-  ready to `import`: `python-docx`, `openpyxl`, `matplotlib` (with
-  `PIL`/Pillow), plus `pandas`/`numpy`. NOT installed and unobtainable offline:
-  `reportlab`, `python-pptx`, `pdfkit`, `fpdf`, `weasyprint`. Route each format
-  below to a pre-installed library; when none fits, **degrade honestly**
-  (produce the content in a format that works and say so) — never attempt a
-  doomed install.
+  install a module, or make any network call from your code. Always pre-installed
+  and ready to `import`: `python-docx`, `openpyxl`, `matplotlib` (with
+  `PIL`/Pillow), plus `pandas`/`numpy`. Two more — `reportlab` (rich PDF) and
+  `python-pptx` (slides) — are present **only on the custom doc-gen sandbox
+  template**: the `pdf` section below try-imports `reportlab` and falls back to
+  matplotlib, so it works either way; the `pptx` section states whether slides
+  are available. Everything else (`pdfkit`, `fpdf`, `weasyprint`) is unobtainable
+  offline. Route each format to a pre-installed library; when none fits, **degrade
+  honestly** (produce the content in a format that works and say so) — never
+  attempt a doomed install.
 - **Output path.** Write to `/workspace/out/<descriptive-name><ext>` from
   inside the sandbox — lowercase, hyphenated filename. The runtime pre-creates
   `/workspace/out` and surfaces the produced file. Same-session persistence
@@ -123,42 +126,80 @@ ws["B4"] = "=SUM(B2:B3)"
 wb.save("/workspace/out/sheet.xlsx")
 ```
 
-### `pdf` — report (`matplotlib.backends.backend_pdf.PdfPages`, pre-installed)
+### `pdf` — report (`reportlab` when present, else matplotlib `PdfPages`)
 
-There is NO `reportlab` offline. Render the PDF with matplotlib's `PdfPages`:
-one `figure` per page, `fig.text(...)` for headings/body (wrap long lines with
-`textwrap.wrap`), and real `Axes` for charts. Good for simple/short documents.
-For heavy rich-text/tables where matplotlib is too poor, **degrade honestly**:
-produce the same content as `docx` (best fidelity offline) and tell the user a
-high-fidelity native PDF needs the custom sandbox template (pending). Use a
-headless backend. Supplements: `pdf-flowables`, `pdf-pagination`, `pdf-images`.
+**Prefer `reportlab`** for real rich-text/tables (`SimpleDocTemplate` + platypus
+flowables — the supplements below are reportlab). It is present on the custom
+doc-gen template but NOT on the default one, so **detect it with a try-import and
+fall back to matplotlib** — never install it. Both branches write a real `.pdf`;
+reportlab is higher fidelity, matplotlib is the always-available floor. This is
+the ONLY place doc-gen branches on a library, and it does so at import time (no
+network, no config). Supplements: `pdf-flowables`, `pdf-pagination`, `pdf-images`.
 
 ```python
-import matplotlib; matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from textwrap import wrap
-with PdfPages("/workspace/out/report.pdf") as pdf:
-    fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
-    fig.text(0.08, 0.95, "Title", fontsize=18, weight="bold", va="top")
-    y = 0.88
-    for line in wrap("Lead paragraph of the report body.", 90):
-        fig.text(0.08, y, line, fontsize=11, va="top"); y -= 0.025
-    plt.axis("off"); pdf.savefig(fig); plt.close(fig)
-    fig2, ax = plt.subplots(figsize=(8.27, 11.69))  # a chart page
-    ax.plot(["Jan", "Feb", "Mar"], [42, 47, 51], marker="o"); ax.set_title("Trend")
-    pdf.savefig(fig2); plt.close(fig2)
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    styles = getSampleStyleSheet()
+    doc = SimpleDocTemplate("/workspace/out/report.pdf", pagesize=A4)
+    doc.build([
+        Paragraph("Title", styles["Title"]),
+        Spacer(1, 12),
+        Paragraph("Lead paragraph of the report body.", styles["BodyText"]),
+    ])  # rich text, wrapped tables, multi-page — see the pdf-flowables supplement
+except ModuleNotFoundError:
+    # Default template: no reportlab. matplotlib PdfPages is the offline floor —
+    # one figure per page, fig.text for headings/body, real Axes for charts.
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from textwrap import wrap
+    with PdfPages("/workspace/out/report.pdf") as pdf:
+        fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
+        fig.text(0.08, 0.95, "Title", fontsize=18, weight="bold", va="top")
+        y = 0.88
+        for line in wrap("Lead paragraph of the report body.", 90):
+            fig.text(0.08, y, line, fontsize=11, va="top"); y -= 0.025
+        plt.axis("off"); pdf.savefig(fig); plt.close(fig)
 ```
 
-### `pptx` — slides (NOT available offline — degrade honestly)
+### `pptx` — slides
+<!--fidelity:full-->
+`python-pptx` IS available on this deployment (the custom doc-gen template).
+**Produce real `.pptx` slides** — a `Presentation()`, one slide per section using
+the layout placeholders (title + body), charts via `python-pptx`'s chart API.
+Supplements: `pptx-layouts`, `pptx-charts`, `pptx-theme`. Keep the try-import
+guard below: if the import unexpectedly fails (a misconfigured template), fall
+back to a slide-structured `docx` and say so — never attempt an install.
 
-`python-pptx` is NOT installed and cannot be installed offline. Do NOT attempt
-any install (it will hang and fail). Instead tell the user that `.pptx`
-generation needs the custom sandbox template (pending), and offer a working
-alternative now: a slide-structured `docx` (one heading per slide) or a `md`
-outline. Pick whichever the user prefers and produce that via the format above.
-Supplements: `pptx-layouts`, `pptx-charts`, `pptx-theme` (read for slide
-structure you can mirror into the docx/md fallback).
+```python
+try:
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])  # title + content
+    slide.shapes.title.text = "Title"
+    slide.placeholders[1].text = "First bullet"
+    prs.save("/workspace/out/deck.pptx")
+except ModuleNotFoundError:
+    # Misconfigured template (python-pptx absent): degrade to a slide-structured
+    # docx (one heading per slide) and tell the user. Do NOT install anything.
+    from docx import Document
+    doc = Document()
+    doc.add_heading("Title", level=1)
+    doc.add_paragraph("First bullet")
+    doc.save("/workspace/out/deck.docx")
+```
+<!--fidelity:else-->
+`python-pptx` is NOT available on this deployment (the default template) and
+cannot be installed offline. Do NOT attempt any install (it will hang and fail).
+Instead tell the user up-front that native `.pptx` needs the custom doc-gen
+sandbox template, and offer a working alternative now: a slide-structured `docx`
+(one heading per slide) or a `md` outline. Pick whichever the user prefers and
+produce that via the format above. Supplements: `pptx-layouts`, `pptx-charts`,
+`pptx-theme` (read for slide structure you can mirror into the docx/md fallback).
+<!--fidelity:end-->
 
 ### `md` — Markdown (stdlib)
 

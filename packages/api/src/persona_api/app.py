@@ -74,7 +74,12 @@ from persona_api.routes import (
     tools,
     uploads,
 )
-from persona_api.sandbox import HostedSandbox, SandboxPool, SandboxPoolConfig
+from persona_api.sandbox import (
+    HostedSandbox,
+    SandboxPool,
+    SandboxPoolConfig,
+    SandboxTemplateConfig,
+)
 from persona_api.services import persona_service
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.runtime_factory import RuntimeFactory
@@ -345,11 +350,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # without an E2B account boot cleanly; the tool is absent in that case
     # and the model would surface ``SandboxUnavailableError`` if it tried
     # (D-12-5 no degraded fallback).
+    # Spec P5: the hosted sandbox template selection (P5-D-3). ``template`` names the
+    # owner's custom doc-gen template alias (reportlab + python-pptx baked in, egress
+    # still off); ``None`` ⇒ the SDK default ``code-interpreter-v1`` (community/OSS).
+    # ``docgen_full_fidelity`` (P5-D-4) is derived from the SAME value and threaded to
+    # the runtime factory below — persona-core never reads ``PERSONA_SANDBOX_*``.
+    sandbox_template_cfg = SandboxTemplateConfig()
     sandbox_pool: SandboxPool | None = None
     if _e2b_api_key_present():
         pool_cfg = SandboxPoolConfig()
         sandbox_pool = SandboxPool(
-            sandbox=HostedSandbox(),  # SDK reads E2B_API_KEY from env (D-12-12)
+            # SDK reads E2B_API_KEY from env (D-12-12); ``template`` selects the
+            # custom image (P5) — None keeps the SDK default. Egress stays off
+            # regardless (D-12-4; ``allow_internet_access=False`` in _create_sandbox).
+            sandbox=HostedSandbox(template=sandbox_template_cfg.template),
             max_per_user=pool_cfg.max_per_user,
             idle_timeout_s=pool_cfg.idle_timeout_s,
             reap_interval_s=pool_cfg.reap_interval_s,
@@ -412,6 +426,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # Spec 33 (D-33-X-memory-chroma-community): the edition's typed-
                 # memory backend (Chroma for community, Postgres for cloud).
                 memory_backend=memory_backend,
+                # Spec P5 (P5-D-4): whether the hosted sandbox runs the custom
+                # doc-gen template (reportlab + python-pptx present). Computed here
+                # from PERSONA_SANDBOX_TEMPLATE; the factory hands it to the
+                # document_generation skill assembly so it teaches full pdf/pptx
+                # fidelity vs the offline-degrade fallback. Core never reads the env.
+                docgen_full_fidelity=sandbox_template_cfg.docgen_full_fidelity,
             )
             app.state.tier_registry = tier_registry
             app.state.authoring_tier = config.authoring_tier

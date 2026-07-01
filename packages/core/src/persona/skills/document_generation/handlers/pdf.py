@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from persona.skills.document_generation.protocol import FormatHandler
 
-#: PDF report via the pre-installed ``matplotlib`` PdfPages backend. The sandbox
-#: has egress disabled (no ``pip install``), and ``reportlab`` is NOT in the
-#: default template, so the SKILL.md teaches matplotlib's PdfPages for offline
-#: PDF (degrade to ``docx`` when rich text/tables exceed it).
+#: PDF report. The SKILL.md teaches a **try-import**: prefer ``reportlab`` (rich
+#: text/tables via platypus flowables — present on the custom doc-gen template,
+#: Spec P5) and fall back to the always-present ``matplotlib`` PdfPages backend on
+#: ``ModuleNotFoundError``. Egress stays disabled (no runtime ``pip install`` — the
+#: libs are baked into the template at BUILD time, P5); the branch is at import
+#: time, so the same static instructions produce a real ``.pdf`` on either template.
 PDF = FormatHandler(
     format_key="pdf",
     output_extension=".pdf",
-    library="matplotlib",
+    library="reportlab||matplotlib",
     supplement_topics=("flowables", "pagination", "images"),
 )
 
