@@ -12,8 +12,10 @@ from datetime import UTC, datetime
 
 from persona.schema.chunks import PersonaChunk
 from persona.schema.persona import Persona, PersonaIdentity
+from persona_runtime.emotional.vocabulary import render_prompt_palette
 from persona_runtime.prompt import (
     CHARACTER_LOCK_VERSION,
+    EMOTION_ADOPTION_VERSION,
     STYLE_GUIDANCE_VERSION,
     VOICE_REGISTER_VERSION,
     PromptBuilder,
@@ -88,15 +90,39 @@ _B1_CHARACTER_LOCK_BLOCK = (
     "up an illusion that could harm someone who is vulnerable.\n\n"
 )
 
+# The N5 emotion-adoption block (N5-D-5), CHAT-mode only, inserted just below the
+# character lock so character structurally bounds the emotion. A deliberate, REVIEWED
+# CHAT re-baseline (the snapshot moves on purpose, not silently). The prose is frozen
+# here for review; the tag palette rides from the versioned vocabulary so the two never
+# drift. Voice omits this block (tags would be stripped) — guarded by
+# TestEmotionAdoption.test_chat_only_never_leaks_to_voice.
+_N5_EMOTION_ADOPTION_BLOCK = (
+    "How you feel. You have feelings, and they colour how you respond. Notice how you "
+    "feel about what is happening in this conversation and let a fitting emotional stance "
+    "shape your reply, always within your character. Your character sets the range: a "
+    "reserved or serious character stays restrained; a warm or playful one shows more. "
+    "Never express a feeling that would break who you are.\n"
+    "When a feeling genuinely adds warmth, connection, or honest concern, you may mark it "
+    "with a feeling-tag written exactly like {{#happy}} or {{#grateful}}. Each tag becomes "
+    "a fitting emoji automatically, so never type an emoji yourself and never invent a tag. "
+    "Use only these feeling-tags: " + render_prompt_palette() + ".\n"
+    "Hold back by default. Feeling-tags are the exception, not the rule: most replies use "
+    "none, you use at most one where it truly fits, and you never add one only to "
+    "decorate. Overusing them reads as insincere. A formal or reserved persona uses "
+    "almost none.\n\n"
+)
+
 # The exact chat system block. Anchor for V11: the pre-V11 block held byte-identical
 # through the mode seam + voice register (A1+A2, proven) — the proof those are
 # voice-only. A3 + B1 then add deliberate both-modes blocks (the style line +
-# the character contract), re-baselined here; the seam itself still adds nothing
-# to chat (guarded by TestVoiceRegister.test_register_never_leaks_to_chat).
+# the character contract); N5 adds the CHAT-only emotion-adoption block below the
+# character lock — all re-baselined here as reviewed changes; the seam itself still
+# adds nothing to chat (guarded by TestVoiceRegister.test_register_never_leaks_to_chat).
 _PRE_V11_CHAT_SYSTEM = (
     "You are Astrid, Norwegian tenancy law assistant.\nKnows husleieloven.\n\n"
     "You must NOT:\n1. Never give binding advice.\n\n"
     + _B1_CHARACTER_LOCK_BLOCK  # noqa: F821 — defined just above this constant
+    + _N5_EMOTION_ADOPTION_BLOCK
     + "Relevant facts about yourself:\n- I specialise in tenancy law.\n\n"
     "Your views:\n- Tenants have strong protections. (fact)\n\n"
     "From earlier conversations:\n- Last time we discussed mould.\n\n"
@@ -393,3 +419,72 @@ class TestSafetyDirectiveInjection:
             .content
         )
         assert system.index("SAFETY_OVERRIDE_X") < system.index("Relevant facts about yourself:")
+
+
+# A stable marker from the N5 emotion-adoption block.
+_EMOTION_MARKER = "How you feel."
+
+
+class TestEmotionAdoption:
+    """N5-B1: the CHAT-mode-only emotion-adoption block (N5-D-5).
+
+    Bounded by character (below the lock, by position), tag-emission chat-only
+    (voice strips), restraint-first framing, and a palette that carries the
+    warm-biased no-anger/no-disgust/no-``disappointed`` policy.
+    """
+
+    def _chat_system(self) -> str:
+        persona, ctx, kwargs = _rich_inputs()
+        return (
+            PromptBuilder()
+            .build(persona, ctx, [], mode=PromptMode.CHAT, **kwargs)[  # type: ignore[arg-type]
+                0
+            ]
+            .content
+        )
+
+    def _voice_system(self) -> str:
+        persona, ctx, kwargs = _rich_inputs()
+        return (
+            PromptBuilder()
+            .build(persona, ctx, [], mode=PromptMode.VOICE, **kwargs)[  # type: ignore[arg-type]
+                0
+            ]
+            .content
+        )
+
+    def test_present_in_chat(self) -> None:
+        assert _EMOTION_MARKER in self._chat_system()
+
+    def test_chat_only_never_leaks_to_voice(self) -> None:
+        """Voice strips tags, so instructing voice to emit them is waste — chat only."""
+        assert _EMOTION_MARKER not in self._voice_system()
+
+    def test_bounded_by_character_below_lock_above_memory(self) -> None:
+        """Character structurally bounds emotion: the block sits below the lock, above memory."""
+        system = self._chat_system()
+        lock_pos = system.index("Inhabit your character")
+        emotion_pos = system.index(_EMOTION_MARKER)
+        assert lock_pos < emotion_pos
+        assert emotion_pos < system.index("Relevant facts about yourself:")
+
+    def test_restraint_framing_leads(self) -> None:
+        system = self._chat_system()
+        assert "Hold back by default" in system
+        assert "the exception, not the rule" in system
+
+    def test_instructs_tag_form_not_raw_emoji(self) -> None:
+        system = self._chat_system()
+        assert "{{#happy}}" in system
+        assert "never type an emoji yourself" in system
+
+    def test_palette_reflects_warm_biased_policy(self) -> None:
+        system = self._chat_system()
+        assert "proud_of_you" in system  # disambiguated, other-directed
+        assert "grateful" in system
+        # The dropped / excluded tags never appear in the palette.
+        for banned in ("disappointed", "angry", "indignant", "disgust", "proud,"):
+            assert banned not in system, banned
+
+    def test_version_constant_is_set(self) -> None:
+        assert EMOTION_ADOPTION_VERSION  # versioned artifact (Spec 10 discipline)

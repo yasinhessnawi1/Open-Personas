@@ -724,3 +724,63 @@ class TestR1HardBypass:
         await _drain(producer, text="what are my rights as a tenant?")
 
         assert backend.captured_prompt is not None  # the model was called
+
+
+class TestFeelingTagStrip:
+    """N5-A8 — a raw feeling-tag must NEVER reach TTS (criterion 3, voice path).
+
+    Voice is CHAT-mode-gated for tag *emission* (N5-D-5), so tags are rare here — but
+    the STRIP filter is the path-independent safety floor: a spoken ``{{#…}}`` is the
+    audio leak. Expressivity on voice is V12's job; N5 only guarantees no escape.
+    """
+
+    @pytest.mark.asyncio
+    async def test_whole_tag_is_stripped_from_speech(self) -> None:
+        backend = _ScriptedBackend(
+            [
+                StreamChunk(delta="I am "),
+                StreamChunk(delta="{{#happy}}"),
+                StreamChunk(delta=" today"),
+                _final(),
+            ]
+        )
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        tokens = await _drain(producer)
+
+        assert all("{{#" not in t for t in tokens)
+        assert "".join(tokens) == "I am  today"
+
+    @pytest.mark.asyncio
+    async def test_tag_split_across_chunks_never_spoken(self) -> None:
+        backend = _ScriptedBackend(
+            [
+                StreamChunk(delta="feeling {{#"),
+                StreamChunk(delta="grate"),
+                StreamChunk(delta="ful}} now"),
+                _final(),
+            ]
+        )
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        tokens = await _drain(producer)
+
+        assert all("{{#" not in t for t in tokens)
+        assert "".join(tokens) == "feeling  now"
+
+    @pytest.mark.asyncio
+    async def test_unclosed_tag_at_stream_end_not_spoken(self) -> None:
+        backend = _ScriptedBackend([StreamChunk(delta="bye {{#hap"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        tokens = await _drain(producer)
+
+        assert all("{{#" not in t for t in tokens)
+        assert "".join(tokens) == "bye "
+
+    @pytest.mark.asyncio
+    async def test_plain_speech_unaffected(self) -> None:
+        backend = _ScriptedBackend([StreamChunk(delta="Hel"), StreamChunk(delta="lo!"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))
+
+        assert await _drain(producer) == ["Hel", "lo!"]

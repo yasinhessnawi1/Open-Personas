@@ -40,6 +40,8 @@ from persona.schema.documents import DocumentChunk  # noqa: TC002 — Pydantic n
 from persona.skills import SUBORDINATION_PREAMBLE, count_tokens
 from pydantic import BaseModel, ConfigDict, Field
 
+from persona_runtime.emotional.vocabulary import render_prompt_palette
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHARACTER_LOCK_VERSION",
+    "EMOTION_ADOPTION_VERSION",
     "K3_USAGE_GUIDANCE_VERSION",
     "STYLE_GUIDANCE_VERSION",
     "VOICE_REGISTER_VERSION",
@@ -215,6 +218,37 @@ _CHARACTER_LOCK = (
     "Step out of any pretense, respond plainly and kindly, as a real person who "
     "cares; take them seriously, and point them toward real human support. Never keep "
     "up an illusion that could harm someone who is vulnerable."
+)
+
+#: Version of the emotion-adoption artifact (N5-D-5, Spec 10 discipline). Bump on every
+#: WORDING change; the N5 bidirectional restraint eval (N5-D-6) re-runs per version. The
+#: tag palette is rendered from the vocabulary (versioned by FEELING_TAG_VERSION), so a
+#: tag change is traced there; this version tracks the instruction prose. An
+#: upper-bounded scored constraint (like the voice register), NOT a checklist to
+#: maximise: restraint is as load-bearing as expression (criterion 5), so the wording
+#: leads with "hold back" and the eval penalises over-expression. Em-dash-free (V11-D-3).
+EMOTION_ADOPTION_VERSION = "v1"
+
+#: CHAT-mode-only emotion-adoption block (N5-D-5). Rendered BELOW _CHARACTER_LOCK so the
+#: character structurally bounds the emotion (criterion 1 by position, mirroring
+#: identity->character->register). Voice STRIPs feeling-tags (N5-D-1), so tag EMISSION is
+#: chat-only (instructing voice to emit tags it then strips is pure waste); voice
+#: emotional expressivity is V12's job, reusing this stance. The literal ``{{#happy}}``
+#: examples are safe here: the converter processes model OUTPUT, never the prompt.
+_EMOTION_ADOPTION = (
+    "How you feel. You have feelings, and they colour how you respond. Notice how you "
+    "feel about what is happening in this conversation and let a fitting emotional stance "
+    "shape your reply, always within your character. Your character sets the range: a "
+    "reserved or serious character stays restrained; a warm or playful one shows more. "
+    "Never express a feeling that would break who you are.\n"
+    "When a feeling genuinely adds warmth, connection, or honest concern, you may mark it "
+    "with a feeling-tag written exactly like {{#happy}} or {{#grateful}}. Each tag becomes "
+    "a fitting emoji automatically, so never type an emoji yourself and never invent a tag. "
+    "Use only these feeling-tags: " + render_prompt_palette() + ".\n"
+    "Hold back by default. Feeling-tags are the exception, not the rule: most replies use "
+    "none, you use at most one where it truly fits, and you never add one only to "
+    "decorate. Overusing them reads as insincere. A formal or reserved persona uses "
+    "almost none."
 )
 
 #: Version of the both-modes style-guidance artifact (V11-D-3, Spec 10 discipline).
@@ -700,6 +734,16 @@ class PromptBuilder:
         # versioned artifact (Spec 10 discipline).
         if mode is PromptMode.VOICE:
             parts.append(_VOICE_REGISTER)
+
+        # 2e. Emotion-adoption block (N5-D-5) — CHAT only. The persona adopts an
+        # emotional stance bounded by its character and expresses it with SPARING
+        # feeling-tags a converter maps to emojis (N5). Sits BELOW the character lock so
+        # character structurally bounds the emotion (criterion 1 by position), above
+        # retrieved memory. Voice STRIPs tags (N5-D-1), so tag emission is chat-only —
+        # voice expressivity is V12. Symmetric to the VOICE-only register above; the two
+        # never co-occur.
+        if mode is PromptMode.CHAT:
+            parts.append(_EMOTION_ADOPTION)
 
         # 3. Self-facts.
         if context.self_facts:

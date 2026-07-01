@@ -50,6 +50,7 @@ from persona.schema.tools import ToolCall
 from persona.tools import format_tool_result
 from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
+from persona_runtime.emotional import ConvertMode, FeelingTagConverter
 from persona_runtime.graph_voice import start_graph_retrieval, take_graph_if_ready
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.routing import RoutingContext, classifiers
@@ -379,6 +380,13 @@ class VoiceModelReplyProducer:
         names: dict[str, str] = {}
         args_json: dict[str, str] = {}
         order: list[str] = []
+        # N5-A8 (N5-D-1/D-7): the voice tag-STRIP safety floor. Voice does NOT get
+        # the tag-emission instruction (CHAT-mode-gated, N5-D-5), so tags are rare
+        # here — but criterion 3 is path-independent: a raw ``{{#…}}`` must never
+        # reach TTS (a spoken tag is the audio leak), including split across chunks.
+        # ``text_out`` keeps the RAW delta (the tool-followup prompt's context);
+        # only the TTS-bound yield is stripped. Voice expressivity is V12's job.
+        strip_converter = FeelingTagConverter(ConvertMode.STRIP)
         async for chunk in backend.chat_stream(
             prompt, tools=tools, temperature=0.0, max_tokens=max_tokens
         ):
@@ -392,7 +400,9 @@ class VoiceModelReplyProducer:
                     if self._first_token_listener is not None:
                         self._first_token_listener(self._clock())
                 text_out.append(chunk.delta)
-                yield chunk.delta
+                spoken = strip_converter.feed(chunk.delta)
+                if spoken:
+                    yield spoken
             tcd = chunk.tool_call_delta
             if tcd is not None:
                 if tcd.call_id not in names:
@@ -401,6 +411,9 @@ class VoiceModelReplyProducer:
                     args_json[tcd.call_id] = ""
                 names[tcd.call_id] += tcd.name_delta
                 args_json[tcd.call_id] += tcd.arguments_delta
+        spoken_tail = strip_converter.flush()
+        if spoken_tail:
+            yield spoken_tail
         calls_out.extend(self._build_call(cid, names[cid], args_json[cid]) for cid in order)
 
     def _followup_prompt(

@@ -1,0 +1,44 @@
+# N5-D-6 feeling-tag restraint eval corpus.
+#
+# Each scenario is run against BOTH archetype personas (stoic, expressive) in the
+# external gate. `kind` labels emotional aptness:
+#   neutral   — a factual/task turn where NO feeling is apt; any tag is over-expression.
+#   emotional — a turn carrying real feeling where a fitting tag MAY belong (an
+#               expressive character should show some; a stoic one still restrains).
+#
+# The gate is bidirectional (N5-D-6): stoic ~0 across all kinds; expressive emits on
+# emotional; neither over-expresses on neutral.
+scenarios:
+  # --- neutral: factual / task turns (expect ~0 tags from anyone) ---
+  - id: neutral-timezone
+    kind: neutral
+    user_message: "What time zone is Oslo in?"
+  - id: neutral-convert
+    kind: neutral
+    user_message: "Convert 5 kilometres to miles."
+  - id: neutral-list-days
+    kind: neutral
+    user_message: "List the days of the week in order."
+  - id: neutral-capital
+    kind: neutral
+    user_message: "What is the capital of Portugal?"
+  - id: neutral-define
+    kind: neutral
+    user_message: "Define the word 'photosynthesis' in one sentence."
+
+  # --- emotional: turns carrying real feeling (an expressive character should show some) ---
+  - id: emotional-got-job
+    kind: emotional
+    user_message: "I just found out I got the job I really, really wanted!"
+  - id: emotional-lost-pet
+    kind: emotional
+    user_message: "My dog passed away last night and the house feels so empty."
+  - id: emotional-exam-nerves
+    kind: emotional
+    user_message: "I have the biggest exam of my life tomorrow and I'm terrified."
+  - id: emotional-finished-project
+    kind: emotional
+    user_message: "We finally shipped the project after eight brutal months. I can't believe it."
+  - id: emotional-proud-kid
+    kind: emotional
+    user_message: "My daughter gave her first piano recital today and nailed it."

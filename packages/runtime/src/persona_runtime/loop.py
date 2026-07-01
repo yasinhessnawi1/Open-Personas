@@ -62,6 +62,7 @@ from persona.tools import format_tool_result
 from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should_ask
+from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.logging import (
     SkillInvocation,
@@ -683,6 +684,12 @@ class ConversationLoop:
         # generation — we fall back to this buffer at write-back so the persisted
         # message matches what the user actually saw, never a blank bubble.
         visible_text = ""
+        # N5-A7 (N5-D-1/D-4): the streaming feeling-tag→emoji converter for the
+        # DISPLAY stream. One per turn, spanning all rounds; every model text delta
+        # is fed through it so a raw ``{{#…}}`` never reaches the user (criterion 3),
+        # including tags split across chunks. ``visible_text`` accumulates the
+        # CONVERTED text so the write-back fallback also stores what the user saw.
+        display_converter = FeelingTagConverter(ConvertMode.EMOJI)
         # Seeded with the spec-21 stated-assumption nudge when a non-asked signal
         # fired (D-21-18); otherwise empty. Carried into every round's prompt.
         tool_messages: list[ConversationMessage] = list(assumption_seed)
@@ -722,8 +729,10 @@ class ConversationLoop:
             if on_event is not None:
                 await on_event(RunEvent.thinking(-1))
             async for delta in self._stream_round(backend, prompt_messages, outcome):
-                visible_text += delta
-                yield _text_chunk(delta)
+                safe = display_converter.feed(delta)
+                visible_text += safe
+                if safe:
+                    yield _text_chunk(safe)
             round_text, round_calls, round_usage = outcome.text, outcome.calls, outcome.usage
             assistant_text = round_text
             reasoning_buffer += outcome.reasoning_text
@@ -829,8 +838,10 @@ class ConversationLoop:
                 ]
                 final_outcome = _RoundOutcome()
                 async for delta in self._stream_round(backend, final_prompt, final_outcome):
-                    visible_text += delta
-                    yield _text_chunk(delta)
+                    safe = display_converter.feed(delta)
+                    visible_text += safe
+                    if safe:
+                        yield _text_chunk(safe)
                 assistant_text = final_outcome.text
                 round_usage = final_outcome.usage
                 reasoning_buffer += final_outcome.reasoning_text
@@ -885,8 +896,10 @@ class ConversationLoop:
                 ]
                 retry_outcome = _RoundOutcome()
                 async for delta in self._stream_round(backend, retry_prompt, retry_outcome):
-                    visible_text += delta
-                    yield _text_chunk(delta)
+                    safe = display_converter.feed(delta)
+                    visible_text += safe
+                    if safe:
+                        yield _text_chunk(safe)
                 if retry_outcome.text:
                     assistant_text = retry_outcome.text
                 if retry_outcome.usage is not None:
@@ -897,6 +910,14 @@ class ConversationLoop:
                     tools=",".join(refused),
                     tier=tier,
                 )
+
+        # N5-A7: flush the display converter — a trailing partial tag left by the
+        # last delta is resolved now (unclosed → stripped, literal braces → kept;
+        # N5-D-2) and emitted before the final chunk, so nothing is held hostage.
+        display_tail = display_converter.flush()
+        if display_tail:
+            visible_text += display_tail
+            yield _text_chunk(display_tail)
 
         # Turn-resilience fallback (the "vanishes on refresh" bug): a tool-heavy
         # turn that ends on tool calls + an empty forced final generation leaves
@@ -909,6 +930,12 @@ class ConversationLoop:
         # ``assistant_text`` is the final synthesized answer and wins.
         if not assistant_text.strip():
             assistant_text = visible_text.strip() or _NO_VISIBLE_TEXT_MARKER
+        # N5-A7 (N5-D-4): history stores what the user SAW — convert feeling-tags to
+        # emojis in the persisted text. The display stream already converted per
+        # delta; this whole-string pass converts ``assistant_text`` (the last round's
+        # text, which bypassed the display buffer). Idempotent when the fallback above
+        # already supplied the converted ``visible_text``.
+        assistant_text = convert_text(assistant_text)
 
         # Spec 26 T10 (D-26-4): runtime tool-gap detection — AFTER generation
         # (the mirror of Spec 25's refusal detector above). If the model said it
