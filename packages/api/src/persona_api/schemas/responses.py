@@ -601,8 +601,33 @@ class MCPServerDetail(_Output):
     # came from (e.g. ``notion-remote``), or ``None`` for a manually-added BYO server.
     # Display metadata for the "self-extended" marker — never a secret.
     catalog_source: str | None = None
+    # Spec R8: the OAuth provider key (e.g. ``github``) for an ``oauth`` server, else
+    # ``None``. Display metadata (drives the "Connect / Reconnect" affordance); never a
+    # secret. Token presence is conveyed by ``has_credential`` (true once authorized).
+    oauth_provider: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class MCPOAuthAuthorizeResponse(_Output):
+    """The provider authorize URL to redirect the user to (Spec R8, T4).
+
+    ``authorize_url`` carries the PKCE ``code_challenge`` + opaque ``state`` — no
+    secret. The flow completes at the web callback → ``POST /mcp-servers/oauth/callback``.
+    """
+
+    authorize_url: str
+
+
+class MCPOAuthCallbackResponse(_Output):
+    """Result of completing an OAuth flow (Spec R8, T5).
+
+    ``server`` is the now-connected server (``has_credential`` true). ``redirect_after``
+    is the server-side-stored app path to return the user to (or ``None``).
+    """
+
+    server: MCPServerDetail
+    redirect_after: str | None = None
 
 
 class MCPServerTestResult(_Output):

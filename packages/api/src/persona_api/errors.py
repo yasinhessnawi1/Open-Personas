@@ -47,6 +47,9 @@ __all__ = [
     "MCPAppAlreadyAdoptedError",
     "MCPAppNotAdoptableError",
     "MCPCredentialError",
+    "MCPOAuthError",
+    "MCPOAuthProviderError",
+    "MCPOAuthStateError",
     "MCPServerNotFoundError",
     "MCPServerValidationError",
     "ModelBackendUnavailableError",
@@ -225,6 +228,34 @@ class MCPAppAlreadyAdoptedError(PersonaError):
     """
 
 
+class MCPOAuthError(PersonaError):
+    """Base for a fail-closed MCP OAuth failure (→ 400; Spec R8, R8-D-6).
+
+    Every OAuth failure — bad ``state``, redirect mismatch, code-exchange error,
+    refresh failure, an unconfigured provider — surfaces here (or a subclass) and
+    leaves the server **not connected**, never half-authenticated. Handlers emit a
+    GENERIC body; ``message``/``context`` are author-controlled and carry a redacted
+    category only, NEVER a token, code, verifier, or client secret.
+    """
+
+
+class MCPOAuthProviderError(MCPOAuthError):
+    """The requested OAuth provider is unknown or not configured (→ 400; R8-D-1/7).
+
+    GitHub is offered only when the operator set its client_id/secret (T9.5 runbook);
+    an unconfigured / misspelled provider fails closed here before any redirect.
+    """
+
+
+class MCPOAuthStateError(MCPOAuthError):
+    """The callback ``state`` is missing / expired / not the caller's (→ 400; R8-D-6).
+
+    The CSRF gate. Any ``state`` that does not map to a live, un-consumed, in-TTL row
+    owned by the current user is rejected — no token is written (fail-closed). The
+    body never distinguishes the sub-reason to callers (no oracle).
+    """
+
+
 class ModelBackendUnavailableError(PersonaError):
     """No usable model backend for a model-required write path (→ 503; R1-D-2).
 
@@ -377,6 +408,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=_body(
                 "mcp_app_already_adopted", exc.message or "app already adopted", exc.context
             ),
+        )
+
+    @app.exception_handler(MCPOAuthError)
+    async def _mcp_oauth_400(_: Request, exc: MCPOAuthError) -> JSONResponse:
+        # Spec R8 (R8-D-6): every OAuth failure is fail-closed → 400, GENERIC body.
+        # FastAPI dispatches by MRO so this base handler catches every subclass
+        # (provider/state/exchange). The context is dropped to ``{}`` deliberately —
+        # no sub-reason oracle on the CSRF/state path, and never a token/code/secret.
+        # The type is logged server-side for diagnosis; the message is not (it is
+        # author-controlled but we keep the surface minimal).
+        _log.warning("mcp oauth failed ({kind})", kind=type(exc).__name__)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=_body("mcp_oauth_failed", "the authorization could not be completed", {}),
         )
 
     @app.exception_handler(RateLimitExceededError)

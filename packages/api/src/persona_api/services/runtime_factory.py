@@ -61,7 +61,7 @@ from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from persona.graph.protocol import GraphStore
@@ -549,6 +549,11 @@ class RuntimeFactory:
         builtin_mcp_servers = await self._builtin_mcp.resolve(
             list(persona.tools), filesystem_scope_root=filesystem_scope_root
         )
+        # Spec R8 (R8-D-5) — refresh-before-inject: rotate any near-expiry OAuth access
+        # token BEFORE the header is built, so the client below injects a fresh token.
+        # A hard refresh failure drops that server to not-connected (fail-closed). Runs
+        # only when an APIConfig + persona_id are present (the hosted path).
+        await self._refresh_oauth_before_inject(persona)
         # Spec 30 (D-30-4/6) — the persona's ASSIGNED bring-your-own MCP servers,
         # built as SSRF-pinned clients (the LIVE connect path: resolve-then-pin
         # + auth header from the decrypted credential). Empty when no servers are
@@ -677,9 +682,12 @@ class RuntimeFactory:
         )
         clients: list[MCPClient] = []
         for s in servers:
+            # Spec R8: ``oauth`` injects like ``bearer`` — the (refreshed) per-user
+            # access token is the decrypted credential. A skipped/un-authorized oauth
+            # server never reaches here (decrypted_servers_for_persona fails it closed).
             headers = (
                 {"Authorization": f"Bearer {s['credential']}"}
-                if s["auth_method"] == "bearer" and s["credential"]
+                if s["auth_method"] in ("bearer", "oauth") and s["credential"]
                 else None
             )
             clients.append(
@@ -689,9 +697,54 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                     enforce_ssrf=True,  # LIVE pinned path (resolve-then-pin per request)
                     headers=headers,
+                    # Spec R8 (R8-D-5): reconnect-on-401 for oauth servers only — a
+                    # mid-session 401 refreshes+rotates the token and rebuilds the
+                    # transport once (fail-closed on failure). None for PAT/no-auth.
+                    reauth=self._make_oauth_reauth(str(s["id"]))
+                    if s["auth_method"] == "oauth"
+                    else None,
                 )
             )
         return clients
+
+    def _make_oauth_reauth(
+        self, server_id: str
+    ) -> Callable[[], Awaitable[dict[str, str] | None]] | None:
+        """Build the reconnect-on-401 callback for an oauth server (R8-D-5), or None.
+
+        None on the CLI/test path (no APIConfig) — reconnect-on-401 is a hosted-only
+        concern. The closure captures the server_id + this factory's engine/config so
+        the client can refresh+rotate without any api import of its own.
+        """
+        if self._api_config is None:
+            return None
+        from persona_api.mcp.oauth import service as oauth_service
+
+        config = self._api_config
+
+        async def _reauth() -> dict[str, str] | None:
+            return await oauth_service.reauthenticate_server(
+                rls_engine=self._engine, config=config, server_id=server_id
+            )
+
+        return _reauth
+
+    async def _refresh_oauth_before_inject(self, persona: Persona) -> None:
+        """Refresh any near-expiry OAuth access token before the header build (R8-D-5).
+
+        No-op on the CLI/test path (no APIConfig or persona_id). Best-effort: a refresh
+        failure for one server is handled inside the service (that server drops to
+        not-connected); it never blocks the toolbox build.
+        """
+        if self._api_config is None or persona.persona_id is None:
+            return
+        from persona_api.mcp.oauth import service as oauth_service
+
+        await oauth_service.refresh_persona_oauth_servers(
+            rls_engine=self._engine,
+            config=self._api_config,
+            persona_id=persona.persona_id,
+        )
 
     def _scan_skills(self, persona: Persona) -> tuple[SkillScanner, list[object]]:
         # ``BUILTIN_ROOT`` (re-exported from persona-core ``persona.skills``)
@@ -727,9 +780,7 @@ class RuntimeFactory:
         merged.extend(self._declared_mirror_skills(persona, merged))
         return scanner, merged
 
-    def _declared_mirror_skills(
-        self, persona: Persona, scanned: Sequence[object]
-    ) -> list[object]:
+    def _declared_mirror_skills(self, persona: Persona, scanned: Sequence[object]) -> list[object]:
         """Resolve a persona's declared external skills against the skill mirror (S2 C1)."""
         from persona.config import PersonaCoreConfig
         from persona.skills.aliases import resolve_skill_aliases

@@ -12,10 +12,15 @@ from fastapi import APIRouter, Depends, Request, status
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.mcp import store as mcp_store
+from persona_api.mcp.oauth import service as oauth_service
 from persona_api.middleware.rate_limit import rate_limit
 from persona_api.schemas import (
     AdoptCatalogAppRequest,
     CreateMCPServerRequest,
+    MCPOAuthAuthorizeRequest,
+    MCPOAuthAuthorizeResponse,
+    MCPOAuthCallbackRequest,
+    MCPOAuthCallbackResponse,
     MCPServerDetail,
     MCPServerTestResult,
     UpdateMCPServerRequest,
@@ -47,6 +52,7 @@ async def create_mcp_server(
         url=body.url,
         auth_method=body.auth_method,
         credential=body.credential,
+        oauth_provider=body.oauth_provider,
     )
     audit_service.record(
         engine=request.app.state.rls_engine,
@@ -55,6 +61,77 @@ async def create_mcp_server(
         target=detail["id"],
     )
     return MCPServerDetail(**detail)
+
+
+@router.post(
+    "/mcp-servers/{server_id}/oauth/authorize",
+    response_model=MCPOAuthAuthorizeResponse,
+    dependencies=[Depends(rate_limit("default"))],
+)
+async def start_mcp_oauth(
+    server_id: str,
+    body: MCPOAuthAuthorizeRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> MCPOAuthAuthorizeResponse:
+    """Begin the OAuth flow for a BYO MCP server (Spec R8, T4).
+
+    RLS-scoped (the server must be the caller's → 404). Mints a server-side
+    state + PKCE pair and returns the provider authorize URL (challenge + opaque
+    state on it — no secret). ``redirect_after`` is stored against the state.
+    """
+    authorize_url = await oauth_service.initiate_authorize(
+        rls_engine=request.app.state.rls_engine,
+        config=request.app.state.config,
+        server_id=server_id,
+        redirect_after=body.redirect_after,
+    )
+    audit_service.record(
+        engine=request.app.state.rls_engine,
+        user_id=user.id,
+        action="mcp.oauth_start",
+        target=server_id,
+    )
+    return MCPOAuthAuthorizeResponse(authorize_url=authorize_url)
+
+
+@router.post(
+    "/mcp-servers/oauth/callback",
+    response_model=MCPOAuthCallbackResponse,
+    dependencies=[Depends(rate_limit("default"))],
+)
+async def complete_mcp_oauth(
+    body: MCPOAuthCallbackRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> MCPOAuthCallbackResponse:
+    """Complete the OAuth flow (Spec R8, T5): consume state, exchange code, store tokens.
+
+    The authenticated web callback relays ``state`` + ``code``. ``consume_state`` runs
+    RLS-scoped to the caller (a stolen/foreign/expired state → fail-closed 400); the
+    code is exchanged on the back channel and the tokens are persisted encrypted. No
+    token is ever returned. Fail-closed on any error — the server stays not connected.
+    """
+    result = await oauth_service.handle_callback(
+        rls_engine=request.app.state.rls_engine,
+        config=request.app.state.config,
+        state=body.state,
+        code=body.code,
+    )
+    # The server_id is bound to the consumed state (not the request body). Re-read the
+    # now-connected server (RLS-scoped) for the client.
+    detail = mcp_store.get_server(
+        rls_engine=request.app.state.rls_engine, server_id=result.server_id
+    )
+    audit_service.record(
+        engine=request.app.state.rls_engine,
+        user_id=user.id,
+        action="mcp.oauth_complete",
+        target=result.server_id,
+    )
+    return MCPOAuthCallbackResponse(
+        server=MCPServerDetail(**detail), redirect_after=result.redirect_after
+    )
 
 
 @router.get("/mcp-servers", response_model=list[MCPServerDetail])

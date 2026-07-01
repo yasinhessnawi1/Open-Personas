@@ -24,12 +24,37 @@ from persona.logging import get_logger
 from persona.schema.tools import ToolResult
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mcp import ClientSession
     from mcp.types import Tool as MCPToolDef
 
 __all__ = ["MCPToolAdapter"]
 
 _logger = get_logger("tools.mcp.adapter")
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """True iff ``exc`` (or its cause/context chain) is an HTTP 401 (Spec R8, R8-D-5).
+
+    The MCP SDK surfaces a transport 401 wrapped in its own error types, so walk the
+    ``__cause__``/``__context__`` chain and check for a ``response.status_code == 401``,
+    a ``status_code == 401`` attribute, or a ``401``/``Unauthorized`` marker in the text.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        response = getattr(cur, "response", None)
+        if response is not None and getattr(response, "status_code", None) == 401:
+            return True
+        if getattr(cur, "status_code", None) == 401:
+            return True
+        text = str(cur)
+        if "401" in text or "Unauthorized" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 class MCPToolAdapter:
@@ -53,10 +78,16 @@ class MCPToolAdapter:
         server_name: str,
         session: ClientSession,
         tool_def: MCPToolDef,
+        on_auth_error: Callable[[], Awaitable[ClientSession | None]] | None = None,
     ) -> None:
         self._server_name = server_name
         self._session = session
         self._mcp_tool_name = tool_def.name
+        # Spec R8 (R8-D-5): reconnect-on-401 hook. On a mid-session 401 the adapter asks
+        # the owning client to refresh+rotate the token and rebuild the transport; the
+        # callback returns the fresh live session to retry on (or None → fail closed).
+        # Default None keeps the pre-R8 adapter behaviour byte-identical.
+        self._on_auth_error = on_auth_error
 
         # Stamp the AsyncTool surface as instance attributes — Protocols
         # accept either properties or plain attributes.
@@ -70,35 +101,56 @@ class MCPToolAdapter:
         try:
             result = await self._session.call_tool(self._mcp_tool_name, arguments=kwargs)
         except Exception as e:  # noqa: BLE001 — broad envelope; tool never raises
+            # Spec R8 (R8-D-5): a mid-session 401 means the static OAuth header outlived
+            # the access token. Ask the client to refresh+rotate + rebuild the transport
+            # ONCE, then retry on the fresh session. A retry that still fails (or a
+            # declined reauth) falls through to the graceful error path — no loop.
+            if self._on_auth_error is not None and _is_auth_error(e):
+                new_session = await self._on_auth_error()
+                if new_session is not None:
+                    self._session = new_session
+                    try:
+                        result = await new_session.call_tool(self._mcp_tool_name, arguments=kwargs)
+                    except Exception as retry_exc:  # noqa: BLE001 — one retry, then fail closed
+                        return self._error_result(retry_exc)
+                    return self._to_result(result)
             # Includes connection-died errors from the SDK (anyio.EndOfStream,
             # ClosedResourceError, httpx.HTTPError) — all become a graceful
             # ToolResult per spec §7.3.
-            _logger.warning(
-                "mcp tool call failed",
-                server=self._server_name,
-                tool=self._mcp_tool_name,
-                error=type(e).__name__,
-            )
-            err_type = type(e).__name__
-            msg = str(e) or ""
-            # Disconnection-like errors get the canonical message.
-            disconnect_markers = ("ClosedResource", "EndOfStream", "Disconnect")
-            if any(marker in err_type for marker in disconnect_markers):
-                return ToolResult(
-                    tool_name=self.name,
-                    content="MCP server disconnected",
-                    is_error=True,
-                )
+            return self._error_result(e)
+        return self._to_result(result)
+
+    def _error_result(self, e: BaseException) -> ToolResult:
+        """Map a call exception to a graceful error :class:`ToolResult` (spec §7.3)."""
+        _logger.warning(
+            "mcp tool call failed",
+            server=self._server_name,
+            tool=self._mcp_tool_name,
+            error=type(e).__name__,
+        )
+        err_type = type(e).__name__
+        msg = str(e) or ""
+        # Disconnection-like errors get the canonical message.
+        disconnect_markers = ("ClosedResource", "EndOfStream", "Disconnect")
+        if any(marker in err_type for marker in disconnect_markers):
             return ToolResult(
                 tool_name=self.name,
-                content=f"{err_type}: {msg}",
+                content="MCP server disconnected",
                 is_error=True,
             )
+        return ToolResult(
+            tool_name=self.name,
+            content=f"{err_type}: {msg}",
+            is_error=True,
+        )
 
-        # Aggregate text content from the result. MCP returns a list of
-        # content blocks (TextContent, ImageContent, etc.); we concatenate
-        # the text content for ToolResult.content and surface structured
-        # content via ToolResult.data when present.
+    def _to_result(self, result: Any) -> ToolResult:  # noqa: ANN401
+        """Aggregate an MCP ``CallToolResult`` into a :class:`ToolResult`.
+
+        MCP returns a list of content blocks (TextContent, ImageContent, etc.); we
+        concatenate the text content for ``content`` and surface structured content via
+        ``data`` when present.
+        """
         text_parts: list[str] = []
         for block in result.content or []:
             text = getattr(block, "text", None)

@@ -61,6 +61,16 @@ _POLICIES: dict[str, str] = {
 # *user*, not the persona FK-chain):
 #   graph_nodes / graph_edges / graph_entities → owner_id = current_user
 
+# Spec R8 (migration 026): the in-flight OAuth state table's RLS lives ENTIRELY in
+# migration 026 (it creates ``mcp_oauth_states`` AND its policy; its downgrade
+# removes both together). Deliberately NOT in ``_POLICIES`` — same rationale as the
+# MCP + graph tables (the table is created later than 001, so 001's downgrade must
+# not ALTER it). 026 owns its full lifecycle; the predicate is the direct user-scope
+# form (per user, like user_mcp_servers):
+#   mcp_oauth_states → owner_id = current_user
+# The R8 token-lifecycle columns on user_mcp_servers are additive + nullable and
+# inherit that table's existing owner_id policy (migration 009) — no RLS change.
+
 # Spec 14 + F3 follow-up — auxiliary RLS policies for the DocumentStore path.
 # CSA-1 calling-convention discipline: DocumentStore calls
 # ``MemoryStore.write(persona_id=<conversation_id>, ...)`` which fails the

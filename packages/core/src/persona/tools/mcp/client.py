@@ -24,9 +24,10 @@ disconnect / server_unavailable lifecycle events emit audit lines.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from persona.errors import MCPServerUnavailableError
 from persona.logging import get_logger
@@ -34,10 +35,17 @@ from persona.tools.audit import ToolAuditEvent
 from persona.tools.mcp.adapter import MCPToolAdapter
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
+
+    from mcp import ClientSession
 
     from persona.tools.audit import ToolAuditLogger
     from persona.tools.protocol import AsyncTool
+
+    # Spec R8 (R8-D-5): given fresh auth headers on a mid-session 401, the api-provided
+    # callback refreshes+rotates the OAuth token and returns the new bearer header (or
+    # ``None`` to fail closed). Persona-core stays api-agnostic — it only holds the hook.
+    ReauthCallback = Callable[[], Awaitable[dict[str, str] | None]]
 
 __all__ = ["MCPClient", "load_mcp_clients"]
 
@@ -72,6 +80,7 @@ class MCPClient:
         persona_id: str | None = None,
         enforce_ssrf: bool = False,
         headers: dict[str, str] | None = None,
+        reauth: ReauthCallback | None = None,
     ) -> None:
         self._server_name = server_name
         self._server_url = server_url
@@ -82,9 +91,17 @@ class MCPClient:
         # ``{"Authorization": "Bearer <token>"}``). Held only in memory for the
         # connection — never logged. None for built-in / operator servers.
         self._headers = headers
+        # Spec R8 (R8-D-5): reconnect-on-401. When a mid-session request 401s (the
+        # static header outlived the OAuth access token), this callback refreshes +
+        # rotates the token and yields a fresh bearer header; the client then rebuilds
+        # the transport transparently and the adapter retries ONCE. Fail-closed backstop:
+        # a single reauth per connection lifetime (``_reauthed_once``) — never a loop.
+        self._reauth = reauth
+        self._reauthed_once = False
+        self._reauth_lock = asyncio.Lock()
 
         self._exit_stack: AsyncExitStack | None = None
-        self._session: object | None = None  # mcp.ClientSession when connected
+        self._session: ClientSession | None = None  # mcp.ClientSession when connected
         self._tools: list[AsyncTool] = []
         self._connected = False
 
@@ -133,26 +150,9 @@ class MCPClient:
 
         stack = AsyncExitStack()
         try:
-            # Spec 30 (D-30-4): bring-your-own servers connect through the
-            # SSRF-pinned httpx client so the untrusted user URL is
-            # resolve-then-pinned + re-validated on every request (incl. redirects)
-            # — on the LIVE path, not just test-connection. Built-in / operator
-            # servers (loopback, trusted) use the SDK default factory.
-            # Build the connect kwargs conditionally so the trusted built-in /
-            # operator path keeps the exact ``streamablehttp_client(url)`` call
-            # shape (no headers, no factory) it had pre-spec-30.
-            connect_kwargs: dict[str, object] = {}
-            if self._headers is not None:
-                connect_kwargs["headers"] = self._headers
-            if self._enforce_ssrf:
-                from persona.tools.mcp.ssrf import pinned_httpx_client_factory
-
-                connect_kwargs["httpx_client_factory"] = pinned_httpx_client_factory
-            transport_ctx = streamablehttp_client(self._server_url, **connect_kwargs)  # type: ignore[arg-type]
-            read, write, _get_session_id = await stack.enter_async_context(transport_ctx)
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            tools_result = await session.list_tools()
+            session, tools_result = await self._open_session(
+                stack, streamablehttp_client, ClientSession
+            )
         except Exception as e:  # noqa: BLE001 — wrap into domain exception
             await stack.aclose()
             self._emit_audit(action="server_unavailable", error=type(e).__name__)
@@ -187,6 +187,9 @@ class MCPClient:
                 server_name=self._server_name,
                 session=session,
                 tool_def=t,
+                # Spec R8 (R8-D-5): a mid-session 401 triggers a single transparent
+                # reauth+reconnect; None when no reauth callback was supplied.
+                on_auth_error=self._reauth_and_reconnect if self._reauth is not None else None,
             )
             for t in tools_result.tools
         ]
@@ -198,6 +201,94 @@ class MCPClient:
             tool_count=len(self._tools),
         )
         self._emit_audit(action="connect")
+
+    async def _open_session(
+        self,
+        stack: AsyncExitStack,
+        streamablehttp_client: Any,  # noqa: ANN401 — the SDK transport fn (patched in tests)
+        client_session: Any,  # noqa: ANN401 — the SDK ClientSession class (patched in tests)
+    ) -> tuple[ClientSession, Any]:
+        """Open the transport + session with the CURRENT headers; return (session, tools).
+
+        Shared by :meth:`connect` and :meth:`_reopen` so the SSRF-pinned / header
+        wiring (D-30-4) is identical on the first connect and on a reconnect-on-401.
+        """
+        # Spec 30 (D-30-4): bring-your-own servers connect through the SSRF-pinned httpx
+        # client so the untrusted user URL is resolve-then-pinned + re-validated on every
+        # request. Built-in / operator servers (loopback, trusted) use the SDK default.
+        # Build kwargs conditionally so the trusted path keeps the exact
+        # ``streamablehttp_client(url)`` call shape (no headers, no factory) it had pre-30.
+        connect_kwargs: dict[str, object] = {}
+        if self._headers is not None:
+            connect_kwargs["headers"] = self._headers
+        if self._enforce_ssrf:
+            from persona.tools.mcp.ssrf import pinned_httpx_client_factory
+
+            connect_kwargs["httpx_client_factory"] = pinned_httpx_client_factory
+        transport_ctx = streamablehttp_client(self._server_url, **connect_kwargs)
+        read, write, _get_session_id = await stack.enter_async_context(transport_ctx)
+        session = await stack.enter_async_context(client_session(read, write))
+        await session.initialize()
+        tools_result = await session.list_tools()
+        return session, tools_result
+
+    async def _reauth_and_reconnect(self) -> ClientSession | None:
+        """Reconnect-on-401 (R8-D-5): refresh the token + rebuild the transport ONCE.
+
+        Called by an adapter when a request 401s mid-session. Fail-closed backstop:
+        at most one reauth per connection lifetime (``_reauthed_once``) — a repeated
+        401 after the retry propagates and the server is left not-connected, never a
+        retry loop. Returns the fresh live session for the adapter to retry on, or
+        ``None`` (reauth declined / rebuild failed) so the adapter fails closed.
+        """
+        if self._reauth is None:
+            return None
+        async with self._reauth_lock:
+            # Another adapter may have already reauthed under the lock — reuse its result.
+            if self._reauthed_once:
+                return self._session if self._connected else None
+            self._reauthed_once = True
+            new_headers = await self._reauth()
+            if not new_headers:
+                _logger.warning(
+                    "mcp reauth declined; server not reconnected", server=self._server_name
+                )
+                return None
+            self._headers = new_headers
+            return await self._reopen()
+
+    async def _reopen(self) -> ClientSession | None:
+        """Tear down the current transport and reopen it with the refreshed headers."""
+        try:
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+        except ImportError:  # pragma: no cover — SDK absent (unit path patches these)
+            return None
+        old_stack = self._exit_stack
+        if old_stack is not None:
+            try:
+                await old_stack.aclose()
+            except Exception as e:  # noqa: BLE001 — teardown must not raise
+                _logger.warning(
+                    "mcp reopen close raised", server=self._server_name, error=type(e).__name__
+                )
+        stack = AsyncExitStack()
+        try:
+            session, _tools = await self._open_session(stack, streamablehttp_client, ClientSession)
+        except Exception as e:  # noqa: BLE001 — a failed reconnect is fail-closed
+            await stack.aclose()
+            self._exit_stack = None
+            self._session = None
+            self._connected = False
+            _logger.warning(
+                "mcp reconnect failed", server=self._server_name, error=type(e).__name__
+            )
+            return None
+        self._exit_stack = stack
+        self._session = session
+        self._connected = True
+        _logger.info("mcp reconnected after 401", server=self._server_name)
+        return session
 
     def get_tools(self) -> list[AsyncTool]:
         """Return adapter-wrapped tools discovered at connect time.

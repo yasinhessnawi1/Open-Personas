@@ -26,9 +26,11 @@ __all__ = [
     "UpdatePersonaRequest",
 ]
 
-#: BYO-MCP auth methods (spec 30, D-30-3). v1 supports no-auth and bearer-token;
+#: BYO-MCP auth methods (spec 30, D-30-3; Spec R8 adds ``oauth``). ``none`` and
+#: ``bearer`` are user-supplied; ``oauth`` (R8) obtains the token via the OAuth dance
+#: (no credential supplied at create — an ``oauth_provider`` is required instead).
 #: ``header`` is reserved in the DB column for a later increment.
-MCPAuthMethod = Literal["none", "bearer"]
+MCPAuthMethod = Literal["none", "bearer", "oauth"]
 
 
 class _Input(BaseModel):
@@ -219,6 +221,33 @@ class CreateMCPServerRequest(_Input):
     url: str = Field(min_length=1, max_length=2048)
     auth_method: MCPAuthMethod = "none"
     credential: str | None = Field(default=None, max_length=4096, repr=False)
+    # Spec R8: required when ``auth_method = "oauth"`` — the provider-registry key
+    # (e.g. ``github``). No credential is supplied for oauth; the token is obtained
+    # via ``POST /mcp-servers/{id}/oauth/authorize`` then the callback.
+    oauth_provider: str | None = Field(default=None, max_length=64)
+
+
+class MCPOAuthAuthorizeRequest(_Input):
+    """Start an OAuth flow for a BYO MCP server (Spec R8, T4).
+
+    ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
+    user to once connected — it is stored SERVER-SIDE against the state (never encoded
+    in the OAuth ``state`` value) and is never an external redirect target.
+    """
+
+    redirect_after: str | None = Field(default=None, max_length=512)
+
+
+class MCPOAuthCallbackRequest(_Input):
+    """Complete an OAuth flow (Spec R8, T5): the web callback relays ``state`` + ``code``.
+
+    Sent by the authenticated web callback page (which received the provider redirect).
+    ``state`` is the opaque CSRF token minted at authorize; ``code`` the provider's
+    one-time authorization code. Both are consumed server-side and never returned.
+    """
+
+    state: str = Field(min_length=1, max_length=512, repr=False)
+    code: str = Field(min_length=1, max_length=4096, repr=False)
 
 
 class AdoptCatalogAppRequest(_Input):

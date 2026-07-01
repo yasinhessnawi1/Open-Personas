@@ -159,6 +159,13 @@ class MCPServerCatalogEntry(BaseModel):
     signed: bool = False
     allow_hosts: tuple[str, ...] = ()
     secrets: tuple[MCPSecretField, ...] = ()
+    # -- Spec R8 (R8-D-7): per-user OAuth binding (additive-with-default) --
+    # ``auth_method = "oauth"`` marks a server whose credential is obtained per-user via
+    # the OAuth dance (Connect flow), NOT an operator-global env token. ``oauth_provider``
+    # is the provider-registry key (e.g. ``github``). Empty = the pre-R8 env/none path.
+    # GitHub is rebound onto this (its ``required_env`` GITHUB_TOKEN bypass removed).
+    auth_method: str = ""
+    oauth_provider: str = ""
 
 
 @dataclass(frozen=True)

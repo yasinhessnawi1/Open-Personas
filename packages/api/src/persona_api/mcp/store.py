@@ -15,6 +15,7 @@ touches their own rows). The two security-load-bearing properties:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import MCPServerUnavailableError, MCPUrlNotAllowedError
@@ -40,12 +41,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "assign_to_persona",
+    "clear_oauth_tokens",
     "create_server",
     "decrypted_servers_for_persona",
     "delete_server",
     "get_server",
     "list_servers",
     "list_servers_for_persona",
+    "oauth_server_context",
+    "oauth_servers_for_persona",
+    "store_oauth_client_id",
+    "store_oauth_tokens",
     "test_connection",
     "unassign_from_persona",
     "update_server",
@@ -67,6 +73,8 @@ def _to_detail(row: dict[str, Any]) -> dict[str, Any]:
         # Adoption provenance (Spec N4, N4-D-9): the catalog entry an adoption came from,
         # or None for a manually-added BYO server. NOT a secret — display metadata only.
         "catalog_source": row.get("catalog_source"),
+        # Spec R8: the oauth provider key for display (drives Connect/Reconnect), or None.
+        "oauth_provider": row.get("oauth_provider"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -80,7 +88,10 @@ def _encrypt_credential(config: APIConfig, auth_method: str, credential: str | N
         MCPCredentialError: a credential was supplied but no key is configured
             (never store a secret in plaintext — fail loud, D-30-4).
     """
-    if auth_method == "none":
+    if auth_method in ("none", "oauth"):
+        # ``oauth`` (Spec R8): the access token is obtained via the OAuth dance and
+        # persisted by :func:`store_oauth_tokens`, NEVER supplied at create — so there
+        # is no user credential to encrypt here (any passed value is ignored).
         return None
     if not credential:
         raise MCPServerValidationError(
@@ -102,7 +113,10 @@ def _auth_headers_for_row(config: APIConfig, row: dict[str, Any]) -> dict[str, s
     plaintext is never returned over the API or logged. ``bearer`` →
     ``Authorization: Bearer <token>``. No-auth / no-key → no header.
     """
-    if row["auth_method"] == "bearer" and row["credentials_encrypted"] is not None:
+    # ``oauth`` (Spec R8) injects exactly like ``bearer``: the per-user OAuth access
+    # token lives in the SAME ``credentials_encrypted`` blob (one credential channel,
+    # R8-D-4). test-connection uses this pre-refresh token as-is.
+    if row["auth_method"] in ("bearer", "oauth") and row["credentials_encrypted"] is not None:
         cipher = cipher_from_config(config)
         if cipher is None:
             return None
@@ -121,14 +135,23 @@ def create_server(
     auth_method: str,
     credential: str | None,
     catalog_source: str | None = None,
+    oauth_provider: str | None = None,
 ) -> dict[str, Any]:
     """Create a BYO MCP server (SSRF-validated, credential encrypted). Returns the detail.
 
     ``catalog_source`` (Spec N4, N4-D-9) records the catalog entry a self-extension
     adoption came from; ``None`` (the default) marks a manually-added BYO server, keeping
     the pre-N4 call sites byte-identical. It is provenance metadata — never a secret.
+
+    ``oauth_provider`` (Spec R8) is the provider-registry key for an ``auth_method =
+    "oauth"`` server (e.g. ``github``); the token itself is obtained later via the OAuth
+    dance, so no credential is stored at create. ``None`` for non-oauth servers.
     """
     assert_url_allowed(url)  # eager SSRF gate (https + public target)
+    if auth_method == "oauth" and not oauth_provider:
+        raise MCPServerValidationError(
+            "oauth requires an oauth_provider", context={"reason": "missing_provider"}
+        )
     encrypted = _encrypt_credential(config, auth_method, credential)
     with rls_engine.begin() as conn:
         row = (
@@ -141,6 +164,7 @@ def create_server(
                     auth_method=auth_method,
                     credentials_encrypted=encrypted,
                     catalog_source=catalog_source,
+                    oauth_provider=oauth_provider,
                 )
                 .returning(*servers_t.c)
             )
@@ -209,8 +233,6 @@ def update_server(
             )
     if not values:
         return _to_detail(current)
-    from datetime import UTC, datetime
-
     values["updated_at"] = datetime.now(UTC)
     with rls_engine.begin() as conn:
         row = (
@@ -265,8 +287,6 @@ async def test_connection(
     except MCPServerUnavailableError:
         return {"ok": False, "tools": [], "error": "unreachable"}
     # Cache the discovered tools on the row (lazy refresh on later use).
-    from datetime import UTC, datetime
-
     with rls_engine.begin() as conn:
         conn.execute(
             update(servers_t)
@@ -348,6 +368,14 @@ def decrypted_servers_for_persona(
     out: list[dict[str, Any]] = []
     for r in rows:
         credential: str | None = None
+        # Spec R8 fail-closed: an ``oauth`` server with no access token yet (never
+        # authorized, or token cleared on a hard refresh failure) is NOT connected —
+        # never connect it unauthenticated (that would bypass the per-user model).
+        if str(r["auth_method"]) == "oauth" and r["credentials_encrypted"] is None:
+            _log.warning(
+                "mcp server {name} is oauth but not yet authorized; skipped", name=r["name"]
+            )
+            continue
         if r["credentials_encrypted"] is not None:
             if cipher is None:
                 # A stored credential but no key — skip the server (cannot auth);
@@ -367,3 +395,160 @@ def decrypted_servers_for_persona(
             }
         )
     return out
+
+
+def store_oauth_tokens(
+    *,
+    rls_engine: Engine,
+    config: APIConfig,
+    server_id: str,
+    provider: str,
+    access_token: str,
+    refresh_token: str | None,
+    access_token_expires_at: datetime | None,
+    scopes: str | None,
+) -> None:
+    """Persist OAuth tokens on a server row (Spec R8, R8-D-4/5). Fail loud with no key.
+
+    The access token goes to the SAME ``credentials_encrypted`` blob as a PAT bearer
+    (one credential channel); the rotating refresh token to ``refresh_token_encrypted``
+    — both under the one Fernet key. Called on the callback exchange AND on every
+    refresh: ``refresh_token`` is written ONLY when the AS returned a new one (rotation),
+    so a non-rotating refresh keeps the prior refresh token. Never touches ``enabled``
+    (the user's preference) — connection is gated by token presence at inject.
+
+    Raises:
+        MCPCredentialError: no ``MCP_CREDENTIAL_KEY`` — never store a token in the clear.
+    """
+    cipher = cipher_from_config(config)
+    if cipher is None:
+        raise MCPCredentialError(
+            "credential encryption is not configured (set MCP_CREDENTIAL_KEY)",
+            context={"reason": "no_key"},
+        )
+    values: dict[str, Any] = {
+        "auth_method": "oauth",
+        "oauth_provider": provider,
+        "credentials_encrypted": cipher.encrypt(access_token),
+        "access_token_expires_at": access_token_expires_at,
+        "oauth_scopes": scopes,
+        "updated_at": datetime.now(UTC),
+    }
+    if refresh_token is not None:
+        values["refresh_token_encrypted"] = cipher.encrypt(refresh_token)
+    with rls_engine.begin() as conn:
+        result = conn.execute(
+            update(servers_t)
+            .where(servers_t.c.id == server_id)
+            .values(**values)
+            .returning(servers_t.c.id)
+        )
+    if result.first() is None:
+        raise MCPServerNotFoundError("mcp server not found", context={"id": server_id})
+
+
+def oauth_server_context(
+    *, rls_engine: Engine, config: APIConfig, server_id: str
+) -> dict[str, Any]:
+    """Load the OAuth-relevant fields of a server (RLS-scoped → 404). Refresh token DECRYPTED.
+
+    Internal helper for the OAuth service (initiate / callback / refresh). The
+    decrypted refresh token lives in memory only for the immediate refresh call and
+    is never returned over the API or logged. ``owner_id`` is the RLS-scoped owner
+    (the caller) — safe to pass to :func:`create_state`'s WITH CHECK.
+    """
+    row = _require_row(rls_engine, server_id)
+    refresh_token: str | None = None
+    if row.get("refresh_token_encrypted") is not None:
+        cipher = cipher_from_config(config)
+        if cipher is not None:
+            refresh_token = cipher.decrypt(str(row["refresh_token_encrypted"]))
+    return {
+        "id": str(row["id"]),
+        "owner_id": str(row["owner_id"]),
+        "url": str(row["url"]),
+        "oauth_provider": row.get("oauth_provider"),
+        "oauth_client_id": row.get("oauth_client_id"),
+        "refresh_token": refresh_token,
+        "access_token_expires_at": row.get("access_token_expires_at"),
+        "oauth_scopes": row.get("oauth_scopes"),
+    }
+
+
+def store_oauth_client_id(*, rls_engine: Engine, server_id: str, client_id: str) -> None:
+    """Persist the DCR-issued client_id for a discovered ``mcp-native`` server (T7).
+
+    The registered client_id cannot be re-derived (re-registering yields a new one), so
+    it is stored once at first discovery and reused on every later authorize/refresh.
+    Not a secret (public client identifier); the endpoints stay re-discovered from ``url``.
+    """
+    with rls_engine.begin() as conn:
+        conn.execute(
+            update(servers_t)
+            .where(servers_t.c.id == server_id)
+            .values(oauth_client_id=client_id, updated_at=datetime.now(UTC))
+        )
+
+
+def oauth_servers_for_persona(
+    *, rls_engine: Engine, config: APIConfig, persona_id: str
+) -> list[dict[str, Any]]:
+    """Enabled ``oauth`` servers assigned to a persona, refresh tokens DECRYPTED (T6).
+
+    The refresh-before-inject reader: returns each oauth server's id, url, provider,
+    expiry, and (in-memory only) decrypted refresh token so the service can refresh
+    any near-expiry token before the header is built. Non-oauth servers are omitted.
+    """
+    cipher = cipher_from_config(config)
+    with rls_engine.begin() as conn:
+        rows = (
+            conn.execute(
+                select(servers_t)
+                .join(assignments_t, assignments_t.c.server_id == servers_t.c.id)
+                .where(
+                    assignments_t.c.persona_id == persona_id,
+                    servers_t.c.enabled.is_(True),
+                    servers_t.c.auth_method == "oauth",
+                )
+            )
+            .mappings()
+            .all()
+        )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        refresh_token: str | None = None
+        if r["refresh_token_encrypted"] is not None and cipher is not None:
+            refresh_token = cipher.decrypt(str(r["refresh_token_encrypted"]))
+        out.append(
+            {
+                "id": str(r["id"]),
+                "url": str(r["url"]),
+                "oauth_provider": r["oauth_provider"],
+                "oauth_client_id": r["oauth_client_id"],
+                "refresh_token": refresh_token,
+                "access_token_expires_at": r["access_token_expires_at"],
+            }
+        )
+    return out
+
+
+def clear_oauth_tokens(*, rls_engine: Engine, server_id: str) -> None:
+    """De-authorize an oauth server (Spec R8 fail-closed): drop tokens → not connected.
+
+    Called on a hard refresh failure (R8-D-5): the rotating refresh token is spent
+    and the exchange failed, so the connection cannot continue. Clearing the access +
+    refresh blobs makes :func:`decrypted_servers_for_persona` skip the server (fail
+    closed) and the UI show a reconnect prompt. ``enabled`` (the user preference) is
+    left intact — the user still wants it, they just need to re-auth.
+    """
+    with rls_engine.begin() as conn:
+        conn.execute(
+            update(servers_t)
+            .where(servers_t.c.id == server_id)
+            .values(
+                credentials_encrypted=None,
+                refresh_token_encrypted=None,
+                access_token_expires_at=None,
+                updated_at=datetime.now(UTC),
+            )
+        )

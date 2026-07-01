@@ -626,11 +626,70 @@ user_mcp_servers = Table(
     # nullable — the pre-N4 BYO path is byte-identical with this NULL. Used for the
     # vetted-set check (N4-D-6) + an honest "self-extended" UI marker; carries no secret.
     Column("catalog_source", Text),
+    # Spec R8 (R8-D-4) — per-user OAuth 2.1 token lifecycle. ALL additive + nullable, so a
+    # BYO/PAT row (auth_method ∈ none/bearer/header) is byte-identical with these NULL.
+    # ``auth_method = 'oauth'`` selects this path. The access token reuses the existing
+    # ``credentials_encrypted`` blob (same Fernet cipher, MCP_CREDENTIAL_KEY — one
+    # credential channel, no second key). NEVER plaintext, NEVER logged, NEVER over the API.
+    #   oauth_provider          — the provider-registry key (e.g. ``github``); the
+    #                             ``mcp-native`` sentinel is reserved for the T7 seam.
+    #   refresh_token_encrypted — Fernet token; the rotating refresh token (R8-D-5).
+    #   access_token_expires_at — when the access token lapses; drives refresh-before-inject
+    #                             (R8-D-5) + reconnect-on-401 (T8).
+    #   oauth_scopes            — the granted scopes (display + re-auth), space-delimited.
+    Column("oauth_provider", Text),
+    Column("refresh_token_encrypted", Text),
+    Column("access_token_expires_at", DateTime(timezone=True)),
+    Column("oauth_scopes", Text),
+    # Spec R8 (T7 generic seam): the RFC 7591 DCR-issued client_id for an
+    # ``mcp-native`` discovered server. It CANNOT be re-derived (re-registering yields a
+    # new one), so it is persisted; the authorize/token endpoints ARE re-discovered from
+    # ``url`` each time. NULL for pre-registered providers (GitHub's client_id is env,
+    # not per-row) and non-oauth rows. Additive-nullable (folded into 026 per R8-D-4).
+    Column("oauth_client_id", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     # No duplicate server names per user (the name keys the mcp:<name>: prefix).
     UniqueConstraint("owner_id", "name", name="uq_user_mcp_servers_owner_name"),
     Index("idx_user_mcp_servers_owner", "owner_id"),
+)
+
+# Spec R8 (R8-D-6) — in-flight OAuth authorization state (the CSRF/PKCE binding).
+# One short-lived row per started flow, minted at /authorize and consumed once at
+# /callback. RLS-keyed to owner_id (its RLS lives ENTIRELY in migration
+# ``027_mcp_oauth`` — the 009/011 pattern — so ``001``'s downgrade never ALTERs a
+# later table; deliberately NOT in ``db.rls._POLICIES``). The opaque ``state`` is the
+# callback lookup key; the PKCE ``code_verifier`` is Fernet-encrypted at rest (same
+# key as the token blobs — a leaked in-flight verifier + code = a token). The redirect
+# target is stored server-side here, NEVER encoded in ``state`` (R8-D-6). ``expires_at``
+# gives the short TTL; the row is deleted on consume (one-time use) → fail-closed.
+mcp_oauth_states = Table(
+    "mcp_oauth_states",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "server_id",
+        Text,
+        ForeignKey("user_mcp_servers.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # Opaque high-entropy CSRF token (secrets.token_urlsafe). The callback lookup key.
+    Column("state", Text, nullable=False),
+    # PKCE code_verifier, Fernet-encrypted at rest (never plaintext). Sent on the
+    # back-channel token exchange only; the AS recomputes SHA256 and rejects a mismatch.
+    Column("code_verifier_encrypted", Text, nullable=False),
+    # The provider-registry key (or ``mcp-native`` sentinel, T7) this flow targets.
+    Column("provider", Text, nullable=False),
+    # Where to send the user's browser after a successful callback — mapped SERVER-SIDE
+    # (never encoded in ``state``). NULL → the default post-connect landing.
+    Column("redirect_after", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # Short TTL — a callback past this is rejected + the row swept (fail-closed).
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    # ``state`` is the global callback key → must be unique.
+    UniqueConstraint("state", name="uq_mcp_oauth_states_state"),
+    Index("idx_mcp_oauth_states_owner", "owner_id"),
 )
 
 # Spec 30 (D-30-6) — persona ↔ BYO-server assignment. Many-personas-to-one-server

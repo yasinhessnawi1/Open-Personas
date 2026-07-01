@@ -268,6 +268,40 @@ class APIConfig(BaseSettings):
     # adoption (mcp_search → adopt); never the existing built-in/Spec-27/N3 grant path.
     mcp_adopt_vetted: str = Field(default="", validation_alias="PERSONA_MCP_ADOPT_VETTED")
 
+    # Spec R8 — per-user MCP OAuth 2.1 (R8-D-1/6/7). Open Persona is the OAuth *client*.
+    #
+    # The fixed, pre-registered HTTPS callback base — the OAuth redirect_uri is
+    # ``{base}/v1/mcp/oauth/callback`` and is validated EXACTLY (never taken from the
+    # form/user). MUST be the https origin registered at each provider (R8-D-6). Empty
+    # → OAuth initiate fails closed (no redirect can be built).
+    mcp_oauth_redirect_base_url: str = Field(
+        default="", validation_alias="PERSONA_MCP_OAUTH_REDIRECT_BASE_URL"
+    )
+    # GitHub pre-registered client (R8-D-7 / T9.5 operator runbook): the operator
+    # one-time registers the Open Persona OAuth app at GitHub (no RFC 7591 DCR there)
+    # and sets these. ``client_id`` is public; ``client_secret`` is a secret (repr=False,
+    # never logged). Unset ``client_id`` → GitHub is simply not an offered provider.
+    mcp_oauth_github_client_id: str = Field(
+        default="", validation_alias="PERSONA_MCP_OAUTH_GITHUB_CLIENT_ID"
+    )
+    mcp_oauth_github_client_secret: SecretStr | None = Field(
+        default=None, validation_alias="PERSONA_MCP_OAUTH_GITHUB_CLIENT_SECRET", repr=False
+    )
+    # Space-delimited OAuth scopes requested for GitHub (least-privilege default: repo).
+    mcp_oauth_github_scopes: str = Field(
+        default="repo", validation_alias="PERSONA_MCP_OAUTH_GITHUB_SCOPES"
+    )
+    # State TTL (seconds) — an in-flight OAuth flow must complete the browser
+    # round-trip within this window; a callback past it is rejected + swept.
+    mcp_oauth_state_ttl_seconds: int = Field(
+        default=600, validation_alias="PERSONA_MCP_OAUTH_STATE_TTL_SECONDS"
+    )
+    # Refresh the access token when it is within this many seconds of expiry at
+    # persona-load (refresh-before-inject, R8-D-5) — a safety margin below expiry.
+    mcp_oauth_refresh_leeway_seconds: int = Field(
+        default=120, validation_alias="PERSONA_MCP_OAUTH_REFRESH_LEEWAY_SECONDS"
+    )
+
     # Memory embedding (D-08-8).
     embedder_model: str = "BAAI/bge-small-en-v1.5"
 

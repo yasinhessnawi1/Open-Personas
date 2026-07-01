@@ -48,10 +48,21 @@ def test_authored_servers_exclude_byo_external_ones() -> None:
     assert mcp_server_entry("github").kind == "external"  # type: ignore[union-attr]
 
 
-def test_github_declares_its_required_token() -> None:
+def test_github_rebound_onto_per_user_oauth() -> None:
+    # Spec R8 (R8-D-7): github is rebound OFF the operator-global GITHUB_TOKEN env var
+    # onto per-user OAuth — no env-token bypass, an oauth provider binding instead.
     github = mcp_server_entry("github")
     assert github is not None
-    assert github.required_env == ("GITHUB_TOKEN",)
+    assert github.required_env == ()  # no GITHUB_TOKEN bypass
+    assert "GITHUB_TOKEN" not in github.required_env
+    assert github.auth_method == "oauth"
+    assert github.oauth_provider == "github"
+
+
+def test_no_catalog_entry_keeps_a_github_token_bypass() -> None:
+    # The rebind removes the ONLY env-var-token path in the bundled catalog.
+    for entry in BUILTIN_MCP_CATALOG.servers.values():
+        assert "GITHUB_TOKEN" not in entry.required_env
 
 
 def test_weather_is_opt_in_not_default_enabled() -> None:

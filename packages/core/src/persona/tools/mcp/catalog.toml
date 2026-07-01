@@ -78,10 +78,16 @@ notes = "NOT authored — the official mcp-server-fetch has an unpatched SSRF (C
 
 [server.github]
 kind = "external"
-description = "GitHub repository, issue, and PR operations over MCP. Bring-your-own."
+description = "GitHub repository, issue, and PR operations over MCP. Per-user OAuth (Connect)."
 default_enabled = false
 risk = "medium"
-required_env = ["GITHUB_TOKEN"]
+# Spec R8 (R8-D-7): rebound OFF the operator-global GITHUB_TOKEN env var onto per-user
+# OAuth. ``required_env`` is now empty — there is NO operator-global token bypass; each
+# user obtains their own token via the Connect (OAuth 2.1 + PKCE) flow, and a server
+# with no per-user token yet is simply not-connected (fail-closed, never half-authed).
+required_env = []
+auth_method = "oauth"
+oauth_provider = "github"
 keywords = ["github", "pull request", "open an issue", "the repository", "code review on github"]
 capability = "work with GitHub repositories, issues, and pull requests"
-notes = "NOT authored — point PERSONA_MCP_SERVERS at the official remote server https://api.githubcopilot.com/mcp/ (already streamable-http + OAuth) and provide GITHUB_TOKEN (D-27-5)."
+notes = "Per-user OAuth (R8): the user clicks Connect → authenticates at GitHub → back and connected, no token handling. Point PERSONA_MCP_SERVERS at the official remote server https://api.githubcopilot.com/mcp/. Operator one-time setup (T9.5): register the Open Persona OAuth app at GitHub (no RFC 7591 DCR) and set PERSONA_MCP_OAUTH_GITHUB_CLIENT_ID/SECRET — recorded in R4 alongside the real-provider round-trip."
