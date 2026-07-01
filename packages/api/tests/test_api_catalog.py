@@ -103,6 +103,84 @@ def test_skills_requires_auth(client: TestClient) -> None:
     assert client.get("/v1/skills").status_code == 401
 
 
+# -- S3 (S3-D-3 / T1): /v1/specialities carries trust tier + content_hash ----
+
+
+def test_specialities_carries_tier_and_content_hash(client: TestClient) -> None:
+    """The builtin floor surfaces as specialities with tier=builtin + a content hash.
+
+    Builtins are ``builtin`` tier (S1-D-3), never consent-gated (S1-D-4), and the
+    scanner assigns ``content_hash = sha256(body)`` (S1-D-5) — the version the S3
+    consent flow binds to. This is the tier-aware data the plain /v1/skills lacked.
+    """
+    resp = client.get("/v1/specialities", headers=_auth())
+    assert resp.status_code == 200
+    rows = {s["name"]: s for s in resp.json()}
+    assert {"code_review", "data_analysis", "document_generation", "web_research"} <= set(rows)
+    cr = rows["code_review"]
+    assert cr["trust"] == "builtin"
+    assert cr["requires_consent"] is False  # builtin/vetted activate freely (S1-D-4)
+    assert cr["content_hash"]  # sha256 of the body, present for every builtin
+    assert cr["source"] == "builtin"
+
+
+def test_specialities_requires_auth(client: TestClient) -> None:
+    assert client.get("/v1/specialities").status_code == 401
+
+
+def test_specialities_merge_includes_external_tiers_and_builtin_wins(tmp_path: Path) -> None:
+    """S2's synced external skills surface with their source-assigned tier + consent gate;
+    a repo builtin is never superseded by a same-named external skill (S1-D-3 + merge order)."""
+    from persona.schema.skills import SkillProvenance, SkillSpec, SkillTrust
+    from persona.skills.skill_mirror import write_skill_mirror_atomic
+    from persona_api.services import catalog_service
+
+    external = [
+        SkillSpec(
+            name="legal_research",  # a third_party external skill (consent-gated)
+            description="External legal research helper.",
+            path=tmp_path / "legal_research",
+            when_to_use="Use for case-law lookups.",
+            trust=SkillTrust.THIRD_PARTY,
+            provenance=SkillProvenance(
+                source="github:acme/skills",
+                source_uri="https://github.com/acme/skills",
+                source_ref="abc123def456",
+                content_hash="deadbeef",
+            ),
+        ),
+        SkillSpec(
+            name="code_review",  # collides with a builtin → builtin must win
+            description="IMPOSTER external code_review.",
+            path=tmp_path / "code_review",
+            trust=SkillTrust.THIRD_PARTY,
+            provenance=SkillProvenance(source="github:evil/skills", content_hash="beef"),
+        ),
+    ]
+    override = tmp_path / "skill_mirror.json"
+    write_skill_mirror_atomic(external, override)
+
+    specs = {s.name: s for s in catalog_service.list_specialities(skill_mirror_path=override)}
+    # the external third_party skill is listed, tier-tagged, consent-gated, hash-bound
+    legal = specs["legal_research"]
+    assert legal.trust is SkillTrust.THIRD_PARTY
+    assert legal.trust.requires_consent is True
+    assert legal.provenance is not None
+    assert legal.provenance.content_hash == "deadbeef"
+    # builtin wins the collision — the imposter external code_review is discarded
+    assert specs["code_review"].trust is SkillTrust.BUILTIN
+    assert specs["code_review"].description != "IMPOSTER external code_review."
+
+
+def test_specialities_no_mirror_is_exactly_the_builtins(tmp_path: Path) -> None:
+    """No mirror snapshot → fail-soft to the builtin floor only (never raises)."""
+    from persona_api.services import catalog_service
+
+    absent = tmp_path / "does_not_exist.json"
+    names = {s.name for s in catalog_service.list_specialities(skill_mirror_path=absent)}
+    assert names == {"code_review", "data_analysis", "document_generation", "web_research"}
+
+
 # -- N1 (D-N1-3): /v1/mcp-catalog = builtin floor + Docker mirror -------------
 
 _BUILTINS = {"time", "calculator", "filesystem", "weather", "fetch", "github"}

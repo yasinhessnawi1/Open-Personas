@@ -222,6 +222,59 @@ export interface paths {
     patch: operations["set_consent_v1_personas__persona_id__consent_patch"];
     trace?: never;
   };
+  "/v1/personas/{persona_id}/specialities": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Persona Specialities
+     * @description List the specialities catalog with THIS persona's consent state (Spec S3, S3-D-3).
+     *
+     *     The catalog facts (tier + ``content_hash``, T1) enriched with the server-computed
+     *     ``consent_state`` per skill — the one security-authoritative bit the client cannot
+     *     derive (it needs the consent store + the current hash). Enablement (the ``skills:``
+     *     declaration) and ``unavailable`` stay client-derived from the edited draft.
+     *     RLS-scoped: a persona the caller does not own → 404.
+     */
+    get: operations["list_persona_specialities_v1_personas__persona_id__specialities_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/personas/{persona_id}/skills/{skill_name}/consent": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Set Skill Consent
+     * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+     *
+     *     The client sends ONLY ``{granted}``. The ``content_hash`` consent binds to and the
+     *     trust tier are resolved SERVER-SIDE from the catalog on every request — never from
+     *     the client (forge-prevention: a stale/forged hash can't bypass the gate or the
+     *     re-gating, S1-D-5; a claimed ``vetted`` tier can't skip the gate, S1-D-3). The
+     *     request model forbids extra fields, so a client that tries to supply either → 422.
+     *     Append-only consent event + an audit row naming the transition.
+     */
+    post: operations["set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/personas/{persona_id}/conversations": {
     parameters: {
       query?: never;
@@ -660,6 +713,32 @@ export interface paths {
      * @description List the available skills (name + description).
      */
     get: operations["list_skills_v1_skills_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/specialities": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Specialities
+     * @description List the available specialities (skills) with trust tier + content hash (Spec S3).
+     *
+     *     The catalog-level surface — the builtin floor + S2's synced external tiers — carrying
+     *     each skill's source-assigned ``trust`` (S1-D-3), whether it ``requires_consent``
+     *     (S1-D-4), and its ``content_hash`` (the version consent binds to, S1-D-5). The
+     *     new-persona flow reads this (no persona context yet); the edit flow reads the
+     *     persona-scoped variant that adds the per-persona declared + consent state.
+     */
+    get: operations["list_specialities_v1_specialities_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1859,6 +1938,39 @@ export interface components {
       conversation_count: number;
     };
     /**
+     * PersonaSpecialitySummary
+     * @description A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
+     *
+     *     The persona-scoped surface adds the server-computed ``consent_state`` — the one
+     *     security-authoritative bit the client cannot derive (it needs the consent store +
+     *     the current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the
+     *     current hash), ``stale`` (consented at an old body hash → re-gate, S1-D-5), or
+     *     ``none`` (never/revoked → default-deny). Enablement (the ``skills:`` declaration)
+     *     and ``unavailable`` stay client-derived from the edited persona draft.
+     */
+    PersonaSpecialitySummary: {
+      /** Name */
+      name: string;
+      /** Description */
+      description: string;
+      /** When To Use */
+      when_to_use?: string | null;
+      /** Trust */
+      trust: string;
+      /** Requires Consent */
+      requires_consent: boolean;
+      /** Content Hash */
+      content_hash?: string | null;
+      /** Source */
+      source?: string | null;
+      /** Source Uri */
+      source_uri?: string | null;
+      /** Source Ref */
+      source_ref?: string | null;
+      /** Consent State */
+      consent_state: string;
+    };
+    /**
      * PersonaSummary
      * @description A persona in a list view (no full YAML).
      *
@@ -2032,6 +2144,51 @@ export interface components {
     SetConsentRequest: {
       /** Granted */
       granted?: boolean | null;
+    };
+    /**
+     * SetSkillConsentRequest
+     * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+     *
+     *     ``granted``: ``True`` = grant (the skill may inject at its current body hash),
+     *     ``False`` = revoke. That is the ONLY field a client may send — the
+     *     ``content_hash`` consent binds to and the trust ``tier`` are **server-derived**
+     *     from the catalog on every request, never accepted from the client (the
+     *     forge-prevention invariant, S3-D-2). ``extra="forbid"`` (inherited from
+     *     ``_Input``) rejects a client that tries to supply either → 422.
+     */
+    SetSkillConsentRequest: {
+      /** Granted */
+      granted: boolean;
+    };
+    /**
+     * SpecialitySummary
+     * @description A speciality (skill) catalog entry with its trust tier + version handle (Spec S3).
+     *
+     *     The user-facing "Specialities" surface renders skills with their source-assigned
+     *     trust tier (S1-D-3 — never self-declared) and binds consent to ``content_hash``
+     *     (S1-D-5: a synced body change → new hash → prior consent is stale → re-gate).
+     *     ``requires_consent`` is the enablement gate (S1-D-4: ``community``/``third_party``
+     *     need owner consent before injection; ``builtin``/``vetted`` activate freely).
+     */
+    SpecialitySummary: {
+      /** Name */
+      name: string;
+      /** Description */
+      description: string;
+      /** When To Use */
+      when_to_use?: string | null;
+      /** Trust */
+      trust: string;
+      /** Requires Consent */
+      requires_consent: boolean;
+      /** Content Hash */
+      content_hash?: string | null;
+      /** Source */
+      source?: string | null;
+      /** Source Uri */
+      source_uri?: string | null;
+      /** Source Ref */
+      source_ref?: string | null;
     };
     /**
      * StartRunRequest
@@ -2521,6 +2678,73 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["PersonaDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_persona_specialities_v1_personas__persona_id__specialities_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaSpecialitySummary"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+        skill_name: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetSkillConsentRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaSpecialitySummary"];
         };
       };
       /** @description Validation Error */
@@ -3134,6 +3358,26 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ToolSummary"][];
+        };
+      };
+    };
+  };
+  list_specialities_v1_specialities_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SpecialitySummary"][];
         };
       };
     };

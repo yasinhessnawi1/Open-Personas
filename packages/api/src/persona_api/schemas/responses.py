@@ -489,6 +489,46 @@ class ToolSummary(_Output):
     description: str
 
 
+class SpecialitySummary(_Output):
+    """A speciality (skill) catalog entry with its trust tier + version handle (Spec S3).
+
+    The user-facing "Specialities" surface renders skills with their source-assigned
+    trust tier (S1-D-3 — never self-declared) and binds consent to ``content_hash``
+    (S1-D-5: a synced body change → new hash → prior consent is stale → re-gate).
+    ``requires_consent`` is the enablement gate (S1-D-4: ``community``/``third_party``
+    need owner consent before injection; ``builtin``/``vetted`` activate freely).
+    """
+
+    name: str
+    description: str
+    when_to_use: str | None = None
+    #: SkillTrust value — builtin | vetted | community | third_party.
+    trust: str
+    #: True for community/third_party (S1-D-4); drives the consent flow.
+    requires_consent: bool
+    #: sha256 of the SKILL.md body — the version handle consent binds to (S1-D-5).
+    content_hash: str | None = None
+    #: Provenance (source-assigned, S1-D-3) — "builtin" or an S2 source id, + repo/commit.
+    source: str | None = None
+    source_uri: str | None = None
+    source_ref: str | None = None
+
+
+class PersonaSpecialitySummary(SpecialitySummary):
+    """A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
+
+    The persona-scoped surface adds the server-computed ``consent_state`` — the one
+    security-authoritative bit the client cannot derive (it needs the consent store +
+    the current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the
+    current hash), ``stale`` (consented at an old body hash → re-gate, S1-D-5), or
+    ``none`` (never/revoked → default-deny). Enablement (the ``skills:`` declaration)
+    and ``unavailable`` stay client-derived from the edited persona draft.
+    """
+
+    #: not_required | granted | stale | none (skill_consent_service).
+    consent_state: str
+
+
 # -- artifacts (Spec F5 D-F5-1) ---------------------------------------------
 
 

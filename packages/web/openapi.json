@@ -486,6 +486,111 @@
         }
       }
     },
+    "/v1/personas/{persona_id}/specialities": {
+      "get": {
+        "tags": ["personas"],
+        "summary": "List Persona Specialities",
+        "description": "List the specialities catalog with THIS persona's consent state (Spec S3, S3-D-3).\n\nThe catalog facts (tier + ``content_hash``, T1) enriched with the server-computed\n``consent_state`` per skill \u2014 the one security-authoritative bit the client cannot\nderive (it needs the consent store + the current hash). Enablement (the ``skills:``\ndeclaration) and ``unavailable`` stay client-derived from the edited draft.\nRLS-scoped: a persona the caller does not own \u2192 404.",
+        "operationId": "list_persona_specialities_v1_personas__persona_id__specialities_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonaSpecialitySummary"
+                  },
+                  "title": "Response List Persona Specialities V1 Personas  Persona Id  Specialities Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/personas/{persona_id}/skills/{skill_name}/consent": {
+      "post": {
+        "tags": ["personas"],
+        "summary": "Set Skill Consent",
+        "description": "Record consent for a community/third-party speciality (Spec S3, S3-D-2).\n\nThe client sends ONLY ``{granted}``. The ``content_hash`` consent binds to and the\ntrust tier are resolved SERVER-SIDE from the catalog on every request \u2014 never from\nthe client (forge-prevention: a stale/forged hash can't bypass the gate or the\nre-gating, S1-D-5; a claimed ``vetted`` tier can't skip the gate, S1-D-3). The\nrequest model forbids extra fields, so a client that tries to supply either \u2192 422.\nAppend-only consent event + an audit row naming the transition.",
+        "operationId": "set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          },
+          {
+            "name": "skill_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Skill Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSkillConsentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaSpecialitySummary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/personas/{persona_id}/conversations": {
       "post": {
         "tags": ["conversations"],
@@ -1289,6 +1394,30 @@
                   },
                   "type": "array",
                   "title": "Response List Skills V1 Skills Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/specialities": {
+      "get": {
+        "tags": ["catalog"],
+        "summary": "List Specialities",
+        "description": "List the available specialities (skills) with trust tier + content hash (Spec S3).\n\nThe catalog-level surface \u2014 the builtin floor + S2's synced external tiers \u2014 carrying\neach skill's source-assigned ``trust`` (S1-D-3), whether it ``requires_consent``\n(S1-D-4), and its ``content_hash`` (the version consent binds to, S1-D-5). The\nnew-persona flow reads this (no persona context yet); the edit flow reads the\npersona-scoped variant that adds the per-persona declared + consent state.",
+        "operationId": "list_specialities_v1_specialities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SpecialitySummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Specialities V1 Specialities Get"
                 }
               }
             }
@@ -3368,6 +3497,96 @@
         "title": "PersonaDetail",
         "description": "A persona's full detail (YAML + metadata).\n\nThe optional :attr:`capabilities` field (D-F3-X-capability-endpoint) is\nadditive on top of the Spec 08 / Spec 09 surface: tests + composition\nroots that do not wire a :class:`TierRegistry` (e.g. unit fixtures\nwithout the runtime) omit the field and the API returns ``None`` so the\npersona-detail surface stays usable without runtime composition."
       },
+      "PersonaSpecialitySummary": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "when_to_use": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "When To Use"
+          },
+          "trust": {
+            "type": "string",
+            "title": "Trust"
+          },
+          "requires_consent": {
+            "type": "boolean",
+            "title": "Requires Consent"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Hash"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "consent_state": {
+            "type": "string",
+            "title": "Consent State"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "trust",
+          "requires_consent",
+          "consent_state"
+        ],
+        "title": "PersonaSpecialitySummary",
+        "description": "A speciality plus THIS persona's consent state (Spec S3, S3-D-3).\n\nThe persona-scoped surface adds the server-computed ``consent_state`` \u2014 the one\nsecurity-authoritative bit the client cannot derive (it needs the consent store +\nthe current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the\ncurrent hash), ``stale`` (consented at an old body hash \u2192 re-gate, S1-D-5), or\n``none`` (never/revoked \u2192 default-deny). Enablement (the ``skills:`` declaration)\nand ``unavailable`` stay client-derived from the edited persona draft."
+      },
       "PersonaSummary": {
         "properties": {
           "id": {
@@ -3648,6 +3867,99 @@
         "type": "object",
         "title": "SetConsentRequest",
         "description": "Set a persona's auto-dispatch consent (spec 21 T09, D-21-7/2).\n\n``granted``: ``True`` = grant (auto-dispatch), ``False`` = decline (stable,\nno re-prompt), ``None`` = revoke back to \"ask\" (the settings-toggle OFF\npath, which re-arms the prompt on the next autonomous dispatch)."
+      },
+      "SetSkillConsentRequest": {
+        "properties": {
+          "granted": {
+            "type": "boolean",
+            "title": "Granted"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["granted"],
+        "title": "SetSkillConsentRequest",
+        "description": "Record consent for a community/third-party speciality (Spec S3, S3-D-2).\n\n``granted``: ``True`` = grant (the skill may inject at its current body hash),\n``False`` = revoke. That is the ONLY field a client may send \u2014 the\n``content_hash`` consent binds to and the trust ``tier`` are **server-derived**\nfrom the catalog on every request, never accepted from the client (the\nforge-prevention invariant, S3-D-2). ``extra=\"forbid\"`` (inherited from\n``_Input``) rejects a client that tries to supply either \u2192 422."
+      },
+      "SpecialitySummary": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "when_to_use": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "When To Use"
+          },
+          "trust": {
+            "type": "string",
+            "title": "Trust"
+          },
+          "requires_consent": {
+            "type": "boolean",
+            "title": "Requires Consent"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Hash"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["name", "description", "trust", "requires_consent"],
+        "title": "SpecialitySummary",
+        "description": "A speciality (skill) catalog entry with its trust tier + version handle (Spec S3).\n\nThe user-facing \"Specialities\" surface renders skills with their source-assigned\ntrust tier (S1-D-3 \u2014 never self-declared) and binds consent to ``content_hash``\n(S1-D-5: a synced body change \u2192 new hash \u2192 prior consent is stale \u2192 re-gate).\n``requires_consent`` is the enablement gate (S1-D-4: ``community``/``third_party``\nneed owner consent before injection; ``builtin``/``vetted`` activate freely)."
       },
       "StartRunRequest": {
         "properties": {

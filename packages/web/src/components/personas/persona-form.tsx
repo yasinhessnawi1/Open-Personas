@@ -27,6 +27,7 @@ import { voiceLanguageWarning } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
 import { RoutingSection } from "./routing-section";
+import { SpecialitiesChooser } from "./specialities-chooser";
 
 // Spec 30 T11 — a built-in MCP server in the capability-management catalog.
 // A persona enables a server by carrying `mcp:<name>` in its `tools` list.
@@ -74,14 +75,16 @@ export function PersonaForm({
   doc,
   onChange,
   tools,
-  skills,
   mcpServers = [],
   personaId,
 }: {
   doc: PersonaDoc;
   onChange: (doc: PersonaDoc) => void;
   tools: string[];
-  skills: string[];
+  // Spec S3: the available-skill names are no longer consumed here — the
+  // SpecialitiesChooser self-fetches the tier-aware catalog + consent state. Kept
+  // in the prop shape so existing callers/tests pass unchanged.
+  skills?: string[];
   // Spec 30 T11 — built-in MCP servers (from GET /v1/mcp-catalog). Optional so
   // existing callers/tests that don't pass it render tools+skills unchanged.
   mcpServers?: McpCatalogEntry[];
@@ -92,6 +95,7 @@ export function PersonaForm({
 }) {
   const t = useTranslations("author");
   const tApps = useTranslations("apps");
+  const tSpecialities = useTranslations("specialities");
   const identity = readIdentity(doc);
   // The persona's current voice id (identity.voice.voice_id), if set — V6 C2.
   const identityRecord = doc.identity as Record<string, unknown> | undefined;
@@ -362,26 +366,26 @@ export function PersonaForm({
           {t("capabilityCount", { count: capabilityCount })} ·{" "}
           {t("capabilityCapHint")}
         </p>
-        <div className="grid gap-5 sm:grid-cols-2">
-          <Subsection title={t("toolsTitle")}>
-            <ChipToggle
-              available={tools}
-              selected={declaredTools}
-              empty={t("noTools")}
-              onChange={(list) => onChange(writeStringList(doc, "tools", list))}
-            />
-          </Subsection>
-          <Subsection title={t("skillsTitle")}>
-            <ChipToggle
-              available={skills}
-              selected={declaredSkills}
-              empty={t("noSkills")}
-              onChange={(list) =>
-                onChange(writeStringList(doc, "skills", list))
-              }
-            />
-          </Subsection>
-        </div>
+        <Subsection title={t("toolsTitle")}>
+          <ChipToggle
+            available={tools}
+            selected={declaredTools}
+            empty={t("noTools")}
+            onChange={(list) => onChange(writeStringList(doc, "tools", list))}
+          />
+        </Subsection>
+        {/* Spec S3 — Specialities: skills surfaced with trust tiers + a consent flow,
+            a SEPARATE surface from the apps chooser below (the not-unified decision).
+            Enable/disable drives the persona's `skills:` declaration (the existing YAML
+            path); the chooser self-fetches the tier-aware catalog + this persona's
+            consent state. */}
+        <Subsection title={tSpecialities("title")}>
+          <SpecialitiesChooser
+            personaId={personaId}
+            declaredSkills={declaredSkills}
+            onChange={(list) => onChange(writeStringList(doc, "skills", list))}
+          />
+        </Subsection>
         <Subsection title={tApps("title")}>
           {/* N3: the apps experience — the MCP catalog reframed as "apps" with a
               searchable chooser + per-app detail. Per-persona enablement stays

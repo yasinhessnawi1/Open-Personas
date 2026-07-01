@@ -57,6 +57,7 @@ from persona_api.editions import MeteredCreditsPolicy
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
+from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
 
 if TYPE_CHECKING:
@@ -799,10 +800,13 @@ class RuntimeFactory:
             # writes were enabled — additive, zero-graph otherwise).
             graph_retrieval=self._build_graph_retrieval(),
             # Spec S1 (S1-D-7 / S1-D-X-consent-wiring): the injection audit sink
-            # (same JSONL posture the stores use). Consent defaults to
-            # DENY-unvetted in the loop until Spec S3 wires a real consent store;
-            # every current skill is ``builtin`` so the gate is inert today.
+            # (same JSONL posture the stores use).
             audit_logger=JSONLAuditLogger(self._audit_root),
+            # Spec S3 (S3-D-2): the REAL consent store replaces S1's DenyUnvettedConsent
+            # stub. Runs on the same RLS-scoped engine → sees only the owner's consent
+            # rows. Empty store ≡ DenyUnvettedConsent (no row → denied): swapping the
+            # stub in can never OPEN access; only a recorded consent does.
+            skill_consent=PostgresSkillConsentStore(self._engine),
             # K4: the per-category care-text the surfacing slot rides (K4-D-3). Stateless;
             # wired only when the graph is composed, so a zero-graph loop is byte-identical.
             graph_surfacing_guidance=(
@@ -840,9 +844,10 @@ class RuntimeFactory:
             prompt_builder=PromptBuilder(),
             router=Router(),
             tier_registry=self._tier_registry,
-            # Spec S1 (S1-D-7): injection audit sink; consent gate defaults to
-            # DENY-unvetted in the loop (inert today — all skills are builtin).
+            # Spec S1 (S1-D-7): injection audit sink.
             audit_logger=JSONLAuditLogger(self._audit_root),
+            # Spec S3 (S3-D-2): the real consent store (empty ≡ DenyUnvettedConsent).
+            skill_consent=PostgresSkillConsentStore(self._engine),
         )
         loop.deferred_input_files = deferred_holder
         return loop

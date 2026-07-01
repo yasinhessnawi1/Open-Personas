@@ -652,6 +652,37 @@ persona_mcp_assignments = Table(
 )
 
 # ---------------------------------------------------------------------------
+# Spec S3 — per-persona speciality (skill) consent (S1-D-6 / S3-D-1).
+#
+# Append-only consent EVENTS: one row per grant/revoke, NEVER updated — the
+# consent history survives (granted at hash H, revoked, re-granted at H' after a
+# body change). Current consent = the latest row for
+# (persona_id, skill_name, content_hash) with ``granted = true``; **absence →
+# denied** (default-deny, S1-D-4). Consent binds to the SKILL.md body hash
+# (``content_hash``, S1-D-5), so a synced body change → new hash → no matching
+# row → the runtime re-gates. Owner-scoped via the persona FK-chain.
+#
+# Its RLS lives ENTIRELY in migration ``026_skill_consents`` (mirroring 009/011 —
+# so ``001``'s downgrade never ALTERs a later table) and is therefore NOT in
+# ``db.rls._POLICIES``. It is a plain relational table (no vectors/FTS), so it is
+# available in BOTH editions — consent gating matters single-user too (community
+# simply runs it without RLS, like every other table there).
+# ---------------------------------------------------------------------------
+skill_consents = Table(
+    "skill_consents",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    Column("skill_name", Text, nullable=False),
+    Column("content_hash", Text, nullable=False),
+    Column("granted", Boolean, nullable=False),
+    Column("granted_by", Text, nullable=False, server_default=text("'user'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # The hot query: the latest event for (persona, skill, current hash).
+    Index("idx_skill_consents_lookup", "persona_id", "skill_name", "content_hash", "created_at"),
+)
+
+# ---------------------------------------------------------------------------
 # Spec K0 — the user-scoped knowledge graph (direction 3).
 #
 # Three Postgres-only tables (pgvector ``Vector`` + ``tsvector``); user-scoped via

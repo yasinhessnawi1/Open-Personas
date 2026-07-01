@@ -13,7 +13,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from persona.imagegen import ContentRejectedError, ImageGenError, craft_avatar_prompt
 from persona.logging import get_logger
@@ -34,9 +34,11 @@ from persona_api.schemas import (
     GrantToolRequest,
     PersonaCapabilities,
     PersonaDetail,
+    PersonaSpecialitySummary,
     PersonaSummary,
     RefinePersonaRequest,
     SetConsentRequest,
+    SetSkillConsentRequest,
     ToolRecommendationResponse,
     UpdatePersonaRequest,
 )
@@ -46,6 +48,7 @@ from persona_api.services import (
     catalog_service,
     consent_service,
     persona_service,
+    skill_consent_service,
     tool_consent_service,
     voice_assignment_service,
 )
@@ -54,6 +57,7 @@ from persona_api.services.provenance import avatar_ai_generated_from_source
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from persona.schema.skills import SkillSpec
     from persona_runtime.tier import TierRegistry
 
 # The 3-round refinement cap (D-10-5): the UI owns the counter, the server is
@@ -789,6 +793,117 @@ async def set_consent(
         rls_engine=request.app.state.rls_engine, persona_id=persona_id
     )
     return _persona_detail(row, tier_registry=_tier_registry(request))
+
+
+def _persona_speciality(spec: SkillSpec, consent_state: str) -> PersonaSpecialitySummary:
+    """Map a catalog ``SkillSpec`` + server-computed consent state to the response model."""
+    prov = spec.provenance
+    return PersonaSpecialitySummary(
+        name=spec.name,
+        description=spec.description,
+        when_to_use=spec.when_to_use,
+        trust=spec.trust.value,
+        requires_consent=spec.trust.requires_consent,
+        content_hash=prov.content_hash if prov else None,
+        source=prov.source if prov else None,
+        source_uri=prov.source_uri if prov else None,
+        source_ref=prov.source_ref if prov else None,
+        consent_state=consent_state,
+    )
+
+
+@router.get("/{persona_id}/specialities", response_model=list[PersonaSpecialitySummary])
+async def list_persona_specialities(
+    persona_id: str,
+    request: Request,
+    _user: AuthenticatedUser = Depends(get_current_user),
+) -> list[PersonaSpecialitySummary]:
+    """List the specialities catalog with THIS persona's consent state (Spec S3, S3-D-3).
+
+    The catalog facts (tier + ``content_hash``, T1) enriched with the server-computed
+    ``consent_state`` per skill — the one security-authoritative bit the client cannot
+    derive (it needs the consent store + the current hash). Enablement (the ``skills:``
+    declaration) and ``unavailable`` stay client-derived from the edited draft.
+    RLS-scoped: a persona the caller does not own → 404.
+    """
+    rls_engine = request.app.state.rls_engine
+    persona_service.get_persona(rls_engine=rls_engine, persona_id=persona_id)  # 404 if not owned
+    out: list[PersonaSpecialitySummary] = []
+    for spec in catalog_service.list_specialities():
+        content_hash = spec.provenance.content_hash if spec.provenance else None
+        state = skill_consent_service.consent_state_for(
+            rls_engine=rls_engine,
+            persona_id=persona_id,
+            skill_name=spec.name,
+            current_hash=content_hash,
+            requires_consent=spec.trust.requires_consent,
+        )
+        out.append(_persona_speciality(spec, state))
+    return out
+
+
+@router.post(
+    "/{persona_id}/skills/{skill_name}/consent", response_model=PersonaSpecialitySummary
+)
+async def set_skill_consent(
+    persona_id: str,
+    skill_name: str,
+    body: SetSkillConsentRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> PersonaSpecialitySummary:
+    """Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+
+    The client sends ONLY ``{granted}``. The ``content_hash`` consent binds to and the
+    trust tier are resolved SERVER-SIDE from the catalog on every request — never from
+    the client (forge-prevention: a stale/forged hash can't bypass the gate or the
+    re-gating, S1-D-5; a claimed ``vetted`` tier can't skip the gate, S1-D-3). The
+    request model forbids extra fields, so a client that tries to supply either → 422.
+    Append-only consent event + an audit row naming the transition.
+    """
+    rls_engine = request.app.state.rls_engine
+    persona_service.get_persona(rls_engine=rls_engine, persona_id=persona_id)  # 404 if not owned
+    spec = {s.name: s for s in catalog_service.list_specialities()}.get(skill_name)
+    if spec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="speciality not found")
+    if not spec.trust.requires_consent:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="speciality does not require consent",
+        )
+    content_hash = spec.provenance.content_hash if spec.provenance else None
+    if content_hash is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="speciality has no content hash to bind consent to",
+        )
+    skill_consent_service.record_consent(
+        rls_engine=rls_engine,
+        persona_id=persona_id,
+        skill_name=skill_name,
+        content_hash=content_hash,  # SERVER-derived — never the client's
+        granted=body.granted,
+        now=datetime.now(UTC),
+    )
+    audit_service.record(
+        engine=rls_engine,
+        user_id=user.id,
+        action=f"persona.skill_consent.{'grant' if body.granted else 'revoke'}",
+        target=persona_id,
+        metadata={
+            "skill_name": skill_name,
+            "content_hash": content_hash,
+            "trust": spec.trust.value,
+        },
+    )
+    state = skill_consent_service.consent_state_for(
+        rls_engine=rls_engine,
+        persona_id=persona_id,
+        skill_name=skill_name,
+        current_hash=content_hash,
+        requires_consent=True,
+    )
+    return _persona_speciality(spec, state)
 
 
 @router.delete("/{persona_id}", status_code=status.HTTP_204_NO_CONTENT)

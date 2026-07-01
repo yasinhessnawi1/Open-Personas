@@ -791,5 +791,52 @@
       "allowHosts": "Talks to: {hosts}",
       "allowHostsNone": "No outbound hosts declared."
     }
+  },
+  "specialities": {
+    "title": "Specialities",
+    "subtitle": "Expertise your persona can follow — separate from apps, which run real code.",
+    "searchPlaceholder": "Search specialities",
+    "empty": "No specialities available.",
+    "searchEmpty": "No specialities match “{query}”.",
+    "loading": "Loading specialities…",
+    "loadError": "Could not load specialities.",
+    "open": "Open {name}",
+    "capability": "Adds expertise your persona will follow — available once enabled.",
+    "whenToUse": "Use when: {text}",
+    "state": {
+      "available": "Available",
+      "enabled": "Enabled",
+      "needsConsent": "Needs consent",
+      "unavailable": "Unavailable"
+    },
+    "enable": {
+      "enable": "Enable for this persona",
+      "disable": "Disable for this persona"
+    },
+    "tier": {
+      "vetted": "Vetted · reviewed by Open Persona",
+      "community": "Community · hand-picked, not formally reviewed",
+      "thirdParty": "Third-party · from {source}",
+      "builtin": "Built-in",
+      "communityWord": "community",
+      "thirdPartyWord": "third-party"
+    },
+    "trust": {
+      "source": "From {project}",
+      "sourceCommit": "From {project} @ {commit}"
+    },
+    "consent": {
+      "disclosure": "This speciality is instructions your persona will follow — {tier} content from {source} that Open Persona hasn't reviewed. Most specialities are helpful, but because one could include hidden instructions that steer your persona in ways you didn't intend, enable it only if you trust the source. You can disable it anytime.",
+      "regate": "This speciality changed since you enabled it. Review it and enable again to keep it active.",
+      "deferred": "You'll confirm consent after saving this persona.",
+      "grant": "Enable — I trust this source",
+      "regrant": "Review & enable again",
+      "granting": "Enabling…",
+      "error": "Could not record consent. Try again."
+    },
+    "unavailable": {
+      "summary": "This speciality is no longer available and won't be used.",
+      "remove": "Remove"
+    }
   }
 }

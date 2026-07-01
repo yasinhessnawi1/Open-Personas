@@ -19,7 +19,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.config import PersonaCoreConfig
+from persona.schema.skills import SkillSpec
 from persona.skills import BUILTIN_ROOT, SkillScanner
+from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_write_path
 from persona.tools import TOOL_CATALOG
 from persona.tools.mcp.catalog import BUILTIN_MCP_CATALOG, MCPServerCatalogEntry
 from persona.tools.mcp.mirror import load_mirror_catalog
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "available_mcp_server_names",
     "list_skills",
+    "list_specialities",
     "list_tools",
     "merged_mcp_catalog",
     "unavailable_enabled_mcp_servers",
@@ -63,6 +66,35 @@ def list_skills() -> list[tuple[str, str]]:
     scanner = SkillScanner(skill_paths=[BUILTIN_ROOT])
     scanned = scanner.scan(declared_skills=_BUILTIN_SKILLS)
     return [(s.name, s.description) for s in scanned]
+
+
+def list_specialities(*, skill_mirror_path: Path | None = None) -> list[SkillSpec]:
+    """The full speciality catalog: bundled builtins + S2's synced external skills.
+
+    Each :class:`SkillSpec` carries its **source-assigned** trust tier (S1-D-3) and
+    ``provenance.content_hash`` (S1-D-5) — the data the user-facing Specialities surface
+    (S3) renders and binds consent to. Builtin skills are scanned from the repo (assigned
+    ``builtin``); external skills come from the S2 mirror snapshot (``vetted`` / ``community``
+    / ``third_party`` per source). The mirror is fail-soft: no sync yet → just the builtins.
+
+    Builtin wins on a name collision (the ``merged_mcp_catalog`` / ``declared_mirror_skills``
+    precedent — a repo skill is never superseded by an external one of the same name); the
+    external tail is unioned in, deterministic order (builtins first).
+
+    Args:
+        skill_mirror_path: Override the mirror snapshot path (tests). ``None`` → the
+            configured writable volume override, else the bundled default.
+    """
+    scanner = SkillScanner(skill_paths=[BUILTIN_ROOT])
+    builtin = scanner.scan(declared_skills=_BUILTIN_SKILLS)
+    mirror_path = (
+        skill_mirror_path
+        if skill_mirror_path is not None
+        else resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+    )
+    external = load_skill_mirror(mirror_path)
+    seen = {s.name for s in builtin}
+    return list(builtin) + [s for s in external if s.name not in seen]
 
 
 def merged_mcp_catalog(*, mirror_path: Path | None = None) -> list[MCPServerCatalogEntry]:

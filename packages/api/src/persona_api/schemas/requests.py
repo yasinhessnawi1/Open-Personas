@@ -80,6 +80,20 @@ class SetConsentRequest(_Input):
     granted: bool | None = None
 
 
+class SetSkillConsentRequest(_Input):
+    """Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+
+    ``granted``: ``True`` = grant (the skill may inject at its current body hash),
+    ``False`` = revoke. That is the ONLY field a client may send — the
+    ``content_hash`` consent binds to and the trust ``tier`` are **server-derived**
+    from the catalog on every request, never accepted from the client (the
+    forge-prevention invariant, S3-D-2). ``extra="forbid"`` (inherited from
+    ``_Input``) rejects a client that tries to supply either → 422.
+    """
+
+    granted: bool
+
+
 class AuthorPersonaRequest(_Input):
     """LLM-assisted authoring from a natural-language description (§5.1, §6.3)."""
 

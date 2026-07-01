@@ -11,6 +11,45 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Specialities Frontend — skills as installable, trust-labelled "Specialities" with a consent flow (2026-07-01)
+
+> Close-out of `specialities-frontend` (Spec S3, `persona-api` + `persona-web`). Skills are now
+> surfaced to users as **"Specialities"**: a searchable chooser (friendly name/description, from
+> the tier-tagged S2 catalog) with **trust-tier labels** (vetted / community / third-party) and an
+> **honest consent flow** for community/third-party skills — a **separate** surface from the N3
+> "apps" chooser (a persona has *apps* and *specialities*, two distinct capability concepts).
+>
+> Scope was larger than "pure frontend": S1/S2 pushed **consent persistence onto S3**, so this
+> ships the **real `SkillConsentPort`** the S1 default-deny stub stood in for — an append-only,
+> RLS-scoped `skill_consents` store, wired into the runtime. Three properties are proven, not
+> asserted: **empty store ≡ default-deny** (swapping the stub in never opens access — consent is
+> the only thing that does); **consent binds to the server-known body hash** (a synced change
+> re-gates; the client can never supply the hash or the tier — forge-prevention); and **see-then-
+> grant** (the enable control lives only in the expanded detail, consistent with N3's expand-to-
+> enable; disabling stays one click). The third-party consent copy is calibrated honest-not-
+> alarmist: it names the real risk ("instructions your persona will follow… hidden instructions
+> that steer your persona in ways you didn't intend") without scaremongering ("most specialities
+> are helpful… you can disable it anytime").
+
+#### Added
+- **`persona-api`** — `GET /v1/specialities` (tier-aware catalog: name/description/when-to-use +
+  `trust` + `content_hash` + `requires_consent`, merging built-ins with S2's external tiers,
+  built-in-wins-on-collision); `GET /v1/personas/{id}/specialities` (that catalog + this persona's
+  server-computed `consent_state`); `POST /v1/personas/{id}/skills/{name}/consent {granted}` (the
+  client sends only `granted`; hash + tier are server-derived). Migration `026_skill_consents`
+  (append-only consent-event table + owner-scoped RLS). `PostgresSkillConsentStore` implements the
+  S1 `SkillConsentPort` and is injected into both runtime loops (replaces `DenyUnvettedConsent`).
+- **`persona-web`** — the `SpecialitiesChooser` (directory→detail→toggle-in-detail; trust-tier
+  badges; the honest third-party consent flow; graceful `unavailable` tombstones), a pure
+  `deriveSpecialityState` model, the `specialities` i18n namespace, and a fixture-fed
+  `/reference/specialities` render composition. Wired into the persona editor beside the apps
+  chooser.
+
+#### Changed
+- **`persona-web`** — the persona editor's Capabilities section replaces the bare skills
+  chip-toggle with the `SpecialitiesChooser` (skills gain tiers + consent; enable/disable still
+  drives the persona's `skills:` declaration via the existing update path).
+
 ### External Skill Sources + Catalog — sourcing skills from external stores, tier-tagged (2026-07-01)
 
 > Close-out of `external-skill-sources` (Spec S2, `persona-core` + `persona-api`). The skill

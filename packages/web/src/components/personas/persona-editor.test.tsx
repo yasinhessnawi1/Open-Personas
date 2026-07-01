@@ -23,6 +23,12 @@ vi.mock("@clerk/nextjs", () => ({
 vi.mock("@/lib/voice/voices", () => ({
   fetchVoices: async () => ({ provider: null, voices: [] }),
 }));
+// Spec S3 — PersonaForm now renders the self-fetching SpecialitiesChooser; keep it
+// offline so these editor tests stay deterministic.
+vi.mock("@/lib/specialities/specialities", () => ({
+  fetchSpecialities: async () => [],
+  recordSpecialityConsent: async () => ({}),
+}));
 
 const DOC: PersonaDoc = {
   schema_version: "1.0",
