@@ -85,6 +85,33 @@ class PostgresGraphBackend:
             surrogate = conn.execute(stmt).scalar_one()
         return int(surrogate)
 
+    def insert_node_if_absent(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+    ) -> int | None:
+        """Insert a node only if its id is free; return the surrogate, or ``None`` on conflict.
+
+        The race-safe get-or-create primitive (Spec K6): ``ON CONFLICT (id) DO
+        NOTHING`` so two concurrent inserts of the same reserved id (the self node)
+        collapse to a single row — the winner gets a ``surrogate``, the loser gets
+        ``None`` (and re-reads the winner). Distinct from :meth:`insert_node`, which
+        assumes a fresh id and raises on a duplicate.
+        """
+        row = self._node_to_row(owner_id, node, embedding, embedding_model)
+        stmt = (
+            pg_insert(graph_nodes)
+            .values(**row)
+            .on_conflict_do_nothing(index_elements=["id"])
+            .returning(graph_nodes.c.surrogate)
+        )
+        with self._engine.begin() as conn:
+            surrogate = conn.execute(stmt).scalar_one_or_none()
+        return None if surrogate is None else int(surrogate)
+
     def update_node(
         self,
         owner_id: str,
@@ -241,9 +268,20 @@ class PostgresGraphBackend:
         return [self._row_to_node(dict(r)) for r in rows]
 
     def count_nodes(self, owner_id: str) -> int:
-        """Number of nodes for the user (the next ``make_node_id`` index)."""
+        """Number of the user's ``::node::`` fact nodes (the next ``make_node_id`` index).
+
+        Excludes the K6 ``SELF`` node (Spec K6): it carries a reserved ``::self`` id
+        outside the monotonic ``::node::{index}`` scheme, so counting it would push
+        fact ids past their true index (harmless gaps, but the two id schemes are
+        cleaner kept independent). Only fact-kind nodes participate in this count.
+        """
         stmt = (
-            select(func.count()).select_from(graph_nodes).where(graph_nodes.c.owner_id == owner_id)
+            select(func.count())
+            .select_from(graph_nodes)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.node_kind != str(NodeKind.SELF),
+            )
         )
         with self._engine.connect() as conn:
             return int(conn.execute(stmt).scalar_one())

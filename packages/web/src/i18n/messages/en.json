@@ -3,6 +3,18 @@
     "name": "Open Persona",
     "tagline": "Typed-memory AI personas with a tier-routed runtime."
   },
+  "profile": {
+    "nameNudge": {
+      "title": "What should we call you?",
+      "subtitle": "Add your name so your personas can address you. Optional — you can skip this.",
+      "firstLabel": "First name",
+      "firstPlaceholder": "First name",
+      "lastLabel": "Last name",
+      "lastPlaceholder": "Last name",
+      "save": "Save",
+      "skip": "Not now"
+    }
+  },
   "scaffold": {
     "title": "Open Persona — web app",
     "subtitle": "Scaffold is live. Auth, personas, chat, runs, and authoring land in the spec-09 tasks.",

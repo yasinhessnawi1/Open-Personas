@@ -35,6 +35,7 @@ __all__ = [
     "ToolResultEvent",
     "ToolSummary",
     "UsageEntry",
+    "UserProfileResponse",
 ]
 
 
@@ -476,6 +477,26 @@ class UsageEntry(_Output):
     prompt_tokens: int
     completion_tokens: int
     cost_cents: float
+    created_at: datetime
+
+
+# -- profile (Spec K6, K6-D-1) ----------------------------------------------
+
+
+class UserProfileResponse(_Output):
+    """The caller's own profile — identity anchor + optional name (Spec K6).
+
+    ``first_name`` / ``last_name`` are optional (``None`` when unset — a nameless
+    account is fully valid). ``email`` may be ``None`` when the token carried none
+    (the provisioning fallback stores a noreply address, but the surface stays
+    nullable so the contract never implies a real address). Our DB is the source of
+    truth; Clerk stays auth-only.
+    """
+
+    id: str
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     created_at: datetime
 
 

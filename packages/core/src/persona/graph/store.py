@@ -30,7 +30,15 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.audit import AuditAction, AuditEvent
 from persona.graph.errors import NodeMergeError
-from persona.graph.models import LinkType, TypedLink, make_edge_id
+from persona.graph.models import (
+    ConceptNode,
+    LinkType,
+    NodeKind,
+    NodeProvenance,
+    TypedLink,
+    make_edge_id,
+    make_self_node_id,
+)
 from persona.graph.protocol import MergeAction
 from persona.schema.chunks import WriteSource
 
@@ -41,9 +49,13 @@ if TYPE_CHECKING:
 
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
-    from persona.graph.models import ConceptNode, NodeProvenance
     from persona.graph.protocol import GraphIndex, KnowledgeCandidate, MergeOutcome
     from persona.stores.embedder import Embedder
+
+#: Placeholder ``concept_name`` for a self node whose user has not set a name yet
+#: (Spec K6 — the name is optional/skippable; the anchor still exists, generically
+#: labelled, until a name is captured and synced in).
+_UNNAMED_SELF_LABEL = "the user"
 
 __all__ = ["PostgresGraphStore", "build_graph_store"]
 
@@ -58,6 +70,12 @@ class _StoreBackend(Protocol):
     ) -> dict[int, ConceptNode]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
     def delete_node(self, owner_id: str, node_id: str) -> int | None: ...
+    def insert_node_if_absent(
+        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+    ) -> int | None: ...
+    def update_node(
+        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+    ) -> int | None: ...
     def surrogates_for_owner(self, owner_id: str) -> list[int]: ...
     def surrogates_for_nodes(self, owner_id: str, node_ids: Sequence[str]) -> list[int]: ...
     def flagged_nodes(self, owner_id: str) -> list[ConceptNode]: ...
@@ -129,6 +147,115 @@ class PostgresGraphStore:
         self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=node_id)
         self._index.remove(surrogate)  # same path; raises on failure (stale entry benign)
         return True
+
+    # ===== the user's self node (Spec K6) =================================
+
+    def get_self_node(self, owner_id: str) -> ConceptNode | None:
+        """Read the user's central self node (Spec K6), or ``None`` if not yet created."""
+        return self._backend.get_node(owner_id, make_self_node_id(owner_id))
+
+    def get_or_create_self_node(
+        self, owner_id: str, *, display_name: str | None = None
+    ) -> ConceptNode:
+        """Ensure the user's central self node exists, sync its name, and return it (K6).
+
+        The single central per-user node (``NodeKind.SELF``, reserved id
+        ``{owner_id}::self``), named with the user's name — the anchor everything the
+        persona learns about them can connect to (Option C / K6-D-2: an ordinary
+        node, no forced star). Idempotent and race-safe (K6-D-5): the reserved id
+        makes concurrent first-writes collapse to one node via the unique
+        constraint (the loser re-reads the winner), never a duplicate or a crash.
+
+        ``display_name`` is the caller-resolved name (the runtime supplies it from
+        the ``users`` table — K6-D-6). ``None`` means "ensure it exists, do NOT touch
+        the name" (e.g. a graph write with no name in hand must not clobber a name
+        already set). A name change (K6-D-9) updates ``concept_name`` and APPENDS a
+        provenance entry recording the prior name (``superseded_content``) — no
+        silent overwrite (K0-D-4). Same-path index sync (the K0 invariant): the node
+        lives in Postgres AND the dense index; intentional retrieval treatment of the
+        self node is the deferred K1/K3 follow-on (K6-D-10).
+        """
+        self_id = make_self_node_id(owner_id)
+        existing = self._backend.get_node(owner_id, self_id)
+        desired_name = display_name if display_name is not None else _UNNAMED_SELF_LABEL
+
+        if existing is not None:
+            # Rename only when the caller knows a name AND it actually changed.
+            if display_name is None or existing.concept_name == desired_name:
+                return existing
+            return self._rename_self_node(owner_id, existing, desired_name)
+        return self._create_self_node(owner_id, self_id, desired_name)
+
+    def _create_self_node(self, owner_id: str, self_id: str, name: str) -> ConceptNode:
+        now = datetime.now(UTC)
+        node = ConceptNode(
+            id=self_id,
+            node_kind=NodeKind.SELF,
+            concept_name=name,
+            content=name,
+            provenance=(
+                NodeProvenance(
+                    source=WriteSource.SYSTEM, written_at=now, reason="self node created"
+                ),
+            ),
+            created_at=now,
+        )
+        vector = self._embedder.encode([node.content])[0]
+        surrogate = self._backend.insert_node_if_absent(owner_id, node, vector)
+        if surrogate is None:
+            # Lost the create race — another writer won; return the persisted winner.
+            winner = self._backend.get_node(owner_id, self_id)
+            if winner is None:  # pragma: no cover - the conflict proves a row exists
+                raise NodeMergeError(
+                    "self node vanished after insert conflict", context={"owner_id": owner_id}
+                )
+            return winner
+        self._index.add(surrogate=surrogate, vector=list(vector))
+        self._emit_audit(
+            owner_id,
+            AuditAction.WRITE,
+            source=WriteSource.SYSTEM,
+            node_id=self_id,
+            provenance=node.provenance[0],
+            metadata={"action": "self_created"},
+        )
+        return node
+
+    def _rename_self_node(self, owner_id: str, existing: ConceptNode, new_name: str) -> ConceptNode:
+        now = datetime.now(UTC)
+        provenance = (
+            *existing.provenance,
+            NodeProvenance(
+                source=WriteSource.USER,
+                written_at=now,
+                reason="name updated",
+                superseded_content=existing.concept_name,
+            ),
+        )
+        renamed = ConceptNode(
+            id=existing.id,
+            node_kind=NodeKind.SELF,
+            concept_name=new_name,
+            content=new_name,
+            metadata=existing.metadata,
+            wellbeing_category=existing.wellbeing_category,
+            provenance=provenance,
+            created_at=existing.created_at,
+        )
+        vector = self._embedder.encode([renamed.content])[0]
+        surrogate = self._backend.update_node(owner_id, renamed, vector)
+        if surrogate is None:  # pragma: no cover - existing was just read
+            raise NodeMergeError("self node vanished before rename", context={"owner_id": owner_id})
+        self._index.replace(surrogate=surrogate, vector=list(vector))
+        self._emit_audit(
+            owner_id,
+            AuditAction.WRITE,
+            source=WriteSource.USER,
+            node_id=existing.id,
+            provenance=provenance[-1],
+            metadata={"action": "self_renamed"},
+        )
+        return renamed
 
     # ===== read: the K1 legs ==============================================
 

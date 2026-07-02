@@ -530,6 +530,7 @@ class PromptBuilder:
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
+        user_name: str | None = None,
     ) -> list[ConversationMessage]:
         """Build the full prompt as a message list.
 
@@ -575,6 +576,12 @@ class PromptBuilder:
                 criterion 6). ``None`` (the default) is the reserved no-op stub:
                 the slot is on the wire but renders nothing — every existing caller
                 passes ``None`` and is byte-identical.
+            user_name: The name of the person the persona is speaking with (Spec K6,
+                K6-D-6) — resolved by the caller from OUR ``users`` table (DB the
+                source of truth; Clerk auth-only). Rendered as a short identity line
+                just after the persona identity, in every channel. ``None``/empty
+                (the default — a nameless account, or any caller that doesn't supply
+                it) renders nothing → byte-identical, null-safe (K6 AC-2/AC-4).
 
         Returns:
             ``[system_message, *history, user_message]`` — sized to ``max_tokens``.
@@ -595,6 +602,7 @@ class PromptBuilder:
             graph_surfacing_guidance,
             mode,
             safety_directive,
+            user_name,
         )
         if self._token_total(messages) <= max_tokens:
             return messages
@@ -617,6 +625,7 @@ class PromptBuilder:
                 graph_surfacing_guidance,
                 mode,
                 safety_directive,
+                user_name,
             )
             if self._token_total(messages) <= max_tokens:
                 return messages
@@ -637,6 +646,7 @@ class PromptBuilder:
                 graph_surfacing_guidance,
                 mode,
                 safety_directive,
+                user_name,
             )
         return messages
 
@@ -653,6 +663,7 @@ class PromptBuilder:
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
+        user_name: str | None = None,
     ) -> list[ConversationMessage]:
         """Compose the message list in the spec §5.1 order."""
         system_text = self._render_system(
@@ -665,6 +676,7 @@ class PromptBuilder:
             graph_surfacing_guidance,
             mode,
             safety_directive,
+            user_name,
         )
         now = datetime.now(UTC)
         system = ConversationMessage(role="system", content=system_text, created_at=now)
@@ -682,6 +694,7 @@ class PromptBuilder:
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
+        user_name: str | None = None,
     ) -> str:
         """Render the system block in the spec §5.1 ordering.
 
@@ -693,6 +706,15 @@ class PromptBuilder:
         # 1. Identity opener.
         ident = persona.identity
         parts.append(f"You are {ident.name}, {ident.role}.\n{ident.background}".rstrip())
+
+        # 1·K6. Who the persona is speaking WITH (Spec K6, K6-D-6/K6-D-8). Rendered
+        # right after the persona identity, in every channel, so the persona
+        # addresses the user by their real name. The name is our own captured data
+        # (normalised at capture — control chars stripped, length-capped — K6-D-8),
+        # so it is safe to interpolate; ``None``/empty (a nameless account, or any
+        # caller that doesn't supply it) renders NOTHING → byte-identical, null-safe.
+        if user_name:
+            parts.append(f"You are speaking with {user_name}.")
 
         # 1a. Reply-language directive (Spec 32 B5, D-32-7). The reply must be
         # generated in the declared language — TTS speaking Norwegian needs the

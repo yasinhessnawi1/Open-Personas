@@ -183,6 +183,14 @@ class _StubStore:
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
         return None
 
+    def get_self_node(self, owner_id: str) -> ConceptNode | None:
+        return None
+
+    def get_or_create_self_node(
+        self, owner_id: str, *, display_name: str | None = None
+    ) -> ConceptNode:
+        raise NotImplementedError
+
     def search_dense(
         self, owner_id: str, query: str, top_k: int, *, allowlist: set[str] | None = None
     ) -> list[ConceptNode]:

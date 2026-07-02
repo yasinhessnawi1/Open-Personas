@@ -149,6 +149,36 @@ def _load_persona(engine: Engine, persona_id: str) -> Persona:
     return Persona.model_validate(raw)
 
 
+def _load_user_name(engine: Engine, user_id: str) -> str | None:
+    """Resolve the caller's display name from OUR ``users`` table (Spec K6, K6-D-6).
+
+    A raw ``SELECT`` (keeps persona-voice free of a persona-api dependency, the
+    layering line — mirrors :func:`_load_persona`), resolved ONCE here at session
+    setup — off the per-utterance path, so no DB read ever runs on the realtime
+    turn loop. Fail-soft: no row, no name, or any error ⇒ ``None`` ⇒ the voice
+    prompt omits the name line (byte-identical, null-safe). The name is a nicety
+    and must never break a call. ``users`` is not RLS-scoped, but the read is by
+    the caller's own id, so it returns only the caller's own name.
+    """
+    try:
+        with engine.begin() as conn:
+            row = (
+                conn.execute(
+                    text("SELECT first_name, last_name FROM users WHERE id = :uid"),
+                    {"uid": user_id},
+                )
+                .mappings()
+                .first()
+            )
+    except Exception:  # noqa: BLE001 — the name is a nicety; never break a call
+        _logger.warning("voice user-name resolution failed (non-fatal)", exc_info=True)
+        return None
+    if row is None:
+        return None
+    parts = [p for p in (row["first_name"], row["last_name"]) if p]
+    return " ".join(parts) or None
+
+
 def _build_stores(engine: Engine, embedder: Embedder, audit_root: Path) -> dict[str, MemoryStore]:
     """The four typed stores over ``PostgresBackend`` (RLS-scoped session engine).
 
@@ -359,6 +389,11 @@ async def build_agent_session(
     rls_engine = make_session_rls_engine(config.database_url, user_id=user_id)
     persona = _load_persona(rls_engine, persona_id)
     stores = _build_stores(rls_engine, embedder, audit_root)
+    # K6 (K6-D-6): resolve the caller's name ONCE at session setup (off the
+    # per-utterance turn loop) so the persona speaks it in the call, exactly as in
+    # chat — one persona, one user, coherent across channels. ``None`` ⇒ nameless ⇒
+    # byte-identical voice prompt.
+    user_name = _load_user_name(rls_engine, user_id)
 
     # --- per-call language plan (Spec 32 B2) ---
     # Resolve the persona's declared language ONCE into the STT route (B3), the
@@ -395,6 +430,7 @@ async def build_agent_session(
         latency_tracker=tracker,
         toolbox=toolbox,
         language=language_plan,
+        user_name=user_name,
     )
     recorder = VoiceTurnRecorder(
         ctx,

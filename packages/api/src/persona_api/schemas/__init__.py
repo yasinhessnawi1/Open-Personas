@@ -21,6 +21,7 @@ from persona_api.schemas.requests import (
     StartRunRequest,
     UpdateMCPServerRequest,
     UpdatePersonaRequest,
+    UpdateProfileRequest,
 )
 from persona_api.schemas.responses import (
     ActiveTurnResponse,
@@ -58,6 +59,7 @@ from persona_api.schemas.responses import (
     ToolResultEvent,
     ToolSummary,
     UsageEntry,
+    UserProfileResponse,
 )
 
 __all__ = [
@@ -113,5 +115,7 @@ __all__ = [
     "SetConsentRequest",
     "UpdateMCPServerRequest",
     "UpdatePersonaRequest",
+    "UpdateProfileRequest",
     "UsageEntry",
+    "UserProfileResponse",
 ]

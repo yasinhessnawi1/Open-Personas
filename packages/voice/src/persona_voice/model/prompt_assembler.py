@@ -152,4 +152,7 @@ class VoicePromptAssembler:
             # V11-D-5: the R1-soft override directive (path-independent with the chat
             # loop). ``None`` ⇒ byte-identical, R0 floor intact.
             safety_directive=safety_directive,
+            # K6 (K6-D-6): the persona speaks the caller's name in-call, resolved once
+            # at session setup (off the per-utterance path). ``None`` ⇒ byte-identical.
+            user_name=self._ctx.user_name,
         )

@@ -324,6 +324,23 @@ class GraphStore(Protocol):
         """
         ...
 
+    # -- the user's self node (Spec K6) ------------------------------------
+
+    def get_self_node(self, owner_id: str) -> ConceptNode | None:
+        """Read the user's central self node (Spec K6), or ``None`` if not yet created."""
+        ...
+
+    def get_or_create_self_node(
+        self, owner_id: str, *, display_name: str | None = None
+    ) -> ConceptNode:
+        """Ensure the user's central ``SELF`` node exists, sync its name, return it (K6).
+
+        Idempotent + race-safe via the reserved id (K6-D-5). ``display_name=None``
+        ensures existence without touching an already-set name; a changed name is
+        applied with a provenance append recording the prior name (K6-D-9).
+        """
+        ...
+
     # -- read: the K1 retrieval legs ---------------------------------------
 
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:

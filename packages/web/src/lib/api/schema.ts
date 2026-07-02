@@ -641,6 +641,39 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/profile": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Profile
+     * @description The caller's own profile — identity + optional name (Spec K6, K6-D-1).
+     *
+     *     Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
+     *     The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
+     *     means a genuine invariant break rather than a first-time user.
+     */
+    get: operations["get_profile_v1_me_profile_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Update Profile
+     * @description Set the caller's optional name (Spec K6, K6-D-1). PATCH — omitted = unchanged.
+     *
+     *     Only the fields the client actually sent are written (``exclude_unset``): a
+     *     string sets, an explicit ``null`` clears, an omitted field is left untouched.
+     *     Names are normalised (control-char strip, whitespace-only → unset) in the
+     *     service (K6-D-8). Scoped to the caller's own row — never another user's.
+     */
+    patch: operations["update_profile_v1_me_profile_patch"];
+    trace?: never;
+  };
   "/v1/me/notifications": {
     parameters: {
       query?: never;
@@ -2487,6 +2520,23 @@ export interface components {
       avatar_url?: string | null;
     };
     /**
+     * UpdateProfileRequest
+     * @description Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.
+     *
+     *     Both fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
+     *     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
+     *     fails fast at the boundary on egregious input; the service then strips control
+     *     characters and treats whitespace-only as unset (:func:`persona_api.services.
+     *     user_service.normalize_name`). The name is never required — an empty PATCH is a
+     *     valid no-op read.
+     */
+    UpdateProfileRequest: {
+      /** First Name */
+      first_name?: string | null;
+      /** Last Name */
+      last_name?: string | null;
+    };
+    /**
      * UsageEntry
      * @description One usage-log row (per-turn telemetry, paginated).
      */
@@ -2503,6 +2553,31 @@ export interface components {
       completion_tokens: number;
       /** Cost Cents */
       cost_cents: number;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /**
+     * UserProfileResponse
+     * @description The caller's own profile — identity anchor + optional name (Spec K6).
+     *
+     *     ``first_name`` / ``last_name`` are optional (``None`` when unset — a nameless
+     *     account is fully valid). ``email`` may be ``None`` when the token carried none
+     *     (the provisioning fallback stores a noreply address, but the surface stays
+     *     nullable so the contract never implies a real address). Our DB is the source of
+     *     truth; Clerk stays auth-only.
+     */
+    UserProfileResponse: {
+      /** Id */
+      id: string;
+      /** Email */
+      email?: string | null;
+      /** First Name */
+      first_name?: string | null;
+      /** Last Name */
+      last_name?: string | null;
       /**
        * Created At
        * Format: date-time
@@ -3473,6 +3548,59 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["UsageEntry"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_profile_v1_me_profile_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["UserProfileResponse"];
+        };
+      };
+    };
+  };
+  update_profile_v1_me_profile_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UpdateProfileRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["UserProfileResponse"];
         };
       };
       /** @description Validation Error */

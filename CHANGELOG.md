@@ -11,6 +11,37 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### User Profile & Graph Root Anchor — the user becomes a named, first-class entity (2026-07-02)
+
+> Close-out of `user-profile` (Spec K6, `persona-api` + `persona-core` + `persona-runtime` +
+> `persona-voice` + `persona-web`). The user was invisible — most accounts had no name, the persona
+> could not address them, and the knowledge graph had no per-user anchor. K6 makes the user a real,
+> **named, first-class entity**: they set their name through our **own** app step (our DB the source
+> of truth; Clerk stays auth-only), and **the persona addresses them by name in chat and voice**,
+> gracefully generic when unset. It also lays the graph's per-user **`SELF` node** foundation.
+>
+> **SOTA-aligned scope (Option C).** The `SELF` node is an ordinary, named, per-user node — K6
+> deliberately does **not** center the graph (no every-fact "ANCHOR" star; the super-hub is avoided,
+> as Zep/Mem0 do in production). Graph-centeredness (retrieval bias, self-entity resolution, hub
+> viz) is the explicitly-deferred **K1/K2/K3/K5** arc, not a K6 deliverable.
+>
+> - **Name capture (our DB the source of truth)** — nullable `users.first_name`/`last_name`
+>   (migration `028`), an optional/skippable `GET`/`PATCH /v1/me/profile` endpoint, and a
+>   claims-gated **Clerk seed** (`given_name`/`family_name` seed our columns once **when null**,
+>   never overwriting a set name; normalised identically to a PATCH). Name is never required —
+>   nameless accounts stay valid everywhere (null-safe).
+> - **The persona speaks the user's name** — a small identity line in the shared `PromptBuilder`
+>   ("You are speaking with {name}."), wired on **chat** (a per-turn provider closure over the
+>   request owner) and **voice** (resolved once at call setup, off the per-utterance loop). A
+>   nameless turn is **byte-identical** to before — no regression.
+> - **The graph `SELF` node** — a per-user `NodeKind.SELF` node with a reserved, race-safe id
+>   (`{owner}::self`), created lazily by the runtime with the resolved name (idempotent; a concurrent
+>   double-create collapses to one), rename-synced with a provenance trail. Additive to K0 — no
+>   parallel structure, no migration for the kind.
+> - **Optional web name step** — a dismissible, no-dark-pattern nudge shown **only** when our DB has
+>   no name (a named/seeded user is never asked); skippable, themed, reduced-motion-safe, i18n'd.
+> - Zero new dependencies. Deferrals + merge-back notes: `docs/specs/phase3/spec_K6/handover.md` +
+>   `closeout.md`.
 ### Notification Coverage Completion — every consequential moment reaches the bell + a durable cross-device feed (Spec P6, 2026-07-02)
 
 - Completes the *event coverage* of Spec 35's notification system: the three deferred D-35-11 sources now surface — **run-terminal** (a background run finishing while you're elsewhere), **persona-ready** (async create / avatar landed), and **low-balance-at-load**.

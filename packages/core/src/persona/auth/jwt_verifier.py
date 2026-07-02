@@ -50,6 +50,15 @@ class AuthenticatedUser(BaseModel):
 
     id: str
     email: str | None = None
+    # Optional name claims (Spec K6, K6-D-1 seed). Present only when the identity
+    # provider's session token is configured to emit them (e.g. Clerk custom claims
+    # ``given_name``/``family_name``); ``None`` otherwise. Used ONLY to seed our
+    # ``users`` name columns once at provisioning when they are still null — our DB
+    # stays the source of truth (never read per-request for the prompt). Additive +
+    # defaulted, so every existing constructor (``AuthenticatedUser(id=…, email=…)``)
+    # is unaffected.
+    first_name: str | None = None
+    last_name: str | None = None
 
 
 class JwtVerifierConfig(Protocol):
@@ -151,6 +160,14 @@ def make_jwt_verifier(
         sub = claims.get("sub")
         if not sub:
             raise AuthenticationError("token missing 'sub' claim")
-        return AuthenticatedUser(id=str(sub), email=claims.get("email"))
+        # K6 seed (K6-D-1): carry the optional name claims when the provider emits
+        # them (Clerk custom claims ``given_name``/``family_name``). Absent ⇒ ``None``
+        # ⇒ the seed is a graceful no-op — the token contract is otherwise unchanged.
+        return AuthenticatedUser(
+            id=str(sub),
+            email=claims.get("email"),
+            first_name=claims.get("given_name"),
+            last_name=claims.get("family_name"),
+        )
 
     return _verify

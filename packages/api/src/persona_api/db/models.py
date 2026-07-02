@@ -103,6 +103,20 @@ users = Table(
     metadata,
     Column("id", Text, primary_key=True),
     Column("email", Text, unique=True, nullable=False),
+    # Optional, first-class user identity (Spec K6, K6-D-1). Captured through our
+    # OWN app step (``PATCH /v1/me/profile``) into our DB — Clerk stays auth-only
+    # (username off; we do not use its required-name fields). Both nullable: a
+    # nameless / pre-K6 account is fully valid everywhere (null-safe), and the
+    # name is never a hard requirement (signup, persona, graph all tolerate NULL).
+    # Split-home (cf. avatar_source / migrations 020 / 023 / 025): declared here so
+    # ``001_initial``'s ``metadata.create_all`` builds them on a fresh DB, and
+    # migration 028's guarded ``ADD COLUMN IF NOT EXISTS`` adds them to a
+    # previously-deployed Postgres. TEXT (not CHECK/ENUM) — the value vocabulary is
+    # free-form; validation (length cap, control-char strip) is at the app layer
+    # (K6-D-8). ``users`` is NOT RLS-scoped (globally readable; child tables carry
+    # the tenant RLS), so a new nullable column needs no policy change.
+    Column("first_name", Text),
+    Column("last_name", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 

@@ -12,6 +12,7 @@
 
 import type { ReactNode } from "react";
 import { ToastProvider } from "@/components/patterns/toast";
+import { NameNudge } from "@/components/profile/name-nudge";
 import { ConfirmProvider } from "@/components/providers/confirm-provider";
 import { NotificationProvider } from "@/components/providers/notification-provider";
 import { ServerNotificationsProvider } from "@/components/providers/server-notifications-provider";
@@ -92,6 +93,10 @@ export async function AppShell({
                 <LowBalanceWatcher />
                 {/* Spec 35 D-35-14: the ⌘K command palette, mounted once for the app. */}
                 <CommandPalette data={data} />
+                {/* Spec K6 (T5): the optional "what should we call you?" nudge —
+                shown only when our DB has no name for the caller; skippable, no
+                dark pattern; dismissed for the session. */}
+                <NameNudge />
                 {/* Spec V7 D-V7-2: the persistent mini call-bar — hidden until a call is
                 active; binds the hoisted session, never owns a Room. */}
                 <MiniCallBar />

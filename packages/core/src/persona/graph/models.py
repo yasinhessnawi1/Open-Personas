@@ -41,6 +41,7 @@ __all__ = [
     "make_edge_id",
     "make_entity_id",
     "make_node_id",
+    "make_self_node_id",
 ]
 
 # Wider than chunks' 4-digit index (D-01-2): the graph is an unbounded,
@@ -51,7 +52,16 @@ NODE_ID_INDEX_WIDTH: int = 8
 
 
 class NodeKind(StrEnum):
-    """What a concept-node represents about the user (Spec K0 §2)."""
+    """What a concept-node represents about the user (Spec K0 §2).
+
+    ``SELF`` (Spec K6, K6-D-3) marks the single central per-user node — the user
+    themselves, named with the user's name. It is an ordinary node in every other
+    respect (Option C / K6-D-2: no forced star; facts connect via the normal typed
+    links when they organically relate). Distinguishing it as a *kind* — rather
+    than a boolean flag — lets ``get_self_node`` and the K5 renderer identify the
+    anchor with a clean predicate, and costs no migration (``node_kind`` is stored
+    as free ``TEXT`` with no CHECK constraint).
+    """
 
     CONCEPT = "concept"
     FACT = "fact"
@@ -60,6 +70,7 @@ class NodeKind(StrEnum):
     GOAL = "goal"
     CIRCUMSTANCE = "circumstance"
     ENTITY = "entity"
+    SELF = "self"
 
 
 class LinkType(StrEnum):
@@ -327,6 +338,21 @@ def make_entity_id(owner_id: str, index: int, *, width: int = NODE_ID_INDEX_WIDT
         ValueError: If ``index`` is negative.
     """
     return _make_scoped_id(owner_id, "entity", index, width)
+
+
+def make_self_node_id(owner_id: str) -> str:
+    """Build the reserved, singular self-node id (Spec K6, K6-D-5).
+
+    Format ``{owner_id}::self`` — deliberately distinct from the monotonic
+    ``{owner_id}::node::{index}`` fact ids and carrying NO index, because there is
+    exactly ONE self node per user. Being deterministic, it makes get-or-create
+    idempotent by primary key: two concurrent first-writes both target this id, so
+    the ``uq_graph_nodes_id_owner`` constraint collapses the race to a single node
+    (the loser re-reads the winner) rather than creating a duplicate or crashing.
+    Verified safe: nothing in the codebase parses the ``::node::`` infix, so a
+    distinct ``::self`` namespace breaks no id consumer.
+    """
+    return f"{owner_id}::self"
 
 
 def make_edge_id(src_node_id: str, dst_node_id: str, link_type: LinkType) -> str:

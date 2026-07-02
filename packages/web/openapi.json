@@ -1317,6 +1317,64 @@
         }
       }
     },
+    "/v1/me/profile": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Get Profile",
+        "description": "The caller's own profile \u2014 identity + optional name (Spec K6, K6-D-1).\n\nNull-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.\nThe row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here\nmeans a genuine invariant break rather than a first-time user.",
+        "operationId": "get_profile_v1_me_profile_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfileResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["me"],
+        "summary": "Update Profile",
+        "description": "Set the caller's optional name (Spec K6, K6-D-1). PATCH \u2014 omitted = unchanged.\n\nOnly the fields the client actually sent are written (``exclude_unset``): a\nstring sets, an explicit ``null`` clears, an omitted field is left untouched.\nNames are normalised (control-char strip, whitespace-only \u2192 unset) in the\nservice (K6-D-8). Scoped to the caller's own row \u2014 never another user's.",
+        "operationId": "update_profile_v1_me_profile_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/notifications": {
       "get": {
         "tags": ["me"],
@@ -4514,6 +4572,38 @@
         "title": "UpdatePersonaRequest",
         "description": "Replace a persona's YAML (re-validated against the v1.0 schema)."
       },
+      "UpdateProfileRequest": {
+        "properties": {
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UpdateProfileRequest",
+        "description": "Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.\n\nBoth fields optional; **omitted = unchanged**, explicit ``null`` = **clear**\n(distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``\nfails fast at the boundary on egregious input; the service then strips control\ncharacters and treats whitespace-only as unset (:func:`persona_api.services.\nuser_service.normalize_name`). The name is never required \u2014 an empty PATCH is a\nvalid no-op read."
+      },
       "UsageEntry": {
         "properties": {
           "persona_id": {
@@ -4565,6 +4655,57 @@
         ],
         "title": "UsageEntry",
         "description": "One usage-log row (per-turn telemetry, paginated)."
+      },
+      "UserProfileResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "created_at"],
+        "title": "UserProfileResponse",
+        "description": "The caller's own profile \u2014 identity anchor + optional name (Spec K6).\n\n``first_name`` / ``last_name`` are optional (``None`` when unset \u2014 a nameless\naccount is fully valid). ``email`` may be ``None`` when the token carried none\n(the provisioning fallback stores a noreply address, but the surface stays\nnullable so the contract never implies a real address). Our DB is the source of\ntruth; Clerk stays auth-only."
       },
       "ValidationError": {
         "properties": {

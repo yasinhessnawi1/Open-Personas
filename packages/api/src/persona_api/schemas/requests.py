@@ -24,6 +24,7 @@ __all__ = [
     "StartRunRequest",
     "UpdateMCPServerRequest",
     "UpdatePersonaRequest",
+    "UpdateProfileRequest",
 ]
 
 #: BYO-MCP auth methods (spec 30, D-30-3; Spec R8 adds ``oauth``). ``none`` and
@@ -276,3 +277,18 @@ class UpdateMCPServerRequest(_Input):
     auth_method: MCPAuthMethod | None = None
     credential: str | None = Field(default=None, max_length=4096, repr=False)
     enabled: bool | None = None
+
+
+class UpdateProfileRequest(_Input):
+    """Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.
+
+    Both fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
+    (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
+    fails fast at the boundary on egregious input; the service then strips control
+    characters and treats whitespace-only as unset (:func:`persona_api.services.
+    user_service.normalize_name`). The name is never required — an empty PATCH is a
+    valid no-op read.
+    """
+
+    first_name: str | None = Field(default=None, max_length=100)
+    last_name: str | None = Field(default=None, max_length=100)

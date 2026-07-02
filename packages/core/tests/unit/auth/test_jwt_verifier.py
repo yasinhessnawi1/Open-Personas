@@ -83,6 +83,38 @@ def test_hs256_round_trip_resolves_sub_and_email() -> None:
     assert user.email == "a@x.test"
 
 
+def test_name_claims_are_carried_when_present() -> None:
+    # K6-D-1 seed: Clerk custom claims given_name/family_name → the principal.
+    verify = make_jwt_verifier(_cfg(secret="s3cret", algorithms=["HS256"]))
+    token = jwt.encode(
+        {
+            "sub": "u1",
+            "email": "a@x.test",
+            "given_name": "Ada",
+            "family_name": "Lovelace",
+            "exp": int(time.time()) + 60,
+        },
+        "s3cret",
+        algorithm="HS256",
+    )
+    user = asyncio.run(verify(token))
+    assert user.first_name == "Ada"
+    assert user.last_name == "Lovelace"
+
+
+def test_absent_name_claims_default_to_none() -> None:
+    # The default token (no custom claims) carries no name → the seed is a no-op.
+    verify = make_jwt_verifier(_cfg(secret="s3cret", algorithms=["HS256"]))
+    token = jwt.encode(
+        {"sub": "u1", "email": "a@x.test", "exp": int(time.time()) + 60},
+        "s3cret",
+        algorithm="HS256",
+    )
+    user = asyncio.run(verify(token))
+    assert user.first_name is None
+    assert user.last_name is None
+
+
 def test_hs256_fails_closed_on_garbage_token() -> None:
     verify = make_jwt_verifier(_cfg(secret="s3cret", algorithms=["HS256"]))
     with pytest.raises(AuthenticationError):

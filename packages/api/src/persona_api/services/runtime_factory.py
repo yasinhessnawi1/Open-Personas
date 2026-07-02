@@ -14,7 +14,7 @@ tenant — D-08-1), so the loop's memory reads/writes are tenant-isolated.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from persona.audit import JSONLAuditLogger
 from persona.backends.errors import ProviderError, TierNotConfiguredError
@@ -302,6 +302,67 @@ class RuntimeFactory:
             allowlist_provider=allowlist_provider,
             recent_window_provider=get_recent_window,
         )
+
+    def _build_user_name_provider(self) -> Callable[[], str | None]:
+        """The per-turn display-name resolver for the chat loop (Spec K6, K6-D-6).
+
+        Reads OUR ``users`` table (DB the source of truth; Clerk auth-only, never read
+        per-request) via the ``current_user_id`` contextvar — the same owner scope as
+        graph retrieval. Fail-soft: no owner (non-request call), no row, or any DB
+        error ⇒ ``None`` ⇒ the prompt omits the name line (byte-identical, null-safe).
+        The name is a nicety and must never break a turn.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services import user_service
+
+        engine = self._engine
+
+        def provider() -> str | None:
+            owner_id = current_user_id.get()
+            if not owner_id:
+                return None
+            try:
+                profile = user_service.get_user_profile(engine, user_id=owner_id)
+            except Exception:  # noqa: BLE001 — the name is a nicety; never fail a turn
+                _logger.warning("user-name resolution failed (non-fatal)", exc_info=True)
+                return None
+            if profile is None:
+                return None
+            return user_service.compose_display_name(
+                cast("str | None", profile.get("first_name")),
+                cast("str | None", profile.get("last_name")),
+            )
+
+        return provider
+
+    def _build_self_node_sync(self) -> Callable[[str | None], None] | None:
+        """The lazy SELF-node create/sync trigger for the chat loop (Spec K6, K6-D-4).
+
+        The runtime prompt path is the SELF node's creation trigger (the K6-D-4
+        addendum): once the user has a name we ensure their central ``SELF`` node
+        exists and tracks that name (idempotent, race-safe). ``None`` when no graph
+        store is composed (byte-identical). Skips a nameless turn — the anchor is
+        materialised only once a name exists, so it is born correctly named rather
+        than generic-then-renamed. Fail-soft: a sync failure never perturbs the turn.
+        """
+        if self._graph_store is None:
+            return None
+        from persona_api.middleware.rls_context import current_user_id
+
+        store = self._graph_store
+
+        def sync(display_name: str | None) -> None:
+            if not display_name:
+                return  # materialise the self node only once a name exists
+            owner_id = current_user_id.get()
+            if not owner_id:
+                return
+            try:
+                store.get_or_create_self_node(owner_id, display_name=display_name)
+            except Exception:  # noqa: BLE001 — foundation upkeep; never fail a turn
+                _logger.warning("self-node sync failed (non-fatal)", exc_info=True)
+
+        return sync
 
     @staticmethod
     def _build_intelligent_router(
@@ -946,6 +1007,12 @@ class RuntimeFactory:
             graph_surfacing_guidance=(
                 wellbeing_surfacing_guidance if self._graph_store is not None else None
             ),
+            # K6 (K6-D-6): the persona addresses the user by their real name (resolved
+            # per turn from our users table). K6-D-4 addendum: the runtime prompt path
+            # is the SELF node's creation trigger (None when no graph store → no sync,
+            # byte-identical). Both fail-soft — a name/anchor hiccup never fails a turn.
+            user_name_provider=self._build_user_name_provider(),
+            self_node_sync=self._build_self_node_sync(),
             # Spec A4 (composition-root activation): the contract flow's loop-side. The recognizer
             # + amendment/steering interpreters are the small-tier precision layer (fail-soft: None
             # in a keyless env → the gates stay inert, chat byte-unchanged). This lands TOGETHER

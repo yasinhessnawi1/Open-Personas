@@ -5,16 +5,18 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — used in cast() at runtime
 from typing import cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.schemas import (
     CreditsResponse,
     NotificationMarkReadResult,
     NotificationOut,
+    UpdateProfileRequest,
     UsageEntry,
+    UserProfileResponse,
 )
-from persona_api.services import credits_service, notifications_service
+from persona_api.services import credits_service, notifications_service, user_service
 
 router = APIRouter(prefix="/v1/me", tags=["me"])
 
@@ -61,6 +63,45 @@ async def get_usage(
         )
         for r in rows
     ]
+
+
+@router.get("/profile", response_model=UserProfileResponse)
+async def get_profile(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> UserProfileResponse:
+    """The caller's own profile — identity + optional name (Spec K6, K6-D-1).
+
+    Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
+    The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
+    means a genuine invariant break rather than a first-time user.
+    """
+    row = user_service.get_user_profile(request.app.state.rls_engine, user_id=user.id)
+    if row is None:  # pragma: no cover - ensure_user guarantees the row exists
+        raise HTTPException(status_code=404, detail="user profile not found")
+    return UserProfileResponse.model_validate(row)
+
+
+@router.patch("/profile", response_model=UserProfileResponse)
+async def update_profile(
+    request: Request,
+    body: UpdateProfileRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> UserProfileResponse:
+    """Set the caller's optional name (Spec K6, K6-D-1). PATCH — omitted = unchanged.
+
+    Only the fields the client actually sent are written (``exclude_unset``): a
+    string sets, an explicit ``null`` clears, an omitted field is left untouched.
+    Names are normalised (control-char strip, whitespace-only → unset) in the
+    service (K6-D-8). Scoped to the caller's own row — never another user's.
+    """
+    provided = body.model_dump(exclude_unset=True)
+    row = user_service.update_user_profile(
+        request.app.state.rls_engine, user_id=user.id, **provided
+    )
+    if row is None:  # pragma: no cover - ensure_user guarantees the row exists
+        raise HTTPException(status_code=404, detail="user profile not found")
+    return UserProfileResponse.model_validate(row)
 
 
 @router.get("/notifications", response_model=list[NotificationOut])

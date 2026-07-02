@@ -398,6 +398,8 @@ class ConversationLoop:
         skill_consent: SkillConsentPort | None = None,
         audit_logger: AuditLogger | None = None,
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
+        user_name_provider: Callable[[], str | None] | None = None,
+        self_node_sync: Callable[[str | None], None] | None = None,
         standing_recognizer: StandingIntentRecognizer | None = None,
         amendment_interpreter: AmendmentInterpreter | None = None,
         steering_interpreter: SteeringInterpreter | None = None,
@@ -443,6 +445,15 @@ class ConversationLoop:
         # rides K3's surfacing slot for any injected wellbeing-tagged node. ``None`` (the
         # default) is the reserved no-op — the prompt renders no care text, byte-identical.
         self._graph_surfacing_guidance = graph_surfacing_guidance
+        # K6 (K6-D-6): the display name of the person this turn is with, resolved per
+        # turn from OUR ``users`` table via a provider closure (contextvar → DB, the
+        # same owner scope as graph retrieval). ``None`` (the default) ⇒ no name line
+        # in the prompt, byte-identical. K6-D-4 addendum: the runtime prompt path is
+        # the SELF node's creation trigger — ``self_node_sync`` create-or-renames it to
+        # the resolved name once per turn (a no-op for a nameless turn). Both ``None``
+        # until the composition root wires them (RuntimeFactory) — additive, no regression.
+        self._user_name_provider = user_name_provider
+        self._self_node_sync = self_node_sync
         # Spec 21 T06: proactive clarifying questions (D-21-1). The author turns
         # an ambiguity signal into the 3+1 question; the template author is the
         # D-21-14 mandatory fallback and the default, a model-backed author is
@@ -986,6 +997,15 @@ class ConversationLoop:
         # directive here and NONE is ``None`` — byte-identical, R0 floor intact.
         safety_directive = safety_verdict.soft_directive
 
+        # K6 (K6-D-6): resolve the user's name once per turn (our DB the source of
+        # truth) so the persona addresses them by name; and (K6-D-4 addendum) sync
+        # the SELF node to that name — the runtime prompt path is its creation
+        # trigger. Both provider/sync are fail-soft + ``None`` by default (no name
+        # line, no self node) → byte-identical for every un-wired caller.
+        user_name = self._user_name_provider() if self._user_name_provider is not None else None
+        if self._self_node_sync is not None:
+            self._self_node_sync(user_name)
+
         while True:
             prompt_messages = [
                 *self._builder.build(
@@ -999,6 +1019,7 @@ class ConversationLoop:
                     document_context=document_context,
                     graph_surfacing_guidance=self._graph_surfacing_guidance,
                     safety_directive=safety_directive,
+                    user_name=user_name,
                 ),
                 *tool_messages,
             ]
