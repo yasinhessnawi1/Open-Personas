@@ -181,7 +181,7 @@ All routes are under `/v1`:
 | `documents`, `uploads` | document ingestion + image upload (vision) |
 | `imagegen`, `artifacts` | image generation (credit-gated) + chart/image serve |
 | `tools`, `mcp_servers` | toolbox introspection; bring-your-own MCP servers |
-| `me` | credit balance + per-turn usage |
+| `me` | credit balance + per-turn usage; the durable cross-device notification feed (`GET /v1/me/notifications` + mark-read), owner-scoped + RLS |
 | `health` | liveness + readiness |
 
 **SSE.** Chat, runs, and LLM-assisted authoring stream over Server-Sent Events

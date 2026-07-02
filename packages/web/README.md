@@ -66,7 +66,13 @@ build never pulls `@clerk/*` into the bundle (enforced by CI gates +
 - **Settings** — credit balance + per-turn usage, theme, tier-badge
   visibility, language toggle, conversations list.
 - **Notifications + consent** — one app-wide notification façade (`useNotify`)
-  over the toast layer, plus a persistent bell center (client-side feed); and
+  over the toast layer, plus a persistent bell center covering every
+  consequential moment: run-terminal (a background run finishing while you're
+  elsewhere), persona-ready, and low-balance-at-load, alongside the common
+  chat/CRUD events. Consequential events (run / persona) are **server-authored
+  into a durable, cross-device feed** (`GET /v1/me/notifications`) that survives
+  reload and syncs across devices; the bell renders that union with a
+  client-session low-balance advisory, and rows deep-link to their target. Plus
   one consent dialog (`useConfirm`) for every confirmation — no native browser
   dialogs.
 - **Responsive + i18n** — usable at 375px, dark-mode-default, fully

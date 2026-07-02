@@ -641,6 +641,66 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/notifications": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Notifications
+     * @description The caller's durable bell feed (Spec P6, RLS-scoped, newest-first, paginated).
+     */
+    get: operations["get_notifications_v1_me_notifications_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/notifications/read-all": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Mark All Notifications Read
+     * @description Mark every unread notification read (bell-open, Spec P6).
+     */
+    post: operations["mark_all_notifications_read_v1_me_notifications_read_all_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/notifications/{notification_id}/read": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Mark Notification Read
+     * @description Mark one notification read (deep-link click, Spec P6). 0 if not owned/absent.
+     */
+    post: operations["mark_notification_read_v1_me_notifications__notification_id__read_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/healthz": {
     parameters: {
       query?: never;
@@ -1961,6 +2021,48 @@ export interface components {
             [key: string]: unknown;
           }[]
         | null;
+    };
+    /**
+     * NotificationMarkReadResult
+     * @description How many feed rows a mark-read touched (0 = nothing unread / not owned).
+     */
+    NotificationMarkReadResult: {
+      /** Updated */
+      updated: number;
+    };
+    /**
+     * NotificationOut
+     * @description One durable bell notification (Spec P6 feed), owner-scoped + RLS.
+     *
+     *     Copy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``
+     *     via next-intl at render. ``kind`` + ``ref_id`` drive the deep-link
+     *     (``run_terminal`` → ``/runs/{ref_id}``, ``persona_ready`` → ``/personas/{ref_id}``).
+     */
+    NotificationOut: {
+      /** Id */
+      id: string;
+      /** Kind */
+      kind: string;
+      /** Ref Id */
+      ref_id?: string | null;
+      /** Level */
+      level: string;
+      /** Message Key */
+      message_key: string;
+      /**
+       * Params
+       * @default {}
+       */
+      params: {
+        [key: string]: string;
+      };
+      /** Read */
+      read: boolean;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
     };
     /**
      * PersonaCapabilities
@@ -3371,6 +3473,89 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["UsageEntry"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_notifications_v1_me_notifications_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotificationOut"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  mark_all_notifications_read_v1_me_notifications_read_all_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotificationMarkReadResult"];
+        };
+      };
+    };
+  };
+  mark_notification_read_v1_me_notifications__notification_id__read_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        notification_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotificationMarkReadResult"];
         };
       };
       /** @description Validation Error */

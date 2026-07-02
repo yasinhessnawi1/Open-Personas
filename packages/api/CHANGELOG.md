@@ -13,6 +13,24 @@ mirrors only the `persona-api`-touching surface.
 
 ## [Unreleased]
 
+### Notification Coverage Completion (Spec P6 — durable cross-device feed)
+
+- **`notifications` table + migration** (owner-scoped, FORCE RLS `owner_id =
+  current_setting('app.current_user_id')`, read/unread, locale-neutral
+  `message_key` + `params` JSONB). Idempotency key `UNIQUE (owner_id, kind, ref_id)`
+  makes a server-authored write once-only across the run persist-final /
+  persist-error paths + the two avatar paths. Migration number is a placeholder
+  chained off the local head; **recomputed off main's real head at merge-back**.
+- **`GET /v1/me/notifications`** (RLS-scoped, newest-first, paginated) + mark-read
+  (`POST …/read-all`, `POST …/{id}/read`). Adversarial cross-tenant RLS test
+  (non-superuser role, non-vacuous both directions, WITH CHECK, fail-closed).
+- **Server-authored writes** — run-terminal at `RunRegistry._persist_final` /
+  `_persist_error`; persona-ready via a shared `persona_service.write_persona_ready`
+  called by both the in-process `set_avatar_url` and the durable-queue avatar
+  handler. Both **best-effort** (never fail the authoritative run/avatar persist)
+  and idempotent. Copy stored locale-neutral; the web localises.
+- **OpenAPI client regen** for the two `me` endpoints is deferred to merge-back.
+
 ### Synthetic-Media Provenance & Disclosure (Spec R3 — EU AI Act Art. 50)
 
 - **`personas.avatar_source` column + migration `025_avatar_source_provenance`** (nullable

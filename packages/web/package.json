@@ -15,6 +15,7 @@
     "check:no-literals": "bash scripts/no-literals.sh",
     "check:clerk-free": "node scripts/check-clerk-free.mjs",
     "check:clerk-free-bundle": "bash scripts/check-clerk-free-bundle.sh",
+    "check:toast-facade": "node scripts/check-toast-facade.mjs",
     "format": "biome format --write",
     "test": "vitest run",
     "test:watch": "vitest",

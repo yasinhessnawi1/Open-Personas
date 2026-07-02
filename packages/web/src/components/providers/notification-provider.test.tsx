@@ -110,6 +110,36 @@ describe("NotificationProvider / useNotify", () => {
     expect(second.result.current.entries[0].title).toBe("Persisted");
   });
 
+  it("persists an optional href (deep-link) on the entry", () => {
+    const { result } = renderHook(() => useNotify(), { wrapper });
+    act(() =>
+      result.current.notify({
+        level: "success",
+        title: "Task finished",
+        href: "/runs/abc",
+      }),
+    );
+    expect(result.current.entries[0].href).toBe("/runs/abc");
+    // href round-trips through localStorage too.
+    const reload = renderHook(() => useNotify(), { wrapper });
+    expect(reload.result.current.entries[0].href).toBe("/runs/abc");
+  });
+
+  it("markRead marks a single entry read without clearing the rest", () => {
+    const { result } = renderHook(() => useNotify(), { wrapper });
+    act(() => result.current.notify({ level: "success", title: "A" }));
+    act(() => result.current.notify({ level: "success", title: "B" }));
+    const target = result.current.entries[0].id; // newest ("B")
+    act(() => result.current.markRead(target));
+    expect(result.current.unreadCount).toBe(1);
+    expect(result.current.entries.find((e) => e.id === target)?.read).toBe(
+      true,
+    );
+    expect(result.current.entries.find((e) => e.title === "A")?.read).toBe(
+      false,
+    );
+  });
+
   it("throws when used outside a NotificationProvider", () => {
     function Bare() {
       useNotify();

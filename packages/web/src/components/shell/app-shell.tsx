@@ -14,7 +14,9 @@ import type { ReactNode } from "react";
 import { ToastProvider } from "@/components/patterns/toast";
 import { ConfirmProvider } from "@/components/providers/confirm-provider";
 import { NotificationProvider } from "@/components/providers/notification-provider";
+import { ServerNotificationsProvider } from "@/components/providers/server-notifications-provider";
 import { CommandPalette } from "@/components/shell/command-palette";
+import { LowBalanceWatcher } from "@/components/shell/low-balance-watcher";
 import { NotificationBell } from "@/components/shell/notification-bell";
 import { Sidebar } from "@/components/shell/sidebar";
 import { MiniCallBar } from "@/components/voice/mini-call-bar";
@@ -59,47 +61,54 @@ export async function AppShell({
     // HARD GUARD: the call's Room + <audio> + mic live inside CallSessionProvider,
     // never a route. The mini-bar (T2) renders inside it, bound to the session.
     <NotificationProvider>
-      <ConfirmProvider>
-        <CallSessionProvider>
-          {/* Spec P1 D-P1-v7-indicator: the chat/run "active work" session — the
+      {/* Spec P6 (D4-e): the durable cross-device feed, polled once for the app;
+          the bell renders it unioned with the client useNotify() feed. */}
+      <ServerNotificationsProvider>
+        <ConfirmProvider>
+          <CallSessionProvider>
+            {/* Spec P1 D-P1-v7-indicator: the chat/run "active work" session — the
               additive sibling of the voice CallSessionProvider (voice mechanics
               untouched). Tracks in-progress detached chat turns so the
               conversation row + the global ActiveWorkBar advertise resumable work. */}
-          <ActiveWorkProvider>
-            <div
-              className={cn("flex min-h-svh", className)}
-              data-slot="app-shell"
-            >
-              <Sidebar data={data} />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ShellHeader data={data} />
-                <main
-                  className="flex flex-1 flex-col"
-                  data-slot="app-shell-main"
-                >
-                  {children}
-                </main>
-              </div>
-              {/* F2 T23: single toast surface for the auth'd app. */}
-              <ToastProvider />
-              {/* Spec 35 D-35-14: the ⌘K command palette, mounted once for the app. */}
-              <CommandPalette data={data} />
-              {/* Spec V7 D-V7-2: the persistent mini call-bar — hidden until a call is
+            <ActiveWorkProvider>
+              <div
+                className={cn("flex min-h-svh", className)}
+                data-slot="app-shell"
+              >
+                <Sidebar data={data} />
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <ShellHeader data={data} />
+                  <main
+                    className="flex flex-1 flex-col"
+                    data-slot="app-shell-main"
+                  >
+                    {children}
+                  </main>
+                </div>
+                {/* F2 T23: single toast surface for the auth'd app. */}
+                <ToastProvider />
+                {/* Spec P6 (P6-D-6): low-balance-at-load — headless; reads
+                /v1/me/credits once per session and warns via useNotify(). */}
+                <LowBalanceWatcher />
+                {/* Spec 35 D-35-14: the ⌘K command palette, mounted once for the app. */}
+                <CommandPalette data={data} />
+                {/* Spec V7 D-V7-2: the persistent mini call-bar — hidden until a call is
                 active; binds the hoisted session, never owns a Room. */}
-              <MiniCallBar />
-              {/* Spec P1 D-P1-v7-indicator: the global "working — return to it" bar,
+                <MiniCallBar />
+                {/* Spec P1 D-P1-v7-indicator: the global "working — return to it" bar,
                 alongside the call pill (additive). Hidden unless a chat turn runs. */}
-              <ActiveWorkBar />
-              {/* Spec V7 D-V7-4: the end-and-switch confirm — shown only when a call is
+                <ActiveWorkBar />
+                {/* Spec V7 D-V7-4: the end-and-switch confirm — shown only when a call is
                 requested while a different one is active. */}
-              <SwitchCallDialog />
-              {/* Spec V7 D-V7-3: the resume-after-reload prompt — shown only when a
+                <SwitchCallDialog />
+                {/* Spec V7 D-V7-3: the resume-after-reload prompt — shown only when a
                 recent call is found in sessionStorage on load. */}
-              <ResumeCallPrompt />
-            </div>
-          </ActiveWorkProvider>
-        </CallSessionProvider>
-      </ConfirmProvider>
+                <ResumeCallPrompt />
+              </div>
+            </ActiveWorkProvider>
+          </CallSessionProvider>
+        </ConfirmProvider>
+      </ServerNotificationsProvider>
     </NotificationProvider>
   );
 }

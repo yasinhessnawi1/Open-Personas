@@ -1317,6 +1317,123 @@
         }
       }
     },
+    "/v1/me/notifications": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Get Notifications",
+        "description": "The caller's durable bell feed (Spec P6, RLS-scoped, newest-first, paginated).",
+        "operationId": "get_notifications_v1_me_notifications_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotificationOut"
+                  },
+                  "title": "Response Get Notifications V1 Me Notifications Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/notifications/read-all": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Mark All Notifications Read",
+        "description": "Mark every unread notification read (bell-open, Spec P6).",
+        "operationId": "mark_all_notifications_read_v1_me_notifications_read_all_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationMarkReadResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/notifications/{notification_id}/read": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Mark Notification Read",
+        "description": "Mark one notification read (deep-link click, Spec P6). 0 if not owned/absent.",
+        "operationId": "mark_notification_read_v1_me_notifications__notification_id__read_post",
+        "parameters": [
+          {
+            "name": "notification_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Notification Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationMarkReadResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": ["health"],
@@ -3552,6 +3669,79 @@
         "required": ["id", "role", "content", "created_at"],
         "title": "MessageView",
         "description": "A single message in a conversation history."
+      },
+      "NotificationMarkReadResult": {
+        "properties": {
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["updated"],
+        "title": "NotificationMarkReadResult",
+        "description": "How many feed rows a mark-read touched (0 = nothing unread / not owned)."
+      },
+      "NotificationOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "ref_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref Id"
+          },
+          "level": {
+            "type": "string",
+            "title": "Level"
+          },
+          "message_key": {
+            "type": "string",
+            "title": "Message Key"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Params",
+            "default": {}
+          },
+          "read": {
+            "type": "boolean",
+            "title": "Read"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "level",
+          "message_key",
+          "read",
+          "created_at"
+        ],
+        "title": "NotificationOut",
+        "description": "One durable bell notification (Spec P6 feed), owner-scoped + RLS.\n\nCopy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``\nvia next-intl at render. ``kind`` + ``ref_id`` drive the deep-link\n(``run_terminal`` \u2192 ``/runs/{ref_id}``, ``persona_ready`` \u2192 ``/personas/{ref_id}``)."
       },
       "PersonaCapabilities": {
         "properties": {

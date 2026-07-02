@@ -46,6 +46,21 @@ function Seeder() {
   );
 }
 
+/** Seeds an entry carrying a deep-link href. */
+function HrefSeeder() {
+  const { notify } = useNotify();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        notify({ level: "success", title: "Task finished", href: "/runs/abc" })
+      }
+    >
+      seed-href
+    </button>
+  );
+}
+
 function renderBell(children?: ReactNode) {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
@@ -92,6 +107,26 @@ describe("NotificationBell", () => {
     expect(
       container.querySelector('[data-slot="notification-unread"]'),
     ).toBeNull();
+  });
+
+  it("renders an entry with href as a deep-link to its target", () => {
+    renderBell(<HrefSeeder />);
+    act(() => {
+      fireEvent.click(screen.getByText("seed-href"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    const link = screen.getByRole("link", { name: /Task finished/ });
+    expect(link).toHaveAttribute("href", "/runs/abc");
+  });
+
+  it("renders an entry without href as non-interactive text (no link)", () => {
+    renderBell(<Seeder />);
+    act(() => {
+      fireEvent.click(screen.getByText("seed"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    expect(screen.getByText("Persona deleted")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Persona deleted/ })).toBeNull();
   });
 
   it("Clear all empties the feed", () => {

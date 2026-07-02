@@ -725,7 +725,21 @@
     "clear": "Clear all",
     "unreadLabel": "{count} unread",
     "deleted": "{name} deleted",
-    "duplicated": "{name} duplicated"
+    "duplicated": "{name} duplicated",
+    "lowBalance": {
+      "title": "Low balance",
+      "body": "{count} credits left"
+    },
+    "personaFallback": "your persona",
+    "run": {
+      "completed": "Task finished · {persona}",
+      "failed": "Task failed · {persona}",
+      "cancelled": "Task cancelled · {persona}",
+      "maxSteps": "Task hit its step limit · {persona}"
+    },
+    "persona": {
+      "ready": "{persona} is ready"
+    }
   },
   "apps": {
     "title": "Apps",

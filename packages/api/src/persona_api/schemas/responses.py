@@ -479,6 +479,30 @@ class UsageEntry(_Output):
     created_at: datetime
 
 
+class NotificationOut(_Output):
+    """One durable bell notification (Spec P6 feed), owner-scoped + RLS.
+
+    Copy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``
+    via next-intl at render. ``kind`` + ``ref_id`` drive the deep-link
+    (``run_terminal`` → ``/runs/{ref_id}``, ``persona_ready`` → ``/personas/{ref_id}``).
+    """
+
+    id: str
+    kind: str
+    ref_id: str | None = None
+    level: str
+    message_key: str
+    params: dict[str, str] = {}
+    read: bool
+    created_at: datetime
+
+
+class NotificationMarkReadResult(_Output):
+    """How many feed rows a mark-read touched (0 = nothing unread / not owned)."""
+
+    updated: int
+
+
 # -- tools / skills (§5.4) --------------------------------------------------
 
 

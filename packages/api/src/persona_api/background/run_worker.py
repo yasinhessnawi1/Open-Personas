@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
 from persona_runtime.agentic.run import CancelToken, RunStatus
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from persona_api.db.models import runs as runs_t
 from persona_api.middleware.rls_context import current_user_id
@@ -37,7 +37,20 @@ from persona_api.sandbox import (
     reset_sandbox_request_context,
     set_sandbox_request_context,
 )
+from persona_api.services import notifications_service
+from persona_api.services.persona_service import persona_name_from_yaml
 from persona_api.services.synthesis_trigger import enqueue_run_synthesis
+
+# Spec P6 (D4-c): terminal run status → (bell level, i18n key). Copy is stored
+# locale-neutral (P6-D-5); the web resolves the key. A status not here is not
+# surfaced (e.g. a non-terminal that slips through).
+_RUN_TERMINAL_COPY: dict[str, tuple[str, str]] = {
+    "completed": ("success", "notifications.run.completed"),
+    "error": ("error", "notifications.run.failed"),
+    "cancelled": ("info", "notifications.run.cancelled"),
+    "max_steps_reached": ("warning", "notifications.run.maxSteps"),
+}
+
 
 if TYPE_CHECKING:
     from persona_runtime.agentic.events import RunEvent
@@ -213,6 +226,9 @@ class RunRegistry:
                     finished_at=run.finished_at,
                 )
             )
+        # Server-authored run-terminal notification (P6-D-3/D4-c) — separate,
+        # best-effort side-effect AFTER the authoritative persist commits.
+        self._notify_run_terminal(run_id, str(run.status))
 
     def _persist_error(self, run_id: str, message: str) -> None:
         with self._engine.begin() as conn:
@@ -220,6 +236,58 @@ class RunRegistry:
                 update(runs_t)
                 .where(runs_t.c.id == run_id)
                 .values(status=str(RunStatus.ERROR), error=message)
+            )
+        self._notify_run_terminal(run_id, str(RunStatus.ERROR))
+
+    def _notify_run_terminal(self, run_id: str, status: str) -> None:
+        """Write the durable run-terminal bell notification (Spec P6, D4-c).
+
+        Server-authored so the owner is notified even off-view / on another device
+        (the cross-device feed). Idempotent via the ``(owner, kind, ref_id)`` key —
+        a retry / restart re-run is a no-op (P6-D-11). **Best-effort: NEVER raises**
+        — the run persist above is authoritative and must not fail because the bell
+        row couldn't be written (D-P6-12). Owner comes from the RLS contextvar the
+        worker binds for the run's lifetime; ``persona`` name (for the copy) is read
+        RLS-scoped by ``run_id`` so it covers both the final + error paths.
+        """
+        copy = _RUN_TERMINAL_COPY.get(status)
+        if copy is None:
+            return
+        owner_id = current_user_id.get()
+        if not owner_id:
+            return
+        level, message_key = copy
+        try:
+            # One owner-scoped transaction, separate from the run persist above:
+            # look up the persona name for the copy, then the idempotent write.
+            with self._engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT p.yaml FROM runs r "
+                        "JOIN personas p ON p.id = r.persona_id AND p.owner_id = r.owner_id "
+                        "WHERE r.id = :rid"
+                    ),
+                    {"rid": run_id},
+                ).first()
+                params: dict[str, str] = {}
+                if row is not None and row.yaml:
+                    name = persona_name_from_yaml(row.yaml)
+                    if name:
+                        params["persona"] = name
+                notifications_service.create_notification(
+                    conn=conn,
+                    owner_id=owner_id,
+                    kind="run_terminal",
+                    ref_id=run_id,
+                    level=level,
+                    message_key=message_key,
+                    params=params,
+                )
+        except Exception as exc:  # noqa: BLE001 — advisory; never fail the run persist
+            _log.warning(
+                "run-terminal notification write failed run={rid}: {err}",
+                rid=run_id,
+                err=str(exc),
             )
 
     async def aclose(self) -> None:

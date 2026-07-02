@@ -25,10 +25,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.jobs import SHORT_LEASE, JobPayload, JobTypeSpec, RetryPolicy
+from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 
 from persona_api.db.models import personas
+from persona_api.services import persona_service
+
+_log = get_logger("api.jobs.avatar")
 
 if TYPE_CHECKING:
     from persona.jobs import JobContext, JobRegistry
@@ -124,11 +128,26 @@ class AvatarGenerationHandler:
         # "exactly one avatar_url wins" invariant extends to provenance — no window where the
         # url is set but provenance is NULL. The Art. 50 disclosure derives from this signal.
         with context.connection() as conn:
-            conn.execute(
+            updated = conn.execute(
                 update(personas)
                 .where(personas.c.id == persona_id, personas.c.avatar_url.is_(None))
                 .values(avatar_url=result.avatar_url, avatar_source="generated")
-            )
+            ).rowcount
+        # Spec P6 (D4-d): announce "persona is ready" only when THIS delivery set
+        # the avatar (a compare-and-set loser doesn't double-signal; the (owner,
+        # kind, ref_id) idempotency key dedups regardless). Best-effort in its OWN
+        # owner-scoped transaction (context.connection()), separate from the avatar
+        # write above — a feed-write failure can never fail the job (D-P6-12).
+        if updated:
+            try:
+                with context.connection() as conn:
+                    persona_service.write_persona_ready(conn, persona_id)
+            except Exception as exc:  # noqa: BLE001 — advisory; never fail the job
+                _log.warning(
+                    "persona-ready notification write failed persona={pid}: {err}",
+                    pid=persona_id,
+                    err=str(exc),
+                )
 
 
 def register_avatar_handler(registry: JobRegistry, generator: AvatarGenerator) -> None:

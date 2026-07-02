@@ -11,6 +11,11 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Notification Coverage Completion — every consequential moment reaches the bell + a durable cross-device feed (Spec P6, 2026-07-02)
+
+- Completes the *event coverage* of Spec 35's notification system: the three deferred D-35-11 sources now surface — **run-terminal** (a background run finishing while you're elsewhere), **persona-ready** (async create / avatar landed), and **low-balance-at-load**.
+- **Durable, cross-device feed** (Deliverable 4): a new owner-scoped, RLS-isolated `notifications` table + `GET /v1/me/notifications` (+ mark-read). Run-terminal and persona-ready are **server-authored** (written at the run persist chokepoint / the shared avatar-write service — best-effort, idempotent), so the bell is correct off-view and syncs across devices. The web bell renders the union of this durable feed and a client-session low-balance advisory, with deep-links and toast-time route-match suppression (no double-signal).
+- Web: deep-link support added to the `useNotify()` façade + bell; a poll-based `ServerNotificationsProvider`. API: the table/migration + endpoints + adversarial cross-tenant RLS proof. Copy is locale-neutral (`message_key` + `params`), resolved by next-intl. OpenAPI client regen + migration renumber happen at merge-back.
 ### Specialities Frontend — skills as installable, trust-labelled "Specialities" with a consent flow (2026-07-01)
 
 > Close-out of `specialities-frontend` (Spec S3, `persona-api` + `persona-web`). Skills are now

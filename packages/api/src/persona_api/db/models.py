@@ -1318,3 +1318,45 @@ platform_controls = Table(
     Column("actor", Text, nullable=True),  # who last toggled it (audit-on-the-row + the audit_log)
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
+
+# Spec P6 (P6-D-11) — the durable, cross-device notification feed.
+#
+# Backs the bell's server-authored entries (run-terminal, persona-ready) so a
+# notification survives reload + syncs across devices — the promotion of Spec
+# 35's ``localStorage``-capped-30 client feed. Owner-scoped + RLS like every
+# tenant table (the ``persona_app`` non-superuser role is subject to it).
+#
+# Copy is stored locale-neutral (P6-D-5): ``message_key`` + ``params`` JSONB, the
+# web localises at render via next-intl — no server-side i18n. ``kind`` + ``ref_id``
+# drive the deep-link (``run_terminal`` → ``/runs/{ref_id}``; ``persona_ready`` →
+# ``/personas/{ref_id}``) and, with ``owner_id``, form the idempotency key that
+# makes a server-authored write once-only across the run's persist-final /
+# persist-error / restart-sweep paths (P6-D-11/D-P6-12).
+notifications = Table(
+    "notifications",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("kind", Text, nullable=False),
+    # The deep-link target's id (a run_id or persona_id). Also the idempotency
+    # discriminator with (owner_id, kind); nullable for future ref-less kinds.
+    Column("ref_id", Text, nullable=True),
+    Column("level", Text, nullable=False),
+    Column("message_key", Text, nullable=False),
+    Column("params", _json(), nullable=False, server_default=text("'{}'")),
+    Column("read", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "kind IN ('run_terminal', 'persona_ready')",
+        name="notifications_kind_check",
+    ),
+    CheckConstraint(
+        "level IN ('success', 'error', 'info', 'warning')",
+        name="notifications_level_check",
+    ),
+    # Idempotency (P6-D-11): one row per (owner, kind, ref) — a retry / restart-
+    # sweep re-run of a server-authored write is a no-op via ON CONFLICT.
+    UniqueConstraint("owner_id", "kind", "ref_id", name="uq_notifications_owner_kind_ref"),
+    # The feed query: newest-first for the current owner (RLS scopes the owner).
+    Index("idx_notifications_owner_created", "owner_id", text("created_at DESC")),
+)

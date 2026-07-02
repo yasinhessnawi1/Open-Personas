@@ -13,7 +13,25 @@ mirrors only the `persona-web`-touching surface.
 
 ## [Unreleased]
 
-(empty — future post-v0.1 work lands here)
+### Notification Coverage Completion (Spec P6)
+
+- **Deep-link foundation** — `useNotify()`'s `NotifyOptions`/`NotificationEntry` gain
+  an optional `href`; bell rows with an `href` render as keyboard-reachable anchors
+  that route, mark themselves read, and close the panel. Added `markRead(id)` for
+  single-entry read. Additive to Spec 35 (hrefless callers unchanged).
+- **Low-balance-at-load** — a headless `LowBalanceWatcher` reads `GET /v1/me/credits`
+  once per session; below the server-computed threshold (`low_balance && balance > 0`)
+  it emits a persistent warning deep-linking to billing, at most once per session
+  (`sessionStorage`-guarded). Best-effort; never disrupts load.
+- **Durable, cross-device bell feed** — a `ServerNotificationsProvider` (mounted once)
+  polls `GET /v1/me/notifications` on load / window focus / a light interval and
+  surfaces the server-authored feed (run-terminal, persona-ready). The bell renders
+  the **union** of this durable feed and the client-session low-balance advisory,
+  newest-first, with deep-links. A newly-seen notification toasts once — suppressed
+  for a run-terminal whose run is the current route (no double-signal); the bell
+  entry lands regardless.
+- **i18n** — `notifications.{run.*,persona.ready,personaFallback,lowBalance.*}` keys;
+  server rows carry a locale-neutral `message_key` + `params`, resolved at render.
 
 ---
 

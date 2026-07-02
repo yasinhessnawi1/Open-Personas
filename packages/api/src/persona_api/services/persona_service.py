@@ -39,13 +39,14 @@ from sqlalchemy import delete, func, insert, select, update
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
+from persona_api.services import notifications_service
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 __all__ = [
     "create_persona",
@@ -54,10 +55,78 @@ __all__ = [
     "get_persona",
     "list_personas",
     "load_persona_from_yaml",
+    "notify_persona_ready",
+    "persona_name_from_yaml",
     "set_avatar_url",
     "summary_of",
     "update_persona",
+    "write_persona_ready",
 ]
+
+
+def persona_name_from_yaml(raw: str) -> str | None:
+    """Best-effort extract ``identity.name`` from a persona YAML blob (None on any miss).
+
+    Shared by the server-authored notification copy (Spec P6, D4-c/d) — used for
+    both the run-terminal and persona-ready notification ``params``.
+    """
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return None
+    if isinstance(data, dict):
+        identity = data.get("identity")
+        if isinstance(identity, dict):
+            name = identity.get("name")
+            if isinstance(name, str):
+                return name
+    return None
+
+
+def write_persona_ready(conn: Connection, persona_id: str) -> None:
+    """Write the "persona is ready" notification on an existing owner-scoped conn.
+
+    The non-swallowing core shared by BOTH avatar paths (P6-D-4 convergence): the
+    in-process :func:`set_avatar_url` and the durable-queue handler. Reads owner +
+    name RLS-scoped, then the idempotent create (``(owner, kind, ref_id)`` → one row
+    even if both paths fire). NOT best-effort itself — the CALLER owns the
+    transaction and the try/except, so a failure rolls back only this write's own
+    transaction and never touches the avatar write (D-P6-12).
+    """
+    row = conn.execute(
+        select(personas_t.c.owner_id, personas_t.c.yaml).where(personas_t.c.id == persona_id)
+    ).first()
+    if row is None:
+        return  # persona gone (concurrent delete) — nothing to announce.
+    name = persona_name_from_yaml(row.yaml) if row.yaml else None
+    params = {"persona": name} if name else {}
+    notifications_service.create_notification(
+        conn=conn,
+        owner_id=row.owner_id,
+        kind="persona_ready",
+        ref_id=persona_id,
+        level="success",
+        message_key="notifications.persona.ready",
+        params=params,
+    )
+
+
+def notify_persona_ready(*, rls_engine: Engine, persona_id: str) -> None:
+    """Best-effort persona-ready notification via a fresh owner-scoped transaction.
+
+    The engine-based convenience for callers that hold an ``Engine`` (the in-process
+    avatar hook, :func:`set_avatar_url`). Isolated: its OWN ``begin()`` transaction,
+    so a feed-write failure rolls back only this write and NEVER fails the avatar
+    write (D-P6-12). The queue handler, which holds only a ``Connection``, wraps
+    :func:`write_persona_ready` directly with the same best-effort guard.
+    """
+    try:
+        with rls_engine.begin() as conn:
+            write_persona_ready(conn, persona_id)
+    except Exception as exc:  # noqa: BLE001 — advisory; never fail the avatar write
+        _LOG.warning(
+            "persona-ready notification write failed", persona_id=persona_id, error=str(exc)
+        )
 
 
 _LOG = get_logger("services.persona")
@@ -312,6 +381,9 @@ def set_avatar_url(
             .where(personas_t.c.id == persona_id)
             .values(avatar_url=avatar_url, avatar_source=avatar_source)
         )
+    # Spec P6 (D4-d): the persona is now visually complete — announce it (the
+    # cross-device "persona is ready" bell). Best-effort; never fails the write.
+    notify_persona_ready(rls_engine=rls_engine, persona_id=persona_id)
 
 
 def set_voice(*, rls_engine: Engine, persona_id: str, provider: str, voice_id: str) -> None:

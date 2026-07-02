@@ -44,6 +44,13 @@ export interface NotifyOptions {
    * toasts unless the caller opts in (e.g. a low-balance warning passes true).
    */
   persist?: boolean;
+  /**
+   * Optional in-app deep-link (P6-D-10). When set, the bell entry becomes a
+   * clickable row that routes here (e.g. `/runs/{id}`, `/personas/{id}`,
+   * `/settings`). Persisted with the entry; only meaningful for persisted
+   * notifications. Must be an app-relative path.
+   */
+  href?: string;
 }
 
 export interface NotificationEntry {
@@ -51,6 +58,8 @@ export interface NotificationEntry {
   level: NotifyLevel;
   title: string;
   body?: string;
+  /** Optional in-app deep-link target (P6-D-10). */
+  href?: string;
   /** Epoch ms — when the notification fired. */
   at: number;
   read: boolean;
@@ -61,6 +70,8 @@ interface NotificationContextValue {
   entries: readonly NotificationEntry[];
   unreadCount: number;
   markAllRead: () => void;
+  /** Mark a single entry read (P6-D-10 — a deep-linked row is read on click). */
+  markRead: (id: string) => void;
   clear: () => void;
 }
 
@@ -125,7 +136,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const notify = useCallback(
-    ({ level, title, body, persist }: NotifyOptions) => {
+    ({ level, title, body, persist, href }: NotifyOptions) => {
       // 1. Immediate toast through the existing sonner layer.
       toast[level](title, body ? { description: body } : undefined);
 
@@ -140,6 +151,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
             level,
             title,
             body,
+            href,
             at: Date.now(),
             read: false,
           };
@@ -161,6 +173,19 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     });
   }, [persistFeed]);
 
+  const markRead = useCallback(
+    (id: string) => {
+      setEntries((cur) => {
+        const target = cur.find((e) => e.id === id);
+        if (!target || target.read) return cur;
+        const next = cur.map((e) => (e.id === id ? { ...e, read: true } : e));
+        persistFeed(next);
+        return next;
+      });
+    },
+    [persistFeed],
+  );
+
   const clear = useCallback(() => {
     setEntries([]);
     persistFeed([]);
@@ -172,8 +197,8 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<NotificationContextValue>(
-    () => ({ notify, entries, unreadCount, markAllRead, clear }),
-    [notify, entries, unreadCount, markAllRead, clear],
+    () => ({ notify, entries, unreadCount, markAllRead, markRead, clear }),
+    [notify, entries, unreadCount, markAllRead, markRead, clear],
   );
 
   return (
