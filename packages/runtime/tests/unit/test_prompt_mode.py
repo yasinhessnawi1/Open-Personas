@@ -456,9 +456,14 @@ class TestEmotionAdoption:
     def test_present_in_chat(self) -> None:
         assert _EMOTION_MARKER in self._chat_system()
 
-    def test_chat_only_never_leaks_to_voice(self) -> None:
-        """Voice strips tags, so instructing voice to emit them is waste — chat only."""
-        assert _EMOTION_MARKER not in self._voice_system()
+    def test_chat_block_never_leaks_to_voice(self) -> None:
+        """The CHAT (emoji-framed) emotion block is chat-only. V12 gives VOICE its OWN
+        emotion block (a differently-worded sibling — see test_prompt_voice_emotion.py),
+        so the chat block's exact opening + its emoji-specific instruction must not appear
+        in voice (voice has no emojis; its tag guides how the reply SOUNDS)."""
+        voice = self._voice_system()
+        assert _EMOTION_MARKER not in voice  # chat block's exact opening ("How you feel.")
+        assert "never type an emoji yourself" not in voice  # emoji framing is chat-only
 
     def test_bounded_by_character_below_lock_above_memory(self) -> None:
         """Character structurally bounds emotion: the block sits below the lock, above memory."""

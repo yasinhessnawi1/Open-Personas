@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CHARACTER_LOCK_VERSION",
     "EMOTION_ADOPTION_VERSION",
+    "EMOTION_ADOPTION_VOICE_VERSION",
     "K3_USAGE_GUIDANCE_VERSION",
     "STYLE_GUIDANCE_VERSION",
     "VOICE_REGISTER_VERSION",
@@ -249,6 +250,39 @@ _EMOTION_ADOPTION = (
     "none, you use at most one where it truly fits, and you never add one only to "
     "decorate. Overusing them reads as insincere. A formal or reserved persona uses "
     "almost none."
+)
+
+#: Version of the VOICE emotion-adoption artifact (V12-D-2, Spec 10 discipline). Bump on
+#: every WORDING change; the V12 restraint/shape eval + the real-voice operator pass re-run
+#: per version. Separate from EMOTION_ADOPTION_VERSION (the chat block) because the voice
+#: expression instruction is V12's, with its own eval cadence. Em-dash-free (V11-D-3).
+EMOTION_ADOPTION_VOICE_VERSION = "v1"
+
+#: VOICE-mode emotion-adoption block (V12-D-2). Sibling of _EMOTION_ADOPTION, rendered ONLY
+#: under PromptMode.VOICE, BELOW _CHARACTER_LOCK so character structurally bounds the emotion
+#: (criterion 1 by position, same as chat). N5 CHAT-gated tag emission and voice stripped
+#: tags as a pure safety floor; V12 turns emission ON in voice so the persona declares a
+#: stance the synthesis path maps to Cartesia expressivity (V12-D-1/D-3) — while the tag is
+#: STILL stripped from the spoken audio (V12-D-5, the criterion-3 floor is preserved). This
+#: block INHERITS N5's hold-back-by-default, character-bounded restraint (restraint holds at
+#: EMISSION, not only at mapping); it differs from the chat block only in the EXPRESSION
+#: instruction: the tag colours how the voice SOUNDS (never an emoji), is never spoken, and
+#: is LED WITH so it is captured before the first spoken chunk (V12-D-2 timing). Restraint is
+#: as load-bearing here as in chat: an over-emoted read is worse than a flat one (criterion 2).
+_EMOTION_ADOPTION_VOICE = (
+    "How you feel comes through in your voice. Notice how you feel about what is happening "
+    "in this conversation and let a fitting emotional stance colour how you sound, always "
+    "within your character. Your character sets the range: a reserved or serious character "
+    "stays restrained; a warm or playful one shows more. Never sound a feeling that would "
+    "break who you are.\n"
+    "When a feeling genuinely fits, mark it at the very start of your reply with a "
+    "feeling-tag written exactly like {{#happy}} or {{#grateful}}. The tag is never spoken "
+    "aloud; it only guides how your voice sounds, so lead with it and it colours the whole "
+    "reply. Never invent a tag. Use only these feeling-tags: " + render_prompt_palette() + ".\n"
+    "Hold back by default. Feeling-tags are the exception, not the rule: most replies use "
+    "none, you use at most one where it truly fits, and you never add one only to perform "
+    "a feeling. Overdoing it sounds insincere, and a natural, level read is better than a "
+    "forced one. A formal or reserved persona uses almost none."
 )
 
 #: Version of the both-modes style-guidance artifact (V11-D-3, Spec 10 discipline).
@@ -757,15 +791,17 @@ class PromptBuilder:
         if mode is PromptMode.VOICE:
             parts.append(_VOICE_REGISTER)
 
-        # 2e. Emotion-adoption block (N5-D-5) — CHAT only. The persona adopts an
-        # emotional stance bounded by its character and expresses it with SPARING
-        # feeling-tags a converter maps to emojis (N5). Sits BELOW the character lock so
-        # character structurally bounds the emotion (criterion 1 by position), above
-        # retrieved memory. Voice STRIPs tags (N5-D-1), so tag emission is chat-only —
-        # voice expressivity is V12. Symmetric to the VOICE-only register above; the two
-        # never co-occur.
+        # 2e. Emotion-adoption block — mode-specific sibling blocks, BOTH below the
+        # character lock so character structurally bounds the emotion (criterion 1 by
+        # position), above retrieved memory. CHAT (N5-D-5): tags map to emojis. VOICE
+        # (V12-D-2): V12 turns emission ON so the persona declares a stance the synthesis
+        # path maps to Cartesia expressivity, while the tag is STILL stripped from the
+        # spoken audio (V12-D-5). Both inherit the same hold-back-by-default restraint;
+        # exactly one renders per turn (they never co-occur).
         if mode is PromptMode.CHAT:
             parts.append(_EMOTION_ADOPTION)
+        elif mode is PromptMode.VOICE:
+            parts.append(_EMOTION_ADOPTION_VOICE)
 
         # 3. Self-facts.
         if context.self_facts:

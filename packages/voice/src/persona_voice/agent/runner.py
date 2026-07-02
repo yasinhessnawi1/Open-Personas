@@ -70,6 +70,7 @@ from persona_voice.model import (
     VoiceTurnRecorder,
     make_small_tier_summariser,
 )
+from persona_voice.model.expressivity import VoiceExpressivityChannel
 from persona_voice.model.transcript import VoiceTranscriptWriter
 from persona_voice.session.call_record import CallRecorder, EndReason
 from persona_voice.session.state_machine import SessionStateMachine, make_session_rls_engine
@@ -458,6 +459,11 @@ async def build_agent_session(
         if lane_holder:
             lane_holder[0].submit(call)
 
+    # V12 (V12-D-4): the per-session expressivity hand-off — the producer publishes the
+    # persona's stance, the Cartesia backend reads it to drive generation_config. Created
+    # here (per session, never global) and injected into exactly one producer + one backend.
+    expressivity_channel = VoiceExpressivityChannel()
+
     producer = VoiceModelReplyProducer(
         ctx,
         tool_policy=VoiceToolPolicy(),
@@ -467,6 +473,8 @@ async def build_agent_session(
         # the off-turn lane (render-when-ready + floor-gated narration).
         on_event=_emit_run_event,
         async_artifact_listener=_submit_async_artifact,
+        # V12: publish the resolved per-utterance expressivity to the TTS backend.
+        expressivity_listener=expressivity_channel.publish,
     )
 
     # --- session state machine ---
@@ -515,7 +523,8 @@ async def build_agent_session(
     # being read with English phonetics. Voices are multilingual, so this is a
     # language code, not a voice constraint.
     tts_config = apply_tts_route(tts_config, language_plan.tts)
-    tts_backend = load_streaming_tts(tts_config)
+    # V12: bind the same per-session channel so the backend reads what the producer publishes.
+    tts_backend = load_streaming_tts(tts_config, expressivity_channel=expressivity_channel)
     tts_seam = build_seam_adapter(
         backend=tts_backend,
         config=tts_config,

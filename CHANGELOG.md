@@ -11,6 +11,43 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Persona Voice Emotion — the persona's voice sounds its feeling (Spec V12, 2026-07-02)
+
+> Close-out of `persona-voice-emotion` (Spec V12, `persona-voice` + `persona-runtime`). N5 gave the
+> persona an emotional **stance** in text (feeling-tags → emojis, stripped before TTS). V12 makes the
+> spoken delivery **carry** that feeling: the stance now maps to **Cartesia Sonic-3.5 expressivity**
+> so an expressive line sounds expressive and a stoic persona stays restrained — bounded by character
+> (V11) and deliberately **restrained** (an over-emoted read is worse than a flat one).
+>
+> **Research-gated, sized to a real mapping.** Phase 2 established — verified against the installed
+> `cartesia 3.2.0` SDK, not just docs — that Sonic-3.5 exposes structured `generation_config`
+> (`emotion` Beta, `speed`/`volume` stable) on the WebSocket-contexts API. Delivery is **out-of-band
+> structured config, never inline SSML** (inline SSML is split by sentence chunkers — pipecat #2963),
+> so a control token can never be spoken or split; the spoken transcript stays pure words.
+>
+> - **Stance capture (reuses N5, floor intact)** — an additive `on_feeling` callback on the exact
+>   `FeelingTagConverter` observes the persona's declared feeling-tag as a pure notification; the tag
+>   is still stripped from the audio (criterion-3 preserved by reuse; N5's fuzz/leak suite unchanged).
+>   Voice now emits stance tags (a VOICE-mode emotion block inheriting N5's hold-back-by-default
+>   restraint); most utterances emit none, a stoic persona ~none.
+> - **The mapping (versioned, warm-subset, restrained)** — `VoiceExpressivity` + a frozen
+>   `V12_EXPRESSIVITY_VERSION="v1"` map from N5's 28 tags to warm Cartesia emotions + small speed/volume
+>   deltas. Only the warm subset is targeted (hostile emotions can't appear); `concerned`/`worried` →
+>   `sympathetic` (caring, not anxious); no tag / stoic → flat.
+> - **The wiring (fail-soft, per-session)** — a per-session `VoiceExpressivityChannel` hands the stance
+>   from the producer to the Cartesia backend, which sets `generation_config` on the utterance's sends
+>   and resets per utterance (no stance bleed). Any extraction/mapping error → today's flat read; no
+>   Protocol change; the voice loop is never starved (pure dict lookup, no added I/O).
+> - **Emotion-Beta kill-switch** — `PERSONA_TTS_EMOTION_ENABLED` (default `true`) drops the Beta
+>   `emotion` layer while keeping stable speed/volume, a no-deploy operator response if the Beta layer
+>   misbehaves. Automatic runtime-rejection retry is deferred (build-time SDK-Literal guard + fail-soft
+>   already cover the realistic cases; the runtime rejection shape is an operator-pass verification item).
+> - **Eval** — CI proves the mapping *shape* (bidirectional non-vacuity: expressive expresses, stoic
+>   stays flat; leak-gate carryover). The real-voice **operator pass (owner-run)** is the only judge of
+>   "expressive-not-over-emoted, in character" and ratifies the provisional control values by ear.
+>
+> No new dependency, no migration, no API/DB schema change. Added env var: `PERSONA_TTS_EMOTION_ENABLED`.
+
 ### User Profile & Graph Root Anchor — the user becomes a named, first-class entity (2026-07-02)
 
 > Close-out of `user-profile` (Spec K6, `persona-api` + `persona-core` + `persona-runtime` +

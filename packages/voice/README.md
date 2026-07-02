@@ -44,6 +44,10 @@ Like the rest of the stack, it carries an **edition** stance (`PERSONA_EDITION`)
 - **V3 — Streaming TTS.** A provider-independent `StreamingTTS` protocol, a
   Cartesia Sonic backend, per-persona voice as a first-class identity
   attribute, and mid-utterance `cancel()` (the barge-in foundation).
+  **Emotion-aware delivery (V12):** the persona's emotional stance (its N5
+  feeling-tags) drives Cartesia `generation_config` expressivity so the voice
+  *sounds* its feeling — bounded by character and restrained, fail-soft to a
+  flat read, with a `PERSONA_TTS_EMOTION_ENABLED` Beta kill-switch.
 - **V4 — Turn-taking + barge-in.** A four-state conversational machine
   (Listening / UserSpeaking / Processing / PersonaSpeaking), automatic
   endpointing, fast-and-discriminating interruption, a cancel watchdog, and

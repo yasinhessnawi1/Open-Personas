@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from persona_voice.loop.streaming import AudioChunk
+    from persona_voice.model.expressivity import VoiceExpressivityChannel
     from persona_voice.tts.config import StreamingTTSConfig
     from persona_voice.tts.types import ResolvedVoice, VoiceGender
 
@@ -107,6 +108,7 @@ class CartesiaStreamingTTS:
         config: StreamingTTSConfig,
         *,
         client: AsyncCartesia | None = None,
+        expressivity_channel: VoiceExpressivityChannel | None = None,
     ) -> None:
         key = config.api_key.get_secret_value() if config.api_key is not None else ""
         if not key:
@@ -116,6 +118,15 @@ class CartesiaStreamingTTS:
             )
         self._config = config
         self._model = config.model
+        # V12 T3 (V12-D-1/D-4): the per-utterance expressivity hand-off. When wired,
+        # the persona's stance (published by the reply producer) is read here and passed
+        # as Cartesia ``generation_config`` on the utterance's sends (out-of-band, never
+        # in the transcript). ``None`` ⇒ today's flat synthesis, byte-identical.
+        self._expressivity_channel = expressivity_channel
+        # V12 (V12-D-6): the emotion-Beta kill-switch. ``False`` drops the Beta ``emotion``
+        # field while keeping the stable ``speed``/``volume`` base — the operator's
+        # no-deploy mid-tier degradation.
+        self._emotion_enabled = config.emotion_enabled
         # Per-call synthesis language (Spec 32 B4) — passed into ``context`` so
         # the persona's declared language is spoken with the right phonetics.
         self._language = config.language
@@ -234,6 +245,11 @@ class CartesiaStreamingTTS:
         directly; a declared non-English language materialises the reply first so
         the fall-back can re-synthesise the same text without losing it.
         """
+        # V12-D-4: clear the expressivity slot at the START of the utterance, before any
+        # token is pulled, so a prior utterance's stance cannot bleed into this one. The
+        # producer republishes (if it emits a tag) while this utterance's tokens stream.
+        if self._expressivity_channel is not None:
+            self._expressivity_channel.reset()
         if self._language is None:
             async for chunk in self._stream_once(text_stream, voice, None):
                 yield chunk
@@ -385,21 +401,74 @@ class CartesiaStreamingTTS:
         here surface to the consumer through the receive loop's error event
         / connection close; this task swallows them so cancellation does
         not raise out of the background task.
+
+        V12-D-1/D-4: the persona's stance is applied here as Cartesia
+        ``generation_config``. It is resolved ONCE, on the first chunk — the
+        producer publishes the stance while producing that first chunk's text (it
+        leads with the tag, which is stripped before any spoken char), so the slot
+        is set by the time the chunk arrives — and reused for every send in this
+        context (Cartesia's "same value per context" guidance, per-context
+        consistency). ``None`` (no tag / no channel) ⇒ no ``generation_config`` sent
+        ⇒ today's flat, byte-identical call.
         """
+        generation_config: dict[str, float | str] | None = None
+        resolved = False
         try:
             async for chunk in text_stream:
                 if self._cancelled:
                     return
+                if not resolved:
+                    resolved = True
+                    generation_config = self._pending_generation_config()
                 if chunk:
-                    await ctx.send(
-                        transcript=chunk,
-                        voice=cast("Any", voice_param),
-                        continue_=True,
-                    )
+                    await self._send_chunk(ctx, chunk, voice_param, generation_config)
             if not self._cancelled:
                 await ctx.no_more_inputs()
         except CartesiaError:
             return
+
+    def _pending_generation_config(self) -> dict[str, float | str] | None:
+        """Read this utterance's expressivity as a ``generation_config`` dict, or ``None``.
+
+        Fail-safe (V12-D-5): ANY error reading/resolving the channel degrades to ``None``
+        (a flat read) — expressivity never breaks or interrupts synthesis. Because the
+        controls are out-of-band, a failure here cannot corrupt the spoken transcript.
+        """
+        channel = self._expressivity_channel
+        if channel is None:
+            return None
+        try:
+            expr = channel.take()
+            if expr is None:
+                return None
+            # include_emotion honours the V12-D-6 kill-switch: off ⇒ speed/volume-only.
+            config = expr.to_generation_config(include_emotion=self._emotion_enabled)
+            return config or None
+        except Exception:  # noqa: BLE001 — expressivity is additive; never break the call
+            _logger.warning("voice expressivity resolve failed; synthesising flat")
+            return None
+
+    async def _send_chunk(
+        self,
+        ctx: Any,  # noqa: ANN401 — vendor AsyncWebSocketContext (dynamic SDK boundary)
+        chunk: str,
+        voice_param: dict[str, Any],
+        generation_config: dict[str, float | str] | None,
+    ) -> None:
+        """Send one text chunk, attaching ``generation_config`` only when present.
+
+        Omitting the kwarg entirely (the ``None`` path) keeps the call byte-identical to
+        pre-V12 — the criterion that the no-tag / no-channel path is unchanged.
+        """
+        if generation_config is None:
+            await ctx.send(transcript=chunk, voice=cast("Any", voice_param), continue_=True)
+        else:
+            await ctx.send(
+                transcript=chunk,
+                voice=cast("Any", voice_param),
+                continue_=True,
+                generation_config=cast("Any", generation_config),
+            )
 
     async def cancel(self) -> None:
         """Abort in-flight synthesis (V4 barge-in). Idempotent."""

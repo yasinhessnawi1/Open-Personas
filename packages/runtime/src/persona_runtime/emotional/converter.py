@@ -23,8 +23,12 @@ concurrency-safe: one instance per stream (each turn constructs its own).
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from persona_runtime.emotional.vocabulary import lookup_feeling
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = ["ConvertMode", "FeelingTagConverter", "convert_text"]
 
@@ -48,13 +52,30 @@ class FeelingTagConverter:
     Usage: ``conv = FeelingTagConverter(mode)``; feed each delta through
     :meth:`feed` and emit its return; call :meth:`flush` once at stream end and
     emit its return. Everything returned is safe to show/speak immediately.
+
+    **V12 capture seam (V12-D-2).** ``on_feeling`` is an optional callback that
+    fires with the tag *name* the moment a **known** feeling-tag is recognised —
+    a pure post-decision **notification**. It does not touch the strip/substitute
+    output or the trailing-prefix buffering, so N5's criterion-3 guarantee is
+    preserved by *reuse*: unknown/malformed tags are still stripped and are
+    **never captured**, and an unset callback (chat, and voice before V12) is
+    byte-identical to the pre-V12 filter. V12's voice path passes this to read
+    the persona's declared stance while the tag is still stripped from TTS. The
+    callback **MUST NOT raise** (the voice caller passes a pure appender); it runs
+    on the streaming hot path, so it must also be cheap.
     """
 
-    __slots__ = ("_buf", "_mode")
+    __slots__ = ("_buf", "_mode", "_on_feeling")
 
-    def __init__(self, mode: ConvertMode) -> None:
+    def __init__(
+        self,
+        mode: ConvertMode,
+        *,
+        on_feeling: Callable[[str], None] | None = None,
+    ) -> None:
         self._mode = mode
         self._buf = ""
+        self._on_feeling = on_feeling
 
     def feed(self, delta: str) -> str:
         """Consume one stream delta; return the safe text ready to emit now."""
@@ -101,8 +122,15 @@ class FeelingTagConverter:
 
             body = rest[len(_SENTINEL) : close]
             emoji = lookup_feeling(body)
-            if emoji is not None and self._mode is ConvertMode.EMOJI:
-                out.append(emoji)
+            if emoji is not None:
+                # V12-D-2: observe the recognised tag (pure notification, any mode)
+                # BEFORE the substitute/strip decision below. Fires only for KNOWN
+                # tags, so an unknown/malformed body is never captured — the strip
+                # guarantee is unchanged either way.
+                if self._on_feeling is not None:
+                    self._on_feeling(body)
+                if self._mode is ConvertMode.EMOJI:
+                    out.append(emoji)
             # STRIP mode, or an unknown/malformed body (emoji is None) → emit
             # nothing: the tag is consumed and never shown raw (criterion 3).
             buf = rest[close + len(_CLOSE) :]

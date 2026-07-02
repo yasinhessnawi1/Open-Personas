@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from persona.logging import get_logger
 from persona.schema.conversation import ConversationMessage
 from persona.schema.tools import ToolCall
 from persona.tools import format_tool_result
@@ -57,6 +58,7 @@ from persona_runtime.routing import RoutingContext, classifiers
 from persona_runtime.routing.model_selection import reorder_primary
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
+from persona_voice.model.expressivity import VoiceExpressivity, resolve_expressivity
 from persona_voice.model.history import VoiceHistoryCompactor
 from persona_voice.model.prompt_assembler import VoicePromptAssembler
 from persona_voice.model.routing import VoiceRoutingPolicy
@@ -80,6 +82,8 @@ if TYPE_CHECKING:
     from persona_voice.model.turn_context import VoiceTurnContext
 
 __all__ = ["VoiceModelReplyProducer"]
+
+_logger = get_logger("voice.reply_producer")
 
 _DEFAULT_MAX_TOKENS = 4096
 
@@ -142,6 +146,7 @@ class VoiceModelReplyProducer:
         first_token_listener: Callable[[datetime], None] | None = None,
         deferred_artifact_listener: Callable[[DeferredArtifact], None] | None = None,
         async_artifact_listener: Callable[[ToolCall], None] | None = None,
+        expressivity_listener: Callable[[VoiceExpressivity | None], None] | None = None,
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
         turn_recorder: VoiceTurnRecorder | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -161,6 +166,13 @@ class VoiceModelReplyProducer:
         # acknowledged-and-deferred; when absent it falls back to the deferred
         # acknowledgement (never strands). Fire-and-forget, like the deferred one.
         self._async_artifact_listener = async_artifact_listener
+        # V12 T3 (V12-D-2/D-4): the per-utterance expressivity hook. When present, the
+        # persona's first declared feeling-tag (captured off the STRIP converter, still
+        # stripped from the spoken audio) is resolved to a VoiceExpressivity and handed
+        # to the TTS side, which drives Cartesia's generation_config (V12-D-1). Absent ⇒
+        # today's flat read. Fire-and-forget + guarded (V12-D-5): it must never break the
+        # spoken stream, so a raising listener degrades to flat, never to a broken turn.
+        self._expressivity_listener = expressivity_listener
         # V10 T1 (V10-D-X-producer-sink): the activity-event sink. When present,
         # tool dispatch routes through P2's ``dispatch_with_activity`` seam.
         self._on_event = on_event
@@ -380,13 +392,14 @@ class VoiceModelReplyProducer:
         names: dict[str, str] = {}
         args_json: dict[str, str] = {}
         order: list[str] = []
-        # N5-A8 (N5-D-1/D-7): the voice tag-STRIP safety floor. Voice does NOT get
-        # the tag-emission instruction (CHAT-mode-gated, N5-D-5), so tags are rare
-        # here — but criterion 3 is path-independent: a raw ``{{#…}}`` must never
-        # reach TTS (a spoken tag is the audio leak), including split across chunks.
-        # ``text_out`` keeps the RAW delta (the tool-followup prompt's context);
-        # only the TTS-bound yield is stripped. Voice expressivity is V12's job.
-        strip_converter = FeelingTagConverter(ConvertMode.STRIP)
+        # N5-A8 (N5-D-1/D-7): the voice tag-STRIP safety floor. A raw ``{{#…}}`` must
+        # never reach TTS (a spoken tag is the audio leak), including split across chunks.
+        # ``text_out`` keeps the RAW delta (the tool-followup prompt's context); only the
+        # TTS-bound yield is stripped. V12 (V12-D-2) turns tag EMISSION on in voice and
+        # OBSERVES the tag via ``on_feeling`` to drive expressivity — a pure notification
+        # that does not touch the strip (the tag is still removed from the audio); the
+        # criterion-3 floor is preserved by reuse of the exact converter.
+        strip_converter = FeelingTagConverter(ConvertMode.STRIP, on_feeling=self._capture_stance())
         async for chunk in backend.chat_stream(
             prompt, tools=tools, temperature=0.0, max_tokens=max_tokens
         ):
@@ -415,6 +428,37 @@ class VoiceModelReplyProducer:
         if spoken_tail:
             yield spoken_tail
         calls_out.extend(self._build_call(cid, names[cid], args_json[cid]) for cid in order)
+
+    def _capture_stance(self) -> Callable[[str], None] | None:
+        """The converter's ``on_feeling`` callback: publish the utterance's stance (V12-D-2).
+
+        Returns ``None`` when no expressivity listener is wired (⇒ pure STRIP, byte-identical
+        to N5). Otherwise returns a callback that, on the **first** recognised feeling-tag of
+        this round (lead-with-the-tag), resolves it to a :class:`VoiceExpressivity` and hands
+        it to the listener. Fires once per round; the TTS side reads the pending value once at
+        the first send (per-context consistency), so the effective config is the first tag
+        seen before the first spoken chunk.
+
+        **Fail-safe (V12-D-5):** this runs inside the streaming converter, so it MUST NOT
+        raise — any error resolving/publishing is swallowed (logged), leaving the spoken
+        stream untouched and the delivery flat. Expressivity can only ever add, never break.
+        """
+        listener = self._expressivity_listener
+        if listener is None:
+            return None
+        published = False
+
+        def _on_feeling(name: str) -> None:
+            nonlocal published
+            if published:
+                return
+            published = True
+            try:
+                listener(resolve_expressivity([name]))
+            except Exception:  # noqa: BLE001 — never let expressivity break the spoken stream
+                _logger.warning("voice expressivity publish failed; delivery stays flat")
+
+        return _on_feeling
 
     def _followup_prompt(
         self,

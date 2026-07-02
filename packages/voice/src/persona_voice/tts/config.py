@@ -91,6 +91,11 @@ class StreamingTTSConfig(BaseSettings):
             ms (0–5000). Default 0 — the client chunker is load-bearing
             (D-V3-X-chunker-placement); a non-zero value would double-buffer
             against the chunker.
+        emotion_enabled: V12 emotion-Beta kill-switch (V12-D-6). ``True``
+            (default) sends Cartesia's Beta ``emotion`` control alongside the
+            stable ``speed``/``volume``; ``False`` drops ``emotion`` and keeps
+            speed/volume — an operator's no-deploy mid-tier degradation if the
+            Beta layer misbehaves in production.
     """
 
     model_config = SettingsConfigDict(
@@ -114,6 +119,13 @@ class StreamingTTSConfig(BaseSettings):
     chunk_max_first_words: int = Field(default=30, ge=1, le=200)
     chunk_min_chars: int = Field(default=20, ge=1, le=500)
     chunk_max_chars: int = Field(default=300, ge=20, le=2000)
+
+    # V12 (V12-D-6): the emotion-Beta operator kill-switch. Cartesia's ``emotion``
+    # control is Beta while ``speed``/``volume`` are stable; if the Beta layer
+    # destabilises in production, an operator sets ``PERSONA_TTS_EMOTION_ENABLED=false``
+    # to drop the emotion field and keep the stable speed/volume base — graceful
+    # mid-tier degradation with NO code deploy. Default ``True`` (emotion active).
+    emotion_enabled: bool = True
 
     cartesia_version: str = "2026-03-01"
     cartesia_max_buffer_delay_ms: int = Field(default=0, ge=0, le=5000)

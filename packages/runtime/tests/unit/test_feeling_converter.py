@@ -162,3 +162,87 @@ def test_invariant_no_raw_sentinel_for_any_split(text: str, mode: ConvertMode) -
         conv = FeelingTagConverter(mode)
         parts = [conv.feed(text[:i]), conv.feed(text[i:]), conv.flush()]
         assert all(_no_raw_tag(p) for p in parts), f"leak: {text!r} split {i} mode {mode}"
+
+
+# --- V12 T1: the on_feeling capture callback (V12-D-2) ----------------------
+#
+# The callback observes a RECOGNISED feeling-tag as a PURE post-decision
+# notification: it must NOT perturb the strip/substitute output or the
+# criterion-3 buffering (N5's floor is preserved by reuse). Unknown/malformed
+# tags are never captured. The V12 caller passes a pure appender (MUST NOT raise).
+
+
+def _run_capture(mode: ConvertMode, chunks: list[str]) -> tuple[str, list[str]]:
+    captured: list[str] = []
+    conv = FeelingTagConverter(mode, on_feeling=captured.append)
+    out = [conv.feed(c) for c in chunks]
+    out.append(conv.flush())
+    return "".join(out), captured
+
+
+def test_v12_callback_fires_on_known_tag_strip_mode() -> None:
+    out, captured = _run_capture(ConvertMode.STRIP, ["I am {{#happy}} today"])
+    assert out == "I am  today"  # strip output UNCHANGED (tag consumed)
+    assert captured == ["happy"]  # the recognised tag name observed
+
+
+def test_v12_callback_fires_on_known_tag_emoji_mode() -> None:
+    out, captured = _run_capture(ConvertMode.EMOJI, ["I am {{#happy}} today"])
+    assert out == "I am 😊 today"  # emoji substitution UNCHANGED
+    assert captured == ["happy"]
+
+
+def test_v12_callback_never_fires_on_unknown_tag() -> None:
+    out, captured = _run_capture(ConvertMode.STRIP, ["a {{#nonsense}} b"])
+    assert out == "a  b"  # unknown still stripped (criterion 3)
+    assert captured == []  # unknown/malformed never captured
+
+
+def test_v12_callback_never_fires_on_malformed_tag() -> None:
+    _, captured = _run_capture(ConvertMode.STRIP, ["{{#}}", "{{# }}", "{{##happy}}"])
+    assert captured == []
+
+
+def test_v12_callback_fires_once_per_tag_split_across_chunks() -> None:
+    out, captured = _run_capture(ConvertMode.STRIP, ["lead {{#", "sa", "d}} tail"])
+    assert out == "lead  tail"
+    assert captured == ["sad"]  # one fire, full name, despite the split
+
+
+def test_v12_callback_captures_multiple_tags_in_order() -> None:
+    _, captured = _run_capture(ConvertMode.STRIP, ["{{#proud_of_you}} and {{#grateful}}"])
+    assert captured == ["proud_of_you", "grateful"]
+
+
+def test_v12_callback_default_none_is_byte_identical_to_no_callback() -> None:
+    """Unset callback ⇒ output identical to today (the additive-safety proof)."""
+    for mode in (ConvertMode.EMOJI, ConvertMode.STRIP):
+        for text in ("plain", "{{#happy}} x", "a {{#unknown}} b", "trailing {{#"):
+            base = _run(mode, [text])
+            with_cb, _ = _run_capture(mode, [text])
+            assert with_cb == base, f"{mode} {text!r}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plain",
+        "{{#happy}}",
+        "a {{#happy}} b {{#unknown}} c",
+        "trailing {{#",
+        "braces { {{ {{# {{#h",
+        "nested {{#a{{#happy}}",
+        "{{#happy}}{{#sad}}",
+    ],
+)
+@pytest.mark.parametrize("mode", [ConvertMode.EMOJI, ConvertMode.STRIP])
+def test_v12_capture_does_not_perturb_the_leak_invariant(text: str, mode: ConvertMode) -> None:
+    """The observe-don't-strip change keeps N5's fuzz-invariant: for ANY split,
+    output with the callback == output without it, and never leaks a raw sentinel."""
+    for i in range(len(text) + 1):
+        base_conv = FeelingTagConverter(mode)
+        base = [base_conv.feed(text[:i]), base_conv.feed(text[i:]), base_conv.flush()]
+        cap_conv = FeelingTagConverter(mode, on_feeling=lambda _n: None)
+        cap = [cap_conv.feed(text[:i]), cap_conv.feed(text[i:]), cap_conv.flush()]
+        assert cap == base, f"perturbed: {text!r} split {i} mode {mode}"
+        assert all(_no_raw_tag(p) for p in cap)

@@ -39,6 +39,7 @@ from persona_voice.model import (
     VoiceTurnRecorder,
 )
 from persona_voice.model.async_lane import AsyncArtifactLane
+from persona_voice.model.expressivity import EXPRESSIVITY_MAP, VoiceExpressivity
 from persona_voice.turn_taking.heard_words import BargedReply
 from persona_voice.turn_taking.orchestrator import ConversationalOrchestrator
 from persona_voice.turn_taking.states import ConversationalState
@@ -784,3 +785,88 @@ class TestFeelingTagStrip:
         producer = VoiceModelReplyProducer(_context(backend))
 
         assert await _drain(producer) == ["Hel", "lo!"]
+
+
+class TestExpressivityCapture:
+    """V12 T3 — the producer captures the persona's stance tag (still stripped from
+    the audio) and publishes the resolved expressivity to the listener (V12-D-2/D-5).
+
+    This is the end-to-end assembly proof: N5's criterion-3 floor (tag never reaches
+    TTS, even split across chunks) holds with the on_feeling capture fully wired.
+    """
+
+    @staticmethod
+    def _producer_with_capture(
+        backend: object, captured: list[VoiceExpressivity | None]
+    ) -> VoiceModelReplyProducer:
+        return VoiceModelReplyProducer(_context(backend), expressivity_listener=captured.append)
+
+    @pytest.mark.asyncio
+    async def test_lead_tag_published_and_stripped_from_audio(self) -> None:
+        captured: list[VoiceExpressivity | None] = []
+        backend = _ScriptedBackend(
+            [StreamChunk(delta="{{#happy}}Hello"), StreamChunk(delta=" there."), _final()]
+        )
+        spoken = await _drain(self._producer_with_capture(backend, captured))
+        assert "".join(spoken) == "Hello there."  # tag never in the spoken audio
+        assert "{{#" not in "".join(spoken)
+        assert captured == [EXPRESSIVITY_MAP["happy"]]  # resolved stance published
+
+    @pytest.mark.asyncio
+    async def test_no_tag_publishes_nothing(self) -> None:
+        captured: list[VoiceExpressivity | None] = []
+        backend = _ScriptedBackend([StreamChunk(delta="Just a flat line."), _final()])
+        spoken = await _drain(self._producer_with_capture(backend, captured))
+        assert "".join(spoken) == "Just a flat line."
+        assert captured == []  # nothing published ⇒ backend resets to flat
+
+    @pytest.mark.asyncio
+    async def test_first_tag_wins_and_all_tags_stripped(self) -> None:
+        captured: list[VoiceExpressivity | None] = []
+        backend = _ScriptedBackend([StreamChunk(delta="{{#sad}}Oh. {{#happy}}Wait."), _final()])
+        spoken = await _drain(self._producer_with_capture(backend, captured))
+        assert "".join(spoken) == "Oh. Wait."  # BOTH tags stripped from audio
+        assert captured == [EXPRESSIVITY_MAP["sad"]]  # only the FIRST tag published
+
+    @pytest.mark.asyncio
+    async def test_tag_split_across_chunks_still_captured_and_stripped(self) -> None:
+        """N5's fuzz-invariant survives the full wiring: a split tag is captured once,
+        never leaked to audio."""
+        captured: list[VoiceExpressivity | None] = []
+        backend = _ScriptedBackend(
+            [
+                StreamChunk(delta="{{#"),
+                StreamChunk(delta="hap"),
+                StreamChunk(delta="py}}Hi."),
+                _final(),
+            ]
+        )
+        spoken = await _drain(self._producer_with_capture(backend, captured))
+        assert "".join(spoken) == "Hi."
+        assert "{{#" not in "".join(spoken)
+        assert captured == [EXPRESSIVITY_MAP["happy"]]
+
+    @pytest.mark.asyncio
+    async def test_listener_raising_never_breaks_stream_or_leaks_tag(self) -> None:
+        """Fail-safe (V12-D-5): a raising listener degrades to flat — the spoken stream
+        still completes and the tag is still stripped."""
+
+        def _boom(_expr: VoiceExpressivity | None) -> None:
+            raise RuntimeError("listener boom")
+
+        backend = _ScriptedBackend(
+            [StreamChunk(delta="{{#happy}}Hello"), StreamChunk(delta=" world."), _final()]
+        )
+        producer = VoiceModelReplyProducer(_context(backend), expressivity_listener=_boom)
+        spoken = await _drain(producer)
+        assert "".join(spoken) == "Hello world."  # stream uninterrupted
+        assert "{{#" not in "".join(spoken)  # tag still stripped
+
+    @pytest.mark.asyncio
+    async def test_no_listener_is_byte_identical_pure_strip(self) -> None:
+        """No expressivity listener ⇒ pure N5 STRIP, byte-identical (tag stripped, no publish)."""
+        backend = _ScriptedBackend([StreamChunk(delta="{{#happy}}Hi."), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))  # no listener
+        spoken = await _drain(producer)
+        assert "".join(spoken) == "Hi."
+        assert "{{#" not in "".join(spoken)
