@@ -1928,6 +1928,97 @@
         }
       }
     },
+    "/v1/mcp-servers/{server_id}/oauth/authorize": {
+      "post": {
+        "tags": ["mcp"],
+        "summary": "Start Mcp Oauth",
+        "description": "Begin the OAuth flow for a BYO MCP server (Spec R8, T4).\n\nRLS-scoped (the server must be the caller's \u2192 404). Mints a server-side\nstate + PKCE pair and returns the provider authorize URL (challenge + opaque\nstate on it \u2014 no secret). ``redirect_after`` is stored against the state.",
+        "operationId": "start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post",
+        "parameters": [
+          {
+            "name": "server_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Server Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MCPOAuthAuthorizeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MCPOAuthAuthorizeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mcp-servers/oauth/callback": {
+      "post": {
+        "tags": ["mcp"],
+        "summary": "Complete Mcp Oauth",
+        "description": "Complete the OAuth flow (Spec R8, T5): consume state, exchange code, store tokens.\n\nThe authenticated web callback relays ``state`` + ``code``. ``consume_state`` runs\nRLS-scoped to the caller (a stolen/foreign/expired state \u2192 fail-closed 400); the\ncode is exchanged on the back channel and the tokens are persisted encrypted. No\ntoken is ever returned. Fail-closed on any error \u2014 the server stays not connected.",
+        "operationId": "complete_mcp_oauth_v1_mcp_servers_oauth_callback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MCPOAuthCallbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MCPOAuthCallbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/mcp-servers/{server_id}": {
       "get": {
         "tags": ["mcp"],
@@ -2797,7 +2888,7 @@
           },
           "auth_method": {
             "type": "string",
-            "enum": ["none", "bearer"],
+            "enum": ["none", "bearer", "oauth"],
             "title": "Auth Method",
             "default": "none"
           },
@@ -2812,6 +2903,18 @@
               }
             ],
             "title": "Credential"
+          },
+          "oauth_provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Provider"
           }
         },
         "additionalProperties": false,
@@ -3190,6 +3293,83 @@
         "title": "MCPCatalogServer",
         "description": "An MCP server in the management catalog (spec 30 T11 + N1).\n\nA persona enables a server by adding ``mcp:<name>`` to its ``tools``\nallow-list. ``provider`` is the recommender tag (``mcp:builtin`` /\n``mcp:optional``); ``required_env`` lists env vars an operator must set.\n\nThe N1 fields below carry the Docker catalog-mirror display metadata the apps UX\n(N3) renders. They are **additive-with-default** so the existing five-field\ncontract is unchanged \u2014 a client written against spec 30 sees no break."
       },
+      "MCPOAuthAuthorizeRequest": {
+        "properties": {
+          "redirect_after": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Redirect After"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "MCPOAuthAuthorizeRequest",
+        "description": "Start an OAuth flow for a BYO MCP server (Spec R8, T4).\n\n``redirect_after`` is an OPTIONAL app-relative path the web callback returns the\nuser to once connected \u2014 it is stored SERVER-SIDE against the state (never encoded\nin the OAuth ``state`` value) and is never an external redirect target."
+      },
+      "MCPOAuthAuthorizeResponse": {
+        "properties": {
+          "authorize_url": {
+            "type": "string",
+            "title": "Authorize Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["authorize_url"],
+        "title": "MCPOAuthAuthorizeResponse",
+        "description": "The provider authorize URL to redirect the user to (Spec R8, T4).\n\n``authorize_url`` carries the PKCE ``code_challenge`` + opaque ``state`` \u2014 no\nsecret. The flow completes at the web callback \u2192 ``POST /mcp-servers/oauth/callback``."
+      },
+      "MCPOAuthCallbackRequest": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "State"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Code"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["state", "code"],
+        "title": "MCPOAuthCallbackRequest",
+        "description": "Complete an OAuth flow (Spec R8, T5): the web callback relays ``state`` + ``code``.\n\nSent by the authenticated web callback page (which received the provider redirect).\n``state`` is the opaque CSRF token minted at authorize; ``code`` the provider's\none-time authorization code. Both are consumed server-side and never returned."
+      },
+      "MCPOAuthCallbackResponse": {
+        "properties": {
+          "server": {
+            "$ref": "#/components/schemas/MCPServerDetail"
+          },
+          "redirect_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Redirect After"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["server"],
+        "title": "MCPOAuthCallbackResponse",
+        "description": "Result of completing an OAuth flow (Spec R8, T5).\n\n``server`` is the now-connected server (``has_credential`` true). ``redirect_after``\nis the server-side-stored app path to return the user to (or ``None``)."
+      },
       "MCPServerDetail": {
         "properties": {
           "id": {
@@ -3240,6 +3420,17 @@
               }
             ],
             "title": "Catalog Source"
+          },
+          "oauth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Provider"
           },
           "created_at": {
             "type": "string",
@@ -4072,7 +4263,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "enum": ["none", "bearer"]
+                "enum": ["none", "bearer", "oauth"]
               },
               {
                 "type": "null"

@@ -37,14 +37,25 @@ from persona_runtime.extraction.synthesizer import build_synthesizer
 
 from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
+from persona_api.jobs.queue import JobQueue
 from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
 from persona_api.jobs.worker import build_worker
+from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
+from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.handler import register_task_leg_handler
+from persona_api.tasks.leg_runner import RuntimeFactoryLegRunnerBuilder
+from persona_api.tasks.scheduled_fire import register_scheduled_task_fire_handler
+from persona_api.tasks.store import CheckpointStore, TaskStore
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from datetime import datetime
     from pathlib import Path
 
+    from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
+    from persona_runtime.legs import LegOutcome
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
@@ -53,6 +64,7 @@ if TYPE_CHECKING:
     from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
     from persona_api.jobs.worker import Worker
     from persona_api.schedules.tick import SchedulerTick
+    from persona_api.services.runtime_factory import RuntimeFactory
 
 __all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
 
@@ -66,14 +78,18 @@ def build_worker_registry(
     tier_registry: TierRegistry,
     audit_root: Path,
     synthesis_tier: str,
+    runtime_factory: RuntimeFactory | None = None,
+    memory_backend: Backend | None = None,
+    edition: object | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
-    Registers the ``synthesis`` handler (K2's reflection pass). The
-    :class:`Synthesizer` is built on the WIRED ``synthesis_tier`` backend (the
-    eval-re-run gate's tier — small/mid, never frontier). The graph store +
-    entity registry are built once on the RLS engine; the worker's per-job choke
-    point scopes them to the job owner via the ``current_user_id`` contextvar.
+    Registers the ``synthesis`` handler (K2's reflection pass) and — when a
+    ``runtime_factory`` is supplied (Spec A4 composition-root activation) — the
+    ``task_leg`` handler: a scheduled/continued task leg runs the **identical**
+    :class:`AgenticLoop` the chat path uses (the no-bypass guarantee), advances the
+    A2 state via :class:`TaskContinuation`, and publishes a granularity-gated digest
+    update on each milestone (T10; live only when ``memory_backend`` is present).
 
     Args:
         rls_engine: The ``persona_app`` RLS engine handlers run on.
@@ -82,6 +98,12 @@ def build_worker_registry(
             resolves the synthesis backend (fallback ``small → mid → frontier``).
         audit_root: The JSONL audit root the graph store's audit logger writes to.
         synthesis_tier: The tier the extractor + entity judge run on (D-K2-3).
+        runtime_factory: The app's runtime factory (the leg runner). ``None`` →
+            the ``task_leg`` tenant is NOT registered (A2 legs stay inert — the
+            pre-activation posture).
+        memory_backend: The edition's memory transport (the digest sender needs it).
+            ``None`` → legs still run, digest updates are simply not delivered.
+        edition: The open-core edition (the C0 recorder's RLS gate).
     """
     backend = tier_registry.get(synthesis_tier)
     graph_backend = PostgresGraphBackend(engine=rls_engine)
@@ -96,12 +118,136 @@ def build_worker_registry(
     )
     registry = JobRegistry()
     register_synthesis_handler(registry, runner=synthesizer, repository=PgSynthesisRepository())
+    if runtime_factory is not None:
+        _register_task_leg_tenant(
+            registry,
+            rls_engine=rls_engine,
+            runtime_factory=runtime_factory,
+            memory_backend=memory_backend,
+            edition=edition,
+            audit_root=audit_root,
+        )
     _log.info(
         "worker registry composed",
         synthesis_tier=synthesis_tier,
         registered_types=registry.types(),
     )
     return registry
+
+
+def _register_task_leg_tenant(
+    registry: JobRegistry,
+    *,
+    rls_engine: Engine,
+    runtime_factory: RuntimeFactory,
+    memory_backend: Backend | None,
+    edition: object | None,
+    audit_root: Path,
+) -> None:
+    """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4)."""
+    task_store = TaskStore(rls_engine)
+    continuation = TaskContinuation(
+        task_store=task_store,
+        queue=JobQueue(rls_engine),
+        checkpoint_store=CheckpointStore(rls_engine),
+        # Spec A4 recurrence: the continuation reads the schedule to decide occurrence-complete →
+        # WAITING (recurring, more fires) vs task-complete (one-time / exhausted).
+        schedule_store=ScheduleStore(rls_engine),
+    )
+    on_milestone = _build_milestone_hook(
+        rls_engine=rls_engine,
+        memory_backend=memory_backend,
+        edition=edition,
+        audit_root=audit_root,
+    )
+    register_task_leg_handler(
+        registry,
+        task_store=task_store,
+        checkpoint_store=CheckpointStore(rls_engine),
+        runner_builder=RuntimeFactoryLegRunnerBuilder(runtime_factory),
+        continuation=continuation,
+        on_milestone=on_milestone,
+    )
+    # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
+    # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
+    register_scheduled_task_fire_handler(
+        registry, task_store=task_store, queue=JobQueue(rls_engine)
+    )
+
+
+def _build_milestone_hook(
+    *,
+    rls_engine: Engine,
+    memory_backend: Backend | None,
+    edition: object | None,
+    audit_root: Path,
+) -> Callable[[LegOutcome, datetime], Awaitable[None]] | None:
+    """Build the digest-on-milestone closure, or ``None`` when the digest can't be delivered.
+
+    Maps a settled leg outcome onto the update's milestone/completion flags, resolves the persona
+    tag, and publishes through the granularity filter (:class:`TaskUpdatePublisher`) on the real C0
+    sender. Completion + timed-wait are milestones; a plain continuation is progress (delivered only
+    under an ``every_leg`` contract). ``memory_backend``/``edition`` absent → no digest (``None``).
+    """
+    if memory_backend is None or edition is None:
+        return None
+    from persona.tasks import is_terminal
+    from persona_runtime.legs import LegDisposition
+
+    from persona_api.approvals.cadence import MessagePriority
+    from persona_api.services.origination_adapters import (
+        OriginatorUpdateSender,
+        resolve_persona_tag,
+    )
+    from persona_api.tasks.store import TaskStore
+    from persona_api.tasks.updates import TaskUpdatePublisher
+
+    sender = OriginatorUpdateSender(
+        rls_engine=rls_engine,
+        memory_backend=memory_backend,
+        edition=edition,  # type: ignore[arg-type]  # Edition; typed as object to avoid an import cycle
+        audit_root=audit_root,
+    )
+    publisher = TaskUpdatePublisher(sender=sender)
+    tasks = TaskStore(rls_engine)
+
+    async def _publish(outcome: LegOutcome, now: datetime) -> None:
+        task = outcome.task
+        tag = resolve_persona_tag(rls_engine, task.persona_id)
+        if tag is None:
+            return
+        # Read the SETTLED state (continuation already applied): a task the leg finished is only
+        # truly *complete* if it's now terminal — a recurring occurrence-complete left it WAITING
+        # for the next fire, so it's PROGRESS, not "I've finished" (the digest must not lie).
+        settled = tasks.get(task.owner_id, task.id)
+        completed = is_terminal(settled.state)
+        occurrence = outcome.disposition is LegDisposition.COMPLETED and not completed
+        waiting = outcome.disposition is LegDisposition.CONTINUE and outcome.resume_at is not None
+        content = _render_digest(
+            task.contract.goal, completed=completed, occurrence=occurrence, waiting=waiting
+        )
+        await publisher.publish(
+            task=task,
+            persona=tag,
+            priority=MessagePriority.PROGRESS,
+            is_milestone=completed or occurrence or waiting,
+            is_completion=completed,
+            content=content,
+            now=now,
+        )
+
+    return _publish
+
+
+def _render_digest(goal: str, *, completed: bool, occurrence: bool, waiting: bool) -> str:
+    """A short, persona-neutral digest line (the originated message name-tags the persona)."""
+    if completed:
+        return f"I've finished the task you set up: {goal}."
+    if occurrence:  # a recurring occurrence done — the task keeps going, so this is progress
+        return f'Done this time on "{goal}" — I\'ll run it again on schedule.'
+    if waiting:
+        return f'Progress on "{goal}" — I\'ve paused until the next scheduled check.'
+    return f'I\'ve made progress on "{goal}".'
 
 
 class InProcessWorker:
@@ -139,10 +285,13 @@ def start_in_process_worker(
     embedder: Embedder,
     tier_registry: TierRegistry,
     audit_root: Path,
+    runtime_factory: RuntimeFactory | None = None,
+    memory_backend: Backend | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
-    Composes the synthesis registry, builds the :class:`Worker` (its own dispatch
+    Composes the synthesis registry (+ the A4 ``task_leg`` tenant when a
+    ``runtime_factory`` is supplied), builds the :class:`Worker` (its own dispatch
     + RLS engines), wires A1's leader-gated :func:`build_scheduler_tick` additively
     (the worker's loop calls it on its cadence — at most one process actually ticks
     under the advisory lock), starts the loop, and returns the handle for the
@@ -154,6 +303,9 @@ def start_in_process_worker(
         tier_registry=tier_registry,
         audit_root=audit_root,
         synthesis_tier=config.synthesis_tier,
+        runtime_factory=runtime_factory,
+        memory_backend=memory_backend,
+        edition=config.edition,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines

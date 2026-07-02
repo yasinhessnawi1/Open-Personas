@@ -1001,6 +1001,55 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/mcp-servers/{server_id}/oauth/authorize": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Start Mcp Oauth
+     * @description Begin the OAuth flow for a BYO MCP server (Spec R8, T4).
+     *
+     *     RLS-scoped (the server must be the caller's → 404). Mints a server-side
+     *     state + PKCE pair and returns the provider authorize URL (challenge + opaque
+     *     state on it — no secret). ``redirect_after`` is stored against the state.
+     */
+    post: operations["start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/mcp-servers/oauth/callback": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Complete Mcp Oauth
+     * @description Complete the OAuth flow (Spec R8, T5): consume state, exchange code, store tokens.
+     *
+     *     The authenticated web callback relays ``state`` + ``code``. ``consume_state`` runs
+     *     RLS-scoped to the caller (a stolen/foreign/expired state → fail-closed 400); the
+     *     code is exchanged on the back channel and the tokens are persisted encrypted. No
+     *     token is ever returned. Fail-closed on any error — the server stays not connected.
+     */
+    post: operations["complete_mcp_oauth_v1_mcp_servers_oauth_callback_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/mcp-servers/{server_id}": {
     parameters: {
       query?: never;
@@ -1460,9 +1509,11 @@ export interface components {
        * @default none
        * @enum {string}
        */
-      auth_method: "none" | "bearer";
+      auth_method: "none" | "bearer" | "oauth";
       /** Credential */
       credential?: string | null;
+      /** Oauth Provider */
+      oauth_provider?: string | null;
     };
     /**
      * CreatePersonaRequest
@@ -1781,6 +1832,55 @@ export interface components {
       secrets?: components["schemas"]["MCPCatalogSecret"][];
     };
     /**
+     * MCPOAuthAuthorizeRequest
+     * @description Start an OAuth flow for a BYO MCP server (Spec R8, T4).
+     *
+     *     ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
+     *     user to once connected — it is stored SERVER-SIDE against the state (never encoded
+     *     in the OAuth ``state`` value) and is never an external redirect target.
+     */
+    MCPOAuthAuthorizeRequest: {
+      /** Redirect After */
+      redirect_after?: string | null;
+    };
+    /**
+     * MCPOAuthAuthorizeResponse
+     * @description The provider authorize URL to redirect the user to (Spec R8, T4).
+     *
+     *     ``authorize_url`` carries the PKCE ``code_challenge`` + opaque ``state`` — no
+     *     secret. The flow completes at the web callback → ``POST /mcp-servers/oauth/callback``.
+     */
+    MCPOAuthAuthorizeResponse: {
+      /** Authorize Url */
+      authorize_url: string;
+    };
+    /**
+     * MCPOAuthCallbackRequest
+     * @description Complete an OAuth flow (Spec R8, T5): the web callback relays ``state`` + ``code``.
+     *
+     *     Sent by the authenticated web callback page (which received the provider redirect).
+     *     ``state`` is the opaque CSRF token minted at authorize; ``code`` the provider's
+     *     one-time authorization code. Both are consumed server-side and never returned.
+     */
+    MCPOAuthCallbackRequest: {
+      /** State */
+      state: string;
+      /** Code */
+      code: string;
+    };
+    /**
+     * MCPOAuthCallbackResponse
+     * @description Result of completing an OAuth flow (Spec R8, T5).
+     *
+     *     ``server`` is the now-connected server (``has_credential`` true). ``redirect_after``
+     *     is the server-side-stored app path to return the user to (or ``None``).
+     */
+    MCPOAuthCallbackResponse: {
+      server: components["schemas"]["MCPServerDetail"];
+      /** Redirect After */
+      redirect_after?: string | null;
+    };
+    /**
      * MCPServerDetail
      * @description A bring-your-own MCP server as returned to its owner (spec 30, D-30-3).
      *
@@ -1805,6 +1905,8 @@ export interface components {
       discovered_tools?: string[] | null;
       /** Catalog Source */
       catalog_source?: string | null;
+      /** Oauth Provider */
+      oauth_provider?: string | null;
       /**
        * Created At
        * Format: date-time
@@ -2266,7 +2368,7 @@ export interface components {
       /** Url */
       url?: string | null;
       /** Auth Method */
-      auth_method?: ("none" | "bearer") | null;
+      auth_method?: ("none" | "bearer" | "oauth") | null;
       /** Credential */
       credential?: string | null;
       /** Enabled */
@@ -3677,6 +3779,74 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MCPServerDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        server_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MCPOAuthAuthorizeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MCPOAuthAuthorizeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  complete_mcp_oauth_v1_mcp_servers_oauth_callback_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MCPOAuthCallbackRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MCPOAuthCallbackResponse"];
         };
       };
       /** @description Validation Error */

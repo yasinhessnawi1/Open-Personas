@@ -30,17 +30,24 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
-from persona.tasks import LegBox, ResumeTrigger, TaskState, is_terminal
+from persona.tasks import LegBox, ResumeTrigger, ScheduledFire, TaskState, is_terminal
 from persona_runtime.legs import BasicCheckpointWriter, LegExecutor
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import Task
-    from persona_runtime.legs import AgenticRunner, CheckpointWriter
+    from persona_runtime.legs import AgenticRunner, CheckpointWriter, LegOutcome
 
     from persona_api.jobs.queue import JobQueue
     from persona_api.tasks.continuation import TaskContinuation
     from persona_api.tasks.store import CheckpointStore, TaskStore
+
+#: The digest hook: called after a leg's continuation applies, with the settled leg outcome (task +
+#: disposition + resume_at), so the composition root can publish a granularity-gated update (Spec
+#: A4, T10). Async + best-effort — it must never fail the leg (updates are additive to the work).
+MilestoneHook = "Callable[[LegOutcome, datetime], Awaitable[None]]"
 
 __all__ = [
     "TASK_LEG_JOB_TYPE",
@@ -116,6 +123,7 @@ class TaskLegHandler:
         writer: CheckpointWriter | None = None,
         box: LegBox | None = None,
         runnable_guard: RunnableGuard | None = None,
+        on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -126,6 +134,9 @@ class TaskLegHandler:
         # The A3 kill-switch guard (T11): persona-suspend / global-pause prevent the next leg
         # (terminal/budget-paused are checked inline). Optional — a plain A2 worker wires none.
         self._runnable_guard = runnable_guard
+        # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
+        # continuation applies. Optional + best-effort; a plain A2 worker wires none.
+        self._on_milestone = on_milestone
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -180,8 +191,22 @@ class TaskLegHandler:
         )
         # Disposition → state machine (continuation / completion / waiting); raises on FAILED
         # so A0 re-delivers (transient). Skipped when no continuation is wired (idempotency-only).
+        # A ScheduledFire's fire_time is the recurrence anchor — "is there a fire after THIS one?" —
+        # so a one-time task completes and a recurring one survives regardless of leg-run latency.
         if self._continuation is not None:
-            self._continuation.apply(owner, outcome, now=now)
+            trigger = payload.trigger
+            fired_at = trigger.fire_time if isinstance(trigger, ScheduledFire) else None
+            self._continuation.apply(owner, outcome, now=now, fired_at=fired_at)
+        # Spec A4 (T10): after the state settles, publish a granularity-gated digest update. The
+        # post-leg task carries the settled state; the hook decides milestone/completion + gating.
+        # Best-effort — a delivery hiccup must never fail or re-deliver the (already-done) leg.
+        if self._on_milestone is not None:
+            try:
+                await self._on_milestone(outcome, now)
+            except Exception as exc:  # noqa: BLE001 — the update is additive; never fail the leg
+                _log.warning(
+                    "task milestone update failed task_id={tid}: {err}", tid=task.id, err=str(exc)
+                )
 
 
 def register_task_leg_handler(
@@ -194,6 +219,7 @@ def register_task_leg_handler(
     writer: CheckpointWriter | None = None,
     box: LegBox | None = None,
     runnable_guard: RunnableGuard | None = None,
+    on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -208,6 +234,7 @@ def register_task_leg_handler(
                 writer=writer,
                 box=box,
                 runnable_guard=runnable_guard,
+                on_milestone=on_milestone,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

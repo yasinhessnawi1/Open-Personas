@@ -28,9 +28,19 @@ from persona.tasks.contract import (
     AcceptanceStatus,
     Contract,
     ContractBounds,
+    UpdateGranularity,
+    UpdatePreference,
 )
 from persona.tasks.entity import TASK_SCHEMA_VERSION, Task
 from persona.tasks.ledger import CostLedger, SpendKind
+from persona.tasks.reader import (
+    IntrospectionStatus,
+    TaskStateReader,
+    TaskStateView,
+    TaskSummary,
+    project_task_state,
+    summarise_task,
+)
 from persona.tasks.reconstruction import (
     RecentLegSummary,
     ReconstructionBlock,
@@ -79,6 +89,7 @@ __all__ = [
     "CostLedger",
     "Decision",
     "EventTrigger",
+    "IntrospectionStatus",
     "StuckReport",
     "LegBox",
     "LegBoxLimit",
@@ -92,8 +103,15 @@ __all__ = [
     "TaskCheckpoint",
     "TaskResumer",
     "TaskState",
+    "TaskStateReader",
+    "TaskStateView",
+    "TaskSummary",
+    "UpdateGranularity",
+    "UpdatePreference",
     "UserReply",
     "WaitKind",
+    "project_task_state",
+    "summarise_task",
     "build_cancellation_summary",
     "build_completion_report",
     "build_stuck_report",

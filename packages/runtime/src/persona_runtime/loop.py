@@ -85,6 +85,20 @@ from persona_runtime.routing import (
     reorder_primary,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
+from persona_runtime.task_origination import (
+    Clause,
+    ContractDraft,
+    RecognitionKind,
+    SteeringVerb,
+    build_task_originated_event,
+    canonicalize_draft,
+    changed_clauses,
+    classify_amendment_materiality,
+    detect_steering_cue,
+    is_affirmative_confirmation,
+    render_clause,
+    render_echo,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -99,6 +113,7 @@ if TYPE_CHECKING:
     from persona.schema.skills import SkillSpec
     from persona.skills import SkillConsentPort, SkillInjector, SkillScanner
     from persona.stores.protocol import MemoryStore
+    from persona.tasks import TaskStateReader
     from persona.tools import Toolbox
 
     from persona_runtime.images import TurnImage
@@ -113,6 +128,11 @@ if TYPE_CHECKING:
     from persona_runtime.question_author import QuestionAuthor
     from persona_runtime.questions import ProactiveQuestion
     from persona_runtime.routing import IntelligentRouter, Router
+    from persona_runtime.task_origination import (
+        AmendmentInterpreter,
+        StandingIntentRecognizer,
+        SteeringInterpreter,
+    )
     from persona_runtime.tier import TierRegistry
 
 __all__ = ["ConversationLoop"]
@@ -180,6 +200,58 @@ def _final_chunk(usage: TokenUsage | None) -> StreamChunk:
     from persona.backends import StreamChunk
 
     return StreamChunk(delta="", is_final=True, usage=usage)
+
+
+#: The persona's reply on a confirmed contract (Spec A4). The actual task create happens api-side
+#: off the emitted event; this is the immediate, honest acknowledgement.
+_CONTRACT_CONFIRMED_TEXT = "Done — I've set that up. I'll keep you posted."
+
+#: Steering acknowledgements (Spec A4, T9b). The actual mutation happens api-side off the event.
+_STEER_PAUSED_TEXT = "Paused — just say the word when you want it going again."
+_STEER_RESUMED_TEXT = "Done — it's running again."
+_STEER_CANCELLED_TEXT = "Cancelled — I've stopped that task."
+
+
+def _pending_cancel_task_id(conversation: Conversation) -> str | None:
+    """The task id of a pending cancel confirmation, if the last assistant turn proposed one."""
+    for message in reversed(conversation.messages):
+        if message.role != "assistant":
+            continue
+        raw = message.metadata.get("cancel_proposal")
+        return raw if isinstance(raw, str) else None
+    return None
+
+
+def _render_amendment(before: ContractDraft, after: ContractDraft) -> str:
+    """Re-echo an amendment (Spec A4, T9): a material change re-echoes the whole contract for a
+    fresh confirm; a tuning change re-echoes just the changed clause(s). Both stay pending — the
+    user must still give a clean confirmation."""
+    from persona.approvals.records import Materiality
+
+    if classify_amendment_materiality(before, after) is Materiality.MATERIAL:
+        return (
+            "That's a bigger change — here's the updated plan:\n"
+            f"{render_echo(after)}\n\nShall I go ahead?"
+        )
+    clauses = changed_clauses(before, after) or (Clause.GOAL,)
+    lines = "\n".join(render_clause(after, clause) for clause in clauses)
+    return f"Done:\n{lines}\n\nShall I go ahead?"
+
+
+def _pending_contract_draft(conversation: Conversation) -> ContractDraft | None:
+    """The contract draft of the most recent assistant turn, if it was a proposal (Spec A4).
+
+    Returns the parsed :class:`ContractDraft` when the last assistant message carries a
+    ``contract_proposal`` (so this turn's user message is its confirm/adjust reply), else
+    ``None``. Only the *most recent* assistant turn counts — a proposal two turns back has
+    already been superseded.
+    """
+    for message in reversed(conversation.messages):
+        if message.role != "assistant":
+            continue
+        raw = message.metadata.get("contract_proposal")
+        return ContractDraft.model_validate_json(raw) if isinstance(raw, str) else None
+    return None
 
 
 def _build_multimodal_user_message(
@@ -326,10 +398,29 @@ class ConversationLoop:
         skill_consent: SkillConsentPort | None = None,
         audit_logger: AuditLogger | None = None,
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
+        standing_recognizer: StandingIntentRecognizer | None = None,
+        amendment_interpreter: AmendmentInterpreter | None = None,
+        steering_interpreter: SteeringInterpreter | None = None,
+        task_reader_provider: Callable[[], TaskStateReader | None] | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
         self._toolbox = toolbox
+        # Spec A4 (A4-D-2 / A4-D-X): the standing-intent → contract flow. ``None`` → the
+        # contract gate is inert and the turn behaves exactly as before (additive). When
+        # present, a standing-intent turn opens the compact echo and a clean confirm reply
+        # emits the ``task_originated`` event the api worker turns into a task.
+        self._standing_recognizer = standing_recognizer
+        # Spec A4 (A4-D-4): adjust-by-reply on a pending proposal. ``None`` → a non-confirm
+        # reply abandons the proposal; when present, a tweak amends the draft + re-echoes the
+        # changed clause and stays pending (only a clean confirm creates).
+        self._amendment_interpreter = amendment_interpreter
+        # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so (pause/resume/cancel).
+        # Both ``None`` → the steering gate is inert. The reader provider resolves "which task"
+        # (list-then-resolve) + the goal for the cancel consequence; pause/resume apply
+        # immediately, cancel asks a consequence-aware confirmation first.
+        self._steering_interpreter = steering_interpreter
+        self._task_reader_provider = task_reader_provider
         # Spec S1 (S1-D-2 / S1-D-X-nonce-injection): the per-injection delimiter
         # nonce source for the subordination guard. ``None`` defaults to the
         # production ``default_nonce`` (secrets-backed); tests pin it for
@@ -581,6 +672,198 @@ class ConversationLoop:
             on_recall=(_note_recall if on_event is not None else None),
         )
         history, compacted = await self._manage_history(conversation)
+
+        # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so. Runs first — "cancel that" /
+        # "pause it" is about an existing task, not a new one. Pause/resume apply immediately; a
+        # cancel asks a consequence-aware confirmation, so a misheard cancel never kills a task.
+        if self._steering_interpreter is not None and self._task_reader_provider is not None:
+            pending_cancel = _pending_cancel_task_id(conversation)
+            if pending_cancel is not None:
+                if is_affirmative_confirmation(user_message):
+                    if on_event is not None:
+                        await on_event(
+                            RunEvent.task_steering(
+                                verb=SteeringVerb.CANCEL.value, task_id=pending_cancel
+                            )
+                        )
+                    yield _text_chunk(_STEER_CANCELLED_TEXT)
+                    now_sc = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_sc)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant", content=_STEER_CANCELLED_TEXT, created_at=now_sc
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                # Not a clean confirm → do NOT cancel; the cancel proposal lapses, fall through.
+            elif detect_steering_cue(user_message):
+                reader = self._task_reader_provider()
+                if reader is not None:
+                    from persona.tasks import summarise_task
+
+                    summaries = [summarise_task(t) for t in reader.list_active()]
+                    intent = await self._steering_interpreter.interpret(user_message, summaries)
+                    if intent is not None and intent.verb is SteeringVerb.CANCEL:
+                        goal = next(
+                            (s.goal for s in summaries if s.task_id == intent.task_id), "this task"
+                        )
+                        prompt = f'Just to confirm — cancelling this stops "{goal}". Cancel it?'
+                        yield _text_chunk(prompt)
+                        now_cp = datetime.now(UTC)
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="user", content=user_message, created_at=now_cp
+                            )
+                        )
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="assistant",
+                                content=prompt,
+                                created_at=now_cp,
+                                metadata={"cancel_proposal": intent.task_id},
+                            )
+                        )
+                        yield _final_chunk(None)
+                        return
+                    if intent is not None:  # pause / resume — apply immediately, no confirm
+                        if on_event is not None:
+                            await on_event(
+                                RunEvent.task_steering(
+                                    verb=intent.verb.value, task_id=intent.task_id
+                                )
+                            )
+                        ack = (
+                            _STEER_PAUSED_TEXT
+                            if intent.verb is SteeringVerb.PAUSE
+                            else _STEER_RESUMED_TEXT
+                        )
+                        yield _text_chunk(ack)
+                        now_st = datetime.now(UTC)
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="user", content=user_message, created_at=now_st
+                            )
+                        )
+                        conversation.messages.append(
+                            ConversationMessage(role="assistant", content=ack, created_at=now_st)
+                        )
+                        yield _final_chunk(None)
+                        return
+                # No resolvable steering intent → fall through to the contract gate / chat.
+
+        # Spec A4 (A4-D-X): the contract flow runs BEFORE the proactive gate — a clean
+        # confirm reply to a pending proposal must be read as a confirmation, not re-analysed
+        # for ambiguity. The gate is inert unless a recognizer is wired (additive). It owns the
+        # turn when it fires (echo / ask-once / confirm) and otherwise falls through unchanged.
+        if self._standing_recognizer is not None:
+            pending = _pending_contract_draft(conversation)
+            if pending is not None:
+                if is_affirmative_confirmation(user_message):
+                    # The one explicit confirmation → emit the create event (the api worker
+                    # injects owner_id + the confirm turn's assistant_message_id; the runtime
+                    # loop knows neither). runtime ⊥ api: a data-only event crosses the seam.
+                    if on_event is not None:
+                        await on_event(
+                            build_task_originated_event(
+                                draft=pending,
+                                owner_id="",  # worker injects the tenant from its handle
+                                persona_id=persona_id,
+                                persona_name=self._persona.identity.name,
+                                conversation_id=conversation.conversation_id,
+                                assistant_message_id="",  # worker injects the confirm turn id
+                            )
+                        )
+                    confirmation = _CONTRACT_CONFIRMED_TEXT
+                    yield _text_chunk(confirmation)
+                    now_c = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_c)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant", content=confirmation, created_at=now_c
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                # Not a clean confirmation — try to interpret it as an amendment (A4-T9): a
+                # tweak amends the draft, re-echoes the changed clause, and STAYS pending. Only
+                # a clean confirm creates; a confirm-with-a-tweak never silently drops the task.
+                if self._amendment_interpreter is not None:
+                    amended = await self._amendment_interpreter.interpret(user_message, pending)
+                    if amended is not None:
+                        amended = canonicalize_draft(amended)
+                        reecho = _render_amendment(pending, amended)
+                        yield _text_chunk(reecho)
+                        now_am = datetime.now(UTC)
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="user", content=user_message, created_at=now_am
+                            )
+                        )
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="assistant",
+                                content=reecho,
+                                created_at=now_am,
+                                metadata={"contract_proposal": amended.model_dump_json()},
+                            )
+                        )
+                        yield _final_chunk(None)
+                        return
+                # Neither a clean confirmation nor an amendment → abandon the proposal and
+                # fall through to ordinary chat.
+            else:
+                contract = await self._standing_recognizer.recognize(
+                    user_message, language=self._persona.identity.language_default
+                )
+                if contract.kind is RecognitionKind.STANDING and contract.draft is not None:
+                    echo = render_echo(contract.draft)
+                    yield _text_chunk(echo)
+                    now_e = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_e)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant",
+                            content=echo,
+                            created_at=now_e,
+                            metadata={"contract_proposal": contract.draft.model_dump_json()},
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                if contract.kind is RecognitionKind.ASK_ONCE and contract.question is not None:
+                    cq = contract.question
+                    if on_event is not None:
+                        await on_event(
+                            RunEvent.asking_user(
+                                -1,
+                                cq.question,
+                                options=cq.options,
+                                allow_free_form=cq.allow_free_form,
+                            )
+                        )
+                    yield _text_chunk(cq.question)
+                    now_a = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_a)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant",
+                            content=cq.question,
+                            created_at=now_a,
+                            metadata={"proactive_question": "true"},
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                # ORDINARY → fall through to the proactive gate + normal generation.
 
         # Spec 21 T06 (D-21-1): proactive clarifying question decision point —
         # PRE-generation, before routing (D-05-12 ordering). When a question is

@@ -72,6 +72,12 @@ class PersonaCoreConfig(BaseSettings):
     model: str = "claude-sonnet-4-6"
     chroma_path: Path = Path(".chroma/")
     log_level: str = "INFO"
+    # Spec A4 — the timezone a task cadence ("every morning at 08:00") is anchored in when the
+    # user's own timezone is unknown. Read from ``PERSONA_DEFAULT_TIMEZONE`` (an IANA name);
+    # rendered transparently in the contract echo so the user sees which zone the time is in.
+    # K6 SEAM: once the user profile carries a per-user timezone, A4 reads that and falls back to
+    # THIS default — A4 stays uncoupled to K6 (no dependency), the per-user value drops in later.
+    default_timezone: str = "Europe/Oslo"
     log_format: Literal["pretty", "json"] = "pretty"
     log_file: Path | None = None
     audit_path: Path | None = None
@@ -92,6 +98,19 @@ class PersonaCoreConfig(BaseSettings):
     # Settings doesn't try to JSON-parse the env value. The dict is computed
     # via `mcp_servers_parsed` below; downstream code uses that. D-03-22.
     mcp_servers: str = Field(default="", repr=False)
+
+    @field_validator("default_timezone", mode="after")
+    @classmethod
+    def _validate_default_timezone(cls, value: str) -> str:
+        """Reject an unknown IANA zone at startup (fail-fast, not at first task cadence)."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            msg = f"invalid PERSONA_DEFAULT_TIMEZONE {value!r} (must be an IANA zone)"
+            raise ValueError(msg) from exc
+        return value
 
     @field_validator("mcp_servers", mode="after")
     @classmethod

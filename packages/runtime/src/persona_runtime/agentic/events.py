@@ -396,3 +396,67 @@ class RunEvent(BaseModel):
             data={"run_id": run.id, "status": str(run.status)},
             timestamp=datetime.now(UTC),
         )
+
+    @classmethod
+    def task_originated(
+        cls,
+        *,
+        owner_id: str,
+        persona_id: str,
+        persona_name: str,
+        conversation_id: str,
+        assistant_message_id: str,
+        contract: Mapping[str, Any],
+        schedule: Mapping[str, Any],
+        draft_hash: str,
+    ) -> RunEvent:
+        """A confirmed standing-task contract, ready for the api to create (Spec A4, A4-D-X).
+
+        Emitted on the confirm turn; the chat-turn worker consumes it and calls the api
+        ``OriginationService`` to create the A2 task + A1 schedule + A3 matrix. The event is
+        **data only** — it crosses the runtime→api boundary as a JSON payload, so creation
+        lands in api while recognition/echo/confirm stay in runtime (runtime ⊥ api is
+        structural, not conventional). ``assistant_message_id`` is the primary idempotency
+        anchor (one proposal turn = one task); ``draft_hash`` is the content-dedup fallback.
+
+        Args:
+            owner_id: The tenant the task runs as (RLS scope).
+            persona_id: The persona that will execute the task.
+            persona_name: The persona's display name (for the persona-voiced failure account).
+            conversation_id: The originating conversation.
+            assistant_message_id: The confirm turn's stable id — the primary dedup key.
+            contract: ``Contract.model_dump(mode="json")`` (goal/scope/criteria/bounds/policy).
+            schedule: The parsed cadence ``{recurrence|one_time_at, timezone}`` (JSON-safe).
+            draft_hash: A stable content hash of the canonical draft (the dedup fallback).
+        """
+        return cls(
+            type="task_originated",
+            step=-1,
+            data={
+                "owner_id": owner_id,
+                "persona_id": persona_id,
+                "persona_name": persona_name,
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
+                "contract": dict(contract),
+                "schedule": dict(schedule),
+                "draft_hash": draft_hash,
+            },
+            timestamp=datetime.now(UTC),
+        )
+
+    @classmethod
+    def task_steering(cls, *, verb: str, task_id: str) -> RunEvent:
+        """A conversational steering request — pause / resume / cancel a live task (Spec A4, T9b).
+
+        Emitted by the runtime when the user steers a running task in chat; the chat-turn worker
+        consumes it and applies the verb via the owner-scoped ``TaskStore`` (it injects ``owner_id``
+        from its handle — the runtime knows the verb + task, the worker owns the tenant + mutation).
+        Data only, so runtime ⊥ api holds.
+        """
+        return cls(
+            type="task_steering",
+            step=-1,
+            data={"verb": verb, "task_id": task_id},
+            timestamp=datetime.now(UTC),
+        )

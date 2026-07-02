@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from persona.errors import PersonaError
 
-__all__ = ["InvalidQuestionAnswerError", "TierNotConfiguredError"]
+__all__ = [
+    "InvalidQuestionAnswerError",
+    "ScheduleParseError",
+    "TierNotConfiguredError",
+]
 
 
 class TierNotConfiguredError(PersonaError):
@@ -28,6 +32,18 @@ class TierNotConfiguredError(PersonaError):
     not resolve even after the ``small → mid → frontier`` fallback and the
     single-backend fallback (D-05-3). Carries ``context`` with the requested
     tier and the configured tier names so the operator can see the gap.
+    """
+
+
+class ScheduleParseError(PersonaError):
+    """A schedule phrase could not be faithfully represented as an A1 cadence (Spec A4).
+
+    Raised by :mod:`persona_runtime.task_origination.schedule` when a candidate cannot
+    form a valid :class:`persona.schedules.RecurrenceRule` / one-time instant, or names an
+    unknown timezone. This is the **parse-honesty** boundary (criterion 4): the persona
+    declines plainly and offers an alternative rather than silently approximating a fuzzy
+    intent. ``context`` carries the offending phrase and, where known, a suggested
+    ``alternative`` the decline message can offer.
     """
 
 

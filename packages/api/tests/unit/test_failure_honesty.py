@@ -19,7 +19,9 @@ from persona_api.approvals import (
     FailureAccount,
     FailureKind,
     account_for_budget_pause,
+    account_for_cancel_failure,
     account_for_expired_approval,
+    account_for_origination_failure,
     account_for_stuck,
     all_failure_kinds_have_a_builder,
     bypasses_cap,
@@ -65,6 +67,12 @@ def _all_accounts() -> dict[FailureKind, FailureAccount]:
             "t1", cap_micros=1000, spent_micros=1000
         ),
         FailureKind.EXPIRED_APPROVAL: account_for_expired_approval(_proposal()),
+        FailureKind.ORIGINATION_FAILED: account_for_origination_failure(
+            "t1", cause="the database was unavailable when I tried to set it up"
+        ),
+        FailureKind.CANCEL_FAILED: account_for_cancel_failure(
+            "t1", cause="the store was unavailable when I tried to cancel it"
+        ),
     }
 
 

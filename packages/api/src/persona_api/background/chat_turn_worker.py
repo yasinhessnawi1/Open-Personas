@@ -45,7 +45,8 @@ from persona_api.sandbox import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
+    from typing import Any
 
     from persona.backends import StreamChunk
     from persona.schema.conversation import Conversation
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
 
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
+    from persona_api.services.origination_service import OriginationService
+    from persona_api.services.task_steering_service import TaskSteeringService
 
 _log = get_logger("api.chat_turn_worker")
 
@@ -141,6 +144,8 @@ class ChatTurnRegistry:
         credits_policy: CreditsPolicy | None = None,
         credits_per_turn: int = 1,
         job_queue: JobQueue | None = None,
+        origination_service: OriginationService | None = None,
+        task_steering_service: TaskSteeringService | None = None,
     ) -> None:
         self._sink = sink
         self._engine = rls_engine
@@ -150,6 +155,12 @@ class ChatTurnRegistry:
         # Relocated from the old inline ``stream_turn`` to the detached worker's
         # clean-completion path; ``None`` → no-op (D-K2-2).
         self._job_queue = job_queue
+        # Spec A4 (A4-D-X): on a confirm turn the loop emits a ``task_originated`` event;
+        # this service creates the A2 task + A1 schedule on the clean-completion path.
+        # ``None`` → no-op (the unmetered/unit-test shape).
+        self._origination_service = origination_service
+        # Spec A4 (T9b): apply a conversational steering verb (pause/resume/cancel) to a live task.
+        self._task_steering_service = task_steering_service
         self._handles: dict[str, ChatTurnHandle] = {}
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
@@ -224,15 +235,40 @@ class ChatTurnRegistry:
         routing: dict[str, object] | None = None
         last_chunk: StreamChunk | None = None
         error_message: str | None = None
+        originated: Mapping[str, Any] | None = None
+        steered: Mapping[str, Any] | None = None
 
         async def _on_event(event: RunEvent) -> None:
-            nonlocal tier, routing
+            nonlocal tier, routing, originated, steered
             if event.type == "tier":
                 # The router's tier choice rides the terminal `done` payload — it
                 # is NOT a frame and NOT in the persisted event-log (it lives on
                 # the `tier_used` column via finalize).
                 tier = str(event.data.get("tier", tier))
                 routing = event.data.get("routing")  # Spec 31; may be None
+                return
+            if event.type == "task_originated":
+                # Spec A4: an internal create-instruction, not an SSE frame — captured here,
+                # acted on the clean-completion path (after the confirm turn is persisted). The
+                # runtime loop knows neither the tenant nor the message id; the worker injects
+                # both from its handle (owner_id = RLS scope; assistant_message_id = the primary
+                # idempotency anchor — this confirm turn's stable id).
+                originated = {
+                    **event.data,
+                    "owner_id": handle.owner_id,
+                    "assistant_message_id": handle.assistant_message_id,
+                }
+                return
+            if event.type == "task_steering":
+                # Spec A4 (T9b): an internal pause/resume/cancel instruction — the worker injects
+                # the tenant + conversation/persona (so a failed cancel can surface an
+                # un-suppressible account on this conversation) and applies it on completion.
+                steered = {
+                    **event.data,
+                    "owner_id": handle.owner_id,
+                    "conversation_id": handle.conversation_id,
+                    "persona_id": conversation.persona_id,
+                }
                 return
             handle.event_log.append(event.model_dump(mode="json"))
             await handle.events.put(("event", event))
@@ -278,6 +314,8 @@ class ChatTurnRegistry:
             if status == "complete":
                 self._deduct(handle)
                 self._enqueue_synthesis(handle, conversation)
+                await self._originate_task(originated)
+                await self._apply_steering(steered)
                 await self._run_on_complete(on_complete, handle)
                 await handle.events.put(
                     ("done", self._done_payload(loop, last_chunk, tier, routing))
@@ -380,6 +418,30 @@ class ChatTurnRegistry:
                 cid=handle.conversation_id,
                 err=str(exc),
             )
+
+    async def _originate_task(self, originated: Mapping[str, Any] | None) -> None:
+        """Spec A4: create the confirmed standing task (idempotent + failure-visible).
+
+        The service owns the invariants (idempotency, failure-visibility); this is the thin
+        clean-completion call. ``None`` event or unconfigured service → no-op. The service does
+        not raise on a create failure (it surfaces a FAILURE-class account instead), so a stray
+        exception here is a bug we log rather than letting it crash the turn's terminal events.
+        """
+        if originated is None or self._origination_service is None:
+            return
+        try:
+            await self._origination_service.originate(originated)
+        except Exception as exc:  # noqa: BLE001 — the service self-reports failures; never crash the turn
+            _log.error("task origination raised unexpectedly: {err}", err=str(exc))
+
+    async def _apply_steering(self, steered: Mapping[str, Any] | None) -> None:
+        """Spec A4 (T9b): apply a captured pause/resume/cancel to the live task (best-effort)."""
+        if steered is None or self._task_steering_service is None:
+            return
+        try:
+            await self._task_steering_service.steer(steered)
+        except Exception as exc:  # noqa: BLE001 — a steering miss (e.g. already terminal) must not crash the turn
+            _log.warning("task steering failed: {err}", err=str(exc))
 
     @staticmethod
     def _done_payload(

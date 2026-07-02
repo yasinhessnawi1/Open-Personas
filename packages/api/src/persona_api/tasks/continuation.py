@@ -26,8 +26,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.errors import TaskLegFailedError
+from persona.errors import ScheduleNotFoundError, TaskLegFailedError
 from persona.logging import get_logger
+from persona.schedules import next_fire_after
 from persona.tasks import (
     ScheduledFire,
     TaskState,
@@ -46,11 +47,13 @@ if TYPE_CHECKING:
         CancellationSummary,
         ResumeTrigger,
         StuckReport,
+        Task,
         TaskCheckpoint,
     )
     from persona_runtime.legs import LegOutcome
 
     from persona_api.jobs.queue import JobQueue
+    from persona_api.schedules.store import ScheduleStore
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
 __all__ = ["TaskContinuation"]
@@ -67,23 +70,41 @@ class TaskContinuation:
         task_store: TaskStore,
         queue: JobQueue,
         checkpoint_store: CheckpointStore | None = None,
+        schedule_store: ScheduleStore | None = None,
     ) -> None:
         self._tasks = task_store
         self._queue = queue
         self._checkpoints = checkpoint_store
+        # Spec A4 recurrence: a leg completing on a RECURRING schedule-backed task is one
+        # OCCURRENCE done, not the task — so the task returns to WAITING(until_time) for the next
+        # scheduled fire (the schedule drives it) instead of terminating. Without a schedule store
+        # a completed leg always terminates (the pre-recurrence A2 shape).
+        self._schedules = schedule_store
 
-    def apply(self, owner_id: str, outcome: LegOutcome, *, now: datetime) -> None:
+    def apply(
+        self, owner_id: str, outcome: LegOutcome, *, now: datetime, fired_at: datetime | None = None
+    ) -> None:
         """Drive the task's next move from a leg outcome.
 
         ``outcome.task`` is the post-append task (head advanced) for CONTINUE/COMPLETED.
+        ``fired_at`` is the scheduled instant that triggered this leg (a :class:`ScheduledFire`'s
+        ``fire_time``), used to decide recurrence — "is there a fire strictly AFTER this one?" —
+        independent of when the leg executes; defaults to ``now`` for non-scheduled continuations.
 
         Raises:
             TaskLegFailedError: On a FAILED leg (so A0 re-delivers — transient).
         """
         task = outcome.task
         if outcome.disposition == LegDisposition.COMPLETED:
-            self._tasks.complete(owner_id, task.id, now=now)
-            _log.info("task completed", task_id=task.id)
+            if self._recurs(owner_id, task, after=fired_at if fired_at is not None else now):
+                # One occurrence done, but the schedule has a future fire — return to
+                # WAITING(until_time); the next scheduled fire resumes it (no enqueue here, the
+                # schedule drives the next leg). This is what makes a recurring task RECUR.
+                self._tasks.begin_wait(owner_id, task.id, WaitKind.UNTIL_TIME, now=now)
+                _log.info("recurring occurrence complete → waiting(until_time)", task_id=task.id)
+            else:
+                self._tasks.complete(owner_id, task.id, now=now)
+                _log.info("task completed", task_id=task.id)
             return
         if outcome.disposition == LegDisposition.WAITING_APPROVAL:
             # A3 gate: the leg recorded a durable proposal and ended (no append). Park the task
@@ -106,6 +127,24 @@ class TaskContinuation:
             _log.info("task waiting(until_time)", task_id=task.id)
         else:
             self._enqueue_next(owner_id, task.id, predecessor, now)  # immediate continuation
+
+    def _recurs(self, owner_id: str, task: Task, *, after: datetime) -> bool:
+        """True iff the task's schedule has a fire strictly AFTER the one that just fired.
+
+        Recomputes ``next_fire_after`` from the schedule's rule + anchor (race-free — independent of
+        the mutable ``next_fire_at`` column the tick advances in a separate txn) relative to
+        ``after`` = this occurrence's fire instant. A recurring rule with a next occurrence →
+        survive; a
+        one-time schedule or an exhausted COUNT/UNTIL rule → ``None`` → terminate. No schedule store
+        wired, or a scheduleless task → not recurring (terminate — the pre-recurrence shape).
+        """
+        if self._schedules is None or task.schedule_id is None:
+            return False
+        try:
+            schedule = self._schedules.get(owner_id, task.schedule_id)
+        except ScheduleNotFoundError:
+            return False  # the schedule is gone (deleted/compensated) → nothing to recur on
+        return next_fire_after(schedule, after=after) is not None
 
     def wait_on_user(self, owner_id: str, task_id: str, *, now: datetime) -> None:
         """Park the task on the user at ZERO cost (a state row, no job). A3/A4 drive this.

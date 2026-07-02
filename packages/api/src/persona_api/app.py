@@ -330,6 +330,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # shutdown (S08-4 single worker; the startup sweep reconciles orphaned
     # ``running`` rows on next boot — T3, D-P1-restart-sweep).
     chat_turn_sink = MessagesTurnSink(rls_engine) if rls_engine is not None else None
+    # Spec A4 (composition-root activation): the WORKER side of the contract flow. Built together
+    # with the loop-side interpreters (runtime_factory) so a confirmed contract that emits
+    # ``task_originated`` is actually created (idempotent + failure-visible) and steering actually
+    # steers (cancel-failure surfaces an un-suppressible account). Gated on a real engine +
+    # memory backend (the C0 originator needs both); ``None`` in unit/community-keyless paths →
+    # the loop's A4 gates run but the worker no-ops, exactly the pre-activation posture.
+    origination_service = None
+    task_steering_service = None
+    if rls_engine is not None and memory_backend is not None:
+        from persona_api.services.task_origination_composition import (
+            compose_task_origination_services,
+        )
+
+        _a4_services = compose_task_origination_services(
+            rls_engine=rls_engine,
+            memory_backend=memory_backend,
+            edition=config.edition,
+            audit_root=app.state.audit_root,
+        )
+        origination_service = _a4_services.origination
+        task_steering_service = _a4_services.steering
     chat_turn_registry = (
         ChatTurnRegistry(
             sink=chat_turn_sink,
@@ -337,6 +358,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             credits_policy=app.state.credits_policy,
             credits_per_turn=config.credits_per_turn,
             job_queue=app.state.job_queue,
+            origination_service=origination_service,
+            task_steering_service=task_steering_service,
         )
         if chat_turn_sink is not None and rls_engine is not None
         else None
@@ -467,6 +490,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             embedder=app.state.embedder,
             tier_registry=_worker_tier_registry,
             audit_root=app.state.audit_root,
+            # Spec A4 (composition-root activation): the task-leg tenant + digest hook. The leg
+            # runner is the SAME AgenticLoop the chat path uses (the no-bypass guarantee); the
+            # digest publisher rides the real C0 sender. ``memory_backend`` present → digest is
+            # live; absent → the leg still runs, updates are simply not delivered.
+            runtime_factory=runtime_factory,
+            memory_backend=memory_backend,
         )
     app.state.in_process_worker = in_process_worker
 

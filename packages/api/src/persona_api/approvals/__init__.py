@@ -26,7 +26,9 @@ from persona_api.approvals.failure import (
     FailureAccount,
     FailureKind,
     account_for_budget_pause,
+    account_for_cancel_failure,
     account_for_expired_approval,
+    account_for_origination_failure,
     account_for_stuck,
     all_failure_kinds_have_a_builder,
 )
@@ -79,6 +81,8 @@ __all__ = [
     "SweepResult",
     "account_for_budget_pause",
     "account_for_expired_approval",
+    "account_for_cancel_failure",
+    "account_for_origination_failure",
     "account_for_stuck",
     "all_failure_kinds_have_a_builder",
     "bypasses_cap",

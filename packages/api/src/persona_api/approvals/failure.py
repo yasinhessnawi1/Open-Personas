@@ -32,7 +32,9 @@ __all__ = [
     "FailureAccount",
     "FailureKind",
     "account_for_budget_pause",
+    "account_for_cancel_failure",
     "account_for_expired_approval",
+    "account_for_origination_failure",
     "account_for_stuck",
     "all_failure_kinds_have_a_builder",
 ]
@@ -45,6 +47,8 @@ class FailureKind(StrEnum):
     TASK_STUCK = "task_stuck"
     BUDGET_PAUSE = "budget_pause"
     EXPIRED_APPROVAL = "expired_approval"
+    ORIGINATION_FAILED = "origination_failed"  # Spec A4 — a confirmed contract failed to create
+    CANCEL_FAILED = "cancel_failed"  # Spec A4 — a requested cancel left the task still active
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,42 @@ def account_for_expired_approval(proposal: ActionProposal) -> FailureAccount:
     )
 
 
+def account_for_origination_failure(task_id: str, *, cause: str) -> FailureAccount:
+    """Voice a failed task creation (Spec A4) — the user confirmed, but the create did not land.
+
+    The load-bearing half of A4-D-X's failure-visibility: a confirmed contract that creates
+    nothing must never be silent. ``MessagePriority.FAILURE`` is a cadence-bypass class, so this
+    reaches the user regardless of any digest/cadence setting (including a ``quiet`` preference).
+    """
+    return FailureAccount(
+        kind=FailureKind.ORIGINATION_FAILED,
+        task_id=task_id,
+        headline="I couldn't set up the task you just confirmed.",
+        cause=cause.strip() or "the task couldn't be created just now",
+        options=("ask me to set it up again", "tell me to leave it for now"),
+        priority=MessagePriority.FAILURE,
+    )
+
+
+def account_for_cancel_failure(task_id: str, *, cause: str) -> FailureAccount:
+    """Voice a cancel that did NOT take (Spec A4) — the task is still active, so say so.
+
+    The cancel-side of A4-D-X's visibility: the persona already acknowledged the cancel in chat,
+    so if the mutation failed the task would otherwise keep running silently — exactly the
+    false-confirmation this account prevents. ``MessagePriority.FAILURE`` is a cadence-bypass
+    class, so it reaches the user regardless of any digest setting. A cancel of an
+    already-terminal task is a benign no-op (no account); only a *still-active* task lands here.
+    """
+    return FailureAccount(
+        kind=FailureKind.CANCEL_FAILED,
+        task_id=task_id,
+        headline="I couldn't cancel that task — it's still running.",
+        cause=cause.strip() or "the cancel didn't go through just now",
+        options=("ask me to cancel it again", "pause it instead"),
+        priority=MessagePriority.FAILURE,
+    )
+
+
 #: Every :class:`FailureKind` MUST have a builder here — the no-silent-failure closure. Builders
 #: take different inputs, so this maps to a presence marker the matrix test enumerates; the
 #: typed builders above are the real constructors.
@@ -124,6 +164,8 @@ _BUILDERS: Mapping[FailureKind, Callable[..., FailureAccount]] = {
     FailureKind.TASK_STUCK: account_for_stuck,
     FailureKind.BUDGET_PAUSE: account_for_budget_pause,
     FailureKind.EXPIRED_APPROVAL: account_for_expired_approval,
+    FailureKind.ORIGINATION_FAILED: account_for_origination_failure,
+    FailureKind.CANCEL_FAILED: account_for_cancel_failure,
 }
 
 

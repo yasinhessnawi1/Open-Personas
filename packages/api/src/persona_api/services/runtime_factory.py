@@ -70,10 +70,16 @@ if TYPE_CHECKING:
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
+    from persona.tasks.reader import TaskStateReader
     from persona.tools.mcp.catalog import MCPCatalog
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import GraphContext
+    from persona_runtime.task_origination import (
+        AmendmentInterpreter,
+        StandingIntentRecognizer,
+        SteeringInterpreter,
+    )
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
@@ -533,6 +539,18 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                 )
             )
+        # Spec A4 (A4-D-5) — the read-only ``task_introspect`` tool: the persona's only window
+        # onto its own standing tasks, grounded in typed state (no transcripts → no confabulated
+        # progress). The reader is resolved per dispatch from the RLS ``current_user_id`` contextvar
+        # so it is owner-scoped and fails closed off-request; the persona allow-list still gates it.
+        from persona.tools.builtin.task_introspection import make_task_introspection_tool
+
+        extra.append(
+            make_task_introspection_tool(
+                reader_provider=self._build_task_reader_provider(),
+                persona_id=persona.persona_id,
+            )
+        )
         # Spec 27 (D-27-3) — lazily spawn the built-in MCP servers THIS persona
         # references (mcp:<server>:) and hand their loopback URLs to the factory.
         # A persona that uses no built-in MCP spawns nothing.
@@ -804,6 +822,70 @@ class RuntimeFactory:
 
     # -- the closures the routes call ---------------------------------------
 
+    def _build_task_origination(
+        self,
+    ) -> tuple[
+        StandingIntentRecognizer | None,
+        AmendmentInterpreter | None,
+        SteeringInterpreter | None,
+    ]:
+        """Build the A4 loop-side interpreters (standing recognizer + amendment + steering).
+
+        The precision layer of the contract flow (A4-D-2/T9/T9b) — all three share one small-tier
+        backend. **Fail-soft** (the text_summarize precedent): if the small backend is unavailable
+        (keyless env / no tier), returns ``(None, None, None)`` so the loop's A4 gates stay inert
+        and ordinary chat is byte-unchanged — never a construction failure.
+        """
+        if self._tier_registry is None:
+            return None, None, None
+        try:
+            backend = self._tier_registry.get("small")
+        except (ProviderError, TierNotConfiguredError) as exc:
+            _logger.warning(
+                "task origination not wired — small-tier backend unavailable: {error}",
+                error=type(exc).__name__,
+            )
+            return None, None, None
+        from persona_runtime.task_origination import (
+            ModelAmendmentInterpreter,
+            ModelStandingIntentJudge,
+            ModelSteeringInterpreter,
+            StandingIntentRecognizer,
+        )
+
+        recognizer = StandingIntentRecognizer(
+            ModelStandingIntentJudge(
+                backend=backend, default_timezone=self._core_config.default_timezone
+            )
+        )
+        return (
+            recognizer,
+            ModelAmendmentInterpreter(backend=backend),
+            ModelSteeringInterpreter(backend=backend),
+        )
+
+    def _build_task_reader_provider(self) -> Callable[[], TaskStateReader | None]:
+        """The owner-scoped task-state reader provider (Spec A4, T7 + composition-root wiring).
+
+        Shared by the ``task_introspect`` tool and the loop's steering gate — both resolve the
+        caller's reader at dispatch from the RLS ``current_user_id`` contextvar (owner-scoped,
+        fail-closed off-request). The stores are engine-scoped, built once per provider.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.tasks.reader import APITaskStateReader
+        from persona_api.tasks.store import CheckpointStore, TaskStore
+
+        task_store = TaskStore(self._engine)
+        checkpoint_store = CheckpointStore(self._engine)
+
+        def _provider() -> TaskStateReader | None:
+            owner = current_user_id.get()
+            if not owner:
+                return None
+            return APITaskStateReader(task_store, checkpoint_store, owner)
+
+        return _provider
+
     async def build_conversation_loop(self, persona_id: str) -> ConversationLoop:
         """Construct the ConversationLoop for ``persona_id`` (KEYSTONE 1, T08).
 
@@ -827,6 +909,7 @@ class RuntimeFactory:
         )
         from persona_runtime.wellbeing import surfacing_guidance as wellbeing_surfacing_guidance
 
+        recognizer, amendment_interpreter, steering_interpreter = self._build_task_origination()
         loop = ConversationLoop(
             persona=persona,
             stores=self._build_stores(),
@@ -863,6 +946,16 @@ class RuntimeFactory:
             graph_surfacing_guidance=(
                 wellbeing_surfacing_guidance if self._graph_store is not None else None
             ),
+            # Spec A4 (composition-root activation): the contract flow's loop-side. The recognizer
+            # + amendment/steering interpreters are the small-tier precision layer (fail-soft: None
+            # in a keyless env → the gates stay inert, chat byte-unchanged). This lands TOGETHER
+            # with the worker-side OriginationService/TaskSteeringService (app.py) so a confirmed
+            # contract that emits ``task_originated`` is actually created — never a false
+            # "I've set that up". The reader powers grounded introspection + steering resolution.
+            standing_recognizer=recognizer,
+            amendment_interpreter=amendment_interpreter,
+            steering_interpreter=steering_interpreter,
+            task_reader_provider=self._build_task_reader_provider(),
         )
         # Replace the loop's default-empty deferred_input_files with the
         # SHARED holder (same identity), so the use_skill intercept's
