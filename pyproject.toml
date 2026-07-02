@@ -116,6 +116,12 @@ ignore = ["COM812"]
 # or `@pytest.mark.usefixtures` (doesn't apply when the test consumes the
 # fixture's return value). The ARG001 is intentional, not a leftover.
 "packages/voice/tests/integration/**" = ["B008", "TC001", "TC002", "TC003", "ARG001"]
+# persona-connectors email adapter (spec C5) — the package is named `email` to match
+# the platform key (the C-track convention: package == platform, like telegram/sms).
+# It shadows the stdlib `email` module by NAME only (A005): Python 3 absolute imports
+# mean `import email` inside the package still resolves to the stdlib top-level module,
+# so there is no real runtime shadow — the collision is cosmetic and intentional.
+"packages/connectors/src/persona_connectors/email/**" = ["A005"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -139,6 +145,13 @@ disallow_incomplete_defs = true
 # its missing imports rather than vendoring stubs for a third-party lib.
 [[tool.mypy.overrides]]
 module = ["pgvector.*"]
+ignore_missing_imports = true
+
+# mail-parser-reply (Spec C5 D-C5-4) — the pure-Python email reply-parser (MIT, zero deps)
+# ships no py.typed marker, so it has no type stubs; ignore its missing imports (the module
+# is thin + wrapped behind persona_connectors.email.parsing).
+[[tool.mypy.overrides]]
+module = ["mailparser_reply", "mailparser_reply.*"]
 ignore_missing_imports = true
 
 # turbovec (Spec K0 optional [turbovec] extra) is a Rust/PyO3 lib with no py.typed

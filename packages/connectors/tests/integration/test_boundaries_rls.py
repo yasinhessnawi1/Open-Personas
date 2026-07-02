@@ -112,6 +112,74 @@ def test_idle_sweep_ends_stale_clears_pointer_spares_recent(
     assert _active(app_engine, channel="c2") == "pa"
 
 
+def _status(engine: Engine, *, platform: str, channel: str, persona: str = "pa") -> str | None:
+    tok = current_user_id.set("user_a")
+    try:
+        with engine.begin() as conn:
+            return conn.execute(
+                text(
+                    "SELECT status FROM connector_conversations WHERE owner_id='user_a' "
+                    "AND platform=:pl AND channel_key=:c AND persona_id=:p"
+                ),
+                {"pl": platform, "c": channel, "p": persona},
+            ).scalar()
+    finally:
+        current_user_id.reset(tok)
+
+
+def _age(engine: Engine, *, platform: str, channel: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE connector_conversations SET last_activity_at = now() - interval '2 hours' "
+                "WHERE owner_id='user_a' AND platform=:pl AND channel_key=:c"
+            ),
+            {"pl": platform, "c": channel},
+        )
+
+
+def test_idle_sweep_empty_exclusion_sweeps_every_platform(
+    app_engine: Engine, migrated_engine: Engine
+) -> None:
+    """Spec C5 D-C5-2 (the C2/C3/C4 additive guarantee): an EMPTY ``exclude_platforms``
+    sweeps every platform byte-for-byte — ``<> ALL(ARRAY[]::text[])`` is vacuously TRUE,
+    so chat's behavior is unchanged by the new parameter."""
+    store = _store(app_engine, migrated_engine)
+    store.foreground(owner_id="user_a", platform="telegram", channel_key="c1", persona_id="pa")
+    store.foreground(owner_id="user_a", platform="email", channel_key="t-root-1", persona_id="pa")
+    _age(migrated_engine, platform="telegram", channel="c1")
+    _age(migrated_engine, platform="email", channel="t-root-1")
+
+    ended = store.sweep_idle_conversations(
+        now=datetime.now(UTC), idle_after=_TIMEOUT, exclude_platforms=()
+    )
+
+    assert ended == 2  # noqa: PLR2004 — both platforms swept; empty exclusion changes nothing
+    assert _status(app_engine, platform="telegram", channel="c1") == "ended"
+    assert _status(app_engine, platform="email", channel="t-root-1") == "ended"
+
+
+def test_idle_sweep_excludes_named_platform_email_thread_survives(
+    app_engine: Engine, migrated_engine: Engine
+) -> None:
+    """Spec C5 D-C5-2 (criterion 2): email opts out of the idle sweep — an idle email
+    thread SURVIVES (so a reply hours/days later continues it), while non-excluded
+    platforms still sweep. This is the platform-native-boundary seam made real."""
+    store = _store(app_engine, migrated_engine)
+    store.foreground(owner_id="user_a", platform="telegram", channel_key="c1", persona_id="pa")
+    store.foreground(owner_id="user_a", platform="email", channel_key="t-root-1", persona_id="pa")
+    _age(migrated_engine, platform="telegram", channel="c1")
+    _age(migrated_engine, platform="email", channel="t-root-1")
+
+    ended = store.sweep_idle_conversations(
+        now=datetime.now(UTC), idle_after=_TIMEOUT, exclude_platforms={"email"}
+    )
+
+    assert ended == 1  # only the non-excluded telegram slot
+    assert _status(app_engine, platform="telegram", channel="c1") == "ended"
+    assert _status(app_engine, platform="email", channel="t-root-1") == "active"  # survives
+
+
 def test_foreground_after_idle_end_starts_fresh(
     app_engine: Engine, migrated_engine: Engine
 ) -> None:

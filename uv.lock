@@ -2120,6 +2120,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mail-parser-reply"
+version = "1.36"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/8b/fc0eaa365f9509e3761beb933d5964eec3f133225c3d081290a511395464/mail_parser_reply-1.36.tar.gz", hash = "sha256:7f451c583c6c599bc933531a6f783fe4d1a26447ebd40382678417dbb92e100e", size = 14412 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/5d/99bd9fb9556c54a66860ead493b9d9d77cc8d7a2c52aa76d995c50b73373/mail_parser_reply-1.36-py3-none-any.whl", hash = "sha256:81395a4d8a0858509c875e6bbb7b004d53d70c7cd92204fe34a9926c55e4ef03", size = 12279 },
+]
+
+[[package]]
 name = "mako"
 version = "1.3.12"
 source = { registry = "https://pypi.org/simple" }
@@ -3137,6 +3146,7 @@ source = { editable = "packages/connectors" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "mail-parser-reply" },
     { name = "persona-api" },
     { name = "persona-core", extra = ["postgres"] },
     { name = "persona-runtime" },
@@ -3148,6 +3158,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "mail-parser-reply", specifier = ">=1.36,<2" },
     { name = "persona-api", editable = "packages/api" },
     { name = "persona-core", extras = ["postgres"], editable = "packages/core" },
     { name = "persona-runtime", editable = "packages/runtime" },

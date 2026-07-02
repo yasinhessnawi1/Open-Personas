@@ -40,6 +40,7 @@ __all__ = [
     "Ambiguous",
     "NoName",
     "parse_addressed_persona",
+    "resolve_persona_tag",
 ]
 
 
@@ -109,6 +110,44 @@ def parse_addressed_persona(
         persona_id
         for persona_id, names in persona_names.items()
         if any(_addresses(text, name) for name in names)
+    }
+    if not matched:
+        return NoName()
+    if len(matched) == 1:
+        return Addressed(persona_id=next(iter(matched)))
+    return Ambiguous(candidate_persona_ids=sorted(matched))
+
+
+def _slug(value: str) -> str:
+    """A name's comparison slug — casefold, alphanumerics only (``Dr. Hansen`` → ``drhansen``)."""
+    return "".join(ch for ch in value.casefold() if ch.isalnum())
+
+
+def resolve_persona_tag(
+    tag: str, *, persona_names: Mapping[str, Sequence[str]]
+) -> AddressingResult:
+    """Resolve an envelope-supplied persona tag to a persona (Spec C5, D-C5-3).
+
+    The deterministic, ambiguity-free counterpart of :func:`parse_addressed_persona`
+    for platforms that put the persona in the **envelope**, not the prose — email
+    plus-addressing (``inbound+astrid@…`` → the ESP's ``MailboxHash`` = ``astrid``).
+    The tag matches a persona iff its :func:`_slug` equals one of the persona's
+    addressable-name slugs. Exactly one match → :class:`Addressed`; two or more →
+    :class:`Ambiguous` (the flow falls back rather than guess); none (or an empty
+    tag) → :class:`NoName` (the flow falls back to the text parse).
+
+    Matching happens **only within the passed ``persona_names``** — which the flow
+    supplies already owner-scoped (RLS) — so a tag can never reach another owner's
+    persona of the same name (the C1-D-5 ownership discipline applied to envelope
+    routing). Owned surface — api-free; stdlib only.
+    """
+    key = _slug(tag)
+    if not key:
+        return NoName()
+    matched = {
+        persona_id
+        for persona_id, names in persona_names.items()
+        if any(_slug(name) == key for name in names)
     }
     if not matched:
         return NoName()

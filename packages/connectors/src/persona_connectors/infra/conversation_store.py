@@ -37,7 +37,7 @@ from persona_connectors.domain.conversation_model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
     from datetime import datetime, timedelta
 
     from sqlalchemy.engine import Engine
@@ -304,7 +304,13 @@ class PostgresConversationStateStore:
             )
             return conversation_id
 
-    def sweep_idle_conversations(self, *, now: datetime, idle_after: timedelta) -> int:
+    def sweep_idle_conversations(
+        self,
+        *,
+        now: datetime,
+        idle_after: timedelta,
+        exclude_platforms: Collection[str] = (),
+    ) -> int:
         """End every live conversation idle past ``now - idle_after`` (the idle sweep, §3).
 
         Cross-tenant batch (the A0-worker maintenance pattern) — runs on the
@@ -312,6 +318,15 @@ class PostgresConversationStateStore:
         index. Ends each stale slot (``active``/``suspended`` → ``ended``),
         per-persona-per-channel, and clears any channel pointer left pointing at an
         ended slot. Returns the number of conversations ended.
+
+        ``exclude_platforms`` (Spec C5, D-C5-2) lets a platform whose conversation
+        boundary is **native** (email — a thread *is* the conversation) opt out of
+        the idle sweep, so an idle email thread survives and a reply hours/days
+        later continues it (criterion 2). The set is **composition-supplied** — the
+        connector service passes the native-boundary platforms it wired; this store
+        never hardcodes a platform literal (D-08-3). An **empty** set is
+        byte-for-byte today's behavior (``<> ALL(ARRAY[]::text[])`` is vacuously
+        TRUE — every platform still swept), so chat (C2/C3/C4) is unchanged.
 
         Raises:
             RuntimeError: No dispatch engine was provided to the store.
@@ -324,9 +339,10 @@ class PostgresConversationStateStore:
             ended = conn.execute(
                 text(
                     "UPDATE connector_conversations SET status='ended', updated_at=now() "
-                    "WHERE status IN ('active','suspended') AND last_activity_at < :cutoff"
+                    "WHERE status IN ('active','suspended') AND last_activity_at < :cutoff "
+                    "AND platform <> ALL(CAST(:excluded AS text[]))"
                 ),
-                {"cutoff": cutoff},
+                {"cutoff": cutoff, "excluded": list(exclude_platforms)},
             ).rowcount
             # A pointer must never point at an ended slot — clear those.
             conn.execute(

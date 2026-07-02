@@ -23,6 +23,7 @@ from persona_connectors.domain.addressing import (
     Ambiguous,
     NoName,
     parse_addressed_persona,
+    resolve_persona_tag,
 )
 
 _PERSONAS = {"astrid": ["Astrid"], "kai": ["Kai", "K"]}
@@ -100,3 +101,43 @@ def test_two_personas_matched_is_ambiguous() -> None:
     result = parse_addressed_persona("Astrid, Kai", persona_names=_PERSONAS)
     assert isinstance(result, Ambiguous)
     assert set(result.candidate_persona_ids) == {"astrid", "kai"}
+
+
+# --- Spec C5 D-C5-3: envelope persona-tag resolution (plus-addressing) ---
+
+
+def test_resolve_persona_tag_unique_match() -> None:
+    """A plus-address tag resolves to the one persona whose name-slug it equals."""
+    assert resolve_persona_tag("astrid", persona_names=_PERSONAS) == Addressed(persona_id="astrid")
+    assert resolve_persona_tag("Kai", persona_names=_PERSONAS) == Addressed(persona_id="kai")
+
+
+def test_resolve_persona_tag_slug_normalises_case_and_punctuation() -> None:
+    """Casefold + alphanumeric-only slug: 'drhansen' matches 'Dr. Hansen'."""
+    names = {"h": ["Dr. Hansen"], "kai": ["Kai"]}
+    assert resolve_persona_tag("drhansen", persona_names=names) == Addressed(persona_id="h")
+    caps = resolve_persona_tag("ASTRID", persona_names={"a": ["Astrid"]})
+    assert caps == Addressed(persona_id="a")
+
+
+def test_resolve_persona_tag_unknown_or_empty_is_noname() -> None:
+    """An unknown/empty tag → NoName (the flow then falls back to text-parse)."""
+    assert resolve_persona_tag("nobody", persona_names=_PERSONAS) == NoName()
+    assert resolve_persona_tag("", persona_names=_PERSONAS) == NoName()
+
+
+def test_resolve_persona_tag_two_matches_is_ambiguous() -> None:
+    """Two personas sharing the tag slug → Ambiguous (the flow falls back, never guesses)."""
+    result = resolve_persona_tag("astrid", persona_names={"a1": ["Astrid"], "a2": ["astrid"]})
+    assert isinstance(result, Ambiguous)
+    assert set(result.candidate_persona_ids) == {"a1", "a2"}
+
+
+def test_resolve_persona_tag_matches_only_within_passed_names() -> None:
+    """The RLS discipline (pure half): the tag resolves ONLY within the passed map.
+    Two owners' maps each carry an 'Astrid' under DIFFERENT ids — resolving against one
+    map never sees the other's persona (the flow passes an owner-scoped map)."""
+    owner_a = {"astrid_a": ["Astrid"], "kai_a": ["Kai"]}
+    owner_b = {"astrid_b": ["Astrid"]}
+    assert resolve_persona_tag("astrid", persona_names=owner_a) == Addressed(persona_id="astrid_a")
+    assert resolve_persona_tag("astrid", persona_names=owner_b) == Addressed(persona_id="astrid_b")

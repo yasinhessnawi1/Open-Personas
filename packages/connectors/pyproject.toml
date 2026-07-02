@@ -81,6 +81,14 @@ dependencies = [
     # duplicate C1's flow). NOT a new project dependency — websockets is already in
     # the lock via uvicorn[standard]; this just declares the direct use (dep hygiene).
     "websockets>=13,<16",
+    # C5 (email adapter, D-C5-4): email reply-parsing — extract the NEW content from a
+    # reply, stripping quoted history + signatures + disclaimers. Postmark's server-side
+    # `StrippedTextReply` is primary; this is the fallback (imperfect/absent strip, or a
+    # future ESP swap). The ONE genuinely-new project dependency C5 adds — chosen over
+    # `talon` (discontinued + a scikit-learn/numpy ML weight disproportionate to a
+    # connector): `mail-parser-reply` is MIT, PURE-PYTHON, ZERO runtime deps (regex +
+    # multi-language), audited at PyPI 1.36 (2025-12). Pinned to the 1.x line.
+    "mail-parser-reply>=1.36,<2",
 ]
 
 [project.urls]

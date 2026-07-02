@@ -37,7 +37,13 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from persona.schema.origination import PersonaIdentityTag
 from pydantic import BaseModel, ConfigDict, Field
 
-from persona_connectors.domain.addressing import parse_addressed_persona
+from persona_connectors.domain.addressing import (
+    Addressed,
+    AddressingResult,
+    NoName,
+    parse_addressed_persona,
+    resolve_persona_tag,
+)
 from persona_connectors.domain.normalise import NormalisedOutbound
 from persona_connectors.domain.resolution import UnlinkedIdentity
 from persona_connectors.domain.routing import ListAndInstructions, decide_route
@@ -163,7 +169,13 @@ class SharedInboundFlow:
         self._run_turn = run_turn
         self._commands = commands if commands is not None else FlowCommands()
 
-    async def handle_text(self, inbound: NormalisedInbound, *, transport: FlowTransport) -> None:
+    async def handle_text(
+        self,
+        inbound: NormalisedInbound,
+        *,
+        transport: FlowTransport,
+        envelope_persona_tag: str | None = None,
+    ) -> None:
         """Run a normalised text inbound through resolve → route → turn → send.
 
         Ownership holds exactly as on the web: an unlinked identity gets a
@@ -171,6 +183,12 @@ class SharedInboundFlow:
         only ever touches their own personas (the injected callables + the store run
         RLS-scoped to that owner). ``inbound.platform`` keys the store (never branched
         on — D-08-3); the transport owns presentation.
+
+        ``envelope_persona_tag`` (Spec C5, D-C5-3) lets a platform that selects the
+        persona in the **envelope** (email plus-addressing — the ESP's ``MailboxHash``)
+        supply that selection: a UNIQUE, owner-scoped tag resolution wins over the text
+        parse; anything else (no tag / unknown / ambiguous) falls back to parsing the
+        body. ``None`` (every non-email adapter) is byte-for-byte today's routing.
         """
         platform = inbound.platform
         chat = inbound.conversation_key
@@ -208,7 +226,16 @@ class SharedInboundFlow:
             return
 
         # 4. Route (C1's decision) → drive a persona, or list-and-instructions.
-        addressing = parse_addressed_persona(inbound.text, persona_names=names)
+        #    A unique envelope tag (D-C5-3, email plus-address) selects the persona
+        #    deterministically; else fall back to parsing the body. Resolution is
+        #    owner-scoped — `names` is this owner's personas only (never cross-owner).
+        addressing: AddressingResult = NoName()
+        if envelope_persona_tag is not None:
+            tag_result = resolve_persona_tag(envelope_persona_tag, persona_names=names)
+            if isinstance(tag_result, Addressed):
+                addressing = tag_result
+        if isinstance(addressing, NoName):
+            addressing = parse_addressed_persona(inbound.text, persona_names=names)
         active = self._store.current_foreground(
             owner_id=owner_id, platform=platform, channel_key=chat
         )

@@ -22,6 +22,8 @@ __all__ = [
     "DiscordRateLimitError",
     "IdentityNotLinkedError",
     "LinkTokenInvalidError",
+    "PostmarkApiError",
+    "PostmarkRateLimitError",
     "SlackApiError",
     "SlackRateLimitError",
     "TelegramApiError",
@@ -124,6 +126,29 @@ class TwilioRateLimitError(TwilioApiError):
     :class:`~persona.delivery.DeliveryResult` ``pending`` (retryable —
     D-C1-X-platform-rejection), never a silent drop. A subclass of
     :class:`TwilioApiError` so a generic catch still maps a rejection to a result.
+    """
+
+
+class PostmarkApiError(ConnectorError):
+    """A Postmark API call failed (Spec C5 — the email adapter-boundary domain error).
+
+    Postmark's transport faults (HTTP errors, network failures) and logical rejections
+    (a non-2xx, or a 200 with a non-zero ``ErrorCode``) are caught at the client boundary
+    and re-raised as this domain error (catch-at-the-boundary). The **server token** rides
+    in the ``X-Postmark-Server-Token`` header; the underlying ``httpx`` exception is never
+    chained or quoted (``raise … from None``) so the token never reaches a traceback — the
+    ``context`` carries only the method + status + Postmark ``ErrorCode``. Postmark's own
+    ``Message`` text is safe to surface (no secret). The connector maps this to a
+    :class:`~persona.delivery.DeliveryResult` ``failed`` (never a silent drop).
+    """
+
+
+class PostmarkRateLimitError(PostmarkApiError):
+    """Postmark throttled the account (HTTP 429) — back off and retry (Spec C5).
+
+    The send path maps this to a :class:`~persona.delivery.DeliveryResult` ``pending``
+    (retryable — D-C1-X-platform-rejection), never a silent drop. A subclass of
+    :class:`PostmarkApiError` so a generic catch still maps a rejection to a result.
     """
 
 

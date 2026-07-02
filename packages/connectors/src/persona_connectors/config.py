@@ -206,3 +206,22 @@ class ConnectorConfig(BaseSettings):
     # GSM-7 / 67-char UCS-2 parts a single reply may span before it is split into
     # separate messages. A tight default keeps replies cheap + readable.
     sms_max_segments: int = Field(default=3, gt=0)
+
+    # --- Email (Spec C5) ---------------------------------------------------------------
+    # The Postmark SERVER token — the send credential (``SecretStr``, never logged;
+    # unwrapped only at the request header). The email channel is enabled iff this AND
+    # ``email_inbound_address`` are set.
+    postmark_server_token: SecretStr | None = Field(default=None)
+    # The shared inbound address personas are reached at + sent from (the ``From``; the
+    # persona rides in its display-name). Plus-addressing (``inbound+astrid@``) selects the
+    # persona (D-C5-3). Empty until the email channel is configured.
+    email_inbound_address: str = Field(default="")
+    # The HTTP Basic-Auth credential the Postmark inbound webhook is configured with (B1,
+    # D-C5-5): validate-before-parse, fail-closed when unset. ``SecretStr`` for the password.
+    postmark_webhook_username: str = Field(default="")
+    postmark_webhook_password: SecretStr | None = Field(default=None)
+    # The Postmark API base (overridable for a faithful stub in tests / a local proxy).
+    postmark_api_base_url: str = Field(default="https://api.postmarkapp.com")
+    # The email-link token TTL (the email-address verification flow, D-C5-X-verification-
+    # carrier). Short-lived + single-use (C1-D-5); a stale code fails closed (regenerate).
+    email_link_token_ttl_minutes: int = Field(default=15, gt=0)

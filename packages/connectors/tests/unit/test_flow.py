@@ -256,3 +256,78 @@ async def test_no_name_no_active_multiple_personas_lists() -> None:
 def test_delivery_result_helper_imported() -> None:
     """Guard: the fake connector's outcome type stays importable (paranoia)."""
     assert DeliveryResult(outcome=DeliveryOutcome.DELIVERED, channel="x").channel == "x"
+
+
+# --- Spec C5 A2: the envelope-persona seam (plus-addressing) ---
+
+
+def _owner_flow(
+    *, owner_id: str, names_by_owner: dict[str, dict[str, list[str]]]
+) -> tuple[SharedInboundFlow, _FakeStore, _TurnRunner]:
+    store = _FakeStore()
+    turn = _TurnRunner()
+    flow = SharedInboundFlow(
+        resolver=_FakeResolver(ResolvedIdentity(owner_id=owner_id)),
+        conversation_store=store,  # type: ignore[arg-type]
+        list_persona_names=lambda owner: names_by_owner[owner],
+        run_turn=turn,
+        commands=_TELEGRAM_COMMANDS,
+    )
+    return flow, store, turn
+
+
+@pytest.mark.asyncio
+async def test_envelope_tag_routes_within_the_addressed_owner_only() -> None:
+    """Spec C5 D-C5-3 — the RLS security proof, NON-VACUOUS: two owners each have an
+    'Astrid' under DIFFERENT persona ids; the envelope tag resolves ONLY within the
+    RESOLVED owner's loaded names, so owner A's inbound reaches A's Astrid and owner B's
+    reaches B's — never a cross-owner bind to the wrong persona named the same."""
+    names_by_owner = {
+        "user_a": {"astrid_a": ["Astrid"], "kai_a": ["Kai"]},
+        "user_b": {"astrid_b": ["Astrid"]},
+    }
+    flow_a, store_a, turn_a = _owner_flow(owner_id="user_a", names_by_owner=names_by_owner)
+    await flow_a.handle_text(
+        _inbound("hello"), transport=_FakeTransport(), envelope_persona_tag="astrid"
+    )
+    assert store_a.foregrounded == ["astrid_a"]  # A's Astrid — never B's
+    assert turn_a.requests[0].persona_id == "astrid_a"
+
+    flow_b, store_b, turn_b = _owner_flow(owner_id="user_b", names_by_owner=names_by_owner)
+    await flow_b.handle_text(
+        _inbound("hello"), transport=_FakeTransport(), envelope_persona_tag="astrid"
+    )
+    assert store_b.foregrounded == ["astrid_b"]  # the same tag, B's persona
+    assert turn_b.requests[0].persona_id == "astrid_b"
+
+
+@pytest.mark.asyncio
+async def test_envelope_tag_overrides_text_parse() -> None:
+    """A unique envelope tag selects the persona even when the body names another —
+    the deterministic envelope wins over prose (plus-addressing primary, D-C5-3)."""
+    flow, transport, store, turn = _flow()
+    await flow.handle_text(
+        _inbound("Kai, hello"), transport=transport, envelope_persona_tag="astrid"
+    )
+    assert store.foregrounded == ["astrid"]  # the envelope tag, not the "Kai" in the text
+    assert turn.requests[0].persona_id == "astrid"
+
+
+@pytest.mark.asyncio
+async def test_unknown_envelope_tag_falls_back_to_text_parse() -> None:
+    """An unresolvable tag falls back to text-parse — no silent misroute."""
+    flow, transport, store, turn = _flow()
+    await flow.handle_text(
+        _inbound("Kai, hello"), transport=transport, envelope_persona_tag="ghost"
+    )
+    assert store.foregrounded == ["kai"]  # fell back to the "Kai" in the text
+
+
+@pytest.mark.asyncio
+async def test_none_envelope_tag_is_todays_chat_behavior() -> None:
+    """None tag (every non-email adapter passes None / omits it) → the existing
+    text-parse routing, byte-for-byte unchanged (the additive guarantee)."""
+    flow, transport, store, turn = _flow()
+    await flow.handle_text(_inbound("Kai, hello"), transport=transport, envelope_persona_tag=None)
+    assert store.foregrounded == ["kai"]
+    assert turn.requests[0].persona_id == "kai"

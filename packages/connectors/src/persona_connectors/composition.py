@@ -30,6 +30,7 @@ from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import persona_service
 from persona_api.services.chat_service import _load_conversation
 from persona_api.services.delivery_router import DeliveryRouter
+from sqlalchemy import text as _sql
 
 from persona_connectors.errors import ConnectorError
 
@@ -183,6 +184,31 @@ def build_persona_name_lister(
         return names
 
     return list_persona_names
+
+
+def build_email_recipient_resolver(
+    *, rls_engine: Engine, owner_scope: Callable[[str], contextlib.AbstractContextManager[None]]
+) -> Callable[[str], str | None]:
+    """Build the email connector's ``recipient_for`` (owner-scoped) — Spec C5, Group E.
+
+    Maps ``owner_id`` → the owner's linked email address (their active
+    ``connector_identities`` row for ``platform='email'``), RLS-scoped via ``owner_scope`` —
+    the recipient for a C0-originated email. ``None`` when the owner has no linked email
+    (→ the connector reports ``pending``, never a lost message).
+    """
+
+    def recipient_for(owner_id: str) -> str | None:
+        with owner_scope(owner_id), rls_engine.begin() as conn:
+            row = conn.execute(
+                _sql(
+                    "SELECT platform_identity FROM connector_identities "
+                    "WHERE owner_id = :o AND platform = 'email' AND status = 'active' LIMIT 1"
+                ),
+                {"o": owner_id},
+            ).scalar()
+        return row if isinstance(row, str) else None
+
+    return recipient_for
 
 
 def build_reply_runner(

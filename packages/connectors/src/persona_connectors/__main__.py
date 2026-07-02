@@ -39,17 +39,21 @@ from persona_runtime.tier import tier_registry_from_env
 from websockets.asyncio.client import connect as ws_connect
 
 from persona_connectors import discord as discord_adapter
+from persona_connectors import email as email_adapter
 from persona_connectors import slack as slack_adapter
 from persona_connectors import sms as sms_adapter
 from persona_connectors import whatsapp as whatsapp_adapter
 from persona_connectors._phone.flow import PhoneInboundFlow
 from persona_connectors._phone.linking import PhoneLinkingService
+from persona_connectors._postmark.client import PostmarkClient
+from persona_connectors._postmark.webhook import PostmarkWebhookAuth
 from persona_connectors._twilio.app import build_twilio_app
 from persona_connectors._twilio.client import TwilioClient
 from persona_connectors._twilio.status import map_delivery, parse_status_callback
 from persona_connectors.composition import (
     ConnectorComposition,
     build_delivery_router,
+    build_email_recipient_resolver,
     build_persona_name_lister,
     build_reply_runner,
 )
@@ -57,6 +61,10 @@ from persona_connectors.config import ConnectorConfig
 from persona_connectors.domain.flow import SharedInboundFlow
 from persona_connectors.domain.linking import LinkingService
 from persona_connectors.domain.resolution import InboundIdentityResolver
+from persona_connectors.email.app import build_email_app
+from persona_connectors.email.connector import EmailConnector
+from persona_connectors.email.flow import EmailInboundFlow
+from persona_connectors.email.linking import EmailLinkingService
 from persona_connectors.errors import ConnectorError
 from persona_connectors.infra import PostgresConversationStateStore, PostgresLinkStore
 from persona_connectors.sms.cost import record_sms_cost
@@ -72,7 +80,14 @@ from persona_connectors.telegram import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import (
+        Awaitable,
+        Callable,
+        Collection,
+        Coroutine,
+        Mapping,
+        Sequence,
+    )
 
     from fastapi import FastAPI
     from persona.delivery import MessageDeliverer
@@ -113,12 +128,23 @@ def _build_runtime_factory(api_config: APIConfig, rls_engine: Engine) -> Runtime
     )
 
 
-async def _run_idle_sweep(store: PostgresConversationStateStore, idle_after: timedelta) -> None:
-    """Periodically end genuinely-idle conversations (the lazy-expiry backstop, §3)."""
+async def _run_idle_sweep(
+    store: PostgresConversationStateStore,
+    idle_after: timedelta,
+    exclude_platforms: Collection[str] = (),
+) -> None:
+    """Periodically end genuinely-idle conversations (the lazy-expiry backstop, §3).
+
+    ``exclude_platforms`` (Spec C5, D-C5-2) is the set of native-boundary platforms
+    (email) that opt out of the sweep — their conversation boundary is the thread,
+    not idleness. Composition-supplied; empty = today's behavior (all swept).
+    """
     while True:
         await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
         try:
-            ended = store.sweep_idle_conversations(now=datetime.now(UTC), idle_after=idle_after)
+            ended = store.sweep_idle_conversations(
+                now=datetime.now(UTC), idle_after=idle_after, exclude_platforms=exclude_platforms
+            )
             if ended:
                 _log.info("idle sweep ended {count} conversation(s)", count=ended)
         except Exception as exc:  # noqa: BLE001 — a sweep fault must not kill the service
@@ -425,6 +451,61 @@ async def _setup_sms(
     )
 
 
+async def _setup_email(
+    *,
+    config: ConnectorConfig,
+    token: SecretStr,
+    http: httpx.AsyncClient,
+    linking_service: LinkingService,
+    resolver: InboundIdentityResolver,
+    conversation_store: ConversationStateStore,
+    list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
+    run_turn: Callable[[TurnRequest], Awaitable[str]],
+    rls_engine: Engine,
+    owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+) -> tuple[MessageDeliverer, FastAPI]:
+    """Assemble the email adapter → (deliverer, the Postmark webhook + issue app, Spec C5)."""
+    client = PostmarkClient(
+        server_token=token, http=http, api_base_url=config.postmark_api_base_url
+    )
+    connector = EmailConnector(
+        client=client,
+        from_address=config.email_inbound_address,
+        recipient_for=build_email_recipient_resolver(
+            rls_engine=rls_engine, owner_scope=owner_scope
+        ),
+    )
+    email_linking = EmailLinkingService(linking=linking_service)
+    shared = SharedInboundFlow(
+        resolver=resolver,
+        conversation_store=conversation_store,
+        list_persona_names=list_persona_names,
+        run_turn=run_turn,
+    )
+    flow = EmailInboundFlow(connector=connector, linking=email_linking, shared=shared, now=_now)
+    ttl = timedelta(minutes=config.email_link_token_ttl_minutes)
+
+    async def issue_code(owner_id: str) -> str:
+        return email_linking.issue_code(owner_id=owner_id, now=_now(), ttl=ttl)
+
+    # B1 fail-closed: no configured Basic-Auth credential → every inbound is rejected.
+    webhook_auth = (
+        PostmarkWebhookAuth(
+            username=config.postmark_webhook_username, password=config.postmark_webhook_password
+        )
+        if config.postmark_webhook_password is not None
+        else None
+    )
+    app = build_email_app(
+        webhook_auth=webhook_auth,
+        on_inbound=flow.handle,
+        issue_code=issue_code,
+        verify_jwt=make_jwt_verifier(config),
+        now=_now,
+    )
+    return connector, app
+
+
 def _build_phone_app(
     *,
     config: ConnectorConfig,
@@ -566,6 +647,24 @@ async def _amain() -> None:
             deliverers["sms"] = connector
             http_apps["sms"] = app
 
+    # Email (Spec C5) — enabled when the Postmark token + inbound address are set. The
+    # webhook app namespaces its routes by ``/email/…`` (no collision with the phone apps).
+    if config.postmark_server_token is not None and config.email_inbound_address:
+        connector, app = await _setup_email(
+            config=config,
+            token=config.postmark_server_token,
+            http=http,
+            linking_service=linking_service,
+            resolver=resolver,
+            conversation_store=conversation_store,
+            list_persona_names=list_persona_names,
+            run_turn=run_turn,
+            rls_engine=rls_engine,
+            owner_scope=composition.owner_scope,
+        )
+        deliverers["email"] = connector
+        http_apps["email"] = app
+
     if not deliverers:
         raise ConnectorError(
             "no connector configured — set at least one platform's bot token "
@@ -594,7 +693,12 @@ async def _amain() -> None:
     )
 
     idle_after = timedelta(minutes=config.idle_timeout_minutes)
-    sweep = asyncio.create_task(_run_idle_sweep(conversation_store, idle_after))
+    # Native-boundary platforms (email — the thread IS the conversation) opt out of the idle
+    # sweep (Spec C5, D-C5-2): composition supplies the set from the registered
+    # native-boundary connectors (email), so the framework store never hardcodes a platform
+    # literal (D-08-3). Empty when email isn't configured ⇒ every platform swept (today).
+    exclude_platforms = {email_adapter.PLATFORM} & set(deliverers)
+    sweep = asyncio.create_task(_run_idle_sweep(conversation_store, idle_after, exclude_platforms))
     _log.info("connector service starting for: {platforms}", platforms=", ".join(deliverers))
     try:
         await asyncio.gather(*runners)
