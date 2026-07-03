@@ -16,7 +16,7 @@ FastAPI app for the email channel. Two routes, injected-dependency-only (api-fre
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 __all__ = ["build_email_app"]
 
+# The email-link token default TTL (the composition root passes the config value,
+# ``config.email_link_token_ttl_minutes``); the default is only a test fallback.
+_DEFAULT_LINK_TTL = timedelta(minutes=15)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -47,6 +51,8 @@ def build_email_app(
     on_inbound: Callable[[ParsedEmail], Awaitable[None]],
     issue_code: Callable[[str], Awaitable[str]],
     verify_jwt: Callable[[str], Awaitable[AuthenticatedUser]],
+    destination: str | None = None,
+    link_ttl: timedelta = _DEFAULT_LINK_TTL,
     now: Callable[[], datetime] = _now,
 ) -> FastAPI:
     """Build the email connector's ASGI app from injected dependencies (api-free).
@@ -57,7 +63,13 @@ def build_email_app(
         on_inbound: The parsed-inbound handler (B2 verdict → OTP redeem / shared flow).
         issue_code: ``owner_id`` → the OTP code to show the user (owner-bound).
         verify_jwt: The Clerk JWT verifier — bearer → :class:`AuthenticatedUser`.
-        now: Tz-aware UTC clock for the inbound ``received_at`` (injected for tests).
+        destination: The shared inbound address (``config.email_inbound_address``) — the
+            PUBLIC address the reversed C5 flow tells the user to email the code to (C6-D-7);
+            the issuing channel owns it (single source of truth). ``None`` omits the field.
+        link_ttl: The OTP token TTL (``config.email_link_token_ttl_minutes``) — the response's
+            server-authoritative ``expires_at`` is ``issue_time + link_ttl`` (C6-D-8).
+        now: Tz-aware UTC clock for the inbound ``received_at`` + ``expires_at`` (injected for
+            tests).
     """
     app = FastAPI(title="persona-connectors (email)")
 
@@ -93,6 +105,9 @@ def build_email_app(
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         code = await issue_code(user.id)
-        return JSONResponse({"code": code})
+        body = {"code": code, "expires_at": (now() + link_ttl).isoformat()}
+        if destination:
+            body["destination"] = destination
+        return JSONResponse(body)
 
     return app

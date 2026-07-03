@@ -524,6 +524,57 @@ class NotificationMarkReadResult(_Output):
     updated: int
 
 
+# -- connectors (Spec C6) ---------------------------------------------------
+
+
+class ConnectorConnectionOut(_Output):
+    """One active platform connection (Spec C6), owner-scoped + RLS.
+
+    Returned by ``GET /v1/me/connectors`` — the caller's live bindings only;
+    absence of a platform ⇒ not connected. ``platform_identity`` is the bound
+    envelope: a phone number / email address (human-recognisable) or an opaque
+    platform user id (Telegram/Discord/Slack numeric id) — the web formats it
+    per platform. No token or secret is ever exposed here (only the public
+    identity + when it linked).
+    """
+
+    platform: str
+    platform_identity: str
+    linked_at: datetime
+
+
+class ConnectorDisconnectResult(_Output):
+    """The outcome of a disconnect (Spec C6, DELETE ``…/connectors/{p}/{id}``).
+
+    ``severed`` is ``True`` iff an active binding of the caller was revoked;
+    ``False`` is the **idempotent no-op** — the binding was already disconnected,
+    never existed, or isn't the caller's (RLS hides a foreign binding, so it is a
+    no-op, never a ``404`` that would leak whether it exists). Disconnect is
+    idempotent by design: a repeat is a clean ``severed=false``.
+    """
+
+    severed: bool
+
+
+class ConnectorLinkArtifact(_Output):
+    """A link-initiation artifact (Spec C6, POST ``…/connectors/{platform}/link``).
+
+    The front-door normalizes the connector service's issue response into ONE shape the
+    web renders, regardless of mechanism: exactly one of ``deep_link`` (Telegram),
+    ``authorize_url`` (Discord/Slack OAuth), or ``code`` (WhatsApp/SMS/email OTP) is set;
+    ``destination`` accompanies ``code`` for the reversed flow ("text/email it to …",
+    C6-D-7); ``expires_at`` is the server-authoritative token expiry (C6-D-8) the web's
+    countdown + re-issue key off. ``extra="forbid"`` guarantees no token, secret, or stray
+    upstream field can ride along — the front-door copies only these known keys.
+    """
+
+    deep_link: str | None = None
+    authorize_url: str | None = None
+    code: str | None = None
+    destination: str | None = None
+    expires_at: datetime
+
+
 # -- tools / skills (§5.4) --------------------------------------------------
 
 

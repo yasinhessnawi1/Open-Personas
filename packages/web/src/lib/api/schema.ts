@@ -1260,6 +1260,90 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/connectors": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Connectors
+     * @description The caller's active platform connections (Spec C6, RLS-scoped).
+     *
+     *     Only the caller's OWN active bindings (criterion 11); absence of a platform
+     *     from the list ⇒ not connected. The web merges this against its static
+     *     six-platform catalogue to render connected / not-connected state + the
+     *     connected identity.
+     */
+    get: operations["list_connectors_v1_me_connectors_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/connectors/{platform}/{platform_identity}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Disconnect Connector
+     * @description Sever the caller's binding for ``(platform, platform_identity)`` (Spec C6).
+     *
+     *     Drives C1's real unlink (``revoke_identity``) under RLS — the platform stops
+     *     reaching the caller's personas (criterion 9), not just a greyed UI chip.
+     *     Idempotent: ``severed=false`` when there was no active binding of the caller's
+     *     to sever (already disconnected / never existed / not owned — RLS makes a
+     *     foreign binding a no-op, never a leaking 404). ``platform_identity`` arrives
+     *     URL-encoded (phone ``+E164`` / email / Slack ``team:user``); FastAPI decodes it.
+     */
+    delete: operations["disconnect_connector_v1_me_connectors__platform___platform_identity__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/connectors/{platform}/link": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Initiate Link
+     * @description Initiate a platform link — proxy to the connector service (Spec C6, C6-D-0).
+     *
+     *     The web's single front-door for link initiation. persona-api does not issue tokens
+     *     (no linking logic here); it forwards to the separate connector service, which owns the
+     *     per-platform carriers + platform secrets. **The owner crosses the boundary as the
+     *     verified Clerk bearer, never a parameter** — the connector service re-verifies the same
+     *     token and derives the owner from its ``sub``, so no ``owner_id`` is spoofable (an
+     *     attacker hitting the connector service directly can still only mint for their own sub).
+     *
+     *     Fails soft: an unset ``connector_service_url``, an unreachable service, a timeout, or a
+     *     non-2xx upstream all raise :class:`ConnectorServiceUnavailableError` (503) so the surface
+     *     shows "temporarily unavailable" — never a dead spinner. Returns exactly the normalized
+     *     :class:`ConnectorLinkArtifact` (``extra="forbid"``) so no upstream field leaks.
+     */
+    post: operations["initiate_link_v1_me_connectors__platform__link_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1474,6 +1558,85 @@ export interface components {
       /** Question */
       question: string;
     };
+    /**
+     * ConnectorConnectionOut
+     * @description One active platform connection (Spec C6), owner-scoped + RLS.
+     *
+     *     Returned by ``GET /v1/me/connectors`` — the caller's live bindings only;
+     *     absence of a platform ⇒ not connected. ``platform_identity`` is the bound
+     *     envelope: a phone number / email address (human-recognisable) or an opaque
+     *     platform user id (Telegram/Discord/Slack numeric id) — the web formats it
+     *     per platform. No token or secret is ever exposed here (only the public
+     *     identity + when it linked).
+     */
+    ConnectorConnectionOut: {
+      /** Platform */
+      platform: string;
+      /** Platform Identity */
+      platform_identity: string;
+      /**
+       * Linked At
+       * Format: date-time
+       */
+      linked_at: string;
+    };
+    /**
+     * ConnectorDisconnectResult
+     * @description The outcome of a disconnect (Spec C6, DELETE ``…/connectors/{p}/{id}``).
+     *
+     *     ``severed`` is ``True`` iff an active binding of the caller was revoked;
+     *     ``False`` is the **idempotent no-op** — the binding was already disconnected,
+     *     never existed, or isn't the caller's (RLS hides a foreign binding, so it is a
+     *     no-op, never a ``404`` that would leak whether it exists). Disconnect is
+     *     idempotent by design: a repeat is a clean ``severed=false``.
+     */
+    ConnectorDisconnectResult: {
+      /** Severed */
+      severed: boolean;
+    };
+    /**
+     * ConnectorLinkArtifact
+     * @description A link-initiation artifact (Spec C6, POST ``…/connectors/{platform}/link``).
+     *
+     *     The front-door normalizes the connector service's issue response into ONE shape the
+     *     web renders, regardless of mechanism: exactly one of ``deep_link`` (Telegram),
+     *     ``authorize_url`` (Discord/Slack OAuth), or ``code`` (WhatsApp/SMS/email OTP) is set;
+     *     ``destination`` accompanies ``code`` for the reversed flow ("text/email it to …",
+     *     C6-D-7); ``expires_at`` is the server-authoritative token expiry (C6-D-8) the web's
+     *     countdown + re-issue key off. ``extra="forbid"`` guarantees no token, secret, or stray
+     *     upstream field can ride along — the front-door copies only these known keys.
+     */
+    ConnectorLinkArtifact: {
+      /** Deep Link */
+      deep_link?: string | null;
+      /** Authorize Url */
+      authorize_url?: string | null;
+      /** Code */
+      code?: string | null;
+      /** Destination */
+      destination?: string | null;
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string;
+    };
+    /**
+     * ConnectorPlatform
+     * @description The six linkable platforms — a closed set (C6-D-1).
+     *
+     *     Used as the ``link`` path-param type so FastAPI rejects any other value with a 422
+     *     BEFORE it can reach the proxy: the value is interpolated into the upstream URL path,
+     *     so a closed enum forecloses path-injection / SSRF into other connector-service routes.
+     * @enum {string}
+     */
+    ConnectorPlatform:
+      | "telegram"
+      | "discord"
+      | "slack"
+      | "whatsapp"
+      | "sms"
+      | "email";
     /**
      * ConversationDetail
      * @description Full conversation history.
@@ -4412,6 +4575,89 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MCPServerDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_connectors_v1_me_connectors_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectorConnectionOut"][];
+        };
+      };
+    };
+  };
+  disconnect_connector_v1_me_connectors__platform___platform_identity__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: string;
+        platform_identity: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectorDisconnectResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  initiate_link_v1_me_connectors__platform__link_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: components["schemas"]["ConnectorPlatform"];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConnectorLinkArtifact"];
         };
       };
       /** @description Validation Error */

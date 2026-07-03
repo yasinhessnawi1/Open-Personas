@@ -65,6 +65,11 @@ build never pulls `@clerk/*` into the bundle (enforced by CI gates +
   mute + push-to-talk; and a post-call recap in the chat thread.
 - **Settings** — credit balance + per-turn usage, theme, tier-badge
   visibility, language toggle, conversations list.
+- **Connectors** (`/settings/connectors`) — link messaging platforms (Telegram,
+  Discord, Slack, WhatsApp, SMS, email) behind one coherent connect → step →
+  progress → confirmed flow over four mechanisms (deep-link / OAuth / phone &
+  email code); connected-identity display + disconnect; the list is the sole
+  completion oracle (thin frontend over the api's connector front-door).
 - **Notifications + consent** — one app-wide notification façade (`useNotify`)
   over the toast layer, plus a persistent bell center covering every
   consequential moment: run-terminal (a background run finishing while you're

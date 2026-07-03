@@ -8,6 +8,8 @@ deriving the owner from the verified JWT (never from the request body).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from persona.auth.jwt_verifier import AuthenticatedUser
@@ -136,3 +138,31 @@ def test_issue_rejects_malformed_authorization(auth: str) -> None:
     client = _app()
     resp = client.post(_ISSUE, json={}, headers={"Authorization": auth})
     assert resp.status_code == 401
+
+
+def test_issue_carries_server_authoritative_expiry() -> None:
+    """C6-D-8: the deep-link response carries expires_at = issue_time + ttl (the web's
+    countdown keys off the server value, never a client constant that could drift)."""
+    fixed = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
+
+    async def on_update(_update: dict[str, object]) -> None: ...
+
+    async def issue_deep_link(owner_id: str) -> str:
+        return f"https://t.me/bot?start=token_for_{owner_id}"
+
+    async def verify_jwt(_token: str) -> AuthenticatedUser:
+        return AuthenticatedUser(id="real_owner", email=None)
+
+    app = build_telegram_app(
+        webhook_secret=_SECRET_OBJ,
+        on_update=on_update,
+        issue_deep_link=issue_deep_link,
+        verify_jwt=verify_jwt,
+        link_ttl=timedelta(minutes=15),
+        now=lambda: fixed,
+    )
+    body = TestClient(app).post(_ISSUE, headers={"Authorization": "Bearer good"}).json()
+    assert body == {
+        "deep_link": "https://t.me/bot?start=token_for_real_owner",
+        "expires_at": "2026-07-03T12:15:00+00:00",
+    }

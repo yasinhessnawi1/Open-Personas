@@ -209,6 +209,8 @@ async def _setup_telegram(
             on_update=flow.handle,
             issue_deep_link=issue_deep_link,
             verify_jwt=make_jwt_verifier(config),
+            link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
+            now=_now,
         )
         return connector, _serve_app(app, port=_HTTP_PORT)
     await client.delete_webhook()  # ensure no webhook competes with long-poll
@@ -390,6 +392,7 @@ async def _setup_whatsapp(
     return connector, _build_phone_app(
         config=config,
         platform=whatsapp_adapter.PLATFORM,
+        destination=config.twilio_whatsapp_from,
         phone_linking=phone_linking,
         on_inbound=flow.handle,
         on_status=on_status,
@@ -445,6 +448,7 @@ async def _setup_sms(
     return connector, _build_phone_app(
         config=config,
         platform=sms_adapter.PLATFORM,
+        destination=config.twilio_sms_from,
         phone_linking=phone_linking,
         on_inbound=flow.handle,
         on_status=on_status,
@@ -501,6 +505,10 @@ async def _setup_email(
         on_inbound=flow.handle,
         issue_code=issue_code,
         verify_jwt=make_jwt_verifier(config),
+        # C6-D-7: the PUBLIC inbound address the reversed flow shows ("email the code to …");
+        # C6-D-8: expires_at = issue_time + ttl (single-source, from config).
+        destination=config.email_inbound_address,
+        link_ttl=ttl,
         now=_now,
     )
     return connector, app
@@ -510,11 +518,17 @@ def _build_phone_app(
     *,
     config: ConnectorConfig,
     platform: str,
+    destination: str,
     phone_linking: PhoneLinkingService,
     on_inbound: Callable[[Mapping[str, str]], Awaitable[None]],
     on_status: Callable[[Mapping[str, str]], Awaitable[None]],
 ) -> FastAPI:
-    """Build a phone channel's Twilio app: bind ``issue_code`` + the JWT verifier (api-free)."""
+    """Build a phone channel's Twilio app: bind ``issue_code`` + the JWT verifier (api-free).
+
+    ``destination`` is the channel's own PUBLIC ``From`` number (``twilio_{whatsapp,sms}_from``)
+    the reversed C4 flow shows the user (C6-D-7); ``link_ttl`` sets the issue response's
+    server-authoritative ``expires_at`` (C6-D-8).
+    """
     ttl = timedelta(minutes=config.phone_link_token_ttl_minutes)
 
     async def issue_code(owner_id: str) -> str:
@@ -527,6 +541,9 @@ def _build_phone_app(
         on_status=on_status,
         issue_code=issue_code,
         verify_jwt=make_jwt_verifier(config),
+        destination=destination,
+        link_ttl=ttl,
+        now=_now,
     )
 
 

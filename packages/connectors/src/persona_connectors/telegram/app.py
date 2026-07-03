@@ -19,6 +19,7 @@ ideal):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -37,6 +38,13 @@ __all__ = ["build_telegram_app"]
 
 _WEBHOOK_PATH = "/telegram/webhook"
 _ISSUE_PATH = "/v1/connectors/telegram/link"
+# The deep-link token default TTL (the composition root passes the config value,
+# ``config.telegram_link_token_ttl_minutes``); the default is only a test fallback.
+_DEFAULT_LINK_TTL = timedelta(minutes=15)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def build_telegram_app(
@@ -45,6 +53,8 @@ def build_telegram_app(
     on_update: Callable[[dict[str, object]], Awaitable[None]],
     issue_deep_link: Callable[[str], Awaitable[str]],
     verify_jwt: Callable[[str], Awaitable[AuthenticatedUser]],
+    link_ttl: timedelta = _DEFAULT_LINK_TTL,
+    now: Callable[[], datetime] = _utcnow,
 ) -> FastAPI:
     """Build the connector ASGI app from injected dependencies (api-free).
 
@@ -57,6 +67,10 @@ def build_telegram_app(
         verify_jwt: The Clerk JWT verifier (the core ``make_jwt_verifier``) — maps a
             bearer token to an :class:`AuthenticatedUser`, raising
             :class:`~persona.errors.AuthenticationError` on any failure.
+        link_ttl: The deep-link token TTL (``config.telegram_link_token_ttl_minutes``) — the
+            response's server-authoritative ``expires_at`` is ``issue_time + link_ttl``
+            (C6-D-8). No ``destination``: the ``t.me`` deep link is self-contained.
+        now: Tz-aware UTC clock (injected for deterministic tests).
 
     Returns:
         The configured :class:`fastapi.FastAPI` app.
@@ -97,6 +111,6 @@ def build_telegram_app(
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         deep_link = await issue_deep_link(user.id)
-        return JSONResponse({"deep_link": deep_link})
+        return JSONResponse({"deep_link": deep_link, "expires_at": (now() + link_ttl).isoformat()})
 
     return app

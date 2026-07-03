@@ -2536,6 +2536,120 @@
           }
         }
       }
+    },
+    "/v1/me/connectors": {
+      "get": {
+        "tags": ["connectors"],
+        "summary": "List Connectors",
+        "description": "The caller's active platform connections (Spec C6, RLS-scoped).\n\nOnly the caller's OWN active bindings (criterion 11); absence of a platform\nfrom the list \u21d2 not connected. The web merges this against its static\nsix-platform catalogue to render connected / not-connected state + the\nconnected identity.",
+        "operationId": "list_connectors_v1_me_connectors_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConnectorConnectionOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Connectors V1 Me Connectors Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/connectors/{platform}/{platform_identity}": {
+      "delete": {
+        "tags": ["connectors"],
+        "summary": "Disconnect Connector",
+        "description": "Sever the caller's binding for ``(platform, platform_identity)`` (Spec C6).\n\nDrives C1's real unlink (``revoke_identity``) under RLS \u2014 the platform stops\nreaching the caller's personas (criterion 9), not just a greyed UI chip.\nIdempotent: ``severed=false`` when there was no active binding of the caller's\nto sever (already disconnected / never existed / not owned \u2014 RLS makes a\nforeign binding a no-op, never a leaking 404). ``platform_identity`` arrives\nURL-encoded (phone ``+E164`` / email / Slack ``team:user``); FastAPI decodes it.",
+        "operationId": "disconnect_connector_v1_me_connectors__platform___platform_identity__delete",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform"
+            }
+          },
+          {
+            "name": "platform_identity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorDisconnectResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/connectors/{platform}/link": {
+      "post": {
+        "tags": ["connectors"],
+        "summary": "Initiate Link",
+        "description": "Initiate a platform link \u2014 proxy to the connector service (Spec C6, C6-D-0).\n\nThe web's single front-door for link initiation. persona-api does not issue tokens\n(no linking logic here); it forwards to the separate connector service, which owns the\nper-platform carriers + platform secrets. **The owner crosses the boundary as the\nverified Clerk bearer, never a parameter** \u2014 the connector service re-verifies the same\ntoken and derives the owner from its ``sub``, so no ``owner_id`` is spoofable (an\nattacker hitting the connector service directly can still only mint for their own sub).\n\nFails soft: an unset ``connector_service_url``, an unreachable service, a timeout, or a\nnon-2xx upstream all raise :class:`ConnectorServiceUnavailableError` (503) so the surface\nshows \"temporarily unavailable\" \u2014 never a dead spinner. Returns exactly the normalized\n:class:`ConnectorLinkArtifact` (``extra=\"forbid\"``) so no upstream field leaks.",
+        "operationId": "initiate_link_v1_me_connectors__platform__link_post",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ConnectorPlatform"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorLinkArtifact"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2916,6 +3030,105 @@
         "required": ["section", "question"],
         "title": "ClarifyingQuestion",
         "description": "One suggested question the user can answer to improve a draft persona.\n\n``section`` is a free-form hint (expected: identity | self_facts | worldview\n| constraints | tools | skills) \u2014 NOT an enum, so a model that names a\nsection we don't anticipate doesn't sink the parse."
+      },
+      "ConnectorConnectionOut": {
+        "properties": {
+          "platform": {
+            "type": "string",
+            "title": "Platform"
+          },
+          "platform_identity": {
+            "type": "string",
+            "title": "Platform Identity"
+          },
+          "linked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Linked At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["platform", "platform_identity", "linked_at"],
+        "title": "ConnectorConnectionOut",
+        "description": "One active platform connection (Spec C6), owner-scoped + RLS.\n\nReturned by ``GET /v1/me/connectors`` \u2014 the caller's live bindings only;\nabsence of a platform \u21d2 not connected. ``platform_identity`` is the bound\nenvelope: a phone number / email address (human-recognisable) or an opaque\nplatform user id (Telegram/Discord/Slack numeric id) \u2014 the web formats it\nper platform. No token or secret is ever exposed here (only the public\nidentity + when it linked)."
+      },
+      "ConnectorDisconnectResult": {
+        "properties": {
+          "severed": {
+            "type": "boolean",
+            "title": "Severed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["severed"],
+        "title": "ConnectorDisconnectResult",
+        "description": "The outcome of a disconnect (Spec C6, DELETE ``\u2026/connectors/{p}/{id}``).\n\n``severed`` is ``True`` iff an active binding of the caller was revoked;\n``False`` is the **idempotent no-op** \u2014 the binding was already disconnected,\nnever existed, or isn't the caller's (RLS hides a foreign binding, so it is a\nno-op, never a ``404`` that would leak whether it exists). Disconnect is\nidempotent by design: a repeat is a clean ``severed=false``."
+      },
+      "ConnectorLinkArtifact": {
+        "properties": {
+          "deep_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deep Link"
+          },
+          "authorize_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorize Url"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Destination"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["expires_at"],
+        "title": "ConnectorLinkArtifact",
+        "description": "A link-initiation artifact (Spec C6, POST ``\u2026/connectors/{platform}/link``).\n\nThe front-door normalizes the connector service's issue response into ONE shape the\nweb renders, regardless of mechanism: exactly one of ``deep_link`` (Telegram),\n``authorize_url`` (Discord/Slack OAuth), or ``code`` (WhatsApp/SMS/email OTP) is set;\n``destination`` accompanies ``code`` for the reversed flow (\"text/email it to \u2026\",\nC6-D-7); ``expires_at`` is the server-authoritative token expiry (C6-D-8) the web's\ncountdown + re-issue key off. ``extra=\"forbid\"`` guarantees no token, secret, or stray\nupstream field can ride along \u2014 the front-door copies only these known keys."
+      },
+      "ConnectorPlatform": {
+        "type": "string",
+        "enum": ["telegram", "discord", "slack", "whatsapp", "sms", "email"],
+        "title": "ConnectorPlatform",
+        "description": "The six linkable platforms \u2014 a closed set (C6-D-1).\n\nUsed as the ``link`` path-param type so FastAPI rejects any other value with a 422\nBEFORE it can reach the proxy: the value is interpolated into the upstream URL path,\nso a closed enum forecloses path-injection / SSRF into other connector-service routes."
       },
       "ConversationDetail": {
         "properties": {

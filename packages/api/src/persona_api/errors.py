@@ -43,6 +43,7 @@ __all__ = [
     "AuthenticationError",
     "CloudConfigRefusedError",
     "ConcurrencyCappedError",
+    "ConnectorServiceUnavailableError",
     "ConversationNotFoundError",
     "CreditsExhaustedError",
     "DailySpendCapExceededError",
@@ -269,6 +270,18 @@ class ModelBackendUnavailableError(PersonaError):
     NOT a leaked 500. Route-local by design: a cloud bad-key still surfaces
     through the normal provider path, so the global ``AuthenticationError``
     (401) mapping is untouched (R1-D-5 stays a tracked follow-up).
+    """
+
+
+class ConnectorServiceUnavailableError(PersonaError):
+    """The connector service could not be reached to issue a link (→ 503; Spec C6, C6-D-0).
+
+    The web front-door (``POST /v1/me/connectors/{platform}/link``) proxies link
+    initiation to the separate connector service. When that service is unreachable
+    (unset ``PERSONA_CONNECTOR_SERVICE_URL``, connection refused, timeout, or a non-2xx
+    upstream), the front-door **fails soft** with this first-class 503 so the surface can
+    show the platform "temporarily unavailable" — never a dead spinner or a leaked 500.
+    ``context`` carries the ``platform`` only; never the caller's bearer or any secret.
     """
 
 
@@ -561,6 +574,25 @@ def register_exception_handlers(app: FastAPI) -> None:
                 exc.context,
             ),
             headers={"Retry-After": "30"},
+        )
+
+    @app.exception_handler(ConnectorServiceUnavailableError)
+    async def _connector_unavailable_503(
+        _: Request, exc: ConnectorServiceUnavailableError
+    ) -> JSONResponse:
+        """Connector service unreachable for link initiation (Spec C6, C6-D-0 fail-soft).
+
+        The surface maps ``connector_unavailable`` to a "temporarily unavailable" chip +
+        retry — never a dead spinner. ``Retry-After: 15`` is a brief back-off hint.
+        """
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=_body(
+                "connector_unavailable",
+                exc.message or "the connector service is temporarily unavailable",
+                exc.context,
+            ),
+            headers={"Retry-After": "15"},
         )
 
     @app.exception_handler(SandboxUnavailableError)

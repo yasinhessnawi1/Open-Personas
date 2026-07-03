@@ -8,6 +8,8 @@ exchange — never an attacker-chosen binding (the CSRF-class boundary, D-C3-4).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from persona.auth.jwt_verifier import AuthenticatedUser
@@ -68,6 +70,33 @@ def test_issue_derives_owner_from_verified_jwt_not_body() -> None:
     assert resp.status_code == 200
     assert resp.json()["authorize_url"].endswith("state=token_for_real_owner")
     assert issued == ["real_owner"]  # owner from the token, not the body
+
+
+def test_issue_carries_server_authoritative_expiry() -> None:
+    """C6-D-8: the authorize-URL response carries expires_at = issue_time + ttl."""
+    fixed = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
+
+    async def issue_authorize_url(owner_id: str) -> str:
+        return f"https://discord.com/oauth2/authorize?state=token_for_{owner_id}"
+
+    async def complete_oauth(_code: str, _state: str) -> str:
+        return "owner-bound"
+
+    async def verify_jwt(_token: str) -> AuthenticatedUser:
+        return AuthenticatedUser(id="real_owner", email=None)
+
+    app = build_discord_app(
+        issue_authorize_url=issue_authorize_url,
+        complete_oauth=complete_oauth,
+        verify_jwt=verify_jwt,
+        link_ttl=timedelta(minutes=15),
+        now=lambda: fixed,
+    )
+    body = TestClient(app).post(_ISSUE, headers={"Authorization": "Bearer good"}).json()
+    assert body == {
+        "authorize_url": "https://discord.com/oauth2/authorize?state=token_for_real_owner",
+        "expires_at": "2026-07-03T12:15:00+00:00",
+    }
 
 
 def test_issue_requires_a_bearer_token() -> None:

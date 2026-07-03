@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
@@ -148,3 +149,39 @@ def test_issue_route_owner_from_jwt_not_body() -> None:
         ).status_code
         == 401
     )
+
+
+def test_issue_route_carries_destination_and_server_authoritative_expiry() -> None:
+    """C6-D-7/D-8: the reversed flow needs the PUBLIC destination to text + a server
+    ``expires_at`` (issue_time + ttl), so the web countdown can't drift from the real TTL."""
+
+    async def issue_code(owner_id: str) -> str:
+        return f"CODE-{owner_id}"
+
+    async def verify_jwt(_bearer: str) -> _AuthedUser:
+        return _AuthedUser(id="owner_a")
+
+    _, inbound = _recorder()
+    _, status = _recorder()
+    fixed = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
+    app = build_twilio_app(
+        platform="sms",
+        auth_token=_TOKEN_SECRET,
+        on_inbound=inbound,  # type: ignore[arg-type]
+        on_status=status,  # type: ignore[arg-type]
+        issue_code=issue_code,  # type: ignore[arg-type]
+        verify_jwt=verify_jwt,  # type: ignore[arg-type]
+        destination="+15557654321",
+        link_ttl=timedelta(minutes=10),
+        now=lambda: fixed,
+    )
+    body = (
+        TestClient(app)
+        .post("/v1/connectors/sms/link", headers={"Authorization": "Bearer good-token"})
+        .json()
+    )
+    assert body == {
+        "code": "CODE-owner_a",
+        "destination": "+15557654321",
+        "expires_at": "2026-07-03T12:10:00+00:00",
+    }

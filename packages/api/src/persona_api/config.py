@@ -96,6 +96,13 @@ class APIConfig(BaseSettings):
     # community (the user runs their own gateway — the local "setup once" win).
     allow_cloud_gateway: bool = Field(default=False, validation_alias="PERSONA_ALLOW_CLOUD_GATEWAY")
 
+    # Spec C6 (C6-D-0): the base URL of the separate connector service (C1-D-1) that the
+    # web front-door proxies link-initiation to (``POST /v1/me/connectors/{platform}/link``
+    # → ``{url}/v1/connectors/{platform}/link``, forwarding the caller's bearer). Empty ⇒
+    # the front-door fails soft with a 503 "connector_unavailable" (never a dead spinner),
+    # so a deploy without connectors configured degrades honestly. No trailing slash.
+    connector_service_url: str = Field(default="", validation_alias="PERSONA_CONNECTOR_SERVICE_URL")
+
     # The bind host the server listens on. Read by the safety guard (D-33-4) to
     # detect a non-loopback (public) bind under community/no-auth. Loopback by
     # default; a community deploy that sets a public host must also set

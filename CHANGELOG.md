@@ -11,6 +11,15 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Connector Management UI — turn on your messaging platforms behind one coherent flow (Spec C6, 2026-07-03)
+> Close-out of `connector-management-ui` (`persona-web` + a thin `persona-api` front-door + additive `persona-connectors` fields). The web surface that makes the C-series usable: connect Telegram / Discord / Slack / WhatsApp / SMS / email to your Persona account, see what's connected (and *as which identity*), and disconnect. **Closes direction 2.**
+- **One coherent frame over four mechanisms (C6-D-1):** a single `ConnectFlow` state machine — `idle → initiating → awaiting → confirmed` + `failed`/`expired` — where only the middle step varies (deep-link / OAuth / phone & email code). **The connectors list is the sole completion oracle** (a gentle poll; the web never handles the final credential — every mechanism redeems out-of-band). Server-authoritative expiry + one-tap re-issue; no zombie pollers.
+- **The reversed phone/email flow (honoring D-C4-5/D-C5-X):** the web shows an issued code + the public destination and the user sends it *from* the account to bind (safer — binds the signature/DMARC-verified envelope) — no OTP field, no number collection.
+- **OAuth (C6-D-2):** full-page redirect out to the provider; the connector-service callback 302s back to `/settings/connectors?result=…` where the return is toast-only voice and the list is the truth (a forged `result=connected` with no binding never renders as connected). `state` = the C1 LinkToken (CSRF-covered, no session needed).
+- **Security:** linking only from the authenticated session; the owner crosses the service boundary **as the verified bearer, never a parameter** (no account-takeover primitive); own-connectors-only under RLS (non-vacuous); disconnect drives C1's real unlink (proven: `resolve_owner` raises after DELETE).
+- **api front-door (the C1-designated "C6 backend", D-C1-5):** `GET /v1/me/connectors` (list, RLS) + `DELETE …/{platform}/{identity}` (unlink, RLS) native; `POST …/{platform}/link` proxies to the connector service (`PERSONA_CONNECTOR_SERVICE_URL`, fail-soft). `persona-connectors` issue routes gained additive `destination` + `expires_at` (618-bar green). No migration; OpenAPI regen at merge-back.
+- **Known limitations (named, not reworded):** Discord/Slack OAuth issue routes exist + unit-tested but are **unmounted** in the connector service (C6-KL-2) — end-to-end OAuth waits on that C3 mount + an R4 live leg; the surface honestly excludes them from first-connection guidance (`backendReady`). Connected-identity display is verbatim for phone/email but an opaque `ID <id>` for Telegram/Discord/Slack (C6-KL-1 — a `display_name`-at-bind C2/C3 fast-follow). Real-provider round-trips (Telegram bot, Twilio, Postmark, registered OAuth apps) are the **R4** owner-run legs; the community render leg (evidence PNGs, both themes) proves the shape.
+
 ### Voice Memory — the persona remembers on a call, both directions (Spec V13, 2026-07-03)
 
 > Close-out of `voice-memory` (`persona-voice` + `persona-runtime` + `persona-core` + `persona-api`).

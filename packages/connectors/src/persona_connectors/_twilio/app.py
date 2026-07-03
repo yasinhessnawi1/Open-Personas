@@ -22,6 +22,7 @@ live-Twilio leg, the one thing a stub cannot prove.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request, Response
@@ -39,6 +40,13 @@ if TYPE_CHECKING:
 __all__ = ["build_twilio_app"]
 
 _EMPTY_TWIML = "<?xml version='1.0' encoding='UTF-8'?><Response></Response>"
+# The phone-link token default TTL (the composition root passes the config value,
+# ``config.phone_link_token_ttl_minutes``); the default is only a test fallback.
+_DEFAULT_LINK_TTL = timedelta(minutes=10)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 async def _verified_params(request: Request, auth_token: SecretStr | None) -> dict[str, str] | None:
@@ -64,6 +72,9 @@ def build_twilio_app(
     on_status: Callable[[Mapping[str, str]], Awaitable[None]],
     issue_code: Callable[[str], Awaitable[str]],
     verify_jwt: Callable[[str], Awaitable[AuthenticatedUser]],
+    destination: str | None = None,
+    link_ttl: timedelta = _DEFAULT_LINK_TTL,
+    now: Callable[[], datetime] = _utcnow,
 ) -> FastAPI:
     """Build a phone channel's Twilio ASGI app from injected dependencies (api-free).
 
@@ -75,6 +86,14 @@ def build_twilio_app(
         on_status: The status-callback handler (per-segment cost + outcome mapping).
         issue_code: ``owner_id`` → the OTP code to show the user (owner-bound).
         verify_jwt: The Clerk JWT verifier — bearer → :class:`AuthenticatedUser`.
+        destination: The channel's own ``From`` address (``whatsapp:+E164`` / bare ``+E164``,
+            ``config.twilio_{whatsapp,sms}_from``) — a PUBLIC value the reversed C4 flow shows
+            the user ("text this code to …", C6-D-7). The issuing channel owns it (single
+            source of truth); ``None`` omits the field.
+        link_ttl: The OTP token TTL (``config.phone_link_token_ttl_minutes``) — the response's
+            server-authoritative ``expires_at`` is ``issue_time + link_ttl`` (C6-D-8), so the
+            web countdown can never drift from the real token TTL.
+        now: Tz-aware UTC clock (injected for deterministic tests).
 
     Returns:
         The configured :class:`fastapi.FastAPI` app.
@@ -115,6 +134,9 @@ def build_twilio_app(
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         code = await issue_code(user.id)
-        return JSONResponse({"code": code})
+        body = {"code": code, "expires_at": (now() + link_ttl).isoformat()}
+        if destination:
+            body["destination"] = destination
+        return JSONResponse(body)
 
     return app

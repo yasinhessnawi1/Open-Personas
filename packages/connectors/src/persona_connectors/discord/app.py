@@ -20,6 +20,7 @@ dependency injected, so the composition root wires the api-coupled bits):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -37,6 +38,14 @@ __all__ = ["build_discord_app"]
 
 _ISSUE_PATH = "/v1/connectors/discord/link"
 _CALLBACK_PATH = "/discord/oauth/callback"
+# The OAuth-state token default TTL (the composition root passes the config value,
+# ``config.discord_link_token_ttl_minutes``); the default is only a test fallback.
+_DEFAULT_LINK_TTL = timedelta(minutes=15)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
 
 _LINKED_HTML = (
     "<html><body><h3>You're linked!</h3>"
@@ -54,6 +63,8 @@ def build_discord_app(
     issue_authorize_url: Callable[[str], Awaitable[str]],
     complete_oauth: Callable[[str, str], Awaitable[str]],
     verify_jwt: Callable[[str], Awaitable[AuthenticatedUser]],
+    link_ttl: timedelta = _DEFAULT_LINK_TTL,
+    now: Callable[[], datetime] = _utcnow,
 ) -> FastAPI:
     """Build the Discord connector ASGI app from injected dependencies (api-free).
 
@@ -67,6 +78,10 @@ def build_discord_app(
         verify_jwt: The Clerk JWT verifier — maps a bearer token to an
             :class:`AuthenticatedUser`, raising
             :class:`~persona.errors.AuthenticationError` on any failure.
+        link_ttl: The OAuth-state token TTL (``config.discord_link_token_ttl_minutes``) — the
+            issue response's server-authoritative ``expires_at`` is ``issue_time + link_ttl``
+            (C6-D-8). No ``destination``: the authorize URL is self-contained.
+        now: Tz-aware UTC clock (injected for deterministic tests).
 
     Returns:
         The configured :class:`fastapi.FastAPI` app.
@@ -86,7 +101,9 @@ def build_discord_app(
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         authorize_url = await issue_authorize_url(user.id)
-        return JSONResponse({"authorize_url": authorize_url})
+        return JSONResponse(
+            {"authorize_url": authorize_url, "expires_at": (now() + link_ttl).isoformat()}
+        )
 
     @app.get(_CALLBACK_PATH)
     async def oauth_callback(request: Request) -> HTMLResponse:

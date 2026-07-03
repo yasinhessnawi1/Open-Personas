@@ -19,6 +19,7 @@ OAuth carrier appears (C4/C5), a shared ``build_oauth_app`` is the natural extra
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -36,6 +37,14 @@ __all__ = ["build_slack_app"]
 
 _ISSUE_PATH = "/v1/connectors/slack/link"
 _CALLBACK_PATH = "/slack/oauth/callback"
+# The OAuth-state token default TTL (the composition root passes the config value,
+# ``config.slack_link_token_ttl_minutes``); the default is only a test fallback.
+_DEFAULT_LINK_TTL = timedelta(minutes=15)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
 
 _LINKED_HTML = (
     "<html><body><h3>You're linked!</h3>"
@@ -53,8 +62,15 @@ def build_slack_app(
     issue_authorize_url: Callable[[str], Awaitable[str]],
     complete_oauth: Callable[[str, str], Awaitable[str]],
     verify_jwt: Callable[[str], Awaitable[AuthenticatedUser]],
+    link_ttl: timedelta = _DEFAULT_LINK_TTL,
+    now: Callable[[], datetime] = _utcnow,
 ) -> FastAPI:
-    """Build the Slack OAuth ASGI app from injected dependencies (api-free)."""
+    """Build the Slack OAuth ASGI app from injected dependencies (api-free).
+
+    ``link_ttl`` (``config.slack_link_token_ttl_minutes``) sets the issue response's
+    server-authoritative ``expires_at`` (``issue_time + link_ttl``, C6-D-8); no
+    ``destination`` — the authorize URL is self-contained. ``now`` is injected for tests.
+    """
     app = FastAPI(title="persona-connectors (slack)")
 
     @app.post(_ISSUE_PATH)
@@ -69,7 +85,9 @@ def build_slack_app(
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         authorize_url = await issue_authorize_url(user.id)
-        return JSONResponse({"authorize_url": authorize_url})
+        return JSONResponse(
+            {"authorize_url": authorize_url, "expires_at": (now() + link_ttl).isoformat()}
+        )
 
     @app.get(_CALLBACK_PATH)
     async def oauth_callback(request: Request) -> HTMLResponse:

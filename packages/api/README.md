@@ -182,6 +182,7 @@ All routes are under `/v1`:
 | `imagegen`, `artifacts` | image generation (credit-gated) + chart/image serve |
 | `tools`, `mcp_servers` | toolbox introspection; bring-your-own MCP servers |
 | `me` | credit balance + per-turn usage; the durable cross-device notification feed (`GET /v1/me/notifications` + mark-read), owner-scoped + RLS |
+| `connectors` | the web front-door for messaging-platform linking (Spec C6) — `GET /v1/me/connectors` (owner's connections + identity, RLS), `DELETE …/{platform}/{identity}` (unlink → C1's real sever), `POST …/{platform}/link` (proxies link-initiation to the connector service, `PERSONA_CONNECTOR_SERVICE_URL`, fail-soft) |
 | `health` | liveness + readiness |
 
 **SSE.** Chat, runs, and LLM-assisted authoring stream over Server-Sent Events

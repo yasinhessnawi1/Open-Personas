@@ -65,6 +65,7 @@ from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.routes import (
     artifacts,
     calls,
+    connectors,
     conversations,
     documents,
     health,
@@ -688,3 +689,4 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(imagegen.router)
     app.include_router(artifacts.router)
     app.include_router(mcp_servers.router)  # spec 30: bring-your-own MCP
+    app.include_router(connectors.router)  # spec C6: connector management front-door
