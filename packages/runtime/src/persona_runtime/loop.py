@@ -62,6 +62,7 @@ from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should_ask
 from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
+from persona_runtime.errors import ScheduleParseError
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.logging import (
     SkillInvocation,
@@ -88,16 +89,19 @@ from persona_runtime.task_origination import (
     Clause,
     ContractDraft,
     RecognitionKind,
+    RescheduleResolutionKind,
     SteeringVerb,
     build_task_originated_event,
     canonicalize_draft,
     changed_clauses,
     classify_amendment_materiality,
+    detect_reschedule_cue,
     detect_steering_cue,
     is_affirmative_confirmation,
     render_clause,
     render_echo,
 )
+from persona_runtime.task_origination.reschedule_flow import assemble_reschedule_echo
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -106,6 +110,7 @@ if TYPE_CHECKING:
     from persona.backends import ChatBackend, StreamChunk, TokenUsage
     from persona.history import ConversationHistoryManager
     from persona.sandbox.result import SandboxFile
+    from persona.schedules import QuietHours
     from persona.schema.content import MessageContent
     from persona.schema.conversation import Conversation
     from persona.schema.persona import Persona
@@ -129,6 +134,7 @@ if TYPE_CHECKING:
     from persona_runtime.routing import IntelligentRouter, Router
     from persona_runtime.task_origination import (
         AmendmentInterpreter,
+        RescheduleInterpreter,
         StandingIntentRecognizer,
         SteeringInterpreter,
     )
@@ -210,6 +216,13 @@ _STEER_PAUSED_TEXT = "Paused — just say the word when you want it going again.
 _STEER_RESUMED_TEXT = "Done — it's running again."
 _STEER_CANCELLED_TEXT = "Cancelled — I've stopped that task."
 
+#: Reschedule acknowledgements (Spec A8, T6). The actual retime/rerule happens api-side off the
+#: emitted event, through the CAS-guarded door; this is the immediate honest ack.
+_RESCHEDULE_APPLIED_TEXT = "Done — I've moved it. The next run is at the new time."
+_RESCHEDULE_DECLINE_TEXT = (
+    "I couldn't set that cadence reliably — want to try a fixed daily or weekly time instead?"
+)
+
 
 def _pending_cancel_task_id(conversation: Conversation) -> str | None:
     """The task id of a pending cancel confirmation, if the last assistant turn proposed one."""
@@ -218,6 +231,21 @@ def _pending_cancel_task_id(conversation: Conversation) -> str | None:
             continue
         raw = message.metadata.get("cancel_proposal")
         return raw if isinstance(raw, str) else None
+    return None
+
+
+def _pending_reschedule_event(conversation: Conversation) -> dict[str, object] | None:
+    """The pending ``task_rescheduled`` event payload, if the last assistant turn proposed one."""
+    import json
+
+    for message in reversed(conversation.messages):
+        if message.role != "assistant":
+            continue
+        raw = message.metadata.get("reschedule_proposal")
+        if not isinstance(raw, str):
+            return None
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else None
     return None
 
 
@@ -404,6 +432,9 @@ class ConversationLoop:
         amendment_interpreter: AmendmentInterpreter | None = None,
         steering_interpreter: SteeringInterpreter | None = None,
         task_reader_provider: Callable[[], TaskStateReader | None] | None = None,
+        reschedule_interpreter: RescheduleInterpreter | None = None,
+        timezone_provider: Callable[[], str] | None = None,
+        quiet_hours_provider: Callable[[], QuietHours | None] | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
@@ -423,6 +454,14 @@ class ConversationLoop:
         # immediately, cancel asks a consequence-aware confirmation first.
         self._steering_interpreter = steering_interpreter
         self._task_reader_provider = task_reader_provider
+        # Spec A8 (T6): the conversational reschedule verb — retime/rerule a live task ("move it to
+        # 9", "make it weekly", "skip tomorrow's"). ``None`` → inert. When present it joins the
+        # steering seam as a propose→confirm flow: resolve the target (honest — ambiguous lists +
+        # asks), re-echo the FULL new clause in the user's tz (+ a quiet-hours warn), and a clean
+        # confirm emits ``task_rescheduled`` for the worker to apply through the CAS door.
+        self._reschedule_interpreter = reschedule_interpreter
+        self._timezone_provider = timezone_provider
+        self._quiet_hours_provider = quiet_hours_provider
         # Spec S1 (S1-D-2 / S1-D-X-nonce-injection): the per-injection delimiter
         # nonce source for the subordination guard. ``None`` defaults to the
         # production ``default_nonce`` (secrets-backed); tests pin it for
@@ -753,6 +792,110 @@ class ConversationLoop:
                         yield _final_chunk(None)
                         return
                 # No resolvable steering intent → fall through to the contract gate / chat.
+
+        # Spec A8 (T6): the conversational reschedule verb — a propose→confirm flow over the same
+        # steering seam. A pending re-echo + a clean confirm emits ``task_rescheduled``; otherwise a
+        # reschedule cue resolves the target (honest — ambiguous lists + asks) and re-echoes the
+        # FULL new clause in the user's tz (+ a quiet-hours warn) for confirmation.
+        if self._reschedule_interpreter is not None and self._task_reader_provider is not None:
+            pending_r = _pending_reschedule_event(conversation)
+            if pending_r is not None:
+                if is_affirmative_confirmation(user_message):
+                    if on_event is not None:
+                        await on_event(RunEvent.task_rescheduled(**pending_r))  # type: ignore[arg-type]
+                    yield _text_chunk(_RESCHEDULE_APPLIED_TEXT)
+                    now_r = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_r)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant", content=_RESCHEDULE_APPLIED_TEXT, created_at=now_r
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                # Not a clean confirm → the reschedule proposal lapses, fall through.
+            elif detect_reschedule_cue(user_message):
+                reader = self._task_reader_provider()
+                if reader is not None:
+                    from persona.tasks import summarise_task
+
+                    summaries = [summarise_task(t) for t in reader.list_active()]
+                    resolution = await self._reschedule_interpreter.interpret(
+                        user_message, summaries
+                    )
+                    if resolution.kind is RescheduleResolutionKind.AMBIGUOUS:
+                        goals = "; ".join(f'"{g}"' for g in resolution.candidate_goals)
+                        ask = f"Which one do you mean — {goals}?"
+                        yield _text_chunk(ask)
+                        now_ra = datetime.now(UTC)
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="user", content=user_message, created_at=now_ra
+                            )
+                        )
+                        conversation.messages.append(
+                            ConversationMessage(role="assistant", content=ask, created_at=now_ra)
+                        )
+                        yield _final_chunk(None)
+                        return
+                    if (
+                        resolution.kind is RescheduleResolutionKind.RESOLVED
+                        and resolution.intent is not None
+                    ):
+                        tz = self._timezone_provider() if self._timezone_provider else "UTC"
+                        quiet = self._quiet_hours_provider() if self._quiet_hours_provider else None
+                        goal = next(
+                            (s.goal for s in summaries if s.task_id == resolution.intent.task_id),
+                            "this task",
+                        )
+                        now_re = datetime.now(UTC)
+                        try:
+                            resched_echo = assemble_reschedule_echo(
+                                resolution.intent,
+                                task_goal=goal,
+                                timezone=tz,
+                                quiet_hours=quiet,
+                                now=now_re,
+                            )
+                        except ScheduleParseError:
+                            yield _text_chunk(_RESCHEDULE_DECLINE_TEXT)
+                            conversation.messages.append(
+                                ConversationMessage(
+                                    role="user", content=user_message, created_at=now_re
+                                )
+                            )
+                            conversation.messages.append(
+                                ConversationMessage(
+                                    role="assistant",
+                                    content=_RESCHEDULE_DECLINE_TEXT,
+                                    created_at=now_re,
+                                )
+                            )
+                            yield _final_chunk(None)
+                            return
+                        import json as _json
+
+                        yield _text_chunk(resched_echo.echo_text)
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="user", content=user_message, created_at=now_re
+                            )
+                        )
+                        conversation.messages.append(
+                            ConversationMessage(
+                                role="assistant",
+                                content=resched_echo.echo_text,
+                                created_at=now_re,
+                                metadata={
+                                    "reschedule_proposal": _json.dumps(resched_echo.event_data)
+                                },
+                            )
+                        )
+                        yield _final_chunk(None)
+                        return
+                # NOT_FOUND / no reader → fall through to the contract gate / chat.
 
         # Spec A4 (A4-D-X): the contract flow runs BEFORE the proactive gate — a clean
         # confirm reply to a pending proposal must be read as a confirmation, not re-analysed

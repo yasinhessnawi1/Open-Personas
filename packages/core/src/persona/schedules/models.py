@@ -105,6 +105,10 @@ class RecurrenceRule(BaseModel):
         byminute: Local minutes-of-hour the rule fires at (0–59).
         byday: RFC-5545 BYDAY tokens (``MO``..``SU``, optional ordinal like ``1MO``).
         bymonthday: Days of month (1–31, or negative from month end).
+        bymonth: Months of year (1–12) — used by a YEARLY rule to pin the month
+            (e.g. ``BYMONTH=3;BYMONTHDAY=15`` = every 15 March). Added for A8's
+            yearly-on-date vocabulary (A8-D-1); additive + defaulted empty, so every
+            pre-A8 serialised rule parses unchanged.
         count: Total number of occurrences before the rule completes (XOR ``until``).
         until: Last instant (tz-aware UTC) the rule may fire at (XOR ``count``).
     """
@@ -117,6 +121,7 @@ class RecurrenceRule(BaseModel):
     byminute: tuple[int, ...] = ()
     byday: tuple[str, ...] = ()
     bymonthday: tuple[int, ...] = ()
+    bymonth: tuple[int, ...] = ()
     count: int | None = Field(default=None, ge=1)
     until: datetime | None = None
 
@@ -150,6 +155,14 @@ class RecurrenceRule(BaseModel):
     def _valid_bymonthday(cls, value: tuple[int, ...]) -> tuple[int, ...]:
         if any(d == 0 or not -31 <= d <= 31 for d in value):
             msg = f"bymonthday values must be in 1..31 or -31..-1, got {value}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("bymonth")
+    @classmethod
+    def _valid_bymonth(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(not 1 <= m <= 12 for m in value):
+            msg = f"bymonth values must be in 1..12, got {value}"
             raise ValueError(msg)
         return value
 
@@ -196,6 +209,8 @@ class RecurrenceRule(BaseModel):
             parts.append(f"BYDAY={','.join(self.byday)}")
         if self.bymonthday:
             parts.append(f"BYMONTHDAY={','.join(str(d) for d in self.bymonthday)}")
+        if self.bymonth:
+            parts.append(f"BYMONTH={','.join(str(m) for m in self.bymonth)}")
         if self.byhour:
             parts.append(f"BYHOUR={','.join(str(h) for h in self.byhour)}")
         if self.byminute:
@@ -255,6 +270,7 @@ class RecurrenceRule(BaseModel):
                 byminute=_ints("BYMINUTE"),
                 byday=byday,
                 bymonthday=_ints("BYMONTHDAY"),
+                bymonth=_ints("BYMONTH"),
                 count=int(count_raw) if count_raw else None,
                 until=until,
             )
@@ -295,6 +311,11 @@ class Schedule(BaseModel):
         fire_count: How many times this schedule has fired.
         created_at: Creation time (UTC).
         updated_at: Last-mutation time (UTC).
+        revision: The optimistic-concurrency counter (Spec A8, A8-D-7). Every durable
+            mutation bumps it; the store's compare-and-swap writes ``WHERE revision =
+            :expected`` so an edit landing between a scheduler fire and its re-arm is
+            detected (the mid-flight edit race guard) instead of silently lost. Owned
+            by the store like the fire bookkeeping; a fresh schedule starts at 0.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -318,6 +339,7 @@ class Schedule(BaseModel):
     fire_count: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
+    revision: int = Field(default=0, ge=0)
 
     @field_validator("timezone")
     @classmethod

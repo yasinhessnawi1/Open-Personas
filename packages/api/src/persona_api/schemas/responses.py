@@ -497,6 +497,13 @@ class UserProfileResponse(_Output):
     email: str | None = None
     first_name: str | None = None
     last_name: str | None = None
+    #: The caller's per-user IANA timezone (Spec A8, A8-D-9). ``None`` when unset —
+    #: schedule computation + rendering then fall back to ``PERSONA_DEFAULT_TIMEZONE``.
+    timezone: str | None = None
+    #: Per-user quiet hours (Spec A8, A8-D-6): local minutes-of-day [start, end) in the
+    #: user's timezone. Both ``None`` = off (off-until-set).
+    quiet_hours_start: int | None = None
+    quiet_hours_end: int | None = None
     created_at: datetime
 
 

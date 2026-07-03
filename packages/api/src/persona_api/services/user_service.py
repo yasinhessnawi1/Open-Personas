@@ -136,7 +136,10 @@ def get_user_profile(engine: Engine, *, user_id: str) -> dict[str, object] | Non
     id; the tenant RLS lives on the child tables). Returns ``None`` if no row exists
     (should not happen post-:func:`ensure_user`, but callers handle it defensively).
     """
-    stmt = text("SELECT id, email, first_name, last_name, created_at FROM users WHERE id = :id")
+    stmt = text(
+        "SELECT id, email, first_name, last_name, timezone, "
+        "quiet_hours_start, quiet_hours_end, created_at FROM users WHERE id = :id"
+    )
     with engine.connect() as conn:
         row = conn.execute(stmt, {"id": user_id}).mappings().first()
     return dict(row) if row is not None else None
@@ -148,26 +151,38 @@ def update_user_profile(
     user_id: str,
     first_name: str | None | _Unset = UNSET,
     last_name: str | None | _Unset = UNSET,
+    timezone: str | None | _Unset = UNSET,
+    quiet_hours_start: int | None | _Unset = UNSET,
+    quiet_hours_end: int | None | _Unset = UNSET,
 ) -> dict[str, object] | None:
-    """Set the caller's name fields and return the updated profile row.
+    """Set the caller's profile fields and return the updated profile row.
 
     PATCH semantics: only fields that are *provided* are written — pass a value
     (``str`` to set, ``None`` to clear) to change a field, or leave it :data:`UNSET`
-    to leave it unchanged. Provided values pass through :func:`normalize_name`
-    (K6-D-8). With nothing provided this is a read (equivalent to
-    :func:`get_user_profile`). Dialect-safe (``UPDATE`` then re-``SELECT``; no
-    ``RETURNING`` so the community SQLite edition behaves identically). Scoped to
-    ``WHERE id = :id`` — a caller can only ever touch their own row.
+    to leave it unchanged. Provided name values pass through :func:`normalize_name`
+    (K6-D-8); ``timezone`` is validated as an IANA zone at the request boundary
+    (Spec A8, A8-D-9 — a bad zone is a 422, never reaching here), so it is written
+    as-given (no normalisation, ``None`` clears → falls back to the config default).
+    With nothing provided this is a read (equivalent to :func:`get_user_profile`).
+    Dialect-safe (``UPDATE`` then re-``SELECT``; no ``RETURNING`` so the community
+    SQLite edition behaves identically). Scoped to ``WHERE id = :id`` — a caller can
+    only ever touch their own row.
     """
-    assignments: dict[str, str | None] = {}
+    assignments: dict[str, str | int | None] = {}
     if not isinstance(first_name, _Unset):
         assignments["first_name"] = normalize_name(first_name)
     if not isinstance(last_name, _Unset):
         assignments["last_name"] = normalize_name(last_name)
+    if not isinstance(timezone, _Unset):
+        assignments["timezone"] = timezone
+    if not isinstance(quiet_hours_start, _Unset):
+        assignments["quiet_hours_start"] = quiet_hours_start
+    if not isinstance(quiet_hours_end, _Unset):
+        assignments["quiet_hours_end"] = quiet_hours_end
     if assignments:
-        # Column names are a fixed internal allowlist ({first_name, last_name}),
-        # never user input — the f-string carries identifiers only; every value is
-        # bound. (No SQL injection surface.)
+        # Column names are a fixed internal allowlist ({first_name, last_name,
+        # timezone}), never user input — the f-string carries identifiers only; every
+        # value is bound. (No SQL injection surface.)
         set_clause = ", ".join(f"{col} = :{col}" for col in assignments)
         stmt = text(f"UPDATE users SET {set_clause} WHERE id = :id")  # noqa: S608 - fixed identifiers
         with engine.begin() as conn:

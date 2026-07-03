@@ -11,6 +11,38 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Schedules, Calendar & Time — one schedule mechanism, two twin interfaces (Spec A8, 2026-07-03)
+
+> Close-out of `feat/schedules-calendar` (`persona-core` + `persona-api` + `persona-web`). A4 made every
+> confirmed task schedule-backed and proved it fires; A8 **finishes time**. One enriched, timezone-correct
+> schedule mechanism behind **one validated CAS-guarded edit door** behind **two twin interfaces**: the
+> persona reschedules live tasks in conversation (re-echo → confirm → the next real fire at the new time),
+> and the user gets a calendar with a real time picker. No raw RRULE reaches any surface.
+
+- **Per-user timezone** (`users.timezone` ?? `PERSONA_DEFAULT_TIMEZONE`, IANA), wired through echoes,
+  next-fire computation, and calendar rendering; DST-correct across a boundary (Oslo/New York/Sydney).
+- **The humane recurrence vocabulary** — daily/weekdays/weekly-on-X/monthly-by-date/monthly-by-Nth-weekday
+  (incl. last-of-month)/every-N-hours (wall-clock)/yearly — round-tripping losslessly phrase↔rule↔picker;
+  one `human_terms` renderer feeds both the chat echo and the calendar picker. Adds `bymonth` to
+  `RecurrenceRule` (additive) for yearly-on-date.
+- **The mid-flight edit race guard** — an optimistic-CAS `schedules.revision`: an edit landing between a
+  scheduler fire and its re-arm neither double-fires nor drops an occurrence (proven with real tick
+  interleaving); also fixes a latent double-`fire_count`-advance under concurrent ticks.
+- **The reschedule verb** in chat ("move it to 9", "make it weekly", "skip tomorrow's") — resolve the
+  target (ambiguous lists + asks), re-echo the full new clause in the user's tz, confirm → apply through
+  the CAS door; the next real fire happens at the new time.
+- **Propose-first is structural** — a persona-originated reschedule NEVER auto-applies; it becomes a
+  dual-resolution proposal a user confirms (chat now, A6 inbox later), applied with distinguishing audit
+  provenance. `actor ∈ {user_via_ui, user_via_chat, persona_proposed}`, server-set.
+- **The occurrences read API** (`GET /v1/me/schedule/occurrences`) — the engine's own forward-expansion
+  (same code path as the tick), server-capped (horizon + count) with an honest `truncated` marker; fire
+  history from the audit trail.
+- **Quiet hours** (per-user, off-until-set) — scheduling into the window warns + offers the nearest edge,
+  never a silent shift; A5 reads the same definition.
+- **The calendar surface** (`/(app)/schedule`) — agenda over the occurrences API (zero client recurrence
+  math), persona-coloured, honest fire-history + truncation; a recurrence builder + time picker (composed
+  from existing primitives, F2 shared-primitive gap flagged) that reschedules through the same CAS door.
+- Migration `030_schedules_calendar` (renumbers at merge-back). OpenAPI regen is a named merge-back item.
 ### Connector Management UI — turn on your messaging platforms behind one coherent flow (Spec C6, 2026-07-03)
 > Close-out of `connector-management-ui` (`persona-web` + a thin `persona-api` front-door + additive `persona-connectors` fields). The web surface that makes the C-series usable: connect Telegram / Discord / Slack / WhatsApp / SMS / email to your Persona account, see what's connected (and *as which identity*), and disconnect. **Closes direction 2.**
 - **One coherent frame over four mechanisms (C6-D-1):** a single `ConnectFlow` state machine — `idle → initiating → awaiting → confirmed` + `failed`/`expired` — where only the middle step varies (deep-link / OAuth / phone & email code). **The connectors list is the sole completion oracle** (a gentle poll; the web never handles the final credential — every mechanism redeems out-of-band). Server-authoritative expiry + one-tap re-issue; no zombie pollers.

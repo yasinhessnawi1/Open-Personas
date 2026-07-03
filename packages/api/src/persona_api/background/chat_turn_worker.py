@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
     from persona_api.services.origination_service import OriginationService
+    from persona_api.services.task_reschedule_service import TaskRescheduleService
     from persona_api.services.task_steering_service import TaskSteeringService
 
 _log = get_logger("api.chat_turn_worker")
@@ -152,6 +153,7 @@ class ChatTurnRegistry:
         job_queue: JobQueue | None = None,
         origination_service: OriginationService | None = None,
         task_steering_service: TaskSteeringService | None = None,
+        task_reschedule_service: TaskRescheduleService | None = None,
     ) -> None:
         self._sink = sink
         self._engine = rls_engine
@@ -167,6 +169,8 @@ class ChatTurnRegistry:
         self._origination_service = origination_service
         # Spec A4 (T9b): apply a conversational steering verb (pause/resume/cancel) to a live task.
         self._task_steering_service = task_steering_service
+        # Spec A8 (T6): apply a user-confirmed conversational reschedule through the CAS door.
+        self._task_reschedule_service = task_reschedule_service
         self._handles: dict[str, ChatTurnHandle] = {}
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
@@ -247,9 +251,10 @@ class ChatTurnRegistry:
         error_message: str | None = None
         originated: Mapping[str, Any] | None = None
         steered: Mapping[str, Any] | None = None
+        rescheduled: Mapping[str, Any] | None = None
 
         async def _on_event(event: RunEvent) -> None:
-            nonlocal tier, routing, originated, steered
+            nonlocal tier, routing, originated, steered, rescheduled
             if event.type == "tier":
                 # The router's tier choice rides the terminal `done` payload — it
                 # is NOT a frame and NOT in the persisted event-log (it lives on
@@ -279,6 +284,11 @@ class ChatTurnRegistry:
                     "conversation_id": handle.conversation_id,
                     "persona_id": conversation.persona_id,
                 }
+                return
+            if event.type == "task_rescheduled":
+                # Spec A8 (T6): a user-confirmed conversational reschedule — the worker injects the
+                # tenant and applies it through the CAS door on the clean-completion path.
+                rescheduled = {**event.data, "owner_id": handle.owner_id}
                 return
             handle.event_log.append(event.model_dump(mode="json"))
             await handle.events.put(("event", event))
@@ -326,6 +336,7 @@ class ChatTurnRegistry:
                 self._enqueue_synthesis(handle, conversation)
                 await self._originate_task(originated)
                 await self._apply_steering(steered)
+                await self._apply_reschedule(rescheduled)
                 await self._run_on_complete(on_complete, handle)
                 await handle.events.put(
                     ("done", self._done_payload(loop, last_chunk, tier, routing))
@@ -471,6 +482,19 @@ class ChatTurnRegistry:
             await self._task_steering_service.steer(steered)
         except Exception as exc:  # noqa: BLE001 — a steering miss (e.g. already terminal) must not crash the turn
             _log.warning("task steering failed: {err}", err=str(exc))
+
+    async def _apply_reschedule(self, rescheduled: Mapping[str, Any] | None) -> None:
+        """Spec A8 (T6): apply a user-confirmed reschedule through the CAS door (best-effort).
+
+        The service is sync (a fast CAS update + audit); run it off the event loop. It self-guards
+        a missing task/schedule as a logged no-op, so a stray exception here is only logged.
+        """
+        if rescheduled is None or self._task_reschedule_service is None:
+            return
+        try:
+            await asyncio.to_thread(self._task_reschedule_service.reschedule, rescheduled)
+        except Exception as exc:  # noqa: BLE001 — a reschedule miss must not crash the turn
+            _log.warning("task reschedule failed: {err}", err=str(exc))
 
     @staticmethod
     def _done_payload(

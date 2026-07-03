@@ -29,6 +29,7 @@ __all__ = [
     "DuplicateJobTypeError",
     "GatedActionProposedError",
     "InvalidRecurrenceRuleError",
+    "InvalidTimezoneError",
     "JobStateError",
     "MCPBuiltinServerError",
     "MCPConnectionError",
@@ -41,6 +42,7 @@ __all__ = [
     "PersonaSelfWriteForbiddenError",
     "RuntimeWriteForbiddenError",
     "SandboxViolationError",
+    "ScheduleConcurrentEditError",
     "ScheduleNotFoundError",
     "ScheduleStateError",
     "SchemaVersionMismatchError",
@@ -478,6 +480,19 @@ class InvalidRecurrenceRuleError(PersonaError):
     """
 
 
+class InvalidTimezoneError(PersonaError):
+    """Raised when a timezone value is not a resolvable IANA zone.
+
+    Spec A8 (A8-D-9). The per-user ``users.timezone`` (and any reschedule tz) is
+    validated at the write boundary — a value that ``zoneinfo`` cannot resolve is
+    rejected (→ 422 at the API edge) rather than stored to mis-fire in the tick.
+    ``context`` carries the offending ``timezone``. Read-time resolution
+    (:func:`persona.timezone.resolve_timezone`) fails soft to the config default
+    instead of raising. Consolidates the IANA check the config default validator
+    and the ``Schedule`` captured-zone validator each did inline.
+    """
+
+
 class ScheduleNotFoundError(PersonaError):
     """Raised when a schedule id is looked up and does not exist (or is not visible).
 
@@ -494,6 +509,19 @@ class ScheduleStateError(PersonaError):
     Spec A1. E.g. recording a fire against a one-time schedule that has already
     completed, or otherwise driving a schedule through a transition its current
     state forbids. ``context`` carries the schedule id and the rejected operation.
+    """
+
+
+class ScheduleConcurrentEditError(PersonaError):
+    """Raised when a schedule edit loses its optimistic-CAS race too many times.
+
+    Spec A8 (A8-D-7). The store retries an edit a bounded number of times on a
+    ``revision`` compare-and-swap miss (a concurrent write landed between the read
+    and the update); if every attempt is beaten, it raises this rather than
+    blindly overwriting — the caller (a reschedule) can re-fetch and re-propose.
+    ``context`` carries the ``schedule_id`` and the attempt count. Rare by
+    construction (contention is one schedule's edit coinciding with its own tick
+    re-arm); a persistent failure signals genuine hot contention, not a lost edit.
     """
 
 

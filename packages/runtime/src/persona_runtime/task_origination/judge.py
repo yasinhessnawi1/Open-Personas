@@ -33,6 +33,7 @@ from persona_runtime.task_origination.recognizer import StandingJudgment, Standi
 from persona_runtime.task_origination.schedule import parse_one_time, parse_recurrence
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     from persona.backends.protocol import ChatBackend
@@ -84,10 +85,42 @@ _MICROS_PER_KR = 10_000
 class ModelStandingIntentJudge:
     """A :class:`StandingIntentJudge` over a chat backend (mockable; conservative)."""
 
-    def __init__(self, *, backend: ChatBackend, default_timezone: str = "UTC") -> None:
-        """Inject the chat backend + the default cadence timezone (the config default, K6 seam)."""
+    def __init__(
+        self,
+        *,
+        backend: ChatBackend,
+        default_timezone: str = "UTC",
+        timezone_provider: Callable[[], str] | None = None,
+    ) -> None:
+        """Inject the chat backend + the cadence timezone source.
+
+        ``timezone_provider`` (Spec A8, A8-D-9 — the K6 seam realised) resolves the
+        caller's per-user timezone at judge time (``users.timezone`` ?? the config
+        default), so a drafted cadence is anchored in *the user's* zone. It is an
+        api-side closure over the RLS ``current_user_id`` contextvar (the runtime
+        stays DB-free). When ``None`` (the pre-A8 / off-request path), the judge
+        falls back to ``default_timezone`` (the config default) — byte-identical to
+        before, so existing tests and the community edition are unchanged.
+        """
         self._backend = backend
         self._default_timezone = default_timezone
+        self._timezone_provider = timezone_provider
+
+    def _resolve_timezone(self) -> str:
+        """The cadence timezone for this draft: the per-user provider, else the default.
+
+        The provider is fail-soft (:func:`persona.timezone.resolve_timezone` already
+        falls back to the config default on an unset/invalid zone); a provider that
+        itself raises degrades to ``default_timezone`` so origination never breaks on
+        a timezone lookup.
+        """
+        if self._timezone_provider is None:
+            return self._default_timezone
+        try:
+            return self._timezone_provider()
+        except Exception:  # noqa: BLE001 — a tz lookup must never break origination
+            _logger.warning("timezone provider failed; using the config default")
+            return self._default_timezone
 
     async def judge(self, message: str, *, language: str) -> StandingJudgment:
         """Judge ``message``; return a verdict (+ a draft iff clearly standing).
@@ -145,7 +178,7 @@ class ModelStandingIntentJudge:
         the user can make it recurring by reply. Any parse failure degrades to the same safe
         run-once fallback — an unrepresentable cadence is declined, never coerced (parse-honesty).
         """
-        tz = self._default_timezone
+        tz = self._resolve_timezone()
         now = self._now()
         rrule = payload.get("recurrence_rrule")
         one_time = payload.get("one_time_at")

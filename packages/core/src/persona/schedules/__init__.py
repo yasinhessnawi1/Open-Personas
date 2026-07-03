@@ -24,19 +24,45 @@ from persona.schedules.models import (
     RecurrenceRule,
     Schedule,
 )
-from persona.schedules.nextfire import next_fire_after
+from persona.schedules.nextfire import next_fire_after, occurrences_between
 from persona.schedules.policy import FireAction, decide_fire
+from persona.schedules.proposal import (
+    RescheduleProposal,
+    RescheduleProposalStatus,
+    resolve_proposal,
+)
+from persona.schedules.quiet_hours import QuietHours, quiet_hours_edge
+from persona.schedules.vocabulary import (
+    RecurrenceKind,
+    RecurrencePattern,
+    pattern_to_rule,
+    render_human_terms,
+    render_recurrence_terms,
+    rule_to_pattern,
+)
 
 __all__ = [
     "FIRE_PAYLOAD_FIRE_TIME_KEY",
     "FIRE_PAYLOAD_SCHEDULE_ID_KEY",
     "FireAction",
     "MissedFirePolicy",
+    "QuietHours",
     "RecurrenceFreq",
+    "RecurrenceKind",
+    "RecurrencePattern",
     "RecurrenceRule",
+    "RescheduleProposal",
+    "RescheduleProposalStatus",
     "Schedule",
     "decide_fire",
     "fire_idempotency_key",
     "fire_payload",
     "next_fire_after",
+    "occurrences_between",
+    "pattern_to_rule",
+    "quiet_hours_edge",
+    "render_human_terms",
+    "render_recurrence_terms",
+    "resolve_proposal",
+    "rule_to_pattern",
 ]

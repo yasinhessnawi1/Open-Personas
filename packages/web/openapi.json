@@ -1339,7 +1339,7 @@
       "patch": {
         "tags": ["me"],
         "summary": "Update Profile",
-        "description": "Set the caller's optional name (Spec K6, K6-D-1). PATCH \u2014 omitted = unchanged.\n\nOnly the fields the client actually sent are written (``exclude_unset``): a\nstring sets, an explicit ``null`` clears, an omitted field is left untouched.\nNames are normalised (control-char strip, whitespace-only \u2192 unset) in the\nservice (K6-D-8). Scoped to the caller's own row \u2014 never another user's.",
+        "description": "Set the caller's optional name + timezone (Spec K6/A8). PATCH \u2014 omitted = unchanged.\n\nOnly the fields the client actually sent are written (``exclude_unset``): a\nstring sets, an explicit ``null`` clears, an omitted field is left untouched.\nNames are normalised (control-char strip, whitespace-only \u2192 unset) in the\nservice (K6-D-8). A provided ``timezone`` is validated as an IANA zone here\n(Spec A8, A8-D-9) \u2014 an unknown zone is a fail-fast 422, never stored to\nmis-fire in the tick; ``null`` clears it (\u2192 falls back to the config default).\nScoped to the caller's own row \u2014 never another user's.",
         "operationId": "update_profile_v1_me_profile_patch",
         "requestBody": {
           "content": {
@@ -1358,6 +1358,160 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UserProfileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule/occurrences": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Get Schedule Occurrences",
+        "description": "The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).\n\nComputed from the engine's own recurrence path (never a client reimplementation), RLS-scoped\nto the caller. The window is server-capped (horizon + count); the response's ``truncated``\nmarker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.",
+        "operationId": "get_schedule_occurrences_v1_me_schedule_occurrences_get",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OccurrencesResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule/{schedule_id}/reschedule/preview": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Preview Schedule Reschedule",
+        "description": "Preview a calendar reschedule \u2014 the engine's next-fire + full clause + quiet-hours warn.\n\nNo write (Spec A8, T9, bars 3/5): the picker shows this as the confirm echo (the SAME full\nclause chat re-echoes) before the user confirms. The next fire is the ENGINE's, so the picker\nnever fabricates a time the DST gap/fold policy would shift.",
+        "operationId": "preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRescheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReschedulePreview"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule/{schedule_id}/reschedule": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Apply Schedule Reschedule",
+        "description": "Apply a calendar reschedule through the SAME CAS door as chat (Spec A8, T9, bar 4).\n\n``actor=user_via_ui``; the client sends picker-state (no raw RRULE \u2014 the server maps it). RLS-\nscoped to the caller. Returns the applied clause + the engine's next fire (the twin's confirm).",
+        "operationId": "apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRescheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReschedulePreview"
                 }
               }
             }
@@ -3442,6 +3596,28 @@
         "title": "DocumentRef",
         "description": "Reference to an attached document \u2014 the API-boundary type.\n\nPersisted alongside the original file as a ``{doc_ref}.meta.json``\nsidecar in the workspace. Returned by :func:`upload`,\n:func:`list_for_conversation`, and (via JSON) the API GET endpoint\n(T18). Carries the metadata T14/T15/T16 need to render the prompt\nsections + the synopsis."
       },
+      "FireEvent": {
+        "properties": {
+          "schedule_id": {
+            "type": "string",
+            "title": "Schedule Id"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["schedule_id", "at", "status"],
+        "title": "FireEvent",
+        "description": "One past fire/miss from the audit trail (the calendar's ran/missed markers)."
+      },
       "GrantToolRequest": {
         "properties": {
           "tool_name": {
@@ -4014,6 +4190,104 @@
         "title": "NotificationOut",
         "description": "One durable bell notification (Spec P6 feed), owner-scoped + RLS.\n\nCopy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``\nvia next-intl at render. ``kind`` + ``ref_id`` drive the deep-link\n(``run_terminal`` \u2192 ``/runs/{ref_id}``, ``persona_ready`` \u2192 ``/personas/{ref_id}``)."
       },
+      "Occurrence": {
+        "properties": {
+          "schedule_id": {
+            "type": "string",
+            "title": "Schedule Id"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fire At"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "human_terms": {
+            "type": "string",
+            "title": "Human Terms"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "schedule_id",
+          "task_id",
+          "persona_id",
+          "fire_at",
+          "timezone",
+          "human_terms"
+        ],
+        "title": "Occurrence",
+        "description": "One computed future fire (tz-aware UTC instant) + its schedule/task context."
+      },
+      "OccurrencesResult": {
+        "properties": {
+          "occurrences": {
+            "items": {
+              "$ref": "#/components/schemas/Occurrence"
+            },
+            "type": "array",
+            "title": "Occurrences"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/FireEvent"
+            },
+            "type": "array",
+            "title": "History"
+          },
+          "window_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window From"
+          },
+          "window_to": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window To"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "occurrences",
+          "history",
+          "window_from",
+          "window_to",
+          "truncated"
+        ],
+        "title": "OccurrencesResult",
+        "description": "The windowed occurrences + fire history + the honest truncation marker (A8-D-11)."
+      },
       "PersonaCapabilities": {
         "properties": {
           "vision": {
@@ -4346,6 +4620,144 @@
         "title": "PostMessageRequest",
         "description": "Send a user message; the response streams over SSE (\u00a75.2).\n\n``channel`` is the optional connector passthrough (D-08-3) \u2014 null for the\nweb UI. The runtime ignores it in v0.1; the API just stores it on the\nmessage row and echoes ``format_hints`` on the ``done`` event.\n\n``images`` is the optional spec-13 multimodal extension (D-13-X-now option\nc, D-13-5): up to 4 :class:`ImageRef` per message. ``None`` (the default)\nkeeps the text-only path byte-for-byte unchanged. An empty list is\nequivalent to ``None`` semantically but rejected as a validation error so\ncallers don't accidentally send ``images=[]`` and skip the cap check; pass\n``None`` or omit the field.\n\nThe cap is enforced via :class:`Field`'s built-in ``min_length`` /\n``max_length`` (D-13-5) so the failure surfaces as a structured\n``too_long`` / ``too_short`` Pydantic v2 error \u2014 JSON-serialisable through\nthe API's ``_request_422`` handler in :mod:`persona_api.errors` (a custom\n``field_validator`` would attach a raw :class:`ValueError` to ``ctx`` and\nbreak the response body's ``json.dumps``)."
       },
+      "RecurrenceKind": {
+        "type": "string",
+        "enum": [
+          "daily",
+          "weekly",
+          "monthly_day",
+          "monthly_weekday",
+          "hourly",
+          "yearly"
+        ],
+        "title": "RecurrenceKind",
+        "description": "The picker's top-level recurrence categories (the humane vocabulary, A8-D-1)."
+      },
+      "RecurrencePattern": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RecurrenceKind"
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Interval",
+            "default": 1
+          },
+          "weekdays": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Weekdays",
+            "default": []
+          },
+          "month_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Month Day"
+          },
+          "weekday": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekday"
+          },
+          "ordinal": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ordinal"
+          },
+          "month": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Month"
+          },
+          "day_of_month": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day Of Month"
+          },
+          "hour": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 23.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hour"
+          },
+          "minute": {
+            "type": "integer",
+            "maximum": 59.0,
+            "minimum": 0.0,
+            "title": "Minute",
+            "default": 0
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["kind"],
+        "title": "RecurrencePattern",
+        "description": "The RRULE-free picker-state for a recurring cadence (A8-D-1).\n\nA structured, UI-bindable view of the v1 vocabulary \u2014 the calendar's recurrence\nbuilder reads/writes THIS, never an RRULE string. Round-trips losslessly with\n:class:`~persona.schedules.RecurrenceRule` via :func:`pattern_to_rule` /\n:func:`rule_to_pattern` for the supported set.\n\nAttributes:\n    kind: The recurrence category.\n    interval: Stride \u2014 days (DAILY), weeks (WEEKLY), months (MONTHLY_*), hours\n        (HOURLY, must divide 24 for a clean wall-clock cadence); 1 for YEARLY.\n    weekdays: WEEKLY \u2014 the selected weekdays (BYDAY tokens ``MO``..``SU``, canonical\n        week order, no ordinal). The 5-weekday preset renders \"every weekday\".\n    month_day: MONTHLY_DAY \u2014 the day of month (1..31, or -1 for the last day).\n    weekday: MONTHLY_WEEKDAY \u2014 the weekday token (``MO``..``SU``).\n    ordinal: MONTHLY_WEEKDAY \u2014 which occurrence (1..4, or -1 for the last).\n    month: YEARLY \u2014 the month (1..12).\n    day_of_month: YEARLY \u2014 the day of month (1..31).\n    hour: Local hour-of-day (0..23). Required for every kind except HOURLY (whose\n        marks come from ``interval``); ``None`` only for HOURLY.\n    minute: Local minute-of-hour (0..59).\n    count: Bound \u2014 total occurrences (XOR ``until``).\n    until: Bound \u2014 last instant, tz-aware UTC (XOR ``count``)."
+      },
       "RefinePersonaRequest": {
         "properties": {
           "current_yaml": {
@@ -4375,6 +4787,51 @@
         "required": ["current_yaml", "question", "answer"],
         "title": "RefinePersonaRequest",
         "description": "Refine a draft persona by answering a clarifying question (spec 10, \u00a74 / D-10-2).\n\nStateless: ``round`` is the count of refinements already applied (the UI owns\nthe counter); the server rejects ``round > 3`` as the backstop on the\n3-round cap (D-10-5)."
+      },
+      "ReschedulePreview": {
+        "properties": {
+          "human_terms": {
+            "type": "string",
+            "title": "Human Terms"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "quiet_hours_offer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours Offer"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "human_terms",
+          "timezone",
+          "next_fire",
+          "quiet_hours_offer"
+        ],
+        "title": "ReschedulePreview",
+        "description": "The engine's preview of a proposed calendar reschedule (no write)."
       },
       "RespondToRunRequest": {
         "properties": {
@@ -4500,6 +4957,43 @@
         "required": ["id", "persona_id", "task", "status", "started_at"],
         "title": "RunSummary",
         "description": "A run in the Tasks index \u2014 a light projection without the steps JSON."
+      },
+      "ScheduleRescheduleRequest": {
+        "properties": {
+          "pattern": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecurrencePattern"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "one_time_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "One Time At"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Timezone"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["timezone"],
+        "title": "ScheduleRescheduleRequest",
+        "description": "A calendar-initiated reschedule (Spec A8, T9 \u2014 the twin of the chat verb).\n\n**Picker-state in \u2014 NO raw RRULE from the client** (bar 1): the web sends a structured\n:class:`~persona.schedules.RecurrencePattern` (or a one-time instant) and the SERVER maps it to\nthe rule, so there is no client-side recurrence math. Exactly one of ``pattern`` /\n``one_time_at`` (XOR, checked in the route). Applied through the SAME CAS door as chat."
       },
       "SetConsentRequest": {
         "properties": {
@@ -4810,12 +5304,50 @@
               }
             ],
             "title": "Last Name"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "quiet_hours_start": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours Start"
+          },
+          "quiet_hours_end": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1439.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours End"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "UpdateProfileRequest",
-        "description": "Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.\n\nBoth fields optional; **omitted = unchanged**, explicit ``null`` = **clear**\n(distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``\nfails fast at the boundary on egregious input; the service then strips control\ncharacters and treats whitespace-only as unset (:func:`persona_api.services.\nuser_service.normalize_name`). The name is never required \u2014 an empty PATCH is a\nvalid no-op read."
+        "description": "Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.\n\nAll fields optional; **omitted = unchanged**, explicit ``null`` = **clear**\n(distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``\nfails fast at the boundary on egregious input; the service then strips control\ncharacters and treats whitespace-only as unset (names,\n:func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,\nA8-D-9) is an IANA zone name whose validity is checked in the route handler\n(:func:`persona.timezone.validate_timezone` \u2192 422) \u2014 the ``max_length`` here is\nonly a cheap egregious-input guard, not the IANA check (a custom ``field_validator``\nwould break the 422 body's ``json.dumps``, cf. ``SendMessageRequest``). ``null``\nclears it \u2192 schedule computation falls back to ``PERSONA_DEFAULT_TIMEZONE``.\nNothing is required \u2014 an empty PATCH is a valid no-op read."
       },
       "UsageEntry": {
         "properties": {
@@ -4907,6 +5439,39 @@
               }
             ],
             "title": "Last Name"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "quiet_hours_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours Start"
+          },
+          "quiet_hours_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours End"
           },
           "created_at": {
             "type": "string",

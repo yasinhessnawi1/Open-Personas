@@ -193,12 +193,15 @@ class SchedulerTick:
         )
         if action is FireAction.SKIP:
             # Worker was down past the catch-up window (or skip-and-note): record a
-            # durable miss note, advance past the backlog, do NOT fire.
+            # durable miss note, advance past the backlog, do NOT fire. CAS-guarded on
+            # the claimed revision so a concurrent edit is reconciled, not clobbered.
             self._store.skip_fire(
                 schedule.owner_id,
                 schedule.id,
                 missed_fire_time=fire_time,
                 next_fire_at=next_fire,
+                now=now,
+                expected_revision=schedule.revision,
             )
             return action
         self._queue.enqueue(
@@ -207,11 +210,17 @@ class SchedulerTick:
             payload=fire_payload(schedule.id, fire_time, schedule.payload_template),
             idempotency_key=fire_idempotency_key(schedule.id, fire_time),
         )
+        # Enqueue-first (idempotent) THEN advance the bookkeeping, CAS-guarded on the
+        # revision claimed above: an edit landing between the claim and here is
+        # reconciled (record the fire against the edited rule), and a concurrent tick's
+        # duplicate advance is a no-op — neither double-fires nor drops (A8-D-7).
         self._store.apply_fire(
             schedule.owner_id,
             schedule.id,
             fire_time=fire_time,
             next_fire_at=next_fire,
+            now=now,
+            expected_revision=schedule.revision,
             late=action is FireAction.FIRE_LATE,
         )
         return action

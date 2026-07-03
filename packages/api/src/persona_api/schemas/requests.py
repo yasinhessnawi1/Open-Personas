@@ -7,14 +7,17 @@ the web app's TypeScript client (spec 09) is generated from — keep them clean.
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 — a runtime Pydantic field type
 from typing import Literal
 
+from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "AuthorPersonaRequest",
     "ChannelContext",
     "CreateConversationRequest",
+    "ScheduleRescheduleRequest",
     "CreateMCPServerRequest",
     "CreatePersonaRequest",
     "ImageRef",
@@ -280,15 +283,40 @@ class UpdateMCPServerRequest(_Input):
 
 
 class UpdateProfileRequest(_Input):
-    """Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.
+    """Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
 
-    Both fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
+    All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
     fails fast at the boundary on egregious input; the service then strips control
-    characters and treats whitespace-only as unset (:func:`persona_api.services.
-    user_service.normalize_name`). The name is never required — an empty PATCH is a
-    valid no-op read.
+    characters and treats whitespace-only as unset (names,
+    :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
+    A8-D-9) is an IANA zone name whose validity is checked in the route handler
+    (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
+    only a cheap egregious-input guard, not the IANA check (a custom ``field_validator``
+    would break the 422 body's ``json.dumps``, cf. ``SendMessageRequest``). ``null``
+    clears it → schedule computation falls back to ``PERSONA_DEFAULT_TIMEZONE``.
+    Nothing is required — an empty PATCH is a valid no-op read.
     """
 
     first_name: str | None = Field(default=None, max_length=100)
     last_name: str | None = Field(default=None, max_length=100)
+    timezone: str | None = Field(default=None, max_length=64)
+    #: Quiet hours (Spec A8, A8-D-6): local minutes-of-day [start, end). Send both to set,
+    #: both ``null`` to clear (off-until-set). Coherence (both-or-neither, start != end) is
+    #: validated in the route handler (a 422), like the timezone IANA check.
+    quiet_hours_start: int | None = Field(default=None, ge=0, le=1439)
+    quiet_hours_end: int | None = Field(default=None, ge=0, le=1439)
+
+
+class ScheduleRescheduleRequest(_Input):
+    """A calendar-initiated reschedule (Spec A8, T9 — the twin of the chat verb).
+
+    **Picker-state in — NO raw RRULE from the client** (bar 1): the web sends a structured
+    :class:`~persona.schedules.RecurrencePattern` (or a one-time instant) and the SERVER maps it to
+    the rule, so there is no client-side recurrence math. Exactly one of ``pattern`` /
+    ``one_time_at`` (XOR, checked in the route). Applied through the SAME CAS door as chat.
+    """
+
+    pattern: RecurrencePattern | None = None
+    one_time_at: datetime | None = None
+    timezone: str = Field(min_length=1, max_length=64)

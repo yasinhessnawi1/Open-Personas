@@ -385,6 +385,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         origination_service = _a4_services.origination
         task_steering_service = _a4_services.steering
+    # Spec A8 (T6): the WORKER side of the conversational reschedule verb — applies a user-confirmed
+    # reschedule through the one CAS-guarded door (owner-scoped via the worker's injected owner_id).
+    task_reschedule_service = None
+    if rls_engine is not None:
+        from persona_api.schedules.store import ScheduleStore
+        from persona_api.services.task_reschedule_service import TaskRescheduleService
+        from persona_api.tasks.store import TaskStore
+
+        task_reschedule_service = TaskRescheduleService(
+            task_reader=TaskStore(rls_engine),
+            schedule_store=ScheduleStore(rls_engine),
+            engine=rls_engine,
+        )
     chat_turn_registry = (
         ChatTurnRegistry(
             sink=chat_turn_sink,
@@ -394,6 +407,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             job_queue=app.state.job_queue,
             origination_service=origination_service,
             task_steering_service=task_steering_service,
+            task_reschedule_service=task_reschedule_service,
         )
         if chat_turn_sink is not None and rls_engine is not None
         else None

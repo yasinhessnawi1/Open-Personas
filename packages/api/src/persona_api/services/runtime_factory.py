@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from persona.graph.protocol import GraphStore
     from persona.imagegen import ImageBackend
     from persona.sandbox.result import SandboxFile
+    from persona.schedules import QuietHours
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     from persona_runtime.prompt import GraphContext
     from persona_runtime.task_origination import (
         AmendmentInterpreter,
+        RescheduleInterpreter,
         StandingIntentRecognizer,
         SteeringInterpreter,
     )
@@ -967,16 +969,17 @@ class RuntimeFactory:
         StandingIntentRecognizer | None,
         AmendmentInterpreter | None,
         SteeringInterpreter | None,
+        RescheduleInterpreter | None,
     ]:
-        """Build the A4 loop-side interpreters (standing recognizer + amendment + steering).
+        """Build the A4/A8 loop-side interpreters (standing + amendment + steering + reschedule).
 
-        The precision layer of the contract flow (A4-D-2/T9/T9b) — all three share one small-tier
-        backend. **Fail-soft** (the text_summarize precedent): if the small backend is unavailable
-        (keyless env / no tier), returns ``(None, None, None)`` so the loop's A4 gates stay inert
-        and ordinary chat is byte-unchanged — never a construction failure.
+        The precision layer of the contract flow (A4-D-2/T9/T9b + A8-T6) — all four share one
+        small-tier backend. **Fail-soft** (the text_summarize precedent): if the small backend is
+        unavailable (keyless env / no tier), returns all ``None`` so the loop's A4/A8 gates stay
+        inert and ordinary chat is byte-unchanged — never a construction failure.
         """
         if self._tier_registry is None:
-            return None, None, None
+            return None, None, None, None
         try:
             backend = self._tier_registry.get("small")
         except (ProviderError, TierNotConfiguredError) as exc:
@@ -984,9 +987,10 @@ class RuntimeFactory:
                 "task origination not wired — small-tier backend unavailable: {error}",
                 error=type(exc).__name__,
             )
-            return None, None, None
+            return None, None, None, None
         from persona_runtime.task_origination import (
             ModelAmendmentInterpreter,
+            ModelRescheduleInterpreter,
             ModelStandingIntentJudge,
             ModelSteeringInterpreter,
             StandingIntentRecognizer,
@@ -994,14 +998,86 @@ class RuntimeFactory:
 
         recognizer = StandingIntentRecognizer(
             ModelStandingIntentJudge(
-                backend=backend, default_timezone=self._core_config.default_timezone
+                backend=backend,
+                default_timezone=self._core_config.default_timezone,
+                timezone_provider=self._build_user_timezone_provider(),
             )
         )
         return (
             recognizer,
             ModelAmendmentInterpreter(backend=backend),
             ModelSteeringInterpreter(backend=backend),
+            ModelRescheduleInterpreter(backend=backend),
         )
+
+    def _build_user_timezone_provider(self) -> Callable[[], str]:
+        """The per-user cadence-timezone provider (Spec A8, A8-D-9 — the K6 seam realised).
+
+        Resolves ``users.timezone`` for the caller (from the RLS ``current_user_id``
+        contextvar) and falls back to ``PERSONA_DEFAULT_TIMEZONE`` when unset/blank/
+        invalid (:func:`persona.timezone.resolve_timezone`). Injected into the
+        standing-intent judge so a drafted cadence is anchored in the user's own zone.
+        Fail-soft: off-request (no owner) or on any lookup error it returns the config
+        default, so origination never breaks on a timezone read. Mirrors
+        :meth:`_build_task_reader_provider` (the owner-scoped-closure precedent).
+        """
+        from persona.timezone import resolve_timezone
+
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services import user_service
+
+        default_tz = self._core_config.default_timezone
+        engine = self._engine
+
+        def _provider() -> str:
+            owner = current_user_id.get()
+            if not owner:
+                return default_tz
+            try:
+                profile = user_service.get_user_profile(engine, user_id=owner)
+            except Exception:  # noqa: BLE001 — a tz lookup must never break origination
+                _logger.warning("user timezone lookup failed; using the config default")
+                return default_tz
+            stored = profile.get("timezone") if profile else None
+            return resolve_timezone(stored if isinstance(stored, str) else None, default=default_tz)
+
+        return _provider
+
+    def _build_user_quiet_hours_provider(self) -> Callable[[], QuietHours | None]:
+        """The per-user quiet-hours provider (Spec A8, A8-D-6 — off-until-set).
+
+        Resolves ``users.quiet_hours_start/end`` for the caller (RLS contextvar) into a
+        :class:`~persona.schedules.QuietHours`, or ``None`` when unset/invalid (off) — so the
+        reschedule re-echo warns + offers the nearest edge only when a window exists. Fail-soft:
+        off-request or on any error it returns ``None`` (no warn), never breaking a turn.
+        """
+        from persona.schedules import QuietHours
+
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services import user_service
+
+        engine = self._engine
+
+        def _provider() -> QuietHours | None:
+            owner = current_user_id.get()
+            if not owner:
+                return None
+            try:
+                profile = user_service.get_user_profile(engine, user_id=owner)
+            except Exception:  # noqa: BLE001 — a quiet-hours lookup must never break a turn
+                _logger.warning("user quiet-hours lookup failed; treating as off")
+                return None
+            if not profile:
+                return None
+            start, end = profile.get("quiet_hours_start"), profile.get("quiet_hours_end")
+            if not isinstance(start, int) or not isinstance(end, int):
+                return None
+            try:
+                return QuietHours(start_minute=start, end_minute=end)
+            except ValueError:
+                return None  # an empty/corrupt window → off
+
+        return _provider
 
     def _build_task_reader_provider(self) -> Callable[[], TaskStateReader | None]:
         """The owner-scoped task-state reader provider (Spec A4, T7 + composition-root wiring).
@@ -1048,7 +1124,9 @@ class RuntimeFactory:
         )
         from persona_runtime.wellbeing import surfacing_guidance as wellbeing_surfacing_guidance
 
-        recognizer, amendment_interpreter, steering_interpreter = self._build_task_origination()
+        recognizer, amendment_interpreter, steering_interpreter, reschedule_interpreter = (
+            self._build_task_origination()
+        )
         loop = ConversationLoop(
             persona=persona,
             stores=self._build_stores(),
@@ -1105,6 +1183,13 @@ class RuntimeFactory:
             amendment_interpreter=amendment_interpreter,
             steering_interpreter=steering_interpreter,
             task_reader_provider=self._build_task_reader_provider(),
+            # Spec A8 (T6): the conversational reschedule verb. The interpreter resolves the target
+            # + new cadence; the tz/quiet-hours providers resolve the user's frame per turn (the K6
+            # seam). Fail-soft: None → the reschedule gate stays inert. Lands with the worker-side
+            # TaskRescheduleService (app.py) so a confirmed reschedule applies through the CAS door.
+            reschedule_interpreter=reschedule_interpreter,
+            timezone_provider=self._build_user_timezone_provider(),
+            quiet_hours_provider=self._build_user_quiet_hours_provider(),
         )
         # Replace the loop's default-empty deferred_input_files with the
         # SHARED holder (same identity), so the use_skill intercept's

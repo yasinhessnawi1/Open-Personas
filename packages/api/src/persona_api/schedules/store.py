@@ -27,9 +27,14 @@ into A0 jobs) is a SEPARATE concern on the dispatch engine — T5/T6.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import ScheduleNotFoundError
+from persona.errors import (
+    ScheduleConcurrentEditError,
+    ScheduleNotFoundError,
+    ScheduleStateError,
+)
 from persona.logging import get_logger
 from persona.schedules import RecurrenceRule, Schedule, next_fire_after
 from sqlalchemy import delete, insert, select, update
@@ -47,20 +52,10 @@ __all__ = ["ScheduleStore"]
 
 _log = get_logger("api.schedules.store")
 
-# The editable columns an edit may change. id / owner_id / created_at / fire_count
-# / last_fire_at are preserved by the store (the ratified anchor + no COUNT reset);
-# next_fire_at is recomputed, never caller-supplied.
-_EDITABLE = (
-    "timezone",
-    "recurrence",
-    "one_time_at",
-    "target_job_type",
-    "payload_template",
-    "enabled",
-    "paused",
-    "missed_fire_policy",
-    "grace_seconds",
-)
+# Bounded optimistic-CAS retries (A8-D-7). Contention is one schedule's edit coinciding
+# with its own tick re-arm, so the loop essentially never spins; the bound is a backstop
+# against genuine hot contention (→ ScheduleConcurrentEditError, never a lost edit).
+_MAX_CAS_RETRIES = 5
 
 
 def _recurrence_str(schedule: Schedule) -> str | None:
@@ -91,6 +86,7 @@ def _row_to_schedule(row: RowMapping) -> Schedule:
         fire_count=row["fire_count"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        revision=row["revision"],
     )
 
 
@@ -112,6 +108,30 @@ def _values(schedule: Schedule) -> dict[str, Any]:
         "next_fire_at": schedule.next_fire_at,
         "fire_count": schedule.fire_count,
         "created_at": schedule.created_at,
+        "updated_at": schedule.updated_at,
+        "revision": schedule.revision,
+    }
+
+
+def _mutable_values(schedule: Schedule) -> dict[str, Any]:
+    """The column subset an edit writes — everything but the immutable/CAS-managed keys.
+
+    Excludes ``id`` / ``owner_id`` (the WHERE + scope) and ``revision`` (bumped by the
+    CAS itself). ``created_at`` / ``fire_count`` / ``last_fire_at`` are carried on the
+    merged Schedule already (the edit preserves the anchor) so writing them is a no-op.
+    """
+    values = _values(schedule)
+    for key in ("id", "owner_id", "revision"):
+        values.pop(key, None)
+    return values
+
+
+def _fire_values(schedule: Schedule) -> dict[str, Any]:
+    """The column subset a fire/skip advance writes (bookkeeping only)."""
+    return {
+        "fire_count": schedule.fire_count,
+        "last_fire_at": schedule.last_fire_at,
+        "next_fire_at": schedule.next_fire_at,
         "updated_at": schedule.updated_at,
     }
 
@@ -179,51 +199,58 @@ class ScheduleStore:
         from ``proposed`` — so a rule change cannot restart the recurrence anchor
         or the fire budget. Only the editable fields move; ``next_fire_at`` is
         recomputed from the new rule as of ``now``. Audits ``schedule.edit``.
+
+        Optimistic-CAS guarded (A8-D-7): the write is ``WHERE revision = :expected``;
+        a concurrent write (a tick re-arm, another edit) is retried a bounded number
+        of times against the fresh row, so the edit lands correctly rather than being
+        clobbered by — or clobbering — the racer. Persistent contention raises
+        :class:`ScheduleConcurrentEditError`.
         """
-        current = self.get(proposed.owner_id, proposed.id)
-        merged = proposed.model_copy(
-            update={
-                "created_at": current.created_at,  # stable recurrence anchor
-                "fire_count": current.fire_count,  # no COUNT reset
-                "last_fire_at": current.last_fire_at,
-            }
+
+        def _compute(current: Schedule) -> tuple[Schedule, dict[str, Any]]:
+            merged = proposed.model_copy(
+                update={
+                    "created_at": current.created_at,  # stable recurrence anchor
+                    "fire_count": current.fire_count,  # no COUNT reset
+                    "last_fire_at": current.last_fire_at,
+                }
+            )
+            next_fire = next_fire_after(merged, after=now)
+            merged = merged.with_next_fire(next_fire, now=now)
+            return merged, _mutable_values(merged)
+
+        return self._mutate(
+            proposed.owner_id, proposed.id, compute=_compute, action="schedule.edit"
         )
-        next_fire = next_fire_after(merged, after=now)
-        merged = merged.with_next_fire(next_fire, now=now)
-        self._update_or_raise(merged.owner_id, merged.id, _values(merged))
-        self._audit(merged.owner_id, "schedule.edit", merged)
-        return merged
 
     def pause(self, owner_id: str, schedule_id: str, *, now: datetime) -> Schedule:
         """Pause a schedule (stops firing, preserves the rule). Audits ``schedule.pause``.
 
         ``next_fire_at`` is left as-is; :meth:`resume` recomputes it so a long
-        pause never fires a stale past time.
+        pause never fires a stale past time. CAS-guarded (A8-D-7 uniform invariant).
         """
-        current = self.get(owner_id, schedule_id)
-        paused = current.model_copy(update={"paused": True, "updated_at": now})
-        self._update_or_raise(owner_id, schedule_id, {"paused": True, "updated_at": now})
-        self._audit(owner_id, "schedule.pause", paused)
-        return paused
+
+        def _compute(current: Schedule) -> tuple[Schedule, dict[str, Any]]:
+            paused = current.model_copy(update={"paused": True, "updated_at": now})
+            return paused, {"paused": True, "updated_at": now}
+
+        return self._mutate(owner_id, schedule_id, compute=_compute, action="schedule.pause")
 
     def resume(self, owner_id: str, schedule_id: str, *, now: datetime) -> Schedule:
         """Resume a paused schedule; recompute ``next_fire_at(now)``. Audits ``schedule.resume``.
 
         Recomputing from ``now`` (criterion 7) means a schedule resumed after a
-        long pause fires next on its rhythm, not a stale missed instant.
+        long pause fires next on its rhythm, not a stale missed instant. CAS-guarded.
         """
-        current = self.get(owner_id, schedule_id)
-        next_fire = next_fire_after(current, after=now)
-        resumed = current.model_copy(
-            update={"paused": False, "next_fire_at": next_fire, "updated_at": now}
-        )
-        self._update_or_raise(
-            owner_id,
-            schedule_id,
-            {"paused": False, "next_fire_at": next_fire, "updated_at": now},
-        )
-        self._audit(owner_id, "schedule.resume", resumed)
-        return resumed
+
+        def _compute(current: Schedule) -> tuple[Schedule, dict[str, Any]]:
+            next_fire = next_fire_after(current, after=now)
+            resumed = current.model_copy(
+                update={"paused": False, "next_fire_at": next_fire, "updated_at": now}
+            )
+            return resumed, {"paused": False, "next_fire_at": next_fire, "updated_at": now}
+
+        return self._mutate(owner_id, schedule_id, compute=_compute, action="schedule.resume")
 
     def record_fire(self, owner_id: str, schedule_id: str, *, fire_time: datetime) -> Schedule:
         """Record a fire, auto-advancing ``next_fire_at`` to the next occurrence.
@@ -232,11 +259,55 @@ class ScheduleStore:
         ``fire_time`` (``None`` when the rule is exhausted or a one-time has fired
         — one-time COMPLETION). Audits ``schedule.fire``. For the tick's coalesced
         advance (next occurrence after *now*, the no-burst path), use
-        :meth:`apply_fire` with an explicit ``next_fire_at``.
+        :meth:`apply_fire` with an explicit ``next_fire_at``. CAS-guarded.
         """
-        current = self.get(owner_id, schedule_id)
-        next_fire = next_fire_after(current, after=fire_time)
-        return self._persist_fire(owner_id, current, fire_time=fire_time, next_fire_at=next_fire)
+
+        def _compute(current: Schedule) -> tuple[Schedule, dict[str, Any]]:
+            next_fire = next_fire_after(current, after=fire_time)
+            fired = current.record_fire(fire_time=fire_time, next_fire_at=next_fire)
+            return fired, _fire_values(fired)
+
+        return self._mutate(
+            owner_id,
+            schedule_id,
+            compute=_compute,
+            action="schedule.fire",
+            extra={"fire_time": fire_time.isoformat()},
+        )
+
+    def skip_next(self, owner_id: str, schedule_id: str, *, now: datetime) -> Schedule:
+        """Suppress exactly the NEXT occurrence; the following one is unaffected (A8-D-2).
+
+        Advances ``next_fire_at`` PAST the next due occurrence to the one after it, WITHOUT
+        firing (no ``fire_count`` bump), and audits ``schedule.skip_next`` with the suppressed
+        instant. The next real fire is then the FOLLOWING occurrence — proven on the real
+        scheduler. CAS-guarded (retries on a concurrent write). Raises
+        :class:`ScheduleStateError` if there is no next occurrence (a completed schedule).
+        """
+        for _ in range(_MAX_CAS_RETRIES):
+            current = self.get(owner_id, schedule_id)
+            suppressed = current.next_fire_at
+            if suppressed is None:
+                raise ScheduleStateError(
+                    "no next occurrence to skip",
+                    context={"schedule_id": schedule_id, "operation": "skip_next"},
+                )
+            following = next_fire_after(current, after=suppressed)
+            updated = current.with_next_fire(following, now=now)
+            values = {"next_fire_at": following, "updated_at": updated.updated_at}
+            if self._cas_update(owner_id, schedule_id, values, expected=current.revision):
+                bumped = updated.model_copy(update={"revision": current.revision + 1})
+                self._audit(
+                    owner_id,
+                    "schedule.skip_next",
+                    bumped,
+                    extra={"suppressed_fire_time": suppressed.isoformat()},
+                )
+                return bumped
+        raise ScheduleConcurrentEditError(
+            "skip-next lost the concurrency race",
+            context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
+        )
 
     def apply_fire(
         self,
@@ -245,22 +316,37 @@ class ScheduleStore:
         *,
         fire_time: datetime,
         next_fire_at: datetime | None,
+        now: datetime,
+        expected_revision: int,
         late: bool = False,
     ) -> Schedule:
-        """Record a fire with an EXPLICIT ``next_fire_at`` (the tick's coalesce).
+        """Record a fire from the tick, CAS-guarded against a mid-flight edit (A8-D-7).
 
-        The tick computes ``next_fire_at = next_fire_after(now)`` so a backlog of
-        missed occurrences collapses to a single fire that jumps to the next
-        FUTURE occurrence (the structural no-burst invariant), then records the
-        fired scheduled instant via this method. ``late`` flags a fire-late-once
-        catch-up: the durable note is ``schedule.fire_late`` (vs ``schedule.fire``)
-        so A3/A6 can surface that the fire was a catch-up. A one-time schedule
-        completes regardless (the entity forces ``None``).
+        The tick claims a due row (at ``expected_revision``), computes
+        ``next_fire_at = next_fire_after(now)`` (the no-burst coalesce), enqueues the
+        job (idempotent), then calls this to advance the bookkeeping. The write is a
+        compare-and-swap on ``expected_revision``:
+
+        * **CAS hit** — the row is untouched since the claim; record the fire against
+          the tick's computed ``next_fire_at``.
+        * **CAS miss** — a write landed between claim and re-arm. RECONCILE
+          (:meth:`_reconcile_fire`): if THIS fire was already recorded by a concurrent
+          tick (``last_fire_at == fire_time`` — the I3 guard) it is a no-op; otherwise
+          an edit landed, so record the fire against the CURRENT (edited) rule, never
+          the tick's stale ``next_fire_at``.
+
+        ``late`` flags a fire-late-once catch-up (``schedule.fire_late``). A one-time
+        schedule completes regardless (the entity forces ``None``).
         """
         current = self.get(owner_id, schedule_id)
-        return self._persist_fire(
-            owner_id, current, fire_time=fire_time, next_fire_at=next_fire_at, late=late
-        )
+        if current.last_fire_at == fire_time:  # already recorded (I3 idempotent bookkeeping)
+            return current
+        fired = current.record_fire(fire_time=fire_time, next_fire_at=next_fire_at)
+        if self._cas_update(owner_id, schedule_id, _fire_values(fired), expected=expected_revision):
+            bumped = fired.model_copy(update={"revision": expected_revision + 1})
+            self._audit_fire(owner_id, bumped, fire_time=fire_time, late=late)
+            return bumped
+        return self._reconcile_fire(owner_id, schedule_id, fire_time=fire_time, now=now, late=late)
 
     def skip_fire(
         self,
@@ -269,6 +355,8 @@ class ScheduleStore:
         *,
         missed_fire_time: datetime,
         next_fire_at: datetime | None,
+        now: datetime,
+        expected_revision: int,
     ) -> Schedule:
         """Skip a missed fire: advance ``next_fire_at``, record a durable miss note.
 
@@ -276,48 +364,124 @@ class ScheduleStore:
         fire-late-once beyond grace). It does NOT enqueue a job and does NOT bump
         ``fire_count`` (no fire happened); it only advances next-fire to the next
         future occurrence (the no-burst floor) and emits a durable ``schedule.miss``
-        audit note (the missed scheduled instant) for A3 honesty / A6 display. A
-        skipped one-time (``next_fire_at`` resolves to ``None``) terminates.
+        audit note. CAS-guarded on the claimed ``expected_revision``: if an edit
+        landed the reconcile re-advances from the CURRENT (edited) rule; if the row
+        already advanced past the missed instant it is a no-op. A skipped one-time
+        (``next_fire_at`` resolves to ``None``) terminates.
         """
         current = self.get(owner_id, schedule_id)
         updated = current.with_next_fire(next_fire_at, now=missed_fire_time)
-        self._update_or_raise(
-            owner_id,
-            schedule_id,
-            {"next_fire_at": next_fire_at, "updated_at": updated.updated_at},
+        values = {"next_fire_at": next_fire_at, "updated_at": updated.updated_at}
+        if self._cas_update(owner_id, schedule_id, values, expected=expected_revision):
+            bumped = updated.model_copy(update={"revision": expected_revision + 1})
+            self._audit(
+                owner_id,
+                "schedule.miss",
+                bumped,
+                extra={"missed_fire_time": missed_fire_time.isoformat()},
+            )
+            return bumped
+        return self._reconcile_skip(
+            owner_id, schedule_id, missed_fire_time=missed_fire_time, now=now
         )
-        self._audit(
-            owner_id,
-            "schedule.miss",
-            updated,
-            extra={"missed_fire_time": missed_fire_time.isoformat()},
-        )
-        return updated
 
-    def _persist_fire(
+    def _reconcile_fire(
+        self, owner_id: str, schedule_id: str, *, fire_time: datetime, now: datetime, late: bool
+    ) -> Schedule:
+        """CAS-miss reconciliation for a fire (A8-D-7): record it once, against the edited rule."""
+        for _ in range(_MAX_CAS_RETRIES):
+            current = self.get(owner_id, schedule_id)
+            if current.last_fire_at == fire_time:  # a concurrent tick already recorded it (I3)
+                return current
+            next_fire = next_fire_after(current, after=now)  # from the CURRENT (edited) rule
+            fired = current.record_fire(fire_time=fire_time, next_fire_at=next_fire)
+            if self._cas_update(
+                owner_id, schedule_id, _fire_values(fired), expected=current.revision
+            ):
+                bumped = fired.model_copy(update={"revision": current.revision + 1})
+                self._audit_fire(owner_id, bumped, fire_time=fire_time, late=late)
+                return bumped
+        raise ScheduleConcurrentEditError(
+            "fire re-arm lost the concurrency race",
+            context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
+        )
+
+    def _reconcile_skip(
+        self, owner_id: str, schedule_id: str, *, missed_fire_time: datetime, now: datetime
+    ) -> Schedule:
+        """CAS-miss reconciliation for a skip: re-advance from the edited rule, once."""
+        for _ in range(_MAX_CAS_RETRIES):
+            current = self.get(owner_id, schedule_id)
+            if current.next_fire_at is None or current.next_fire_at > missed_fire_time:
+                return current  # already advanced past the miss (edit / concurrent handling)
+            next_fire = next_fire_after(current, after=now)
+            updated = current.with_next_fire(next_fire, now=missed_fire_time)
+            values = {"next_fire_at": next_fire, "updated_at": updated.updated_at}
+            if self._cas_update(owner_id, schedule_id, values, expected=current.revision):
+                bumped = updated.model_copy(update={"revision": current.revision + 1})
+                self._audit(
+                    owner_id,
+                    "schedule.miss",
+                    bumped,
+                    extra={"missed_fire_time": missed_fire_time.isoformat()},
+                )
+                return bumped
+        raise ScheduleConcurrentEditError(
+            "skip re-arm lost the concurrency race",
+            context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
+        )
+
+    def _mutate(
         self,
         owner_id: str,
-        current: Schedule,
+        schedule_id: str,
         *,
-        fire_time: datetime,
-        next_fire_at: datetime | None,
-        late: bool = False,
+        compute: Callable[[Schedule], tuple[Schedule, dict[str, Any]]],
+        action: str,
+        extra: dict[str, str] | None = None,
     ) -> Schedule:
-        """Apply + persist + audit a fire on an already-fetched schedule."""
-        fired = current.record_fire(fire_time=fire_time, next_fire_at=next_fire_at)
-        self._update_or_raise(
-            owner_id,
-            current.id,
-            {
-                "fire_count": fired.fire_count,
-                "last_fire_at": fired.last_fire_at,
-                "next_fire_at": fired.next_fire_at,
-                "updated_at": fired.updated_at,
-            },
+        """Read-modify-write with optimistic-CAS retry (the non-tick mutation path).
+
+        ``compute(current)`` returns the post-mutation :class:`Schedule` + the column
+        subset to write; the CAS bumps ``revision`` and guards ``WHERE revision =
+        current.revision``. A miss (a concurrent write) re-reads and retries; a
+        genuine miss on the row surfaces as ``ScheduleNotFoundError`` on the next
+        ``get``. Bounded — persistent contention raises ``ScheduleConcurrentEditError``.
+        """
+        for _ in range(_MAX_CAS_RETRIES):
+            current = self.get(owner_id, schedule_id)
+            new_schedule, values = compute(current)
+            if self._cas_update(owner_id, schedule_id, values, expected=current.revision):
+                bumped = new_schedule.model_copy(update={"revision": current.revision + 1})
+                self._audit(owner_id, action, bumped, extra=extra)
+                return bumped
+        raise ScheduleConcurrentEditError(
+            "schedule mutation lost the concurrency race",
+            context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
         )
+
+    def _cas_update(
+        self, owner_id: str, schedule_id: str, values: dict[str, Any], *, expected: int
+    ) -> bool:
+        """Compare-and-swap UPDATE: SET ``values`` + ``revision+1`` WHERE id AND revision=expected.
+
+        Returns ``True`` iff exactly one row matched (the CAS held); ``False`` on a
+        revision miss OR an absent row (the caller's next ``get`` distinguishes them).
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            result = conn.execute(
+                update(schedules_t)
+                .where(schedules_t.c.id == schedule_id, schedules_t.c.revision == expected)
+                .values(**values, revision=schedules_t.c.revision + 1)
+            )
+        return result.rowcount == 1
+
+    def _audit_fire(
+        self, owner_id: str, schedule: Schedule, *, fire_time: datetime, late: bool
+    ) -> None:
+        """Emit the per-fire audit note (``schedule.fire`` / ``schedule.fire_late``)."""
         action = "schedule.fire_late" if late else "schedule.fire"
-        self._audit(owner_id, action, fired, extra={"fire_time": fire_time.isoformat()})
-        return fired
+        self._audit(owner_id, action, schedule, extra={"fire_time": fire_time.isoformat()})
 
     def delete(self, owner_id: str, schedule_id: str) -> None:
         """Delete a schedule. Raises :class:`ScheduleNotFoundError` if absent.
@@ -341,17 +505,6 @@ class ScheduleStore:
         )
 
     # --- internals ----------------------------------------------------------
-
-    def _update_or_raise(self, owner_id: str, schedule_id: str, values: dict[str, Any]) -> None:
-        """RLS-scoped UPDATE of ``values``; raise NotFound if no row matched."""
-        with rls_connection(self._engine, owner_id) as conn:
-            result = conn.execute(
-                update(schedules_t).where(schedules_t.c.id == schedule_id).values(**values)
-            )
-            if result.rowcount != 1:
-                raise ScheduleNotFoundError(
-                    "schedule not found", context={"schedule_id": schedule_id}
-                )
 
     def _audit(
         self,

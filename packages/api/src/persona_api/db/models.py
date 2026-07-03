@@ -124,6 +124,21 @@ users = Table(
     # the tenant RLS), so a new nullable column needs no policy change.
     Column("first_name", Text),
     Column("last_name", Text),
+    # Per-user timezone (Spec A8, A8-D-9). An IANA zone name (e.g. ``Europe/Oslo``),
+    # nullable → falls back to ``PERSONA_DEFAULT_TIMEZONE`` when unset
+    # (:func:`persona.timezone.resolve_timezone`). Realises the K6 seam A4 named:
+    # governs the DEFAULT captured zone for NEW schedules + the RENDERING frame for
+    # echoes/calendar; it NEVER silently re-anchors an existing schedule's captured
+    # zone (D-A1-4 stability). Same split-home / TEXT posture as the name columns;
+    # IANA validity is enforced at the write boundary (:func:`persona.timezone.
+    # validate_timezone` → 422), not by a DB CHECK.
+    Column("timezone", Text),
+    # Per-user quiet hours (Spec A8, A8-D-6): local minutes-of-day [start, end) in the
+    # user's timezone; both NULL = OFF (off-until-set). Scheduling into the window warns +
+    # offers the nearest edge (never a silent shift). Integer (not a time type) keeps the
+    # community SQLite edition byte-identical; range validation is at the app layer.
+    Column("quiet_hours_start", Integer),
+    Column("quiet_hours_end", Integer),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -449,6 +464,11 @@ schedules = Table(
     Column("fire_count", Integer, nullable=False, server_default=text("0")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # The optimistic-concurrency counter (Spec A8, A8-D-7). Every store mutation bumps
+    # it via a compare-and-swap (``WHERE revision = :expected``) so an edit landing
+    # between a scheduler fire and its re-arm is detected, not silently lost. Split-home
+    # with the Schedule entity's ``revision`` field.
+    Column("revision", Integer, nullable=False, server_default=text("0")),
     # The recurrence/one-time XOR — exactly one of the two is set. Mirrors the
     # Schedule entity's model validator so the invariant holds even for a direct
     # SQL write (defence in depth).

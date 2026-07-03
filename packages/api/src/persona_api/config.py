@@ -217,6 +217,15 @@ class APIConfig(BaseSettings):
     scheduler_on_time_tolerance_seconds: float = Field(
         default=120.0, ge=0, validation_alias="PERSONA_SCHEDULER_ON_TIME_TOLERANCE_SECONDS"
     )
+    # Spec A8 (A8-D-11) — the occurrences read API's server caps: a wide ?from&to can never
+    # become unbounded engine iteration. Whichever binds first clamps the window/count and the
+    # response carries an honest ``truncated`` marker (no silent cap).
+    schedule_occurrences_max_horizon_days: int = Field(
+        default=90, ge=1, validation_alias="PERSONA_SCHEDULE_OCCURRENCES_MAX_HORIZON_DAYS"
+    )
+    schedule_occurrences_max_count: int = Field(
+        default=500, ge=1, validation_alias="PERSONA_SCHEDULE_OCCURRENCES_MAX_COUNT"
+    )
     # Spec N2 — the MCP catalog auto-sync (hosted in the worker loop, leader-gated;
     # N2-D-1/2/3). A daily-ish periodic task re-pulls Docker's catalog and reconciles
     # the writable mirror (PERSONA_MCP_MIRROR_PATH). ``enabled`` is the opt-out for

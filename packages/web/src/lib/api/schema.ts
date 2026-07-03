@@ -664,14 +664,88 @@ export interface paths {
     head?: never;
     /**
      * Update Profile
-     * @description Set the caller's optional name (Spec K6, K6-D-1). PATCH — omitted = unchanged.
+     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH — omitted = unchanged.
      *
      *     Only the fields the client actually sent are written (``exclude_unset``): a
      *     string sets, an explicit ``null`` clears, an omitted field is left untouched.
      *     Names are normalised (control-char strip, whitespace-only → unset) in the
-     *     service (K6-D-8). Scoped to the caller's own row — never another user's.
+     *     service (K6-D-8). A provided ``timezone`` is validated as an IANA zone here
+     *     (Spec A8, A8-D-9) — an unknown zone is a fail-fast 422, never stored to
+     *     mis-fire in the tick; ``null`` clears it (→ falls back to the config default).
+     *     Scoped to the caller's own row — never another user's.
      */
     patch: operations["update_profile_v1_me_profile_patch"];
+    trace?: never;
+  };
+  "/v1/me/schedule/occurrences": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Schedule Occurrences
+     * @description The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).
+     *
+     *     Computed from the engine's own recurrence path (never a client reimplementation), RLS-scoped
+     *     to the caller. The window is server-capped (horizon + count); the response's ``truncated``
+     *     marker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.
+     */
+    get: operations["get_schedule_occurrences_v1_me_schedule_occurrences_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/schedule/{schedule_id}/reschedule/preview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Preview Schedule Reschedule
+     * @description Preview a calendar reschedule — the engine's next-fire + full clause + quiet-hours warn.
+     *
+     *     No write (Spec A8, T9, bars 3/5): the picker shows this as the confirm echo (the SAME full
+     *     clause chat re-echoes) before the user confirms. The next fire is the ENGINE's, so the picker
+     *     never fabricates a time the DST gap/fold policy would shift.
+     */
+    post: operations["preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/schedule/{schedule_id}/reschedule": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Apply Schedule Reschedule
+     * @description Apply a calendar reschedule through the SAME CAS door as chat (Spec A8, T9, bar 4).
+     *
+     *     ``actor=user_via_ui``; the client sends picker-state (no raw RRULE — the server maps it). RLS-
+     *     scoped to the caller. Returns the applied clause + the engine's next fire (the twin's confirm).
+     */
+    post: operations["apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   "/v1/me/notifications": {
@@ -1838,6 +1912,21 @@ export interface components {
       images: components["schemas"]["ImageContent"][];
     };
     /**
+     * FireEvent
+     * @description One past fire/miss from the audit trail (the calendar's ran/missed markers).
+     */
+    FireEvent: {
+      /** Schedule Id */
+      schedule_id: string;
+      /**
+       * At
+       * Format: date-time
+       */
+      at: string;
+      /** Status */
+      status: string;
+    };
+    /**
      * GrantToolRequest
      * @description Enable a tool on a persona's allow-list via runtime consent (spec 26 T11).
      *
@@ -2261,6 +2350,49 @@ export interface components {
       created_at: string;
     };
     /**
+     * Occurrence
+     * @description One computed future fire (tz-aware UTC instant) + its schedule/task context.
+     */
+    Occurrence: {
+      /** Schedule Id */
+      schedule_id: string;
+      /** Task Id */
+      task_id: string | null;
+      /** Persona Id */
+      persona_id: string | null;
+      /**
+       * Fire At
+       * Format: date-time
+       */
+      fire_at: string;
+      /** Timezone */
+      timezone: string;
+      /** Human Terms */
+      human_terms: string;
+    };
+    /**
+     * OccurrencesResult
+     * @description The windowed occurrences + fire history + the honest truncation marker (A8-D-11).
+     */
+    OccurrencesResult: {
+      /** Occurrences */
+      occurrences: components["schemas"]["Occurrence"][];
+      /** History */
+      history: components["schemas"]["FireEvent"][];
+      /**
+       * Window From
+       * Format: date-time
+       */
+      window_from: string;
+      /**
+       * Window To
+       * Format: date-time
+       */
+      window_to: string;
+      /** Truncated */
+      truncated: boolean;
+    };
+    /**
      * PersonaCapabilities
      * @description Deployment-derived capability flags surfaced with the persona detail.
      *
@@ -2454,6 +2586,78 @@ export interface components {
       images?: components["schemas"]["ImageRef"][] | null;
     };
     /**
+     * RecurrenceKind
+     * @description The picker's top-level recurrence categories (the humane vocabulary, A8-D-1).
+     * @enum {string}
+     */
+    RecurrenceKind:
+      | "daily"
+      | "weekly"
+      | "monthly_day"
+      | "monthly_weekday"
+      | "hourly"
+      | "yearly";
+    /**
+     * RecurrencePattern
+     * @description The RRULE-free picker-state for a recurring cadence (A8-D-1).
+     *
+     *     A structured, UI-bindable view of the v1 vocabulary — the calendar's recurrence
+     *     builder reads/writes THIS, never an RRULE string. Round-trips losslessly with
+     *     :class:`~persona.schedules.RecurrenceRule` via :func:`pattern_to_rule` /
+     *     :func:`rule_to_pattern` for the supported set.
+     *
+     *     Attributes:
+     *         kind: The recurrence category.
+     *         interval: Stride — days (DAILY), weeks (WEEKLY), months (MONTHLY_*), hours
+     *             (HOURLY, must divide 24 for a clean wall-clock cadence); 1 for YEARLY.
+     *         weekdays: WEEKLY — the selected weekdays (BYDAY tokens ``MO``..``SU``, canonical
+     *             week order, no ordinal). The 5-weekday preset renders "every weekday".
+     *         month_day: MONTHLY_DAY — the day of month (1..31, or -1 for the last day).
+     *         weekday: MONTHLY_WEEKDAY — the weekday token (``MO``..``SU``).
+     *         ordinal: MONTHLY_WEEKDAY — which occurrence (1..4, or -1 for the last).
+     *         month: YEARLY — the month (1..12).
+     *         day_of_month: YEARLY — the day of month (1..31).
+     *         hour: Local hour-of-day (0..23). Required for every kind except HOURLY (whose
+     *             marks come from ``interval``); ``None`` only for HOURLY.
+     *         minute: Local minute-of-hour (0..59).
+     *         count: Bound — total occurrences (XOR ``until``).
+     *         until: Bound — last instant, tz-aware UTC (XOR ``count``).
+     */
+    RecurrencePattern: {
+      kind: components["schemas"]["RecurrenceKind"];
+      /**
+       * Interval
+       * @default 1
+       */
+      interval: number;
+      /**
+       * Weekdays
+       * @default []
+       */
+      weekdays: string[];
+      /** Month Day */
+      month_day?: number | null;
+      /** Weekday */
+      weekday?: string | null;
+      /** Ordinal */
+      ordinal?: number | null;
+      /** Month */
+      month?: number | null;
+      /** Day Of Month */
+      day_of_month?: number | null;
+      /** Hour */
+      hour?: number | null;
+      /**
+       * Minute
+       * @default 0
+       */
+      minute: number;
+      /** Count */
+      count?: number | null;
+      /** Until */
+      until?: string | null;
+    };
+    /**
      * RefinePersonaRequest
      * @description Refine a draft persona by answering a clarifying question (spec 10, §4 / D-10-2).
      *
@@ -2473,6 +2677,20 @@ export interface components {
        * @default 0
        */
       round: number;
+    };
+    /**
+     * ReschedulePreview
+     * @description The engine's preview of a proposed calendar reschedule (no write).
+     */
+    ReschedulePreview: {
+      /** Human Terms */
+      human_terms: string;
+      /** Timezone */
+      timezone: string;
+      /** Next Fire */
+      next_fire: string | null;
+      /** Quiet Hours Offer */
+      quiet_hours_offer: string | null;
     };
     /**
      * RespondToRunRequest
@@ -2532,6 +2750,22 @@ export interface components {
       started_at: string;
       /** Finished At */
       finished_at?: string | null;
+    };
+    /**
+     * ScheduleRescheduleRequest
+     * @description A calendar-initiated reschedule (Spec A8, T9 — the twin of the chat verb).
+     *
+     *     **Picker-state in — NO raw RRULE from the client** (bar 1): the web sends a structured
+     *     :class:`~persona.schedules.RecurrencePattern` (or a one-time instant) and the SERVER maps it to
+     *     the rule, so there is no client-side recurrence math. Exactly one of ``pattern`` /
+     *     ``one_time_at`` (XOR, checked in the route). Applied through the SAME CAS door as chat.
+     */
+    ScheduleRescheduleRequest: {
+      pattern?: components["schemas"]["RecurrencePattern"] | null;
+      /** One Time At */
+      one_time_at?: string | null;
+      /** Timezone */
+      timezone: string;
     };
     /**
      * SetConsentRequest
@@ -2684,20 +2918,31 @@ export interface components {
     };
     /**
      * UpdateProfileRequest
-     * @description Set the caller's optional name (Spec K6, K6-D-1/K6-D-8). PATCH semantics.
+     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
      *
-     *     Both fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
+     *     All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
      *     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
      *     fails fast at the boundary on egregious input; the service then strips control
-     *     characters and treats whitespace-only as unset (:func:`persona_api.services.
-     *     user_service.normalize_name`). The name is never required — an empty PATCH is a
-     *     valid no-op read.
+     *     characters and treats whitespace-only as unset (names,
+     *     :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
+     *     A8-D-9) is an IANA zone name whose validity is checked in the route handler
+     *     (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
+     *     only a cheap egregious-input guard, not the IANA check (a custom ``field_validator``
+     *     would break the 422 body's ``json.dumps``, cf. ``SendMessageRequest``). ``null``
+     *     clears it → schedule computation falls back to ``PERSONA_DEFAULT_TIMEZONE``.
+     *     Nothing is required — an empty PATCH is a valid no-op read.
      */
     UpdateProfileRequest: {
       /** First Name */
       first_name?: string | null;
       /** Last Name */
       last_name?: string | null;
+      /** Timezone */
+      timezone?: string | null;
+      /** Quiet Hours Start */
+      quiet_hours_start?: number | null;
+      /** Quiet Hours End */
+      quiet_hours_end?: number | null;
     };
     /**
      * UsageEntry
@@ -2741,6 +2986,12 @@ export interface components {
       first_name?: string | null;
       /** Last Name */
       last_name?: string | null;
+      /** Timezone */
+      timezone?: string | null;
+      /** Quiet Hours Start */
+      quiet_hours_start?: number | null;
+      /** Quiet Hours End */
+      quiet_hours_end?: number | null;
       /**
        * Created At
        * Format: date-time
@@ -3764,6 +4015,108 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["UserProfileResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_schedule_occurrences_v1_me_schedule_occurrences_get: {
+    parameters: {
+      query: {
+        from: string;
+        to: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["OccurrencesResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        schedule_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ScheduleRescheduleRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReschedulePreview"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        schedule_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ScheduleRescheduleRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReschedulePreview"];
         };
       };
       /** @description Validation Error */

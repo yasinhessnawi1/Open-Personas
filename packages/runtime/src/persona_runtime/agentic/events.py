@@ -460,3 +460,34 @@ class RunEvent(BaseModel):
             data={"verb": verb, "task_id": task_id},
             timestamp=datetime.now(UTC),
         )
+
+    @classmethod
+    def task_rescheduled(
+        cls,
+        *,
+        task_id: str,
+        timezone: str,
+        recurrence_rrule: str | None = None,
+        one_time_at: str | None = None,
+        skip_next: bool = False,
+    ) -> RunEvent:
+        """A user-confirmed conversational reschedule — retime/rerule a live task (Spec A8, T6).
+
+        Emitted by the runtime AFTER the user confirms the re-echoed new schedule clause; the
+        chat-turn worker consumes it and applies the change through the CAS-guarded reschedule
+        door (``actor=user_via_chat``), injecting ``owner_id`` from its handle. Carries the new
+        cadence (an RRULE candidate XOR a one-time ISO instant) OR ``skip_next``, plus the tz the
+        cadence is anchored in. Data only, so runtime ⊥ api holds.
+        """
+        return cls(
+            type="task_rescheduled",
+            step=-1,
+            data={
+                "task_id": task_id,
+                "timezone": timezone,
+                "recurrence_rrule": recurrence_rrule,
+                "one_time_at": one_time_at,
+                "skip_next": skip_next,
+            },
+            timestamp=datetime.now(UTC),
+        )
