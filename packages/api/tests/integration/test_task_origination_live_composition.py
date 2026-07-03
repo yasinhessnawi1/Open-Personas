@@ -36,7 +36,7 @@ from persona.backends.types import ChatResponse
 from persona.schema.conversation import Conversation
 from persona.stores.postgres import PostgresBackend
 from persona_api.approvals.failure import account_for_cancel_failure
-from persona_api.config import Edition
+from persona_api.config import APIConfig, Edition
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services.origination_adapters import resolve_persona_tag
 from persona_api.services.runtime_factory import RuntimeFactory
@@ -297,8 +297,12 @@ async def test_a4_flows_through_the_real_composition_root(
         assert len(steering) == 1
         assert steering[0].data["task_id"] == outcome.task_id  # resolved to the live task
         await services.steering.steer(
-            {**steering[0].data, "owner_id": owner, "conversation_id": conv_id,
-             "persona_id": persona_id}
+            {
+                **steering[0].data,
+                "owner_id": owner,
+                "conversation_id": conv_id,
+                "persona_id": persona_id,
+            }
         )
         assert TaskStore(rls_engine).get(owner, outcome.task_id).paused is True
 
@@ -308,12 +312,16 @@ async def test_a4_flows_through_the_real_composition_root(
         from persona_api.services.origination_adapters import OriginatorFailureNotifier
 
         notifier = OriginatorFailureNotifier(
-            rls_engine=rls_engine, memory_backend=memory_backend,
-            edition=Edition.cloud, audit_root=_AUDIT,
+            rls_engine=rls_engine,
+            memory_backend=memory_backend,
+            edition=Edition.cloud,
+            audit_root=_AUDIT,
         )
         await notifier.notify(
             account_for_cancel_failure(outcome.task_id, cause="the store was unavailable"),
-            persona=tag, owner_id=owner, conversation_id=conv_id,
+            persona=tag,
+            owner_id=owner,
+            conversation_id=conv_id,
         )
         assert any("still running" in m for m in _messages_on(su_url, conv_id))
 
@@ -324,7 +332,7 @@ async def test_a4_flows_through_the_real_composition_root(
             rls_engine=rls_engine,
             embedder=embedder,
             tier_registry=_ScriptedRegistry(),  # type: ignore[arg-type]
-            audit_root=_AUDIT,
+            config=APIConfig(audit_root=str(_AUDIT)),
             synthesis_tier="small",
             runtime_factory=factory,
             memory_backend=memory_backend,

@@ -35,17 +35,25 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, REAL, TSVECTOR
 
 __all__ = [
     "EMBEDDING_DIM",
+    "graph_consolidation_markers",
     "graph_edges",
     "graph_entities",
     "graph_metadata",
     "graph_node_entities",
+    "graph_node_versions",
     "graph_nodes",
 ]
+
+# HNSW build params (Spec K7, K7-D-9): m=16 is right at 384-dim; ef_construction 200
+# is the first-knob win. The migration recreates the indexes WITH these; declaring
+# them here keeps ``create_all`` (core integration tests) building the same shape.
+_HNSW_WITH = {"m": 16, "ef_construction": 200}
 
 # bge-small-en-v1.5. Must match the api migration's vector(384); the T4 contract
 # test asserts both ends agree.
@@ -71,6 +79,19 @@ graph_nodes = Table(
     # The accumulation trail (D-K0-4): a JSONB array of NodeProvenance dumps.
     Column("provenance", JSONB, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # --- Spec K7 lifecycle columns (K7-D-6/-4/-X-migration) ----------------
+    # Evidence-salience (K7-D-6): a real typed/indexable column, not metadata JSONB.
+    Column("salience", REAL, nullable=False, server_default=text("1.0")),
+    # The ordinal evidence-clock epoch of this node's last evidence event — NEVER
+    # wall time (K7-D-6). Disuse decay is measured in epochs beyond grace.
+    Column("last_evidence_epoch", BigInteger, nullable=False, server_default=text("0")),
+    # Soft merge reference (K7-D-4): a consolidated node points at its canonical.
+    # Deliberately NO FK (K5's future delete-a-canonical must not cascade/fail on
+    # members; integrity is code-validated). NULL = a live, non-merged node.
+    Column("merged_into", Text, nullable=True),
+    # Dirty-neighbourhood watermark source (K7-D-4): maintained by insert/update
+    # transport writes; the consolidation pass scans updated_at > watermark.
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column(
         "fts",
         TSVECTOR,
@@ -79,19 +100,29 @@ graph_nodes = Table(
     # Lets graph_edges reference (id, owner_id) so an edge can never cross tenants.
     UniqueConstraint("id", "owner_id", name="uq_graph_nodes_id_owner"),
     Index("ix_graph_nodes_owner", "owner_id"),
+    Index("ix_graph_nodes_updated_at", "owner_id", "updated_at"),
     Index(
         "ix_graph_nodes_embedding_hnsw",
         "embedding",
         postgresql_using="hnsw",
         postgresql_ops={"embedding": "vector_cosine_ops"},
+        postgresql_with=_HNSW_WITH,
     ),
     Index("ix_graph_nodes_fts", "fts", postgresql_using="gin"),
 )
 
+# Valid-time-windowed edges (Spec K7, K7-D-1/-X-migration). The PK moves off ``id``
+# to a BIGINT ``edge_key`` surrogate so a closed fact row and its re-asserted open
+# successor can coexist as rows sharing the fact-``id``. A partial UNIQUE on ``id``
+# WHERE ``invalid_at IS NULL`` enforces "one open edge per fact" — the idempotent
+# upsert's conflict target. Windows: ``valid_at`` (backfilled := created_at),
+# ``invalid_at`` (NULL = open), ``invalidated_by`` (provenance-of-closure),
+# ``invalidated_at`` (bookkeeping, K7-D-10). Closed edges are NEVER deleted (§0).
 graph_edges = Table(
     "graph_edges",
     graph_metadata,
-    Column("id", Text, primary_key=True),
+    Column("edge_key", BigInteger, Identity(always=True), primary_key=True),
+    Column("id", Text, nullable=False),
     Column("owner_id", Text, nullable=False),
     Column("src_node_id", Text, nullable=False),
     Column("dst_node_id", Text, nullable=False),
@@ -99,9 +130,17 @@ graph_edges = Table(
     Column("weight", REAL),
     Column("provenance", JSONB),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("valid_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("invalid_at", DateTime(timezone=True), nullable=True),
+    Column("invalidated_by", Text, nullable=True),
+    Column("invalidated_at", DateTime(timezone=True), nullable=True),
     CheckConstraint(
         "link_type IN ('semantic', 'entity', 'temporal', 'causal')",
         name="graph_edges_link_type_check",
+    ),
+    CheckConstraint(
+        "invalid_at IS NULL OR invalid_at > valid_at",
+        name="graph_edges_window_check",
     ),
     # Composite FKs: both endpoints must belong to the SAME owner (finding-1
     # defense-in-depth); ON DELETE CASCADE removes a node's edges with it.
@@ -117,8 +156,28 @@ graph_edges = Table(
         ondelete="CASCADE",
         name="fk_graph_edges_dst_owner",
     ),
-    Index("ix_graph_edges_src", "owner_id", "src_node_id", "link_type"),
-    Index("ix_graph_edges_dst", "owner_id", "dst_node_id", "link_type"),
+    # One OPEN edge per fact-id (the idempotent-upsert conflict target).
+    Index(
+        "uq_graph_edges_open_id",
+        "id",
+        unique=True,
+        postgresql_where=text("invalid_at IS NULL"),
+    ),
+    # Traversal indexes scoped to OPEN edges (the common current-state read).
+    Index(
+        "ix_graph_edges_src",
+        "owner_id",
+        "src_node_id",
+        "link_type",
+        postgresql_where=text("invalid_at IS NULL"),
+    ),
+    Index(
+        "ix_graph_edges_dst",
+        "owner_id",
+        "dst_node_id",
+        "link_type",
+        postgresql_where=text("invalid_at IS NULL"),
+    ),
 )
 
 graph_entities = Table(
@@ -140,6 +199,7 @@ graph_entities = Table(
         "name_embedding",
         postgresql_using="hnsw",
         postgresql_ops={"name_embedding": "vector_cosine_ops"},
+        postgresql_with=_HNSW_WITH,
     ),
 )
 
@@ -171,4 +231,52 @@ graph_node_entities = Table(
     ),
     Index("ix_gne_entity", "owner_id", "entity_id"),
     Index("ix_gne_node", "owner_id", "node_id"),
+)
+
+# Node-version history (Spec K7, K7-D-1). On a superseding evolve the node's PRIOR
+# mutable state (content + embedding + metadata + wellbeing + content_hash +
+# provenance-trail snapshot) is preserved here, window-closed — the §0-honest fix
+# for the one destructive spot in the old write path. Point-in-time node reads read
+# these; retrieval stays scoped to current graph_nodes rows (no ranking pollution).
+# Composite FK to (id, owner_id) ON DELETE CASCADE: a user-deleted node takes its
+# history with it. Direct owner_id RLS (the 011 template) is added by the migration.
+graph_node_versions = Table(
+    "graph_node_versions",
+    graph_metadata,
+    Column("version_key", BigInteger, Identity(always=True), primary_key=True),
+    Column("owner_id", Text, nullable=False),
+    Column("node_id", Text, nullable=False),
+    Column("node_kind", Text, nullable=False),
+    Column("concept_name", Text, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("metadata", JSONB, nullable=False),
+    Column("wellbeing_category", Text),
+    Column("embedding", Vector(EMBEDDING_DIM), nullable=False),
+    Column("embedding_model", Text, nullable=False),
+    Column("content_hash", Text, nullable=False),
+    Column("provenance", JSONB, nullable=False),
+    Column("valid_at", DateTime(timezone=True), nullable=False),
+    Column("invalid_at", DateTime(timezone=True), nullable=False),
+    Column("invalidated_by", Text, nullable=True),
+    Column("invalidated_at", DateTime(timezone=True), nullable=True),
+    ForeignKeyConstraint(
+        ["node_id", "owner_id"],
+        ["graph_nodes.id", "graph_nodes.owner_id"],
+        ondelete="CASCADE",
+        name="fk_gnv_node_owner",
+    ),
+    Index("ix_gnv_node", "owner_id", "node_id", "invalid_at"),
+)
+
+# Per-owner consolidation bookkeeping (Spec K7, K7-D-4/-6). ``current_epoch`` is the
+# ORDINAL evidence clock (incremented once per consolidation run — never wall time);
+# ``watermark`` bounds the dirty-neighbourhood scan; ``last_run_at`` is diagnostic.
+# Direct owner_id RLS (migration).
+graph_consolidation_markers = Table(
+    "graph_consolidation_markers",
+    graph_metadata,
+    Column("owner_id", Text, primary_key=True),
+    Column("current_epoch", BigInteger, nullable=False, server_default=text("0")),
+    Column("watermark", DateTime(timezone=True), nullable=True),
+    Column("last_run_at", DateTime(timezone=True), nullable=True),
 )

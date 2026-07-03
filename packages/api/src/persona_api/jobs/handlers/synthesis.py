@@ -40,6 +40,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from persona_api.db.models import conversations, messages, synthesis_markers
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from persona.extraction import ExtractionInput
     from persona.graph.protocol import MergeOutcome
     from persona.jobs import JobContext, JobRegistry
@@ -112,11 +114,25 @@ class SynthesisRunner(Protocol):
 
 
 class SynthesisHandler:
-    """Idempotent synthesis: window → synthesise → meter → advance the marker."""
+    """Idempotent synthesis: window → synthesise → meter → advance the marker.
 
-    def __init__(self, *, runner: SynthesisRunner, repository: SynthesisRepository) -> None:
+    When the synthesis produced knowledge (the graph was dirtied), it enqueues a
+    coalesced ``graph_consolidation`` run at its tail (K7-D-5) — the channel-agnostic
+    turn-end/run-end/voice-end trigger carries consolidation for free. The hook is
+    optional + off the critical path; ``None`` disables it (the consolidation-off
+    config path), keeping synthesis independently testable.
+    """
+
+    def __init__(
+        self,
+        *,
+        runner: SynthesisRunner,
+        repository: SynthesisRepository,
+        enqueue_consolidation: Callable[[str], None] | None = None,
+    ) -> None:
         self._runner = runner
         self._repo = repository
+        self._enqueue_consolidation = enqueue_consolidation
 
     async def handle(self, payload: SynthesisJobPayload, context: JobContext) -> None:
         with context.connection() as conn:
@@ -155,6 +171,15 @@ class SynthesisHandler:
                 payload=payload,
                 high_water_mark=window.high_water_mark,
             )
+
+        # Synthesis-tail consolidation trigger (K7-D-5): only when knowledge was
+        # written (the graph got dirty). Outside the job transaction — a best-effort
+        # enqueue must never fail or roll back the completed synthesis.
+        if self._enqueue_consolidation is not None and outcomes:
+            try:
+                self._enqueue_consolidation(context.owner_id)
+            except Exception:  # noqa: BLE001 — the enqueue is best-effort, off the critical path
+                _logger.warning("consolidation enqueue failed", owner_id=context.owner_id)
 
 
 class PgSynthesisRepository:
@@ -225,14 +250,26 @@ class PgSynthesisRepository:
 
 
 def register_synthesis_handler(
-    registry: JobRegistry, *, runner: SynthesisRunner, repository: SynthesisRepository
+    registry: JobRegistry,
+    *,
+    runner: SynthesisRunner,
+    repository: SynthesisRepository,
+    enqueue_consolidation: Callable[[str], None] | None = None,
 ) -> None:
-    """Register the synthesis handler (A0's second tenant) with its declared idempotency."""
+    """Register the synthesis handler (A0's second tenant) with its declared idempotency.
+
+    ``enqueue_consolidation`` (K7-D-5) is the synthesis-tail trigger the worker root
+    wires when consolidation is enabled; ``None`` leaves synthesis unchanged.
+    """
     registry.register(
         JobTypeSpec(
             type=SYNTHESIS_JOB_TYPE,
             payload_model=SynthesisJobPayload,
-            handler=SynthesisHandler(runner=runner, repository=repository),
+            handler=SynthesisHandler(
+                runner=runner,
+                repository=repository,
+                enqueue_consolidation=enqueue_consolidation,
+            ),
             idempotency_key=synthesis_idempotency_key,
             retry=RetryPolicy(max_attempts=3),
             lease=MEDIUM_LEASE,

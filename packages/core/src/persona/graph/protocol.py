@@ -20,6 +20,7 @@ store maps between them. Surrogates never escape into K1/K2/K5.
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access for KnowledgeCandidate
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -33,8 +34,15 @@ from persona.graph.models import (  # noqa: TC001 — Pydantic runtime
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from datetime import datetime
 
-    from persona.graph.models import CanonicalEntity, ConceptNode, EntityAlias, TypedLink
+    from persona.graph.models import (
+        CanonicalEntity,
+        ConceptNode,
+        EntityAlias,
+        NodeVersion,
+        TypedLink,
+    )
 
 __all__ = [
     "EntityCandidate",
@@ -105,6 +113,14 @@ class KnowledgeCandidate(BaseModel):
         wellbeing_category: K4 sensitive-category tag set at write (K2 §2; criterion 7).
         provenance: who/when/grounding (K2's grounded-extraction basis lives here).
         update_intent / target_node_id: the contradiction/update signal (D-K0-4).
+    valid_at: the candidate's world-time event time (Spec K7, K7-D-2). The
+        supersede gate compares this against the target's current ``valid_at``;
+        ``None`` defaults to ``provenance.written_at``. K2 does not extract event
+        time today — the slot is additive for a later K2 extraction extension.
+    close_link_ids: edges K2's extraction layer (which has LLM judgment, off the
+        hot path) explicitly names to window-close (Spec K7, K7-D-1.4). Merge
+        validates each is the owner's + open, then calls ``invalidate_edge``.
+        Defaulted-empty and not v1-wired by K2 (a later K2 follow-on emits it).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -118,13 +134,27 @@ class KnowledgeCandidate(BaseModel):
     provenance: NodeProvenance
     update_intent: UpdateIntent = UpdateIntent.NONE
     target_node_id: str | None = None
+    # --- K7 additive contract slots (K7-D-8; defaulted → K2 payloads byte-compatible)
+    valid_at: datetime | None = None
+    close_link_ids: tuple[str, ...] = ()
 
 
 class MergeAction(StrEnum):
-    """What merge did with a candidate (the observable half of idempotency, K2 §2)."""
+    """What merge did with a candidate (the observable half of idempotency, K2 §2).
+
+    Widened additively by K7 (K7-D-8): ``EVOLVED`` distinguishes an UPDATE/CONTRADICT
+    that superseded a prior account (Phase-1 finding: ``_evolve`` returned an
+    indistinct ``EXTENDED``), and ``UNCHANGED`` names the observable idempotent no-op
+    (the evolve short-circuit). Verified before widening: no consumer matches
+    ``MergeAction`` exhaustively — ``store.py`` compares ``is CREATED`` (EVOLVED /
+    UNCHANGED correctly take the index-``replace`` branch), K2 only logs it, and
+    ``MergeOutcome`` is an in-process return value, never a persisted snapshot.
+    """
 
     CREATED = "created"
     EXTENDED = "extended"
+    EVOLVED = "evolved"
+    UNCHANGED = "unchanged"
 
 
 class MergeOutcome(BaseModel):
@@ -141,6 +171,10 @@ class MergeOutcome(BaseModel):
     node_id: str
     created_link_ids: tuple[str, ...] = ()
     entity_ids: tuple[str, ...] = ()
+    #: The version row written by an evolve-that-superseded (Spec K7, K7-D-8) — the
+    #: durable ``NodeVersion.version_id`` so K8/K5 can point at the prior account.
+    #: ``None`` unless this outcome closed a node account.
+    superseded_version_id: str | None = None
 
 
 # ===========================================================================
@@ -343,8 +377,29 @@ class GraphStore(Protocol):
 
     # -- read: the K1 retrieval legs ---------------------------------------
 
-    def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
-        """Fetch a node (with its provenance trail) by durable id (K1 traversal, K5)."""
+    def get_node(
+        self, owner_id: str, node_id: str, *, as_of: datetime | None = None
+    ) -> ConceptNode | None:
+        """Fetch a node (with its provenance trail) by durable id (K1 traversal, K5).
+
+        ``as_of=None`` returns the CURRENT account (today's behaviour). With an
+        ``as_of`` world-time, returns the account that was current at that instant
+        (Spec K7, K7-D-1 / K7-D-X-read-surface point-in-time read): the matching
+        window-closed :class:`~persona.graph.models.NodeVersion` reconstructed as a
+        ``ConceptNode``, the current account if ``as_of`` is at/after its start, or
+        ``None`` if the node did not yet exist. Retrieval (dense/FTS) is unaffected —
+        it always scopes to current rows.
+        """
+        ...
+
+    def get_node_versions(self, owner_id: str, node_id: str) -> list[NodeVersion]:
+        """A node's window-closed prior accounts, oldest→newest (Spec K7, K7-D-1).
+
+        Each :class:`~persona.graph.models.NodeVersion` preserves the account's
+        content + metadata + provenance snapshot and its ``[valid_at, invalid_at)``
+        world-time window — the §0-honest history the old in-place ``_evolve`` erased.
+        Empty when the node has never been superseded.
+        """
         ...
 
     def search_dense(
@@ -401,6 +456,7 @@ class GraphStore(Protocol):
         *,
         link_types: set[LinkType] | None = None,
         limit: int,
+        as_of: datetime | None = None,
     ) -> list[tuple[TypedLink, ConceptNode]]:
         """Typed one-hop traversal from ``node_id`` (K1 §2 link-aware; criterion 7).
 
@@ -408,6 +464,11 @@ class GraphStore(Protocol):
         the entity thread (``{ENTITY}``) or the story around an event
         (``{TEMPORAL, CAUSAL}``). Bounded by ``limit`` (K1-D-3 anti-flooding).
         Returns ``(edge, neighbour-node)`` so K1 can weight by link type/weight.
+
+        **Traverses OPEN edges by default** (K7-D-1 / K7-D-X-read-surface); an
+        ``as_of`` world-time returns the edges whose valid-time window covers that
+        instant (point-in-time traversal). ENTITY threads are a current-state
+        relationship (un-windowed) and are excluded when ``as_of`` is set.
         """
         ...
 
@@ -416,6 +477,16 @@ class GraphStore(Protocol):
 
         The exact truth K1's rerank verification (criterion 2) compares against,
         and the source the dense rerank and index rebuild read.
+        """
+        ...
+
+    def record_recall(self, owner_id: str, node_ids: Sequence[str]) -> None:
+        """Reinforce recalled nodes' evidence-salience — fail-soft, OFF the token path (K7-D-6).
+
+        The recall-side hook K3 calls AFTER its injection selection (the nodes that
+        entered the prompt), never on the reply stream. Best-effort ``+δ_r``; a
+        failure never breaks the turn. v1 wires salience into no retrieval gate — this
+        only records the evidence dynamics (K9 owns recall-side use).
         """
         ...
 

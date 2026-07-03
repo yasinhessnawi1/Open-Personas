@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import pytest
 from persona.graph._schema import EMBEDDING_DIM as CORE_DIM
+from persona.graph._schema import graph_consolidation_markers as core_markers
 from persona.graph._schema import graph_edges as core_edges
 from persona.graph._schema import graph_entities as core_entities
 from persona.graph._schema import graph_node_entities as core_node_entities
+from persona.graph._schema import graph_node_versions as core_versions
 from persona.graph._schema import graph_nodes as core_nodes
 from persona_api.db.community import build_community_metadata
 from persona_api.db.models import EMBEDDING_DIM as API_DIM
 from persona_api.db.models import (
+    graph_consolidation_markers,
     graph_edges,
     graph_entities,
     graph_node_entities,
+    graph_node_versions,
     graph_nodes,
     metadata,
 )
@@ -33,8 +37,18 @@ _PAIRS = [
     ("graph_edges", core_edges, graph_edges),
     ("graph_entities", core_entities, graph_entities),
     ("graph_node_entities", core_node_entities, graph_node_entities),
+    # Spec K7 additions (K7-D-1 / K7-D-4).
+    ("graph_node_versions", core_versions, graph_node_versions),
+    ("graph_consolidation_markers", core_markers, graph_consolidation_markers),
 ]
-_GRAPH_TABLES = {"graph_nodes", "graph_edges", "graph_entities", "graph_node_entities"}
+_GRAPH_TABLES = {
+    "graph_nodes",
+    "graph_edges",
+    "graph_entities",
+    "graph_node_entities",
+    "graph_node_versions",
+    "graph_consolidation_markers",
+}
 
 
 @pytest.mark.parametrize(("name", "core_t", "api_t"), _PAIRS, ids=[p[0] for p in _PAIRS])
@@ -59,6 +73,8 @@ def test_embedding_dim_agreement() -> None:
     assert core_nodes.c.embedding.type.dim == graph_nodes.c.embedding.type.dim == 384
     assert core_entities.c.name_embedding.type.dim == 384
     assert graph_entities.c.name_embedding.type.dim == 384
+    # The version row preserves the node's embedding byte-exact (K7-D-1).
+    assert core_versions.c.embedding.type.dim == graph_node_versions.c.embedding.type.dim == 384
 
 
 def test_graph_tables_present_in_canonical_metadata() -> None:

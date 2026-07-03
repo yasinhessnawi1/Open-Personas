@@ -15,11 +15,18 @@ from __future__ import annotations
 
 from persona.graph.calibration import ThresholdResult, best_threshold, sweep_thresholds
 from persona.graph.config import GraphSettings
+from persona.graph.consolidation import (
+    ConsolidationPass,
+    ConsolidationReport,
+    MergeGroup,
+    SkippedCandidate,
+)
 from persona.graph.entities import PostgresEntityRegistry
 from persona.graph.errors import (
     EntityResolutionError,
     GraphError,
     GraphIndexError,
+    GraphProtectedNodeError,
     GraphRebuildError,
     NodeMergeError,
 )
@@ -36,6 +43,7 @@ from persona.graph.models import (
     LinkType,
     NodeKind,
     NodeProvenance,
+    NodeVersion,
     TypedLink,
     make_edge_id,
     make_entity_id,
@@ -55,12 +63,15 @@ from persona.graph.protocol import (
     UpdateIntent,
 )
 from persona.graph.retrieval import HybridRetriever
+from persona.graph.salience import contradict, corroborate, disuse_decay, reinforce
 from persona.graph.store import PostgresGraphStore, build_graph_store
 
 __all__ = [
     "NODE_ID_INDEX_WIDTH",
     "CanonicalEntity",
     "ConceptNode",
+    "ConsolidationPass",
+    "ConsolidationReport",
     "EntityAlias",
     "EntityCandidate",
     "EntityRegistry",
@@ -68,6 +79,7 @@ __all__ = [
     "GraphError",
     "GraphIndex",
     "GraphIndexError",
+    "GraphProtectedNodeError",
     "GraphRebuildError",
     "GraphSettings",
     "GraphStore",
@@ -77,10 +89,12 @@ __all__ = [
     "LinkType",
     "MergeAction",
     "MergeEngine",
+    "MergeGroup",
     "MergeOutcome",
     "NodeKind",
     "NodeMergeError",
     "NodeProvenance",
+    "NodeVersion",
     "PgvectorGraphIndex",
     "PostgresEntityRegistry",
     "PostgresGraphStore",
@@ -88,12 +102,17 @@ __all__ = [
     "TurbovecGraphIndex",
     "ResolutionDecision",
     "ResolutionVerdict",
+    "SkippedCandidate",
     "ThresholdResult",
     "TypedLink",
     "UpdateIntent",
     "best_threshold",
     "build_graph_store",
+    "contradict",
+    "corroborate",
+    "disuse_decay",
     "exact_rerank",
+    "reinforce",
     "reciprocal_rank_fusion",
     "make_edge_id",
     "make_entity_id",

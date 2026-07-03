@@ -25,11 +25,12 @@ audit logger. It owns the cross-cutting guarantees:
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from persona.audit import AuditAction, AuditEvent
-from persona.graph.errors import NodeMergeError
+from persona.graph.errors import GraphProtectedNodeError, NodeMergeError
 from persona.graph.models import (
     ConceptNode,
     LinkType,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
+    from persona.graph.models import NodeVersion
     from persona.graph.protocol import GraphIndex, KnowledgeCandidate, MergeOutcome
     from persona.stores.embedder import Embedder
 
@@ -69,6 +71,10 @@ class _StoreBackend(Protocol):
         self, owner_id: str, surrogates: Sequence[int]
     ) -> dict[int, ConceptNode]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
+    def get_node_versions(self, owner_id: str, node_id: str) -> list[NodeVersion]: ...
+    def read_version_for_restore(
+        self, owner_id: str, version_id: str
+    ) -> tuple[NodeVersion, list[float]] | None: ...
     def delete_node(self, owner_id: str, node_id: str) -> int | None: ...
     def insert_node_if_absent(
         self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
@@ -82,10 +88,27 @@ class _StoreBackend(Protocol):
     def node_ids_for_owner(self, owner_id: str) -> list[str]: ...
     def fts_query(self, owner_id: str, query: str, top_k: int) -> list[ConceptNode]: ...
     def neighbors(
-        self, owner_id: str, node_id: str, *, link_types: set[LinkType] | None, limit: int
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        link_types: set[LinkType] | None,
+        limit: int,
+        as_of: datetime | None = None,
     ) -> list[tuple[TypedLink, ConceptNode]]: ...
     def entity_neighbors(self, owner_id: str, node_id: str) -> list[ConceptNode]: ...
     def iter_embeddings(self, owner_id: str) -> list[tuple[int, list[float]]]: ...
+    def current_epoch(self, owner_id: str) -> int: ...
+    def record_recall(
+        self,
+        owner_id: str,
+        node_ids: Sequence[str],
+        *,
+        delta: float,
+        epoch: int,
+        floor: float,
+        cap: float,
+    ) -> int: ...
 
 
 class _MergeRunner(Protocol):
@@ -141,6 +164,15 @@ class PostgresGraphStore:
         return outcome
 
     def delete_node(self, owner_id: str, node_id: str) -> bool:
+        # The SELF anchor is not deletable (K7-D-7): a rename flows through K6-D-9's
+        # provenance-append path; K7 owns the invalidate-vs-true-delete boundary and
+        # the anchor sits outside it. delete_node remains the ONLY deletion primitive,
+        # behind the explicit user/privacy policy (K5's surface).
+        if node_id == make_self_node_id(owner_id):
+            raise GraphProtectedNodeError(
+                "the SELF node is not deletable",
+                context={"node_id": node_id, "op": "delete"},
+            )
         surrogate = self._backend.delete_node(owner_id, node_id)  # Postgres (authoritative)
         if surrogate is None:
             return False
@@ -259,8 +291,102 @@ class PostgresGraphStore:
 
     # ===== read: the K1 legs ==============================================
 
-    def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
-        return self._backend.get_node(owner_id, node_id)
+    def get_node(
+        self, owner_id: str, node_id: str, *, as_of: datetime | None = None
+    ) -> ConceptNode | None:
+        current = self._backend.get_node(owner_id, node_id)
+        if as_of is None:
+            return current
+        # Point-in-time read (K7-D-1): the account valid at ``as_of``. Closed windows
+        # live in version rows; the current account runs from the latest close (or the
+        # creation event time) to now.
+        versions = self._backend.get_node_versions(owner_id, node_id)
+        for version in versions:
+            if version.valid_at <= as_of < version.invalid_at:
+                return self._version_to_node(version, current)
+        if current is not None:
+            current_start = (
+                versions[-1].invalid_at if versions else current.provenance[0].written_at
+            )
+            if as_of >= current_start:
+                return current
+        return None
+
+    def get_node_versions(self, owner_id: str, node_id: str) -> list[NodeVersion]:
+        """A node's window-closed prior accounts, oldest→newest (K7-D-1 point-in-time)."""
+        return self._backend.get_node_versions(owner_id, node_id)
+
+    def restore_node_version(self, owner_id: str, node_id: str, version_id: str) -> ConceptNode:
+        """Re-apply a version's content + embedding as the current account (K7-D-1 restore).
+
+        The reversibility primitive: reads the window-closed version row (byte-exact
+        content + embedding) and re-applies it through the existing update path with a
+        provenance entry recording the restore (source=SYSTEM) — never a silent
+        overwrite (§0). A NEW version row is NOT written here; restore is itself an
+        evolve the caller can re-version if it later supersedes. Raises
+        ``NodeMergeError`` if the node or version is missing.
+        """
+        current = self._backend.get_node(owner_id, node_id)
+        if current is None:
+            raise NodeMergeError(
+                "restore target node not found", context={"node_id": node_id, "owner_id": owner_id}
+            )
+        loaded = self._backend.read_version_for_restore(owner_id, version_id)
+        if loaded is None:
+            raise NodeMergeError(
+                "version not found for restore",
+                context={"node_id": node_id, "version_id": version_id},
+            )
+        version, embedding = loaded
+        restored = ConceptNode(
+            id=node_id,
+            node_kind=version.node_kind,
+            concept_name=version.concept_name,
+            content=version.content,
+            metadata=dict(version.metadata),
+            wellbeing_category=version.wellbeing_category,
+            provenance=(
+                *current.provenance,
+                NodeProvenance(
+                    source=WriteSource.SYSTEM,
+                    written_at=datetime.now(UTC),
+                    reason=f"restored version {version_id}",
+                    superseded_content=current.content,
+                ),
+            ),
+            created_at=current.created_at,
+        )
+        surrogate = self._backend.update_node(owner_id, restored, embedding)
+        if surrogate is None:  # pragma: no cover - current was just read
+            raise NodeMergeError(
+                "node vanished before restore", context={"node_id": node_id, "owner_id": owner_id}
+            )
+        self._index.replace(surrogate=surrogate, vector=embedding)
+        self._emit_audit(
+            owner_id,
+            AuditAction.WRITE,
+            source=WriteSource.SYSTEM,
+            node_id=node_id,
+            provenance=restored.provenance[-1],
+            metadata={"action": "version_restored", "version_id": version_id},
+        )
+        return restored
+
+    @staticmethod
+    def _version_to_node(version: NodeVersion, current: ConceptNode | None) -> ConceptNode:
+        """Reconstruct the historical account as a ``ConceptNode`` (point-in-time read)."""
+        created_at = current.created_at if current is not None else version.valid_at
+        return ConceptNode(
+            id=version.node_id,
+            node_kind=version.node_kind,
+            concept_name=version.concept_name,
+            content=version.content,
+            metadata=dict(version.metadata),
+            wellbeing_category=version.wellbeing_category,
+            content_hash=version.content_hash,
+            provenance=version.provenance,
+            created_at=created_at,
+        )
 
     def search_dense(
         self,
@@ -271,8 +397,15 @@ class PostgresGraphStore:
         allowlist: set[str] | None = None,
     ) -> list[ConceptNode]:
         vector = self._embedder.encode([query])[0]
-        allowed = self._effective_allowlist(owner_id, allowlist)
-        hits = self._index.search(query_vector=vector, top_k=top_k, allowlist=allowed)
+        search_owner = getattr(self._index, "search_owner", None)
+        if allowlist is None and search_owner is not None:
+            # K7-D-9 common path: owner-predicate scoped, NO positive IN-list — the
+            # per-query surrogate enumeration leaves the hot path (pgvector only).
+            hits = search_owner(owner_id=owner_id, query_vector=vector, top_k=top_k)
+        else:
+            # K4-gated (positive allowlist) or turbovec: the allowlist path, unchanged.
+            allowed = self._effective_allowlist(owner_id, allowlist)
+            hits = self._index.search(query_vector=vector, top_k=top_k, allowlist=allowed)
         nodes = self._backend.get_nodes_by_surrogates(owner_id, [s for s, _ in hits])
         out: list[ConceptNode] = []
         for surrogate, score in hits:
@@ -309,15 +442,21 @@ class PostgresGraphStore:
         *,
         link_types: set[LinkType] | None = None,
         limit: int,
+        as_of: datetime | None = None,
     ) -> list[tuple[TypedLink, ConceptNode]]:
         types = link_types if link_types is not None else set(LinkType)
         out: list[tuple[TypedLink, ConceptNode]] = []
         edge_types = types - {LinkType.ENTITY}
         if edge_types:
             out.extend(
-                self._backend.neighbors(owner_id, node_id, link_types=edge_types, limit=limit)
+                self._backend.neighbors(
+                    owner_id, node_id, link_types=edge_types, limit=limit, as_of=as_of
+                )
             )
-        if LinkType.ENTITY in types and len(out) < limit:
+        # ENTITY threads resolve through the (un-windowed) association table, so they
+        # are a CURRENT-state relationship only — excluded from point-in-time reads
+        # (K7-D-1: as_of covers the valid-time edge windows, not entity associations).
+        if as_of is None and LinkType.ENTITY in types and len(out) < limit:
             for node in self._backend.entity_neighbors(owner_id, node_id)[: limit - len(out)]:
                 # ENTITY links are resolved on-the-fly (D-K0-9) — synthesise the edge.
                 edge = TypedLink(
@@ -332,6 +471,31 @@ class PostgresGraphStore:
 
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]:
         return self._backend.get_embeddings(owner_id, node_ids)
+
+    # ===== salience (K7-D-6) ==============================================
+
+    def record_recall(self, owner_id: str, node_ids: Sequence[str]) -> None:
+        """Reinforce recalled nodes' evidence-salience — fail-soft, OFF the token path (K7-D-6).
+
+        The recall-side hook: **invoked AFTER K3's injection selection** (the nodes that
+        actually entered the prompt), NEVER on the reply stream. A single clamped
+        ``+δ_r`` UPDATE stamped at the owner's current evidence epoch. Fail-soft by
+        contract — a salience write must never break retrieval or the turn — so any
+        error is swallowed (best-effort, like metering). v1 wires salience into NO
+        retrieval gate (K9 owns recall-side *use*); this only records the dynamics.
+        """
+        if not node_ids:
+            return
+        # Fail-soft: a salience write must never break retrieval or the turn.
+        with contextlib.suppress(Exception):
+            self._backend.record_recall(
+                owner_id,
+                node_ids,
+                delta=self._settings.salience_delta_recall,
+                epoch=self._backend.current_epoch(owner_id),
+                floor=self._settings.salience_floor,
+                cap=self._settings.salience_cap,
+            )
 
     # ===== lifecycle =======================================================
 

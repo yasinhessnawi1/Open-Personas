@@ -69,6 +69,8 @@ _CLOUD_ONLY_TABLES = frozenset(
         "graph_edges",
         "graph_entities",
         "graph_node_entities",
+        "graph_node_versions",
+        "graph_consolidation_markers",
         "synthesis_markers",
     }
 )

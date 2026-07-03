@@ -48,8 +48,9 @@ def _node(**kw: object) -> ConceptNode:
 
 
 def test_node_kind_has_the_spec_kinds() -> None:
-    # The seven K0 kinds + the K6 ``self`` marker (Spec K6, K6-D-3 — the central
-    # per-user node; additive, no migration since ``node_kind`` is free TEXT).
+    # The seven K0 kinds + the K6 ``self`` marker + the K7 ``procedural`` kind
+    # (Spec K7, K7-D-12 — learned interaction patterns; additive, no migration since
+    # ``node_kind`` is free TEXT).
     assert {k.value for k in NodeKind} == {
         "concept",
         "fact",
@@ -59,6 +60,7 @@ def test_node_kind_has_the_spec_kinds() -> None:
         "circumstance",
         "entity",
         "self",
+        "procedural",
     }
 
 

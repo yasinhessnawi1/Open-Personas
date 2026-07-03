@@ -133,6 +133,60 @@ class GraphSettings(BaseSettings):
     inject_similarity_floor: float = Field(default=0.66, ge=0.0, le=1.0)
     inject_sparse_rank_cap: int = Field(default=3, gt=0)
 
+    # --- consolidation (K7, K7-D-4/-5) -------------------------------------
+    # The background near-duplicate consolidation pass. The near-dup band it reads
+    # is [semantic_link_threshold, merge_extend_threshold) — existing knobs, no new
+    # threshold (K7-D-3). Scoped to dirty neighbourhoods (localized maintenance,
+    # 2606.24775), never a global re-org. Enabled by default in the worker; the pass
+    # is additive + reversible (K7-D-4) so the flag is the whole off-switch.
+    consolidation_enabled: bool = True
+    # Idle-coalescing delay before a queued pass runs (the D-K2-2 pattern): bursts
+    # of synthesis-tail enqueues collapse to one run per (owner, watermark-bucket).
+    consolidation_delay_seconds: float = Field(default=300.0, ge=0.0)
+    consolidation_bucket_seconds: float = Field(default=300.0, gt=0.0)
+    # A cluster must have at least this many members (canonical + N) to consolidate.
+    consolidation_min_cluster_size: int = Field(default=2, gt=1)
+    # Per-run caps so one pass over a very dirty owner stays bounded.
+    consolidation_max_clusters_per_run: int = Field(default=50, gt=0)
+    consolidation_max_members_per_cluster: int = Field(default=32, gt=0)
+
+    # --- salience by evidence (K7, K7-D-6) ---------------------------------
+    # Salience is a pure function of the ordered evidence-event log — NEVER wall time
+    # (uniform time decay is ~18× harmful, 2604.26970). All deltas are config so a
+    # re-tune is a config change (the D-K0-1 posture). Clamped to [floor, cap].
+    salience_default: float = Field(default=1.0, ge=0.0)
+    salience_floor: float = Field(default=0.0, ge=0.0)
+    salience_cap: float = Field(default=10.0, gt=0.0)
+    salience_delta_corroboration: float = Field(default=0.5, ge=0.0)  # +δ_c
+    salience_delta_contradiction: float = Field(default=0.5, ge=0.0)  # −δ_x (subtracted)
+    salience_delta_recall: float = Field(default=0.25, ge=0.0)  # +δ_r
+    # Disuse decay is per ORDINAL evidence epoch beyond a per-kind grace — the
+    # background pass increments the owner's epoch counter (never now()). Base rate +
+    # per-kind overrides: TRAIT never fades by disuse (identity facts), CIRCUMSTANCE
+    # fastest (the 2604.26970 type-aware hierarchy over our kinds). SELF is excluded
+    # from salience entirely (K7-D-7), so it needs no entry.
+    salience_disuse_delta: float = Field(default=0.1, ge=0.0)  # base −δ_d per epoch
+    salience_disuse_grace_epochs: int = Field(default=3, ge=0)
+    salience_disuse_delta_by_kind: dict[str, float] = Field(
+        default_factory=lambda: {"trait": 0.0, "circumstance": 0.25}
+    )
+    salience_disuse_grace_by_kind: dict[str, int] = Field(
+        default_factory=lambda: {"trait": 0, "circumstance": 1}
+    )
+
+    # --- pgvector / HNSW store hygiene (K7, K7-D-9) ------------------------
+    # The migration recreates the HNSW indexes WITH these build params (young/small
+    # tables → plain DROP/CREATE). ef_search is a SESSION GUC set via set_config()
+    # at the query site (NEVER `SET LOCAL … $1` — the Spec-07 syntax trap). The
+    # 40 → 100 → 200 ladder is the measurement harness's sweep (acceptance 7); the
+    # runtime operating value defaults to 100 (~98% recall). Iterative scans
+    # (pgvector ≥ 0.8.0) fix the filtered-recall failure class (up to 9× faster).
+    hnsw_m: int = Field(default=16, gt=0)
+    hnsw_ef_construction: int = Field(default=200, gt=0)
+    hnsw_ef_search: int = Field(default=100, gt=0)
+    hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "relaxed_order"
+    hnsw_max_scan_tuples: int = Field(default=20000, gt=0)
+
     @model_validator(mode="after")
     def _bands_ordered(self) -> GraphSettings:
         if self.alias_separate_threshold > self.alias_merge_threshold:
@@ -151,3 +205,21 @@ class GraphSettings(BaseSettings):
             msg = "dense_weight and sparse_weight cannot both be 0 (it collapses RRF scoring)"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _salience_bounds_ordered(self) -> GraphSettings:
+        if self.salience_floor > self.salience_cap:
+            msg = (
+                "salience_floor must be <= salience_cap "
+                f"(got {self.salience_floor} > {self.salience_cap})"
+            )
+            raise ValueError(msg)
+        return self
+
+    def disuse_delta_for(self, node_kind: str) -> float:
+        """Per-epoch disuse decay for ``node_kind`` (override or the base rate, K7-D-6)."""
+        return self.salience_disuse_delta_by_kind.get(node_kind, self.salience_disuse_delta)
+
+    def disuse_grace_for(self, node_kind: str) -> int:
+        """Grace epochs before disuse decay starts for ``node_kind`` (K7-D-6)."""
+        return self.salience_disuse_grace_by_kind.get(node_kind, self.salience_disuse_grace_epochs)

@@ -31,12 +31,21 @@ mutates Postgres only; the store wraps it to sync the dense index + emit audit).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from persona.graph.errors import NodeMergeError
-from persona.graph.models import ConceptNode, LinkType, TypedLink, make_edge_id, make_node_id
+from persona.graph.errors import GraphProtectedNodeError, NodeMergeError
+from persona.graph.models import (
+    ConceptNode,
+    LinkType,
+    NodeKind,
+    TypedLink,
+    make_edge_id,
+    make_node_id,
+    make_self_node_id,
+)
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, MergeOutcome, UpdateIntent
+from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -45,6 +54,18 @@ if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
 
 __all__ = ["MergeEngine"]
+
+#: Source-trust tiers for the supersede tie-break (K7-D-2): ``system > user >
+#: persona_self`` (inherited). Higher rank wins an equal-event-time contest.
+_TRUST_RANK: dict[WriteSource, int] = {
+    WriteSource.SYSTEM: 2,
+    WriteSource.USER: 1,
+    WriteSource.PERSONA_SELF: 0,
+}
+
+
+def _trust(source: WriteSource) -> int:
+    return _TRUST_RANK.get(source, 0)
 
 
 def accumulate(existing: str, addition: str) -> str:
@@ -69,15 +90,34 @@ class _MergeBackend(Protocol):
         top_k: int,
         *,
         allowed_surrogates: Sequence[int] | None = None,
+        exclude_self: bool = False,
     ) -> list[ConceptNode]: ...
-    def count_nodes(self, owner_id: str) -> int: ...
+    def next_node_index(self, owner_id: str) -> int: ...
+    def is_merged(self, owner_id: str, node_id: str) -> bool: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
     def insert_node(self, owner_id: str, node: ConceptNode, embedding: Sequence[float]) -> int: ...
     def update_node(
         self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
     ) -> int | None: ...
+    def snapshot_node_version(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        valid_at: datetime,
+        invalid_at: datetime,
+        invalidated_by: str | None,
+    ) -> int | None: ...
+    def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None: ...
+    def current_epoch(self, owner_id: str) -> int: ...
+    def bump_salience(
+        self, owner_id: str, node_id: str, *, delta: float, epoch: int, floor: float, cap: float
+    ) -> None: ...
     def upsert_edge(self, owner_id: str, link: TypedLink) -> None: ...
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None: ...
+    def invalidate_edge(
+        self, owner_id: str, edge_id: str, *, invalidated_by: str | None
+    ) -> bool: ...
     def associate_entities(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
@@ -110,13 +150,54 @@ class MergeEngine:
 
         # Explicit update/contradiction → evolve a named node (D-K0-4).
         if candidate.update_intent in (UpdateIntent.UPDATE, UpdateIntent.CONTRADICT):
-            return self._evolve(owner_id, candidate, vec)
+            outcome = self._evolve(owner_id, candidate, vec)
+        else:
+            # Extend-vs-create on the merge threshold (D-K0-1). The extend-target search
+            # excludes the SELF anchor + merged nodes (K7-D-7): neither is ever a valid
+            # extend/evolve target.
+            nearest = self._backend.dense_query(owner_id, vec, 1, exclude_self=True)
+            if nearest and _similarity(nearest[0]) >= self._settings.merge_extend_threshold:
+                outcome = self._extend(owner_id, nearest[0], candidate, vec)
+            else:
+                outcome = self._create(owner_id, candidate, vec)
 
-        # Extend-vs-create on the merge threshold (D-K0-1).
-        nearest = self._backend.dense_query(owner_id, vec, 1)
-        if nearest and _similarity(nearest[0]) >= self._settings.merge_extend_threshold:
-            return self._extend(owner_id, nearest[0], candidate, vec)
-        return self._create(owner_id, candidate, vec)
+        # The K2-named edge closures (K7-D-1.4 / K7-D-8): K2's extraction layer (which
+        # HAS the LLM judgment, off the hot path) may name assertion edges to close;
+        # merge validates each is the owner's + open and window-closes it. Defaulted
+        # empty, so today's K2 payloads are byte-compatible; no lifecycle path
+        # auto-closes temporal/causal edges (K7-D-1.3) — only this explicit slot does.
+        self._close_named_links(owner_id, candidate)
+        self._apply_salience(owner_id, outcome)
+        return outcome
+
+    def _apply_salience(self, owner_id: str, outcome: MergeOutcome) -> None:
+        """Move the touched node's evidence-salience by the event's delta (K7-D-6).
+
+        A corroborating EXTEND (``+δ_c``) or a contradicting supersede EVOLVE
+        (``−δ_x``); CREATED starts at the default and UNCHANGED is a true no-op — so
+        neither bumps. The evidence epoch is the owner's current ordinal (never a clock).
+        """
+        if outcome.action is MergeAction.EXTENDED:
+            delta = self._settings.salience_delta_corroboration
+        elif outcome.action is MergeAction.EVOLVED:
+            delta = -self._settings.salience_delta_contradiction
+        else:
+            return  # CREATED / UNCHANGED — no evidence-salience change
+        self._backend.bump_salience(
+            owner_id,
+            outcome.node_id,
+            delta=delta,
+            epoch=self._backend.current_epoch(owner_id),
+            floor=self._settings.salience_floor,
+            cap=self._settings.salience_cap,
+        )
+
+    def _close_named_links(self, owner_id: str, candidate: KnowledgeCandidate) -> None:
+        if not candidate.close_link_ids:
+            return
+        ref = candidate.provenance.interaction_id or str(candidate.provenance.source)
+        for edge_id in candidate.close_link_ids:
+            self._backend.invalidate_edge(owner_id, edge_id, invalidated_by=f"close:{ref}")
 
     # -- create -------------------------------------------------------------
 
@@ -124,7 +205,7 @@ class MergeEngine:
         self, owner_id: str, candidate: KnowledgeCandidate, vec: Sequence[float]
     ) -> MergeOutcome:
         node = ConceptNode(
-            id=make_node_id(owner_id, self._backend.count_nodes(owner_id)),
+            id=make_node_id(owner_id, self._backend.next_node_index(owner_id)),
             node_kind=candidate.node_kind,
             concept_name=candidate.concept_name,
             content=candidate.content,
@@ -184,29 +265,85 @@ class MergeEngine:
                 "update/contradict requires target_node_id",
                 context={"intent": str(candidate.update_intent), "concept": candidate.concept_name},
             )
+        # SELF is never a valid evolve target (K7-D-7): the anchor is outside every K7
+        # lifecycle op; only K6-D-9's rename path changes its label. Guard on the id
+        # scheme first (cheap, no read) so a merge never even loads it as a target.
+        if candidate.target_node_id == make_self_node_id(owner_id):
+            raise GraphProtectedNodeError(
+                "the SELF node is not a valid update/contradict target",
+                context={"target_node_id": candidate.target_node_id, "op": "evolve"},
+            )
         target = self._backend.get_node(owner_id, candidate.target_node_id)
         if target is None:
             raise NodeMergeError(
                 "update/contradict target not found",
                 context={"target_node_id": candidate.target_node_id, "owner_id": owner_id},
             )
-        # Current account wins for retrieval; the appended provenance entry records
-        # the change (NOT a silent overwrite — D-K0-4). The prior content is retained
-        # in the provenance trail's reason for audit/K5.
+        if target.node_kind is NodeKind.SELF:  # defence-in-depth: kind agrees with id
+            raise GraphProtectedNodeError(
+                "the SELF node is not a valid update/contradict target",
+                context={"target_node_id": target.id, "op": "evolve"},
+            )
+        # A consolidated (merged) node must never be extended/evolved into (K7-D-4/-7):
+        # its content is byte-frozen; a follow-on account belongs on the canonical.
+        if self._backend.is_merged(owner_id, target.id):
+            raise NodeMergeError(
+                "cannot evolve a consolidated (merged) node",
+                context={"target_node_id": target.id, "owner_id": owner_id},
+            )
+
+        # Idempotency short-circuit (K7-D-8): replaying the same account from the same
+        # evidence reference writes nothing and reports it observably (UNCHANGED).
+        if _is_idempotent_evolve(target, candidate):
+            return MergeOutcome(action=MergeAction.UNCHANGED, node_id=target.id)
+
+        # The supersede gate on EVENT time (K7-D-2). The candidate's world event time
+        # defaults to its provenance.written_at; the current account began at the most
+        # recent version's close (or the node's creation event time if never evolved).
+        cand_valid_at = candidate.valid_at or candidate.provenance.written_at
+        prior_invalid = self._backend.latest_version_invalid_at(owner_id, target.id)
+        current_valid_at = (
+            prior_invalid if prior_invalid is not None else target.provenance[0].written_at
+        )
+        current_source = target.provenance[-1].source
+        if not _supersedes(
+            cand_valid_at, candidate.provenance.source, current_valid_at, current_source
+        ):
+            # A late-arriving account about the past does NOT replace current content
+            # (K7-D-2): it accumulates (extend semantics, provenance-appended). No
+            # version closes — nothing is lost, nothing lies about "current".
+            return self._extend(owner_id, target, candidate, vec)
+
+        # Supersede: preserve the prior account (content + embedding) as a window-closed
+        # version row BEFORE overwriting (K7-D-1, §0). In an exact event-time tie won by
+        # trust the world-window is nominally zero-width; record invalid_at one
+        # microsecond after valid_at so the row stays non-degenerate (the DDL CHECK)
+        # while still preserving the prior content + embedding for point-in-time restore.
+        invalid_at = (
+            cand_valid_at
+            if cand_valid_at > current_valid_at
+            else current_valid_at + timedelta(microseconds=1)
+        )
+        invalidated_by = candidate.provenance.interaction_id or str(candidate.provenance.source)
+        version_key = self._backend.snapshot_node_version(
+            owner_id,
+            target.id,
+            valid_at=current_valid_at,
+            invalid_at=invalid_at,
+            invalidated_by=invalidated_by,
+        )
         node = self._rebuilt(
-            target,
-            content=candidate.content,
-            candidate=candidate,
-            superseded=target.content,
+            target, content=candidate.content, candidate=candidate, superseded=target.content
         )
         self._backend.update_node(owner_id, node, vec)
         link_ids = self._form_semantic_links(owner_id, node, vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(
-            action=MergeAction.EXTENDED,
+            action=MergeAction.EVOLVED,
             node_id=node.id,
             created_link_ids=tuple(link_ids),
             entity_ids=candidate.entity_ids,
+            superseded_version_id=None if version_key is None else str(version_key),
         )
 
     # -- helpers ------------------------------------------------------------
@@ -307,3 +444,37 @@ class MergeEngine:
 def _similarity(node: ConceptNode) -> float:
     """Cosine similarity from a dense-query result's ``distance`` (1 - distance)."""
     return 1.0 - (node.distance if node.distance is not None else 1.0)
+
+
+def _supersedes(
+    new_valid_at: datetime,
+    new_source: WriteSource,
+    current_valid_at: datetime,
+    current_source: WriteSource,
+) -> bool:
+    """Whether a candidate supersedes the current account (K7-D-2, gate-not-overwrite).
+
+    Recency on the WORLD timeline (event time): a later ``valid_at`` supersedes; an
+    equal ``valid_at`` supersedes only when the candidate's source trust is ``>=`` the
+    current last writer's (``system > user > persona_self``) — the tie case, proven.
+    An earlier ``valid_at`` never supersedes (it accumulates instead — never destroys).
+    """
+    if new_valid_at > current_valid_at:
+        return True
+    if new_valid_at == current_valid_at:
+        return _trust(new_source) >= _trust(current_source)
+    return False
+
+
+def _is_idempotent_evolve(target: ConceptNode, candidate: KnowledgeCandidate) -> bool:
+    """The evolve idempotency no-op check (K7-D-8): same account, same evidence ref.
+
+    ``(fact identity, evidence reference)`` set-membership (Graphiti's shipped
+    discipline): if the target's current content already equals the candidate's AND
+    the trail already carries an entry for this ``(interaction_id, source)``, replaying
+    it writes nothing. Returns ``True`` ⇒ the caller reports ``MergeAction.UNCHANGED``.
+    """
+    if target.content != candidate.content:
+        return False
+    key = (candidate.provenance.interaction_id, candidate.provenance.source)
+    return any((p.interaction_id, p.source) == key for p in target.provenance)

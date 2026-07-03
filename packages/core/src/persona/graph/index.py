@@ -59,4 +59,4 @@ def make_graph_index(
             rerank_n=settings.rerank_n,
             path=settings.index_path,
         )
-    return PgvectorGraphIndex(engine=engine)
+    return PgvectorGraphIndex(engine=engine, settings=settings)

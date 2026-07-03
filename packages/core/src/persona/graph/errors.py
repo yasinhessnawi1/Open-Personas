@@ -16,6 +16,7 @@ __all__ = [
     "EntityResolutionError",
     "GraphError",
     "GraphIndexError",
+    "GraphProtectedNodeError",
     "GraphRebuildError",
     "NodeMergeError",
 ]
@@ -63,6 +64,19 @@ class GraphIndexError(GraphError):
     both raise this at their boundary so callers depend on the domain type,
     not on a backend-specific exception. ``context`` conventionally carries
     the backend and the offending node-id/surrogate.
+    """
+
+
+class GraphProtectedNodeError(GraphError):
+    """Raised when a K7 lifecycle op targets a structurally-protected node (K7-D-7).
+
+    The ``NodeKind.SELF`` anchor (``{owner}::self``, Spec K6) sits OUTSIDE every K7
+    lifecycle operation and the merge target space: it can never be evolved,
+    consolidated, decayed, or true-deleted — a rename flows through K6-D-9's
+    provenance-append path instead, and deletion is refused outright (the anchor is
+    not deletable). This closes the Phase-1 gap where SELF was reachable as a
+    merge/evolve/delete target. ``context`` conventionally carries the offending
+    ``node_id`` and the attempted operation.
     """
 
 

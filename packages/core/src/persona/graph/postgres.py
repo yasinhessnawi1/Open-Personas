@@ -25,14 +25,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import BigInteger, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona.graph._schema import (
     EMBEDDING_DIM,
+    graph_consolidation_markers,
     graph_edges,
     graph_entities,
     graph_node_entities,
+    graph_node_versions,
     graph_nodes,
 )
 from persona.graph.errors import GraphIndexError
@@ -43,6 +45,7 @@ from persona.graph.models import (
     LinkType,
     NodeKind,
     NodeProvenance,
+    NodeVersion,
     TypedLink,
 )
 
@@ -140,6 +143,10 @@ class PostgresGraphBackend:
                 embedding_model=embedding_model,
                 content_hash=node.content_hash,
                 provenance=[p.model_dump(mode="json") for p in node.provenance],
+                # Advance the dirty-neighbourhood watermark (K7-D-4). salience /
+                # last_evidence_epoch / merged_into are lifecycle state and are
+                # deliberately NOT touched by a content update.
+                updated_at=datetime.now(UTC),
             )
             .returning(graph_nodes.c.surrogate)
         )
@@ -233,19 +240,31 @@ class PostgresGraphBackend:
         top_k: int,
         *,
         allowed_surrogates: Sequence[int] | None = None,
+        exclude_self: bool = False,
     ) -> list[ConceptNode]:
         """Exact pgvector cosine search, allowlist-scoped (the pgvector dense leg).
 
         ``allowed_surrogates=None`` → all the user's nodes; an empty sequence →
         no candidates (returns ``[]``) — isolation never relies on ``None``
         (design call #3). Returned nodes carry ``distance``.
+
+        **Consolidated nodes are never returned** (``merged_into IS NULL``, K7-D-4 /
+        K7-D-X-read-surface — a merged node left the retrievable set). ``exclude_self``
+        additionally drops the ``NodeKind.SELF`` anchor (K7-D-7): the merge engine
+        passes it for the extend-target top-1 so the anchor is never an extend/evolve
+        target; semantic-link wiring leaves it off (SELF may still be a link end).
         """
         self._check_dim(query_vector, "<query>")
         if allowed_surrogates is not None and len(allowed_surrogates) == 0:
             return []
         q_vec = list(query_vector)
         distance = graph_nodes.c.embedding.cosine_distance(q_vec).label("distance")
-        stmt = select(graph_nodes, distance).where(graph_nodes.c.owner_id == owner_id)
+        stmt = select(graph_nodes, distance).where(
+            graph_nodes.c.owner_id == owner_id,
+            graph_nodes.c.merged_into.is_(None),
+        )
+        if exclude_self:
+            stmt = stmt.where(graph_nodes.c.node_kind != str(NodeKind.SELF))
         if allowed_surrogates is not None:
             stmt = stmt.where(graph_nodes.c.surrogate.in_(list(allowed_surrogates)))
         stmt = stmt.order_by(distance).limit(top_k)
@@ -285,6 +304,152 @@ class PostgresGraphBackend:
         )
         with self._engine.connect() as conn:
             return int(conn.execute(stmt).scalar_one())
+
+    def next_node_index(self, owner_id: str) -> int:
+        """The next collision-free ``make_node_id`` index for the owner (Spec K7, K7-D-9).
+
+        **Fixes the latent delete→create id collision** the Phase-1 audit flagged:
+        ``count_nodes`` (create → 0,1,2; delete id 1; count → 2; next create reuses
+        index 2 → collides with the live node 2). The fix is ``MAX(live index) + 1``:
+        we always allocate strictly above every LIVE ``::node::`` id, so a deleted
+        id's number is only ever reused when it is genuinely gone — two live nodes can
+        never share an id (also PK-guarded). ``split_part(id, '::', -1)`` reads the
+        trailing index segment (robust to an ``owner_id`` containing ``::``); the K6
+        ``::self`` node is excluded (its last segment is non-numeric).
+
+        **K5 coordination (state.md cross-spec item 1):** K5's close-out was to own
+        this allocator fix; K5 has NOT merged, so K7 implements it here. Whichever
+        lands second at merge-back must NOT double-fix — the orchestrator reconciles.
+        """
+        stmt = select(
+            func.coalesce(
+                func.max(func.split_part(graph_nodes.c.id, "::", -1).cast(BigInteger)),
+                -1,
+            )
+            + 1
+        ).where(
+            graph_nodes.c.owner_id == owner_id,
+            graph_nodes.c.node_kind != str(NodeKind.SELF),
+        )
+        with self._engine.connect() as conn:
+            return int(conn.execute(stmt).scalar_one())
+
+    def is_merged(self, owner_id: str, node_id: str) -> bool:
+        """Whether ``node_id`` has been consolidated into a canonical (K7-D-4/-7).
+
+        A merged node must never be an extend/evolve target; ``get_node`` still
+        returns it (K5 inspection / restore), so the merge engine checks this before
+        evolving an explicitly-named target.
+        """
+        stmt = select(graph_nodes.c.merged_into).where(
+            graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
+        )
+        with self._engine.connect() as conn:
+            val = conn.execute(stmt).scalar_one_or_none()
+        return val is not None
+
+    # ===== node versions (Spec K7, K7-D-1) ================================
+
+    def snapshot_node_version(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        valid_at: datetime,
+        invalid_at: datetime,
+        invalidated_by: str | None,
+    ) -> int | None:
+        """Preserve the node's CURRENT state as a window-closed version row (K7-D-1).
+
+        Reads the live ``graph_nodes`` row (content + **embedding** + metadata +
+        wellbeing + content_hash + provenance-trail snapshot) and inserts an immutable
+        version row window-closed at ``[valid_at, invalid_at]`` — the §0-honest
+        preservation the caller runs BEFORE overwriting the node with the superseding
+        account. Nothing is destroyed; the prior embedding is byte-exact for restore.
+        ``invalidated_at`` (bookkeeping, K7-D-10) records the SYSTEM close moment.
+        Returns the assigned ``version_key`` (the ``superseded_version_id`` source),
+        or ``None`` if the node vanished.
+        """
+        with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(graph_nodes).where(
+                        graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            ins = (
+                pg_insert(graph_node_versions)
+                .values(
+                    owner_id=owner_id,
+                    node_id=node_id,
+                    node_kind=row["node_kind"],
+                    concept_name=row["concept_name"],
+                    content=row["content"],
+                    metadata=dict(row["metadata"]),
+                    wellbeing_category=row["wellbeing_category"],
+                    embedding=list(row["embedding"]),
+                    embedding_model=row["embedding_model"],
+                    content_hash=row["content_hash"],
+                    provenance=row["provenance"],
+                    valid_at=valid_at,
+                    invalid_at=invalid_at,
+                    invalidated_by=invalidated_by,
+                    invalidated_at=datetime.now(UTC),
+                )
+                .returning(graph_node_versions.c.version_key)
+            )
+            return int(conn.execute(ins).scalar_one())
+
+    def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
+        """The max ``invalid_at`` across a node's versions — when its CURRENT account began.
+
+        ``None`` when the node has never been superseded (its current account's
+        world-time origin is then the creation provenance's ``written_at``).
+        """
+        stmt = select(func.max(graph_node_versions.c.invalid_at)).where(
+            graph_node_versions.c.owner_id == owner_id,
+            graph_node_versions.c.node_id == node_id,
+        )
+        with self._engine.connect() as conn:
+            val = conn.execute(stmt).scalar_one_or_none()
+        return None if val is None else _as_utc(val)
+
+    def get_node_versions(self, owner_id: str, node_id: str) -> list[NodeVersion]:
+        """A node's window-closed prior accounts, oldest→newest (K7-D-1 point-in-time)."""
+        stmt = (
+            select(graph_node_versions)
+            .where(
+                graph_node_versions.c.owner_id == owner_id,
+                graph_node_versions.c.node_id == node_id,
+            )
+            .order_by(graph_node_versions.c.valid_at, graph_node_versions.c.version_key)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_version(dict(r)) for r in rows]
+
+    def read_version_for_restore(
+        self, owner_id: str, version_id: str
+    ) -> tuple[NodeVersion, list[float]] | None:
+        """A version row + its preserved float32 embedding (the byte-exact restore source)."""
+        try:
+            version_key = int(version_id)
+        except (TypeError, ValueError):
+            return None
+        stmt = select(graph_node_versions).where(
+            graph_node_versions.c.version_key == version_key,
+            graph_node_versions.c.owner_id == owner_id,
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).mappings().one_or_none()
+        if row is None:
+            return None
+        return self._row_to_version(dict(row)), [float(x) for x in row["embedding"]]
 
     # ===== embeddings (rerank source + rebuild) ===========================
 
@@ -326,16 +491,34 @@ class PostgresGraphBackend:
     # ===== edges ===========================================================
 
     def upsert_edge(self, owner_id: str, link: TypedLink) -> None:
-        """Insert or replace a typed edge by id (idempotent link assertion, D-K0-2)."""
+        """Insert or replace the OPEN edge for a fact-id (idempotent assertion, D-K0-2, K7-D-1).
+
+        The conflict target is the partial unique index ``(id) WHERE invalid_at IS
+        NULL`` — one open edge per fact. A window-closed edge with the same ``id``
+        coexists as a separate row (it is outside the partial index), so re-asserting
+        a fact after it was closed opens a NEW open row (K7-D-1) without touching the
+        closed history. ``edge_key`` (IDENTITY) is never written and never updated.
+        """
         row = self._link_to_row(owner_id, link)
         stmt = pg_insert(graph_edges).values(**row)
-        update_cols = {c.name: stmt.excluded[c.name] for c in graph_edges.c if c.name != "id"}
-        stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols)
+        update_cols = {
+            c.name: stmt.excluded[c.name] for c in graph_edges.c if c.name not in ("id", "edge_key")
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["id"],
+            index_where=graph_edges.c.invalid_at.is_(None),
+            set_=update_cols,
+        )
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
-        """Delete a node's OUTGOING edges of one type (semantic-link re-eval on extend, D-K0-2)."""
+        """Delete a node's OUTGOING edges of one type (semantic-link re-eval on extend, D-K0-2).
+
+        Only ever called with ``LinkType.SEMANTIC`` — semantic wiring is derived and
+        recomputable (K7-D-1.3), so it is hard-deleted-and-reformed on evolve, NOT
+        window-closed. Assertion edges (temporal/causal) are never touched here.
+        """
         stmt = delete(graph_edges).where(
             graph_edges.c.owner_id == owner_id,
             graph_edges.c.src_node_id == node_id,
@@ -344,6 +527,44 @@ class PostgresGraphBackend:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
+    def invalidate_edge(
+        self,
+        owner_id: str,
+        edge_id: str,
+        *,
+        invalidated_by: str | None,
+        invalid_at: datetime | None = None,
+    ) -> bool:
+        """Window-close the OPEN edge for a fact-id — never delete (Spec K7, K7-D-1, §0).
+
+        Sets ``invalid_at`` (world-time end), ``invalidated_by`` (provenance-of-closure)
+        and ``invalidated_at`` (system bookkeeping, K7-D-10) on the single open row for
+        ``edge_id`` (owner-scoped, ``invalid_at IS NULL``). The row PERSISTS — a
+        subsequent :meth:`upsert_edge` of the same fact opens a NEW row sharing the
+        ``id`` (the two coexist, one closed one open). Idempotent: closing an
+        already-closed / absent / other-owner edge affects zero rows and returns
+        ``False``. ``invalid_at`` defaults to now; it is clamped strictly after
+        ``valid_at`` (the DDL window CHECK) so an immediate open→close stays valid.
+        """
+        end_ts = invalid_at if invalid_at is not None else datetime.now(UTC)
+        closed = func.greatest(end_ts, graph_edges.c.valid_at + text("interval '1 microsecond'"))
+        stmt = (
+            update(graph_edges)
+            .where(
+                graph_edges.c.owner_id == owner_id,
+                graph_edges.c.id == edge_id,
+                graph_edges.c.invalid_at.is_(None),
+            )
+            .values(
+                invalid_at=closed,
+                invalidated_by=invalidated_by,
+                invalidated_at=datetime.now(UTC),
+            )
+            .returning(graph_edges.c.edge_key)
+        )
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).scalar_one_or_none() is not None
+
     def neighbors(
         self,
         owner_id: str,
@@ -351,11 +572,17 @@ class PostgresGraphBackend:
         *,
         link_types: set[LinkType] | None = None,
         limit: int,
+        as_of: datetime | None = None,
     ) -> list[tuple[TypedLink, ConceptNode]]:
-        """Typed one-hop traversal in BOTH directions (K1 §2; crit 7).
+        """Typed one-hop traversal in BOTH directions (K1 §2; crit 7 / K7-D-1).
 
         Returns ``(edge, neighbour-node)``. ``link_types=None`` traverses all four
-        types; bounded by ``limit`` (K1-D-3 anti-flooding).
+        types; bounded by ``limit`` (K1-D-3 anti-flooding). **Traverses OPEN edges by
+        default** (``invalid_at IS NULL``) — a window-closed edge is invisible to
+        current-state reads. With an ``as_of`` world-time, returns exactly the edges
+        whose window covers that instant (``valid_at <= as_of AND (invalid_at IS NULL
+        OR invalid_at > as_of)``, the Zep predicate) — a closed edge is visible inside
+        its window, invisible after.
         """
         conds = [
             graph_edges.c.owner_id == owner_id,
@@ -363,6 +590,11 @@ class PostgresGraphBackend:
         ]
         if link_types is not None:
             conds.append(graph_edges.c.link_type.in_([str(lt) for lt in link_types]))
+        if as_of is None:
+            conds.append(graph_edges.c.invalid_at.is_(None))
+        else:
+            conds.append(graph_edges.c.valid_at <= as_of)
+            conds.append(or_(graph_edges.c.invalid_at.is_(None), graph_edges.c.invalid_at > as_of))
         edge_stmt = (
             select(graph_edges).where(*conds).order_by(graph_edges.c.created_at).limit(limit)
         )
@@ -524,6 +756,7 @@ class PostgresGraphBackend:
             .where(
                 graph_node_entities.c.owner_id == owner_id,
                 graph_node_entities.c.entity_id == entity_id,
+                graph_nodes.c.merged_into.is_(None),  # merged members leave the thread (K7-D-4)
             )
         )
         with self._engine.connect() as conn:
@@ -559,11 +792,329 @@ class PostgresGraphBackend:
                 graph_nodes.c.owner_id == owner_id,
                 mine.c.node_id == node_id,
                 theirs.c.node_id != node_id,
+                graph_nodes.c.merged_into.is_(None),  # merged siblings are invisible (K7-D-4)
             )
         )
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_node(dict(r)) for r in rows]
+
+    # ===== consolidation (Spec K7, K7-D-4) ================================
+
+    def get_marker(self, owner_id: str) -> tuple[int, datetime | None]:
+        """Get-or-create the per-owner consolidation marker → ``(current_epoch, watermark)``."""
+        ins = (
+            pg_insert(graph_consolidation_markers)
+            .values(owner_id=owner_id)
+            .on_conflict_do_nothing(index_elements=["owner_id"])
+        )
+        stmt = select(
+            graph_consolidation_markers.c.current_epoch,
+            graph_consolidation_markers.c.watermark,
+        ).where(graph_consolidation_markers.c.owner_id == owner_id)
+        with self._engine.begin() as conn:
+            conn.execute(ins)
+            row = conn.execute(stmt).one()
+        return int(row[0]), (None if row[1] is None else _as_utc(row[1]))
+
+    def advance_marker(
+        self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
+    ) -> None:
+        """Advance the marker after a pass (ordinal epoch + dirty watermark + run time)."""
+        stmt = (
+            update(graph_consolidation_markers)
+            .where(graph_consolidation_markers.c.owner_id == owner_id)
+            .values(current_epoch=epoch, watermark=watermark, last_run_at=last_run_at)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def dirty_candidates(self, owner_id: str, watermark: datetime | None) -> list[ConceptNode]:
+        """Consolidation candidates: non-merged, non-SELF, dirty-since-watermark (K7-D-4).
+
+        Ordered by evidence (provenance-trail length) DESC, then oldest ``created_at``,
+        then min ``id`` — the deterministic seed/canonical survivorship order (K7-D-4.3).
+        """
+        conds = [
+            graph_nodes.c.owner_id == owner_id,
+            graph_nodes.c.merged_into.is_(None),
+            graph_nodes.c.node_kind != str(NodeKind.SELF),
+        ]
+        if watermark is not None:
+            conds.append(graph_nodes.c.updated_at > watermark)
+        stmt = (
+            select(graph_nodes)
+            .where(*conds)
+            .order_by(
+                func.jsonb_array_length(graph_nodes.c.provenance).desc(),
+                graph_nodes.c.created_at.asc(),
+                graph_nodes.c.id.asc(),
+            )
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_node(dict(r)) for r in rows]
+
+    def band_semantic_neighbors(
+        self, owner_id: str, node_id: str, *, floor: float, ceil: float
+    ) -> list[ConceptNode]:
+        """Non-merged, non-SELF nodes joined to ``node_id`` by an OPEN band semantic edge.
+
+        The near-dup cluster substrate (K7-D-3): open ``semantic`` edges whose weight
+        is in ``[floor, ceil)`` (the existing config band). The pass then re-verifies
+        similarity-to-seed from stored embeddings (K7-D-4.2 star-clustering).
+        """
+        conds = [
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.link_type == str(LinkType.SEMANTIC),
+            graph_edges.c.invalid_at.is_(None),
+            graph_edges.c.weight >= floor,
+            graph_edges.c.weight < ceil,
+            or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+        ]
+        with self._engine.connect() as conn:
+            edge_rows = conn.execute(
+                select(graph_edges.c.src_node_id, graph_edges.c.dst_node_id).where(*conds)
+            ).all()
+            other_ids = {(r[1] if r[0] == node_id else r[0]) for r in edge_rows} - {node_id}
+            if not other_ids:
+                return []
+            node_rows = (
+                conn.execute(
+                    select(graph_nodes).where(
+                        graph_nodes.c.owner_id == owner_id,
+                        graph_nodes.c.id.in_(other_ids),
+                        graph_nodes.c.merged_into.is_(None),
+                        graph_nodes.c.node_kind != str(NodeKind.SELF),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [self._row_to_node(dict(r)) for r in node_rows]
+
+    def open_assertion_edges(self, owner_id: str, node_id: str) -> list[TypedLink]:
+        """A node's OPEN temporal/causal edges (both directions) — the mirror source (K7-D-4.4)."""
+        conds = [
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.invalid_at.is_(None),
+            graph_edges.c.link_type.in_([str(LinkType.TEMPORAL), str(LinkType.CAUSAL)]),
+            or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+        ]
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(graph_edges).where(*conds)).mappings().all()
+        return [self._row_to_link(dict(r)) for r in rows]
+
+    def close_edges_incident(
+        self, owner_id: str, node_id: str, *, invalidated_by: str
+    ) -> list[str]:
+        """Window-close ALL open edges incident to ``node_id``; return their fact-ids (K7-D-4.4)."""
+        now = datetime.now(UTC)
+        closed = func.greatest(now, graph_edges.c.valid_at + text("interval '1 microsecond'"))
+        stmt = (
+            update(graph_edges)
+            .where(
+                graph_edges.c.owner_id == owner_id,
+                graph_edges.c.invalid_at.is_(None),
+                or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+            )
+            .values(invalid_at=closed, invalidated_by=invalidated_by, invalidated_at=now)
+            .returning(graph_edges.c.id)
+        )
+        with self._engine.begin() as conn:
+            return [str(r[0]) for r in conn.execute(stmt)]
+
+    def reopen_edges_incident(self, owner_id: str, node_id: str, *, invalidated_by: str) -> None:
+        """Re-open the edges incident to ``node_id`` closed under ``invalidated_by`` (unmerge)."""
+        stmt = (
+            update(graph_edges)
+            .where(
+                graph_edges.c.owner_id == owner_id,
+                graph_edges.c.invalidated_by == invalidated_by,
+                or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+            )
+            .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def delete_open_edge(self, owner_id: str, edge_id: str) -> None:
+        """Remove the OPEN row for ``edge_id`` (unmerge: drop a consolidation-mirrored edge)."""
+        stmt = delete(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.id == edge_id,
+            graph_edges.c.invalid_at.is_(None),
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def remove_entity_associations(
+        self, owner_id: str, node_id: str, entity_ids: Sequence[str]
+    ) -> None:
+        """Drop specific ``(node_id, entity_id)`` associations (unmerge: undo the copy)."""
+        if not entity_ids:
+            return
+        stmt = delete(graph_node_entities).where(
+            graph_node_entities.c.owner_id == owner_id,
+            graph_node_entities.c.node_id == node_id,
+            graph_node_entities.c.entity_id.in_(list(entity_ids)),
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def set_merged_into(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        merged_into: str | None,
+        metadata: dict[str, str],
+        content_hash: str,
+    ) -> None:
+        """Set/clear ``merged_into`` + bookkeeping ``metadata``/``content_hash`` (K7-D-4.4).
+
+        Targeted update — does NOT touch ``content``/``embedding`` (§0 byte-equality) or
+        ``salience``/``last_evidence_epoch``. Advances ``updated_at`` so a re-scan sees
+        the change (idempotency converges: a merged node is then excluded from candidacy).
+        """
+        stmt = (
+            update(graph_nodes)
+            .where(graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id)
+            .values(
+                merged_into=merged_into,
+                metadata=metadata,
+                content_hash=content_hash,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def merged_members(self, owner_id: str, canonical_id: str) -> list[ConceptNode]:
+        """The nodes consolidated into ``canonical_id`` (K5 inspection / unmerge scope)."""
+        stmt = select(graph_nodes).where(
+            graph_nodes.c.owner_id == owner_id, graph_nodes.c.merged_into == canonical_id
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_node(dict(r)) for r in rows]
+
+    # ===== salience by evidence (Spec K7, K7-D-6) =========================
+    # Every statement here moves salience by an ordinal EVIDENCE epoch — NEVER a
+    # clock. The no-wallclock structural test asserts none of these methods read
+    # now()/datetime.now/func.now. Clamping is SQL GREATEST/LEAST so each is a single
+    # statement; ``updated_at`` is deliberately untouched (salience is not a content
+    # change → a bump must not make a node a fresh consolidation candidate).
+
+    def current_epoch(self, owner_id: str) -> int:
+        """The owner's ordinal evidence epoch (the consolidation-run counter), 0 if unset."""
+        stmt = select(graph_consolidation_markers.c.current_epoch).where(
+            graph_consolidation_markers.c.owner_id == owner_id
+        )
+        with self._engine.connect() as conn:
+            val = conn.execute(stmt).scalar_one_or_none()
+        return 0 if val is None else int(val)
+
+    def bump_salience(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        delta: float,
+        epoch: int,
+        floor: float,
+        cap: float,
+    ) -> None:
+        """Move one node's salience by ``delta`` (clamped) and stamp its evidence epoch.
+
+        A corroboration (``+δ_c``) / contradiction (``−δ_x``) event — a single clamped
+        UPDATE; ``last_evidence_epoch`` records that this node saw evidence at ``epoch``
+        (resetting its disuse clock). SELF is never salient (K7-D-7), so it is excluded.
+        """
+        clamped = func.greatest(floor, func.least(cap, graph_nodes.c.salience + delta))
+        stmt = (
+            update(graph_nodes)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.id == node_id,
+                graph_nodes.c.node_kind != str(NodeKind.SELF),
+            )
+            .values(salience=clamped, last_evidence_epoch=epoch)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def record_recall(
+        self,
+        owner_id: str,
+        node_ids: Sequence[str],
+        *,
+        delta: float,
+        epoch: int,
+        floor: float,
+        cap: float,
+    ) -> int:
+        """Reinforce recalled nodes (``+δ_r``) in ONE statement (K7-D-6 recall path).
+
+        The off-the-token-path recall bump: a single clamped UPDATE over the injected
+        node ids (SELF excluded), stamping ``last_evidence_epoch``. Returns the row
+        count. The store wraps this fail-soft; the caller invokes it AFTER K3's
+        injection selection, never on the reply stream.
+        """
+        if not node_ids:
+            return 0
+        clamped = func.greatest(floor, func.least(cap, graph_nodes.c.salience + delta))
+        stmt = (
+            update(graph_nodes)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.id.in_(list(node_ids)),
+                graph_nodes.c.node_kind != str(NodeKind.SELF),
+            )
+            .values(salience=clamped, last_evidence_epoch=epoch)
+        )
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).rowcount
+
+    def apply_disuse_decay(
+        self,
+        owner_id: str,
+        node_kind: str,
+        *,
+        current_epoch: int,
+        grace: int,
+        delta: float,
+        floor: float,
+    ) -> None:
+        """Decay one kind's idle-beyond-grace nodes by one step (K7-D-6 disuse, per pass).
+
+        Idleness is ``current_epoch − last_evidence_epoch`` (ordinal epochs, not time).
+        Does NOT reset ``last_evidence_epoch`` — an idle node keeps decaying each pass
+        until an evidence event stamps it. Callers skip ``TRAIT`` (``delta == 0``) and
+        SELF. Merged nodes are left alone (they are outside retrieval).
+        """
+        clamped = func.greatest(floor, graph_nodes.c.salience - delta)
+        stmt = (
+            update(graph_nodes)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.node_kind == node_kind,
+                graph_nodes.c.merged_into.is_(None),
+                (current_epoch - graph_nodes.c.last_evidence_epoch) > grace,
+            )
+            .values(salience=clamped)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def get_salience(self, owner_id: str, node_id: str) -> tuple[float, int] | None:
+        """``(salience, last_evidence_epoch)`` for a node — the read used by tests/K9."""
+        stmt = select(graph_nodes.c.salience, graph_nodes.c.last_evidence_epoch).where(
+            graph_nodes.c.owner_id == owner_id, graph_nodes.c.id == node_id
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one_or_none()
+        return None if row is None else (float(row[0]), int(row[1]))
 
     # ===== row <-> model ===================================================
 
@@ -592,6 +1143,9 @@ class PostgresGraphBackend:
             "content_hash": node.content_hash,
             "provenance": [p.model_dump(mode="json") for p in node.provenance],
             "created_at": node.created_at,
+            # updated_at starts at insert time (K7-D-4 dirty watermark). salience /
+            # last_evidence_epoch / merged_into take their server defaults.
+            "updated_at": node.created_at,
         }
 
     def _row_to_node(self, row: dict[str, Any], *, distance: float | None = None) -> ConceptNode:
@@ -610,6 +1164,9 @@ class PostgresGraphBackend:
         )
 
     def _link_to_row(self, owner_id: str, link: TypedLink) -> dict[str, Any]:
+        # valid_at defaults to created_at (K7-D-1 backfill semantics) when a caller
+        # leaves it unset — old TypedLink constructors stay byte-compatible. edge_key
+        # is IDENTITY-assigned by Postgres and is never written here.
         return {
             "id": link.id,
             "owner_id": owner_id,
@@ -621,6 +1178,10 @@ class PostgresGraphBackend:
             if link.provenance is None
             else link.provenance.model_dump(mode="json"),
             "created_at": link.created_at,
+            "valid_at": link.valid_at if link.valid_at is not None else link.created_at,
+            "invalid_at": link.invalid_at,
+            "invalidated_by": link.invalidated_by,
+            "invalidated_at": link.invalidated_at,
         }
 
     def _row_to_link(self, row: dict[str, Any]) -> TypedLink:
@@ -633,6 +1194,32 @@ class PostgresGraphBackend:
             weight=None if row.get("weight") is None else float(row["weight"]),
             provenance=None if prov is None else NodeProvenance.model_validate(prov),
             created_at=_as_utc(row["created_at"]),
+            valid_at=None if row.get("valid_at") is None else _as_utc(row["valid_at"]),
+            invalid_at=None if row.get("invalid_at") is None else _as_utc(row["invalid_at"]),
+            invalidated_by=row.get("invalidated_by"),
+            invalidated_at=None
+            if row.get("invalidated_at") is None
+            else _as_utc(row["invalidated_at"]),
+        )
+
+    def _row_to_version(self, row: dict[str, Any]) -> NodeVersion:
+        trail = tuple(NodeProvenance.model_validate(p) for p in row["provenance"])
+        return NodeVersion(
+            version_id=str(row["version_key"]),
+            node_id=str(row["node_id"]),
+            node_kind=NodeKind(row["node_kind"]),
+            concept_name=str(row["concept_name"]),
+            content=str(row["content"]),
+            metadata=_as_str_dict(row.get("metadata")),
+            wellbeing_category=row.get("wellbeing_category"),
+            content_hash=str(row["content_hash"]),
+            provenance=trail,
+            valid_at=_as_utc(row["valid_at"]),
+            invalid_at=_as_utc(row["invalid_at"]),
+            invalidated_by=row.get("invalidated_by"),
+            invalidated_at=None
+            if row.get("invalidated_at") is None
+            else _as_utc(row["invalidated_at"]),
         )
 
     def _row_to_entity(self, row: dict[str, Any]) -> CanonicalEntity:

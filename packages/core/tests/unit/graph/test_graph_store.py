@@ -14,8 +14,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 from persona.audit import AuditAction, MemoryAuditLogger
-from persona.graph.errors import GraphIndexError
-from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
+from persona.graph.errors import GraphIndexError, GraphProtectedNodeError
+from persona.graph.models import (
+    ConceptNode,
+    LinkType,
+    NodeKind,
+    NodeProvenance,
+    TypedLink,
+    make_self_node_id,
+)
 from persona.graph.protocol import (
     GraphStore,
     KnowledgeCandidate,
@@ -159,7 +166,13 @@ class _FakeBackend:
         return list(self.owner_node_ids)
 
     def neighbors(
-        self, owner_id: str, node_id: str, *, link_types: set[LinkType] | None, limit: int
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        link_types: set[LinkType] | None,
+        limit: int,
+        as_of: datetime | None = None,
     ) -> list[tuple[TypedLink, ConceptNode]]:
         return self.edge_neighbors[:limit]
 
@@ -250,6 +263,18 @@ def test_delete_removes_from_both_and_audits_once() -> None:
     assert idx.removed == [7]  # delete_returns
     assert len(audit.events) == 1
     assert audit.events[0].action is AuditAction.DELETE
+
+
+def test_delete_self_node_raises_protected() -> None:
+    # The SELF anchor is not deletable (K7-D-7): the guard fires before the backend,
+    # so nothing is deleted and no audit is emitted.
+    b, idx, audit = _FakeBackend(), _FakeIndex(), MemoryAuditLogger()
+    store = _store(b, idx, _created_merge(), audit)
+    with pytest.raises(GraphProtectedNodeError):
+        store.delete_node("u1", make_self_node_id("u1"))
+    assert b.deleted == []
+    assert idx.removed == []
+    assert audit.events == []
 
 
 def test_delete_missing_node_is_false_and_no_audit() -> None:

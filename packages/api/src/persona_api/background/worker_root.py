@@ -29,7 +29,9 @@ import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from persona.graph import PostgresEntityRegistry, build_graph_store
+from persona.graph import ConsolidationPass, PostgresEntityRegistry, build_graph_store
+from persona.graph.config import GraphSettings
+from persona.graph.index import make_graph_index
 from persona.graph.postgres import PostgresGraphBackend
 from persona.jobs import JobRegistry
 from persona.logging import get_logger
@@ -37,6 +39,10 @@ from persona_runtime.extraction.synthesizer import build_synthesizer
 
 from persona_api.db.audit_factory import build_audit_logger
 from persona_api.jobs.catalog_sync import build_catalog_sync
+from persona_api.jobs.handlers.consolidation import (
+    enqueue_graph_consolidation,
+    register_graph_consolidation_handler,
+)
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.queue import JobQueue
 from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
@@ -123,7 +129,44 @@ def build_worker_registry(
         graph_store=graph_store, registry=entity_registry, backend=backend
     )
     registry = JobRegistry()
-    register_synthesis_handler(registry, runner=synthesizer, repository=PgSynthesisRepository())
+
+    # Graph consolidation (Spec K7, K7-D-5) — the durable background pass, enabled by
+    # config (default ON in the worker). Wire it BEFORE synthesis so the synthesis-tail
+    # trigger can enqueue it. Built-but-inert is the failure class this guards against:
+    # the handler is only registered AND the trigger only bound when enabled.
+    graph_settings = GraphSettings()
+    enqueue_consolidation: Callable[[str], None] | None = None
+    if graph_settings.consolidation_enabled:
+        consolidation_pass = ConsolidationPass(
+            backend=graph_backend,
+            index=make_graph_index(
+                settings=graph_settings,
+                engine=rls_engine,
+                float32_fetch=graph_backend.embeddings_by_surrogate,
+            ),
+            embedder=embedder,
+            # R5-D-2 worker parity: consolidation runs IN the A0 worker — its
+            # mutation audit must use the config-selected multi-worker-safe
+            # backend, same as every other worker-side sink.
+            audit_logger=build_audit_logger(config, rls_engine),
+            settings=graph_settings,
+        )
+        register_graph_consolidation_handler(registry, pass_=consolidation_pass)
+
+        def enqueue_consolidation(owner_id: str) -> None:
+            enqueue_graph_consolidation(
+                JobQueue(rls_engine),
+                owner_id=owner_id,
+                delay_seconds=graph_settings.consolidation_delay_seconds,
+                bucket_seconds=graph_settings.consolidation_bucket_seconds,
+            )
+
+    register_synthesis_handler(
+        registry,
+        runner=synthesizer,
+        repository=PgSynthesisRepository(),
+        enqueue_consolidation=enqueue_consolidation,
+    )
     if runtime_factory is not None:
         _register_task_leg_tenant(
             registry,

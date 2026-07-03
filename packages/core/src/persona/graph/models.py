@@ -37,6 +37,7 @@ __all__ = [
     "LinkType",
     "NodeKind",
     "NodeProvenance",
+    "NodeVersion",
     "TypedLink",
     "make_edge_id",
     "make_entity_id",
@@ -71,6 +72,14 @@ class NodeKind(StrEnum):
     CIRCUMSTANCE = "circumstance"
     ENTITY = "entity"
     SELF = "self"
+    #: Learned interaction patterns — "how this user likes the persona to behave"
+    #: (Spec K7, K7-D-12; CoALA's procedural leg, arXiv 2309.02427). Zero migration:
+    #: ``node_kind`` is free ``TEXT`` (the K6-D-3 precedent). Storable / retrievable /
+    #: K4-gated exactly like every other kind; K2's extractor learns to emit it as a
+    #: named follow-on (out of K7). Lifecycle (version / consolidate / decay) is the
+    #: same as any node — Memp's "update, correct, deprecate" maps to
+    #: invalidate-don't-delete (per-kind disuse rate is config, moderate).
+    PROCEDURAL = "procedural"
 
 
 class LinkType(StrEnum):
@@ -230,6 +239,67 @@ class ConceptNode(BaseModel):
         return self
 
 
+class NodeVersion(BaseModel):
+    """A window-closed prior state of a :class:`ConceptNode` (Spec K7, K7-D-1).
+
+    Written by ``_evolve`` when a node's account is superseded (an UPDATE/CONTRADICT
+    that wins the recency+trust gate, K7-D-2): the node's PRIOR
+    ``concept_name``/``content``/``metadata``/``wellbeing_category``/``content_hash``
+    + the full provenance-trail snapshot are preserved as an immutable, RLS-scoped
+    row, window-closed (``valid_at`` = when that account became current,
+    ``invalid_at`` = the superseding fact's event time). This is the §0-honest fix
+    for the one destructive spot in the old write path — ``_evolve`` used to replace
+    content + embedding in place, leaving the prior account unreachable point-in-time.
+
+    Like :class:`ConceptNode`, the durable ``embedding`` is a *storage* concern (it
+    is preserved in the version row for byte-exact restore, K7-D-1, but never
+    surfaced on the domain model). Retrieval (dense/FTS) stays scoped to current
+    rows — version rows never pollute ranking. Point-in-time reads
+    (:meth:`GraphStore.get_node_versions` / ``get_node_as_of``) return these.
+
+    Attributes:
+        version_id: The version row's durable string identity (from the BIGINT
+            ``version_key``) — what ``MergeOutcome.superseded_version_id`` points at
+            so K5/K8 can address a specific historical account.
+        node_id: The live node this is a prior state of.
+        node_kind / concept_name / content / metadata / wellbeing_category /
+            content_hash / provenance: the snapshot of the node's mutable fields as
+            they were while this account was current.
+        valid_at: When this account became the node's current state.
+        invalid_at: When it was superseded (the superseding fact's event time).
+        invalidated_by: Provenance-of-closure (the superseding interaction/ref).
+        invalidated_at: Bookkeeping (K7-D-10) — the SYSTEM moment of closure.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version_id: str
+    node_id: str
+    node_kind: NodeKind
+    concept_name: str
+    content: str
+    metadata: dict[str, str] = Field(default_factory=dict)
+    wellbeing_category: str | None = None
+    content_hash: str
+    provenance: tuple[NodeProvenance, ...] = Field(min_length=1)
+    valid_at: datetime
+    invalid_at: datetime
+    invalidated_by: str | None = None
+    invalidated_at: datetime | None = None
+
+    @field_validator("valid_at", "invalid_at", "invalidated_at", mode="after")
+    @classmethod
+    def _windows_tz_aware(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _ensure_utc(value)
+
+    @model_validator(mode="after")
+    def _window_ordered(self) -> NodeVersion:
+        if self.invalid_at <= self.valid_at:
+            msg = f"invalid_at ({self.invalid_at}) must be after valid_at ({self.valid_at})"
+            raise ValueError(msg)
+        return self
+
+
 class TypedLink(BaseModel):
     """A typed, directed edge between two concept-nodes (Spec K0 §3).
 
@@ -244,6 +314,18 @@ class TypedLink(BaseModel):
         provenance: Who asserted the edge (entity/temporal/causal links carry
             this; auto semantic links may leave it ``None``).
         created_at: UTC creation timestamp. Naive datetimes rejected.
+        valid_at: Start of the edge's world-time validity window (Spec K7,
+            K7-D-1). ``None`` on construction means "= ``created_at``" (the
+            transport backfills it) — old constructors stay byte-compatible.
+        invalid_at: End of the validity window — set by :meth:`invalidate_edge`
+            when a later fact closes this edge (K7-D-1); ``None`` = still open.
+            Point-in-time reads use ``valid_at <= q AND (invalid_at IS NULL OR
+            invalid_at > q)``. A closed edge is NEVER deleted (§0).
+        invalidated_by: Provenance-of-closure — who/what closed the window
+            (e.g. ``"consolidation:{run_id}"`` or a K2 closure ref); ``None``
+            while open.
+        invalidated_at: Bookkeeping (K7-D-10) — the SYSTEM moment the window was
+            closed (Graphiti's ``expired_at`` analogue); inert, no query surface.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -255,16 +337,35 @@ class TypedLink(BaseModel):
     weight: float | None = None
     provenance: NodeProvenance | None = None
     created_at: datetime
+    valid_at: datetime | None = None
+    invalid_at: datetime | None = None
+    invalidated_by: str | None = None
+    invalidated_at: datetime | None = None
 
     @field_validator("created_at", mode="after")
     @classmethod
     def _created_at_must_be_tz_aware(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
 
+    @field_validator("valid_at", "invalid_at", "invalidated_at", mode="after")
+    @classmethod
+    def _window_fields_tz_aware(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _ensure_utc(value)
+
     @model_validator(mode="after")
     def _no_self_loops(self) -> TypedLink:
         if self.src_node_id == self.dst_node_id:
             msg = f"a typed link cannot connect a node to itself: {self.src_node_id!r}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _window_ordered(self) -> TypedLink:
+        # Mirrors the DDL CHECK (invalid_at > valid_at): a window cannot close
+        # before it opens. valid_at may be None on construction (= created_at).
+        start = self.valid_at if self.valid_at is not None else self.created_at
+        if self.invalid_at is not None and self.invalid_at <= start:
+            msg = f"invalid_at ({self.invalid_at}) must be after valid_at ({start})"
             raise ValueError(msg)
         return self
 

@@ -31,7 +31,7 @@ from persona.backends.types import ChatResponse
 from persona.schema.conversation import Conversation
 from persona.stores.postgres import PostgresBackend
 from persona.tasks import TaskState, is_terminal
-from persona_api.config import Edition
+from persona_api.config import APIConfig, Edition
 from persona_api.jobs import Worker
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.schedules import ScheduleStore
@@ -97,8 +97,11 @@ class _ScriptedA4Backend:
                 '{"verdict": "standing", "goal": "track morning fares", ' + self._cadence + "}"
             )
         return ChatResponse(
-            content=content, model=self.model_name, provider=self.provider_name,
-            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2), latency_ms=1.0,
+            content=content,
+            model=self.model_name,
+            provider=self.provider_name,
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            latency_ms=1.0,
         )
 
     async def chat_stream(
@@ -107,7 +110,8 @@ class _ScriptedA4Backend:
         **_: object,
     ) -> AsyncIterator[StreamChunk]:
         yield StreamChunk(
-            delta="done", is_final=True,
+            delta="done",
+            is_final=True,
             usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         )
 
@@ -180,9 +184,16 @@ def _seed(su_url: str, embedder: HashEmbedder384, owner: str, persona_id: str, c
     from persona.schema.chunks import PersonaChunk
 
     backend.upsert(
-        persona_id=persona_id, store_kind="self_facts",
-        chunks=[PersonaChunk(id=f"{persona_id}::self_facts::0", text="x", metadata={},
-                             created_at=datetime.now(UTC))],
+        persona_id=persona_id,
+        store_kind="self_facts",
+        chunks=[
+            PersonaChunk(
+                id=f"{persona_id}::self_facts::0",
+                text="x",
+                metadata={},
+                created_at=datetime.now(UTC),
+            )
+        ],
     )
     su.dispose()
 
@@ -230,7 +241,9 @@ async def _originate_via_real_flow(
     originated = [e for e in confirm if e.type == "task_originated"]
     assert len(originated) == 1
     data: Mapping[str, object] = {
-        **originated[0].data, "owner_id": owner, "assistant_message_id": "amsg-recur",
+        **originated[0].data,
+        "owner_id": owner,
+        "assistant_message_id": "amsg-recur",
     }
     outcome = await services.origination.originate(data)  # type: ignore[attr-defined]
     return outcome.task_id
@@ -282,9 +295,14 @@ async def test_recurring_task_fires_at_least_twice_on_cadence(
         assert created.schedule_id is not None
 
         registry = build_worker_registry(
-            rls_engine=app_engine, embedder=embedder, tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
-            audit_root=_AUDIT, synthesis_tier="small",
-            runtime_factory=factory, memory_backend=memory, edition=Edition.cloud,
+            rls_engine=app_engine,
+            embedder=embedder,
+            tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
+            config=APIConfig(audit_root=str(_AUDIT)),
+            synthesis_tier="small",
+            runtime_factory=factory,
+            memory_backend=memory,
+            edition=Edition.cloud,
         )
         tick = SchedulerTick(dispatch_engine=dispatch_engine, rls_engine=app_engine, leader=leader)
         worker = Worker(
@@ -342,9 +360,14 @@ async def test_one_off_task_fires_exactly_once_then_terminal(
         assert created.state is TaskState.WAITING
 
         registry = build_worker_registry(
-            rls_engine=app_engine, embedder=embedder, tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
-            audit_root=_AUDIT, synthesis_tier="small",
-            runtime_factory=factory, memory_backend=memory, edition=Edition.cloud,
+            rls_engine=app_engine,
+            embedder=embedder,
+            tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
+            config=APIConfig(audit_root=str(_AUDIT)),
+            synthesis_tier="small",
+            runtime_factory=factory,
+            memory_backend=memory,
+            edition=Edition.cloud,
         )
         tick = SchedulerTick(dispatch_engine=dispatch_engine, rls_engine=app_engine, leader=leader)
         worker = Worker(

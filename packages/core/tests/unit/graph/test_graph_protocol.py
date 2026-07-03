@@ -20,6 +20,7 @@ from persona.graph.models import (
     LinkType,
     NodeKind,
     NodeProvenance,
+    NodeVersion,
     TypedLink,
 )
 from persona.graph.protocol import (
@@ -60,6 +61,10 @@ def test_knowledge_candidate_minimal_and_defaults() -> None:
     assert cand.wellbeing_category is None
     assert cand.update_intent is UpdateIntent.NONE
     assert cand.target_node_id is None
+    # K7 additive contract slots default to unset (K7-D-8) — K2 payloads stay
+    # byte-compatible.
+    assert cand.valid_at is None
+    assert cand.close_link_ids == ()
 
 
 def test_knowledge_candidate_carries_k2_write_path_fields() -> None:
@@ -126,7 +131,14 @@ def test_resolution_verdict_three_shapes() -> None:
 
 def test_boundary_enums_values() -> None:
     assert {x.value for x in UpdateIntent} == {"none", "update", "contradict"}
-    assert {x.value for x in MergeAction} == {"created", "extended"}
+    # K7 widened MergeAction additively (K7-D-8): EVOLVED (a supersede) + UNCHANGED
+    # (the observable idempotent no-op).
+    assert {x.value for x in MergeAction} == {
+        "created",
+        "extended",
+        "evolved",
+        "unchanged",
+    }
     assert {x.value for x in ResolutionDecision} == {"merge", "separate", "ambiguous"}
 
 
@@ -180,8 +192,13 @@ class _StubStore:
     def delete_node(self, owner_id: str, node_id: str) -> bool:
         return False
 
-    def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
+    def get_node(
+        self, owner_id: str, node_id: str, *, as_of: datetime | None = None
+    ) -> ConceptNode | None:
         return None
+
+    def get_node_versions(self, owner_id: str, node_id: str) -> list[NodeVersion]:
+        return []
 
     def get_self_node(self, owner_id: str) -> ConceptNode | None:
         return None
@@ -217,6 +234,8 @@ class _StubStore:
 
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]:
         return {}
+
+    def record_recall(self, owner_id: str, node_ids: Sequence[str]) -> None: ...
 
     def rebuild_index(self, owner_id: str) -> None: ...
 
