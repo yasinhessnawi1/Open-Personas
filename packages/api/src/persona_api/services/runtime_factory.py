@@ -50,7 +50,7 @@ from persona_runtime.loop import ConversationLoop
 from persona_runtime.prompt import PromptBuilder
 from persona_runtime.router import Router
 from persona_runtime.routing import FirstTokenLatencyTracker, IntelligentRouter
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from persona_api.db.models import personas as personas_t
 from persona_api.editions import MeteredCreditsPolicy
@@ -415,6 +415,64 @@ class RuntimeFactory:
             metadata_resolver=resolver,
             latency_tracker=latency_tracker,
         )
+
+    def _build_day_spent_cents_provider(
+        self, persona_id: str | None
+    ) -> Callable[[], float] | None:
+        """The soft per-day cost-bias ramp's real cross-session spend source (R7-D-1).
+
+        Discharges D-23-X: sums today's recorded ``turn_logs.cost_cents`` for the
+        request owner's conversations with this persona over the current UTC day —
+        the DURABLE cross-session number the ramp needs (replacing the deferred
+        ``0.0``). Bound to the request owner at DISPATCH time via the
+        ``current_user_id`` contextvar (the K3/K4 owner-provider pattern), so one
+        provider serves every turn under the request's RLS scope.
+
+        FAIL-SOFT to ``0.0`` on any error / no bound owner / no persona (= the pre-R7
+        behaviour): a routing bias must never crash or perturb a turn, and the
+        community/no-DB path is unaffected. Feeds the SOFT ramp only — the HARD
+        per-day guard is R7's credits day-cap (``book_day_spend``); the ramp reads
+        ``turn_logs`` (cents), NOT the ``day_spend`` credits counter (units differ).
+        """
+        if persona_id is None:
+            return None
+        from persona_api.middleware.rls_context import current_user_id
+
+        engine = self._engine
+
+        def _provider() -> float:
+            owner = current_user_id.get()
+            if not owner:
+                return 0.0
+            try:
+                return self._sum_day_spent_cents(engine, owner_id=owner, persona_id=persona_id)
+            except Exception:
+                _logger.debug("day_spent_cents provider failed; ramp reads 0.0 (fail-soft)")
+                return 0.0
+
+        return _provider
+
+    @staticmethod
+    def _sum_day_spent_cents(engine: Engine, *, owner_id: str, persona_id: str) -> float:
+        """Sum ``turn_logs.cost_cents`` for owner+persona over the current UTC day.
+
+        The durable cross-session per-day spend the soft ramp reads (R7-D-1). Range
+        predicate on ``created_at`` (``>= UTC-midnight-today``) is sargable via
+        ``idx_turn_logs_conversation_created``; the persona/owner scope rides the
+        ``conversations`` join. Extracted for direct testing of the aggregate.
+        """
+        with engine.begin() as conn:
+            total = conn.execute(
+                text(
+                    "SELECT COALESCE(SUM(tl.cost_cents), 0.0) FROM turn_logs tl "
+                    "JOIN conversations c ON c.id = tl.conversation_id "
+                    "WHERE c.owner_id = :owner AND c.persona_id = :persona "
+                    "AND tl.created_at >= "
+                    "date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+                ),
+                {"owner": owner_id, "persona": persona_id},
+            ).scalar_one()
+        return float(total or 0.0)
 
     # -- shared per-request pieces ------------------------------------------
 
@@ -1007,10 +1065,14 @@ class RuntimeFactory:
             # latency tracker persists per-model EWMA across requests; the
             # IntelligentRouter is consulted only when the persona opted in
             # (routing.intelligent.enabled) — default-off personas route
-            # byte-identically (criterion 11). A persona with an unenforceable
-            # per-day cap fails loud at this construction (D-23-7 ruling).
+            # byte-identically (criterion 11).
             latency_tracker=self._latency_tracker,
             intelligent_router=self._intelligent_router,
+            # Spec R7 (R7-D-1 discharge of D-23-X): the soft per-day cost-bias ramp's
+            # real cross-session spend source (today's recorded turn_logs cost for
+            # this owner+persona). Fail-soft to 0.0; replaces the old construction-
+            # time fail-loud guard for an unenforceable per-day cap.
+            day_spent_cents_provider=self._build_day_spent_cents_provider(persona.persona_id),
             # K3: the owner-scoped graph-knowledge retrieval (None until graph
             # writes were enabled — additive, zero-graph otherwise).
             graph_retrieval=self._build_graph_retrieval(),

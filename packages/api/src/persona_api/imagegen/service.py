@@ -155,6 +155,7 @@ async def generate(
     prompt: str,
     options: ImageGenOptions,
     cost_per_image_credits: int = DEFAULT_COST_PER_IMAGE_CREDITS,
+    concurrency_slots: int = 1,
 ) -> GenerationResult:
     """Run one full image-generation flow: cap → deduct → backend → persist.
 
@@ -258,7 +259,9 @@ async def generate(
     try:
         with (
             rls_engine.begin() as conn,
-            acquire_user_concurrency(conn=conn, user_id=user_id) as acquired,
+            acquire_user_concurrency(
+                conn=conn, user_id=user_id, slots=concurrency_slots
+            ) as acquired,
         ):
             if not acquired:
                 # Cap held — raise BEFORE pre-deduct so the rollback

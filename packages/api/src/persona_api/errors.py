@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from persona.errors import (
     CreditsExhaustedError,
+    DailySpendCapExceededError,
     PersonaError,
     PersonaNotFoundError,
     RuntimeWriteForbiddenError,
@@ -44,6 +45,7 @@ __all__ = [
     "ConcurrencyCappedError",
     "ConversationNotFoundError",
     "CreditsExhaustedError",
+    "DailySpendCapExceededError",
     "MCPAppAlreadyAdoptedError",
     "MCPAppNotAdoptableError",
     "MCPCredentialError",
@@ -311,6 +313,32 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             content=_body("credits_exhausted", exc.message or "insufficient credits", exc.context),
+        )
+
+    @app.exception_handler(DailySpendCapExceededError)
+    async def _daily_cap_429(_: Request, exc: DailySpendCapExceededError) -> JSONResponse:
+        """Per-UTC-day spend cap reached (Spec R7, R7-D-5).
+
+        Distinct from :class:`CreditsExhaustedError` (→ 402, "out of credits
+        forever"): this is "capped for *today*, back tomorrow", so it maps to
+        **429 + ``Retry-After`` = seconds until the next UTC midnight** (the honest
+        "come back later" — 402 would wrongly imply a permanent state). The body
+        carries ``cap`` / ``spent`` / ``reset_epoch`` for client-side messaging;
+        no internal detail leaks. The refusal is audited durably at the policy seam
+        (``MeteredCreditsPolicy._audit_daily_cap_refusal``), not here.
+        """
+        import time
+
+        reset_epoch = int(exc.context.get("reset_epoch", "0") or "0")
+        retry_after = max(1, reset_epoch - int(time.time())) if reset_epoch else 60
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content=_body(
+                "daily_spend_cap_exceeded",
+                exc.message or "daily spend cap reached",
+                exc.context,
+            ),
+            headers={"Retry-After": str(retry_after)},
         )
 
     @app.exception_handler(ToolNotAllowedError)

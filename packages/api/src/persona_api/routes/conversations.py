@@ -268,6 +268,9 @@ async def post_message(
         # Image-workspace cascade: thread the workspace root so the turn can
         # resolve the uploaded image bytes for the model + sandbox.
         workspace_root=getattr(request.app.state, "workspace_root", None),
+        # Spec R7 (R7-D-4): the per-user long-op concurrency cap (chat SSE). 0 =
+        # uncapped (community / unset), so existing behaviour is unchanged.
+        max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
         # R5-D-4: the file-storage backend the turn resolves inbound image bytes
         # through (local/S3). workspace_root stays for the deferred file-tool paths.
         file_storage=getattr(request.app.state, "file_storage", None),

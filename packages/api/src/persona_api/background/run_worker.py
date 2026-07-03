@@ -76,6 +76,10 @@ class RunHandle:
         self.responses: asyncio.Queue[str] = asyncio.Queue()
         self.cancel_token = CancelToken()
         self.task: asyncio.Task[None] | None = None
+        #: Spec R7 (R7-D-4): the durable long-op concurrency slot held for this run's
+        #: lifetime; reserved in ``start_run`` (pre-persist), released in ``_run``'s
+        #: terminal ``finally``. ``None`` = no cap wired (community / uncapped).
+        self.op_token: str | None = None
 
     async def on_event(self, event: RunEvent) -> None:
         """The loop's event callback: publish to the SSE queue."""
@@ -117,9 +121,15 @@ class RunRegistry:
         owner_id: str,
         loop: AgenticLoop,
         task_text: str,
+        op_token: str | None = None,
     ) -> RunHandle:
-        """Create a handle and launch the run as an ``asyncio.Task``."""
+        """Create a handle and launch the run as an ``asyncio.Task``.
+
+        ``op_token`` (R7-D-4) is the durable long-op concurrency slot reserved by the
+        caller pre-persist; the worker releases it in its terminal ``finally``.
+        """
         handle = RunHandle(run_id, owner_id)
+        handle.op_token = op_token
         self._handles[run_id] = handle
         handle.task = asyncio.create_task(self._run(handle, loop, task_text))
         return handle
@@ -187,8 +197,26 @@ class RunRegistry:
             self._persist_error(handle.run_id, str(exc))
         finally:
             reset_sandbox_request_context(sandbox_token)
+            # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
+            # (clean / cancel / error / shutdown). Best-effort — teardown must never
+            # crash (the TTL staleness sweep in ``admit_long_op`` is the crash backstop).
+            self._release_op_slot(handle)
             current_user_id.reset(token)
             await handle.events.put(None)  # end-of-stream sentinel for SSE
+
+    def _release_op_slot(self, handle: RunHandle) -> None:
+        if handle.op_token is None:
+            return
+        from persona.concurrency import release_long_op  # noqa: PLC0415
+
+        try:
+            release_long_op(rls_engine=self._engine, user_id=handle.owner_id, op_id=handle.op_token)
+        except Exception as exc:  # noqa: BLE001 — teardown must never crash
+            _log.warning(
+                "agentic run concurrency-slot release failed rid={rid}: {err}",
+                rid=handle.run_id,
+                err=str(exc),
+            )
 
     async def _maybe_originate(self, handle: RunHandle, run: Run) -> None:
         """Fire within-runtime origination on a completed run (Spec C0, T7).

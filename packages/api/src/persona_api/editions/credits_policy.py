@@ -42,6 +42,7 @@ from persona.credits import (
 from persona.credits import (
     require_credits as _require_credits,
 )
+from persona.errors import DailySpendCapExceededError
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
@@ -91,13 +92,63 @@ class CreditsPolicy(Protocol):
 
 
 class MeteredCreditsPolicy:
-    """Cloud: the existing metered ledger (delegates to ``persona.credits``)."""
+    """Cloud: the existing metered ledger (delegates to ``persona.credits``).
+
+    Spec R7 (R7-D-1/6): carries the per-UTC-day spend cap. ``deduct`` books the
+    day-cap atomically-with the credit decrement (the core ``deduct`` does this in
+    one transaction when ``daily_cap > 0``); an over-cap spend raises
+    :class:`DailySpendCapExceededError` (→ 429) AND writes a durable ``audit_log``
+    refusal row (R7-D-5 fail-loud + audited). ``daily_cap = 0`` (the community/uncapped
+    default) leaves behaviour byte-identical to pre-R7.
+    """
+
+    def __init__(self, *, daily_cap: int = 0) -> None:
+        self._daily_cap = daily_cap
 
     def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:
         return _require_credits(rls_engine=rls_engine, user_id=user_id)
 
     def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
-        return _deduct(rls_engine=rls_engine, user_id=user_id, amount=amount, reason=reason)
+        try:
+            return _deduct(
+                rls_engine=rls_engine,
+                user_id=user_id,
+                amount=amount,
+                reason=reason,
+                daily_cap=self._daily_cap,
+            )
+        except DailySpendCapExceededError as exc:
+            # FAIL-LOUD + audited (R7-D-5): the spend rolled back in ``_deduct``'s
+            # transaction; record the refusal durably in its OWN transaction so the
+            # audit survives regardless. The audit write never masks the refusal —
+            # any audit failure propagates (a money-guard that can't be audited must
+            # not silently pass).
+            self._audit_daily_cap_refusal(
+                rls_engine=rls_engine, user_id=user_id, context=exc.context
+            )
+            raise
+
+    @staticmethod
+    def _audit_daily_cap_refusal(
+        *, rls_engine: Engine, user_id: str, context: dict[str, str]
+    ) -> None:
+        from sqlalchemy import insert
+
+        from persona_api.db.models import audit_log
+
+        with rls_engine.begin() as conn:
+            conn.execute(
+                insert(audit_log).values(
+                    user_id=user_id,
+                    action="daily_spend_cap_exceeded",
+                    target=user_id,
+                    metadata={
+                        "cap": context.get("cap", ""),
+                        "spent": context.get("spent", ""),
+                        "requested_cost": context.get("requested_cost", ""),
+                    },
+                )
+            )
 
     def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
         return _refund(rls_engine=rls_engine, user_id=user_id, amount=amount, reason=reason)

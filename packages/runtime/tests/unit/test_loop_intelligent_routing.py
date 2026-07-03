@@ -206,11 +206,13 @@ class TestOptInPath:
         assert d.model_fallback_reason == "metadata_miss"
 
 
-class TestPerDayBudgetFailLoud:
-    """D-23-7 ruling: a configured per-day cap must NOT silently no-op (v0.2)."""
+class TestPerDayBudgetDischarged:
+    """Spec R7 (R7-D-1) discharges D-23-X: a configured per-day cap NO LONGER fails
+    loud at construction — the durable cross-session spend source now exists
+    (``turn_logs`` via an injected provider), so the soft per-day ramp runs for real."""
 
-    def test_per_day_cap_with_intelligent_routing_fails_at_construction(self) -> None:
-        from persona.backends.errors import IntelligentRoutingError
+    def test_per_day_cap_with_intelligent_routing_constructs_cleanly(self) -> None:
+        """The inverse of the old D-23-7 fail-loud: construction now SUCCEEDS."""
         from persona.schema.persona import RoutingBudgetConfig
 
         registry = _multi_model_registry()
@@ -224,15 +226,32 @@ class TestPerDayBudgetFailLoud:
                 budget=RoutingBudgetConfig(max_cents_per_day=500.0),
             ),
         )
-        with pytest.raises(IntelligentRoutingError) as exc:
-            _build_loop(
-                persona=persona,
-                registry=registry,
-                intelligent_router=IntelligentRouter(
-                    tier_registry=registry, metadata_resolver=_MapResolver({})
-                ),
-            )
-        assert "max_cents_per_day" in exc.value.context
+        # No raise — a persona with a per-day cap + intelligent routing builds fine.
+        loop = _build_loop(
+            persona=persona,
+            registry=registry,
+            intelligent_router=IntelligentRouter(
+                tier_registry=registry, metadata_resolver=_MapResolver({})
+            ),
+        )
+        assert loop is not None
+
+    def test_per_day_provider_feeds_the_soft_ramp(self) -> None:
+        """A rising day-spend from the injected provider shifts the ramp toward cost
+        (the soft per-day bias) — the discharge's functional half. The provider here
+        stands in for the runtime_factory turn_logs reader; the integration test
+        proves the real recorded-cost transition end-to-end."""
+        from persona_runtime.routing import routing_budget
+        from persona_runtime.routing.scoring import ProfileWeights
+
+        base = ProfileWeights(cost=0.34, quality=0.33, latency=0.33)
+        cap = 500.0
+        # Below the 80% soft threshold → no bias yet.
+        low = routing_budget.effective_weights(base, day_spent_cents=100.0, max_cents_per_day=cap)
+        # Near/over the cap → bias moves toward cost.
+        high = routing_budget.effective_weights(base, day_spent_cents=480.0, max_cents_per_day=cap)
+        assert low.cost == base.cost, "no bias below the soft threshold"
+        assert high.cost > low.cost, "the ramp must bias toward cost as day-spend rises"
 
     def test_per_day_cap_inert_when_intelligent_disabled(self) -> None:
         # Feature off → budget is inert by design; no error.

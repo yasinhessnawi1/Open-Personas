@@ -350,6 +350,7 @@ async def start_chat_turn(
     turn_has_image: bool = False,
     document_context: DocumentContext | None = None,
     workspace_root: Path | None = None,
+    max_concurrent_long_ops: int = 0,
     file_storage: FileStorage | None = None,
 ) -> ChatTurnHandle:
     """Persist the turn at START + launch it detached; return the live handle (P1, T2b).
@@ -380,78 +381,115 @@ async def start_chat_turn(
             context={"conversation_id": conversation_id},
         )
 
-    with rls_engine.begin() as conn:
-        conversation = _load_conversation(conn, conversation_id)
-        prior_msg_count = len(conversation.messages)
-    persona_id = conversation.persona_id
-    is_first_turn = prior_msg_count == 0
+    # Spec R7 (R7-D-4): reserve the durable per-user long-op slot BEFORE any persist,
+    # so an over-cap user gets a clean 429 before a message is written (a post-persist
+    # refusal would orphan a ``running`` row and wedge the one-active-turn guard). The
+    # slot is released in the worker's terminal ``finally`` (all paths); if any setup
+    # step below raises BEFORE the turn is handed off to the worker, we release here so
+    # the slot never leaks. ``max_concurrent_long_ops <= 0`` (community/uncapped) is a
+    # no-op that always admits (no DB write). This is the parallel-spend race the
+    # per-conversation one-active guard can't close — a user with N conversations could
+    # otherwise start N concurrent turns.
+    from persona.concurrency import admit_long_op, release_long_op  # noqa: PLC0415
 
-    # Resolve images/documents + stage docs for the host file tools (request
-    # scope — needs workspace_root). The detached worker binds the sandbox
-    # contextvar for code_execution; these resolve bytes by path, no contextvar.
-    turn_images = _resolve_turn_images(
-        file_storage=file_storage, owner_id=owner_id, persona_id=persona_id, images=images
+    op_token = admit_long_op(
+        rls_engine=rls_engine,
+        user_id=owner_id,
+        op_class="chat",
+        max_concurrent=max_concurrent_long_ops,
     )
-    turn_documents = _resolve_turn_documents(
-        file_storage=file_storage,
-        owner_id=owner_id,
-        persona_id=persona_id,
-        conversation_id=conversation_id,
-    )
-    _stage_documents_for_file_read(
-        workspace_root=workspace_root,
-        owner_id=owner_id,
-        persona_id=persona_id,
-        documents=turn_documents,
-    )
+    if op_token is None:
+        from persona_api.errors import ConcurrencyCappedError  # noqa: PLC0415
 
-    # Spec P4-D-3 — bind the request's sandbox context for the DURATION of the loop
-    # build only (tight set→try→reset). The builtin ``filesystem`` MCP subprocess is
-    # scoped at SPAWN, which happens inside this build; the supervisor resolves its
-    # scoped root from this contextvar (same source as the in-process file tools).
-    # The detached worker re-binds the SAME (owner, conversation) context for turn
-    # execution (chat_turn_worker), so spawn-time and turn-time scope agree.
-    # Contextvars don't propagate into the worker's task, so this bind cannot leak
-    # past the build; unbound at build ⇒ the child fails closed (serve-and-deny).
-    from persona_api.sandbox import (  # noqa: PLC0415
-        SandboxRequestContext,
-        reset_sandbox_request_context,
-        set_sandbox_request_context,
-    )
-
-    _scope_token = set_sandbox_request_context(
-        SandboxRequestContext(owner_id=owner_id, conversation_id=conversation_id)
-    )
+        raise ConcurrencyCappedError(
+            "too many concurrent chat turns in flight for this user",
+            context={"user_id": owner_id, "retry_after_s": "5"},
+        )
     try:
-        loop = await loop_builder(persona_id)
-    finally:
-        reset_sandbox_request_context(_scope_token)
-    assistant_message_id = sink.open_turn(
-        conversation_id=conversation_id, user_message=user_message, channel=channel, images=images
-    )
+        with rls_engine.begin() as conn:
+            conversation = _load_conversation(conn, conversation_id)
+            prior_msg_count = len(conversation.messages)
+        persona_id = conversation.persona_id
+        is_first_turn = prior_msg_count == 0
 
-    # Auto-title the first turn from its first user message (best-effort, small
-    # tier) on the detached completion path — never delays / breaks the turn.
-    on_complete: Callable[[], Awaitable[None]] | None = None
-    if is_first_turn and title_builder is not None:
-        _title_builder = title_builder
+        # Resolve images/documents + stage docs for the host file tools (request
+        # scope — needs workspace_root). The detached worker binds the sandbox
+        # contextvar for code_execution; these resolve bytes by path, no contextvar.
+        turn_images = _resolve_turn_images(
+            file_storage=file_storage, owner_id=owner_id, persona_id=persona_id, images=images
+        )
+        turn_documents = _resolve_turn_documents(
+            file_storage=file_storage,
+            owner_id=owner_id,
+            persona_id=persona_id,
+            conversation_id=conversation_id,
+        )
+        _stage_documents_for_file_read(
+            workspace_root=workspace_root,
+            owner_id=owner_id,
+            persona_id=persona_id,
+            documents=turn_documents,
+        )
 
-        async def on_complete() -> None:
-            await _maybe_set_title(rls_engine, conversation_id, user_message, _title_builder)
+        # Spec P4-D-3 — bind the request's sandbox context for the DURATION of the loop
+        # build only (tight set→try→reset). The builtin ``filesystem`` MCP subprocess is
+        # scoped at SPAWN, which happens inside this build; the supervisor resolves its
+        # scoped root from this contextvar (same source as the in-process file tools).
+        # The detached worker re-binds the SAME (owner, conversation) context for turn
+        # execution (chat_turn_worker), so spawn-time and turn-time scope agree.
+        # Contextvars don't propagate into the worker's task, so this bind cannot leak
+        # past the build; unbound at build ⇒ the child fails closed (serve-and-deny).
+        from persona_api.sandbox import (  # noqa: PLC0415
+            SandboxRequestContext,
+            reset_sandbox_request_context,
+            set_sandbox_request_context,
+        )
 
-    return registry.start(
-        conversation_id=conversation_id,
-        owner_id=owner_id,
-        assistant_message_id=assistant_message_id,
-        loop=loop,
-        conversation=conversation,
-        user_message=user_message,
-        on_complete=on_complete,
-        turn_has_image=turn_has_image,
-        images=turn_images or None,
-        documents=turn_documents or None,
-        document_context=document_context,
-    )
+        _scope_token = set_sandbox_request_context(
+            SandboxRequestContext(owner_id=owner_id, conversation_id=conversation_id)
+        )
+        try:
+            loop = await loop_builder(persona_id)
+        finally:
+            reset_sandbox_request_context(_scope_token)
+        assistant_message_id = sink.open_turn(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            channel=channel,
+            images=images,
+        )
+
+        # Auto-title the first turn from its first user message (best-effort, small
+        # tier) on the detached completion path — never delays / breaks the turn.
+        on_complete: Callable[[], Awaitable[None]] | None = None
+        if is_first_turn and title_builder is not None:
+            _title_builder = title_builder
+
+            async def on_complete() -> None:
+                await _maybe_set_title(rls_engine, conversation_id, user_message, _title_builder)
+
+        handle = registry.start(
+            conversation_id=conversation_id,
+            owner_id=owner_id,
+            assistant_message_id=assistant_message_id,
+            loop=loop,
+            conversation=conversation,
+            user_message=user_message,
+            on_complete=on_complete,
+            op_token=op_token,
+            turn_has_image=turn_has_image,
+            images=turn_images or None,
+            documents=turn_documents or None,
+            document_context=document_context,
+        )
+    except BaseException:
+        # Any failure BEFORE the worker took ownership (load / resolve / build /
+        # open_turn / a one-active re-check in ``registry.start``) → release the slot
+        # here so a failed setup never leaks it (the worker's ``finally`` only runs
+        # once the turn is handed off). On success the worker owns the release.
+        release_long_op(rls_engine=rls_engine, user_id=owner_id, op_id=op_token)
+        raise
+    return handle
 
 
 async def stream_turn(handle: ChatTurnHandle) -> AsyncIterator[bytes]:

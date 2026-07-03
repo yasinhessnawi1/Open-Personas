@@ -258,6 +258,10 @@ async def post_imagegen(
             persona_visual_style=persona_visual_style,
             prompt=body.prompt,
             options=options,
+            # Spec R7 (R7-D-4): the per-user bounded-op concurrency cap (imagegen). 1 =
+            # the ratified per-class default (byte-preserves the shipped cap-1); 0 =
+            # community/uncapped (edition-gated on app.state).
+            concurrency_slots=getattr(request.app.state, "max_concurrent_bounded_ops", 1),
         )
     except ContentRejectedError as exc:
         # 422 with structured body so the client can present a

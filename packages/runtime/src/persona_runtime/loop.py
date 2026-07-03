@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from persona.audit import AuditAction
 from persona.autonomy import policy_for, resolve_autonomy
-from persona.backends.errors import IntelligentRoutingError
 from persona.backends.types import reasoning_as_text
 from persona.errors import SkillCompositionDepthError, SkillCycleError
 from persona.logging import get_logger
@@ -393,6 +392,7 @@ class ConversationLoop:
         latency_tracker: FirstTokenLatencyTracker | None = None,
         question_author: QuestionAuthor | None = None,
         intelligent_router: IntelligentRouter | None = None,
+        day_spent_cents_provider: Callable[[], float] | None = None,
         graph_retrieval: Callable[[str], GraphContext] | None = None,
         nonce_source: Callable[[], str] | None = None,
         skill_consent: SkillConsentPort | None = None,
@@ -495,31 +495,20 @@ class ConversationLoop:
         # byte-identical. The per-session spend tally is loop-owned (D-23-7 /
         # D-25-X-t12-window-location precedent: the loop owns the rolling window,
         # not the stateless router/backend); it accumulates each turn's cost and
-        # feeds the soft per-session budget ramp. (Per-day enforcement needs a
-        # cross-session persistent store — deferred; see MAINTENANCE.md.)
+        # feeds the soft per-session budget ramp.
         self._intelligent_router = intelligent_router
         self._session_spent_cents: float = 0.0
-        # Spec 23 T11 (D-23-7): per-day budget enforcement needs a cross-session
-        # persistent spend store that v0.2 does not have — the loop tracks only
-        # its own per-session tally. A configured ``max_cents_per_day`` must NOT
-        # silently no-op (operators trust a cost cap they set), so fail LOUD at
-        # construction rather than accept an unenforced cap. Per-turn (hard) and
-        # per-session (soft) ship functional; remove the per-day cap or use those.
-        if (
-            intelligent_router is not None
-            and persona.routing.intelligent.enabled
-            and persona.routing.budget.max_cents_per_day is not None
-        ):
-            raise IntelligentRoutingError(
-                "routing.budget.max_cents_per_day is set but per-day enforcement is "
-                "not available in this version (no cross-session spend store); the cap "
-                "would not be enforced. Remove max_cents_per_day, or use "
-                "max_cents_per_turn / max_cents_per_session which are enforced.",
-                context={
-                    "persona_id": persona.persona_id or "",
-                    "max_cents_per_day": str(persona.routing.budget.max_cents_per_day),
-                },
-            )
+        # Spec R7 (R7-D-1 discharge of D-23-X): per-day enforcement is no longer
+        # deferred — the DURABLE cross-session per-day number is ``turn_logs``
+        # (recorded actual ``cost_cents``), read via an injected provider closure
+        # (the runtime_factory provider pattern). The old fail-loud construction
+        # guard (a configured ``max_cents_per_day`` couldn't be enforced without a
+        # cross-session store) is REMOVED: the soft per-day cost-bias ramp now runs
+        # against real recorded spend. ``None`` (no provider wired — unit tests, or
+        # the community/no-DB path) fails soft to ``0.0`` = the pre-R7 behaviour, so
+        # nothing regresses. NB: the ramp reads ``turn_logs`` (cents), NOT R7's
+        # ``day_spend`` credits counter — the units never matched; the ledger did.
+        self._day_spent_cents_provider = day_spent_cents_provider
         # Spec 18 T06 strangler-fig affordance: legacy callers may have
         # constructed `Router()` without a registry; ensure the router's
         # registry slot is wired so `route(context)` can do Layer 1 filtering.
@@ -1756,7 +1745,13 @@ class ConversationLoop:
             intelligent=self._persona.routing.intelligent,
             budget=self._persona.routing.budget,
             session_spent_cents=self._session_spent_cents,
-            day_spent_cents=0.0,  # per-day needs a persistent cross-session store (deferred)
+            # Spec R7 (R7-D-1 discharge): real cross-session per-day spend from
+            # ``turn_logs`` via the injected provider; fail-soft to 0.0 (no provider
+            # wired ⇒ pre-R7 behaviour). Feeds the SOFT per-day cost-bias ramp only —
+            # the HARD per-day guard is R7's credits day-cap (``book_day_spend``).
+            day_spent_cents=(
+                self._day_spent_cents_provider() if self._day_spent_cents_provider else 0.0
+            ),
         )
         return decision.model_copy(
             update={

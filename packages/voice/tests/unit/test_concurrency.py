@@ -72,7 +72,11 @@ def test_user_id_is_passed_as_bound_parameter_not_interpolated() -> None:
     with acquire_voice_call_concurrency(conn=conn, user_id="user_a'; DROP TABLE personas; --") as _:
         pass
     params = conn.execute.call_args.args[1]
-    assert params == {"user_id": "user_a'; DROP TABLE personas; --"}
+    # R7 T7: the primitive generalized to N slots, so params also carry the slot
+    # index now — but ``user_id`` is STILL a bound parameter (the injection-safety
+    # intent this test guards), never string-interpolated into the lock SQL.
+    assert params["user_id"] == "user_a'; DROP TABLE personas; --"
+    assert params["slot"] == 0  # slots=1 → slot 0 (byte-preserves the cap-1 lock key)
 
 
 def test_acquire_is_keyed_per_user_id() -> None:
@@ -85,8 +89,9 @@ def test_acquire_is_keyed_per_user_id() -> None:
     with acquire_voice_call_concurrency(conn=conn, user_id="user_b") as _:
         pass
     assert conn.execute.call_count == 2
-    assert conn.execute.call_args_list[0].args[1] == {"user_id": "user_a"}
-    assert conn.execute.call_args_list[1].args[1] == {"user_id": "user_b"}
+    # user_id still keys the lock (slot index rides alongside post-R7 generalization).
+    assert conn.execute.call_args_list[0].args[1]["user_id"] == "user_a"
+    assert conn.execute.call_args_list[1].args[1]["user_id"] == "user_b"
 
 
 # ---------- error class ----------------------------------------------------

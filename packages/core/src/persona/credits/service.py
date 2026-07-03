@@ -27,6 +27,7 @@ caller's tenant scope.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -44,13 +45,14 @@ from sqlalchemy import (
     update,
 )
 
-from persona.errors import CreditsExhaustedError
+from persona.errors import CreditsExhaustedError, DailySpendCapExceededError
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 __all__ = [
     "LOW_BALANCE_THRESHOLD",
+    "book_day_spend",
     "deduct",
     "ensure_balance",
     "get_balance",
@@ -158,7 +160,107 @@ def require_credits(*, rls_engine: Engine, user_id: str) -> int:
     return balance
 
 
-def deduct(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
+# --- Spec R7 per-UTC-day spend cap (R7-D-1/2/3) --------------------------------
+#
+# The primary denial-of-wallet guard: a per-user counter of credits spent in the
+# current UTC calendar day, enforced with the SAME conditional-before-booking
+# discipline R2 used for the credit floor — so two concurrent near-cap requests
+# can't both pass (the TOCTOU class R2 closed).
+#
+# ``utc_day`` is computed IN SQL as ``(now() AT TIME ZONE 'UTC')::date``. ``now()``
+# is the transaction timestamp (fixed for the life of a transaction), so the
+# ensure-row INSERT and the conditional UPDATE below target the SAME row within
+# one ``begin()`` — and the day boundary is DB-authoritative, immune to app/DB
+# clock skew (R7-D-2 fixed UTC-day reset).
+_DAY = "(now() AT TIME ZONE 'UTC')::date"
+
+# 1. Ensure the counter row exists at 0 (race-safe: ``ON CONFLICT DO NOTHING``).
+_ENSURE_DAY_ROW_SQL = text(
+    f"INSERT INTO day_spend (user_id, utc_day, spent) VALUES (:uid, {_DAY}, 0) "
+    f"ON CONFLICT (user_id, utc_day) DO NOTHING"
+)
+# 2. The R2 conditional-before-booking write: increment ONLY ``WHERE spent + cost
+#    <= cap``. A booking that would breach the cap matches no row → RETURNING
+#    yields nothing → refuse. Race-safe under READ COMMITTED: Postgres re-evaluates
+#    the WHERE against the latest row version after taking the row write-lock, so
+#    the second of two concurrent near-cap bookings sees the first's increment and
+#    is rejected. (Diverges from the literal R7-D-3 ``INSERT … ON CONFLICT DO
+#    UPDATE … WHERE`` because that leaves the initial no-conflict INSERT UNGUARDED
+#    — a first-of-day op that alone exceeds the cap would book over-cap and fail
+#    OPEN. The ensure-row + guarded-UPDATE shape closes that money-guard hole:
+#    ``spent`` starts at 0 and the UPDATE's WHERE covers ``0 + cost <= cap`` too.)
+_BOOK_DAY_SPEND_SQL = text(
+    f"UPDATE day_spend SET spent = spent + :cost, updated_at = now() "
+    f"WHERE user_id = :uid AND utc_day = {_DAY} AND spent + :cost <= :cap "
+    f"RETURNING spent"
+)
+# The current day's spend, for the refusal's error context (informational only —
+# NOT part of the guard; the conditional UPDATE above is the single point of truth).
+_CURRENT_DAY_SPENT_SQL = text(
+    f"SELECT spent FROM day_spend WHERE user_id = :uid AND utc_day = {_DAY}"
+)
+
+
+def _book_day_spend_conn(conn: Connection, *, user_id: str, cost: int, cap: int) -> int | None:
+    """Book ``cost`` against the user's UTC-day counter on an OPEN transaction.
+
+    Returns the new day-spend total on success, or ``None`` when the booking would
+    breach ``cap`` (over-cap ⇒ refuse). The two statements run on the caller's
+    ``conn`` so a day-cap booking composes ATOMICALLY with the credit decrement in
+    :func:`deduct` (both roll back together on any refusal — fail-closed).
+
+    ``cap <= 0`` means *unlimited* (the config default 0 = uncapped, community
+    no-ops entirely) and ``cost <= 0`` is nothing to book: both short-circuit to
+    "allowed" (a non-``None`` sentinel) WITHOUT writing, so an uncapped deployment
+    is byte-identical to pre-R7 behaviour.
+    """
+    if cap <= 0 or cost <= 0:
+        return 0
+    conn.execute(_ENSURE_DAY_ROW_SQL, {"uid": user_id})
+    return conn.execute(
+        _BOOK_DAY_SPEND_SQL, {"uid": user_id, "cost": cost, "cap": cap}
+    ).scalar_one_or_none()
+
+
+def _current_day_spent(conn: Connection, *, user_id: str) -> int:
+    row = conn.execute(_CURRENT_DAY_SPENT_SQL, {"uid": user_id}).scalar_one_or_none()
+    return int(row) if row is not None else 0
+
+
+def _next_utc_midnight_epoch() -> int:
+    """Epoch seconds of the next UTC midnight — when the day counter resets (R7-D-5).
+
+    The API edge turns this into ``Retry-After`` (seconds-to-reset), the honest
+    "capped for today, back tomorrow" hint. A hair of app/DB clock skew vs the
+    DB-authoritative ``utc_day`` boundary is immaterial for a back-off hint.
+    """
+    now = datetime.now(UTC)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp())
+
+
+def book_day_spend(*, rls_engine: Engine, user_id: str, cost: int, cap: int) -> bool:
+    """Atomically book ``cost`` against the user's per-UTC-day spend cap (R7-D-3).
+
+    The standalone conditional-write surface — the load-bearing race-safe primitive
+    the TOCTOU proof (T3) fires N parallel requests at. Returns ``True`` if the
+    booking landed within ``cap``, ``False`` if it would breach the cap (over-cap ⇒
+    the caller refuses; :func:`deduct` composes this INTO its own transaction so the
+    day-cap and the credit decrement move atomically).
+
+    Runs in its own ``rls_engine.begin()`` on a fresh pooled connection (R2-D-7 — no
+    new lock scope, no deadlock with a caller's transaction). ``cap <= 0`` (unlimited)
+    or ``cost <= 0`` allow without writing.
+    """
+    if cap <= 0 or cost <= 0:
+        return True
+    with rls_engine.begin() as conn:
+        return _book_day_spend_conn(conn, user_id=user_id, cost=cost, cap=cap) is not None
+
+
+def deduct(
+    *, rls_engine: Engine, user_id: str, amount: int, reason: str, daily_cap: int = 0
+) -> int:
     """Deduct ``amount`` credits and record a transaction. Returns the new balance.
 
     Spec R2 R2-D-3 (F-04): the decrement is **conditional and atomic** — the
@@ -167,6 +269,15 @@ def deduct(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int
     closes the double-spend race: the pre-flight :func:`require_credits` gate
     runs in a separate transaction, so two concurrent turns could each pass it at
     balance=1; the floor on the decrement itself is the single point of truth.
+
+    Spec R7 (R7-D-1/3): when ``daily_cap > 0`` the deduct ALSO books ``amount``
+    against the per-UTC-day spend counter — in the SAME transaction as the credit
+    decrement, so the day-cap and the floor move ATOMICALLY. The day-cap is booked
+    FIRST (:func:`_book_day_spend_conn`); an over-cap booking raises
+    :class:`DailySpendCapExceededError` (→ 429) BEFORE the balance is touched, and
+    because it shares the transaction the whole thing rolls back — no credit spent,
+    no day-spend booked (FAIL-CLOSED, R7-D-5). ``daily_cap <= 0`` is uncapped and
+    leaves the pre-R7 behaviour byte-identical.
 
     On insufficient balance this raises :class:`CreditsExhaustedError` (→ 402)
     and writes **no** ledger row (CQS: a failed decrement records nothing). The
@@ -177,6 +288,21 @@ def deduct(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int
     """
     ensure_balance(rls_engine=rls_engine, user_id=user_id)
     with rls_engine.begin() as conn:
+        # R7: book the day-cap FIRST, atomically-with the decrement below. Over-cap
+        # ⇒ raise before any spend is booked; the ``with`` rolls back the whole txn.
+        if daily_cap > 0 and amount > 0:
+            booked = _book_day_spend_conn(conn, user_id=user_id, cost=amount, cap=daily_cap)
+            if booked is None:
+                spent = _current_day_spent(conn, user_id=user_id)
+                raise DailySpendCapExceededError(
+                    "Daily spend cap reached — this resets at UTC midnight.",
+                    context={
+                        "cap": str(daily_cap),
+                        "spent": str(spent),
+                        "requested_cost": str(amount),
+                        "reset_epoch": str(_next_utc_midnight_epoch()),
+                    },
+                )
         new_balance = conn.execute(
             update(_credits_t)
             .where(_credits_t.c.user_id == user_id, _credits_t.c.balance >= amount)
@@ -186,7 +312,9 @@ def deduct(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int
         if new_balance is None:
             # No row matched ``balance >= amount`` → insufficient funds. Raise
             # WITHOUT writing a ledger row; the rolled-back transaction records
-            # nothing (the ``with`` block rolls back on the exception).
+            # nothing (the ``with`` block rolls back on the exception — including
+            # any day-spend booked just above, so an unaffordable turn never
+            # consumes the day counter either).
             raise CreditsExhaustedError(
                 "Your free credits are used up. Top-up coming soon — contact support.",
                 context={"amount": str(amount), "reason": reason},

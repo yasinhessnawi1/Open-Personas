@@ -112,6 +112,12 @@ class ChatTurnHandle:
         #: Live tail: events / chunks / done / error in emission order, ``None``-terminated.
         self.events: asyncio.Queue[tuple[str, object] | None] = asyncio.Queue()
         self.task: asyncio.Task[None] | None = None
+        #: Spec R7 (R7-D-4): the durable long-op concurrency slot token held for this
+        #: turn's lifetime. Reserved in ``start_chat_turn`` (pre-persist) and released
+        #: in ``_run_turn``'s terminal ``finally`` — so a client disconnect (the turn
+        #: keeps running, detached) never frees the slot early, and a crash/error/cancel
+        #: still releases it. ``None`` = no cap wired (community / uncapped).
+        self.op_token: str | None = None
         #: Accumulating partial response (the checkpoint source of truth).
         self._content: list[str] = []
         self.event_log: list[dict[str, object]] = []
@@ -176,12 +182,15 @@ class ChatTurnRegistry:
         conversation: Conversation,
         user_message: str,
         on_complete: Callable[[], Awaitable[None]] | None = None,
+        op_token: str | None = None,
         **turn_kwargs: object,
     ) -> ChatTurnHandle:
         """Create a handle and launch the turn as a detached ``asyncio.Task``.
 
         ``on_complete`` is an optional best-effort async hook run AFTER a clean
-        completion (e.g. auto-title); its failure never affects the turn. Raises
+        completion (e.g. auto-title); its failure never affects the turn. ``op_token``
+        (R7-D-4) is the durable long-op concurrency slot reserved by the caller
+        pre-persist; the worker releases it in its terminal ``finally``. Raises
         :class:`TurnAlreadyActiveError` if a turn is already running for this
         conversation (block, don't queue — D-P1-one-active-turn).
         """
@@ -191,6 +200,7 @@ class ChatTurnRegistry:
                 context={"conversation_id": conversation_id},
             )
         handle = ChatTurnHandle(conversation_id, owner_id, assistant_message_id)
+        handle.op_token = op_token
         self._handles[conversation_id] = handle
         handle.task = asyncio.create_task(
             self._run_turn(handle, loop, conversation, user_message, on_complete, turn_kwargs)
@@ -326,9 +336,28 @@ class ChatTurnRegistry:
                 )
         finally:
             reset_sandbox_request_context(sandbox_token)
+            # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
+            # (clean / cancel / error / shutdown) so the per-user cap doesn't ratchet
+            # shut. Best-effort — a release failure must never crash the worker teardown
+            # (the TTL staleness sweep in ``admit_long_op`` is the crash-safety backstop).
+            self._release_op_slot(handle)
             current_user_id.reset(token)
             self._handles.pop(handle.conversation_id, None)
             await handle.events.put(None)  # end-of-stream sentinel for the SSE tail
+
+    def _release_op_slot(self, handle: ChatTurnHandle) -> None:
+        if self._engine is None or handle.op_token is None:
+            return
+        from persona.concurrency import release_long_op  # noqa: PLC0415
+
+        try:
+            release_long_op(rls_engine=self._engine, user_id=handle.owner_id, op_id=handle.op_token)
+        except Exception as exc:  # noqa: BLE001 — teardown must never crash
+            _log.warning(
+                "chat turn concurrency-slot release failed cid={cid}: {err}",
+                cid=handle.conversation_id,
+                err=str(exc),
+            )
 
     def _checkpoint(self, handle: ChatTurnHandle, *, force: bool) -> None:
         """Persist the partial — immediately when ``force`` (tool event), else throttled."""

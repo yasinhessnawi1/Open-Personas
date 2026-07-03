@@ -155,6 +155,25 @@ class APIConfig(BaseSettings):
         default=3, ge=1, validation_alias="WORKER_MAX_JOBS_PER_USER"
     )
     worker_max_jobs_global: int = Field(default=0, ge=0, validation_alias="WORKER_MAX_JOBS_GLOBAL")
+    # Spec R7 (R7-D-1/4/6) — denial-of-wallet caps. All three ride the edition seam:
+    # ``cloud`` enforces, ``community`` no-ops (self-host is single-owner, no DoW
+    # surface — the factory maps them to 0/unlimited). ``0`` = unlimited everywhere,
+    # so an unset knob never regresses behaviour.
+    #  * ``credits_max_per_day`` — per-user credits/UTC-day HARD spend cap (the primary
+    #    DoW guard). Default 10,000 ≈ 10% of the 100,000 starter balance/day → a ~10-day
+    #    floor for a normal user, a hard ceiling for an abuser.
+    #  * ``max_concurrent_bounded_ops_per_user`` — N advisory slots for whole-op-in-one-txn
+    #    ops (imagegen, voice). Default 1 preserves today's per-class cap exactly.
+    #  * ``max_concurrent_long_ops_per_user`` — durable-count cap for long streams/jobs
+    #    (chat SSE, agentic runs). Default 3 (the parallel-spend race the day-counter alone
+    #    can't close — N long ops estimate up-front but book late).
+    credits_max_per_day: int = Field(default=10_000, ge=0, validation_alias="CREDITS_MAX_PER_DAY")
+    max_concurrent_bounded_ops_per_user: int = Field(
+        default=1, ge=0, validation_alias="MAX_CONCURRENT_BOUNDED_OPS_PER_USER"
+    )
+    max_concurrent_long_ops_per_user: int = Field(
+        default=3, ge=0, validation_alias="MAX_CONCURRENT_LONG_OPS_PER_USER"
+    )
     # Maintenance sweep cadence (D-A0-4): each worker periodically rescues expired
     # leases (the rescuer), ages terminal jobs older than ``archive_after`` into the
     # cold ``jobs_archive`` (the cleaner — keeps the hot table small), and purges

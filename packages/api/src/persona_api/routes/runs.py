@@ -52,6 +52,9 @@ async def start_run(
         owner_id=user.id,
         persona_id=persona_id,
         task=body.task,
+        # Spec R7 (R7-D-4): the per-user long-op concurrency cap (agentic runs). 0 =
+        # uncapped (community / unset), so existing behaviour is unchanged.
+        max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,

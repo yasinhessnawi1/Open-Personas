@@ -68,10 +68,12 @@ __all__ = [
     "conversations",
     "credit_transactions",
     "credits",
+    "day_spend",
     "graph_edges",
     "graph_entities",
     "graph_node_entities",
     "graph_nodes",
+    "inflight_ops",
     "jobs",
     "jobs_archive",
     "memory_chunks",
@@ -565,6 +567,12 @@ turn_logs = Table(
     ),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Index("idx_turn_logs_conversation", "conversation_id"),
+    # Spec R7 (R7-D-1 discharge): supports the per-day soft-ramp aggregate — sum
+    # ``cost_cents`` for a conversation over the current UTC day (sargable range on
+    # ``created_at``). turn_logs is conversation-keyed (persona is reached via the
+    # ``conversations`` join, itself owner-indexed), so this composite is the
+    # load-bearing index for the day-window scan.
+    Index("idx_turn_logs_conversation_created", "conversation_id", "created_at"),
 )
 
 rate_limit_buckets = Table(
@@ -617,6 +625,49 @@ audit_log = Table(
     # (target, action) — the A3 budget effective-cap read sums budget.extended rows per task
     # on the leg-boundary budget check; this keeps that lookup off a full audit_log scan (T10).
     Index("idx_audit_target_action", "target", "action"),
+)
+
+# Spec R7 (R7-D-1/2/3) — the per-user per-UTC-day spend counter, the primary
+# denial-of-wallet guard. One integer row per (user_id, utc_day); the atomic
+# conditional write in ``persona.credits.service.book_day_spend`` books spend
+# only ``WHERE spent + :cost <= :cap`` (the R2 TOCTOU-safe family), so two
+# concurrent near-cap requests can't both pass. RLS-scoped by ``user_id`` (its
+# ENABLE/FORCE/policy live entirely in migration 026 — the 009/011/021 split-home
+# template; deliberately NOT in ``db/rls._POLICIES`` since the table post-dates
+# 001_initial). ``utc_day`` is a DATE keyed on the UTC calendar day (fixed-window
+# reset — R7-D-2). The core-owned ``persona.credits`` mirror-view (T2) writes it
+# on the caller's RLS engine; the api-side integration tests guard view↔DDL drift.
+day_spend = Table(
+    "day_spend",
+    metadata,
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("utc_day", Date, nullable=False),
+    Column("spent", Integer, nullable=False, server_default=text("0")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    PrimaryKeyConstraint("user_id", "utc_day"),
+    # A booked counter is never negative (refunds don't decrement the day counter —
+    # a refund reverses the *balance*, not the day's spend commitment; R7-D-3). The
+    # DB-level floor is belt-and-braces against any future write path.
+    CheckConstraint("spent >= 0", name="day_spend_nonneg_check"),
+)
+
+# Spec R7 (R7-D-4) — the durable in-flight registry for LONG-running ops
+# (chat SSE, agentic jobs) whose work spans no single short transaction, so the
+# ``pg_try_advisory_xact_lock`` bounded-op primitive cannot hold across them. One
+# row per admitted op; admission is count-filtered under a per-(user,op_class)
+# advisory lock so exactly N are admitted (R7-D-4 HARD cap). The row is DELETEd on
+# completion; a TTL-based stale-reclaim in ``persona.concurrency.admit_long_op``
+# frees a slot a crashed op would otherwise leak. RLS-scoped by ``user_id`` (RLS
+# lifecycle in migration 026, split-home template; not in ``db/rls._POLICIES``).
+inflight_ops = Table(
+    "inflight_ops",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("op_class", Text, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # The count-filter admission (``WHERE count(inflight) < :max``) reads this index.
+    Index("idx_inflight_by_owner", "user_id", "op_class"),
 )
 
 # Spec R5 (R5-D-1) — multi-worker-safe store-mutation audit. The JSONL

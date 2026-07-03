@@ -48,6 +48,7 @@ async def start_run(
     owner_id: str,
     persona_id: str,
     task: str,
+    max_concurrent_long_ops: int = 0,
 ) -> str:
     """Insert the run row (status=running), build the loop, launch the task.
 
@@ -56,41 +57,71 @@ async def start_run(
     on the new id find it.
     """
     run_id = f"run_{uuid.uuid4().hex}"
-    with rls_engine.begin() as conn:
-        if (
-            conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
-            is None
-        ):
-            raise PersonaNotFoundError("persona not found", context={"id": persona_id})
-        conn.execute(
-            insert(runs_t).values(
-                id=run_id,
-                owner_id=owner_id,
-                persona_id=persona_id,
-                task=task,
-                status="running",
-                started_at=datetime.now(UTC),
-            )
-        )
-    # Spec P4-D-3 — bind the run's sandbox context for the loop build only, so the
-    # builtin ``filesystem`` MCP subprocess is scoped at SPAWN from the same source
-    # as the in-process file tools. The run uses ``run_id`` as the conversation_id
-    # slot, EXACTLY as run_worker re-binds it for execution (owner_id:run_id), so
-    # spawn-time and turn-time scope agree. Tight set→try→reset; no leak past build.
-    from persona_api.sandbox import (  # noqa: PLC0415
-        SandboxRequestContext,
-        reset_sandbox_request_context,
-        set_sandbox_request_context,
-    )
 
-    _scope_token = set_sandbox_request_context(
-        SandboxRequestContext(owner_id=owner_id, conversation_id=run_id)
+    # Spec R7 (R7-D-4): reserve the durable per-user long-op slot BEFORE the run row
+    # is persisted, so an over-cap user gets a clean 429 before a ``running`` row is
+    # written. Released in the worker's terminal ``finally`` (all paths); if any setup
+    # step below raises before hand-off, we release here so the slot never leaks.
+    # ``max_concurrent_long_ops <= 0`` (community/uncapped) always admits (no DB write).
+    from persona.concurrency import admit_long_op, release_long_op  # noqa: PLC0415
+
+    op_token = admit_long_op(
+        rls_engine=rls_engine,
+        user_id=owner_id,
+        op_class="agentic",
+        max_concurrent=max_concurrent_long_ops,
     )
+    if op_token is None:
+        from persona_api.errors import ConcurrencyCappedError  # noqa: PLC0415
+
+        raise ConcurrencyCappedError(
+            "too many concurrent agentic runs in flight for this user",
+            context={"user_id": owner_id, "retry_after_s": "5"},
+        )
     try:
-        loop = await loop_builder(persona_id)
-    finally:
-        reset_sandbox_request_context(_scope_token)
-    registry.start(run_id=run_id, owner_id=owner_id, loop=loop, task_text=task)
+        with rls_engine.begin() as conn:
+            if (
+                conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
+                is None
+            ):
+                raise PersonaNotFoundError("persona not found", context={"id": persona_id})
+            conn.execute(
+                insert(runs_t).values(
+                    id=run_id,
+                    owner_id=owner_id,
+                    persona_id=persona_id,
+                    task=task,
+                    status="running",
+                    started_at=datetime.now(UTC),
+                )
+            )
+        # Spec P4-D-3 — bind the run's sandbox context for the loop build only, so the
+        # builtin ``filesystem`` MCP subprocess is scoped at SPAWN from the same source
+        # as the in-process file tools. The run uses ``run_id`` as the conversation_id
+        # slot, EXACTLY as run_worker re-binds it for execution (owner_id:run_id), so
+        # spawn-time and turn-time scope agree. Tight set→try→reset; no leak past build.
+        from persona_api.sandbox import (  # noqa: PLC0415
+            SandboxRequestContext,
+            reset_sandbox_request_context,
+            set_sandbox_request_context,
+        )
+
+        _scope_token = set_sandbox_request_context(
+            SandboxRequestContext(owner_id=owner_id, conversation_id=run_id)
+        )
+        try:
+            loop = await loop_builder(persona_id)
+        finally:
+            reset_sandbox_request_context(_scope_token)
+        registry.start(
+            run_id=run_id, owner_id=owner_id, loop=loop, task_text=task, op_token=op_token
+        )
+    except BaseException:
+        # Any failure BEFORE the worker took ownership (persona 404 / persist / build)
+        # → release the slot so a failed start never leaks it. On success the worker's
+        # ``finally`` owns the release.
+        release_long_op(rls_engine=rls_engine, user_id=owner_id, op_id=op_token)
+        raise
     return run_id
 
 

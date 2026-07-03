@@ -24,6 +24,7 @@ __all__ = [
     "ChannelUnreachableError",
     "CheckpointTooLargeError",
     "CreditsExhaustedError",
+    "DailySpendCapExceededError",
     "ApprovalNotFoundError",
     "DuplicateJobTypeError",
     "GatedActionProposedError",
@@ -273,6 +274,27 @@ class CreditsExhaustedError(PersonaError):
     from :func:`persona.credits.service.require_credits` without taking a
     persona-api dependency (voice surface is latency-critical per R-V1-1 — no
     HTTP/RPC hop). ``persona_api.errors`` re-exports for back-compat.
+    """
+
+
+class DailySpendCapExceededError(PersonaError):
+    """Raised when a user hits the per-UTC-day spend cap (→ 429; Spec R7, R7-D-5).
+
+    The primary denial-of-wallet guard: an operation would push the user's
+    same-day credit spend past ``CREDITS_MAX_PER_DAY``. Raised by
+    :func:`persona.credits.service.deduct` when its atomic conditional day-spend
+    write (:func:`persona.credits.service.book_day_spend`) rejects the booking
+    ``WHERE spent + :cost <= :cap`` — BEFORE any credits are decremented (the
+    enclosing transaction rolls back, so nothing is booked; FAIL-CLOSED).
+
+    Distinct from :class:`CreditsExhaustedError` (→ 402, "out of credits
+    forever"): this is "capped for *today*, back tomorrow", so the API edge maps
+    it to **429 + ``Retry-After`` = seconds until the next UTC midnight**.
+    ``context`` carries ``cap``, ``spent``, ``requested_cost``, and
+    ``reset_epoch`` (the UTC-midnight epoch) — never any internal leakage. Home
+    in persona-core (alongside :class:`CreditsExhaustedError`) so persona-voice
+    can raise it too without a persona-api dependency; ``persona_api.errors``
+    re-exports for back-compat.
     """
 
 

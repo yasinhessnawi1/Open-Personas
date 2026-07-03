@@ -612,6 +612,17 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # The lifespan re-affirms it from ``app.state.workspace_root`` (same value).
     app.state.file_storage = build_file_storage(config, Path(config.workspace_root))
 
+    # Spec R7 (R7-D-4/6): the per-user concurrency caps ride the same edition seam —
+    # ``cloud`` enforces the configured caps, ``community`` no-ops (0 = unlimited; the
+    # helper takes no lock / writes no row, so the single-owner SQLite self-host path
+    # is untouched). Effective values are read from ``app.state`` by the entry points
+    # (chat/agentic long-op admission; imagegen/voice bounded slots).
+    _cloud = config.edition is Edition.cloud
+    app.state.max_concurrent_long_ops = config.max_concurrent_long_ops_per_user if _cloud else 0
+    app.state.max_concurrent_bounded_ops = (
+        config.max_concurrent_bounded_ops_per_user if _cloud else 0
+    )
+
     register_exception_handlers(app)
 
     # CORS for the spec-09 web app (browser → API is cross-origin). Bearer auth

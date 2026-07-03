@@ -37,7 +37,12 @@ def build_owner_resolver(config: APIConfig) -> OwnerResolver:
 
 
 def build_credits_policy(config: APIConfig) -> CreditsPolicy:
-    """The edition's credits policy (§2.2)."""
+    """The edition's credits policy (§2.2).
+
+    Spec R7 (R7-D-6): cloud's metered policy carries the per-UTC-day spend cap
+    (``CREDITS_MAX_PER_DAY``); community's :class:`UnlimitedCreditsPolicy` no-ops, so
+    the cap never applies to a self-host install.
+    """
     if config.edition is Edition.cloud:
-        return MeteredCreditsPolicy()
+        return MeteredCreditsPolicy(daily_cap=config.credits_max_per_day)
     return UnlimitedCreditsPolicy()
