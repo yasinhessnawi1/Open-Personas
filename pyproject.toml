@@ -277,6 +277,13 @@ ignore_missing_imports = true
 module = ["onnxruntime", "onnxruntime.*"]
 ignore_missing_imports = true
 
+# scikit-learn (R6 crisis-encoder head, R6-D-1) ships no py.typed marker; the sole use
+# is LogisticRegression(...).fit / .predict_proba in crisis_encoder.py. Ignore missing
+# imports rather than vendoring a partial stub — mirrors the pgvector/jose/onnx approach.
+[[tool.mypy.overrides]]
+module = ["sklearn", "sklearn.*"]
+ignore_missing_imports = true
+
 # cartesia (persona-voice [packages/voice], spec V3 T04) — D-V3-1 LOCK launch
 # streaming-TTS provider (Sonic 3.5). NO mypy override needed:
 # D-V3-X-mypy-tts-sdk-override verified at T04 install that the PyPI `cartesia`

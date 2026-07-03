@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from persona.schema.persona import Persona
     from persona.stores.protocol import MemoryStore
     from persona.tools import Toolbox
+    from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.prompt import GraphContext, GraphRecency, PromptBuilder
     from persona_runtime.routing import FirstTokenLatencyTracker, IntelligentRouter, Router
     from persona_runtime.tier import TierRegistry
@@ -124,6 +125,11 @@ class VoiceTurnContext:
     ``None`` ⇒ the reserved no-op (no care text rendered). Wired alongside
     ``graph_retrieval`` so a surfaced wellbeing-tagged node rides its care guidance
     on a voice turn exactly as on the text path."""
+    crisis_encoder: CrisisScorer | None = None
+    """The R6 crisis encoder (R6-D-3). ``None`` ⇒ the voice turn's safety gate is
+    lexical-only (V11). The reply producer runs the composed classify OFF the event loop
+    (``asyncio.to_thread``) so the CPU-bound score never starves the voice loop; fail-soft→
+    R0 (encoder error / not-yet-warm / timeout ⇒ lexical) lives in ``classify_user_message``."""
 
     def __post_init__(self) -> None:
         missing = [kind for kind in REQUIRED_STORE_KINDS if kind not in self.stores]

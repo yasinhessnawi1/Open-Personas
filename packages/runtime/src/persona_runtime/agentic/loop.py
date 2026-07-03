@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     from persona.stores.protocol import MemoryStore
     from persona.tools import Toolbox
 
+    from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.prompt import PromptBuilder
 
     # Spec 18 T06: type-hint widened to the Router Protocol; behaviour
@@ -167,10 +168,15 @@ class AgenticLoop:
         nonce_source: Callable[[], str] | None = None,
         skill_consent: SkillConsentPort | None = None,
         audit_logger: AuditLogger | None = None,
+        crisis_encoder: CrisisScorer | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
         self._toolbox = toolbox
+        # R6 (R6-D-3): the app-scoped crisis encoder (RuntimeFactory-wired). ``None`` is
+        # the additive lexical-only path — byte-identical to V11. Composed inside
+        # ``classify_user_message``; fail-soft→R0 lives there.
+        self._crisis_encoder = crisis_encoder
         # Spec 21 T07: proactive-question scaffold + caps (D-21-9/5/6). The
         # author wraps the model's [ASK_USER] question with 3+1 options; the
         # per-run cap + dedup registry are reset per run() (mirrors the
@@ -237,7 +243,11 @@ class AgenticLoop:
         # deterministic safe completion as the run output with NO steps, never running
         # the agentic loop. Agentic output is text (no TTS), so the chat rendering is
         # used. One acute path: bypass.
-        safety_verdict = classify_user_message(task, locale=self._persona.identity.language_default)
+        safety_verdict = classify_user_message(
+            task,
+            locale=self._persona.identity.language_default,
+            encoder=self._crisis_encoder,
+        )
         if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
             await self._emit(on_event, RunEvent.started(task))
             run = Run(

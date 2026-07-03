@@ -481,3 +481,30 @@ async def test_launcher_isolates_a_failing_session() -> None:
     # The guarded task must complete WITHOUT raising into the caller.
     await asyncio.gather(*launcher._tasks)  # noqa: SLF001
     assert launcher._tasks == set()  # noqa: SLF001 — done-callback cleared it
+
+
+@pytest.mark.asyncio
+async def test_warm_starts_the_crisis_encoder_warmup_off_loop() -> None:
+    """R6 T8: the REAL voice boot path (launcher.warm) invokes the crisis-encoder warm-up
+    off the loop, so the first call never pays the ~40 s cold load (built-but-inert)."""
+
+    class _CrisisStub:
+        def __init__(self) -> None:
+            self.warmed = 0
+
+        def warmup(self) -> None:
+            self.warmed += 1
+
+    launcher = InProcessAgentLauncher(config=object())  # type: ignore[arg-type]
+    # Pre-set the heavy singletons so warm() skips the real bge/tier build; the bad
+    # sentinel embedder makes start_embedder_warmup's encode fail, which it swallows.
+    launcher._embedder = object()  # type: ignore[assignment]  # noqa: SLF001
+    launcher._tier_registry = object()  # type: ignore[assignment]  # noqa: SLF001
+    stub = _CrisisStub()
+    launcher._crisis_encoder = stub  # type: ignore[assignment]  # noqa: SLF001
+
+    await launcher.warm()
+
+    assert launcher._crisis_warmup is not None  # noqa: SLF001 — boot started the off-loop warm
+    await launcher._crisis_warmup  # noqa: SLF001 — let the background warm complete
+    assert stub.warmed == 1  # the real boot path invoked warmup()

@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from persona.tasks.reader import TaskStateReader
     from persona.tools.mcp.catalog import MCPCatalog
     from persona.tools.mcp.client import MCPClient
+    from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import GraphContext
     from persona_runtime.task_origination import (
@@ -121,6 +122,7 @@ class RuntimeFactory:
         credits_policy: CreditsPolicy | None = None,
         memory_backend: Backend | None = None,
         docgen_full_fidelity: bool = False,
+        crisis_encoder: CrisisScorer | None = None,
     ) -> None:
         """Composition root for per-request loops.
 
@@ -147,6 +149,11 @@ class RuntimeFactory:
         """
         self._engine = rls_engine
         self._embedder = embedder
+        # R6 (R6-D-3/5): the app-scoped crisis encoder, injected into every chat/agentic
+        # loop this factory builds so ALL request paths route through the SAME composed
+        # ``classify_user_message`` (lexical ∪ encoder). ``None`` ⇒ lexical-only (V11) —
+        # e.g. an edition with the encoder disabled. Warmed off-loop at boot (app lifespan).
+        self._crisis_encoder = crisis_encoder
         # Spec 33 (D-33-X-creditspolicy-di): the code_execution credit deduction
         # flows through the injected policy. Defaults to the metered policy so a
         # RuntimeFactory built without an explicit policy keeps today's behavior.
@@ -1167,6 +1174,10 @@ class RuntimeFactory:
             graph_surfacing_guidance=(
                 wellbeing_surfacing_guidance if self._graph_store is not None else None
             ),
+            # R6: the app-scoped crisis encoder (euphemistic/non-English recall). None ⇒
+            # V11 lexical-only. The same instance is shared across every loop + the agentic
+            # loop, so there is ONE classifier for the whole process.
+            crisis_encoder=self._crisis_encoder,
             # K6 (K6-D-6): the persona addresses the user by their real name (resolved
             # per turn from our users table). K6-D-4 addendum: the runtime prompt path
             # is the SELF node's creation trigger (None when no graph store → no sync,
@@ -1226,6 +1237,8 @@ class RuntimeFactory:
             audit_logger=self._resolve_audit_logger(),
             # Spec S3 (S3-D-2): the real consent store (empty ≡ DenyUnvettedConsent).
             skill_consent=PostgresSkillConsentStore(self._engine),
+            # R6: same shared crisis encoder as the chat loop — ONE classifier.
+            crisis_encoder=self._crisis_encoder,
         )
         loop.deferred_input_files = deferred_holder
         return loop

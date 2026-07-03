@@ -465,9 +465,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         except TierNotConfiguredError:
             tier_registry = None
         if tier_registry is not None:
+            from persona_runtime.crisis_encoder import (
+                build_crisis_encoder,
+                start_crisis_encoder_warmup,
+            )
+            from persona_runtime.safety_intercept import SafetyInterceptSettings
+
+            # R6 (T8): ONE app-scoped crisis encoder, injected into every chat + agentic
+            # loop the factory builds — so all request paths share the SAME composed
+            # ``classify_user_message`` (lexical ∪ encoder). Built (lazy) only when the
+            # encoder is enabled (an edition may disable it → V11 lexical-only); the model
+            # loads at the off-loop warm-up below, never on a user's first turn.
+            crisis_encoder = (
+                build_crisis_encoder() if SafetyInterceptSettings().encoder_enabled else None
+            )
             runtime_factory = RuntimeFactory(
                 rls_engine=rls_engine,
                 embedder=app.state.embedder,
+                crisis_encoder=crisis_encoder,
                 tier_registry=tier_registry,
                 # Postgres turn_logs (D-08-7); RLS-scoped via conversations.
                 turn_log_writer=PostgresTurnLogWriter(rls_engine),
@@ -520,6 +535,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # graph per request (the request-path graph wiring). Built once on the
             # RLS engine; owner-scoped per request via the checkout listener.
             runtime_factory.enable_graph_writes(audit_root=app.state.audit_root)
+            # R6 (T8): pay the crisis-encoder cold load (~40 s) OFF the event loop at
+            # boot, so the first user never pays it (the built-but-inert failure class).
+            # Non-blocking: the warm window is fail-soft (encoder score times out → the
+            # turn runs lexical-only). The task is held on app.state so it is not GC'd.
+            if crisis_encoder is not None:
+                app.state.crisis_encoder_warmup = start_crisis_encoder_warmup(crisis_encoder)
 
     # Spec K2 (T8d): the CONSUMER. Single-process deploy (D-08-5) ⇒ the durable A0
     # worker + A1 scheduler tick run as an in-process background task. Composes the

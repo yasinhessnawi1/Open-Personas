@@ -1,0 +1,216 @@
+# R6 crisis-detection-encoder FEW-SHOT TRAINING set (Spec R6, R6-D-1 / R6-D-4).
+#
+# The labelled few-shot set the encoder head (LogReg over the FROZEN
+# `paraphrase-multilingual-MiniLM-L12-v2` body) is fitted on at load. SetFit's finding
+# (≈8 examples/class ≈ RoBERTa-Large on 3k) is what lets this be small — a few dozen
+# authored examples per class, no large sensitive corpus (R6-D-1; the reason V11
+# deferred R2).
+#
+# ── SENSITIVE-DATA POLICY (R6-D-4, STRICT) ──────────────────────────────────────────
+#   SYNTHETIC / AUTHORED only. NO real crisis text vendored. No line copied from any
+#   person, forum, transcript, or gated corpus.
+#
+# ── HELD-OUT / DISJOINTNESS ──────────────────────────────────────────────────────────
+#   Every text here is DISJOINT from the EVAL suite (`tests/fixtures/
+#   crisis_encoder_probes.yaml`) — DELIBERATELY DIFFERENT phrasings, so T5 measures the
+#   encoder's GENERALISATION, not memorisation. Enforced by
+#   `test_crisis_encoder.py::test_eval_and_train_sets_are_disjoint` (a test, not a
+#   convention): a probe that appears in both fails the build.
+#
+# ── LABELS ──────────────────────────────────────────────────────────────────────────
+#   label: crisis  → positive (the head learns "route to the wellbeing path")
+#   label: benign  → negative (incl. ADJACENT hard negatives — tired / mildly sad /
+#     figurative kill·dead — so the head learns precision, holding the FP ceiling)
+#   Positives span the six covered non-English languages + English (explicit + indirect)
+#   so the multilingual recall is trained, not just English.
+examples:
+  # ============================ POSITIVES (crisis) ============================
+  # --- English, indirect / euphemistic (distinct from eval phrasings) ---
+  - text: "i don't want to be here anymore"
+    label: crisis
+    lang: en
+  - text: "i just want everything to go quiet forever"
+    label: crisis
+    lang: en
+  - text: "there's nothing left for me in this life"
+    label: crisis
+    lang: en
+  - text: "i can't see any point in carrying on"
+    label: crisis
+    lang: en
+  - text: "i wish i could just stop existing"
+    label: crisis
+    lang: en
+  - text: "life feels like a weight i can't carry any longer"
+    label: crisis
+    lang: en
+  - text: "i keep thinking everyone would be better off if i were gone"
+    label: crisis
+    lang: en
+  - text: "i just want to close my eyes and not have to wake up"
+    label: crisis
+    lang: en
+  - text: "i've been quietly planning how to end things"
+    label: crisis
+    lang: en
+  - text: "i don't think i'll be around much longer"
+    label: crisis
+    lang: en
+  - text: "nothing brings me any relief and i'm ready for it to be over"
+    label: crisis
+    lang: en
+  - text: "i feel completely empty and i just want it all to stop"
+    label: crisis
+    lang: en
+  # --- English, explicit ---
+  - text: "i want to kill myself"
+    label: crisis
+    lang: en
+  - text: "i'm going to end my life"
+    label: crisis
+    lang: en
+  - text: "i want to die"
+    label: crisis
+    lang: en
+  - text: "i've been thinking about suicide a lot"
+    label: crisis
+    lang: en
+  # --- Norwegian (nb) ---
+  - text: "jeg vil ikke leve mer"
+    label: crisis
+    lang: nb
+  - text: "jeg ønsker bare at alt tar slutt"
+    label: crisis
+    lang: nb
+  - text: "jeg klarer ikke mer, jeg vil dø"
+    label: crisis
+    lang: nb
+  # --- Swedish (sv) ---
+  - text: "jag vill inte leva längre"
+    label: crisis
+    lang: sv
+  - text: "jag önskar bara att allt tog slut"
+    label: crisis
+    lang: sv
+  - text: "jag orkar inte leva mer"
+    label: crisis
+    lang: sv
+  # --- Danish (da) ---
+  - text: "jeg vil ikke leve mere"
+    label: crisis
+    lang: da
+  - text: "jeg ønsker bare at det hele slutter"
+    label: crisis
+    lang: da
+  - text: "jeg kan ikke klare mere, jeg vil dø"
+    label: crisis
+    lang: da
+  # --- Arabic (ar) ---
+  - text: "لا أريد أن أعيش بعد الآن"
+    label: crisis
+    lang: ar
+  - text: "أتمنى لو أموت"
+    label: crisis
+    lang: ar
+  - text: "لم يعد للحياة أي معنى بالنسبة لي"
+    label: crisis
+    lang: ar
+  # --- Turkish (tr) ---
+  - text: "artık yaşamak istemiyorum"
+    label: crisis
+    lang: tr
+  - text: "keşke ölsem"
+    label: crisis
+    lang: tr
+  - text: "hayatın benim için hiçbir anlamı kalmadı"
+    label: crisis
+    lang: tr
+  # --- Urdu (ur) ---
+  - text: "میں اب جینا نہیں چاہتا"
+    label: crisis
+    lang: ur
+  - text: "کاش میں مر جاؤں"
+    label: crisis
+    lang: ur
+  - text: "میری زندگی میں اب کوئی معنی نہیں رہا"
+    label: crisis
+    lang: ur
+
+  # ============================ NEGATIVES (benign) ============================
+  # --- English, adjacent hard negatives + mundane ---
+  - text: "i'm exhausted, i just need a really good night's sleep"
+    label: benign
+    lang: en
+  - text: "this week has been rough but i'll be totally fine"
+    label: benign
+    lang: en
+  - text: "i'm feeling a bit down today but nothing serious"
+    label: benign
+    lang: en
+  - text: "work is killing me with all this overtime lately"
+    label: benign
+    lang: en
+  - text: "that exam nearly killed me but i passed in the end"
+    label: benign
+    lang: en
+  - text: "i'm dead tired, heading to bed early tonight"
+    label: benign
+    lang: en
+  - text: "i'm starving, i could honestly eat a whole cake"
+    label: benign
+    lang: en
+  - text: "feeling gloomy today, it's probably just the grey weather"
+    label: benign
+    lang: en
+  - text: "what's the weather going to be like tomorrow?"
+    label: benign
+    lang: en
+  - text: "can you help me write a cover letter for a job?"
+    label: benign
+    lang: en
+  - text: "you're an AI, just admit it already"
+    label: benign
+    lang: en
+  # --- Non-English, mildly-sad-but-fine + mundane (multilingual precision) ---
+  - text: "litt nedfor i dag, men det går helt fint"
+    label: benign
+    lang: nb
+  - text: "jeg er sliten etter en lang dag på jobb"
+    label: benign
+    lang: nb
+  - text: "lite nere idag, men det ordnar sig"
+    label: benign
+    lang: sv
+  - text: "jag är trött efter en lång dag på jobbet"
+    label: benign
+    lang: sv
+  - text: "lidt nede i dag, men det skal nok gå"
+    label: benign
+    lang: da
+  - text: "jeg er træt efter en lang dag på arbejde"
+    label: benign
+    lang: da
+  - text: "أشعر بحزن بسيط اليوم لكنني بخير"
+    label: benign
+    lang: ar
+  - text: "أنا متعب بعد يوم طويل في العمل"
+    label: benign
+    lang: ar
+  - text: "bugün biraz üzgünüm ama gayet iyiyim"
+    label: benign
+    lang: tr
+  - text: "uzun bir iş gününün ardından yorgunum"
+    label: benign
+    lang: tr
+  - text: "آج تھوڑا اداس ہوں لیکن بالکل ٹھیک ہوں"
+    label: benign
+    lang: ur
+  - text: "کام کے لمبے دن کے بعد تھکا ہوا ہوں"
+    label: benign
+    lang: ur
+  - text: "hva bør jeg lage til middag i kveld?"
+    label: benign
+    lang: nb
+  - text: "akşam yemeğinde ne pişirsem acaba?"
+    label: benign
+    lang: tr

@@ -11,6 +11,54 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Crisis-Detection Encoder — euphemistic / non-English recall for the R1 safety gate (2026-07-04)
+
+> Close-out of `crisis-detection-encoder` (Spec R6, `persona-runtime` + `persona-api` +
+> `persona-voice`). V11's R1 crisis gate is **lexical** — reliable on explicit English
+> self-harm phrasing, blind to **euphemistic, indirect, and non-English** distress (the
+> residual V11 owned and deferred, V11-D-7). R6 adds a small fine-tuned **multilingual
+> encoder** (a frozen `paraphrase-multilingual-MiniLM-L12-v2` body + a few-shot
+> LogisticRegression head, SetFit's mechanism minus the contrastive tune) that catches
+> what the lexicon misses and **feeds V11's existing R1 machinery** — it composes
+> `lexical ∪ encoder`, it does not replace the gate.
+>
+> **THE EVAL IS THE GATE, and it cleared it on REAL probes** (no forced verdicts): the
+> euphemistic-English recall rose **0.40 → 0.756** and the non-English aggregate (nb/ar/sv/
+> da/tr/ur) **~0 → 0.875**, with false-BYPASS controls held at **0** and explicit-acute
+> **not regressed** (1.00). The lift is fully attributable — those families score 0/N under
+> lexical-only, so every catch is the encoder's. Honest framing carries: this is a measured
+> lift over a named residual, **not** comprehensive detection (V11-D-7).
+>
+> Three things are load-bearing and proven, not asserted: **fail-soft → R0** (encoder
+> disabled / erroring / not-yet-warm / timeout ⇒ lexical-only, and `None` ⇒ byte-identical
+> V11 — the community/no-model path); the crisis body ships on **torch** (it shares the
+> serving process's already-resident torch runtime — an ONNX body adds a second ~280 MB
+> runtime for no RSS win, recorded as a future lever); and the localized SafeCompletions
+> obey **locale ≠ country** — every crisis number lives in a provenance table with a
+> verified date + source, ar/tr/ur are pointer-first (findahelpline.com), and a build guard
+> fails on any number not in the table.
+
+#### Added
+
+- **`persona_runtime.crisis_encoder`** — the in-process crisis encoder (`CrisisEncoder`,
+  lazy + thread-safe), the `CrisisScorer` protocol the gate composes with, and the
+  `build_crisis_encoder` / `start_crisis_encoder_warmup` composition-root helpers. Bundled
+  authored few-shot training set (`data/crisis_fewshot_train.yaml`, synthetic, all 6
+  languages, disjoint-from-eval by test).
+- **Localized SafeCompletions** (nb/ar/sv/da/tr/ur + English neutral) driven from a crisis-
+  resource provenance table (`_RESOURCES` in `safety_intercept.py`) — verified numbers only,
+  pointer-first for the multi-country languages, structural build guard.
+- `PERSONA_SAFETY_ENCODER_ENABLED` / `_T_SOFT` / `_T_HARD` / `_TIMEOUT_S` env knobs.
+
+#### Changed
+
+- **`classify_user_message` now composes `lexical ∪ encoder`** with precedence lexical-HARD
+  → encoder-HARD (`score ≥ T_hard`) → SOFT (`lexical-SOFT ∪ score ≥ T_soft`) → NONE; a
+  per-call hang-guard degrades a slow/wedged encoder to lexical-only. `SAFETY_INTERCEPT_
+  VERSION` v1 → **v2** (composition + localization changed; the encoder artifact is versioned
+  separately, `CRISIS_ENCODER_VERSION` v1). The encoder is factory-wired into the chat +
+  agentic loops (`RuntimeFactory`) and the voice path (`InProcessAgentLauncher` →
+  `VoiceTurnContext`), warmed off-loop at boot; voice runs the score off the event loop.
 ### Schedules, Calendar & Time — one schedule mechanism, two twin interfaces (Spec A8, 2026-07-03)
 
 > Close-out of `feat/schedules-calendar` (`persona-core` + `persona-api` + `persona-web`). A4 made every

@@ -48,6 +48,31 @@ def _factory() -> RuntimeFactory:
     )
 
 
+class _SpyScorer:
+    def score(self, _text: str) -> float:  # pragma: no cover — identity is what matters here
+        return 0.0
+
+
+def test_factory_holds_the_injected_crisis_encoder() -> None:
+    """R6 T8: the composition root's encoder is held on the app-scoped factory, so every
+    chat + agentic loop it builds shares the SAME instance (``build_*`` pass
+    ``self._crisis_encoder`` — proven wired into the loop in the runtime suite)."""
+    scorer = _SpyScorer()
+    factory = RuntimeFactory(
+        rls_engine=object(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),  # type: ignore[arg-type]
+        tier_registry=_SpyTierRegistry(),  # type: ignore[arg-type]
+        turn_log_writer=object(),  # type: ignore[arg-type]
+        audit_root=Path("/tmp/persona-audit-test"),
+        crisis_encoder=scorer,  # type: ignore[arg-type]
+    )
+    assert factory._crisis_encoder is scorer  # noqa: SLF001
+
+
+def test_factory_defaults_to_no_encoder_which_is_v11_lexical_only() -> None:
+    assert _factory()._crisis_encoder is None  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_aclose_closes_tier_registry_and_mcp_clients() -> None:
     factory = _factory()

@@ -201,9 +201,16 @@ class VoiceModelReplyProducer:
         # never the chat resource block, and never call the model. Classified before
         # any routing/retrieval so the bypass skips all of it. The user turn is noted
         # for the unified-memory write; V4's commit path records what was spoken. One
-        # acute path: bypass (never inject-and-generate).
-        safety_verdict = classify_user_message(
-            user_message, locale=ctx.persona.identity.language_default
+        # acute path: bypass (never inject-and-generate). The composed classify (V11
+        # lexical ∪ the R6 encoder) is CPU-bound when the encoder is wired, so it runs on
+        # a worker thread — the voice event loop must never block on the forward pass (the
+        # voice-event-loop-starvation rule; R6-D-2). Fail-soft→R0 lives inside classify
+        # (encoder error / not-yet-warm / timeout ⇒ lexical), so this always returns.
+        safety_verdict = await asyncio.to_thread(
+            classify_user_message,
+            user_message,
+            locale=ctx.persona.identity.language_default,
+            encoder=ctx.crisis_encoder,
         )
         if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
             if self._turn_recorder is not None:

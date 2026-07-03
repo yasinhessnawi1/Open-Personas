@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from persona.stores.embedder import Embedder
+    from persona_runtime.crisis_encoder import CrisisEncoder
     from persona_runtime.tier import TierRegistry
 
     from persona_voice.config import VoiceConfig
@@ -72,6 +73,11 @@ class InProcessAgentLauncher:
         self._broadcaster_factory = broadcaster_factory
         self._embedder: Embedder | None = None
         self._tier_registry: TierRegistry | None = None
+        # R6 (T8): the process-shared crisis encoder + its off-loop warm-up task, built
+        # once like the embedder and injected into every call's VoiceTurnContext so the
+        # voice safety gate composes the encoder (euphemistic/non-English recall).
+        self._crisis_encoder: CrisisEncoder | None = None
+        self._crisis_warmup: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._singletons_lock = asyncio.Lock()
 
@@ -104,6 +110,7 @@ class InProcessAgentLauncher:
                 config=self._config,
                 embedder=self._embedder,
                 tier_registry=self._tier_registry,
+                crisis_encoder=self._crisis_encoder,
                 broadcaster_factory=self._broadcaster_factory,
             )
         except asyncio.CancelledError:
@@ -129,6 +136,14 @@ class InProcessAgentLauncher:
                 self._embedder = SentenceTransformerEmbedder(model_name=_BGE_MODEL, device="cpu")
             if self._tier_registry is None:
                 self._tier_registry = tier_registry_from_env()
+            if self._crisis_encoder is None:
+                # R6 (T8): lazy — the model loads at :meth:`warm` (off-loop), never on a
+                # call's first turn. Built only when enabled; disabled ⇒ lexical-only (V11).
+                from persona_runtime.crisis_encoder import build_crisis_encoder
+                from persona_runtime.safety_intercept import SafetyInterceptSettings
+
+                if SafetyInterceptSettings().encoder_enabled:
+                    self._crisis_encoder = build_crisis_encoder()
 
     async def warm(self) -> None:
         """Build + warm the shared singletons at SERVER STARTUP (BLOCKING).
@@ -148,6 +163,15 @@ class InProcessAgentLauncher:
         await self._ensure_singletons()
         if self._embedder is not None:
             await start_embedder_warmup(self._embedder)
+        # R6 (T8): warm the crisis encoder in the BACKGROUND (non-blocking) — unlike the
+        # embedder (which gates turn-0 recall, so it's awaited), a not-yet-warm crisis
+        # encoder is fail-soft: a turn's score times out (the 2 s hang-guard) and runs
+        # lexical-only, so the ~40 s crisis load must NOT add to the blocking voice-startup
+        # window. The task is held on ``self`` so it is not GC'd.
+        if self._crisis_encoder is not None:
+            from persona_runtime.crisis_encoder import start_crisis_encoder_warmup
+
+            self._crisis_warmup = start_crisis_encoder_warmup(self._crisis_encoder)
 
     async def aclose(self) -> None:
         """Cancel any in-flight sessions + dispose the shared tier registry."""

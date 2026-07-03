@@ -787,6 +787,76 @@ class TestFeelingTagStrip:
         assert await _drain(producer) == ["Hel", "lo!"]
 
 
+class TestR6CrisisEncoderWiring:
+    """T8 — the R6 crisis encoder is wired into the voice path AND runs off the loop."""
+
+    _EUPH = "i just want to fade out of the picture and not come back"
+    _EXPLICIT = "i want to kill myself tonight"
+
+    @pytest.mark.asyncio
+    async def test_encoder_hard_bypasses_generation_and_runs_off_loop(self) -> None:
+        import time
+
+        from persona_runtime.crisis_encoder import CrisisEncoderError  # noqa: F401 — parity
+
+        class _SlowSpy:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def score(self, _text: str) -> float:
+                self.calls += 1
+                time.sleep(0.15)  # CPU-bound: proves the loop isn't blocked while it runs
+                return 0.99
+
+        from dataclasses import replace
+
+        backend = _ScriptedBackend([StreamChunk(delta="MODEL_OUTPUT"), _final()])
+        spy = _SlowSpy()
+        ctx = replace(_context(backend), crisis_encoder=spy)  # VoiceTurnContext is frozen
+        producer = VoiceModelReplyProducer(ctx)
+
+        ticks = 0
+
+        async def _ticker() -> None:
+            nonlocal ticks
+            for _ in range(30):
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(_ticker())
+        spoken = "".join(await _drain(producer, self._EUPH))
+        await task
+
+        assert spy.calls > 0, "the voice path never consulted the encoder"
+        assert "MODEL_OUTPUT" not in spoken, "generation was NOT bypassed"
+        assert "an AI" in spoken, "the spoken SafeCompletion was not emitted"
+        assert ticks >= 8, f"the voice loop was starved while the score ran (ticks={ticks})"
+
+    @pytest.mark.asyncio
+    async def test_broken_encoder_keeps_lexical_hard(self) -> None:
+        from persona_runtime.crisis_encoder import CrisisEncoderError
+
+        class _Raises:
+            def score(self, _text: str) -> float:
+                msg = "boom"
+                raise CrisisEncoderError(msg)
+
+        from dataclasses import replace
+
+        backend = _ScriptedBackend([StreamChunk(delta="MODEL_OUTPUT"), _final()])
+        ctx = replace(_context(backend), crisis_encoder=_Raises())
+        spoken = "".join(await _drain(VoiceModelReplyProducer(ctx), self._EXPLICIT))
+        assert "MODEL_OUTPUT" not in spoken  # lexical-HARD fired despite the broken encoder
+        assert "an AI" in spoken
+
+    @pytest.mark.asyncio
+    async def test_none_encoder_is_v11_no_bypass(self) -> None:
+        backend = _ScriptedBackend([StreamChunk(delta="MODEL_OUTPUT"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))  # ctx.crisis_encoder is None
+        spoken = "".join(await _drain(producer, self._EUPH))
+        assert "MODEL_OUTPUT" in spoken  # V11: euphemism generates normally
+
+
 class TestExpressivityCapture:
     """V12 T3 — the producer captures the persona's stance tag (still stripped from
     the audio) and publishes the resolved expressivity to the listener (V12-D-2/D-5).

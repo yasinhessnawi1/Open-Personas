@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     from persona.stores.protocol import MemoryStore
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.agentic.events import RunEvent
+    from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.prompt import GraphContext, GraphRecency
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
@@ -349,6 +350,7 @@ async def build_agent_session(
     config: VoiceConfig,
     embedder: Embedder | None = None,
     tier_registry: TierRegistry | None = None,
+    crisis_encoder: CrisisScorer | None = None,
     core_config: PersonaCoreConfig | None = None,
     stt_config: StreamingSTTConfig | None = None,
     tts_config: StreamingTTSConfig | None = None,
@@ -469,6 +471,10 @@ async def build_agent_session(
         latency_tracker=tracker,
         toolbox=toolbox,
         language=language_plan,
+        # R6 (T8): the process-shared crisis encoder (launcher-injected). ``None`` ⇒ the
+        # voice safety gate is lexical-only (V11) — e.g. a standalone session without a
+        # launcher. The reply producer runs the composed classify off the loop.
+        crisis_encoder=crisis_encoder,
         user_name=user_name,
         graph_retrieval=graph_retrieval,
         graph_surfacing_guidance=graph_surfacing_guidance,
@@ -725,6 +731,7 @@ async def run_agent_session(
     config: VoiceConfig,
     embedder: Embedder | None = None,
     tier_registry: TierRegistry | None = None,
+    crisis_encoder: CrisisScorer | None = None,
     core_config: PersonaCoreConfig | None = None,
     broadcaster_factory: Callable[[VoiceRoom], DataChannelBroadcaster] | None = None,
 ) -> None:
@@ -743,6 +750,7 @@ async def run_agent_session(
         config=config,
         embedder=embedder,
         tier_registry=tier_registry,
+        crisis_encoder=crisis_encoder,
         core_config=core_config,
         broadcaster_factory=broadcaster_factory,
     )

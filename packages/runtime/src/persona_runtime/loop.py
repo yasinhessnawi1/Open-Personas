@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     from persona.tasks import TaskStateReader
     from persona.tools import Toolbox
 
+    from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.images import TurnImage
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import (
@@ -426,6 +427,7 @@ class ConversationLoop:
         skill_consent: SkillConsentPort | None = None,
         audit_logger: AuditLogger | None = None,
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
+        crisis_encoder: CrisisScorer | None = None,
         user_name_provider: Callable[[], str | None] | None = None,
         self_node_sync: Callable[[str | None], None] | None = None,
         standing_recognizer: StandingIntentRecognizer | None = None,
@@ -484,6 +486,11 @@ class ConversationLoop:
         # rides K3's surfacing slot for any injected wellbeing-tagged node. ``None`` (the
         # default) is the reserved no-op — the prompt renders no care text, byte-identical.
         self._graph_surfacing_guidance = graph_surfacing_guidance
+        # R6 (R6-D-3): the app-scoped crisis encoder the composition root wires. ``None``
+        # (the default) is the additive lexical-only path — byte-identical to V11 until a
+        # root injects it (RuntimeFactory). Composed with the lexical gate inside
+        # ``classify_user_message``; fail-soft→R0 lives there.
+        self._crisis_encoder = crisis_encoder
         # K6 (K6-D-6): the display name of the person this turn is with, resolved per
         # turn from OUR ``users`` table via a provider closure (contextvar → DB, the
         # same owner scope as graph retrieval). ``None`` (the default) ⇒ no name line
@@ -643,7 +650,9 @@ class ConversationLoop:
         # generate). A SOFT verdict instead injects the override directive below
         # (path-independent with the voice path); NONE leaves the always-on R0 floor.
         safety_verdict = classify_user_message(
-            user_message, locale=self._persona.identity.language_default
+            user_message,
+            locale=self._persona.identity.language_default,
+            encoder=self._crisis_encoder,
         )
         if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
             completion_text = safety_verdict.completion.chat_text

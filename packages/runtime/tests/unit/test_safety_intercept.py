@@ -87,8 +87,12 @@ class TestSafeCompletionLocaleAware:
         assert "where you are" in c.chat_text.lower()
 
     def test_completion_always_discloses_ai(self) -> None:
-        """A distressed user must not be deceived about talking to an AI."""
-        for loc in ("no", "zz", None):
+        """A distressed user must not be deceived about talking to an AI. The completion
+        is now localized (R6-D-5): the ``no`` rendering discloses in Norwegian (``KI``),
+        the neutral English ones in ``an AI``. Full per-language disclosure is covered by
+        ``test_crisis_completions``."""
+        assert "KI" in safe_completion(locale="no").chat_text  # Norwegian AI disclosure
+        for loc in ("zz", None):
             assert "an AI" in safe_completion(locale=loc).chat_text
 
 
