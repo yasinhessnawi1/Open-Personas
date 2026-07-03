@@ -26,6 +26,7 @@ from persona_api.config import APIConfig
 from persona_api.errors import ConversationNotFoundError
 from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimiter
 from persona_api.services import audit_service, chat_service, document_service
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
@@ -105,6 +106,7 @@ def client(
     app.state.verify_token = _verify
     app.state.rls_engine = None
     app.state.workspace_root = workspace_root
+    app.state.file_storage = LocalFileStorage(workspace_root)  # R5-D-4: routes read this
     app.state.build_document_store = lambda: document_store
     app.state.rate_limiter = RateLimiter(
         InMemoryRateLimitStore(), default_limit=1000, per_endpoint={}
@@ -161,7 +163,7 @@ class TestDocumentCascadeOnConversationDelete:
     ) -> None:
         # Upload two documents to the conversation.
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -170,7 +172,7 @@ class TestDocumentCascadeOnConversationDelete:
             document_store=document_store,
         )
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -181,7 +183,7 @@ class TestDocumentCascadeOnConversationDelete:
         assert (
             len(
                 document_service.list_for_conversation(
-                    sandbox_root=workspace_root,
+                    file_storage=LocalFileStorage(workspace_root),
                     owner_id="u1",
                     persona_id="astrid",
                     conversation_id="conv_u1",
@@ -196,7 +198,7 @@ class TestDocumentCascadeOnConversationDelete:
 
         # Workspace files for the conversation's documents are gone.
         remaining = document_service.list_for_conversation(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -213,7 +215,7 @@ class TestDocumentCascadeOnConversationDelete:
         # Force large-doc path so chunks land in the store.
         monkeypatch.setenv("PERSONA_DOC_INJECT_THRESHOLD", "100")
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -239,7 +241,7 @@ class TestDocumentCascadeOnConversationDelete:
         # workspace-scoped, not RLS-scoped here since fake delete only
         # accepts conv_u1).
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -248,7 +250,7 @@ class TestDocumentCascadeOnConversationDelete:
             document_store=document_store,
         )
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_OTHER",
@@ -261,7 +263,7 @@ class TestDocumentCascadeOnConversationDelete:
 
         # conv_OTHER's documents survived the cascade.
         other_remaining = document_service.list_for_conversation(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_OTHER",
@@ -292,7 +294,7 @@ class TestCriterion6HoldsAtCascadeBoundary:
             seen_kinds_before.add(store_kind)
 
         document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",

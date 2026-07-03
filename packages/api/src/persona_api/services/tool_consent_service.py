@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import yaml
-from persona.audit import JSONLAuditLogger
+from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.errors import PersonaNotFoundError, ToolNotAllowedError
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores import SelfFactsStore
@@ -84,6 +84,7 @@ def grant_tool_consent(
     now: datetime,
     turn_index: int | None = None,
     memory_backend: Backend | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> bool:
     """Enable ``tool_name`` on the persona's allow-list with a persona_self audit.
 
@@ -160,7 +161,9 @@ def grant_tool_consent(
     backend = memory_backend or PostgresBackend(engine=rls_engine, embedder=embedder)
     store = SelfFactsStore(
         backend=backend,
-        audit_logger=JSONLAuditLogger(audit_root),
+        # R5-D-2: app-selected audit backend (Postgres when multi-worker), else
+        # the JSONL default (byte-unchanged for callers that pass no logger).
+        audit_logger=audit_logger or JSONLAuditLogger(audit_root),
     )
     logical_id = _logical_id(tool_name)
     next_version = len(store.history(persona_id, logical_id)) + 1

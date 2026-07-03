@@ -22,6 +22,7 @@ from persona_api.services.artifact_metadata import (
     WorkspaceArtifactMetadata,
     write_artifact_sidecar,
 )
+from persona_api.storage import LocalFileStorage
 
 
 @pytest.fixture
@@ -62,6 +63,7 @@ def client(
     app.state.verify_token = _verify
     app.state.rls_engine = None
     app.state.workspace_root = workspace_root
+    app.state.file_storage = LocalFileStorage(workspace_root)  # R5-D-4: list/delete read this
     app.state.rate_limiter = RateLimiter(
         InMemoryRateLimitStore(), default_limit=10_000, per_endpoint={}
     )

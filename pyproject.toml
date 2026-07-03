@@ -182,6 +182,14 @@ ignore_missing_imports = true
 module = ["openpyxl.*"]
 ignore_missing_imports = true
 
+# boto3 / botocore (Spec R5 R5-D-4) — the OPTIONAL S3 storage backend. The
+# imports are guarded (only ``S3FileStorage`` needs them; the local/community
+# path pulls nothing). ``boto3-stubs`` lags + is heavy; mirror the e2b / docker
+# optional-dep approach rather than vendor a partial stub.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
+
 # docker SDK (persona-core [sandbox] extra, spec 12 LocalDockerSandbox) ships
 # no py.typed marker; ``types-docker`` lags the runtime and is partial. The
 # LocalDockerSandbox lazy-imports docker at construction so the module stays

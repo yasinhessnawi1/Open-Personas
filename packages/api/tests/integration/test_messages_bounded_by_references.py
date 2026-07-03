@@ -62,6 +62,7 @@ from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig
 from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.services import image_service
+from persona_api.storage import LocalFileStorage
 from persona_runtime.prompt import PromptBuilder
 from sqlalchemy import text
 
@@ -210,7 +211,7 @@ def test_messages_row_total_stays_bounded_with_ten_image_turns(
         # but the test only proves something if the images are *big*.
         assert len(png) >= 500_000, f"PNG fixture too small: {len(png)} bytes"
         ref = image_service.upload(
-            workspace_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id=uid,
             persona_id=persona_id,
             file_bytes=png,
@@ -364,7 +365,7 @@ def image_workspace(tmp_path: Path) -> tuple[Path, str, bytes]:
     persona_id = "persona_t13"
     png = _make_random_png(side=1500)
     ref = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id=owner_id,
         persona_id=persona_id,
         file_bytes=png,

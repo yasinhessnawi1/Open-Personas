@@ -28,6 +28,7 @@ from persona_api.sandbox import (
     set_sandbox_request_context,
 )
 from persona_api.services.workspace_persister import WorkspaceDirPersister
+from persona_api.storage import LocalFileStorage
 from persona_runtime.agentic.events import RunEvent
 
 if TYPE_CHECKING:
@@ -86,7 +87,7 @@ async def test_file_write_chain(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
-    persister = WorkspaceDirPersister(workspace_root=workspace, persona_id="astrid")
+    persister = WorkspaceDirPersister(file_storage=LocalFileStorage(workspace), persona_id="astrid")
     tool = make_file_write_tool(sandbox_root=sandbox, persister=persister)
 
     result = await tool.execute(path="out/report.md", content="# Title\n")
@@ -112,7 +113,7 @@ async def test_file_write_chain(tmp_path: Path) -> None:
 )
 async def test_render_diagram_chain(tmp_path: Path, fmt: str, mime: str, ext: str) -> None:
     workspace = tmp_path / "ws"
-    persister = WorkspaceDirPersister(workspace_root=workspace, persona_id="astrid")
+    persister = WorkspaceDirPersister(file_storage=LocalFileStorage(workspace), persona_id="astrid")
     tool = make_render_diagram_tool(persister=persister)
 
     source = "graph TD; A-->B" if fmt == "mermaid" else "digraph { a -> b }"
@@ -137,7 +138,7 @@ async def test_render_diagram_chain(tmp_path: Path, fmt: str, mime: str, ext: st
 @pytest.mark.usefixtures("ctx")
 async def test_generate_image_chain(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
-    persister = WorkspaceDirPersister(workspace_root=workspace, persona_id="astrid")
+    persister = WorkspaceDirPersister(file_storage=LocalFileStorage(workspace), persona_id="astrid")
     tool = make_generate_image_tool(backend=_FakeImageBackend(), persister=persister)
 
     result = await tool.execute(prompt="a bicycle")

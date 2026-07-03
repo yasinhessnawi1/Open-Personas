@@ -80,8 +80,11 @@ __all__ = [
     "persona_mcp_assignments",
     "personas",
     "rate_limit_buckets",
+    "request_telemetry",
     "runs",
     "schedules",
+    "store_audit_events",
+    "tool_audit_events",
     "turn_logs",
     "user_mcp_servers",
     "users",
@@ -614,6 +617,91 @@ audit_log = Table(
     # (target, action) — the A3 budget effective-cap read sums budget.extended rows per task
     # on the leg-boundary budget check; this keeps that lookup off a full audit_log scan (T10).
     Index("idx_audit_target_action", "target", "action"),
+)
+
+# Spec R5 (R5-D-1) — multi-worker-safe store-mutation audit. The JSONL
+# ``persona.audit.JSONLAuditLogger`` assumes ONE writer (process-local
+# ``threading.Lock``) and breaks the moment the API runs on N workers / N Fly
+# machines (S08-4). ``PostgresAuditLogger`` writes here instead: PostgreSQL
+# MVCC + WAL make concurrent INSERTs from N processes non-blocking, per-statement
+# atomic, and durable — no lost / duplicated / interleaved-corrupted rows, no
+# explicit locking for an append-only pattern. Columns mirror the frozen
+# ``persona.audit.AuditEvent`` verbatim; ``list``/``dict`` fields → JSON(B).
+# NON-RLS platform table (like ``audit_log`` / ``rate_limit_buckets``): written
+# via a plain ``engine.begin()``, no owner GUC. This is FORENSIC store-mutation
+# audit — distinct from ``audit_log`` (API-action forensics) and from
+# ``tool_audit_events`` (below); do NOT conflate.
+store_audit_events = Table(
+    "store_audit_events",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column("persona_id", Text, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("store", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("written_by", Text),
+    Column("reason", Text),
+    Column("chunk_ids", _json(), nullable=False, server_default=text("'[]'")),
+    Column("logical_ids", _json(), nullable=False, server_default=text("'[]'")),
+    Column("metadata", _json(), nullable=False, server_default=text("'{}'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # BRIN on the append-only, timestamp-ascending ``created_at``: hundreds of ×
+    # smaller than BTREE with faster range scans for the ``since=`` read path
+    # (R5-D-1). SQLite (community) ignores ``postgresql_using`` → plain index.
+    Index("idx_store_audit_created", "created_at", postgresql_using="brin"),
+    # BTREE on ``persona_id`` for the ``.read(persona_id, …)`` equality path.
+    Index("idx_store_audit_persona", "persona_id"),
+)
+
+# Spec R5 (R5-D-1) — multi-worker-safe TOOL audit. Mirrors
+# ``persona.tools.audit.ToolAuditEvent`` (file_write / MCP connect-disconnect /
+# code-exec ``execute``). Same single-writer JSONL flaw, same Postgres fix.
+# ``persona_id`` is nullable (CLI dev sessions carry no persona). NON-RLS
+# platform table, plain engine. Distinct from ``store_audit_events`` (store
+# mutations) and ``audit_log`` (API actions).
+tool_audit_events = Table(
+    "tool_audit_events",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column("persona_id", Text),
+    Column("tool_name", Text, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("resource", Text, nullable=False),
+    Column("is_error", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("metadata", _json(), nullable=False, server_default=text("'{}'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("idx_tool_audit_created", "created_at", postgresql_using="brin"),
+    Index("idx_tool_audit_persona", "persona_id"),
+)
+
+# Spec R5 (R5-D-3) — per-request telemetry for the §6.3 "system health" dashboard
+# (the D-11-5 gap: ``turn_logs`` has no per-endpoint / HTTP-status / error
+# dimension, and ``latency_ms`` is per-TURN model latency, not per-ENDPOINT p99).
+# One row per HTTP request, written by ``RequestTelemetryMiddleware`` via a
+# BUFFERED background flush — never synchronously on the request path (R5-D-3).
+# NON-RLS platform table (operator forensics; read by the ``grafana_ro BYPASSRLS``
+# role), plain engine, like ``turn_logs`` / ``audit_log``. ``timestamp`` is the
+# request-completion moment captured in-band (NOT the flush time — the buffer
+# flushes seconds later); ``route_template`` is the matched route pattern
+# (e.g. ``/v1/personas/{persona_id}``) NOT the raw path, to bound cardinality.
+request_telemetry = Table(
+    "request_telemetry",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column("method", Text, nullable=False),
+    Column("route_template", Text, nullable=False),
+    Column("status_code", Integer, nullable=False),
+    Column("duration_ms", Float, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # BRIN on the append-only, time-ascending ``timestamp`` for the windowed
+    # percentile_cont / group-by scans the §6.3 panels run (R5-D-3). SQLite
+    # ignores ``postgresql_using`` → plain index.
+    Index("idx_request_telemetry_ts", "timestamp", postgresql_using="brin"),
+    # BTREE on ``route_template`` for the per-endpoint GROUP BY.
+    Index("idx_request_telemetry_route", "route_template"),
 )
 
 # Spec 30 (D-30-3) — bring-your-own MCP servers. User-scoped (reusable across the

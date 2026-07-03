@@ -53,17 +53,17 @@ import hashlib
 import struct
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import Path
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from persona.errors import PersonaError, SandboxViolationError
 from persona.logging import get_logger
-from persona.tools._sandbox import (
-    is_regular_file_nofollow,
-    read_nofollow_bytes,
-    resolve_sandbox_path,
-    write_nofollow_bytes,
-)
 from PIL import Image, UnidentifiedImageError
+
+from persona_api.services.artifact_storage import artifact_key
+
+if TYPE_CHECKING:
+    from persona_api.storage import FileStorage
 
 # Defence-in-depth: Pillow's own decompression-bomb guard. The pre-decode
 # header guard (:func:`_pre_decode_dims`) is the primary gate; this is the
@@ -136,7 +136,7 @@ class ImageRef:
 
 def upload(
     *,
-    workspace_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     file_bytes: bytes,
@@ -239,15 +239,11 @@ def upload(
     ref = hashlib.blake2b(file_bytes, digest_size=16).hexdigest()
     relative = f"{_UPLOAD_DIR_NAME}/{ref}{ext}"
 
-    sandbox_root = workspace_root / owner_id / persona_id
-    sandbox_root.mkdir(parents=True, exist_ok=True)
-    resolved = resolve_sandbox_path(sandbox_root, relative)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    # O_NOFOLLOW closes the TOCTOU window between resolver + open, via the shared
-    # sandbox opener (R2-D-4). O_EXCL would reject re-upload of the same content;
-    # we tolerate that (idempotent content-addressed write).
-    write_nofollow_bytes(resolved, file_bytes)
+    # R5-D-4: write through the FileStorage backend (LocalFileStorage keeps the
+    # exact resolve_sandbox_path + O_NOFOLLOW byte-identical write; S3 uploads the
+    # object). Content-addressed key stays idempotent-overwrite.
+    key = artifact_key(owner_id, persona_id, relative)
+    file_storage.put(key, file_bytes, content_type=declared_media_type)
 
     _log.info(
         "image upload accepted",
@@ -264,15 +260,14 @@ def upload(
     # F5 artifact-list endpoint can filter/sort this upload. Best-effort
     # (failures log but do not abort the upload) — sidecar absence falls back
     # to metadata=null on the artifact-list view, not a broken upload.
-    try:
-        from persona_api.services.artifact_metadata import (
-            WorkspaceArtifactMetadata,
-            utcnow,
-            write_artifact_sidecar,
-        )
+    from persona_api.services.artifact_metadata import WorkspaceArtifactMetadata, utcnow
+    from persona_api.services.artifact_storage import write_sidecar
 
-        write_artifact_sidecar(
-            resolved,
+    try:
+        # R5-D-4: sidecar routes through the SAME backend as a sibling object.
+        write_sidecar(
+            file_storage,
+            key,
             WorkspaceArtifactMetadata(
                 source="upload",
                 type="image",
@@ -298,7 +293,7 @@ def upload(
 
 def fetch(
     *,
-    workspace_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     ref: str,
@@ -325,45 +320,26 @@ def fetch(
             resolves outside the sandbox (cross-tenant / traversal).
     """
     relative = ref if "/" in ref else f"{_UPLOAD_DIR_NAME}/{ref}"
-    sandbox_root = workspace_root / owner_id / persona_id
+    key = artifact_key(owner_id, persona_id, relative)
+    not_found = PersonaError("image not found", context={"reason": "not_found", "ref": ref[:120]})
 
-    try:
-        resolved = resolve_sandbox_path(sandbox_root, relative)
-    except SandboxViolationError as exc:
-        # Existence-disclosure-safe: treat traversal as not_found.
-        raise PersonaError(
-            "image not found",
-            context={"reason": "not_found", "ref": ref[:120]},
-        ) from exc
-
-    # R2 F-03: lstat check (no symlink follow) — a symlink swapped into the final
-    # component would pass a plain ``is_file()`` (which follows it to an
-    # out-of-sandbox target). Treat a non-regular/symlinked entry as not_found.
-    if not is_regular_file_nofollow(resolved):
-        raise PersonaError(
-            "image not found",
-            context={"reason": "not_found", "ref": ref[:120]},
-        )
-
-    media_type = _media_type_for_ext(resolved.suffix.lower())
+    media_type = _media_type_for_ext(PurePosixPath(relative).suffix.lower())
     if media_type is None:
-        # An on-disk file with a foreign extension shouldn't exist (we wrote
-        # it ourselves with a known extension); treat as not_found.
-        raise PersonaError(
-            "image not found",
-            context={"reason": "not_found", "ref": ref[:120]},
-        )
+        raise not_found
 
-    # R2 F-03: read via the O_NOFOLLOW opener so a symlink swapped into the final
-    # component after resolution cannot serve an out-of-sandbox file. A swapped
-    # link raises OSError → treated as not_found (no information leak).
+    # R5-D-4 via the backend. LocalFileStorage preserves the security semantics
+    # (``resolve_sandbox_path`` raises ``SandboxViolationError`` on traversal;
+    # ``is_regular_file_nofollow`` treats a swapped symlink / missing file as
+    # absent; the read is O_NOFOLLOW). Traversal + missing/symlink both collapse
+    # to ``not_found`` — existence-disclosure-safe, unchanged from the inline path.
     try:
-        return read_nofollow_bytes(resolved), media_type
+        if not file_storage.exists(key):
+            raise not_found
+        return file_storage.get(key), media_type
+    except SandboxViolationError as exc:
+        raise not_found from exc
     except OSError as exc:
-        raise PersonaError(
-            "image not found",
-            context={"reason": "not_found", "ref": ref[:120]},
-        ) from exc
+        raise not_found from exc
 
 
 # ---------------------------------------------------------------------------

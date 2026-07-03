@@ -26,15 +26,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from persona.audit import JSONLAuditLogger
 from persona.graph import PostgresEntityRegistry, build_graph_store
 from persona.graph.postgres import PostgresGraphBackend
 from persona.jobs import JobRegistry
 from persona.logging import get_logger
 from persona_runtime.extraction.synthesizer import build_synthesizer
 
+from persona_api.db.audit_factory import build_audit_logger
 from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.queue import JobQueue
@@ -51,8 +52,8 @@ from persona_api.tasks.store import CheckpointStore, TaskStore
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from datetime import datetime
-    from pathlib import Path
 
+    from persona.audit import AuditLogger
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
     from persona_runtime.legs import LegOutcome
@@ -76,7 +77,7 @@ def build_worker_registry(
     rls_engine: Engine,
     embedder: Embedder,
     tier_registry: TierRegistry,
-    audit_root: Path,
+    config: APIConfig,
     synthesis_tier: str,
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
@@ -96,7 +97,10 @@ def build_worker_registry(
         embedder: The persona-memory embedder (shared, lazy weights).
         tier_registry: The app-scoped tier registry; ``get(synthesis_tier)``
             resolves the synthesis backend (fallback ``small → mid → frontier``).
-        audit_root: The JSONL audit root the graph store's audit logger writes to.
+        config: The API config — drives the graph store's audit backend so the
+            worker writes graph-mutation audit to the SAME place the API does
+            (R5-D-2: worker MUST select the same backend or scaling it re-opens
+            the single-writer JSONL hole).
         synthesis_tier: The tier the extractor + entity judge run on (D-K2-3).
         runtime_factory: The app's runtime factory (the leg runner). ``None`` →
             the ``task_leg`` tenant is NOT registered (A2 legs stay inert — the
@@ -110,7 +114,9 @@ def build_worker_registry(
     graph_store = build_graph_store(
         engine=rls_engine,
         embedder=embedder,
-        audit_logger=JSONLAuditLogger(audit_root),
+        # R5-D-2: Postgres audit when PERSONA_API_AUDIT_BACKEND=postgres, else the
+        # JSONL default (config.audit_root) — the same selection the API makes.
+        audit_logger=build_audit_logger(config, rls_engine),
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(
@@ -125,7 +131,10 @@ def build_worker_registry(
             runtime_factory=runtime_factory,
             memory_backend=memory_backend,
             edition=edition,
-            audit_root=audit_root,
+            # R5-D-2 worker parity: the origination audit sink follows the same
+            # config-selected backend; audit_root stays the JSONL fallback path.
+            audit_root=Path(config.audit_root),
+            audit_logger=build_audit_logger(config, rls_engine),
         )
     _log.info(
         "worker registry composed",
@@ -143,6 +152,7 @@ def _register_task_leg_tenant(
     memory_backend: Backend | None,
     edition: object | None,
     audit_root: Path,
+    audit_logger: AuditLogger | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4)."""
     task_store = TaskStore(rls_engine)
@@ -159,6 +169,7 @@ def _register_task_leg_tenant(
         memory_backend=memory_backend,
         edition=edition,
         audit_root=audit_root,
+        audit_logger=audit_logger,
     )
     register_task_leg_handler(
         registry,
@@ -181,6 +192,7 @@ def _build_milestone_hook(
     memory_backend: Backend | None,
     edition: object | None,
     audit_root: Path,
+    audit_logger: AuditLogger | None = None,
 ) -> Callable[[LegOutcome, datetime], Awaitable[None]] | None:
     """Build the digest-on-milestone closure, or ``None`` when the digest can't be delivered.
 
@@ -207,6 +219,7 @@ def _build_milestone_hook(
         memory_backend=memory_backend,
         edition=edition,  # type: ignore[arg-type]  # Edition; typed as object to avoid an import cycle
         audit_root=audit_root,
+        audit_logger=audit_logger,
     )
     publisher = TaskUpdatePublisher(sender=sender)
     tasks = TaskStore(rls_engine)
@@ -284,7 +297,6 @@ def start_in_process_worker(
     rls_engine: Engine,
     embedder: Embedder,
     tier_registry: TierRegistry,
-    audit_root: Path,
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
 ) -> InProcessWorker:
@@ -301,7 +313,7 @@ def start_in_process_worker(
         rls_engine=rls_engine,
         embedder=embedder,
         tier_registry=tier_registry,
-        audit_root=audit_root,
+        config=config,
         synthesis_tier=config.synthesis_tier,
         runtime_factory=runtime_factory,
         memory_backend=memory_backend,

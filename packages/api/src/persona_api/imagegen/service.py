@@ -60,7 +60,6 @@ References:
 from __future__ import annotations
 
 import hashlib
-import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -75,22 +74,21 @@ from persona.imagegen import (
 )
 from persona.imagegen._merge import merge_visual_style
 from persona.logging import get_logger
-from persona.tools._sandbox import resolve_sandbox_path
 from persona.tools.audit import ToolAuditEvent
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.errors import ConcurrencyCappedError
 from persona_api.imagegen.concurrency import acquire_user_concurrency
+from persona_api.services.artifact_storage import artifact_key
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from persona.imagegen.protocol import ImageBackend
     from persona.imagegen.result import ImageMediaType
     from persona.tools.audit import ToolAuditLogger
     from sqlalchemy import Engine
 
     from persona_api.editions import CreditsPolicy
+    from persona_api.storage import FileStorage
 
 __all__ = ["DEFAULT_COST_PER_IMAGE_CREDITS", "generate", "generate_avatar"]
 
@@ -149,7 +147,7 @@ async def generate(
     *,
     rls_engine: Engine,
     credits_policy: CreditsPolicy | None = None,
-    workspace_root: Path,
+    file_storage: FileStorage,
     backend: ImageBackend,
     user_id: str,
     persona_id: str,
@@ -316,13 +314,15 @@ async def generate(
     # Phase 2: persist bytes to the workspace (D-13-4 layout) and
     # rewrite the result so ``workspace_path`` is populated and
     # ``image_bytes`` is zeroed for the response envelope.
-    sandbox_root = workspace_root / user_id / persona_id
-    sandbox_root.mkdir(parents=True, exist_ok=True)
+    # R5-D-4: persistence now routes through file_storage (the backend owns the
+    # path resolution + dir creation); no local sandbox_root needed here.
 
     stored_images: list[GeneratedImage] = []
     for img in result.images:
         relative = _persist_bytes(
-            sandbox_root=sandbox_root,
+            file_storage=file_storage,
+            owner_id=user_id,
+            persona_id=persona_id,
             image_bytes=img.image_bytes,
             media_type=img.media_type,
             conversation_id=None,  # Spec 15 generate doesn't thread conv_id at v0.1
@@ -351,7 +351,9 @@ async def generate(
 
 def _persist_bytes(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
+    owner_id: str,
+    persona_id: str,
     image_bytes: bytes,
     media_type: ImageMediaType,
     conversation_id: str | None = None,
@@ -379,59 +381,40 @@ def _persist_bytes(
     ref = hashlib.blake2b(image_bytes, digest_size=16).hexdigest()
     relative = f"{_UPLOAD_DIR_NAME}/{ref}{ext}"
 
-    resolved = resolve_sandbox_path(sandbox_root, relative)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-
-    # ``O_NOFOLLOW`` closes the TOCTOU window between resolver + open
-    # (mirrors ``persona.tools.builtin.file_write`` and the spec-13
-    # ``image_service.upload`` write site). ``O_EXCL`` would reject the
-    # second generation of identical bytes; we tolerate that (idempotent
-    # content-addressed write).
-    fd = os.open(
-        resolved,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        os.write(fd, image_bytes)
-    finally:
-        os.close(fd)
+    # R5-D-4: write through the FileStorage backend (LocalFileStorage keeps the
+    # exact resolve_sandbox_path + O_NOFOLLOW byte-identical write; S3 uploads the
+    # object). The content-addressed key stays idempotent-overwrite (never O_EXCL).
+    key = artifact_key(owner_id, persona_id, relative)
+    file_storage.put(key, image_bytes, content_type=media_type)
 
     # F5 T05 — D-F5-X-artifact-metadata-convention: write the sidecar so the
     # F5 artifact-list endpoint can filter generated images. Best-effort —
     # failure logs but does not abort the generation (the bytes are the
     # primary deliverable; metadata is enrichment).
-    try:
-        from persona_api.services.artifact_metadata import (
-            WorkspaceArtifactMetadata,
-            utcnow,
-            write_artifact_sidecar,
-        )
+    from persona_api.services.artifact_metadata import WorkspaceArtifactMetadata, utcnow
+    from persona_api.services.artifact_storage import write_sidecar
 
-        write_artifact_sidecar(
-            resolved,
-            WorkspaceArtifactMetadata(
-                source="generated",
-                type="image",
-                producing_spec="15",
-                conversation_id=conversation_id,
-                created_at=utcnow(),
-                original_name=None,
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 — sidecar failure non-fatal
-        _LOG.warning(
-            "F5 sidecar write failed (imagegen still succeeded)",
-            workspace_path=relative,
-            error=str(exc),
-        )
+    # Sidecar routes through the SAME backend as a sibling object (R5-D-4), so
+    # listing works on S3. ``write_sidecar`` is best-effort (suppresses failures).
+    write_sidecar(
+        file_storage,
+        key,
+        WorkspaceArtifactMetadata(
+            source="generated",
+            type="image",
+            producing_spec="15",
+            conversation_id=conversation_id,
+            created_at=utcnow(),
+            original_name=None,
+        ),
+    )
 
     return relative
 
 
 async def generate_avatar(
     *,
-    workspace_root: Path,
+    file_storage: FileStorage,
     backend: ImageBackend,
     user_id: str,
     persona_id: str,
@@ -561,12 +544,14 @@ async def generate_avatar(
 
     # 3. Persist bytes to the workspace (D-13-4 layout) — same content-
     #    addressed write as ``generate``; the avatar is one square image.
-    sandbox_root = workspace_root / user_id / persona_id
-    sandbox_root.mkdir(parents=True, exist_ok=True)
+    # R5-D-4: persistence now routes through file_storage (the backend owns the
+    # path resolution + dir creation); no local sandbox_root needed here.
     stored_images: list[GeneratedImage] = []
     for img in result.images:
         relative = _persist_bytes(
-            sandbox_root=sandbox_root,
+            file_storage=file_storage,
+            owner_id=user_id,
+            persona_id=persona_id,
             image_bytes=img.image_bytes,
             media_type=img.media_type,
             conversation_id=None,

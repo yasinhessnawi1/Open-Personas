@@ -54,6 +54,7 @@ from persona_api.db.models import credits as credits_t
 from persona_api.errors import ConcurrencyCappedError
 from persona_api.imagegen import service as imagegen_service
 from persona_api.imagegen.concurrency import acquire_user_concurrency
+from persona_api.storage import LocalFileStorage
 from sqlalchemy import select, text
 
 if TYPE_CHECKING:
@@ -304,7 +305,7 @@ def test_generate_happy_path_persists_bytes_and_deducts_credits(
     result = asyncio.run(
         imagegen_service.generate(
             rls_engine=seeded_engine,
-            workspace_root=tmp_path / "workspace",
+            file_storage=LocalFileStorage(tmp_path / "workspace"),
             backend=backend,
             user_id=_USER,
             persona_id=_PERSONA,
@@ -351,7 +352,7 @@ def test_generate_happy_path_with_count_2_persists_two_files(
     result = asyncio.run(
         imagegen_service.generate(
             rls_engine=seeded_engine,
-            workspace_root=tmp_path / "workspace",
+            file_storage=LocalFileStorage(tmp_path / "workspace"),
             backend=backend,
             user_id=_USER,
             persona_id=_PERSONA,
@@ -396,7 +397,7 @@ def test_generate_happy_path_merges_visual_style_into_prompt(
     asyncio.run(
         imagegen_service.generate(
             rls_engine=seeded_engine,
-            workspace_root=tmp_path / "workspace",
+            file_storage=LocalFileStorage(tmp_path / "workspace"),
             backend=backend,
             user_id=_USER,
             persona_id=_PERSONA,
@@ -430,7 +431,7 @@ def test_generate_backend_content_rejection_refunds_credits(
         asyncio.run(
             imagegen_service.generate(
                 rls_engine=seeded_engine,
-                workspace_root=tmp_path / "workspace",
+                file_storage=LocalFileStorage(tmp_path / "workspace"),
                 backend=backend,
                 user_id=_USER,
                 persona_id=_PERSONA,
@@ -474,7 +475,7 @@ def test_generate_backend_transient_error_refunds_credits(
         asyncio.run(
             imagegen_service.generate(
                 rls_engine=seeded_engine,
-                workspace_root=tmp_path / "workspace",
+                file_storage=LocalFileStorage(tmp_path / "workspace"),
                 backend=backend,
                 user_id=_USER,
                 persona_id=_PERSONA,
@@ -532,7 +533,7 @@ def test_generate_concurrency_capped_does_not_touch_credits(
                 asyncio.run(
                     imagegen_service.generate(
                         rls_engine=seeded_engine,
-                        workspace_root=tmp_path / "workspace",
+                        file_storage=LocalFileStorage(tmp_path / "workspace"),
                         backend=backend,
                         user_id=_USER,
                         persona_id=_PERSONA,
@@ -585,7 +586,7 @@ def test_generate_after_concurrency_cap_releases_succeeds(
                 asyncio.run(
                     imagegen_service.generate(
                         rls_engine=seeded_engine,
-                        workspace_root=tmp_path / "workspace",
+                        file_storage=LocalFileStorage(tmp_path / "workspace"),
                         backend=backend,
                         user_id=_USER,
                         persona_id=_PERSONA,
@@ -602,7 +603,7 @@ def test_generate_after_concurrency_cap_releases_succeeds(
     result = asyncio.run(
         imagegen_service.generate(
             rls_engine=seeded_engine,
-            workspace_root=tmp_path / "workspace",
+            file_storage=LocalFileStorage(tmp_path / "workspace"),
             backend=backend,
             user_id=_USER,
             persona_id=_PERSONA,

@@ -18,7 +18,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 import yaml
-from persona.audit import JSONLAuditLogger
+from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.errors import PersonaError, PersonaNotFoundError
 from persona.language_capability import serviceability_warning
 from persona.logging import get_logger
@@ -243,6 +243,7 @@ def _build_registry(
     embedder: Embedder,
     audit_root: Path,
     memory_backend: Backend | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> PersonaRegistry:
     """Compose the four typed stores over the edition's memory backend.
 
@@ -254,7 +255,9 @@ def _build_registry(
     memory_chunks`` — the create/update routes pass the app's edition backend.
     """
     backend = memory_backend or PostgresBackend(engine=engine, embedder=embedder)
-    audit = JSONLAuditLogger(audit_root)
+    # R5-D-2: the app-selected audit backend (Postgres when multi-worker), else
+    # the JSONL default (byte-unchanged for CLI / tests that pass no logger).
+    audit = audit_logger or JSONLAuditLogger(audit_root)
     stores = {
         "identity": IdentityStore(backend=backend, audit_logger=audit),
         "self_facts": SelfFactsStore(backend=backend, audit_logger=audit),
@@ -273,6 +276,7 @@ def create_persona(
     yaml_str: str,
     avatar_url: str | None = None,
     memory_backend: Backend | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> str:
     """Create a persona: insert the row + populate memory stores (D-08-8).
 
@@ -310,7 +314,7 @@ def create_persona(
             )
         )
     # Persona row committed → its FK target is visible to the store connections.
-    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend)
+    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
     registry.load_persona(persona)
     return persona_id
 
@@ -325,6 +329,7 @@ def update_persona(
     yaml_str: str,
     avatar_url: str | None = None,
     memory_backend: Backend | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> None:
     """Replace a persona's YAML (re-validated) and re-index its memory.
 
@@ -352,7 +357,7 @@ def update_persona(
         )
         if result.first() is None:
             raise PersonaNotFoundError("persona not found", context={"id": persona_id})
-    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend)
+    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
     registry.load_persona(persona)
 
 

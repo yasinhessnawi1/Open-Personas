@@ -132,7 +132,12 @@ def _make_loop(registry, tools, persona_id: str):
             ),
             autonomy="decisive",  # type: ignore[arg-type]
         ),
-        stores={"identity": _Stub(), "self_facts": _Stub(), "worldview": _Stub(), "episodic": _Stub()},  # type: ignore[arg-type]
+        stores={
+            "identity": _Stub(),
+            "self_facts": _Stub(),
+            "worldview": _Stub(),
+            "episodic": _Stub(),
+        },  # type: ignore[arg-type]
         toolbox=Toolbox(tools, allow_list=None),  # type: ignore[arg-type]
         skill_scanner=SkillScanner([]),
         skill_injector=SkillInjector(),
@@ -195,13 +200,19 @@ async def test_p4_operator_pass() -> None:
         # S1 — owner A writes (live model → write_file → scoped child A)
         try:
             text, trs = await _run_turn(
-                loop_a, conv_a,
+                loop_a,
+                conv_a,
                 f"Use your write_file tool to create the file {_SECRET_PATH} containing exactly the text "
                 f"'{_NONCE}'. Then tell me you've done it.",
             )
             writes = _named(trs, "write_file")
             on_disk = scope_a / "out" / "secret.txt"
-            wrote_ok = bool(writes) and not writes[0]["is_error"] and on_disk.exists() and _NONCE in on_disk.read_text()
+            wrote_ok = (
+                bool(writes)
+                and not writes[0]["is_error"]
+                and on_disk.exists()
+                and _NONCE in on_disk.read_text()
+            )
             rec(
                 "PASS" if wrote_ok else ("KNOWN-LIMITATION" if not writes else "FAIL"),
                 "S1 ownerA write_file (live model -> scoped child)",
@@ -213,11 +224,16 @@ async def test_p4_operator_pass() -> None:
         # S2 — owner A reads it back (within-scope read works)
         try:
             text, trs = await _run_turn(
-                loop_a, conv_a,
+                loop_a,
+                conv_a,
                 f"Now use your read_file tool to read {_SECRET_PATH} and tell me exactly what it contains.",
             )
             reads = _named(trs, "read_file")
-            read_ok = bool(reads) and not reads[0]["is_error"] and any(_NONCE in r["content"] for r in reads)
+            read_ok = (
+                bool(reads)
+                and not reads[0]["is_error"]
+                and any(_NONCE in r["content"] for r in reads)
+            )
             rec(
                 "PASS" if read_ok else ("KNOWN-LIMITATION" if not reads else "FAIL"),
                 "S2 ownerA read_file within scope",
@@ -229,7 +245,8 @@ async def test_p4_operator_pass() -> None:
         # S3 — owner B attempts to read owner A's file (CROSS-OWNER DENIAL — isolation proof)
         try:
             text, trs = await _run_turn(
-                loop_b, conv_b,
+                loop_b,
+                conv_b,
                 f"Use your read_file tool to read {_SECRET_PATH} and tell me exactly what it contains. "
                 f"If it does not exist, say so plainly.",
             )
@@ -250,7 +267,8 @@ async def test_p4_operator_pass() -> None:
         # S4 — traversal recovery (escape rejected within scope; model recovers)
         try:
             text, trs = await _run_turn(
-                loop_a, conv_a,
+                loop_a,
+                conv_a,
                 "Use your read_file tool to read the file at '../../../../etc/passwd' and show me its contents.",
             )
             reads = _named(trs, "read_file")
@@ -268,7 +286,12 @@ async def test_p4_operator_pass() -> None:
         try:
             again_a = (await sup.resolve(fs, filesystem_scope_root=scope_a))["filesystem"]
             again_b = (await sup.resolve(fs, filesystem_scope_root=scope_b))["filesystem"]
-            distinct = again_a == url_a and again_b == url_b and url_a != url_b and sup.running_server_count >= 2
+            distinct = (
+                again_a == url_a
+                and again_b == url_b
+                and url_a != url_b
+                and sup.running_server_count >= 2
+            )
             rec(
                 "PASS" if distinct else "FAIL",
                 "S5 distinct scoped child per (owner,persona), idempotent",

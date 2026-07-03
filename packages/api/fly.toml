@@ -1,9 +1,30 @@
 # Open Persona — persona-api Fly.io app config (Spec 11, T10).
 # Companion walkthrough: deploy/FLY_DEPLOY.md
 #
-# Single Machine, single uvicorn worker (S08-4 / D-08-5) — the in-process
-# agentic-run event bus and in-memory rate limiter REQUIRE it. Never autoscale,
-# never autostop.
+# Single Machine, single uvicorn worker (S08-4 / D-08-5). Kept single for now —
+# NOT autoscaled, NOT autostopped — see the scale-readiness note below.
+#
+# SCALE-READINESS (Spec R5, R5-D-6). R5 lifted the single-worker assumption for
+# the subsystems where it was a correctness bug, so these are now multi-worker /
+# multi-instance SAFE:
+#   - Audit (store-mutation + tool): PERSONA_API_AUDIT_BACKEND=postgres routes to
+#     the store_audit_events / tool_audit_events tables (was single-writer JSONL).
+#   - Request telemetry: RequestTelemetryMiddleware → the shared request_telemetry
+#     table (§6.3), aggregated across workers.
+#   - Artifacts / uploads / images: PERSONA_API_STORAGE_BACKEND=s3 (Tigris) lifts
+#     the Fly-volume host/region pin so bytes aren't machine-local.
+# STILL REQUIRED before raising min_machines_running > 1 (documented-OUT of R5):
+#   - The in-process agentic-run / chat SSE event bus (background/run_worker.py) is
+#     machine-local — a client reconnecting to a different Machine loses the live
+#     stream. Needs sticky sessions or LISTEN/NOTIFY/pub-sub first. Steps persist
+#     to runs.steps, so runs stay crash-viewable, but the live tail does not survive.
+#   - The rate limiter is already PostgresRateLimitStore (D-19-5, multi-instance-safe).
+#   - The routing latency tracker re-warms per-Machine (~5 turns, self-healing) —
+#     degraded-but-tolerable, not blocking.
+#   - The file-tool sandbox (PERSONA_TOOLS_SANDBOX_ROOT) is still volume-local
+#     (R5-D-4 deferred). Multi-instance file-tool state needs its own pass.
+# Enabling N-instance is a deploy decision AFTER the event-bus item is addressed;
+# set the three env backends above to their shared-store values at that time.
 
 app = "open-persona-api"                # rename: `flyctl apps create <your-name>` first
 primary_region = "fra"                  # Frankfurt — near Vercel `fra1` (D-11-2)

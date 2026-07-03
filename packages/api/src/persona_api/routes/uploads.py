@@ -221,7 +221,7 @@ def _handle_image_upload(
     """
     try:
         ref = image_service.upload(
-            workspace_root=request.app.state.workspace_root,
+            file_storage=request.app.state.file_storage,
             owner_id=user.id,
             persona_id=persona_id,
             file_bytes=file_bytes,
@@ -288,7 +288,7 @@ def _handle_document_upload(
 
     try:
         ref = document_service.upload(
-            sandbox_root=Path(request.app.state.workspace_root),
+            file_storage=request.app.state.file_storage,
             owner_id=user.id,
             persona_id=persona_id,
             conversation_id=conversation_id,
@@ -364,7 +364,7 @@ async def get_upload(
 
     try:
         file_bytes, media_type = image_service.fetch(
-            workspace_root=request.app.state.workspace_root,
+            file_storage=request.app.state.file_storage,
             owner_id=user.id,
             persona_id=persona_id,
             ref=ref,

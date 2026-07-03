@@ -151,14 +151,13 @@ async def delete_conversation(
         rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
     )
 
-    # T19 — document workspace + DocumentStore chunks cascade.
-    workspace_root = getattr(request.app.state, "workspace_root", None)
+    # T19 — document workspace + DocumentStore chunks cascade (R5-D-4: via the
+    # storage backend so uploads on S3 cascade-delete too).
+    file_storage = getattr(request.app.state, "file_storage", None)
     build_document_store = getattr(request.app.state, "build_document_store", None)
-    if workspace_root is not None and build_document_store is not None:
-        from pathlib import Path  # noqa: PLC0415 — deliberate local import
-
+    if file_storage is not None and build_document_store is not None:
         document_service.remove_all_for_conversation(
-            sandbox_root=Path(workspace_root),
+            file_storage=file_storage,
             owner_id=user.id,
             persona_id=persona_id,
             conversation_id=conversation_id,
@@ -232,7 +231,7 @@ async def post_message(
         )
         persona_id_for_docs = str(conversation_row["persona_id"])
         document_context = document_service.build_document_context(
-            sandbox_root=request.app.state.workspace_root,
+            file_storage=request.app.state.file_storage,
             owner_id=user.id,
             persona_id=persona_id_for_docs,
             conversation_id=conversation_id,
@@ -269,6 +268,9 @@ async def post_message(
         # Image-workspace cascade: thread the workspace root so the turn can
         # resolve the uploaded image bytes for the model + sandbox.
         workspace_root=getattr(request.app.state, "workspace_root", None),
+        # R5-D-4: the file-storage backend the turn resolves inbound image bytes
+        # through (local/S3). workspace_root stays for the deferred file-tool paths.
+        file_storage=getattr(request.app.state, "file_storage", None),
     )
     # Spec K2 (T8d): off-critical-path synthesis is enqueued at the turn boundary
     # by the detached worker on clean completion (relocated from the old inline

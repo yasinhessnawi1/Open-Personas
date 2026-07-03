@@ -19,6 +19,7 @@ from persona_api.services.artifact_metadata import (
     SIDECAR_SUFFIX,
     read_artifact_sidecar,
 )
+from persona_api.storage import LocalFileStorage
 
 
 def _make_png() -> bytes:
@@ -50,7 +51,7 @@ def test_image_upload_writes_f5_sidecar_with_correct_metadata(
     png_bytes: bytes,
 ) -> None:
     ref = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id="u1",
         persona_id="astrid",
         file_bytes=png_bytes,
@@ -80,7 +81,7 @@ def test_image_upload_sidecar_handles_none_conversation_id_and_filename(
 ) -> None:
     """The route may not have conversation_id or filename (persona-scoped uploads)."""
     ref = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id="u1",
         persona_id="astrid",
         file_bytes=png_bytes,
@@ -93,22 +94,41 @@ def test_image_upload_sidecar_handles_none_conversation_id_and_filename(
     assert meta.original_name is None
 
 
+class _SidecarFailingStorage:
+    """Wraps LocalFileStorage but raises on the ``.f5.json`` sidecar put — proves
+    the sidecar write is best-effort (R5-D-4: ``write_sidecar`` swallows it)."""
+
+    def __init__(self, root: Path) -> None:
+        self._inner = LocalFileStorage(root)
+
+    def put(self, key: str, data: bytes, *, content_type: str | None = None) -> str:
+        if key.endswith(SIDECAR_SUFFIX):
+            raise OSError("simulated disk failure")
+        return self._inner.put(key, data, content_type=content_type)
+
+    def get(self, key: str) -> bytes:
+        return self._inner.get(key)
+
+    def open_stream(self, key: str) -> object:
+        return self._inner.open_stream(key)
+
+    def exists(self, key: str) -> bool:
+        return self._inner.exists(key)
+
+    def delete(self, key: str) -> bool:
+        return self._inner.delete(key)
+
+    def list(self, prefix: str) -> object:
+        return self._inner.list(prefix)
+
+
 def test_image_upload_sidecar_write_failure_does_not_abort_upload(
     workspace_root: Path,
     png_bytes: bytes,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sidecar write is best-effort — a failure must NOT abort the upload."""
-
-    def _raise(*_args: object, **_kwargs: object) -> None:
-        raise OSError("simulated disk failure")
-
-    import persona_api.services.artifact_metadata as am
-
-    monkeypatch.setattr(am, "write_artifact_sidecar", _raise)
-
     ref = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=_SidecarFailingStorage(workspace_root),  # type: ignore[arg-type]
         owner_id="u1",
         persona_id="astrid",
         file_bytes=png_bytes,
@@ -128,7 +148,7 @@ def test_image_upload_sidecar_idempotent_on_re_upload(
     with the new metadata (last-writer-wins per D-F5-X-artifact-metadata-
     convention)."""
     ref1 = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id="u1",
         persona_id="astrid",
         file_bytes=png_bytes,
@@ -136,7 +156,7 @@ def test_image_upload_sidecar_idempotent_on_re_upload(
         original_name="first.png",
     )
     ref2 = image_service.upload(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id="u1",
         persona_id="astrid",
         file_bytes=png_bytes,

@@ -251,7 +251,7 @@ async def post_imagegen(
         result = await imagegen_service.generate(
             rls_engine=request.app.state.rls_engine,
             credits_policy=request.app.state.credits_policy,
-            workspace_root=request.app.state.workspace_root,
+            file_storage=request.app.state.file_storage,
             backend=backend,
             user_id=user.id,
             persona_id=persona_id,

@@ -23,24 +23,18 @@ indistinguishable from the operator path downstream.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import mimetypes
-import os
 from typing import TYPE_CHECKING
 
 from persona.schema.tools import PersistedArtifact
-from persona.tools._sandbox import resolve_sandbox_path
 
 from persona_api.sandbox import get_sandbox_request_context
-from persona_api.services.artifact_metadata import (
-    WorkspaceArtifactMetadata,
-    utcnow,
-    write_artifact_sidecar,
-)
+from persona_api.services.artifact_metadata import WorkspaceArtifactMetadata, utcnow
+from persona_api.services.artifact_storage import artifact_key, write_sidecar
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from persona_api.storage import FileStorage
 
 __all__ = ["WorkspaceDirPersister"]
 
@@ -115,22 +109,9 @@ class WorkspaceDirPersister:
     the persona owner via the sandbox request context (D-28-X-persister-user-scope).
     """
 
-    def __init__(self, *, workspace_root: Path, persona_id: str) -> None:
-        self._workspace_root = workspace_root
+    def __init__(self, *, file_storage: FileStorage, persona_id: str) -> None:
+        self._file_storage = file_storage
         self._persona_id = persona_id
-
-    def _resolve_sandbox_root(self) -> Path:
-        """Resolve ``<workspace_root>/<owner_id>/<persona_id>`` from context.
-
-        Raises:
-            RuntimeError: when no sandbox request context is bound — the chat
-                persist path requires an authenticated, persona-scoped request.
-        """
-        ctx = get_sandbox_request_context()
-        if ctx is None:
-            msg = "WorkspaceDirPersister.persist requires a bound sandbox request context"
-            raise RuntimeError(msg)
-        return self._workspace_root / ctx.owner_id / self._persona_id
 
     async def persist(
         self,
@@ -141,41 +122,38 @@ class WorkspaceDirPersister:
     ) -> PersistedArtifact:
         """Persist ``data`` and return its :class:`PersistedArtifact`.
 
-        Content-addressed (blake2b-16) so identical bytes collapse to one file
-        (idempotent). The F5 sidecar is best-effort — a sidecar failure does not
-        fail the persist (the bytes are the primary deliverable).
+        Content-addressed (blake2b-16) so identical bytes collapse to one object
+        (idempotent). R5-D-4: written through the storage backend (local
+        byte-identical / S3 object); the F5 sidecar is best-effort (a sidecar
+        failure never fails the persist — the bytes are the deliverable).
+
+        Raises:
+            RuntimeError: when no sandbox request context is bound — the chat
+                persist path requires an authenticated, persona-scoped request.
         """
-        sandbox_root = self._resolve_sandbox_root()
+        ctx = get_sandbox_request_context()
+        if ctx is None:
+            msg = "WorkspaceDirPersister.persist requires a bound sandbox request context"
+            raise RuntimeError(msg)
+
         ext = _ext_for(mime_type, suggested_filename)
         digest = hashlib.blake2b(data, digest_size=16).hexdigest()
         relative = f"{_UPLOAD_DIR_NAME}/{digest}{ext}"
+        key = artifact_key(ctx.owner_id, self._persona_id, relative)
 
-        resolved = resolve_sandbox_path(sandbox_root, relative)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        # O_NOFOLLOW closes the TOCTOU window; O_TRUNC tolerates re-persisting
-        # identical content-addressed bytes (idempotent, never O_EXCL).
-        fd = os.open(resolved, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-
-        ctx = get_sandbox_request_context()
-        conversation_id = ctx.conversation_id if ctx is not None else None
-        # Sidecar is enrichment — a failure must not fail the persist (the bytes
-        # are the primary deliverable). Mirrors imagegen/service.py:_persist_bytes.
-        with contextlib.suppress(Exception):
-            write_artifact_sidecar(
-                resolved,
-                WorkspaceArtifactMetadata(
-                    source="generated",
-                    type=_sidecar_type_for(mime_type),  # type: ignore[arg-type]
-                    producing_spec="28",
-                    conversation_id=conversation_id,
-                    created_at=utcnow(),
-                    original_name=_display_name_for(suggested_filename),
-                ),
-            )
+        self._file_storage.put(key, data, content_type=mime_type)
+        write_sidecar(
+            self._file_storage,
+            key,
+            WorkspaceArtifactMetadata(
+                source="generated",
+                type=_sidecar_type_for(mime_type),  # type: ignore[arg-type]
+                producing_spec="28",
+                conversation_id=ctx.conversation_id,
+                created_at=utcnow(),
+                original_name=_display_name_for(suggested_filename),
+            ),
+        )
 
         return PersistedArtifact(
             workspace_path=relative,

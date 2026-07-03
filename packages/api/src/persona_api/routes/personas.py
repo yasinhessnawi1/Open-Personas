@@ -227,7 +227,9 @@ async def _maybe_generate_avatar(
     its avatar could not be drawn. F1's default renders until one is set.
     """
     state = request.app.state
-    audit = JSONLToolAuditLogger(state.audit_root)
+    # R5-D-2: the app-selected tool-audit backend (Postgres when multi-worker),
+    # falling back to the JSONL default for test overrides that set no logger.
+    audit = getattr(state, "tool_audit_logger", None) or JSONLToolAuditLogger(state.audit_root)
 
     # Backend absent (no PERSONA_IMAGEGEN_API_KEY) → fail-soft + audit.
     backend = getattr(state, "image_backend", None)
@@ -246,7 +248,7 @@ async def _maybe_generate_avatar(
     try:
         result = await asyncio.wait_for(
             imagegen_service.generate_avatar(
-                workspace_root=state.workspace_root,
+                file_storage=state.file_storage,
                 backend=backend,
                 user_id=owner_id,
                 persona_id=persona_id,
@@ -377,6 +379,9 @@ async def create_persona(
         # cloud); a hardcoded PostgresBackend has no memory_chunks table on the
         # community SQLite path (Spec 33 D-33-X-memory-chroma-community).
         memory_backend=getattr(request.app.state, "memory_backend", None),
+        # R5-D-2: the app-selected store-mutation audit backend (Postgres when
+        # multi-worker). None (test overrides) ⇒ the JSONL default.
+        audit_logger=getattr(request.app.state, "audit_logger", None),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,
@@ -654,6 +659,8 @@ async def grant_tool(
         # Edition's typed-memory backend (Chroma community / Postgres cloud) — the
         # self_facts consent audit must not hardcode PostgresBackend on SQLite.
         memory_backend=getattr(request.app.state, "memory_backend", None),
+        # R5-D-2: app-selected store-mutation audit backend (JSONL default).
+        audit_logger=getattr(request.app.state, "audit_logger", None),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,
@@ -746,6 +753,8 @@ async def update_persona(
         # Edition's typed-memory backend (Chroma community / Postgres cloud) — see
         # create_persona; never a hardcoded PostgresBackend on the SQLite path.
         memory_backend=getattr(request.app.state, "memory_backend", None),
+        # R5-D-2: app-selected store-mutation audit backend (JSONL default).
+        audit_logger=getattr(request.app.state, "audit_logger", None),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from persona.audit import JSONLAuditLogger
+from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.backends.errors import ProviderError, TierNotConfiguredError
 from persona.backends.metadata import (
     ChainedModelMetadataResolver,
@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from persona_api.config import APIConfig
     from persona_api.editions import CreditsPolicy
     from persona_api.sandbox.pool import SandboxPool
+    from persona_api.storage import FileStorage
 
 __all__ = ["RuntimeFactory"]
 
@@ -108,6 +109,8 @@ class RuntimeFactory:
         tier_registry: TierRegistry,
         turn_log_writer: TurnLogWriter,
         audit_root: Path,
+        audit_logger: AuditLogger | None = None,
+        file_storage: FileStorage | None = None,
         core_config: PersonaCoreConfig | None = None,
         sandbox_pool: SandboxPool | None = None,
         workspace_root: Path | None = None,
@@ -152,6 +155,13 @@ class RuntimeFactory:
         self._tier_registry = tier_registry
         self._turn_log_writer = turn_log_writer
         self._audit_root = audit_root
+        # R5-D-2: the app-selected audit backend (Postgres when multi-worker,
+        # else JSONL). None ⇒ CLI / legacy callers get the byte-unchanged JSONL
+        # default via ``_resolve_audit_logger`` — no behaviour change for them.
+        self._audit_logger = audit_logger
+        # R5-D-4: the storage backend the chat-path workspace persister writes
+        # produced artifacts through. None ⇒ persistence disabled (CLI / test).
+        self._file_storage = file_storage
         self._core_config = core_config or PersonaCoreConfig()
         # Spec 12 T10 — hosted sandbox pool. None when E2B_API_KEY is unset
         # (dev environments without an account boot cleanly); the
@@ -219,6 +229,15 @@ class RuntimeFactory:
             else True
         )
 
+    def _resolve_audit_logger(self) -> AuditLogger:
+        """The app-selected audit backend (R5-D-2), or the JSONL default.
+
+        Returns the injected logger (Postgres in a multi-worker deploy) when the
+        composition root supplied one, else a fresh ``JSONLAuditLogger`` on the
+        audit root — the historical, byte-unchanged default for CLI / tests.
+        """
+        return self._audit_logger or JSONLAuditLogger(self._audit_root)
+
     def enable_graph_writes(self, *, audit_root: Path) -> None:
         """Compose the user-scoped graph store for ``record_user_fact`` (Spec K2 T8d).
 
@@ -230,13 +249,14 @@ class RuntimeFactory:
         """
         if self._graph_store is not None:
             return
-        from persona.audit import JSONLAuditLogger
         from persona.graph import build_graph_store
 
+        # R5-D-2: prefer the app-selected backend; ``audit_root`` remains the
+        # JSONL fallback for legacy callers (see ``_resolve_audit_logger``).
         self._graph_store = build_graph_store(
             engine=self._engine,
             embedder=self._embedder,
-            audit_logger=JSONLAuditLogger(audit_root),
+            audit_logger=self._audit_logger or JSONLAuditLogger(audit_root),
         )
         _logger.info("graph writes enabled (record_user_fact composed into toolboxes)")
 
@@ -426,7 +446,7 @@ class RuntimeFactory:
         backend = self._memory_backend or PostgresBackend(
             engine=self._engine, embedder=self._embedder
         )
-        audit = JSONLAuditLogger(self._audit_root)
+        audit = self._resolve_audit_logger()
         return {
             "identity": IdentityStore(backend=backend, audit_logger=audit),
             "self_facts": SelfFactsStore(backend=backend, audit_logger=audit),
@@ -462,9 +482,9 @@ class RuntimeFactory:
         # tools produce their pre-Spec-28 result shape (criterion #9).
         workspace_persister = (
             WorkspaceDirPersister(
-                workspace_root=self._workspace_root, persona_id=persona.persona_id
+                file_storage=self._file_storage, persona_id=persona.persona_id
             )
-            if self._workspace_root is not None and persona.persona_id is not None
+            if self._file_storage is not None and persona.persona_id is not None
             else None
         )
         # SECURITY (cross-context isolation): the built-in ``file_read`` /
@@ -995,8 +1015,8 @@ class RuntimeFactory:
             # writes were enabled — additive, zero-graph otherwise).
             graph_retrieval=self._build_graph_retrieval(),
             # Spec S1 (S1-D-7 / S1-D-X-consent-wiring): the injection audit sink
-            # (same JSONL posture the stores use).
-            audit_logger=JSONLAuditLogger(self._audit_root),
+            # (R5: backend-selected via the shared factory — JSONL default, Postgres opt-in).
+            audit_logger=self._resolve_audit_logger(),
             # Spec S3 (S3-D-2): the REAL consent store replaces S1's DenyUnvettedConsent
             # stub. Runs on the same RLS-scoped engine → sees only the owner's consent
             # rows. Empty store ≡ DenyUnvettedConsent (no row → denied): swapping the
@@ -1055,8 +1075,8 @@ class RuntimeFactory:
             prompt_builder=PromptBuilder(),
             router=Router(),
             tier_registry=self._tier_registry,
-            # Spec S1 (S1-D-7): injection audit sink.
-            audit_logger=JSONLAuditLogger(self._audit_root),
+            # Spec S1 (S1-D-7): injection audit sink (R5: backend-selected).
+            audit_logger=self._resolve_audit_logger(),
             # Spec S3 (S3-D-2): the real consent store (empty ≡ DenyUnvettedConsent).
             skill_consent=PostgresSkillConsentStore(self._engine),
         )

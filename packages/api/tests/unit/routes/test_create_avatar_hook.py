@@ -29,6 +29,7 @@ from persona.imagegen import (
     ImageProviderError,
 )
 from persona_api.routes import personas as personas_routes
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,6 +128,7 @@ def _request(tmp_path: Path, *, backend: object, timeout_s: float = 25.0) -> Sim
         audit_root=tmp_path / "audit",
         image_backend=backend,
         workspace_root=tmp_path / "ws",
+        file_storage=LocalFileStorage(tmp_path / "ws"),
         avatar_gen_timeout_s=timeout_s,
         rls_engine=object(),  # never hit — set_avatar_url is monkeypatched
     )

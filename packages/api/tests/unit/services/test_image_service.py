@@ -35,6 +35,7 @@ from persona_api.services.image_service import (
     fetch,
     upload,
 )
+from persona_api.storage import LocalFileStorage
 
 # Fixture directory (decompression bombs ship as committed files for repeatable
 # review — they are tiny and never decoded).
@@ -104,7 +105,7 @@ class TestUpload:
     def test_happy_path_returns_image_ref(self, workspace: Path) -> None:
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="owner-1",
             persona_id="persona-A",
             file_bytes=png,
@@ -125,14 +126,14 @@ class TestUpload:
         """Same bytes -> same workspace_path (content-addressed)."""
         png = _minimal_png()
         first = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=png,
             declared_media_type="image/png",
         )
         second = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=png,
@@ -150,7 +151,7 @@ class TestUploadValidationErrors:
     def test_unsupported_media_type(self, workspace: Path) -> None:
         with pytest.raises(PersonaError) as exc:
             upload(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 file_bytes=b"hello",
@@ -163,7 +164,7 @@ class TestUploadValidationErrors:
         oversize = b"\x00" * (MAX_UPLOAD_BYTES + 1)
         with pytest.raises(PersonaError) as exc:
             upload(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 file_bytes=oversize,
@@ -189,7 +190,7 @@ class TestUploadValidationErrors:
     ) -> None:
         with pytest.raises(PersonaError) as exc:
             upload(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 file_bytes=bytes_payload,
@@ -217,7 +218,7 @@ class TestPreDecodeDimensionGuard:
         bomb = (_FIXTURE_DIR / fixture_name).read_bytes()
         with pytest.raises(PersonaError) as exc:
             upload(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 file_bytes=bomb,
@@ -250,7 +251,7 @@ class TestPreDecodeDimensionGuard:
             # Sanity: just confirm the upload raises without PIL anywhere.
             with pytest.raises(PersonaError) as exc:
                 upload(
-                    workspace_root=workspace,
+                    file_storage=LocalFileStorage(workspace),
                     owner_id="o",
                     persona_id="p",
                     file_bytes=bomb,
@@ -262,7 +263,7 @@ class TestPreDecodeDimensionGuard:
         with patch("PIL.Image.open") as mock_open:
             with pytest.raises(PersonaError):
                 upload(
-                    workspace_root=workspace,
+                    file_storage=LocalFileStorage(workspace),
                     owner_id="o",
                     persona_id="p",
                     file_bytes=bomb,
@@ -280,14 +281,14 @@ class TestFetch:
     def test_roundtrip(self, workspace: Path) -> None:
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=png,
             declared_media_type="image/png",
         )
         data, media_type = fetch(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             ref=ref.workspace_path,
@@ -299,7 +300,7 @@ class TestFetch:
         """``fetch`` tolerates the bare ``<digest><ext>`` (route convenience)."""
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=png,
@@ -307,7 +308,7 @@ class TestFetch:
         )
         bare = ref.workspace_path.removeprefix("uploads/")
         data, media_type = fetch(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             ref=bare,
@@ -318,7 +319,7 @@ class TestFetch:
     def test_cross_tenant_returns_not_found(self, workspace: Path) -> None:
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="owner-1",
             persona_id="p",
             file_bytes=png,
@@ -327,7 +328,7 @@ class TestFetch:
         # Different owner_id — workspace path doesn't exist for that tenant.
         with pytest.raises(PersonaError) as exc:
             fetch(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="owner-2",
                 persona_id="p",
                 ref=ref.workspace_path,
@@ -339,7 +340,7 @@ class TestFetch:
         # to a plain not_found (existence-disclosure-safe).
         with pytest.raises(PersonaError) as exc:
             fetch(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 ref="../../../etc/passwd",
@@ -350,7 +351,7 @@ class TestFetch:
         (workspace / "o" / "p" / "uploads").mkdir(parents=True, exist_ok=True)
         with pytest.raises(PersonaError) as exc:
             fetch(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 ref="uploads/nonexistent.png",
@@ -368,7 +369,7 @@ class TestUploadSandboxBoundary:
         """Owner A's upload lands under {workspace}/A/{persona}/uploads/..."""
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="A",
             persona_id="P",
             file_bytes=png,
@@ -409,7 +410,7 @@ class TestDownscale:
         """A 3000×3000 PNG (over the 1568 ceiling, under the 4096 hard reject) downscales."""
         big = _synthesize_png(3000, 3000)
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=big,
@@ -417,7 +418,10 @@ class TestDownscale:
         )
         # Re-read the stored bytes and confirm long-edge == 1568.
         stored, _ = fetch(
-            workspace_root=workspace, owner_id="o", persona_id="p", ref=ref.workspace_path
+            file_storage=LocalFileStorage(workspace),
+            owner_id="o",
+            persona_id="p",
+            ref=ref.workspace_path,
         )
         w, h = _png_dims_from_bytes(stored)
         assert max(w, h) == DOWNSCALE_CEILING_PX
@@ -428,14 +432,17 @@ class TestDownscale:
         """A 1×1 PNG (well under the ceiling) stores its original bytes."""
         png = _minimal_png()
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=png,
             declared_media_type="image/png",
         )
         stored, _ = fetch(
-            workspace_root=workspace, owner_id="o", persona_id="p", ref=ref.workspace_path
+            file_storage=LocalFileStorage(workspace),
+            owner_id="o",
+            persona_id="p",
+            ref=ref.workspace_path,
         )
         assert stored == png  # Bit-identical — no re-encode happened.
 
@@ -447,14 +454,17 @@ class TestDownscale:
         """
         big = _synthesize_png(4000, 4000)
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=big,
             declared_media_type="image/png",
         )
         stored, _ = fetch(
-            workspace_root=workspace, owner_id="o", persona_id="p", ref=ref.workspace_path
+            file_storage=LocalFileStorage(workspace),
+            owner_id="o",
+            persona_id="p",
+            ref=ref.workspace_path,
         )
         w, h = _png_dims_from_bytes(stored)
         assert max(w, h) == DOWNSCALE_CEILING_PX
@@ -470,7 +480,7 @@ class TestHardReject:
         big = _synthesize_png(5000, 5000)
         with pytest.raises(PersonaError) as exc:
             upload(
-                workspace_root=workspace,
+                file_storage=LocalFileStorage(workspace),
                 owner_id="o",
                 persona_id="p",
                 file_bytes=big,
@@ -503,14 +513,17 @@ class TestEXIFStrip:
         assert b"Exif\x00\x00" in jpeg_with_exif
 
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=jpeg_with_exif,
             declared_media_type="image/jpeg",
         )
         stored, _ = fetch(
-            workspace_root=workspace, owner_id="o", persona_id="p", ref=ref.workspace_path
+            file_storage=LocalFileStorage(workspace),
+            owner_id="o",
+            persona_id="p",
+            ref=ref.workspace_path,
         )
         # The downscale path re-encodes; without exif=, Pillow drops the
         # EXIF payload. The APP1 marker may still appear if a fresh empty
@@ -538,7 +551,7 @@ class TestPillowMaxImagePixelsGuard:
         valid_big = _synthesize_png(4000, 4000)
         # Reaches upload + _maybe_downscale without DecompressionBombError.
         ref = upload(
-            workspace_root=workspace,
+            file_storage=LocalFileStorage(workspace),
             owner_id="o",
             persona_id="p",
             file_bytes=valid_big,
@@ -627,7 +640,10 @@ class TestRichOutputServeExtensions:
         uploads.mkdir(parents=True)
         (uploads / "abc.md").write_text("# Hi\n")
         body, media = image_service.fetch(
-            workspace_root=workspace, owner_id=owner, persona_id=persona, ref="uploads/abc.md"
+            file_storage=LocalFileStorage(workspace),
+            owner_id=owner,
+            persona_id=persona,
+            ref="uploads/abc.md",
         )
         assert body == b"# Hi\n"
         assert media == "text/markdown"

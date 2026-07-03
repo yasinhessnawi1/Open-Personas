@@ -19,6 +19,7 @@ from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig
 from persona_api.errors import ConversationNotFoundError
 from persona_api.services import chat_service, document_service
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
@@ -98,6 +99,7 @@ def client(
     app.state.verify_token = _verify
     app.state.rls_engine = None  # fake get_conversation ignores it
     app.state.sandbox_root = sandbox_root
+    app.state.file_storage = LocalFileStorage(sandbox_root)  # R5-D-4: routes read this
     app.state.build_document_store = lambda: document_store
 
     # Mock chat_service.get_conversation to return a synthetic row for the
@@ -145,7 +147,7 @@ class TestListDocuments:
         document_store: DocumentStore,
     ) -> None:
         document_service.upload(
-            sandbox_root=sandbox_root,
+            file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -177,7 +179,7 @@ class TestDeleteDocument:
         document_store: DocumentStore,
     ) -> None:
         ref = document_service.upload(
-            sandbox_root=sandbox_root,
+            file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -192,7 +194,7 @@ class TestDeleteDocument:
         assert resp.status_code == 204
         # List confirms the document was removed.
         refs = document_service.list_for_conversation(
-            sandbox_root=sandbox_root,
+            file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="astrid",
             conversation_id="conv_u1",
@@ -234,7 +236,7 @@ class TestCrossTenantIsolation:
         # Upload a doc to conv_other (persona_id="other_persona"). conv_other
         # is unknown to the fake get_conversation → 404.
         document_service.upload(
-            sandbox_root=sandbox_root,
+            file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="other_persona",
             conversation_id="conv_other",

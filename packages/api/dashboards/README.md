@@ -1,14 +1,14 @@
 # Open Persona — Observability Dashboards (Spec 11 §6)
 
-Two committed Grafana dashboards for the v0.1 launch, reading from the live
-`persona-api` Postgres. The third dashboard from the spec (§6.3, system health)
-is **documented as post-September** below — it needs request-telemetry the
-current schema doesn't capture (D-11-5).
+Three committed Grafana dashboards, reading from the live `persona-api`
+Postgres. §6.3 (system health) was the D-11-5 gap; **Spec R5 (R5-D-3) closed it**
+by adding the request-telemetry the earlier schema couldn't capture.
 
 | File | Spec | Data source |
 |---|---|---|
 | [`01_per_persona_usage.json`](01_per_persona_usage.json) | §6.1 — per-persona usage | `personas`, `conversations`, `turn_logs`, `memory_chunks` |
 | [`02_routing_health.json`](02_routing_health.json) | §6.2 — routing health | `turn_logs` |
+| [`03_system_health.json`](03_system_health.json) | §6.3 — system health | `request_telemetry` |
 
 ## Setup — the read-only role (D-11-5)
 
@@ -23,8 +23,14 @@ with `BYPASSRLS`:
 CREATE ROLE grafana_ro LOGIN PASSWORD '<strong-password>' NOSUPERUSER BYPASSRLS;
 GRANT USAGE ON SCHEMA public TO grafana_ro;
 GRANT SELECT ON personas, conversations, turn_logs, memory_chunks,
-                  credit_transactions TO grafana_ro;
+                  credit_transactions, request_telemetry TO grafana_ro;
 ```
+
+`request_telemetry` (Spec R5, R5-D-3) is a **non-RLS platform table**, so a plain
+`SELECT` grant suffices — but it is granted here alongside the RLS tables so the
+one operator role reads every dashboard. It is operator-forensic (no tenant data
+beyond the route template + status + latency); still, never expose `grafana_ro`
+to a tenant-facing surface.
 
 Do **not** expose this role to the web app or any tenant-facing surface — it
 intentionally bypasses RLS for operator visibility.
@@ -76,26 +82,29 @@ Both dashboards are tagged `open-persona` for discovery.
 - **Skill activations per day** — `COUNT(*) WHERE skill_used IS NOT NULL`,
   grouped by day + skill.
 
-## §6.3 — System health (DOCUMENTED, post-September)
+### §6.3 — System health (Spec R5, R5-D-3)
 
-Per D-11-5, the system-health dashboard from spec §6.3 is **deferred**. It
-prescribes:
+The endpoint-level view D-11-5 deferred. Backed by the new `request_telemetry`
+table, populated by `RequestTelemetryMiddleware` (one row per HTTP request:
+matched `route_template` — NOT the raw path — `method`, `status_code`,
+`duration_ms`, `timestamp`). The write is **buffered + flushed off the request
+path, fail-soft** — a dropped telemetry row never breaks a request. Panels:
 
-- Request latency p50 / p95 / p99 **per endpoint**
-- Error rate **per endpoint**
-- Rate-limit rejections per minute
-- Provider availability — successful vs failed model calls per provider
+- **Requests per endpoint (count / minute)** — `COUNT(*)` GROUP BY `route_template`.
+- **Error rate by status class (2xx / 4xx / 5xx)** — stacked, `status_code / 100`.
+- **Rate-limit rejections per minute** — `COUNT(*) WHERE status_code = 429`.
+- **Latency per endpoint p50 / p95 / p99** — `percentile_cont` over the windowed
+  rows (the known percentile-slowness only bites at 300 TB / unbounded scans, not
+  persona traffic over a bounded `$__timeFilter` window). **t-digest /
+  pre-bucketing is the v0.2 escalation** if telemetry row volume forces it.
+- **Overall p95 / p99 latency (all endpoints)** — trend line.
 
-These need **request-level telemetry that no table captures**: `turn_logs` has
-no `endpoint` / HTTP-status / error dimension; `latency_ms` is per-*turn*
-(model latency), not per-*endpoint* p99; provider availability isn't logged.
-Implementing §6.3 requires adding request-telemetry middleware (or shipping
-metrics to Prometheus/OpenTelemetry) — out of scope for a single-operator v0.1
-demo and flagged as **additive scope**, not silently folded in.
-
-A *partial* turn-level dashboard (model latency by provider, turn-level error
-counts) is derivable from `turn_logs`; ship it as a follow-up if useful, but
-note it is NOT the spec's endpoint-level system-health view.
+Aggregates **across all workers / instances** because every process writes to the
+one `request_telemetry` table — unlike a per-process Prometheus histogram, which
+would need a scrape/merge server (the "new metrics platform" R5 deliberately
+avoids). **Provider/model availability stays in §6.2** (`turn_logs` already covers
+it); in-flight/saturation gauges + circuit-breaker signals are the next additive
+step, not v1.
 
 ## Versioning
 

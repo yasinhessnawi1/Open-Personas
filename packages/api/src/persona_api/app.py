@@ -38,6 +38,7 @@ from persona_api.background.chat_turn_worker import ChatTurnRegistry
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.background.run_worker import RunRegistry
 from persona_api.config import APIConfig, Edition
+from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
 from persona_api.db.community import (
     create_community_schema,
     ensure_owner,
@@ -59,6 +60,7 @@ from persona_api.middleware.rate_limit import (
     RateLimiter,
     RateLimitStore,
 )
+from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware, TelemetryBuffer
 from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.routes import (
     artifacts,
@@ -84,6 +86,7 @@ from persona_api.services import persona_service
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
+from persona_api.storage import build_file_storage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -261,10 +264,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     _dispatch_engine = admin_engine if admin_engine is not None else rls_engine
     app.state.job_queue = JobQueue(_dispatch_engine) if _dispatch_engine is not None else None
     app.state.audit_root = Path(config.audit_root)
+    # Audit loggers (R5-D-2). Postgres-backed (multi-worker-safe
+    # store_audit_events / tool_audit_events) when PERSONA_API_AUDIT_BACKEND=postgres
+    # + an engine exists; the JSONL default otherwise (community / single-node
+    # byte-unchanged). Built ONCE here and threaded through app.state to every
+    # store-mutation / tool-audit site so N workers don't each open the
+    # single-writer JSONL hole (S08-4). The background worker selects the SAME
+    # backend independently in worker_root (R5-D-2). Mirrors _build_rate_limiter:
+    # the tables are non-RLS, so the plain rls_engine (no GUC dependence) is fine.
+    app.state.audit_logger = build_audit_logger(config, rls_engine)
+    app.state.tool_audit_logger = build_tool_audit_logger(config, rls_engine)
     # Spec 13 D-13-4: workspace root for image uploads + (later) per-persona
     # tool artefacts. Resolved up front so routes/services can rely on it.
     app.state.workspace_root = Path(config.workspace_root)
     app.state.workspace_root.mkdir(parents=True, exist_ok=True)
+    # External file storage (R5-D-4). Local (byte-unchanged) by default; S3-generic
+    # (Tigris / R2 / MinIO / AWS) when PERSONA_API_STORAGE_BACKEND=s3, lifting the
+    # Fly-volume single-Machine pin so artifacts/uploads/images aren't host-pinned.
+    # Keyed by the workspace-relative logical key ({owner}/{persona}/{relative}).
+    app.state.file_storage = build_file_storage(config, app.state.workspace_root)
     # Spec 29 D-29-3: the wall-clock bound the create hook applies to
     # build-time avatar generation (env: PERSONA_API_AVATAR_GEN_TIMEOUT_S).
     app.state.avatar_gen_timeout_s = config.avatar_gen_timeout_s
@@ -272,6 +290,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # available; in-memory otherwise. The buckets table is NOT under RLS, so the
     # Postgres store uses a plain (non-listener) engine.
     app.state.rate_limiter = _build_rate_limiter(config, rls_engine)
+
+    # Request telemetry (R5-D-3, §6.3). The buffer + its background flush are built
+    # here (the middleware, added in create_app, records into it). NON-RLS table
+    # written by a plain platform engine (admin_engine when present, else the
+    # rls_engine — the GUC is irrelevant for a non-RLS table), mirroring the sweep
+    # / dispatch engine choice. None ⇒ the middleware no-ops (no-DB / disabled).
+    app.state.telemetry_buffer = None
+    if config.telemetry_enabled:
+        _telemetry_engine = admin_engine if admin_engine is not None else rls_engine
+        if _telemetry_engine is not None:
+            telemetry_buffer = TelemetryBuffer(_telemetry_engine)
+            telemetry_buffer.start()
+            app.state.telemetry_buffer = telemetry_buffer
 
     # F3 — DocumentStore builder (Spec 14 T17/T18). Per-request callable so
     # routes/uploads.py + routes/documents.py + routes/conversations.py
@@ -306,6 +337,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             memory_backend=memory_backend,
             edition=config.edition,
             audit_root=app.state.audit_root,
+            # R5-D-2: the app-selected audit backend (Postgres when multi-worker).
+            audit_logger=app.state.audit_logger,
         )
     # Spec K2 (T8d): thread the durable ``job_queue`` so a completed agentic run
     # enqueues synthesis (the producer was inert — ``job_queue=None`` — until now).
@@ -424,6 +457,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # Postgres turn_logs (D-08-7); RLS-scoped via conversations.
                 turn_log_writer=PostgresTurnLogWriter(rls_engine),
                 audit_root=Path(config.audit_root),
+                # R5-D-2: the app-selected audit backend (Postgres when
+                # multi-worker). audit_root stays the JSONL fallback.
+                audit_logger=app.state.audit_logger,
+                # R5-D-4: the storage backend the chat-path workspace persister
+                # writes produced artifacts through (local/S3).
+                file_storage=app.state.file_storage,
                 # Spec 12 T10: pass the hosted sandbox pool (may be None when
                 # E2B_API_KEY is unset; factory absents code_execution in that case).
                 sandbox_pool=sandbox_pool,
@@ -489,11 +528,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             rls_engine=rls_engine,
             embedder=app.state.embedder,
             tier_registry=_worker_tier_registry,
-            audit_root=app.state.audit_root,
             # Spec A4 (composition-root activation): the task-leg tenant + digest hook. The leg
             # runner is the SAME AgenticLoop the chat path uses (the no-bypass guarantee); the
             # digest publisher rides the real C0 sender. ``memory_backend`` present → digest is
             # live; absent → the leg still runs, updates are simply not delivered.
+            # (R5: audit_root param removed — the worker selects its audit backend from config.)
             runtime_factory=runtime_factory,
             memory_backend=memory_backend,
         )
@@ -512,6 +551,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Flush + stop telemetry FIRST so a final drain lands before engines close
+        # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
+        if app.state.telemetry_buffer is not None:
+            await app.state.telemetry_buffer.aclose()
         if in_process_worker is not None:
             await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
         if run_registry is not None:
@@ -563,6 +606,11 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # tests that hit the app without TestClient's lifespan).
     app.state.owner_resolver = build_owner_resolver(config)
     app.state.credits_policy = build_credits_policy(config)
+    # R5-D-4: the file-storage backend, set at factory time (stateless, like the
+    # edition seams) so routes that read ``app.state.file_storage`` work even when
+    # the lifespan hasn't run (tests hitting the app without TestClient's lifespan).
+    # The lifespan re-affirms it from ``app.state.workspace_root`` (same value).
+    app.state.file_storage = build_file_storage(config, Path(config.workspace_root))
 
     register_exception_handlers(app)
 
@@ -583,6 +631,13 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
                 "Retry-After",
             ],
         )
+
+    # Request telemetry (R5-D-3, §6.3). Records one buffered, fail-soft row per
+    # request into request_telemetry — off the hot path. Added here; the buffer it
+    # writes to is built in the lifespan (present only when a platform engine
+    # exists), so the middleware no-ops until then + when telemetry is disabled.
+    if config.telemetry_enabled:
+        app.add_middleware(RequestTelemetryMiddleware)
 
     # Routers are registered as they land (T07 personas, T08 conversations,
     # T11 runs, T12 me/health, T13 tools). Kept as an explicit include list so

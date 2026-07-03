@@ -25,6 +25,7 @@ from persona.schema.conversation import Conversation
 from persona_api.services import chat_service
 from persona_api.services.chat_service import _resolve_turn_documents
 from persona_api.services.document_service import DOCUMENT_DIR_NAME, DocumentRef
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -72,7 +73,10 @@ class TestResolveTurnDocuments:
         _write_document(tmp_path)
 
         staged = _resolve_turn_documents(
-            workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+            file_storage=LocalFileStorage(tmp_path),
+            owner_id=_OWNER,
+            persona_id=_PERSONA,
+            conversation_id=_CONV,
         )
 
         assert len(staged) == 1
@@ -84,7 +88,7 @@ class TestResolveTurnDocuments:
     def test_no_workspace_root_returns_empty(self) -> None:
         assert (
             _resolve_turn_documents(
-                workspace_root=None, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=None, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
             )
             == []
         )
@@ -92,7 +96,10 @@ class TestResolveTurnDocuments:
     def test_no_documents_returns_empty(self, tmp_path: Path) -> None:
         assert (
             _resolve_turn_documents(
-                workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id=_OWNER,
+                persona_id=_PERSONA,
+                conversation_id=_CONV,
             )
             == []
         )
@@ -105,7 +112,10 @@ class TestResolveTurnDocuments:
 
         assert (
             _resolve_turn_documents(
-                workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id=_OWNER,
+                persona_id=_PERSONA,
+                conversation_id=_CONV,
             )
             == []
         )
@@ -126,7 +136,10 @@ class TestStageDocumentsForFileRead:
         _write_document(tmp_path)
         return list(
             _resolve_turn_documents(
-                workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id=_OWNER,
+                persona_id=_PERSONA,
+                conversation_id=_CONV,
             )
         )
 
@@ -220,7 +233,10 @@ class TestFileReadReconciliation:
         _write_document(tmp_path)
         documents = list(
             _resolve_turn_documents(
-                workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id=_OWNER,
+                persona_id=_PERSONA,
+                conversation_id=_CONV,
             )
         )
         _stage_documents_for_file_read(
@@ -247,7 +263,10 @@ class TestFileReadReconciliation:
         _write_document(tmp_path)
         documents = list(
             _resolve_turn_documents(
-                workspace_root=tmp_path, owner_id=_OWNER, persona_id=_PERSONA, conversation_id=_CONV
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id=_OWNER,
+                persona_id=_PERSONA,
+                conversation_id=_CONV,
             )
         )
         _stage_documents_for_file_read(
@@ -350,6 +369,7 @@ async def test_start_chat_turn_forwards_resolved_documents_to_loop(
         user_message="summarise the doc",
         channel=None,
         workspace_root=tmp_path,
+        file_storage=LocalFileStorage(tmp_path),
     )
     await handle.task
 

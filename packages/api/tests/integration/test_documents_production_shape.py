@@ -46,6 +46,7 @@ from persona.stores.postgres import PostgresBackend
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import document_service
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_api.storage import LocalFileStorage
 from sqlalchemy import text
 
 if TYPE_CHECKING:
@@ -246,7 +247,7 @@ async def test_production_shape_upload_to_prompt(
         # policy on memory_chunks for kind='document'). Without the
         # policy this write raises InsufficientPrivilege.
         ref = document_service.upload(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id=owner,
             persona_id=persona_id,
             conversation_id=conversation_id,
@@ -265,7 +266,7 @@ async def test_production_shape_upload_to_prompt(
         # what routes/conversations.py calls before stream_chat to build
         # the DocumentContext the runtime threads into PromptBuilder.
         document_context = document_service.build_document_context(
-            sandbox_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id=owner,
             persona_id=persona_id,
             conversation_id=conversation_id,

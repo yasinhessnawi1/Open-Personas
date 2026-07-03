@@ -22,6 +22,7 @@ from persona.schema.conversation import Conversation, ConversationMessage
 from persona_api.schemas import ImageRef
 from persona_api.services import chat_service, image_service
 from persona_api.services.chat_service import _resolve_turn_images
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -49,7 +50,7 @@ def _minimal_png() -> bytes:
 class TestResolveTurnImages:
     def test_resolves_bytes_and_media_type(self, tmp_path: Path) -> None:
         ref = image_service.upload(
-            workspace_root=tmp_path,
+            file_storage=LocalFileStorage(tmp_path),
             owner_id="user_1",
             persona_id="astrid",
             file_bytes=_minimal_png(),
@@ -58,7 +59,7 @@ class TestResolveTurnImages:
         body_image = ImageRef(workspace_path=ref.workspace_path, media_type="image/png")
 
         resolved = _resolve_turn_images(
-            workspace_root=tmp_path,
+            file_storage=LocalFileStorage(tmp_path),
             owner_id="user_1",
             persona_id="astrid",
             images=[body_image],
@@ -72,7 +73,12 @@ class TestResolveTurnImages:
 
     def test_none_or_empty_returns_empty(self, tmp_path: Path) -> None:
         assert (
-            _resolve_turn_images(workspace_root=tmp_path, owner_id="u", persona_id="p", images=None)
+            _resolve_turn_images(
+                file_storage=LocalFileStorage(tmp_path),
+                owner_id="u",
+                persona_id="p",
+                images=None,
+            )
             == []
         )
 
@@ -80,7 +86,7 @@ class TestResolveTurnImages:
         body_image = ImageRef(workspace_path="uploads/x.png", media_type="image/png")
         assert (
             _resolve_turn_images(
-                workspace_root=None, owner_id="u", persona_id="p", images=[body_image]
+                file_storage=None, owner_id="u", persona_id="p", images=[body_image]
             )
             == []
         )
@@ -149,7 +155,7 @@ async def test_start_chat_turn_forwards_resolved_images_to_loop(
     from persona_api.background.chat_turn_worker import ChatTurnRegistry
 
     ref = image_service.upload(
-        workspace_root=tmp_path,
+        file_storage=LocalFileStorage(tmp_path),
         owner_id="user_1",
         persona_id="astrid",
         file_bytes=_minimal_png(),
@@ -182,6 +188,7 @@ async def test_start_chat_turn_forwards_resolved_images_to_loop(
         images=[body_image],
         turn_has_image=True,
         workspace_root=tmp_path,
+        file_storage=LocalFileStorage(tmp_path),
     )
     await handle.task
 

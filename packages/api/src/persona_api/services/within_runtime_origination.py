@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import yaml as _yaml
-from persona.audit import JSONLAuditLogger
+from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.originator import Originator
 from persona.schema.origination import OriginatedMessage, PersonaIdentityTag
 from persona.stores.episodic import EpisodicStore
@@ -108,15 +108,18 @@ class WithinRuntimeOriginator:
         memory_backend: Backend,
         edition: Edition,
         audit_root: Path,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
         # Edition-agnostic: the episodic store uses the SAME memory backend the
         # rest of the app does (Chroma for community, Postgres for cloud — Spec 33),
         # so within-runtime origination works in both editions, not just cloud.
+        # R5-D-2: prefer the app-selected audit backend (Postgres when
+        # multi-worker); audit_root is the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
             backend=memory_backend,
-            audit_logger=JSONLAuditLogger(audit_root),
+            audit_logger=audit_logger or JSONLAuditLogger(audit_root),
         )
 
     async def originate_run_conclusion(self, handle: RunHandle, run: Run) -> None:

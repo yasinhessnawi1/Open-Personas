@@ -35,6 +35,7 @@ from persona.imagegen import (
 )
 from persona.tools.audit import MemoryToolAuditLogger
 from persona_api.imagegen import service as imagegen_service
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,7 +146,7 @@ def _run_avatar(
 ) -> GenerationResult:
     return asyncio.run(
         imagegen_service.generate_avatar(
-            workspace_root=tmp_path / "ws",
+            file_storage=LocalFileStorage(tmp_path / "ws"),
             backend=backend,  # type: ignore[arg-type]
             user_id=_USER,
             persona_id=_PERSONA,

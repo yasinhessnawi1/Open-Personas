@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from persona.errors import PersonaError
 from persona_api.services import image_service
+from persona_api.storage import LocalFileStorage
 
 
 def test_fetch_refuses_a_symlink_swapped_for_an_outside_file(tmp_path: Path) -> None:
@@ -32,7 +33,7 @@ def test_fetch_refuses_a_symlink_swapped_for_an_outside_file(tmp_path: Path) -> 
 
     with pytest.raises(PersonaError) as exc_info:
         image_service.fetch(
-            workspace_root=workspace_root,
+            file_storage=LocalFileStorage(workspace_root),
             owner_id=owner_id,
             persona_id=persona_id,
             ref="avatar.png",
@@ -50,7 +51,7 @@ def test_fetch_serves_a_genuine_regular_file(tmp_path: Path) -> None:
     (uploads / "real.png").write_bytes(payload)
 
     data, media_type = image_service.fetch(
-        workspace_root=workspace_root,
+        file_storage=LocalFileStorage(workspace_root),
         owner_id=owner_id,
         persona_id=persona_id,
         ref="real.png",

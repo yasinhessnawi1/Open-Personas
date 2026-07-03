@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from persona_api.schemas import ChannelContext
     from persona_api.schemas import ImageRef as ImageRefSchema
     from persona_api.services.chat_turn_sink import MessagesTurnSink
+    from persona_api.storage import FileStorage
 
     # The runtime factory (T10) builds a ConversationLoop for a persona under the
     # current request's RLS scope, given the persona_id.
@@ -349,6 +350,7 @@ async def start_chat_turn(
     turn_has_image: bool = False,
     document_context: DocumentContext | None = None,
     workspace_root: Path | None = None,
+    file_storage: FileStorage | None = None,
 ) -> ChatTurnHandle:
     """Persist the turn at START + launch it detached; return the live handle (P1, T2b).
 
@@ -388,10 +390,10 @@ async def start_chat_turn(
     # scope — needs workspace_root). The detached worker binds the sandbox
     # contextvar for code_execution; these resolve bytes by path, no contextvar.
     turn_images = _resolve_turn_images(
-        workspace_root=workspace_root, owner_id=owner_id, persona_id=persona_id, images=images
+        file_storage=file_storage, owner_id=owner_id, persona_id=persona_id, images=images
     )
     turn_documents = _resolve_turn_documents(
-        workspace_root=workspace_root,
+        file_storage=file_storage,
         owner_id=owner_id,
         persona_id=persona_id,
         conversation_id=conversation_id,
@@ -484,7 +486,7 @@ async def stream_turn(handle: ChatTurnHandle) -> AsyncIterator[bytes]:
 
 def _resolve_turn_images(
     *,
-    workspace_root: Path | None,
+    file_storage: FileStorage | None,
     owner_id: str,
     persona_id: str,
     images: list[ImageRefSchema] | None,
@@ -514,7 +516,7 @@ def _resolve_turn_images(
     Returns:
         Resolved :class:`TurnImage` carriers in caller order (possibly empty).
     """
-    if not images or workspace_root is None:
+    if not images or file_storage is None:
         return []
     # Local import: keeps the api-runtime import graph free of the runtime
     # package at module load + mirrors the lazy-import discipline elsewhere.
@@ -524,7 +526,7 @@ def _resolve_turn_images(
     for ref in images:
         try:
             file_bytes, _media = image_service.fetch(
-                workspace_root=workspace_root,
+                file_storage=file_storage,
                 owner_id=owner_id,
                 persona_id=persona_id,
                 ref=ref.workspace_path,
@@ -548,7 +550,7 @@ def _resolve_turn_images(
 
 def _resolve_turn_documents(
     *,
-    workspace_root: Path | None,
+    file_storage: FileStorage | None,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -577,14 +579,14 @@ def _resolve_turn_documents(
         Resolved :class:`SandboxFile` carriers in workspace order (possibly
         empty — no documents, or no ``workspace_root`` on the CLI/test path).
     """
-    if workspace_root is None:
+    if file_storage is None:
         return []
     # Local import: keep the api module-load import graph free of the runtime/
     # core sandbox types (mirrors the lazy-import discipline above).
     from persona.sandbox.result import SandboxFile, guess_media_type  # noqa: PLC0415
 
     refs = document_service.list_for_conversation(
-        sandbox_root=workspace_root,
+        file_storage=file_storage,
         owner_id=owner_id,
         persona_id=persona_id,
         conversation_id=conversation_id,
@@ -595,7 +597,7 @@ def _resolve_turn_documents(
     resolved: list[SandboxFile] = []
     for ref in refs:
         file_bytes = document_service.read_document_bytes(
-            sandbox_root=workspace_root,
+            file_storage=file_storage,
             owner_id=owner_id,
             persona_id=persona_id,
             conversation_id=conversation_id,

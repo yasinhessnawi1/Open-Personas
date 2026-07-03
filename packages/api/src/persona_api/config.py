@@ -309,8 +309,35 @@ class APIConfig(BaseSettings):
     # Distinct from the api `audit_log` TABLE (T12) — see spec-07 handoff.
     audit_root: str = "./.persona_audit"
 
+    # Audit backend (R5-D-2). "jsonl" (default → the per-persona JSONL files;
+    # community / single-node stays byte-unchanged) or "postgres" (the
+    # multi-worker-safe store_audit_events / tool_audit_events tables). Selected
+    # by _build_audit_logger / _build_tool_audit_logger (mirrors
+    # rate_limit_backend). The JSONL logger's process-local threading.Lock is
+    # NOT multi-worker-safe (S08-4) — set this to "postgres" before scaling the
+    # API past one worker / one Machine.
+    audit_backend: str = "jsonl"
+
     # Connection pool (research §5 — roomy pool removes store/CRUD contention).
     db_pool_size: int = 5
+
+    # External file storage (R5-D-4). "local" (default → the workspace volume,
+    # byte-unchanged) or "s3" (generic S3 — Tigris / R2 / MinIO / AWS via boto3).
+    # S3 lifts the Fly-volume single-Machine pin so artifacts/uploads/images are
+    # not host-pinned. boto3 is an OPTIONAL dep; only the s3 backend needs it.
+    # Credentials come from the standard AWS_* env; bucket + endpoint + region are
+    # here. Falls back to local when s3 is set but no bucket is configured.
+    storage_backend: str = "local"
+    storage_s3_bucket: str = ""
+    # Tigris: "https://t3.storage.dev"; region "auto". Empty ⇒ boto3 default (AWS).
+    storage_s3_endpoint_url: str = ""
+    storage_s3_region: str = ""
+
+    # Request telemetry (R5-D-3, §6.3 system-health). When true AND a platform
+    # engine exists, RequestTelemetryMiddleware records one buffered, fail-soft
+    # row per request into request_telemetry (off the request path). Default on;
+    # a no-DB / no-engine process is a silent no-op.
+    telemetry_enabled: bool = True
 
     # Rate limiting (§6). backend: "memory" (dev/tests) or "postgres".
     rate_limit_backend: str = "memory"

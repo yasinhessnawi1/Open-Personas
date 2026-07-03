@@ -1,0 +1,106 @@
+{
+  "title": "Open Persona — System Health (§6.3)",
+  "uid": "open-persona-system-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["open-persona", "spec-11", "section-6.3", "spec-r5"],
+  "timezone": "browser",
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "1m",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Requests per endpoint (count / minute)",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 20, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "values": ["lastNotNull", "sum"]}},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, route_template AS metric, COUNT(*)::int AS requests FROM request_telemetry WHERE $__timeFilter(timestamp) GROUP BY 1, route_template ORDER BY 1;"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Error rate by status class (2xx / 4xx / 5xx, stacked %)",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "custom": {"drawStyle": "line", "fillOpacity": 50, "stacking": {"mode": "percent"}, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"showLegend": true, "displayMode": "table", "values": ["lastNotNull"]}},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, ((status_code / 100)::text || 'xx') AS metric, COUNT(*)::int AS requests FROM request_telemetry WHERE $__timeFilter(timestamp) GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Rate-limit rejections per minute (HTTP 429)",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "bars", "fillOpacity": 70, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"showLegend": false}},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, COUNT(*)::int AS rejections FROM request_telemetry WHERE $__timeFilter(timestamp) AND status_code = 429 GROUP BY 1 ORDER BY 1;"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Latency per endpoint — p50 / p95 / p99 (ms, windowed percentile_cont)",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 10},
+      "fieldConfig": {"defaults": {"unit": "ms", "decimals": 1}, "overrides": []},
+      "options": {"showHeader": true, "sortBy": [{"displayName": "p99", "desc": true}]},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT route_template, COUNT(*)::int AS requests, percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms)::numeric(10,1) AS p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric(10,1) AS p95, percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms)::numeric(10,1) AS p99 FROM request_telemetry WHERE $__timeFilter(timestamp) GROUP BY route_template ORDER BY p99 DESC;"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Overall p95 / p99 latency (ms, all endpoints, per minute)",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "gridPos": {"x": 0, "y": 26, "w": 24, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"showLegend": true}},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', timestamp) AS time, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95, percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms) AS p99 FROM request_telemetry WHERE $__timeFilter(timestamp) GROUP BY 1 ORDER BY 1;"
+        }
+      ]
+    }
+  ]
+}

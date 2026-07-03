@@ -23,7 +23,6 @@ file is not involved in the cascade path.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request, status
@@ -40,14 +39,6 @@ if TYPE_CHECKING:
 
 
 router = APIRouter(prefix="/v1", tags=["documents"])
-
-
-def _sandbox_root(request: Request) -> Path:
-    """Resolve the workspace root from app.state with a safe default."""
-    raw = getattr(request.app.state, "sandbox_root", None)
-    if raw is None:
-        return Path("./.persona_work")
-    return Path(raw)
 
 
 def _build_document_store(request: Request) -> DocumentStore:
@@ -88,7 +79,7 @@ async def list_documents(
     )
     persona_id = str(conv["persona_id"])
     return document_service.list_for_conversation(
-        sandbox_root=_sandbox_root(request),
+        file_storage=request.app.state.file_storage,
         owner_id=user.id,
         persona_id=persona_id,
         conversation_id=conversation_id,
@@ -115,7 +106,7 @@ async def delete_document(
     )
     persona_id = str(conv["persona_id"])
     document_service.remove_document(
-        sandbox_root=_sandbox_root(request),
+        file_storage=request.app.state.file_storage,
         owner_id=user.id,
         persona_id=persona_id,
         conversation_id=conversation_id,

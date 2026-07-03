@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import yaml as _yaml
-from persona.audit import JSONLAuditLogger
+from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.errors import ScheduleNotFoundError, TaskNotFoundError
 from persona.logging import get_logger
 from persona.originator import Originator
@@ -219,11 +219,14 @@ class OriginatorFailureNotifier:
         memory_backend: Backend,
         edition: Edition,
         audit_root: Path,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
+        # R5-D-2: backend-selected audit when supplied (worker parity);
+        # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
-            backend=memory_backend, audit_logger=JSONLAuditLogger(audit_root)
+            backend=memory_backend, audit_logger=audit_logger or JSONLAuditLogger(audit_root)
         )
 
     async def notify(
@@ -263,11 +266,14 @@ class OriginatorUpdateSender:
         memory_backend: Backend,
         edition: Edition,
         audit_root: Path,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
+        # R5-D-2: backend-selected audit when supplied (worker parity);
+        # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
-            backend=memory_backend, audit_logger=JSONLAuditLogger(audit_root)
+            backend=memory_backend, audit_logger=audit_logger or JSONLAuditLogger(audit_root)
         )
 
     async def send(

@@ -18,11 +18,11 @@ alongside the UI delete flow.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from persona.errors import PersonaError, PersonaNotFoundError
-from persona.tools._sandbox import is_regular_file_nofollow, resolve_sandbox_path
+from persona.errors import PersonaError, PersonaNotFoundError, SandboxViolationError
+from pydantic import ValidationError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.middleware.rate_limit import rate_limit
@@ -33,12 +33,15 @@ from persona_api.schemas import (
 )
 from persona_api.services import persona_service
 from persona_api.services.artifact_metadata import (
+    SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
-    delete_artifact_sidecar,
     is_any_sidecar,
-    read_artifact_sidecar,
 )
+from persona_api.services.artifact_storage import read_sidecar
 from persona_api.services.provenance import ai_generated_from_source
+
+if TYPE_CHECKING:
+    from persona_api.storage import FileStorage
 
 router = APIRouter(prefix="/v1/personas", tags=["artifacts"])
 
@@ -137,16 +140,16 @@ def _matches_filters(
     return True
 
 
-def _sort_key(item: tuple[str, Path, WorkspaceArtifactMetadata | None]) -> tuple[float, str]:
+def _sort_key(item: tuple[str, WorkspaceArtifactMetadata | None, int]) -> tuple[float, str]:
     """Sort key for artifact rows: created_at DESC, ref ASC for stability.
 
-    Uses the sidecar ``created_at`` when present, falls back to the file's
-    mtime so legacy artifacts still sort sensibly.
-    """
-    _ref, path, meta = item
-    ts = meta.created_at.timestamp() if meta is not None else path.stat().st_mtime
+    Uses the sidecar ``created_at`` when present; a metadata-less legacy artifact
+    (R5-D-4: no mtime available through the backend abstraction) sorts as oldest
+    (``0.0``) — such files appear only in unfiltered / q-only views anyway."""
+    ref, meta, _size = item
+    ts = meta.created_at.timestamp() if meta is not None else 0.0
     # Negate for DESC (Python's tuple sort is ASC); ref ASC ties as secondary.
-    return (-ts, item[0])
+    return (-ts, ref)
 
 
 @router.get(
@@ -179,32 +182,35 @@ async def list_artifacts(
     """
     _ensure_persona_visible(request, persona_id)
 
-    workspace_root: Path = request.app.state.workspace_root
-    persona_root = workspace_root / user.id / persona_id
+    # R5-D-4: enumerate through the storage backend (local walk / S3 list_objects_v2)
+    # so the Files view works on S3 too. Keys come back as ``{owner}/{persona}/…``;
+    # ``ref`` strips that prefix to match the pre-R5 persona-root-relative form.
+    file_storage: FileStorage = request.app.state.file_storage
+    prefix = f"{user.id}/{persona_id}"
+    strip = f"{prefix}/"
 
-    candidates: list[tuple[str, Path, WorkspaceArtifactMetadata | None]] = []
-    if persona_root.is_dir():
-        for path in persona_root.rglob("*"):
-            if not path.is_file():
-                continue
-            if is_any_sidecar(path):
-                continue
-            try:
-                meta = read_artifact_sidecar(path)
-            except PersonaError as exc:  # pragma: no cover — defence-in-depth
-                # Malformed sidecar bubbles up as PersonaError(reason="invalid").
-                # Skip the artifact rather than fail the whole list; the
-                # operator surfaces it via audit log.
-                raise PersonaNotFoundError(
-                    "artifact metadata malformed",
-                    context={"reason": "invalid", "ref": str(path)[:120]},
-                ) from exc
-            ref = str(path.relative_to(persona_root)).replace("\\", "/")
-            candidates.append((ref, path, meta))
+    candidates: list[tuple[str, WorkspaceArtifactMetadata | None, int]] = []
+    for obj in file_storage.list(prefix):
+        if is_any_sidecar(Path(obj.key)):
+            continue
+        try:
+            meta = read_sidecar(file_storage, obj.key)
+        except PersonaError as exc:  # pragma: no cover — defence-in-depth
+            raise PersonaNotFoundError(
+                "artifact metadata malformed",
+                context={"reason": "invalid", "ref": obj.key[:120]},
+            ) from exc
+        except ValidationError as exc:
+            raise PersonaNotFoundError(
+                "artifact metadata malformed",
+                context={"reason": "invalid", "ref": obj.key[:120]},
+            ) from exc
+        ref = obj.key[len(strip) :] if obj.key.startswith(strip) else obj.key
+        candidates.append((ref, meta, obj.size))
 
     filtered = [
-        (ref, path, meta)
-        for ref, path, meta in candidates
+        (ref, meta, size)
+        for ref, meta, size in candidates
         if _matches_filters(
             meta=meta,
             ref=ref,
@@ -222,11 +228,11 @@ async def list_artifacts(
     items = [
         ArtifactItem(
             ref=ref,
-            size_bytes=path.stat().st_size,
-            media_type=_media_type_for(path),
+            size_bytes=size,
+            media_type=_media_type_for(Path(ref)),
             metadata=_to_view(meta),
         )
-        for ref, path, meta in window
+        for ref, meta, size in window
     ]
 
     return ArtifactListResponse(
@@ -258,31 +264,28 @@ async def delete_artifact(
     """
     _ensure_persona_visible(request, persona_id)
 
-    workspace_root: Path = request.app.state.workspace_root
-    sandbox_root = workspace_root / user.id / persona_id
+    file_storage: FileStorage = request.app.state.file_storage
+    key = f"{user.id}/{persona_id}/{ref}"
 
+    # Existence + traversal-safety through the backend: LocalFileStorage.exists
+    # runs resolve_sandbox_path (traversal → SandboxViolationError) +
+    # is_regular_file_nofollow (swapped symlink / missing → False); S3 head_object.
     try:
-        resolved = resolve_sandbox_path(sandbox_root, ref)
-    except Exception as exc:  # noqa: BLE001 — path-traversal → 404
+        present = file_storage.exists(key)
+    except SandboxViolationError as exc:
         raise PersonaNotFoundError(
             "artifact not found",
             context={"reason": "not_found", "ref": ref[:120]},
         ) from exc
-
-    # R2 F-03: lstat-based check (no symlink follow). A symlink swapped into the
-    # final component after resolve would pass a plain ``is_file()`` (which follows
-    # the link to an out-of-sandbox target); ``is_regular_file_nofollow`` treats it
-    # as not-found, so we never act on a planted link.
-    if not is_regular_file_nofollow(resolved):
+    if not present:
         raise PersonaNotFoundError(
             "artifact not found",
             context={"reason": "not_found", "ref": ref[:120]},
         )
 
-    # Bytes-first per the atomicity invariant. ``unlink`` removes the path itself
-    # (never follows a final symlink), so the delete stays inside the sandbox.
+    # Bytes-first per the atomicity invariant (D-F5-X-artifact-delete-shape).
     try:
-        resolved.unlink()
+        file_storage.delete(key)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
@@ -293,10 +296,10 @@ async def delete_artifact(
             },
         ) from exc
 
+    # The F5 ``.f5.json`` sidecar is a sibling object — remove it after the bytes.
     try:
-        delete_artifact_sidecar(resolved)
+        file_storage.delete(key + SIDECAR_SUFFIX)
     except OSError as exc:
-        # Bytes are gone; sidecar removal failed. Operator surfaces this.
         raise HTTPException(
             status_code=500,
             detail={

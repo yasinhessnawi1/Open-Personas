@@ -60,6 +60,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -68,19 +69,20 @@ from persona.documents.ingest import IngestStrategy, ingest_document
 from persona.documents.parsers import SUPPORTED_EXTENSIONS, parse_document
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
-from persona.tools._sandbox import read_nofollow_bytes, resolve_sandbox_path
 from pydantic import BaseModel, ConfigDict, Field
 
 from persona_api.services.artifact_metadata import (
     SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
     utcnow,
-    write_artifact_sidecar,
 )
+from persona_api.services.artifact_storage import write_sidecar
 
 if TYPE_CHECKING:
     from persona.stores.document_store import DocumentStore
     from persona_runtime.prompt import DocumentContext
+
+    from persona_api.storage import FileStorage
 
 __all__ = [
     "DOCUMENT_DIR_NAME",
@@ -165,7 +167,7 @@ class DocumentRef(BaseModel):
 
 def upload(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -219,61 +221,56 @@ def upload(
         )
 
     doc_ref = _make_doc_ref(filename)
-    relative_path = (
+    key = (
         f"{owner_id}/{persona_id}/conversations/{conversation_id}"
         f"/{DOCUMENT_DIR_NAME}/{doc_ref}{extension}"
     )
-    workspace_path = resolve_sandbox_path(sandbox_root, relative_path)
-    workspace_path.parent.mkdir(parents=True, exist_ok=True)
-    workspace_path.write_bytes(file_bytes)
-
-    try:
-        parse_result = parse_document(workspace_path)
-    except Exception:
-        # On parser failure, clean up the workspace file so we don't leak
-        # orphans. The original exception propagates.
-        workspace_path.unlink(missing_ok=True)
-        raise
-
-    title = filename
     document_format = _format_for_extension(extension)
 
-    ingest_result = ingest_document(
-        parse_result=parse_result,
-        conversation_id=conversation_id,
-        doc_ref=doc_ref,
-        title=title,
-        document_format=document_format,
-        document_store=document_store,
-    )
+    # R5-D-4: parse + rasterise need a real local path (pypdfium2 + the parsers
+    # read from disk), so stage the bytes in a NODE-LOCAL temp file — transient
+    # scratch, NOT the durable copy. The durable bytes go to ``file_storage``
+    # (local byte-identical / S3 object) only AFTER a successful parse, so a parse
+    # failure leaves NO orphan (the temp auto-deletes; nothing was persisted).
+    with tempfile.NamedTemporaryFile(suffix=extension) as tmp:
+        tmp.write(file_bytes)
+        tmp.flush()
+        tmp_path = Path(tmp.name)
 
-    images: tuple[ImageContent, ...] = ()
-    if ingest_result.strategy == IngestStrategy.VISION_HANDOFF_REQUIRED:
-        # T21 — the real vision handoff. Rasterise pages via pypdfium2 +
-        # Pillow, persist each page PNG under the workspace, and produce
-        # ImageContent references (Spec 13's D-13-X-now option (c) shape:
-        # workspace_path-only, no inlined bytes). The conversation message
-        # that references this document carries these images so the
-        # router's vision pre-filter (Spec 13 T09) routes the turn to a
-        # vision-capable tier per D-13-X-pdf-contract.
-        images = _rasterise_and_persist_pages(
-            sandbox_root=sandbox_root,
-            owner_id=owner_id,
-            persona_id=persona_id,
+        parse_result = parse_document(tmp_path)
+        title = filename
+        ingest_result = ingest_document(
+            parse_result=parse_result,
             conversation_id=conversation_id,
             doc_ref=doc_ref,
-            pdf_path=workspace_path,
+            title=title,
+            document_format=document_format,
+            document_store=document_store,
         )
-        # The ingest result is updated so the DocumentRef's strategy +
-        # token_count reflect the vision path's outcome.
-        ingest_result = ingest_result.model_copy(update={"strategy": IngestStrategy.VISION_HANDOFF})
+
+        images: tuple[ImageContent, ...] = ()
+        if ingest_result.strategy == IngestStrategy.VISION_HANDOFF_REQUIRED:
+            # T21 vision handoff: rasterise pages via pypdfium2 + Pillow (from the
+            # local temp), persist each page PNG through the backend, and produce
+            # ImageContent references (Spec 13 option (c): workspace_path-only).
+            images = _rasterise_and_persist_pages(
+                file_storage=file_storage,
+                owner_id=owner_id,
+                persona_id=persona_id,
+                conversation_id=conversation_id,
+                doc_ref=doc_ref,
+                pdf_path=tmp_path,
+            )
+            ingest_result = ingest_result.model_copy(
+                update={"strategy": IngestStrategy.VISION_HANDOFF}
+            )
 
     ref = DocumentRef(
         doc_ref=doc_ref,
         filename=_safe_filename(filename),
         title=title,
         format=document_format,
-        workspace_path=relative_path,
+        workspace_path=key,
         strategy=ingest_result.strategy,
         token_count=ingest_result.token_count,
         page_count=parse_result.page_count,
@@ -282,17 +279,17 @@ def upload(
         images=images,
     )
 
-    sidecar_path = workspace_path.with_suffix(workspace_path.suffix + ".meta.json")
-    sidecar_path.write_text(ref.model_dump_json())
-
-    # Spec 35: ALSO register the upload as a conversation ARTIFACT (source=
-    # "upload") so it surfaces in the unified Files viewer alongside persona-
-    # generated artifacts — not only as a conversation-scoped document chip.
-    # The ``.f5.json`` artifact sidecar is distinct from the ``.meta.json``
-    # DocumentRef sidecar above; the F5 artifact walker scans the documents dir
-    # recursively and scopes the listing by ``conversation_id``.
-    write_artifact_sidecar(
-        workspace_path,
+    # R5-D-4: durable writes through the backend (local byte-identical / S3 object),
+    # AFTER a successful parse so a bad upload never persists.
+    file_storage.put(key, file_bytes)
+    # The ``.meta.json`` DocumentRef sidecar — a SIBLING object (list works on S3).
+    file_storage.put(f"{key}.meta.json", ref.model_dump_json().encode("utf-8"))
+    # Spec 35: ALSO register the upload as a conversation ARTIFACT via the distinct
+    # ``.f5.json`` sidecar so it surfaces in the unified Files viewer; routed as a
+    # sibling object through the SAME backend.
+    write_sidecar(
+        file_storage,
+        key,
         WorkspaceArtifactMetadata(
             source="upload",
             type="doc",
@@ -317,7 +314,7 @@ def upload(
 
 def list_for_conversation(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -327,15 +324,15 @@ def list_for_conversation(
     Returns an empty list if the conversation directory doesn't exist
     (no documents uploaded yet).
     """
-    base = _conversation_documents_dir(sandbox_root, owner_id, persona_id, conversation_id)
-    if not base.exists():
-        return []
+    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
     refs: list[DocumentRef] = []
-    for sidecar in sorted(base.glob("*.meta.json")):
+    for obj in sorted(file_storage.list(prefix), key=lambda o: o.key):
+        if not obj.key.endswith(".meta.json"):
+            continue
         try:
-            ref = DocumentRef.model_validate_json(sidecar.read_text())
+            ref = DocumentRef.model_validate_json(file_storage.get(obj.key).decode("utf-8"))
         except Exception:  # noqa: BLE001 — sidecar may be corrupt; skip
-            _log.warning("skipping unreadable sidecar {}", sidecar)
+            _log.warning("skipping unreadable sidecar {}", obj.key)
             continue
         refs.append(ref)
     return refs
@@ -343,7 +340,7 @@ def list_for_conversation(
 
 def build_document_context(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -394,7 +391,7 @@ def build_document_context(
     )
 
     refs = list_for_conversation(
-        sandbox_root=sandbox_root,
+        file_storage=file_storage,
         owner_id=owner_id,
         persona_id=persona_id,
         conversation_id=conversation_id,
@@ -418,7 +415,7 @@ def build_document_context(
         )
         if ref.strategy == IngestStrategy.WHOLE_INJECT:
             text = get_document_text(
-                sandbox_root=sandbox_root,
+                file_storage=file_storage,
                 owner_id=owner_id,
                 persona_id=persona_id,
                 conversation_id=conversation_id,
@@ -460,7 +457,7 @@ def build_document_context(
 
 def get_document_text(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -482,40 +479,47 @@ def get_document_text(
         The full extracted text. Empty string if the document isn't
         found or is unreadable (T14 handles empty cleanly).
     """
-    base = _conversation_documents_dir(sandbox_root, owner_id, persona_id, conversation_id)
-    if not base.exists():
-        return ""
-    # Find the original file by doc_ref prefix (the extension is preserved).
-    for candidate in base.iterdir():
-        if _is_original_document(candidate, doc_ref):
+    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    for obj in file_storage.list(prefix):
+        name = obj.key.rsplit("/", 1)[-1]
+        if not _is_original_name(name, doc_ref):
+            continue
+        try:
+            data = file_storage.get(obj.key)
+        except OSError:
+            _log.warning("get_document_text failed for ref {}", doc_ref)
+            return ""
+        # parse_document needs a local path; stage the bytes in a node-local temp.
+        with tempfile.NamedTemporaryFile(suffix=Path(name).suffix) as tmp:
+            tmp.write(data)
+            tmp.flush()
             try:
-                return parse_document(candidate).full_text
+                return parse_document(Path(tmp.name)).full_text
             except Exception:  # noqa: BLE001 — fail-safe; T14 handles empty
                 _log.warning("get_document_text failed for ref {}", doc_ref)
                 return ""
     return ""
 
 
-def _is_original_document(candidate: Path, doc_ref: str) -> bool:
-    """Whether ``candidate`` is the ORIGINAL uploaded file for ``doc_ref``.
+def _is_original_name(name: str, doc_ref: str) -> bool:
+    """Whether object base-name ``name`` is the ORIGINAL uploaded file for ``doc_ref``.
 
     Matches the ``{doc_ref}.<ext>`` original while excluding BOTH co-located
-    sidecars: the ``.meta.json`` DocumentRef sidecar AND the ``.f5.json``
-    artifact sidecar (Spec 35). Without the ``.f5.json`` exclusion the
-    ``iterdir()`` walk could pick the artifact sidecar (it also starts with
-    ``{doc_ref}.``) and parse JSON metadata as the document body.
-    """
-    name = candidate.name
+    sidecars: the ``.meta.json`` DocumentRef sidecar AND the ``.f5.json`` artifact
+    sidecar (Spec 35), and the rasterised ``{doc_ref}.page-NNNN.png`` pages. Without
+    these exclusions the listing could pick the sidecar (it also starts with
+    ``{doc_ref}.``) and parse JSON metadata as the document body."""
     return (
         name.startswith(f"{doc_ref}.")
         and not name.endswith(".meta.json")
         and not name.endswith(SIDECAR_SUFFIX)
+        and ".page-" not in name
     )
 
 
 def read_document_bytes(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -540,24 +544,24 @@ def read_document_bytes(
         The raw file bytes, or ``None`` when the document is missing/unreadable
         (the caller skips it — a partial staging beats a hard turn failure).
     """
-    base = _conversation_documents_dir(sandbox_root, owner_id, persona_id, conversation_id)
-    if not base.exists():
-        return None
-    for candidate in base.iterdir():
-        if _is_original_document(candidate, doc_ref):
-            try:
-                # R2 F-03: O_NOFOLLOW read so a symlink swapped into the final
-                # component can't serve an out-of-sandbox file (OSError → skip).
-                return read_nofollow_bytes(candidate)
-            except OSError:
-                _log.warning("read_document_bytes failed for ref {}", doc_ref)
-                return None
+    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    for obj in file_storage.list(prefix):
+        name = obj.key.rsplit("/", 1)[-1]
+        if not _is_original_name(name, doc_ref):
+            continue
+        try:
+            # LocalFileStorage reads via the O_NOFOLLOW opener (symlink-swap safe →
+            # OSError → skip); S3 returns the object bytes.
+            return file_storage.get(obj.key)
+        except OSError:
+            _log.warning("read_document_bytes failed for ref {}", doc_ref)
+            return None
     return None
 
 
 def remove_document(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -577,20 +581,20 @@ def remove_document(
             this ``doc_ref`` are removed via the 4-component
             chunk-ID prefix-match (D-14-X-document-chunk-id).
     """
-    base = _conversation_documents_dir(sandbox_root, owner_id, persona_id, conversation_id)
-    if base.exists():
-        for candidate in list(base.iterdir()):
-            if candidate.name.startswith(f"{doc_ref}.") or candidate.name.startswith(f"{doc_ref}."):
-                # Matches both ``{doc_ref}.pdf`` (original) and
-                # ``{doc_ref}.pdf.meta.json`` (sidecar) since both start
-                # with ``{doc_ref}.``.
-                candidate.unlink(missing_ok=True)
+    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    for obj in file_storage.list(prefix):
+        name = obj.key.rsplit("/", 1)[-1]
+        # Matches the original ``{doc_ref}.pdf``, both sidecars
+        # (``.meta.json`` / ``.f5.json``), and the ``{doc_ref}.page-NNNN.png``
+        # rasterised pages — all start with ``{doc_ref}.``.
+        if name.startswith(f"{doc_ref}."):
+            file_storage.delete(obj.key)
     document_store.delete_document(conversation_id, doc_ref)
 
 
 def remove_all_for_conversation(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -607,13 +611,9 @@ def remove_all_for_conversation(
 
     Idempotent: removing an empty / non-existent set is a no-op.
     """
-    base = _conversation_documents_dir(sandbox_root, owner_id, persona_id, conversation_id)
-    if base.exists():
-        for child in list(base.iterdir()):
-            child.unlink(missing_ok=True)
-        # Remove the documents sub-directory and any now-empty parents.
-        base.rmdir()
-        _cleanup_empty_parents(base, stop_at=sandbox_root)
+    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    for obj in file_storage.list(prefix):
+        file_storage.delete(obj.key)
     document_store.delete(conversation_id)
 
 
@@ -644,7 +644,7 @@ def _resolve_raster_dpi() -> int:
 
 def _rasterise_and_persist_pages(
     *,
-    sandbox_root: Path,
+    file_storage: FileStorage,
     owner_id: str,
     persona_id: str,
     conversation_id: str,
@@ -684,14 +684,14 @@ def _rasterise_and_persist_pages(
             finally:
                 page.close()
 
-            page_relative = f"{base_relative}/{doc_ref}.page-{page_index + 1:04d}.png"
-            page_path = resolve_sandbox_path(sandbox_root, page_relative)
-            page_path.parent.mkdir(parents=True, exist_ok=True)
-            page_path.write_bytes(png_bytes)
+            page_key = f"{base_relative}/{doc_ref}.page-{page_index + 1:04d}.png"
+            # R5-D-4: persist the page PNG through the backend (local byte-identical
+            # / S3 object) instead of an inline O_NOFOLLOW write.
+            file_storage.put(page_key, png_bytes, content_type="image/png")
 
             images.append(
                 ImageContent(
-                    workspace_path=page_relative,
+                    workspace_path=page_key,
                     media_type="image/png",
                 )
             )
@@ -704,18 +704,14 @@ def _rasterise_and_persist_pages(
 # ----- helpers (private) -----------------------------------------------------
 
 
-def _conversation_documents_dir(
-    sandbox_root: Path, owner_id: str, persona_id: str, conversation_id: str
-) -> Path:
-    # Spec 35: owner-scoped layout (matches image_service + the F5 artifacts
-    # walk: workspace_root/<owner_id>/<persona_id>/...). Previously persona-only
-    # ("persona_<id>/...") which the conversation Files viewer never found.
-    relative = f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
-    # Resolve through the sandbox helper so traversal attempts are caught even
-    # for the read paths. ``resolve_sandbox_path`` raises ``SandboxViolationError``
-    # on traversal; this is a programmer-error boundary for read helpers
-    # (caller-supplied conversation_id must be valid).
-    return resolve_sandbox_path(sandbox_root, relative)
+def _conversation_documents_prefix(owner_id: str, persona_id: str, conversation_id: str) -> str:
+    """The FileStorage key prefix for a conversation's documents (R5-D-4).
+
+    Owner-scoped layout (matches image_service + the F5 artifacts walk:
+    ``<owner_id>/<persona_id>/...``). This is the ``list`` prefix + the stem every
+    document/sidecar/page key is built under. Backend-agnostic (the local backend
+    still resolves it under the workspace root via ``resolve_sandbox_path``)."""
+    return f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
 
 
 def _make_doc_ref(filename: str) -> str:
@@ -788,15 +784,3 @@ def _format_for_extension(extension: str) -> str:
     if extension in code_extensions:
         return "code"
     return "unknown"
-
-
-def _cleanup_empty_parents(path: Path, *, stop_at: Path) -> None:
-    """Remove empty parent directories up to (but not including) ``stop_at``."""
-    stop_resolved = stop_at.resolve(strict=False)
-    parent = path.parent
-    while parent.resolve(strict=False) != stop_resolved:
-        try:
-            parent.rmdir()
-        except OSError:
-            break
-        parent = parent.parent
