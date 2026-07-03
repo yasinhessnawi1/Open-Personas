@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     from persona.stores.protocol import MemoryStore
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.agentic.events import RunEvent
+    from persona_runtime.prompt import GraphContext, GraphRecency
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
@@ -226,6 +227,7 @@ class AgentSession:
         call_recorder: CallRecorder | None = None,
         call_record_engine: Engine | None = None,
         async_lane: AsyncArtifactLane | None = None,
+        on_call_complete: Callable[[], None] | None = None,
     ) -> None:
         self._voice_room = voice_room
         self._loop = loop
@@ -254,6 +256,10 @@ class AgentSession:
         self._embedder_warmup = embedder_warmup
         self._greet = greet
         self._greet_task: asyncio.Task[None] | None = None
+        # V13 (V13-T5): the post-call synthesis enqueue — fired once at teardown, off
+        # the loop, best-effort. Accumulation rides the K2 background seam; it is NOT
+        # gated by the graph-memory kill-switch (D-6 governs read/surfacing only).
+        self._on_call_complete = on_call_complete
 
     async def run(self) -> None:
         """Join the Room, run the loop until disconnect, then tear down."""
@@ -307,6 +313,13 @@ class AgentSession:
         ):
             with contextlib.suppress(Exception):
                 await step
+        # V13 (V13-T5): the loop has stopped, so the conversation is final — enqueue
+        # post-call graph synthesis now, OFF the loop (a short DB INSERT on its own
+        # engine), best-effort. A queue-absent / DB-down failure never strands the
+        # rest of teardown. The api worker claims + processes it later (D-4-amended).
+        if self._on_call_complete is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self._on_call_complete)
         for client in self._mcp_clients:
             with contextlib.suppress(Exception):
                 await client.disconnect()
@@ -396,6 +409,31 @@ async def build_agent_session(
     # byte-identical voice prompt.
     user_name = _load_user_name(rls_engine, user_id)
 
+    # --- V13 (V13-D-1/D-5/D-6): the K4-gated graph-memory read shell ---
+    # Compose the owner-scoped graph store + the K4-gated retrieval (allowlist
+    # subtraction + recent-window lift + surfacing + recency, mirrored from chat's
+    # ``_build_graph_retrieval`` — never a voice-local variant), ONLY when the
+    # kill-switch is ON (D-6). OFF (default) ⇒ both stay ``None`` ⇒ ``VoiceTurnContext``
+    # runs graph-off, byte-identical to today. The store is built on the SAME session
+    # RLS engine (owner-scoped) with the SAME embedder already warming off-loop above,
+    # so the first recall pays no cold load. The retrieval callable runs off the loop
+    # (``graph_voice`` overlap-or-skip); this only wires it.
+    graph_retrieval: Callable[[str], GraphContext] | None = None
+    graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None
+    if config.graph_memory_enabled:
+        from persona.graph import build_graph_store
+
+        from persona_voice.model.graph import build_voice_graph_retrieval
+
+        graph_store = build_graph_store(
+            engine=rls_engine,
+            embedder=embedder,
+            audit_logger=JSONLAuditLogger(audit_root),
+        )
+        composition = build_voice_graph_retrieval(graph_store, owner_id=user_id)
+        graph_retrieval = composition.retrieval
+        graph_surfacing_guidance = composition.surfacing_guidance
+
     # --- per-call language plan (Spec 32 B2) ---
     # Resolve the persona's declared language ONCE into the STT route (B3), the
     # TTS route (B4), and the reply language (B5). Fail-soft never raises; it
@@ -432,6 +470,8 @@ async def build_agent_session(
         toolbox=toolbox,
         language=language_plan,
         user_name=user_name,
+        graph_retrieval=graph_retrieval,
+        graph_surfacing_guidance=graph_surfacing_guidance,
     )
     recorder = VoiceTurnRecorder(
         ctx,
@@ -635,6 +675,27 @@ async def build_agent_session(
         owner_id=user_id,
     )
 
+    # V13 (V13-T5): post-call graph synthesis. At session-end the conversation is
+    # complete, so enqueue ONE durable synthesis job (post-call batch, D-4) over a
+    # FRESH short-lived session RLS engine — the session engine is disposed by
+    # ``session.end()`` before teardown (the V9 recorder pattern), and a fresh engine
+    # keeps this INSERT owner-scoped without holding a connection for the whole call.
+    # The twin raw-INSERT writer builds the SAME core payload the api writer builds.
+    def _enqueue_synthesis_on_end() -> None:
+        from persona_voice.session.synthesis_enqueue import enqueue_voice_synthesis
+
+        eng = make_session_rls_engine(config.database_url, user_id=user_id)
+        try:
+            enqueue_voice_synthesis(
+                eng,
+                owner_id=user_id,
+                conversation_id=conversation_id,
+                persona_id=persona_id,
+                message_count=len(conversation.messages),
+            )
+        finally:
+            eng.dispose()
+
     # mcp_clients accumulated by build_default_toolbox are closed at teardown.
     return AgentSession(
         voice_room=voice_room,
@@ -651,6 +712,7 @@ async def build_agent_session(
         call_recorder=call_recorder,
         call_record_engine=call_record_engine,
         async_lane=async_lane,
+        on_call_complete=_enqueue_synthesis_on_end,
     )
 
 

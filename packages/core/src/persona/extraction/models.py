@@ -169,6 +169,9 @@ class ExtractionInput(BaseModel):
         interaction_id: The source interaction's id (conversation / run / voice session).
         persona_id: The persona whose interaction this is (→ ``NodeProvenance.persona_id``).
         content: The interaction text to extract from (already windowed if long).
+        channel: The originating surface (``chat`` / ``voice``, Spec V13) → the
+            minted node's ``NodeProvenance.channel``. Defaults to ``chat`` so
+            existing callers are unchanged; voice synthesis sets ``voice``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -177,3 +180,4 @@ class ExtractionInput(BaseModel):
     interaction_id: str = Field(min_length=1)
     persona_id: str = Field(min_length=1)
     content: str
+    channel: str = "chat"

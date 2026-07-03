@@ -6,12 +6,23 @@ work taught (the ``project_voice_graph_unwired`` lesson): an autonomous path mus
 are structural checks — no live model, no DB — so a later fork of a task-specific runtime or a
 bare graph read is caught in CI, not in production.
 
+**V13 re-baseline (deliberate, not a deletion — the reviewed-re-baseline discipline).** The
+``project_voice_graph_unwired`` state this file cites is *retired* by V13: voice no longer runs
+graph-OFF-by-caution — it now reads the graph through the SAME K4-gated composition chat uses
+(``build_voice_graph_retrieval`` mirrors ``_build_graph_retrieval``), off-loop and budgeted. The
+PRINCIPLE is unchanged and now governs voice ACTIVELY, not by absence: *no path reads the graph
+unguarded.* The voice-layer structural proof lives in the voice package
+(``persona_voice/tests/unit/model/test_graph_no_bypass.py``: the turn context exposes the graph
+only as the injected gated callable, never a raw store) — this file (persona-runtime) cannot
+import persona-voice, so it documents the discipline; the leg assertion below still holds (a task
+leg remains graph-OFF).
+
 - **Criterion 5 (no-bypass):** a task leg drives the identical Spec-06 loop (``AgenticLoop``) via
   the ``AgenticRunner`` interface — there is no reduced/task-specific runner.
 - **Criterion 6 (both directions, gated):**
   - *read:* the leg runtime cannot read the graph **bare** — ``AgenticLoop`` has no graph seam at
-    all (graph-OFF, safe); chat's read is the K4-gated ``graph_retrieval`` (never raw). No path
-    reads the graph unguarded.
+    all (graph-OFF, safe); chat's AND voice's (V13) read is the K4-gated ``graph_retrieval``
+    (never raw). No path reads the graph unguarded.
   - *write (facts):* a task-learned fact routes through the K2 gate (``graph_store.merge``), never
     a bare insert.
   - *write (episodic):* task progress reaches episodic only through the milestone gate (restraint),

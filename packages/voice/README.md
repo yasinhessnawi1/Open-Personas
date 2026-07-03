@@ -70,6 +70,16 @@ Like the rest of the stack, it carries an **edition** stance (`PERSONA_EDITION`)
 - **V6 — Frontend voice client (in development).** Browser-side audio plumbing
   + UI in `persona-web`; an optional dev agent launcher fires from the token
   endpoint.
+- **V13 — Voice memory.** The persona remembers on a call in **both** directions.
+  **Read:** graph retrieval on voice, routed through K4's wellbeing gate (mirrored
+  exactly from chat — allowlist subtraction + recent-window lift + care-text
+  surfacing + recency), executed off the loop with timeout-fail-soft (a slow turn
+  degrades to a clean memoryless one, never a stall). Gated by
+  `PERSONA_VOICE_GRAPH_MEMORY_ENABLED` (default **OFF** → byte-identical graph-OFF;
+  flip ON after the operator pass ratifies latency + care). **Write:** completed
+  calls enqueue post-call graph synthesis through the existing K2 background seam
+  (`source: voice` provenance, idempotent) and write episodic chunks at chat parity —
+  so what you say on a call becomes memory the persona knows in chat, and vice versa.
 - **V8 — STT cost gating.** Bill Deepgram for the user's speech, not the whole
   call. The seam adapter's tee is *split* — the Silero VAD is always fed (so
   barge-in is never starved) while the billed backend leg is gated by

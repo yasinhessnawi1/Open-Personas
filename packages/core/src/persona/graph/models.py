@@ -149,6 +149,11 @@ class NodeProvenance(BaseModel):
             node's PRIOR content — preserved as structured data (not buried in
             ``reason``) so K4 can read the trajectory and K5 can render a clean
             before/after. ``None`` on ordinary accumulation.
+        channel: The originating surface of a synthesis contribution (``voice`` for
+            a fact minted from a call, ``chat`` for a web/chat conversation), Spec
+            V13. ``source`` stays ``system`` for all synthesis; ``channel`` is the
+            finer provenance marker. ``None`` for pre-V13 nodes + non-synthesis
+            writes (a direct persona/user write carries no channel).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -160,6 +165,7 @@ class NodeProvenance(BaseModel):
     grounding: str | None = None
     reason: str | None = None
     superseded_content: str | None = None
+    channel: str | None = None
 
     @field_validator("written_at", mode="after")
     @classmethod

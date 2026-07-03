@@ -11,6 +11,40 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Voice Memory — the persona remembers on a call, both directions (Spec V13, 2026-07-03)
+
+> Close-out of `voice-memory` (`persona-voice` + `persona-runtime` + `persona-core` + `persona-api`).
+> Ends voice's memory dead-zone: the call gains **graph retrieval** (routed through K4's wellbeing
+> gate, never bare), voice conversations **feed the graph** (post-call synthesis), and voice's
+> episodic contribution + consumption reach **chat parity** — so the persona that knows you in chat
+> no longer forgets you on calls. **Discharges K4's recorded BLOCKING constraint** (voice graph
+> surfacing routes through K4's gate) and **retires the `voice-graph-unwired` dormant state.**
+
+- **Read — graph retrieval on voice, K4-gated.** `build_voice_graph_retrieval`
+  (`persona_voice/model/graph.py`) mirrors chat's `_build_graph_retrieval` **exactly** — the same
+  allowlist subtraction + recent-window lift + care-text surfacing + recency banding — adapted only
+  for the voice owner scope (fixed caller) and the tighter voice profile (traversal-off,
+  `VOICE_NODE_BUDGET`). Composed into the pre-existing K3-D-6 read shell (`graph_voice.py`
+  overlap-or-skip): the query runs off the event loop, concurrent with pre-model work, taken only if
+  ready by prompt assembly — **timeout ⇒ a clean memoryless turn, never a stall**. A bare-wiring
+  variant is **impossible-green** (a composition missing the gate demonstrably leaks a gate-eligible
+  wellbeing node). Ships behind `PERSONA_VOICE_GRAPH_MEMORY_ENABLED` (default **OFF** → byte-identical
+  graph-OFF).
+- **Write — accumulation from voice.** Completed calls enqueue post-call graph synthesis through the
+  existing K2 background seam. The synthesis-job contract is unified in **core** (`persona.jobs`:
+  `SynthesisJobPayload` + `synthesis_idempotency_key` + `channel`); api's `JobQueue.enqueue` is the
+  canonical writer and voice a twin raw-INSERT beside its raw-SQL peers, pinned by a bidirectional
+  column-parity test + a real-A0-worker transition test. Minted facts carry `source: voice`
+  (`NodeProvenance.channel`), merge idempotently (re-enqueue is an `ON CONFLICT` no-op), and never
+  target the K6 SELF node.
+- **Episodic parity.** Voice turns write episodic chunks at chat parity (voice-marked
+  `modality: voice`) and recall reads them through the shared `retrieve_context` — cross-channel both
+  ways (a call-era episode surfaces in chat and vice versa).
+- **The K9 seam.** Everything above is the voice recall **shell**; K9 later swaps the recall engine
+  behind `build_voice_graph_retrieval` with one engine swap, zero re-plumbing (documented handover).
+- **Migration: none** (composition + seams over existing tables; `channel` is a backward-compatible
+  optional field). New env var: `PERSONA_VOICE_GRAPH_MEMORY_ENABLED`.
+
 ### Persona Voice Emotion — the persona's voice sounds its feeling (Spec V12, 2026-07-02)
 
 > Close-out of `persona-voice-emotion` (Spec V12, `persona-voice` + `persona-runtime`). N5 gave the

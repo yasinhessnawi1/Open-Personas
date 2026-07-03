@@ -25,11 +25,22 @@ from persona.jobs.models import (
     validate_transition,
 )
 from persona.jobs.registry import JobContext, JobHandler, JobRegistry, JobTypeSpec
+from persona.jobs.synthesis import (
+    CHANNEL_CHAT,
+    CHANNEL_VOICE,
+    SYNTHESIS_JOB_TYPE,
+    SynthesisJobPayload,
+    make_conversation_synthesis_payload,
+    synthesis_idempotency_key,
+)
 
 __all__ = [
+    "CHANNEL_CHAT",
+    "CHANNEL_VOICE",
     "LONG_LEASE",
     "MEDIUM_LEASE",
     "SHORT_LEASE",
+    "SYNTHESIS_JOB_TYPE",
     "TERMINAL_STATES",
     "Job",
     "JobContext",
@@ -40,7 +51,10 @@ __all__ = [
     "JobTypeSpec",
     "LeasePolicy",
     "RetryPolicy",
+    "SynthesisJobPayload",
     "can_transition",
     "is_terminal",
+    "make_conversation_synthesis_payload",
+    "synthesis_idempotency_key",
     "validate_transition",
 ]

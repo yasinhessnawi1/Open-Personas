@@ -78,6 +78,10 @@ class Synthesizer:
             persona_id=interaction.persona_id,
             interaction_id=interaction.interaction_id,
             written_at=datetime.now(UTC),
+            # V13: mark the originating surface (``voice`` for a fact minted from a
+            # call) so a graph node is attributable cross-channel. ``source`` stays
+            # SYSTEM — synthesis is always a system reflection pass.
+            channel=interaction.channel,
         )
 
         mentions = [m.surface for c in candidates for m in c.entity_mentions]

@@ -48,6 +48,7 @@ def build_window(
     interaction_kind: InteractionKind,
     interaction_id: str,
     persona_id: str,
+    channel: str = "chat",
 ) -> Window | None:
     """Window an interaction for synthesis, or ``None`` if nothing is new.
 
@@ -57,6 +58,8 @@ def build_window(
         synthesised_up_to: The high-water-mark — messages at indices below this are
             already synthesised and are not re-grounded.
         interaction_kind / interaction_id / persona_id: provenance material.
+        channel: The originating surface (``chat`` / ``voice``, Spec V13) → the
+            minted node's provenance channel. Defaults to ``chat``.
     """
     total = len(messages)
     if total <= synthesised_up_to:
@@ -77,6 +80,7 @@ def build_window(
             interaction_id=interaction_id,
             persona_id=persona_id,
             content=content,
+            channel=channel,
         ),
         high_water_mark=total,
     )

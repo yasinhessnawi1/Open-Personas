@@ -22,7 +22,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.extraction import InteractionKind
-from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
+from persona.jobs import (
+    MEDIUM_LEASE,
+    SYNTHESIS_JOB_TYPE,
+    JobTypeSpec,
+    RetryPolicy,
+    SynthesisJobPayload,
+    synthesis_idempotency_key,
+)
+from persona.jobs.synthesis import CHANNEL_CHAT
 from persona.logging import get_logger
 from persona_runtime.extraction.windowing import build_window
 from pydantic import BaseModel, ConfigDict
@@ -39,6 +47,10 @@ if TYPE_CHECKING:
 
     from persona_api.jobs.queue import JobQueue
 
+# ``SYNTHESIS_JOB_TYPE`` / ``SynthesisJobPayload`` / ``synthesis_idempotency_key`` are
+# re-exported from ``persona.jobs`` (V13 D-4-amended: the ONE canonical synthesis
+# contract lives in core so the api + voice writers cannot drift). Kept in ``__all__``
+# so existing ``from persona_api.jobs.handlers.synthesis import ...`` imports still work.
 __all__ = [
     "SYNTHESIS_JOB_TYPE",
     "InteractionData",
@@ -52,34 +64,10 @@ __all__ = [
     "synthesis_idempotency_key",
 ]
 
-SYNTHESIS_JOB_TYPE = "synthesis"
-
 _logger = get_logger("jobs.synthesis")
 
 # Roles whose text forms the synthesis transcript (the grounding source).
 _TRANSCRIPT_ROLES = ("user", "assistant")
-
-
-class SynthesisJobPayload(JobPayload):
-    """Which completed interaction to synthesise.
-
-    ``high_water_mark`` is the enqueue-time message count — it scopes the A0
-    idempotency key so a continued conversation re-keys to a new job (D-K2-2). The
-    handler re-reads the live marker + messages at run time; it does not trust this
-    value for the actual windowing.
-    """
-
-    interaction_kind: str
-    interaction_id: str
-    persona_id: str
-    high_water_mark: int
-
-
-def synthesis_idempotency_key(payload: SynthesisJobPayload) -> str:
-    """``synthesis:{kind}:{interaction_id}:{high_water_mark}`` (D-K2-2)."""
-    return (
-        f"synthesis:{payload.interaction_kind}:{payload.interaction_id}:{payload.high_water_mark}"
-    )
 
 
 class InteractionData(BaseModel):
@@ -142,6 +130,7 @@ class SynthesisHandler:
                 interaction_kind=InteractionKind(payload.interaction_kind),
                 interaction_id=payload.interaction_id,
                 persona_id=payload.persona_id,
+                channel=payload.channel,
             )
             if window is None:
                 return  # nothing new past the marker — the idempotency no-op.
@@ -259,17 +248,21 @@ def enqueue_synthesis(
     interaction_id: str,
     persona_id: str,
     message_count: int,
+    channel: str = CHANNEL_CHAT,
 ) -> None:
     """Enqueue a synthesis job at an interaction boundary (turn-end / run-end / voice-end).
 
     Keyed by the message count so a continued conversation re-keys to a new job; an
-    identical re-enqueue is A0's ``ON CONFLICT`` no-op. Off the critical path.
+    identical re-enqueue is A0's ``ON CONFLICT`` no-op. Off the critical path. This is
+    the api-side writer (over ``JobQueue`` — the canonical A0 semantics); the voice
+    process has a twin raw-INSERT writer building the SAME core payload (V13 D-4-amended).
     """
     payload = SynthesisJobPayload(
         interaction_kind=interaction_kind,
         interaction_id=interaction_id,
         persona_id=persona_id,
         high_water_mark=message_count,
+        channel=channel,
     )
     queue.enqueue(
         type=SYNTHESIS_JOB_TYPE,
