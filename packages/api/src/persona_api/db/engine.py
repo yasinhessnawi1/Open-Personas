@@ -62,7 +62,16 @@ def set_current_user(connection: Connection, user_id: str) -> None:
 
     Must be called inside an open transaction; the setting is transaction-local
     and auto-clears at commit/rollback. The value is bound, never interpolated.
+
+    Community SQLite (D-33-X-community-engine): the single-owner engine
+    satisfies the ``rls_engine`` contract WITHOUT multi-tenant GUC scoping —
+    ``set_config`` does not exist on SQLite and scoping is by owner-id
+    predicate. The GUC bind is a Postgres-only defence layer, so it no-ops on
+    the sqlite dialect rather than erroring every ``rls_connection`` caller
+    (tasks/schedules/jobs/approvals) out of the community edition.
     """
+    if connection.dialect.name == "sqlite":
+        return
     connection.execute(_SET_USER_SQL, {"uid": user_id})
 
 

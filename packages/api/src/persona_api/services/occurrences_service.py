@@ -13,12 +13,13 @@ never A's — the standing cross-tenant guarantee, tested non-vacuously.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta  # noqa: TC003 — datetime is a runtime Pydantic field type
 from typing import TYPE_CHECKING
 
 from persona.schedules import occurrences_between, render_human_terms
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from persona_api.db.engine import rls_connection
 from persona_api.schedules.store import ScheduleStore
@@ -142,11 +143,14 @@ def _fire_history(
     engine: Engine, owner_id: str, *, from_: datetime, to: datetime, cap: int
 ) -> list[FireEvent]:
     """Recent fire/miss events from the audit trail, within the window (RLS-scoped)."""
+    # ``IN :actions`` with an expanding bindparam, NOT Postgres ``= ANY(:list)``:
+    # the community edition runs this on SQLite (D-33-X-community-engine), where
+    # ANY does not exist; expanding IN compiles portably on both dialects.
     stmt = text(
         "SELECT action, target, metadata FROM audit_log "
-        "WHERE user_id = :owner AND action = ANY(:actions) "
+        "WHERE user_id = :owner AND action IN :actions "
         "ORDER BY created_at DESC LIMIT :cap"
-    )
+    ).bindparams(bindparam("actions", expanding=True))
     with rls_connection(engine, owner_id) as conn:
         rows = (
             conn.execute(
@@ -158,7 +162,16 @@ def _fire_history(
         )
     events: list[FireEvent] = []
     for row in rows:
-        meta = row["metadata"] or {}
+        # Raw text() carries no column type info: Postgres/psycopg gives JSONB
+        # back as a dict, SQLite gives the stored TEXT — decode the latter.
+        meta_raw = row["metadata"]
+        if isinstance(meta_raw, str):
+            try:
+                meta = json.loads(meta_raw)
+            except ValueError:
+                meta = {}
+        else:
+            meta = meta_raw or {}
         raw = meta.get("fire_time") or meta.get("missed_fire_time")
         if not isinstance(raw, str):
             continue

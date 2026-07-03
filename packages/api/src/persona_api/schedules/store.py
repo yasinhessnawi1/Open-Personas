@@ -28,6 +28,7 @@ into A0 jobs) is a SEPARATE concern on the dispatch engine — T5/T6.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import (
@@ -44,8 +45,6 @@ from persona_api.db.models import schedules as schedules_t
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from sqlalchemy import Engine, RowMapping
 
 __all__ = ["ScheduleStore"]
@@ -63,6 +62,31 @@ def _recurrence_str(schedule: Schedule) -> str | None:
     return schedule.recurrence.to_rrule_string() if schedule.recurrence is not None else None
 
 
+def _aware_utc(value: datetime | str | None) -> datetime | None:
+    """Coerce a stored instant to tz-aware UTC.
+
+    The schedules columns are ``DateTime(timezone=True)`` and every write is
+    tz-aware UTC — but the community SQLite engine (D-33-X-community-engine)
+    has no tz storage and hands the instant back naive (or as ISO text through
+    raw SQL). The storage convention IS UTC, so re-attaching it here is
+    lossless; Postgres values pass through untouched.
+    """
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _aware_utc_required(value: datetime | str) -> datetime:
+    """The NOT-NULL-column form of :func:`_aware_utc`."""
+    out = _aware_utc(value)
+    if out is None:  # pragma: no cover — NOT NULL column
+        msg = "NOT NULL datetime column yielded None"
+        raise ValueError(msg)
+    return out
+
+
 def _row_to_schedule(row: RowMapping) -> Schedule:
     """Build a :class:`Schedule` from a ``schedules`` row (RRULE string → rule)."""
     recurrence_raw = row["recurrence"]
@@ -74,18 +98,18 @@ def _row_to_schedule(row: RowMapping) -> Schedule:
         owner_id=row["owner_id"],
         timezone=row["timezone"],
         recurrence=recurrence,
-        one_time_at=row["one_time_at"],
+        one_time_at=_aware_utc(row["one_time_at"]),
         target_job_type=row["target_job_type"],
         payload_template=row["payload_template"],
         enabled=row["enabled"],
         paused=row["paused"],
         missed_fire_policy=row["missed_fire_policy"],
         grace_seconds=row["grace_seconds"],
-        last_fire_at=row["last_fire_at"],
-        next_fire_at=row["next_fire_at"],
+        last_fire_at=_aware_utc(row["last_fire_at"]),
+        next_fire_at=_aware_utc(row["next_fire_at"]),
         fire_count=row["fire_count"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        created_at=_aware_utc_required(row["created_at"]),
+        updated_at=_aware_utc_required(row["updated_at"]),
         revision=row["revision"],
     )
 

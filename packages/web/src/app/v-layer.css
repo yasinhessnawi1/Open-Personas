@@ -1724,3 +1724,244 @@
     animation: none !important;
   }
 }
+
+@layer components {
+  /* ============================ SPEC A8 — SCHEDULE / CALENDAR ============================
+     The calendar surface's missing style layer (caught by the A8 render-evidence leg):
+     agenda cards, the 7-column week/month grids (scoped — the bare .v-grid utility stays
+     a plain grid), the reschedule dialog (scrim via 100vmax shadow), and the quiet-hours
+     preview strip. Tokens only (D-35-8). */
+  .v-schedule {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: var(--v-page-max);
+    margin-inline: auto;
+    padding: var(--v-gap);
+    min-width: 0;
+  }
+  .v-schedule-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .v-schedule-head h1 {
+    font-size: 1.35rem;
+    margin: 0;
+  }
+  .v-schedule-tz {
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    font-size: 0.8rem;
+    margin-inline-end: auto;
+  }
+  .v-schedule-views {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--v-hairline);
+    border-radius: 10px;
+  }
+  .v-schedule-views button {
+    border: 0;
+    background: transparent;
+    border-radius: 7px;
+    padding: 4px 12px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    color: inherit;
+  }
+  .v-schedule-views button[aria-pressed="true"] {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+  .v-schedule-truncation {
+    display: block;
+    font-size: 0.82rem;
+    padding: 7px 12px;
+    border: 1px solid color-mix(in oklch, var(--primary) 35%, transparent);
+    background: color-mix(in oklch, var(--primary) 8%, transparent);
+    border-radius: 9px;
+  }
+  .v-schedule-loading,
+  .v-schedule-error,
+  .v-schedule-empty {
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    padding: var(--v-gap);
+    text-align: center;
+  }
+  .v-agenda-day {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-block-end: 10px;
+  }
+  .v-agenda-heading {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    border-block-end: 1px solid var(--v-hairline);
+    padding-block-end: 4px;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .v-occurrence-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--card, var(--background));
+    box-shadow: 0 0 0 1px var(--v-card-ring);
+    border-inline-start: 3px solid var(--v-id);
+  }
+  .v-occurrence-card > :first-child {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    min-width: 3.2em;
+  }
+  .v-occurrence-card > :last-child {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    min-width: 0;
+  }
+  .v-occurrence-terms {
+    margin: 0;
+    font-size: 0.85rem;
+    color: color-mix(in oklch, var(--foreground) 70%, transparent);
+    overflow-wrap: anywhere;
+  }
+  .v-day-status {
+    font-size: 0.72rem;
+    border-radius: 999px;
+    padding: 1px 8px;
+    border: 1px solid var(--v-hairline);
+    color: color-mix(in oklch, var(--foreground) 65%, transparent);
+  }
+  .v-day-status--missed {
+    border-color: color-mix(in oklch, var(--destructive) 55%, transparent);
+    color: var(--destructive);
+  }
+  .v-day-status--ran_late {
+    border-color: color-mix(in oklch, var(--primary) 45%, transparent);
+  }
+  /* Week/month: a real 7-column calendar grid — scoped so the shared .v-grid
+     utility keeps its plain display:grid contract. */
+  .v-schedule .v-grid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--v-hairline);
+    border: 1px solid var(--v-hairline);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .v-grid-cell {
+    background: var(--background);
+    min-height: 96px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .v-grid-daynum {
+    font-size: 0.75rem;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 4px;
+  }
+  .v-grid-cell--muted .v-grid-daynum {
+    opacity: 0.35;
+  }
+  .v-grid-occ {
+    display: block;
+    width: 100%;
+    text-align: start;
+    border: 0;
+    cursor: pointer;
+    font-size: 0.72rem;
+    line-height: 1.25;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: color-mix(in oklch, var(--v-id) 14%, transparent);
+    color: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .v-grid-occ + .v-grid-occ {
+    margin-block-start: 2px;
+  }
+  /* The reschedule dialog: centered panel; the scrim is the 100vmax spread
+     shadow (no backdrop element exists on a plain div[role=dialog]). */
+  .v-reschedule-dialog {
+    position: fixed;
+    inset-block-start: 50%;
+    inset-inline-start: 50%;
+    translate: -50% -50%;
+    z-index: 60;
+    width: min(460px, calc(100vw - 32px));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px;
+    border-radius: 14px;
+    background: var(--background);
+    box-shadow:
+      0 0 0 1px var(--v-card-ring),
+      0 18px 48px color-mix(in oklch, var(--foreground) 18%, transparent),
+      0 0 0 100vmax color-mix(in oklch, var(--foreground) 25%, transparent);
+  }
+  .v-reschedule-preview {
+    margin: 0;
+    font-size: 0.85rem;
+    padding: 9px 12px;
+    border-radius: 9px;
+    border-inline-start: 3px solid var(--v-id);
+    background: color-mix(in oklch, var(--v-id) 8%, transparent);
+  }
+  .v-reschedule-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .v-recur-builder {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .v-recur-builder label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+  }
+  .v-recur-builder select,
+  .v-recur-builder input {
+    border: 1px solid var(--v-hairline);
+    background: var(--background);
+    color: inherit;
+    border-radius: 8px;
+    padding: 5px 9px;
+    font: inherit;
+  }
+  .v-recur-tz {
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    font-size: 0.8rem;
+  }
+  .v-recur-weekdays {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
