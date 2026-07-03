@@ -45,7 +45,11 @@ metadata:
     - web_research
     - code_review
   output_format: A file written to /workspace/out/<name>.<ext>, surfaced to the conversation as an artifact.
-  token_budget: 2000
+  # D-24-5 per-skill loosening (2026-07-03): the P5 full-fidelity variant
+  # resolves to ~2114 tokens; at 2000 the injector would TRUNCATE it the day
+  # a custom sandbox template activates. 2200 covers it with headroom; the
+  # degrade variant (~1953) was always under. The class default stays 2000.
+  token_budget: 2200
 ---
 
 # Document Generation

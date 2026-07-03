@@ -566,6 +566,14 @@ class TestCompositionEndToEnd:
             # Sanity-check the scanned spec's token budget — a regression guard
             # symmetric to builtin-skills test_under_token_budget.
             doc_spec = next(s for s in scanned if s.name == "document_generation")
-            assert count_tokens(doc_spec.content) <= 2000
+            # The injection contract (2026-07-03): what this e2e actually
+            # injects is the fence-RESOLVED variant, which must fit the skill's
+            # declared D-24-5 token_budget or the injector truncates it.
+            from persona.skills.document_generation import apply_docgen_fidelity
+
+            budget = doc_spec.token_budget
+            assert budget is not None
+            resolved = apply_docgen_fidelity(doc_spec, full_fidelity=False)
+            assert count_tokens(resolved.content) <= budget
         finally:
             await sandbox.aclose()

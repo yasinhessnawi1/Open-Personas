@@ -159,13 +159,24 @@ class TestTokenCountRegressionGuards:
         self,
         document_generation_spec,  # noqa: ANN001
     ) -> None:
-        # Relocated from document_drafting: the unified skill's body must fit
-        # the verbatim pass-through path (D-04-7 hard ceiling 2000).
-        assert document_generation_spec.content_token_count < 2000, (
-            f"document_generation grew to {document_generation_spec.content_token_count} "
-            "tokens; must stay < 2000 so the verbatim pass-through path is exercised. "
-            "Move per-format detail into supplements/ instead of growing the body."
-        )
+        # The injection contract (what the model actually receives): the RAW
+        # body carries BOTH fidelity variants (P5's fence) and is never
+        # injected — each RESOLVED variant must fit the skill's declared
+        # D-24-5 budget so the injector's verbatim branch is exercised
+        # (over-budget content is summarised/TRUNCATED — the real failure).
+        from persona.skills.document_generation import apply_docgen_fidelity
+
+        budget = document_generation_spec.token_budget
+        assert budget is not None
+        for full in (True, False):
+            resolved = apply_docgen_fidelity(document_generation_spec, full_fidelity=full)
+            n = count_tokens(resolved.content)
+            assert n <= budget, (
+                f"document_generation ({'full' if full else 'degrade'} variant) "
+                f"resolved to {n} tokens > the declared token_budget {budget}; "
+                "the injector would truncate it. Raise the D-24-5 frontmatter "
+                "budget deliberately or move detail into supplements/."
+            )
 
     def test_data_analysis_under_budget(
         self,
@@ -339,9 +350,15 @@ class TestUnifiedDocumentGenerationSkill:
 
     def test_under_token_budget(self, document_generation_spec) -> None:  # noqa: ANN001
         n = count_tokens(document_generation_spec.content)
-        assert n <= 2000, (
-            f"document_generation body grew to {n} tokens; D-04-7 hard ceiling is 2000. "
-            "Move per-format detail into supplements/ instead of growing the body."
+        # Growth guard on the RAW body (2026-07-03): the raw body carries BOTH
+        # P5 fidelity variants inline (the fence) and is never injected as-is —
+        # the injection contract (each resolved variant ≤ the declared D-24-5
+        # token_budget) is asserted in test_document_generation_under_budget.
+        # This guard only catches unbounded body growth.
+        assert n <= 2500, (
+            f"document_generation RAW body grew to {n} tokens (> 2500). Move "
+            "per-format detail into supplements/ instead of growing the body, "
+            "and check the resolved variants against the declared token_budget."
         )
 
     def test_when_to_use_populated(self, document_generation_spec) -> None:  # noqa: ANN001
