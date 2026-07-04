@@ -29,6 +29,13 @@ export SSL_CERT_FILE="${SSL_CERT_FILE:-$(uv run python -m certifi 2>/dev/null)}"
 # the wrong store. Both api + voice read PERSONA_EDITION (no prefix).
 export PERSONA_EDITION="cloud"
 
+# The single local process IS the whole cluster (D-08-5): without the in-process
+# worker the durable A0 consumer + A1 scheduler tick never run, so synthesis jobs
+# pile up unclaimed (graph/memory facts are never extracted → "the persona doesn't
+# remember") AND scheduled tasks never fire. Prod runs a dedicated worker; local
+# must turn it on here or those two subsystems are silently dead. (R4-C1-11)
+export PERSONA_API_IN_PROCESS_WORKER="true"
+
 export DATABASE_URL="postgresql+psycopg://persona:persona@localhost:5436/persona"
 export APP_DATABASE_URL="postgresql+psycopg://persona_app:persona_app@localhost:5436/persona"
 
