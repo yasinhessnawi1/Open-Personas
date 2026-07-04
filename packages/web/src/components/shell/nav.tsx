@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  CalendarClock,
   Home,
   ListChecks,
   MessagesSquare,
@@ -31,6 +32,11 @@ const ITEMS = [
   // Spec V9: the voice-call history surface.
   { href: "/calls", key: "calls", icon: Phone, count: undefined },
   { href: "/runs", key: "tasks", icon: ListChecks, count: undefined },
+  // Spec A8: the schedule/calendar surface (time's view of the personas'
+  // commitments). The route + calendar shipped styled but was unreachable —
+  // reachable only by typed URL — until this nav row (R4-C1-10, built-but-inert
+  // at the nav level). A6 may later re-home it alongside the review inbox.
+  { href: "/schedule", key: "schedule", icon: CalendarClock, count: undefined },
 ] as const;
 
 /** Live counts shown on nav rows (Spec 35 D-35-13) — derived from sidebar data. */
