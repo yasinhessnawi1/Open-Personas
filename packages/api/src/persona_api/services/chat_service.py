@@ -34,6 +34,7 @@ from persona.logging import get_logger
 from persona.schema.conversation import Conversation, ConversationMessage
 from sqlalchemy import delete, func, insert, over, select, update
 
+from persona_api.db.engine import aware_utc
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
@@ -326,7 +327,9 @@ def _to_message(row: dict[str, object]) -> ConversationMessage:
     """Build a ConversationMessage from a DB row. ``role`` is constrained to the
     valid set by the ``messages_role_check`` DB CHECK, so the cast is sound."""
     role = cast("Role", str(row["role"]))
-    created_at = cast("datetime", row["created_at"])
+    # aware_utc: community SQLite returns naive instants (R4-C1-8) — the frozen
+    # model rejects them, which 422'd every send in any conversation with history.
+    created_at = cast("datetime", aware_utc(cast("datetime", row["created_at"])))
     return ConversationMessage(role=role, content=str(row["content"]), created_at=created_at)
 
 

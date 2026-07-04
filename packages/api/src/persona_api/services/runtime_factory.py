@@ -288,6 +288,7 @@ class RuntimeFactory:
         from persona.wellbeing_policy import is_gate_eligible, parse_category
         from persona_runtime.graph_selection import make_graph_retrieval, recency_bucket
         from persona_runtime.graph_window import get_recent_window
+        from persona_runtime.prompt import GraphContext
         from persona_runtime.wellbeing import FlaggedNode, make_allowlist_provider, recency_band
 
         from persona_api.middleware.rls_context import current_user_id
@@ -324,13 +325,30 @@ class RuntimeFactory:
         # The recent-window source: the per-turn ContextVar every conversational loop sets
         # before retrieval (K4-D-X-gating-signal-seam) — so the gate reads the conversation,
         # not the bare query (no uncanny re-closing). Unset ⇒ empty ⇒ query-only (fail-safe).
-        return make_graph_retrieval(
+        inner = make_graph_retrieval(
             retriever=retriever,
             owner_provider=current_user_id.get,
             settings=settings,
             allowlist_provider=allowlist_provider,
             recent_window_provider=get_recent_window,
         )
+
+        # R4-C1-7 fail-soft: a graph-read failure must degrade the turn to
+        # MEMORYLESS, never kill it — zero-graph is the loop's designed additive
+        # path, so an empty context is always safe. Before this wrap, any store
+        # error (a Postgres blip in cloud; the missing tables a misconfigured
+        # community build hits) propagated out of the detached worker and failed
+        # the whole turn. Mirrors V13's timeout⇒memoryless posture in voice.
+        def safe_retrieval(query: str) -> GraphContext:
+            try:
+                return inner(query)
+            except Exception:  # noqa: BLE001 — memoryless beats turn-fatal
+                _logger.warning(
+                    "graph retrieval failed; turn degrades to zero-graph", exc_info=True
+                )
+                return GraphContext()
+
+        return safe_retrieval
 
     def _build_user_name_provider(self) -> Callable[[], str | None]:
         """The per-turn display-name resolver for the chat loop (Spec K6, K6-D-6).

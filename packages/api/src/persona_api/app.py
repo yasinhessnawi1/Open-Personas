@@ -534,7 +534,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # ``record_user_fact`` direct-write tool can merge into the user's
             # graph per request (the request-path graph wiring). Built once on the
             # RLS engine; owner-scoped per request via the checkout listener.
-            runtime_factory.enable_graph_writes(audit_root=app.state.audit_root)
+            # CLOUD-ONLY (R4-C1-7): the graph tables are Postgres+pgvector and the
+            # community schema deliberately excludes them (D-33-7) — composing the
+            # store against SQLite made EVERY community chat turn die at query
+            # time ("no such table: graph_nodes"). Community runs zero-graph,
+            # which the loop treats as the additive byte-identical path.
+            if config.edition is Edition.cloud:
+                runtime_factory.enable_graph_writes(audit_root=app.state.audit_root)
             # R6 (T8): pay the crisis-encoder cold load (~40 s) OFF the event loop at
             # boot, so the first user never pays it (the built-but-inert failure class).
             # Non-blocking: the warm window is fail-soft (encoder score times out → the

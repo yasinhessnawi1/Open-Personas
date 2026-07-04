@@ -27,10 +27,11 @@ from sqlalchemy import create_engine, text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from datetime import datetime
 
     from sqlalchemy import Connection, Engine
 
-__all__ = ["create_db_engine", "rls_connection", "set_current_user"]
+__all__ = ["aware_utc", "create_db_engine", "rls_connection", "set_current_user"]
 
 _SET_USER_SQL = text("SELECT set_config('app.current_user_id', :uid, true)")
 
@@ -86,3 +87,24 @@ def rls_connection(engine: Engine, user_id: str) -> Iterator[Connection]:
     with engine.begin() as connection:
         set_current_user(connection, user_id)
         yield connection
+
+
+def aware_utc(value: datetime | str | None) -> datetime | None:
+    """Coerce a stored instant to tz-aware UTC at a row->model boundary.
+
+    Every write in this codebase is tz-aware UTC, but the community SQLite
+    engine (D-33-X-community-engine) stores no tzinfo and hands instants back
+    naive (or as ISO text through raw SQL) — the canonical Tables carry
+    Postgres types, and the community metadata's type shims only apply to the
+    DDL copy, never to runtime reads (the R4-C1 finding family). Storage
+    convention IS UTC, so re-attaching it is lossless; Postgres values pass
+    through untouched. Use at every boundary that feeds a tz-validating model.
+    """
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    if isinstance(value, str):
+        value = _dt.fromisoformat(value)
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value

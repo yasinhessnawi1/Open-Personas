@@ -28,7 +28,7 @@ into A0 jobs) is a SEPARATE concern on the dispatch engine — T5/T6.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import (
@@ -40,6 +40,7 @@ from persona.logging import get_logger
 from persona.schedules import RecurrenceRule, Schedule, next_fire_after
 from sqlalchemy import delete, insert, select, update
 
+from persona_api.db.engine import aware_utc as _aware_utc
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import schedules as schedules_t
 from persona_api.services import audit_service
@@ -60,22 +61,6 @@ _MAX_CAS_RETRIES = 5
 def _recurrence_str(schedule: Schedule) -> str | None:
     """The RFC-5545 RRULE string for the durable column (None for a one-time)."""
     return schedule.recurrence.to_rrule_string() if schedule.recurrence is not None else None
-
-
-def _aware_utc(value: datetime | str | None) -> datetime | None:
-    """Coerce a stored instant to tz-aware UTC.
-
-    The schedules columns are ``DateTime(timezone=True)`` and every write is
-    tz-aware UTC — but the community SQLite engine (D-33-X-community-engine)
-    has no tz storage and hands the instant back naive (or as ISO text through
-    raw SQL). The storage convention IS UTC, so re-attaching it here is
-    lossless; Postgres values pass through untouched.
-    """
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value
 
 
 def _aware_utc_required(value: datetime | str) -> datetime:
