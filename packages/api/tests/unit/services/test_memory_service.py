@@ -162,3 +162,72 @@ def test_node_detail_carries_wellbeing_mark() -> None:
 
 def test_node_detail_missing_returns_none() -> None:
     assert memory_service.node_detail(_star(), "u1", "ghost") is None  # type: ignore[arg-type]
+
+
+# --- Defect 2: provenance attribution (R-K5-PROV-PERSONA / R-K5-OPEN-CONV) -------
+
+
+def test_node_detail_resolves_persona_name_from_persona_id() -> None:
+    """The panel shows "learned by <persona>" — persona_id resolves to a name (owner-scoped)."""
+    prov = [
+        NodeProvenance(
+            source=WriteSource.SYSTEM,
+            persona_id="persona-1",
+            interaction_id="conv-1",
+            interaction_kind="conversation",
+            written_at=NOW,
+        )
+    ]
+    store = _FakeStore([_node("hub", provenance=prov)], [])
+    detail = memory_service.node_detail(
+        store,  # type: ignore[arg-type]
+        "u1",
+        "hub",
+        persona_name_resolver=lambda pid: "Aria" if pid == "persona-1" else None,
+    )
+    assert detail is not None
+    assert detail.origin.persona_name == "Aria"
+
+
+def test_node_detail_persona_name_none_without_resolver() -> None:
+    """Absent a resolver (or an unresolved id) the name stays None → source-based fallback."""
+    prov = [
+        NodeProvenance(source=WriteSource.SYSTEM, persona_id="persona-1", written_at=NOW),
+    ]
+    store = _FakeStore([_node("hub", provenance=prov)], [])
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+    assert detail is not None
+    assert detail.origin.persona_name is None
+
+
+def test_node_detail_conversation_link_for_conversation_source() -> None:
+    """A chat/voice-sourced memory exposes a conversation_id the panel can open."""
+    prov = [
+        NodeProvenance(
+            source=WriteSource.SYSTEM,
+            interaction_id="conv-42",
+            interaction_kind="conversation",
+            written_at=NOW,
+        )
+    ]
+    store = _FakeStore([_node("hub", provenance=prov)], [])
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+    assert detail is not None
+    assert detail.origin.conversation_id == "conv-42"
+
+
+def test_node_detail_no_conversation_link_for_run_source() -> None:
+    """A run-sourced memory's id is a run_id — must NOT be offered as a /chat link (404 guard)."""
+    prov = [
+        NodeProvenance(
+            source=WriteSource.SYSTEM,
+            interaction_id="run-7",
+            interaction_kind="agentic_run",
+            written_at=NOW,
+        )
+    ]
+    store = _FakeStore([_node("hub", provenance=prov)], [])
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+    assert detail is not None
+    assert detail.origin.conversation_id is None
+    assert detail.origin.interaction_id == "run-7"  # still shown, just not linkable

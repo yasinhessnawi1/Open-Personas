@@ -77,6 +77,10 @@ class Synthesizer:
             source=WriteSource.SYSTEM,
             persona_id=interaction.persona_id,
             interaction_id=interaction.interaction_id,
+            # Record WHICH kind of interaction the id names so the K5 panel can tell a
+            # linkable conversation id from a run id (R-K5-OPEN-CONV) — the id alone is
+            # ambiguous (== conversation_id for chat/voice, == run_id for agentic runs).
+            interaction_kind=interaction.interaction_kind.value,
             written_at=datetime.now(UTC),
             # V13: mark the originating surface (``voice`` for a fact minted from a
             # call) so a graph node is attributable cross-channel. ``source`` stays

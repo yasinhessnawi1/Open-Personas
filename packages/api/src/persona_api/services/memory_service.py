@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from persona.extraction import InteractionKind
 from persona.graph.config import GraphSettings
 from persona.graph.retrieval import HybridRetriever
 
@@ -30,12 +31,30 @@ from persona_api.schemas.responses import (
 )
 
 if TYPE_CHECKING:
-    from persona.graph.models import ConceptNode, TypedLink
+    from collections.abc import Callable
+
+    from persona.graph.models import ConceptNode, NodeProvenance, TypedLink
     from persona.graph.protocol import GraphStore
 
 # Provisional window sizes (K5-D-2 — B1-tuned; config later).
 _SEED_LIMIT = 200
 _NEIGHBOR_LIMIT = 60
+
+
+def _conversation_id(origin: NodeProvenance) -> str | None:
+    """The conversation this memory can be opened at, or ``None`` if it isn't a conversation.
+
+    ``interaction_id`` is a conversation id for chat/voice-sourced memories but a run id
+    for agentic-run-sourced ones (R-K5-OPEN-CONV) — routing to ``/chat/{run_id}`` would
+    404. We expose the id as ``conversation_id`` ONLY when the source is a conversation.
+    A legacy/absent ``interaction_kind`` is treated as a conversation (every persisted
+    memory today is conversation-sourced — the run source is not yet wired).
+    """
+    if origin.interaction_id is None:
+        return None
+    if origin.interaction_kind == InteractionKind.AGENTIC_RUN.value:
+        return None
+    return origin.interaction_id
 
 
 def _summary(node: ConceptNode, *, degree: int = 0) -> MemoryNodeSummary:
@@ -140,6 +159,7 @@ def node_detail(
     node_id: str,
     *,
     neighbor_limit: int = _NEIGHBOR_LIMIT,
+    persona_name_resolver: Callable[[str], str | None] | None = None,
 ) -> MemoryNodeDetail | None:
     """The node's full detail — content, provenance-as-story, evolution, typed links.
 
@@ -147,12 +167,23 @@ def node_detail(
     is the node's full accumulation trail (D-K0-4); ``origin`` is its first
     contribution (where it came from). Typed links come from ``neighbors`` so the four
     relationships — including on-the-fly ENTITY threads — are all traversable.
+
+    ``persona_name_resolver`` resolves the origin's ``persona_id`` to a display name so
+    the panel reads "learned by <persona>" instead of a bare "system" (R-K5-PROV-PERSONA);
+    the route binds it to the request's RLS engine (owner-scoped). ``origin.conversation_id``
+    is the openable conversation link, set only for conversation-sourced memories
+    (R-K5-OPEN-CONV).
     """
     node = store.get_node(owner_id, node_id)
     if node is None:
         return None
     trail = node.provenance  # at least one entry (ConceptNode invariant)
     origin = trail[0]
+    persona_name = (
+        persona_name_resolver(origin.persona_id)
+        if persona_name_resolver is not None and origin.persona_id is not None
+        else None
+    )
     links: list[MemoryLinkView] = []
     for edge, neighbor in store.neighbors(owner_id, node_id, limit=neighbor_limit):
         direction: Literal["out", "in"] = "out" if edge.src_node_id == node_id else "in"
@@ -174,7 +205,9 @@ def node_detail(
         origin=MemoryProvenanceView(
             source=str(origin.source),
             persona_id=origin.persona_id,
+            persona_name=persona_name,
             interaction_id=origin.interaction_id,
+            conversation_id=_conversation_id(origin),
             written_at=origin.written_at,
             reason=origin.reason,
             grounding=origin.grounding,

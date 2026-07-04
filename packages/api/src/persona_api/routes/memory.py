@@ -23,10 +23,13 @@ from persona_api.schemas.responses import (
     MemorySearchResponse,
     MemoryWindowResponse,
 )
-from persona_api.services import memory_service
+from persona_api.services import memory_service, persona_service
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from persona.graph.protocol import GraphStore
+    from sqlalchemy import Engine
 
 router = APIRouter(prefix="/v1/memory", tags=["memory"])
 
@@ -35,6 +38,28 @@ def _graph_store(request: Request) -> GraphStore | None:
     """The wired graph store, or ``None`` when the graph is not composed (edition/off)."""
     store: GraphStore | None = getattr(request.app.state, "graph_store", None)
     return store
+
+
+def _persona_name_resolver(request: Request) -> Callable[[str], str | None] | None:
+    """A ``persona_id → name`` resolver bound to the request's RLS engine (owner-scoped).
+
+    Feeds the node-detail projection so provenance reads "learned by <persona>" instead of
+    a bare "system" (R-K5-PROV-PERSONA). ``None`` when no RLS engine is wired; each lookup
+    is fail-soft (a miss → ``None`` → the UI's source-based fallback avatar).
+    """
+    rls_engine: Engine | None = getattr(request.app.state, "rls_engine", None)
+    if rls_engine is None:
+        return None
+
+    def _resolve(persona_id: str) -> str | None:
+        try:
+            return persona_service.persona_display_name(
+                rls_engine=rls_engine, persona_id=persona_id
+            )
+        except Exception:  # noqa: BLE001 — attribution is fail-soft on a read path.
+            return None
+
+    return _resolve
 
 
 @router.get("/graph", response_model=MemoryWindowResponse)
@@ -71,7 +96,16 @@ async def get_node_detail(
 ) -> MemoryNodeDetail:
     """A node's full detail: content, provenance, evolution, typed links (criterion 3)."""
     store = _graph_store(request)
-    detail = None if store is None else memory_service.node_detail(store, user.id, node_id)
+    detail = (
+        None
+        if store is None
+        else memory_service.node_detail(
+            store,
+            user.id,
+            node_id,
+            persona_name_resolver=_persona_name_resolver(request),
+        )
+    )
     if detail is None:
         raise MemoryNodeNotFoundError("memory not found", context={"node_id": node_id})
     return detail
