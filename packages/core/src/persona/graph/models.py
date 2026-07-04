@@ -150,6 +150,12 @@ class NodeProvenance(BaseModel):
             for a K5 edit.
         persona_id: Which persona contributed it (``None`` for user/system edits).
         interaction_id: The source interaction (conversation / run) id, if any.
+        interaction_kind: Which kind of interaction the ``interaction_id`` names
+            (``conversation`` / ``agentic_run`` / ``voice``, mirroring
+            :class:`persona.extraction.InteractionKind`). Disambiguates the id so a
+            reader knows whether ``interaction_id`` is a conversation id (linkable at
+            ``/chat/{id}``) or a run id (not). ``None`` for pre-existing/non-synthesis
+            writes — treated as conversation-sourced (the only persisted source today).
         written_at: UTC timestamp of the contribution. Naive datetimes rejected.
         grounding: The supporting basis the contribution rests on — K2's
             grounded-extraction discipline records *why* this is believed.
@@ -170,6 +176,7 @@ class NodeProvenance(BaseModel):
     source: WriteSource
     persona_id: str | None = None
     interaction_id: str | None = None
+    interaction_kind: str | None = None
     written_at: datetime
     grounding: str | None = None
     reason: str | None = None

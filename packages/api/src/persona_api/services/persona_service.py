@@ -56,6 +56,7 @@ __all__ = [
     "list_personas",
     "load_persona_from_yaml",
     "notify_persona_ready",
+    "persona_display_name",
     "persona_name_from_yaml",
     "set_avatar_url",
     "summary_of",
@@ -424,6 +425,26 @@ def get_persona(*, rls_engine: Engine, persona_id: str) -> dict[str, object]:
     if row is None:
         raise PersonaNotFoundError("persona not found", context={"id": persona_id})
     return dict(row)
+
+
+def persona_display_name(*, rls_engine: Engine, persona_id: str) -> str | None:
+    """Resolve a persona's display name from its id (RLS-scoped), or ``None`` if unknown.
+
+    The K5 Memory panel's "learned by <persona>" attribution (R-K5-PROV-PERSONA): reads
+    the caller's persona row and extracts ``identity.name`` from its YAML. Owner-scoped by
+    the RLS engine, so another tenant's id resolves to ``None`` (never leaks a name). Kept
+    fail-soft — a parse miss or absent persona degrades to the source-based fallback, never
+    an error on a read path.
+    """
+    with rls_engine.begin() as conn:
+        row = (
+            conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id))
+            .mappings()
+            .first()
+        )
+    if row is None:
+        return None
+    return persona_name_from_yaml(row["yaml"])
 
 
 def list_personas(*, rls_engine: Engine, limit: int, offset: int) -> list[dict[str, object]]:

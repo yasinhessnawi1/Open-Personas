@@ -816,6 +816,11 @@ class MemoryProvenanceView(_Output):
     # UI falls back to a source-based avatar when absent.
     persona_name: str | None = None
     interaction_id: str | None = None
+    # The conversation this memory can be opened at (``/chat/{conversation_id}``).
+    # Set ONLY when the source interaction IS a conversation (chat/voice); ``None`` for
+    # a run-sourced memory, whose ``interaction_id`` is a run id and would 404 the link
+    # (R-K5-OPEN-CONV). The UI enables "open conversation" iff this is present.
+    conversation_id: str | None = None
     written_at: datetime
     reason: str | None = None
     grounding: str | None = None

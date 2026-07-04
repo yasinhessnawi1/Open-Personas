@@ -30,14 +30,18 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from persona.audit import AuditAction, AuditEvent
+from persona.graph.entities import normalize_surface
 from persona.graph.errors import GraphProtectedNodeError, NodeMergeError
 from persona.graph.models import (
+    CanonicalEntity,
     ConceptNode,
+    EntityAlias,
     LinkType,
     NodeKind,
     NodeProvenance,
     TypedLink,
     make_edge_id,
+    make_entity_id,
     make_self_node_id,
 )
 from persona.graph.protocol import MergeAction
@@ -87,6 +91,16 @@ class _StoreBackend(Protocol):
     def flagged_nodes(self, owner_id: str) -> list[ConceptNode]: ...
     def node_ids_for_owner(self, owner_id: str) -> list[str]: ...
     def count_nodes(self, owner_id: str) -> int: ...
+    def count_entities(self, owner_id: str) -> int: ...
+    def find_entity_by_text(
+        self, owner_id: str, normalized_name: str
+    ) -> CanonicalEntity | None: ...
+    def insert_entity(
+        self, owner_id: str, entity: CanonicalEntity, name_embedding: Sequence[float]
+    ) -> None: ...
+    def associate_entities(
+        self, owner_id: str, node_id: str, entity_ids: Sequence[str]
+    ) -> None: ...
     def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
     def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]: ...
     def fts_query(self, owner_id: str, query: str, top_k: int) -> list[ConceptNode]: ...
@@ -282,6 +296,11 @@ class PostgresGraphStore:
                 )
             return winner
         self._index.add(surrogate=surrogate, vector=list(vector))
+        # The user IS a canonical entity (the graph's most important one): register it
+        # and associate the SELF node so a later name variant of the user ("Yasin" vs
+        # "yasin hessnawi") resolves ONTO them instead of minting a fragment. Only the
+        # create-race winner reaches here, so the registration is never double-run.
+        self._ensure_self_entity(owner_id, self_id, name)
         self._emit_audit(
             owner_id,
             AuditAction.WRITE,
@@ -318,6 +337,10 @@ class PostgresGraphStore:
         if surrogate is None:  # pragma: no cover - existing was just read
             raise NodeMergeError("self node vanished before rename", context={"owner_id": owner_id})
         self._index.replace(surrogate=surrogate, vector=list(vector))
+        # Keep the user's canonical entity in step with the new name (K6-D-9): the
+        # renamed surface becomes resolvable to the user (idempotent — an existing
+        # entity for the name is reused, else registered).
+        self._ensure_self_entity(owner_id, existing.id, new_name, alias_of=existing.concept_name)
         self._emit_audit(
             owner_id,
             AuditAction.WRITE,
@@ -327,6 +350,45 @@ class PostgresGraphStore:
             metadata={"action": "self_renamed"},
         )
         return renamed
+
+    def _ensure_self_entity(
+        self, owner_id: str, self_id: str, name: str, *, alias_of: str | None = None
+    ) -> None:
+        """Register the user as a canonical entity + associate the SELF node (idempotent).
+
+        The graph's entity registry is what unifies name variants ("Yasin" ⇒ "yasin
+        hessnawi") — content-embedding similarity of bare names is too weak to cross the
+        semantic-link / consolidation bars, and the SELF anchor is (by K7-D-7) outside
+        consolidation entirely. Registering the user as an entity closes that gap at the
+        root: a later mention of a name variant now resolves ONTO the user (exact/MERGE
+        or the AMBIGUOUS review band), and any node concerning them shares this entity, so
+        the ENTITY thread connects them. No-op while the name is the placeholder label.
+        """
+        if name == _UNNAMED_SELF_LABEL:
+            return
+        existing = self._backend.find_entity_by_text(owner_id, normalize_surface(name))
+        if existing is not None:
+            entity_id = existing.id
+        else:
+            aliases = (
+                (EntityAlias(surface=alias_of),)
+                if alias_of and alias_of != _UNNAMED_SELF_LABEL
+                else ()
+            )
+            entity = CanonicalEntity(
+                id=make_entity_id(owner_id, self._backend.count_entities(owner_id)),
+                canonical_name=name,
+                aliases=aliases,
+                provenance=NodeProvenance(
+                    source=WriteSource.SYSTEM,
+                    written_at=datetime.now(UTC),
+                    reason="self entity",
+                ),
+                created_at=datetime.now(UTC),
+            )
+            self._backend.insert_entity(owner_id, entity, self._embedder.encode([name])[0])
+            entity_id = entity.id
+        self._backend.associate_entities(owner_id, self_id, [entity_id])
 
     # ===== read: the K1 legs ==============================================
 
