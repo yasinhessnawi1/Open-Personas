@@ -4531,6 +4531,17 @@
             ],
             "title": "Interaction Id"
           },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
           "written_at": {
             "type": "string",
             "format": "date-time",

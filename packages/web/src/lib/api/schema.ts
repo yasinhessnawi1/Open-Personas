@@ -2472,6 +2472,8 @@ export interface components {
       persona_name?: string | null;
       /** Interaction Id */
       interaction_id?: string | null;
+      /** Conversation Id */
+      conversation_id?: string | null;
       /**
        * Written At
        * Format: date-time
