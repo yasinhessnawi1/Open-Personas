@@ -13,6 +13,20 @@ mirrors only the `persona-api`-touching surface.
 
 ## [Unreleased]
 
+### Added — Memory read/edit endpoints (Spec K5)
+
+- **`GET /v1/memory/graph|nodes/{id}|search`, `PATCH`/`DELETE /v1/memory/nodes/{id}`** — the
+  knowledge-graph UI's backend: windowed, RLS-scoped via the per-request engine, pure projection
+  of K0 types (no graph logic in the route). `graph` is the seed window or a focus neighbourhood;
+  `search` wraps K1 hybrid retrieval; `PATCH` routes to `correct_node`, `DELETE` to `delete_node`.
+- **`MemoryWindowResponse.available`** — distinguishes *no usable graph store* (community-on-
+  SQLite / graph off) from *an empty graph*, so the UI shows a distinct unavailable state instead
+  of the "no memories yet" invite. `enable_graph_writes` gates on the engine dialect (the K0 graph
+  is Postgres-only), so `graph_store` is `None` on non-Postgres and the routes degrade gracefully.
+- **`MemoryProvenanceView.persona_name`** (nullable) — for the panel's provenance avatar;
+  `persona_id → name` resolution in `node_detail` is a recorded follow-up (R-K5-PROV-PERSONA).
+- Seed-index migration `ix_graph_nodes_owner_created` (renumbers off main's head at merge-back,
+  R-K5-MIG-RENUMBER).
 ### Notification Coverage Completion (Spec P6 — durable cross-device feed)
 
 - **`notifications` table + migration** (owner-scoped, FORCE RLS `owner_id =

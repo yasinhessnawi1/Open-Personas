@@ -351,6 +351,22 @@ class GraphStore(Protocol):
         """
         ...
 
+    def correct_node(
+        self, owner_id: str, node_id: str, new_content: str, *, interaction_id: str | None = None
+    ) -> None:
+        """Apply a user's correction to one node, in place (K5-D-7) — the highest-quality write.
+
+        Targets *this* exact node (unlike :meth:`merge`'s similarity routing): re-embeds the
+        new content, re-syncs the index (same path), re-evaluates the node's SEMANTIC links
+        from the fresh embedding (entity/temporal/causal preserved — assertion-based), and
+        appends a ``WriteSource.USER`` provenance entry carrying the prior content as
+        ``superseded_content`` (D-K0-4 accumulate-in-place). A CQS command (returns
+        confirmation by not raising; the caller re-queries ``get_node``).
+
+        Raises ``GraphNodeNotFoundError`` when the node is not the owner's.
+        """
+        ...
+
     def delete_node(self, owner_id: str, node_id: str) -> bool:
         """Delete a node from Postgres AND the index in the same path (criterion 8; K5).
 
@@ -446,6 +462,35 @@ class GraphStore(Protocol):
         Returns every durable node-id the owner holds; K4 subtracts the flagged
         set from this to build :meth:`search_dense`'s positive allowlist.
         RLS-scoped like all Postgres access.
+        """
+        ...
+
+    def count_nodes(self, owner_id: str) -> int:
+        """The owner's total node count — the Memory header tally (K5-D-8).
+
+        A cheap aggregate, so the windowed read never enumerates the whole graph
+        just to show a total. RLS-scoped; a read (CQS).
+        """
+        ...
+
+    def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The first-paint seed window — the owner's most-recent nodes (K5-D-8, B1-refined).
+
+        Returns up to ``limit`` nodes ordered by ``created_at`` DESC — "what you've been
+        thinking about lately", the view the Memory map opens on when there is no focus.
+        Index-served (``owner_id, created_at``), O(limit) regardless of graph size; never a
+        whole-graph load. Recency is the v1 product choice (the seed is recoverable); the
+        degree-anchor is a recorded planned option (decisions.md B1). RLS-scoped; a read (CQS).
+        """
+        ...
+
+    def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """The stored typed edges whose both endpoints lie in ``node_ids`` (K5-D-2).
+
+        The induced sub-graph of a window, in one query — the
+        semantic/temporal/causal edges materialised in storage. ENTITY links are
+        resolved on-the-fly (:meth:`neighbors`, D-K0-9) and are not returned here.
+        RLS-scoped; a read (CQS).
         """
         ...
 

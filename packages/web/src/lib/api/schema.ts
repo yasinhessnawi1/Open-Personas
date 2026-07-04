@@ -1334,6 +1334,80 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/memory/graph": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Graph Window
+     * @description A windowed slice of the caller's graph — the seed, or a focus neighbourhood (K5-D-2).
+     */
+    get: operations["get_graph_window_v1_memory_graph_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/memory/nodes/{node_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Node Detail
+     * @description A node's full detail: content, provenance, evolution, typed links (criterion 3).
+     */
+    get: operations["get_node_detail_v1_memory_nodes__node_id__get"];
+    put?: never;
+    post?: never;
+    /**
+     * Delete Node
+     * @description Delete a node — gone from Postgres + index + every persona's retrieval (criterion 7).
+     *
+     *     The trust-critical action (K5 §7). 204 on success; 404 when the node is not the
+     *     caller's (existence-disclosure-safe — never reveals another tenant's node exists).
+     */
+    delete: operations["delete_node_v1_memory_nodes__node_id__delete"];
+    options?: never;
+    head?: never;
+    /**
+     * Correct Node
+     * @description Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
+     *
+     *     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
+     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
+     */
+    patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
+    trace?: never;
+  };
+  "/v1/memory/search": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Search Memory
+     * @description Search-to-navigate over the caller's graph — K1 hybrid retrieval (criterion 5).
+     */
+    get: operations["search_memory_v1_memory_search_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/me/connectors": {
     parameters: {
       query?: never;
@@ -2277,6 +2351,194 @@ export interface components {
       tools?: string[];
       /** Error */
       error?: string | null;
+    };
+    /**
+     * MemoryCorrectionRequest
+     * @description Correct a Memory node's content (Spec K5, K5-D-7 / K5-D-5).
+     *
+     *     The user's edit to what a node says — the highest-quality write the graph gets.
+     *     Content-only (per K5-D-7): it flows through K0's update path (re-embed, re-index,
+     *     semantic links re-evaluated) and records provenance as ``user``-edited.
+     */
+    MemoryCorrectionRequest: {
+      /** Content */
+      content: string;
+    };
+    /**
+     * MemoryEvolutionEntry
+     * @description One step in how a memory grew — a provenance contribution (oldest first).
+     */
+    MemoryEvolutionEntry: {
+      /** Source */
+      source: string;
+      /**
+       * Written At
+       * Format: date-time
+       */
+      written_at: string;
+      /** Reason */
+      reason?: string | null;
+      /** Superseded Content */
+      superseded_content?: string | null;
+    };
+    /**
+     * MemoryLinkEdge
+     * @description A typed edge for the canvas — one of the four LinkType relationships.
+     */
+    MemoryLinkEdge: {
+      /** Src Node Id */
+      src_node_id: string;
+      /** Dst Node Id */
+      dst_node_id: string;
+      /** Link Type */
+      link_type: string;
+      /** Weight */
+      weight?: number | null;
+    };
+    /**
+     * MemoryLinkView
+     * @description A traversable typed link in the detail panel — the edge plus the neighbour.
+     */
+    MemoryLinkView: {
+      /** Link Type */
+      link_type: string;
+      /** Weight */
+      weight?: number | null;
+      /**
+       * Direction
+       * @enum {string}
+       */
+      direction: "out" | "in";
+      neighbor: components["schemas"]["MemoryNodeSummary"];
+    };
+    /**
+     * MemoryNodeDetail
+     * @description A node's full detail: content, provenance-as-story, evolution, typed links.
+     */
+    MemoryNodeDetail: {
+      /** Id */
+      id: string;
+      /** Kind */
+      kind: string;
+      /** Label */
+      label: string;
+      /** Content */
+      content: string;
+      /** Wellbeing Category */
+      wellbeing_category?: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      origin: components["schemas"]["MemoryProvenanceView"];
+      /** Evolution */
+      evolution: components["schemas"]["MemoryEvolutionEntry"][];
+      /** Links */
+      links: components["schemas"]["MemoryLinkView"][];
+    };
+    /**
+     * MemoryNodeSummary
+     * @description A node as drawn on the canvas — no content/provenance (that is the detail).
+     *
+     *     ``degree`` is the node's connectedness within the returned window (0 when not
+     *     computed for this view) — the "size by connectedness, lightly" signal (K5-D-3).
+     */
+    MemoryNodeSummary: {
+      /** Id */
+      id: string;
+      /** Kind */
+      kind: string;
+      /** Label */
+      label: string;
+      /** Wellbeing Category */
+      wellbeing_category?: string | null;
+      /**
+       * Degree
+       * @default 0
+       */
+      degree: number;
+    };
+    /**
+     * MemoryProvenanceView
+     * @description Where a memory came from — the structured basis the UI renders as story.
+     */
+    MemoryProvenanceView: {
+      /** Source */
+      source: string;
+      /** Persona Id */
+      persona_id?: string | null;
+      /** Persona Name */
+      persona_name?: string | null;
+      /** Interaction Id */
+      interaction_id?: string | null;
+      /**
+       * Written At
+       * Format: date-time
+       */
+      written_at: string;
+      /** Reason */
+      reason?: string | null;
+      /** Grounding */
+      grounding?: string | null;
+    };
+    /**
+     * MemorySearchResponse
+     * @description The matches for a Memory search query, best-first (criterion 5).
+     */
+    MemorySearchResponse: {
+      /** Query */
+      query: string;
+      /** Results */
+      results: components["schemas"]["MemorySearchResult"][];
+    };
+    /**
+     * MemorySearchResult
+     * @description One search hit — exact-term and paraphrase ranks both visible (K1 hybrid).
+     */
+    MemorySearchResult: {
+      /** Node Id */
+      node_id: string;
+      /** Label */
+      label: string;
+      /** Kind */
+      kind: string;
+      /** Score */
+      score: number;
+      /** Dense Rank */
+      dense_rank?: number | null;
+      /** Sparse Rank */
+      sparse_rank?: number | null;
+    };
+    /**
+     * MemoryWindowResponse
+     * @description A windowed slice of the graph — the seed (no focus) or a focus neighbourhood.
+     *
+     *     Never the whole graph (K5-D-2): ``total_nodes`` is the owner's full tally for the
+     *     header; ``nodes``/``links`` are only the loaded window.
+     *
+     *     ``available`` distinguishes *no graph store* (this deployment has no usable graph —
+     *     e.g. community-on-SQLite, the K0 graph being Postgres-only) from *an empty graph*
+     *     (a real but as-yet-unpopulated map). The UI must not show the "no memories yet"
+     *     invite when the truth is "Memory isn't available here" — so the nav is gated and
+     *     the page shows a distinct unavailable state when this is ``False`` (Spec K5).
+     */
+    MemoryWindowResponse: {
+      /**
+       * Available
+       * @default true
+       */
+      available: boolean;
+      /** Focus Id */
+      focus_id?: string | null;
+      /** Is Seed */
+      is_seed: boolean;
+      /** Total Nodes */
+      total_nodes: number;
+      /** Nodes */
+      nodes: components["schemas"]["MemoryNodeSummary"][];
+      /** Links */
+      links: components["schemas"]["MemoryLinkEdge"][];
     };
     /**
      * MessageView
@@ -4928,6 +5190,165 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MCPServerDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_graph_window_v1_memory_graph_get: {
+    parameters: {
+      query?: {
+        /** @description Centre node id; omit for the first-paint seed window. */
+        focus?: string | null;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MemoryWindowResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_node_detail_v1_memory_nodes__node_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        node_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MemoryNodeDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_node_v1_memory_nodes__node_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        node_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  correct_node_v1_memory_nodes__node_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        node_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MemoryCorrectionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MemoryNodeDetail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  search_memory_v1_memory_search_get: {
+    parameters: {
+      query: {
+        /** @description The search query — exact term or paraphrase. */
+        q: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MemorySearchResponse"];
         };
       };
       /** @description Validation Error */

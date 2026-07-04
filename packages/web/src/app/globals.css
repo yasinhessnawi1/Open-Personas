@@ -241,6 +241,14 @@
   --chart-3: oklch(0.6 0.045 232);
   --chart-4: oklch(0.55 0.09 145);
   --chart-5: oklch(0.5 0.12 330);
+  /*
+   * Spec K5 (K5-D-3) — the Memory knowledge-graph palette (node colour by the
+   * seven NodeKinds, the four typed-link colours, the K4 care mark) lives in
+   * `src/lib/memory/encoding.ts`, NOT here: it is consumed only at runtime
+   * (canvas `getComputedStyle` / inline `var()`), which Tailwind v4's static
+   * scan can't see — so `:root` custom properties for it are tree-shaken out of
+   * the build. The encoding module is the single tunable source (Group E).
+   */
   --sidebar: oklch(0.97 0.009 72);
   --sidebar-foreground: oklch(0.24 0.012 55);
   --sidebar-primary: oklch(0.585 0.196 30);

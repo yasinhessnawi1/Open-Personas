@@ -24,6 +24,15 @@ __all__ = [
     "ConversationSummary",
     "CreditsResponse",
     "DoneEvent",
+    "MemoryEvolutionEntry",
+    "MemoryLinkEdge",
+    "MemoryLinkView",
+    "MemoryNodeDetail",
+    "MemoryNodeSummary",
+    "MemoryProvenanceView",
+    "MemorySearchResponse",
+    "MemorySearchResult",
+    "MemoryWindowResponse",
     "MessageView",
     "PersonaCapabilities",
     "PersonaDetail",
@@ -788,3 +797,119 @@ class MCPCatalogServer(_Output):
     signed: bool = False
     allow_hosts: list[str] = Field(default_factory=list)
     secrets: list[MCPCatalogSecret] = Field(default_factory=list)
+
+
+# -- K5: Memory (the knowledge-graph UI) ------------------------------------
+# Pure projection of the K0 graph types (ConceptNode / TypedLink / NodeProvenance)
+# — no graph logic here, the API just shapes what the store returns (criterion 12).
+# ``kind`` (NodeKind) and ``link_type`` (LinkType) are strings, not Literals, so a
+# future store-side enum value never breaks the contract.
+
+
+class MemoryProvenanceView(_Output):
+    """Where a memory came from — the structured basis the UI renders as story."""
+
+    source: str
+    persona_id: str | None = None
+    # Human-readable name of the persona that learned this (for the panel avatar).
+    # ``None`` until resolved from ``persona_id`` (R-K5-PROV-PERSONA follow-up); the
+    # UI falls back to a source-based avatar when absent.
+    persona_name: str | None = None
+    interaction_id: str | None = None
+    written_at: datetime
+    reason: str | None = None
+    grounding: str | None = None
+
+
+class MemoryEvolutionEntry(_Output):
+    """One step in how a memory grew — a provenance contribution (oldest first)."""
+
+    source: str
+    written_at: datetime
+    reason: str | None = None
+    superseded_content: str | None = None
+
+
+class MemoryNodeSummary(_Output):
+    """A node as drawn on the canvas — no content/provenance (that is the detail).
+
+    ``degree`` is the node's connectedness within the returned window (0 when not
+    computed for this view) — the "size by connectedness, lightly" signal (K5-D-3).
+    """
+
+    id: str
+    kind: str
+    label: str
+    wellbeing_category: str | None = None
+    degree: int = 0
+
+
+class MemoryLinkEdge(_Output):
+    """A typed edge for the canvas — one of the four LinkType relationships."""
+
+    src_node_id: str
+    dst_node_id: str
+    link_type: str
+    weight: float | None = None
+
+
+class MemoryWindowResponse(_Output):
+    """A windowed slice of the graph — the seed (no focus) or a focus neighbourhood.
+
+    Never the whole graph (K5-D-2): ``total_nodes`` is the owner's full tally for the
+    header; ``nodes``/``links`` are only the loaded window.
+
+    ``available`` distinguishes *no graph store* (this deployment has no usable graph —
+    e.g. community-on-SQLite, the K0 graph being Postgres-only) from *an empty graph*
+    (a real but as-yet-unpopulated map). The UI must not show the "no memories yet"
+    invite when the truth is "Memory isn't available here" — so the nav is gated and
+    the page shows a distinct unavailable state when this is ``False`` (Spec K5).
+    """
+
+    available: bool = True
+    focus_id: str | None = None
+    is_seed: bool
+    total_nodes: int
+    nodes: list[MemoryNodeSummary]
+    links: list[MemoryLinkEdge]
+
+
+class MemoryLinkView(_Output):
+    """A traversable typed link in the detail panel — the edge plus the neighbour."""
+
+    link_type: str
+    weight: float | None = None
+    direction: Literal["out", "in"]
+    neighbor: MemoryNodeSummary
+
+
+class MemoryNodeDetail(_Output):
+    """A node's full detail: content, provenance-as-story, evolution, typed links."""
+
+    id: str
+    kind: str
+    label: str
+    content: str
+    wellbeing_category: str | None = None
+    created_at: datetime
+    origin: MemoryProvenanceView
+    evolution: list[MemoryEvolutionEntry]
+    links: list[MemoryLinkView]
+
+
+class MemorySearchResult(_Output):
+    """One search hit — exact-term and paraphrase ranks both visible (K1 hybrid)."""
+
+    node_id: str
+    label: str
+    kind: str
+    score: float
+    dense_rank: int | None = None
+    sparse_rank: int | None = None
+
+
+class MemorySearchResponse(_Output):
+    """The matches for a Memory search query, best-first (criterion 5)."""
+
+    query: str
+    results: list[MemorySearchResult]

@@ -305,6 +305,47 @@ class PostgresGraphBackend:
         with self._engine.connect() as conn:
             return int(conn.execute(stmt).scalar_one())
 
+    def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The first-paint seed window: the owner's most-recent nodes (K5-D-8, B1-refined).
+
+        Ordered by ``created_at`` DESC — "what you've been thinking about lately" — served by
+        the ``(owner_id, created_at)`` index as a bounded backward index-scan (O(limit), flat
+        regardless of graph size). Recency is the v1 product choice (the seed is recoverable —
+        the user explores outward); the degree-"anchor" alternative is a recorded planned option
+        (a materialised degree column on the write path) — see decisions.md B1. Degree-for-sizing
+        stays free per-window via :meth:`edges_among`.
+        """
+        if limit <= 0:
+            return []
+        stmt = (
+            select(graph_nodes)
+            .where(graph_nodes.c.owner_id == owner_id)
+            .order_by(graph_nodes.c.created_at.desc())
+            .limit(limit)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_node(dict(r)) for r in rows]
+
+    def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """The stored typed edges whose BOTH endpoints lie in ``node_ids``.
+
+        The induced sub-graph of a window (K5-D-2) in one query — semantic,
+        temporal, and causal edges (which are materialised in ``graph_edges``).
+        ENTITY links are resolved on-the-fly (D-K0-9) and are NOT returned here;
+        the detail panel surfaces them via :meth:`neighbors`. RLS-scoped read.
+        """
+        ids = list(node_ids)
+        if len(ids) < 2:  # noqa: PLR2004 — an edge needs two distinct endpoints in the set
+            return []
+        stmt = select(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.src_node_id.in_(ids),
+            graph_edges.c.dst_node_id.in_(ids),
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_link(dict(r)) for r in rows]
     def next_node_index(self, owner_id: str) -> int:
         """The next collision-free ``make_node_id`` index for the owner (Spec K7, K7-D-9).
 
@@ -527,6 +568,26 @@ class PostgresGraphBackend:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
+    def delete_links_incident(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
+        """Delete a node's edges of one type in BOTH directions (K5-D-7 correction re-eval).
+
+        On a user correction the node's embedding changes, so every semantic edge
+        *incident* to it is stale — including INBOUND ones (``dst = node``) that a
+        neighbour scored against the OLD embedding (the half-edge a one-sided
+        ``delete_links_from`` would leave behind). Clearing both directions, then
+        re-forming the node's outgoing links from the fresh embedding, keeps the
+        symmetric semantic neighbourhood honest. RLS-scoped.
+        """
+        stmt = delete(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.link_type == str(link_type),
+            or_(
+                graph_edges.c.src_node_id == node_id,
+                graph_edges.c.dst_node_id == node_id,
+            ),
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
     def invalidate_edge(
         self,
         owner_id: str,

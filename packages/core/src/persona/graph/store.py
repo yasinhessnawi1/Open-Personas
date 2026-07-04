@@ -86,6 +86,9 @@ class _StoreBackend(Protocol):
     def surrogates_for_nodes(self, owner_id: str, node_ids: Sequence[str]) -> list[int]: ...
     def flagged_nodes(self, owner_id: str) -> list[ConceptNode]: ...
     def node_ids_for_owner(self, owner_id: str) -> list[str]: ...
+    def count_nodes(self, owner_id: str) -> int: ...
+    def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
+    def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]: ...
     def fts_query(self, owner_id: str, query: str, top_k: int) -> list[ConceptNode]: ...
     def neighbors(
         self,
@@ -113,6 +116,9 @@ class _StoreBackend(Protocol):
 
 class _MergeRunner(Protocol):
     def merge(self, owner_id: str, candidate: KnowledgeCandidate) -> MergeOutcome: ...
+    def correct_node(
+        self, owner_id: str, node_id: str, new_content: str, *, interaction_id: str | None = None
+    ) -> None: ...
 
 
 class PostgresGraphStore:
@@ -162,6 +168,39 @@ class PostgresGraphStore:
         else:
             self._index.replace(surrogate=surrogate, vector=embedding)
         return outcome
+
+    def correct_node(
+        self, owner_id: str, node_id: str, new_content: str, *, interaction_id: str | None = None
+    ) -> None:
+        """Apply a user's correction to one node, in place (K5-D-7) — the most trustworthy write.
+
+        Routes through K0's update path (re-embed, re-evaluate semantic links, append a
+        ``WriteSource.USER`` provenance entry with the superseded content), then syncs the
+        dense index from the durable embedding (same-path, mirroring :meth:`merge`).
+        Entity/temporal/causal links are preserved (only SEMANTIC re-evaluates). A CQS
+        command: returns confirmation by not raising; the caller re-queries ``get_node``
+        for the fresh state, never this method.
+
+        Raises:
+            GraphNodeNotFoundError: the node is not the owner's (no silent no-op/create).
+        """
+        self._merge.correct_node(owner_id, node_id, new_content, interaction_id=interaction_id)
+        self._emit_audit(
+            owner_id,
+            AuditAction.WRITE,
+            source=WriteSource.USER,
+            node_id=node_id,
+            metadata={"action": "corrected"},
+        )
+        # Same-path index sync — the corrected embedding is the durable truth in Postgres.
+        surrogate = self._backend.surrogate_for(owner_id, node_id)
+        embedding = self._backend.get_embeddings(owner_id, [node_id]).get(node_id)
+        if surrogate is None or embedding is None:  # pragma: no cover - defensive
+            raise NodeMergeError(
+                "corrected node not found for index sync",
+                context={"node_id": node_id, "owner_id": owner_id},
+            )
+        self._index.replace(surrogate=surrogate, vector=embedding)
 
     def delete_node(self, owner_id: str, node_id: str) -> bool:
         # The SELF anchor is not deletable (K7-D-7): a rename flows through K6-D-9's
@@ -434,6 +473,26 @@ class PostgresGraphStore:
         (CQS — no writes).
         """
         return self._backend.node_ids_for_owner(owner_id)
+
+    def count_nodes(self, owner_id: str) -> int:
+        """The owner's total node count — the Memory header tally (K5-D-8). A read."""
+        return self._backend.count_nodes(owner_id)
+
+    def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The first-paint seed window — the owner's most-recent nodes (K5-D-8, B1-refined).
+
+        The Memory view's no-focus opening: a bounded, recency-ordered set (index-served,
+        O(limit)), never the whole graph. RLS-scoped; a read (CQS — no writes).
+        """
+        return self._backend.seed_nodes(owner_id, limit=limit)
+
+    def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """The stored typed edges induced by a node set — the window's links (K5-D-2).
+
+        Semantic/temporal/causal edges among ``node_ids`` (ENTITY links resolve
+        on-the-fly via :meth:`neighbors`, not here). RLS-scoped; a read (CQS).
+        """
+        return self._backend.edges_among(owner_id, node_ids)
 
     def neighbors(
         self,

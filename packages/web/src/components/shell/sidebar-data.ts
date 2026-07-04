@@ -74,6 +74,13 @@ export interface SidebarData {
   readonly personas: readonly SidebarPersona[];
   readonly conversations: readonly SidebarConversation[];
   readonly calls: readonly SidebarCall[];
+  /**
+   * Spec K5: whether this deployment has a usable knowledge-graph (Memory). A
+   * runtime signal — the API's window reports `available: false` when there is no
+   * Postgres graph store (community-on-SQLite / graph off) — so the nav gates the
+   * Memory row by availability, not by hardcoded edition.
+   */
+  readonly memoryAvailable: boolean;
 }
 
 /**

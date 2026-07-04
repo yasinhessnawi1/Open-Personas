@@ -100,6 +100,9 @@ graph_nodes = Table(
     # Lets graph_edges reference (id, owner_id) so an edge can never cross tenants.
     UniqueConstraint("id", "owner_id", name="uq_graph_nodes_id_owner"),
     Index("ix_graph_nodes_owner", "owner_id"),
+    # The K5 first-paint seed (K5-D-8, B1-refined): WHERE owner_id ORDER BY created_at DESC
+    # LIMIT — a bounded backward index-scan, O(limit) regardless of graph size.
+    Index("ix_graph_nodes_owner_created", "owner_id", "created_at"),
     Index("ix_graph_nodes_updated_at", "owner_id", "updated_at"),
     Index(
         "ix_graph_nodes_embedding_hnsw",

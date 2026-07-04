@@ -31,3 +31,14 @@ export type PostMessageRequest = Schemas["PostMessageRequest"];
 export type ChannelContext = Schemas["ChannelContext"];
 export type StartRunRequest = Schemas["StartRunRequest"];
 export type RespondToRunRequest = Schemas["RespondToRunRequest"];
+
+// Spec K5 — Memory (the interactive knowledge-graph)
+export type MemoryWindowResponse = Schemas["MemoryWindowResponse"];
+export type MemoryNodeSummary = Schemas["MemoryNodeSummary"];
+export type MemoryLinkEdge = Schemas["MemoryLinkEdge"];
+export type MemoryNodeDetail = Schemas["MemoryNodeDetail"];
+export type MemoryLinkView = Schemas["MemoryLinkView"];
+export type MemoryEvolutionEntry = Schemas["MemoryEvolutionEntry"];
+export type MemorySearchResponse = Schemas["MemorySearchResponse"];
+export type MemorySearchResult = Schemas["MemorySearchResult"];
+export type MemoryCorrectionRequest = Schemas["MemoryCorrectionRequest"];

@@ -12,16 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from persona_runtime.prompt import GraphContext
-
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_runtime.prompt import GraphContext
 
 
 class _ExplodingStore:
     """Every read explodes — the community-missing-tables / Postgres-blip shape."""
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401 — total stub
-        def _boom(*args: object, **kwargs: object) -> object:
+        def _boom(*args: object, **kwargs: object) -> object:  # noqa: ARG001
             msg = "no such table: graph_nodes"
             raise RuntimeError(msg)
 

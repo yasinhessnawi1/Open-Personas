@@ -21,6 +21,7 @@ __all__ = [
     "CreateMCPServerRequest",
     "CreatePersonaRequest",
     "ImageRef",
+    "MemoryCorrectionRequest",
     "PostMessageRequest",
     "RefinePersonaRequest",
     "RespondToRunRequest",
@@ -55,6 +56,17 @@ class ChannelContext(_Input):
     platform_user_id: str | None = None
     platform_chat_id: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class MemoryCorrectionRequest(_Input):
+    """Correct a Memory node's content (Spec K5, K5-D-7 / K5-D-5).
+
+    The user's edit to what a node says — the highest-quality write the graph gets.
+    Content-only (per K5-D-7): it flows through K0's update path (re-embed, re-index,
+    semantic links re-evaluated) and records provenance as ``user``-edited.
+    """
+
+    content: str = Field(min_length=1, max_length=8000)
 
 
 class CreatePersonaRequest(_Input):

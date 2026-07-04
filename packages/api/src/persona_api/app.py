@@ -72,6 +72,7 @@ from persona_api.routes import (
     imagegen,
     mcp_servers,
     me,
+    memory,
     personas,
     runs,
     tools,
@@ -534,13 +535,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # ``record_user_fact`` direct-write tool can merge into the user's
             # graph per request (the request-path graph wiring). Built once on the
             # RLS engine; owner-scoped per request via the checkout listener.
-            # CLOUD-ONLY (R4-C1-7): the graph tables are Postgres+pgvector and the
-            # community schema deliberately excludes them (D-33-7) — composing the
-            # store against SQLite made EVERY community chat turn die at query
-            # time ("no such table: graph_nodes"). Community runs zero-graph,
-            # which the loop treats as the additive byte-identical path.
-            if config.edition is Edition.cloud:
-                runtime_factory.enable_graph_writes(audit_root=app.state.audit_root)
+            # ``enable_graph_writes`` self-guards on the ENGINE dialect (K5 +
+            # R4-C1-7): on a non-Postgres engine (community-on-SQLite) it leaves the
+            # store None instead of composing a Postgres-typed store that 500s on
+            # first use — so this call is unconditional and the factory decides.
+            # A self-hosted community-on-Postgres deploy still gets the full graph.
+            runtime_factory.enable_graph_writes(audit_root=app.state.audit_root)
+            # Spec K5: expose that same owner-scoped store to the Memory read/edit
+            # routes (one instance, one RLS scope per request). ``None`` when the
+            # graph isn't composed (no-Postgres engine) ⇒ the Memory area reads as
+            # empty + the nav row gates (the routes fall back gracefully).
+            app.state.graph_store = runtime_factory.graph_store
             # R6 (T8): pay the crisis-encoder cold load (~40 s) OFF the event loop at
             # boot, so the first user never pays it (the built-but-inert failure class).
             # Non-blocking: the warm window is fail-soft (encoder score times out → the
@@ -730,4 +735,5 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(imagegen.router)
     app.include_router(artifacts.router)
     app.include_router(mcp_servers.router)  # spec 30: bring-your-own MCP
+    app.include_router(memory.router)  # spec K5: the knowledge-graph UI ("Memory")
     app.include_router(connectors.router)  # spec C6: connector management front-door

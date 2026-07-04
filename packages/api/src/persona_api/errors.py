@@ -54,6 +54,7 @@ __all__ = [
     "MCPOAuthProviderError",
     "MCPOAuthStateError",
     "MCPServerNotFoundError",
+    "MemoryNodeNotFoundError",
     "MCPServerValidationError",
     "ModelBackendUnavailableError",
     "PublicNoAuthRefusedError",
@@ -136,6 +137,16 @@ class ConversationNotFoundError(PersonaError):
 
 class RunNotFoundError(PersonaError):
     """Raised when a run is not visible to the current user (→ 404)."""
+
+
+class MemoryNodeNotFoundError(PersonaError):
+    """Raised when a Memory (graph) node is not the current user's (→ 404; Spec K5).
+
+    The Memory read/edit/delete surface (``/v1/memory/nodes/{id}``) 404s when the
+    node id is unknown or belongs to another user — RLS already scopes the read, so
+    a miss is indistinguishable from "not yours," which is the correct, leak-free
+    signal. ``context`` carries the ``node_id``.
+    """
 
 
 class TurnAlreadyActiveError(PersonaError):
@@ -382,6 +393,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_body("run_not_found", exc.message or "run not found", exc.context),
+        )
+
+    @app.exception_handler(MemoryNodeNotFoundError)
+    async def _memory_node_404(_: Request, exc: MemoryNodeNotFoundError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=_body("memory_node_not_found", exc.message or "memory not found", exc.context),
         )
 
     @app.exception_handler(TurnNotActiveError)

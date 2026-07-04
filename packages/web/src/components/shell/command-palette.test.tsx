@@ -59,6 +59,7 @@ const DATA: SidebarData = {
     },
   ],
   calls: [],
+  memoryAvailable: false,
 };
 
 function renderWith(node: React.ReactNode) {

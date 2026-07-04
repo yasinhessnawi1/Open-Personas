@@ -40,7 +40,11 @@ around two ideas that hold up over hundreds of turns:
   *naturally* (applied where relevant, never recited or paraded), held tentatively
   when old, and honestly attributable when you ask how it knows — with wellbeing-
   sensitive matters handled with care. It's additive: a persona with an empty
-  graph behaves exactly as before.
+  graph behaves exactly as before. And it's **yours to see and shape**: the
+  **Memory** surface draws that graph as a living, force-directed map — every node
+  shows where it came from (as story, not audit), and you can **correct** or
+  **delete** anything, which re-indexes or removes it from what *every* persona
+  retrieves. Transparency + control are what make the shared brain legitimate.
 
 Wrap audio I/O around the same turn loop and you get **real-time voice** with the
 same persona, memory, and routing — voice is the same stack, not a parallel one.

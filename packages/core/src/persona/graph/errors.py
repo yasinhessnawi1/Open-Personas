@@ -16,6 +16,7 @@ __all__ = [
     "EntityResolutionError",
     "GraphError",
     "GraphIndexError",
+    "GraphNodeNotFoundError",
     "GraphProtectedNodeError",
     "GraphRebuildError",
     "NodeMergeError",
@@ -52,6 +53,16 @@ class NodeMergeError(GraphError):
     (no silent overwrite, D-K0-4) — when merge cannot proceed safely it
     raises rather than guessing. ``context`` conventionally carries the
     candidate concept and the failing step.
+    """
+
+
+class GraphNodeNotFoundError(GraphError):
+    """Raised when a targeted node operation addresses a node the owner does not hold (Spec K5).
+
+    The user-correction path (``correct_node``, K5-D-7) targets one exact node; if the id
+    is unknown or belongs to another owner (RLS scopes the read, so the two are
+    indistinguishable — the leak-free signal), correction must not silently no-op or
+    create a node. ``context`` conventionally carries ``{"node_id": ..., "owner_id": ...}``.
     """
 
 

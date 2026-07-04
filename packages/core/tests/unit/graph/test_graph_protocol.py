@@ -189,6 +189,10 @@ class _StubStore:
     def merge(self, owner_id: str, candidate: KnowledgeCandidate) -> MergeOutcome:
         return MergeOutcome(action=MergeAction.CREATED, node_id="u1::node::00000001")
 
+    def correct_node(
+        self, owner_id: str, node_id: str, new_content: str, *, interaction_id: str | None = None
+    ) -> None: ...
+
     def delete_node(self, owner_id: str, node_id: str) -> bool:
         return False
 
@@ -220,6 +224,15 @@ class _StubStore:
         return []
 
     def node_ids_for_owner(self, owner_id: str) -> list[str]:
+        return []
+
+    def count_nodes(self, owner_id: str) -> int:
+        return 0
+
+    def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        return []
+
+    def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
         return []
 
     def neighbors(

@@ -34,11 +34,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
-from persona.graph.errors import GraphProtectedNodeError, NodeMergeError
+from persona.graph.errors import (
+    GraphNodeNotFoundError,
+    GraphProtectedNodeError,
+    NodeMergeError,
+)
 from persona.graph.models import (
     ConceptNode,
     LinkType,
     NodeKind,
+    NodeProvenance,
     TypedLink,
     make_edge_id,
     make_node_id,
@@ -115,6 +120,7 @@ class _MergeBackend(Protocol):
     ) -> None: ...
     def upsert_edge(self, owner_id: str, link: TypedLink) -> None: ...
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None: ...
+    def delete_links_incident(self, owner_id: str, node_id: str, link_type: LinkType) -> None: ...
     def invalidate_edge(
         self, owner_id: str, edge_id: str, *, invalidated_by: str | None
     ) -> bool: ...
@@ -198,6 +204,57 @@ class MergeEngine:
         ref = candidate.provenance.interaction_id or str(candidate.provenance.source)
         for edge_id in candidate.close_link_ids:
             self._backend.invalidate_edge(owner_id, edge_id, invalidated_by=f"close:{ref}")
+
+    # -- correct (the user's edit — K5-D-7) ---------------------------------
+
+    def correct_node(
+        self, owner_id: str, node_id: str, new_content: str, *, interaction_id: str | None = None
+    ) -> None:
+        """Apply a user's correction to one node, in place (K5-D-7 / D-K0-4).
+
+        Re-embeds the new content, persists it with the trail grown by a
+        ``WriteSource.USER`` provenance entry carrying the prior content as
+        ``superseded_content``, then re-evaluates the node's SEMANTIC links from the
+        fresh embedding. Entity / temporal / causal links are PRESERVED — they are
+        assertion-based (user-stated / K2-derived, incl. D-K0-8 causal); a content
+        correction must never silently drop a stated relationship. The index sync +
+        audit are the store's (T8), mirroring ``merge``.
+
+        Raises:
+            GraphNodeNotFoundError: the node is not the owner's (no silent no-op /
+                create — the user is correcting *this* node, K5-D-7).
+        """
+        target = self._backend.get_node(owner_id, node_id)
+        if target is None:
+            raise GraphNodeNotFoundError(
+                "memory not found for correction",
+                context={"node_id": node_id, "owner_id": owner_id},
+            )
+        entry = NodeProvenance(
+            source=WriteSource.USER,
+            interaction_id=interaction_id,
+            written_at=datetime.now(UTC),
+            superseded_content=target.content,
+            reason="user correction",
+        )
+        node = ConceptNode(
+            id=target.id,
+            node_kind=target.node_kind,
+            concept_name=target.concept_name,
+            content=new_content,
+            metadata=dict(target.metadata),
+            wellbeing_category=target.wellbeing_category,
+            provenance=(*target.provenance, entry),
+            created_at=target.created_at,
+        )
+        new_vec = self._embedder.encode([new_content])[0]
+        self._backend.update_node(owner_id, node, new_vec)
+        # Half-edge fix (K5-D-7): clear EVERY incident semantic edge — inbound ones a
+        # neighbour scored against the OLD embedding too, not just outgoing — then
+        # re-form this node's outgoing links from the fresh embedding (re_eval=False,
+        # since the incident-clear already removed the outgoing set).
+        self._backend.delete_links_incident(owner_id, node.id, LinkType.SEMANTIC)
+        self._form_semantic_links(owner_id, node, new_vec, re_eval=False)
 
     # -- create -------------------------------------------------------------
 

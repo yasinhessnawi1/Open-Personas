@@ -227,6 +227,7 @@ export function Sidebar({ data }: { data: SidebarData }) {
               personas: data.personas.length,
               conversations: data.conversations.length,
             }}
+            memoryAvailable={data.memoryAvailable}
           />
 
           <Separator className="bg-sidebar-border" />

@@ -2691,6 +2691,222 @@
         }
       }
     },
+    "/v1/memory/graph": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Get Graph Window",
+        "description": "A windowed slice of the caller's graph \u2014 the seed, or a focus neighbourhood (K5-D-2).",
+        "operationId": "get_graph_window_v1_memory_graph_get",
+        "parameters": [
+          {
+            "name": "focus",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Centre node id; omit for the first-paint seed window.",
+              "title": "Focus"
+            },
+            "description": "Centre node id; omit for the first-paint seed window."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryWindowResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/nodes/{node_id}": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Get Node Detail",
+        "description": "A node's full detail: content, provenance, evolution, typed links (criterion 3).",
+        "operationId": "get_node_detail_v1_memory_nodes__node_id__get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNodeDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["memory"],
+        "summary": "Correct Node",
+        "description": "Correct a node's content (criterion 6) \u2014 re-embed, re-index, provenance \u2192 user-edited.\n\nThe most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the\npanel shows the user-edited provenance immediately. 404 when the node is not the caller's.",
+        "operationId": "correct_node_v1_memory_nodes__node_id__patch",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryCorrectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryNodeDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["memory"],
+        "summary": "Delete Node",
+        "description": "Delete a node \u2014 gone from Postgres + index + every persona's retrieval (criterion 7).\n\nThe trust-critical action (K5 \u00a77). 204 on success; 404 when the node is not the\ncaller's (existence-disclosure-safe \u2014 never reveals another tenant's node exists).",
+        "operationId": "delete_node_v1_memory_nodes__node_id__delete",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/search": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Search Memory",
+        "description": "Search-to-navigate over the caller's graph \u2014 K1 hybrid retrieval (criterion 5).",
+        "operationId": "search_memory_v1_memory_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The search query \u2014 exact term or paraphrase.",
+              "title": "Q"
+            },
+            "description": "The search query \u2014 exact term or paraphrase."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemorySearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/connectors": {
       "get": {
         "tags": ["connectors"],
@@ -4052,6 +4268,416 @@
         "required": ["ok"],
         "title": "MCPServerTestResult",
         "description": "Outcome of a BYO-MCP test-connection (spec 30, D-30-5).\n\n``ok`` true \u2192 ``tools`` lists the discovered tool names (cached on the row).\n``ok`` false \u2192 ``error`` is a short, non-sensitive reason category."
+      },
+      "MemoryCorrectionRequest": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["content"],
+        "title": "MemoryCorrectionRequest",
+        "description": "Correct a Memory node's content (Spec K5, K5-D-7 / K5-D-5).\n\nThe user's edit to what a node says \u2014 the highest-quality write the graph gets.\nContent-only (per K5-D-7): it flows through K0's update path (re-embed, re-index,\nsemantic links re-evaluated) and records provenance as ``user``-edited."
+      },
+      "MemoryEvolutionEntry": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "written_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Written At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "superseded_content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["source", "written_at"],
+        "title": "MemoryEvolutionEntry",
+        "description": "One step in how a memory grew \u2014 a provenance contribution (oldest first)."
+      },
+      "MemoryLinkEdge": {
+        "properties": {
+          "src_node_id": {
+            "type": "string",
+            "title": "Src Node Id"
+          },
+          "dst_node_id": {
+            "type": "string",
+            "title": "Dst Node Id"
+          },
+          "link_type": {
+            "type": "string",
+            "title": "Link Type"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["src_node_id", "dst_node_id", "link_type"],
+        "title": "MemoryLinkEdge",
+        "description": "A typed edge for the canvas \u2014 one of the four LinkType relationships."
+      },
+      "MemoryLinkView": {
+        "properties": {
+          "link_type": {
+            "type": "string",
+            "title": "Link Type"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["out", "in"],
+            "title": "Direction"
+          },
+          "neighbor": {
+            "$ref": "#/components/schemas/MemoryNodeSummary"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["link_type", "direction", "neighbor"],
+        "title": "MemoryLinkView",
+        "description": "A traversable typed link in the detail panel \u2014 the edge plus the neighbour."
+      },
+      "MemoryNodeDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "wellbeing_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wellbeing Category"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/MemoryProvenanceView"
+          },
+          "evolution": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryEvolutionEntry"
+            },
+            "type": "array",
+            "title": "Evolution"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryLinkView"
+            },
+            "type": "array",
+            "title": "Links"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "content",
+          "created_at",
+          "origin",
+          "evolution",
+          "links"
+        ],
+        "title": "MemoryNodeDetail",
+        "description": "A node's full detail: content, provenance-as-story, evolution, typed links."
+      },
+      "MemoryNodeSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "wellbeing_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wellbeing Category"
+          },
+          "degree": {
+            "type": "integer",
+            "title": "Degree",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "kind", "label"],
+        "title": "MemoryNodeSummary",
+        "description": "A node as drawn on the canvas \u2014 no content/provenance (that is the detail).\n\n``degree`` is the node's connectedness within the returned window (0 when not\ncomputed for this view) \u2014 the \"size by connectedness, lightly\" signal (K5-D-3)."
+      },
+      "MemoryProvenanceView": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
+          "persona_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Name"
+          },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Id"
+          },
+          "written_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Written At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["source", "written_at"],
+        "title": "MemoryProvenanceView",
+        "description": "Where a memory came from \u2014 the structured basis the UI renders as story."
+      },
+      "MemorySearchResponse": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/MemorySearchResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["query", "results"],
+        "title": "MemorySearchResponse",
+        "description": "The matches for a Memory search query, best-first (criterion 5)."
+      },
+      "MemorySearchResult": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "title": "Node Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "dense_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dense Rank"
+          },
+          "sparse_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sparse Rank"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["node_id", "label", "kind", "score"],
+        "title": "MemorySearchResult",
+        "description": "One search hit \u2014 exact-term and paraphrase ranks both visible (K1 hybrid)."
+      },
+      "MemoryWindowResponse": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": true
+          },
+          "focus_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Focus Id"
+          },
+          "is_seed": {
+            "type": "boolean",
+            "title": "Is Seed"
+          },
+          "total_nodes": {
+            "type": "integer",
+            "title": "Total Nodes"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryNodeSummary"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryLinkEdge"
+            },
+            "type": "array",
+            "title": "Links"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["is_seed", "total_nodes", "nodes", "links"],
+        "title": "MemoryWindowResponse",
+        "description": "A windowed slice of the graph \u2014 the seed (no focus) or a focus neighbourhood.\n\nNever the whole graph (K5-D-2): ``total_nodes`` is the owner's full tally for the\nheader; ``nodes``/``links`` are only the loaded window.\n\n``available`` distinguishes *no graph store* (this deployment has no usable graph \u2014\ne.g. community-on-SQLite, the K0 graph being Postgres-only) from *an empty graph*\n(a real but as-yet-unpopulated map). The UI must not show the \"no memories yet\"\ninvite when the truth is \"Memory isn't available here\" \u2014 so the nav is gated and\nthe page shows a distinct unavailable state when this is ``False`` (Spec K5)."
       },
       "MessageView": {
         "properties": {

@@ -7,6 +7,7 @@ import {
   MessagesSquare,
   Phone,
   Sparkles,
+  Waypoints,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -32,6 +33,8 @@ const ITEMS = [
   // Spec V9: the voice-call history surface.
   { href: "/calls", key: "calls", icon: Phone, count: undefined },
   { href: "/runs", key: "tasks", icon: ListChecks, count: undefined },
+  // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."
+  { href: "/memory", key: "memory", icon: Waypoints, count: undefined },
   // Spec A8: the schedule/calendar surface (time's view of the personas'
   // commitments). The route + calendar shipped styled but was unreachable —
   // reachable only by typed URL — until this nav row (R4-C1-10, built-but-inert
@@ -49,16 +52,29 @@ export function Nav({
   onNavigate,
   collapsed = false,
   counts,
+  memoryAvailable = false,
 }: {
   onNavigate?: () => void;
   collapsed?: boolean;
   counts?: NavCounts;
+  /**
+   * Spec K5: whether this deployment has a usable knowledge-graph (a Postgres
+   * graph store). The "Memory" row is hidden when absent — showing it where the
+   * graph is structurally always-empty (community-on-SQLite) would read as the
+   * user having no memories. Availability is a RUNTIME signal from the API
+   * (the window's `available` flag), not a build-time edition check, so a
+   * self-hosted community deploy backed by Postgres still surfaces Memory.
+   */
+  memoryAvailable?: boolean;
 }) {
   const pathname = usePathname();
   const t = useTranslations("nav");
+  const items = ITEMS.filter(
+    (item) => item.key !== "memory" || memoryAvailable,
+  );
   return (
     <nav aria-label={t("primary")} className="flex flex-col gap-1">
-      {ITEMS.map(({ href, key, icon: Icon, count }) => {
+      {items.map(({ href, key, icon: Icon, count }) => {
         const active = pathname === href || pathname.startsWith(`${href}/`);
         const countValue = count ? counts?.[count] : undefined;
         const link = (

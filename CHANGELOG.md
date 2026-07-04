@@ -11,6 +11,46 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Memory — the interactive knowledge-graph UI (Spec K5)
+
+> The user-facing surface for the shared-brain knowledge graph: **everything your
+> personas know about you, drawn as a living map you own**. Transparency + control
+> are what make the share-everything design legitimate — so this is the trust
+> capstone of the shared-graph direction, not a viewer.
+
+#### Added
+- **`Memory` area** (`persona-web`, `/memory`) — a 2-D-canvas force-graph port of the
+  §3 design north-star: ForceAtlas2 layout in a real Web Worker (graphology), pan/zoom/
+  neighbourhood-highlight, node colour by the seven `NodeKind`s, typed-edge encoding
+  (causal red+arrow · temporal green-dashed · entity gold-solid · semantic faint-dotted),
+  degree-sized hubs, far-zoom Louvain region LOD, degree-priority collision-avoided labels,
+  and zoom-to-fit. Nav row is **availability-gated** (shown only where a graph store exists).
+- **Editorial detail panel** — provenance-as-story (persona avatar + "learned by …"),
+  evolution timeline, traversable typed links, the K4 sensitive mark rendered as *care*
+  (K5-D-10), **content-only correction** (title-edit hidden, K5-D-5a) wired to `PATCH`, and
+  a **consequence-language deletion** wired to `DELETE`. Search-to-fly over K1 hybrid retrieval.
+- **Windowed working set** (K5-D-2) — seed → focus-expansion (merge) → **eviction cap**;
+  the client never loads or draws the whole graph. Recency seed is index-served (B1: sub-ms
+  at 50k vs an 893ms degree-aggregate).
+- **Memory read/edit endpoints** (`persona-api`) — `GET /v1/memory/graph|nodes/{id}|search`,
+  `PATCH`/`DELETE /v1/memory/nodes/{id}` — windowed, RLS-scoped, pure projection of K0 types;
+  `MemoryWindowResponse.available` distinguishes *no graph store* from *empty graph*.
+- **`correct_node` K0 seam** (`persona-core`, the spec's central decision, K5-D-7) — a single
+  additive, targeted content-update on the `GraphStore` protocol: re-embed, re-index, re-evaluate
+  *semantic* links (entity/temporal/causal preserved), append a `WriteSource.USER` provenance
+  entry. The inbound-semantic-half-edge bug it surfaced is fixed (`delete_links_incident`, both
+  directions). Criteria 6/7 proven end-to-end through the **real K4-gated retrieval** path.
+
+#### Availability
+- The K0 graph is Postgres-only (JSONB/pgvector/tsvector/HNSW); `enable_graph_writes` gates on
+  the engine dialect, so community-on-SQLite degrades gracefully (`graph_store=None`, Memory
+  reads empty / nav hidden) rather than erroring. Availability-based, not edition-hardcoded.
+
+#### Deferred (K5-R-4 operator/Playwright leg + fast-follows)
+- The live-data-feel verifications (Playwright render→search→inspect→correct→delete-gone on a
+  seeded graph; `persona_name` resolution; "Open conversation" run-source routing) ride the
+  real-stack operator leg. Small-phone list mode (K5-D-4) and redraw-on-settle are fast-follows.
+  See `docs/specs/phase3/spec_K5/acceptance.md`.
 ### Crisis-Detection Encoder — euphemistic / non-English recall for the R1 safety gate (2026-07-04)
 
 > Close-out of `crisis-detection-encoder` (Spec R6, `persona-runtime` + `persona-api` +

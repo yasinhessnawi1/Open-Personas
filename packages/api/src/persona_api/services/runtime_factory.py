@@ -258,6 +258,25 @@ class RuntimeFactory:
         """
         if self._graph_store is not None:
             return
+        # The K0 graph schema (``graph/_schema.py``) is Postgres-only — JSONB,
+        # pgvector ``Vector``, ``TSVECTOR`` + HNSW indexes have no SQLite equivalent
+        # (``create_all`` won't even compile the DDL on SQLite). On a non-Postgres
+        # engine (community-on-SQLite, or any no-graph config) there is no usable
+        # graph store, so leave ``_graph_store`` None — the documented
+        # graceful-absence shape: ``record_user_fact`` stays absent (K2) and the
+        # Memory routes read empty / the nav is gated (K5), instead of composing a
+        # Postgres-typed store over SQLite that 500s ("no such table: graph_nodes")
+        # on first use. Gates on the ENGINE, not the edition (supersedes the R4-C1-7
+        # edition gate — self-hosted community-on-Postgres still gets the full graph);
+        # graph RETRIEVAL is separately fail-soft-to-memoryless (R4-C1-7).
+        if self._engine.dialect.name != "postgresql":
+            _logger.info(
+                "graph store unavailable on a %s engine — record_user_fact absent + "
+                "Memory reads empty (the K0 graph is Postgres-only)",
+                self._engine.dialect.name,
+            )
+            return
+        from persona.audit import JSONLAuditLogger
         from persona.graph import build_graph_store
 
         # R5-D-2: prefer the app-selected backend; ``audit_root`` remains the
@@ -268,6 +287,16 @@ class RuntimeFactory:
             audit_logger=self._audit_logger or JSONLAuditLogger(audit_root),
         )
         _logger.info("graph writes enabled (record_user_fact composed into toolboxes)")
+
+    @property
+    def graph_store(self) -> GraphStore | None:
+        """The composed user-scoped graph store (``None`` until ``enable_graph_writes``).
+
+        Exposed read-only so the Memory HTTP routes (Spec K5) read and edit through the
+        same owner-scoped store the runtime writes/retrieves with — one instance, one
+        scope (RLS + the ``current_user_id`` contextvar per request).
+        """
+        return self._graph_store
 
     def _build_graph_retrieval(self) -> Callable[[str], GraphContext] | None:
         """The owner-scoped graph-knowledge retrieval for the chat loop (K3).

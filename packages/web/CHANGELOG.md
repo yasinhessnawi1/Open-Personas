@@ -13,6 +13,21 @@ mirrors only the `persona-web`-touching surface.
 
 ## [Unreleased]
 
+### Added — Memory, the interactive knowledge-graph UI (Spec K5)
+
+- **`/memory` area** — a 2-D-canvas force-graph (graphology ForceAtlas2 in a Web Worker):
+  pan/zoom/neighbourhood-highlight, node colour by the seven `NodeKind`s, typed-edge encoding
+  (causal red+arrow · temporal green-dashed · entity gold-solid · semantic faint-dotted),
+  degree-sized hubs, far-zoom Louvain LOD, collision-avoided degree-priority labels, zoom-to-fit.
+- **Editorial detail panel** — kind icon-square, provenance-as-story with a persona avatar,
+  evolution timeline, traversable typed-link rows (colour swatches), the K4 care mark,
+  content-only correction (`PATCH`, title hidden), consequence delete (`DELETE`),
+  "Open conversation". Search-to-fly (K1) with a "⏎ fly to" hint.
+- **Windowed working set** — seed → focus-expansion (merge) → eviction cap (`window-ops`,
+  unit-tested); never draws the whole graph.
+- Nav is **availability-gated**; a distinct "Memory isn't available here" state where no graph
+  store exists (vs the "no memories yet" invite). New deps: `graphology`, `-layout-forceatlas2`,
+  `-communities-louvain`. Dev harness at `scratch/memory` (NODE_ENV-guarded).
 ### Notification Coverage Completion (Spec P6)
 
 - **Deep-link foundation** — `useNotify()`'s `NotifyOptions`/`NotificationEntry` gain

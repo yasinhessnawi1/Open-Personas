@@ -70,6 +70,7 @@ const data: SidebarData = {
   personas: [],
   conversations: manyConversations,
   calls: [],
+  memoryAvailable: false,
 };
 
 function wrap(ui: React.ReactNode) {

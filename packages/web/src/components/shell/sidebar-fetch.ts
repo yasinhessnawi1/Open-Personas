@@ -26,15 +26,20 @@ const CALL_ROWS = 8;
 export async function fetchSidebarData(): Promise<SidebarData> {
   try {
     const api = await serverApi();
-    const [personasRes, conversationsRes, callsRes] = await Promise.all([
-      api.GET("/v1/personas"),
-      api.GET("/v1/conversations", {
-        params: { query: { limit: MESSAGE_ROWS, offset: 0 } },
-      }),
-      api.GET("/v1/calls", {
-        params: { query: { limit: CALL_ROWS, offset: 0 } },
-      }),
-    ]);
+    const [personasRes, conversationsRes, callsRes, memoryRes] =
+      await Promise.all([
+        api.GET("/v1/personas"),
+        api.GET("/v1/conversations", {
+          params: { query: { limit: MESSAGE_ROWS, offset: 0 } },
+        }),
+        api.GET("/v1/calls", {
+          params: { query: { limit: CALL_ROWS, offset: 0 } },
+        }),
+        // Spec K5: a bounded, fail-soft availability probe — gates the Memory nav
+        // row by whether the deployment has a usable knowledge-graph (the window's
+        // `available` flag). Parallel with the rest; any failure degrades to hidden.
+        api.GET("/v1/memory/graph"),
+      ]);
     const personas = personasRes.data ?? [];
     const conversations = conversationsRes.data ?? [];
     const calls = callsRes.data ?? [];
@@ -46,8 +51,14 @@ export async function fetchSidebarData(): Promise<SidebarData> {
       ),
       conversations: resolveConversations(conversations, personas),
       calls: resolveCalls(calls, personas),
+      memoryAvailable: memoryRes.data?.available ?? false,
     };
   } catch {
-    return { personas: [], conversations: [], calls: [] };
+    return {
+      personas: [],
+      conversations: [],
+      calls: [],
+      memoryAvailable: false,
+    };
   }
 }
