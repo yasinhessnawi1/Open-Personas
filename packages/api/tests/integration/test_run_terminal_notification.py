@@ -42,9 +42,7 @@ _T0 = datetime(2026, 6, 25, 12, 0, 0, tzinfo=UTC)
 
 def _fake_run(status: RunStatus) -> SimpleNamespace:
     """A minimal stand-in for the loop's ``Run`` (only the fields _persist_final reads)."""
-    return SimpleNamespace(
-        status=status, steps=[], output="done", error=None, finished_at=_T0
-    )
+    return SimpleNamespace(status=status, steps=[], output="done", error=None, finished_at=_T0)
 
 
 @pytest.fixture

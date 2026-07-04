@@ -82,8 +82,7 @@ class ModelSteeringInterpreter:
         now = self._now()
         listing = "\n".join(f"- id={t.task_id}: {t.goal}" for t in active_tasks)
         user = (
-            f'Active tasks:\n{listing}\n\nUser message:\n"{message}"\n\n'
-            "Reply with the JSON object."
+            f'Active tasks:\n{listing}\n\nUser message:\n"{message}"\n\nReply with the JSON object.'
         )
         messages = [
             ConversationMessage(role="system", content=_SYSTEM_PROMPT, created_at=now),

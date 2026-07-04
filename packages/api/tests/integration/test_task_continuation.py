@@ -146,24 +146,36 @@ def _attach_schedule(engine: Engine, *, recurring: bool, exhausted: bool = False
     anchor = _NOW - timedelta(days=1)
     if recurring and not exhausted:
         sched = Schedule(
-            id="s1", owner_id="user_a", timezone="Europe/Oslo",
+            id="s1",
+            owner_id="user_a",
+            timezone="Europe/Oslo",
             recurrence=RecurrenceRule.from_rrule_string("FREQ=DAILY;BYHOUR=6;BYMINUTE=0"),
-            target_job_type="task_leg", payload_template={"task_id": "t1"},
-            created_at=anchor, updated_at=anchor,
+            target_job_type="task_leg",
+            payload_template={"task_id": "t1"},
+            created_at=anchor,
+            updated_at=anchor,
         )
     elif exhausted:
         sched = Schedule(
-            id="s1", owner_id="user_a", timezone="Europe/Oslo",
+            id="s1",
+            owner_id="user_a",
+            timezone="Europe/Oslo",
             recurrence=RecurrenceRule.from_rrule_string("FREQ=DAILY;BYHOUR=6;BYMINUTE=0;COUNT=1"),
-            target_job_type="task_leg", payload_template={"task_id": "t1"},
-            created_at=anchor, updated_at=anchor,
+            target_job_type="task_leg",
+            payload_template={"task_id": "t1"},
+            created_at=anchor,
+            updated_at=anchor,
         )
     else:
         sched = Schedule(
-            id="s1", owner_id="user_a", timezone="Europe/Oslo",
+            id="s1",
+            owner_id="user_a",
+            timezone="Europe/Oslo",
             one_time_at=_NOW - timedelta(minutes=5),  # already fired → no future occurrence
-            target_job_type="task_leg", payload_template={"task_id": "t1"},
-            created_at=anchor, updated_at=anchor,
+            target_job_type="task_leg",
+            payload_template={"task_id": "t1"},
+            created_at=anchor,
+            updated_at=anchor,
         )
     ScheduleStore(engine).create(sched, now=anchor)
     with engine.begin() as conn:
@@ -198,9 +210,7 @@ def test_recurring_task_occurrence_complete_returns_to_waiting_not_terminal(
     assert len(_leg_jobs(migrated_engine)) == 0  # the SCHEDULE re-arms the next leg, not us
 
 
-def test_one_time_task_completes_terminally(
-    migrated_engine: Engine, app_engine: Engine
-) -> None:
+def test_one_time_task_completes_terminally(migrated_engine: Engine, app_engine: Engine) -> None:
     task = _scheduled_task(migrated_engine, app_engine, recurring=False)
     cont = TaskContinuation(
         task_store=TaskStore(app_engine),

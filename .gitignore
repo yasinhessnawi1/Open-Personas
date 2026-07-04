@@ -75,3 +75,6 @@ CLAUDE.md
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.
 **/.persona_community.db
 **/.persona_chroma/
+
+# secrets live outside the tree everywhere (the api symlink included)
+.secrets

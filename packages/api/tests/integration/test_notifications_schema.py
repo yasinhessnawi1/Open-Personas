@@ -184,9 +184,7 @@ def test_notifications_isolated_per_tenant_both_directions(
     assert owners_b == {"user_b"}, f"RLS leak: user_b saw {owners_b}"
 
 
-def test_with_check_blocks_cross_tenant_insert(
-    migrated_engine: Engine, app_engine: Engine
-) -> None:
+def test_with_check_blocks_cross_tenant_insert(migrated_engine: Engine, app_engine: Engine) -> None:
     _seed_two_tenants(migrated_engine)
     # user_a tries to write a row owned by user_b → WITH CHECK rejects it
     # (an RLS policy violation surfaces as InsufficientPrivilege / ProgrammingError).

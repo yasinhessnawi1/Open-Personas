@@ -91,8 +91,7 @@ class ModelAmendmentInterpreter:
             f"updates: {draft.updates.granularity.value} / {draft.updates.channel or 'home'}"
         )
         user = (
-            f"Current proposal:\n{current}\n\nUser reply:\n\"{reply}\"\n\n"
-            "Reply with the JSON object."
+            f'Current proposal:\n{current}\n\nUser reply:\n"{reply}"\n\nReply with the JSON object.'
         )
         messages = [
             ConversationMessage(role="system", content=_SYSTEM_PROMPT, created_at=now),
@@ -109,9 +108,7 @@ class ModelAmendmentInterpreter:
 
     @staticmethod
     def _current_cap_kr(draft: ContractDraft) -> str:
-        cap = next(
-            (g.cap_micros for g in draft.grants if g.category is ActionCategory.SPEND), None
-        )
+        cap = next((g.cap_micros for g in draft.grants if g.category is ActionCategory.SPEND), None)
         return "(none)" if cap is None else str(cap // _MICROS_PER_KR)
 
     def _apply(self, text: str, draft: ContractDraft) -> ContractDraft | None:
@@ -159,9 +156,7 @@ class ModelAmendmentInterpreter:
             _logger.info("schedule amendment without an existing cadence frame; skipping")
             return draft
         try:
-            parsed = parse_recurrence(
-                rrule.strip(), draft.schedule.timezone, phrase=rrule.strip()
-            )
+            parsed = parse_recurrence(rrule.strip(), draft.schedule.timezone, phrase=rrule.strip())
         except ScheduleParseError:
             _logger.info("amended schedule not representable; skipping the schedule clause")
             return draft

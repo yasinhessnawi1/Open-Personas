@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import Callable  # noqa: TC003 — used at runtime in _BACKENDS type
+from collections.abc import Callable, Iterator  # noqa: TC003 — used at runtime in _BACKENDS type
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -287,9 +287,21 @@ _BACKENDS: list[tuple[str, str, Callable[[], Any]]] = [
     params=_BACKENDS,
     ids=[name for name, _, _ in _BACKENDS],
 )
-def backend_fixture(request: pytest.FixtureRequest) -> Any:
+def backend_fixture(request: pytest.FixtureRequest) -> Iterator[tuple[Any, str]]:
     _name, expected_provider, factory = request.param
-    return factory(), expected_provider
+    # The hf_local factory plants torch/transformers STUBS in sys.modules (the
+    # backend imports them lazily per call, so they must persist through the
+    # test) — but a bare fake torch without ``Tensor`` left behind poisons the
+    # first sklearn/scipy import later in the SAME pytest process (scipy's
+    # array-api probe getattr(torch, "Tensor") — the R6 crisis-encoder tests
+    # were the victims). Save-and-restore around every param.
+    saved = {m: sys.modules.get(m) for m in ("torch", "transformers")}
+    yield factory(), expected_provider
+    for mod, orig in saved.items():
+        if orig is not None:
+            sys.modules[mod] = orig
+        else:
+            sys.modules.pop(mod, None)
 
 
 # -----------------------------------------------------------------------------

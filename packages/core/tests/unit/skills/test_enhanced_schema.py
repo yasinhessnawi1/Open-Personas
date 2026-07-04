@@ -118,5 +118,5 @@ def test_document_generation_builtin_carries_v2_parameters() -> None:
     [spec] = SkillScanner([BUILTIN_ROOT]).scan(["document_generation"])
     assert spec.parameters is not None
     assert "format" in spec.parameters["properties"]
-    assert spec.token_budget == 2000
+    assert spec.token_budget == 2200  # D-24-5 per-skill loosening (the P5 full-fidelity variant)
     assert "web_research" in spec.composes_with

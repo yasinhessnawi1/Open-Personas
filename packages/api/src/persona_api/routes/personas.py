@@ -851,9 +851,7 @@ async def list_persona_specialities(
     return out
 
 
-@router.post(
-    "/{persona_id}/skills/{skill_name}/consent", response_model=PersonaSpecialitySummary
-)
+@router.post("/{persona_id}/skills/{skill_name}/consent", response_model=PersonaSpecialitySummary)
 async def set_skill_consent(
     persona_id: str,
     skill_name: str,

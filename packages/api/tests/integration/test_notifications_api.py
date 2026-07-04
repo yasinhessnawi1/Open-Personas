@@ -202,9 +202,7 @@ def test_mark_read_on_foreign_id_is_noop(client: tuple[TestClient, str]) -> None
     c, uid = client
     su = make_rls_engine(os.environ["DATABASE_URL"])
     try:
-        _seed_notification(
-            su, nid="n_theirs", owner="user_notif_b", created_at=_T0, ref="r_theirs"
-        )
+        _seed_notification(su, nid="n_theirs", owner="user_notif_b", created_at=_T0, ref="r_theirs")
     finally:
         su.dispose()
 

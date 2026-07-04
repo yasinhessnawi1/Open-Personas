@@ -425,9 +425,7 @@ class RuntimeFactory:
             latency_tracker=latency_tracker,
         )
 
-    def _build_day_spent_cents_provider(
-        self, persona_id: str | None
-    ) -> Callable[[], float] | None:
+    def _build_day_spent_cents_provider(self, persona_id: str | None) -> Callable[[], float] | None:
         """The soft per-day cost-bias ramp's real cross-session spend source (R7-D-1).
 
         Discharges D-23-X: sums today's recorded ``turn_logs.cost_cents`` for the
@@ -548,9 +546,7 @@ class RuntimeFactory:
         # §2.9). None when no workspace_root is configured (CLI / test path) ⇒
         # tools produce their pre-Spec-28 result shape (criterion #9).
         workspace_persister = (
-            WorkspaceDirPersister(
-                file_storage=self._file_storage, persona_id=persona.persona_id
-            )
+            WorkspaceDirPersister(file_storage=self._file_storage, persona_id=persona.persona_id)
             if self._file_storage is not None and persona.persona_id is not None
             else None
         )
