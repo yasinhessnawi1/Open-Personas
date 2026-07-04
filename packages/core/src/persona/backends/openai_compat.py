@@ -716,7 +716,9 @@ class OpenAICompatibleBackend:
         if top_p is not None:
             kwargs["top_p"] = top_p
         if use_native and tools:
-            kwargs["tools"] = [_tool_spec_to_openai(t) for t in tools]
+            # R4-C1-13: cover history tool_calls so a strict provider (groq) does
+            # not 400 on a hallucinated call the model already got an error for.
+            kwargs["tools"] = _openai_tools_covering_history(tools, messages)
         # D-20-3: opaque pass-through to the vendor SDK's ``extra_body``.
         if self._config.extra_body is not None:
             kwargs["extra_body"] = self._config.extra_body
@@ -767,7 +769,9 @@ class OpenAICompatibleBackend:
         if top_p is not None:
             kwargs["top_p"] = top_p
         if use_native and tools:
-            kwargs["tools"] = [_tool_spec_to_openai(t) for t in tools]
+            # R4-C1-13: cover history tool_calls so a strict provider (groq) does
+            # not 400 on a hallucinated call the model already got an error for.
+            kwargs["tools"] = _openai_tools_covering_history(tools, messages)
         # D-20-3: opaque pass-through to the vendor SDK's ``extra_body``.
         if self._config.extra_body is not None:
             kwargs["extra_body"] = self._config.extra_body
@@ -1287,6 +1291,42 @@ def _tool_spec_to_anthropic(tool: ToolSpec) -> dict[str, Any]:
         "description": tool.description,
         "input_schema": tool.parameters,
     }
+
+
+def _openai_tools_covering_history(
+    tools: list[ToolSpec], messages: list[ConversationMessage]
+) -> list[dict[str, Any]]:
+    """OpenAI tool dicts, augmented to cover every tool_call name in the history.
+
+    Strict OpenAI-compatible providers (groq) reject a request if ANY tool_call
+    in the message history references a tool absent from ``tools`` — including a
+    HALLUCINATED call the model already received an ``is_error`` result for (e.g.
+    a weak model calling a *skill* name like ``document_generation`` directly
+    instead of via ``use_skill``). Lenient providers (OpenAI proper, Anthropic)
+    ignore the history-vs-tools relation; groq validates it and 400s, hard-failing
+    the whole turn. So we advertise a synthetic no-op spec for any historical
+    tool_call name not already offered — the request validates, and the model does
+    not re-call it because it already holds the "not available" result (R4-C1-13).
+    """
+    out = [_tool_spec_to_openai(t) for t in tools]
+    advertised = {d["function"]["name"] for d in out}
+    seen: set[str] = set()
+    for m in messages:
+        for tc in m.tool_calls or ():
+            if tc.name in advertised or tc.name in seen:
+                continue
+            seen.add(tc.name)
+            out.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "description": "(unavailable — do not call this; it is not a tool)",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            )
+    return out
 
 
 def _tool_spec_to_openai(tool: ToolSpec) -> dict[str, Any]:

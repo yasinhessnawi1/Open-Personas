@@ -1406,3 +1406,56 @@ class TestTruncatedToolCallArguments:
         call = resp.tool_calls[0]
         assert call.truncated is False
         assert call.args == {"code": "print(1)"}
+
+
+def test_history_tool_calls_are_covered_in_the_tools_array() -> None:
+    """R4-C1-13: a strict provider (groq) rejects a request whose history holds a
+    tool_call for a tool absent from ``tools`` — including a hallucinated skill
+    call the model already got an is_error for. The tools array must synthesise a
+    no-op spec covering every historical tool_call name, so the request validates
+    and the model is steered off (it holds the "not available" result)."""
+    from datetime import UTC, datetime
+
+    from persona.backends.openai_compat import _openai_tools_covering_history
+    from persona.schema.conversation import ConversationMessage
+    from persona.schema.tools import ToolCall
+
+    real = [ToolSpec(name="use_skill", description="activate a skill", parameters={})]
+    messages = [
+        ConversationMessage(role="user", content="make a doc", created_at=datetime.now(UTC)),
+        ConversationMessage(
+            role="assistant",
+            content="",
+            created_at=datetime.now(UTC),
+            # The model hallucinated a DIRECT call to a skill name (not a real tool).
+            tool_calls=[ToolCall(call_id="c1", name="document_generation", args={})],
+        ),
+    ]
+    covered = _openai_tools_covering_history(real, messages)
+    names = {d["function"]["name"] for d in covered}
+    assert "use_skill" in names  # the real tool survives
+    assert "document_generation" in names  # the hallucinated call is now covered
+    synth = next(d for d in covered if d["function"]["name"] == "document_generation")
+    assert synth["function"]["parameters"] == {"type": "object", "properties": {}}
+
+
+def test_covering_is_a_noop_when_history_matches_tools() -> None:
+    """No synthetic specs when every historical tool_call is a real tool — the
+    common case must not grow the tools array."""
+    from datetime import UTC, datetime
+
+    from persona.backends.openai_compat import _openai_tools_covering_history
+    from persona.schema.conversation import ConversationMessage
+    from persona.schema.tools import ToolCall
+
+    real = [ToolSpec(name="use_skill", description="x", parameters={})]
+    messages = [
+        ConversationMessage(
+            role="assistant",
+            content="",
+            created_at=datetime.now(UTC),
+            tool_calls=[ToolCall(call_id="c1", name="use_skill", args={})],
+        ),
+    ]
+    covered = _openai_tools_covering_history(real, messages)
+    assert [d["function"]["name"] for d in covered] == ["use_skill"]
