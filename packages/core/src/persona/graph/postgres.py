@@ -346,6 +346,7 @@ class PostgresGraphBackend:
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_link(dict(r)) for r in rows]
+
     def next_node_index(self, owner_id: str) -> int:
         """The next collision-free ``make_node_id`` index for the owner (Spec K7, K7-D-9).
 
@@ -355,12 +356,12 @@ class PostgresGraphBackend:
         we always allocate strictly above every LIVE ``::node::`` id, so a deleted
         id's number is only ever reused when it is genuinely gone — two live nodes can
         never share an id (also PK-guarded). ``split_part(id, '::', -1)`` reads the
-        trailing index segment (robust to an ``owner_id`` containing ``::``); the K6
-        ``::self`` node is excluded (its last segment is non-numeric).
+        trailing index segment (robust to an ``owner_id`` containing ``::``). The K6
+        ``{owner}::self`` anchor is the only id excluded — by its SHAPE (see the
+        WHERE clause), never by node_kind (R4-C1-12, which cost dead-lettered jobs).
 
-        **K5 coordination (state.md cross-spec item 1):** K5's close-out was to own
-        this allocator fix; K5 has NOT merged, so K7 implements it here. Whichever
-        lands second at merge-back must NOT double-fix — the orchestrator reconciles.
+        **K5 coordination (state.md cross-spec item 1):** K7 implemented this
+        allocator; R4 corrected the exclusion. One canonical allocator, no double-fix.
         """
         stmt = select(
             func.coalesce(
@@ -370,7 +371,16 @@ class PostgresGraphBackend:
             + 1
         ).where(
             graph_nodes.c.owner_id == owner_id,
-            graph_nodes.c.node_kind != str(NodeKind.SELF),
+            # Exclude by ID SHAPE, not node_kind (R4-C1-12). Only the K6 anchor
+            # ``{owner}::self`` must be skipped (its trailing segment is the literal
+            # ``self`` — un-castable). Excluding by node_kind was WRONG: a SELF-KIND
+            # node can carry a numeric ``{owner}::node::NNNNN`` id (synthesis/entity
+            # mis-classifying a person as self), and dropping it from the MAX made the
+            # allocator re-hand-out its index → INSERT PK collision that dead-lettered
+            # every synthesis job. ``::node::`` ids have ``node`` as the 2nd-to-last
+            # segment; the ``::self`` anchor does not — so this counts every numeric
+            # node (any kind) and only ever skips the anchor.
+            func.split_part(graph_nodes.c.id, "::", -2) == "node",
         )
         with self._engine.connect() as conn:
             return int(conn.execute(stmt).scalar_one())
@@ -588,6 +598,7 @@ class PostgresGraphBackend:
         )
         with self._engine.begin() as conn:
             conn.execute(stmt)
+
     def invalidate_edge(
         self,
         owner_id: str,

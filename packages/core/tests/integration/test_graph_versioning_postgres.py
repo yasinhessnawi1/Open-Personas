@@ -249,6 +249,39 @@ def test_allocator_no_collision_after_delete(store: PostgresGraphStore) -> None:
     assert c.node_id != b.node_id
 
 
+def test_allocator_counts_self_kind_node_with_numeric_id(
+    store: PostgresGraphStore,
+    _engine: Engine,  # noqa: PT019 — used directly for the raw seed insert
+) -> None:
+    """R4-C1-12: a SELF-*kind* node carrying a numeric ``::node::`` id (synthesis /
+    entity resolution mis-classifying a person as self) MUST be counted by the
+    allocator. Excluding by node_kind dropped it from the MAX, so the allocator
+    re-handed-out its index → an INSERT PK collision that dead-lettered every
+    synthesis job. Only the ``{owner}::self`` anchor (non-numeric suffix) is skipped.
+    """
+    import json
+
+    from sqlalchemy import text
+
+    store.merge("u1", _cand("n-zero"))  # ::node::00000000
+    store.merge("u1", _cand("n-one"))  # ::node::00000001
+    # The pathological row: SELF kind, but a numeric ``::node::`` id (NOT the anchor).
+    prov = NodeProvenance(source=WriteSource.SYSTEM, written_at=datetime(2026, 1, 1, tzinfo=UTC))
+    with _engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO graph_nodes (id, owner_id, node_kind, concept_name, content, "
+                "metadata, embedding, embedding_model, content_hash, provenance, created_at, "
+                "updated_at) VALUES ('u1::node::00000002', 'u1', 'self', 'p', 'p', '{}', :emb, "
+                "'m', 'h', CAST(:prov AS jsonb), now(), now())"
+            ),
+            {"emb": str([0.0] * 384), "prov": json.dumps([prov.model_dump(mode="json")])},
+        )
+    # The allocator must return 3 (MAX over ALL numeric ids incl. the self-kind one),
+    # never 2 — which would collide with the row just inserted and dead-letter the job.
+    assert store._backend.next_node_index("u1") == 3  # noqa: SLF001 — the method under test
+
+
 # ----- SELF guards over the store surface (K7-D-7) -------------------------
 
 
