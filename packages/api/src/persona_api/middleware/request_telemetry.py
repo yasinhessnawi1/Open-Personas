@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from persona.logging import get_logger
 from sqlalchemy import insert
@@ -117,6 +118,13 @@ class TelemetryBuffer:
             ev = self._buf.popleft()
             rows.append(
                 {
+                    # Mint the PK client-side: the canonical column's
+                    # gen_random_uuid() server default is Postgres-only, and this
+                    # flush is the ONE writer that relied on it — on community
+                    # SQLite every row hit NOT NULL and telemetry silently died
+                    # (R4-C1-4). Explicit uuid is dialect-agnostic and identical
+                    # in effect on Postgres.
+                    "id": uuid4().hex,
                     "timestamp": ev.timestamp,
                     "method": ev.method,
                     "route_template": ev.route_template,

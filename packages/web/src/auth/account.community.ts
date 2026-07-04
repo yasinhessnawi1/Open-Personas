@@ -10,11 +10,15 @@
 
 import type { Account } from "./types";
 
+// Same referential-stability contract as `useAuth` (R4-C1-6): one frozen
+// instance so effect/callback deps on the account surface never churn.
+const _STABLE_ACCOUNT: Account = Object.freeze({
+  name: "",
+  email: null,
+  imageUrl: null,
+  available: false,
+});
+
 export function useAccount(): Account {
-  return {
-    name: "",
-    email: null,
-    imageUrl: null,
-    available: false,
-  };
+  return _STABLE_ACCOUNT;
 }

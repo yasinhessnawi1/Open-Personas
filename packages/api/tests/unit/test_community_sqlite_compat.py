@@ -113,3 +113,34 @@ def test_occurrences_read_model_runs_on_sqlite_incl_fire_history(engine: Engine)
     assert len(result.occurrences) >= 1
     assert [h.status for h in result.history] == ["ran"]
     assert result.history[0].at == fire_time
+
+
+def test_telemetry_flush_lands_rows_on_sqlite(engine: Engine) -> None:
+    """Fix 4 (R4-C1-4): the telemetry flush must mint its PK client-side.
+
+    The canonical column's ``gen_random_uuid()`` server default is
+    Postgres-only; relying on it made EVERY community flush die on NOT NULL
+    and telemetry silently dropped 100% of rows. The flush now mints the id.
+    """
+    import asyncio
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from persona_api.middleware.request_telemetry import TelemetryBuffer, TelemetryEvent
+
+    buf = TelemetryBuffer(engine)
+    buf.record(
+        TelemetryEvent(
+            timestamp=_dt(2026, 7, 4, 12, 0, tzinfo=_UTC),
+            method="GET",
+            route_template="/v1/personas/{persona_id}",
+            status_code=200,
+            duration_ms=12.5,
+        )
+    )
+    asyncio.run(buf._flush_once())  # noqa: SLF001 — the flush IS the unit under test
+    with engine.begin() as conn:
+        n = conn.execute(text("SELECT count(*) FROM request_telemetry")).scalar_one()
+        row_id = conn.execute(text("SELECT id FROM request_telemetry")).scalar_one()
+    assert n == 1
+    assert row_id  # non-null, client-minted
