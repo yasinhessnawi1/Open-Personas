@@ -183,6 +183,56 @@ Per-spec entries are added by the close-out phase of each spec.
   math), persona-coloured, honest fire-history + truncation; a recurrence builder + time picker (composed
   from existing primitives, F2 shared-primitive gap flagged) that reschedules through the same CAS door.
 - Migration `030_schedules_calendar` (renumbers at merge-back). OpenAPI regen is a named merge-back item.
+### Episodic Multi-Resolution Memory — the pyramid + lifecycle (Spec K8, 2026-07-05)
+
+> Close-out of `episodic-pyramid` (`persona-core` stores + `persona-runtime` retrieval +
+> `persona-voice` recorder + `persona-api` worker/migration). Replaces the flat, unbounded,
+> over-forgetting episodic store with a **multi-resolution pyramid**: raw chunks kept forever
+> (text + embedding — provenance-safe by construction, §0), background-built gists above,
+> decay made structural, one sleep-time engine feeding BOTH the pyramid and the knowledge
+> graph. Plus the verified O(N)-write bug class, killed with measurement.
+
+- **The O(N) write fix (fast-track):** SEVEN sites eliminated — six count-derived episodic
+  writers (chat loop, voice recorder, agentic loop, task milestones, origination, CLI) now
+  mint race-free uuidv7 ids (K8-D-6; ordering moved to `(created_at, id)`), and
+  `TypedStore.write`'s full-store versioning scan became a scoped `get_by_logical_ids`
+  (K8-D-12 — versioned kinds still find their true prior heads, contract-proven). Measured at
+  a 20k-chunk store: write read-side **8068 ms → 5.6 ms**; `recent()` **6994 ms → 4.4 ms**
+  (new `Backend.count/recent` pushdowns + the `(persona_id, kind, created_at)` index).
+- **The pyramid (K8-D-1/2, depth-2 A):** gists are ordinary `PersonaChunk`s
+  (`kind='episodic_gist'`) carrying ordered `member_ids` drill pointers; lifecycle state
+  (`strength`, `last_recalled_at`, `band`, `pinned`) is hash-EXCLUDED (reinforce/demote never
+  re-embeds or trips the tamper check — proven on both transports); bands are data, not DDL
+  (B is additive); drill-down bottoms out at the hash-identical 100% original; gist-as-member
+  is unstorable AND unassemblable (summary-of-summary impossible at storage + input).
+- **Decay made structural (K8-D-3/4/5):** MemoryBank retention `R = exp(−Δt/(τ₀·strength))`
+  with per-class pins (explicit `pinned` flag / importance ≥ 0.8 — never compress, the AFM
+  rule); ranking `sim · max(R, floor)` — old memory can be down-ranked but never rank-killed
+  (the flat-24h "ranking-dead" class is deleted outright); recall REINFORCES via the explicit
+  batched `reinforce()` command (chat sync, voice off-loop; `retrieve_context` stays pure).
+- **Band-resolved display (K8-D-11):** a demoted hit renders its gist with the constant
+  `[older memory — summarized]` marker (deduped, fail-soft to raw); which memories are FOUND
+  is unchanged — `RetrievedContext.episodic_recalled_ids` records the found set so demoted
+  hits still reinforce and re-promote.
+- **The sleep-time engine (K8-D-8/9/15):** per-persona idle-window clustering (temporal gaps
+  + embedder topic-split, deterministic ⇒ idempotent; derived watermark — no marker table);
+  summaries from originals ONLY through the T5 `Summarizer` seam (async Protocol; stub +
+  interim tier adapter on its own `PERSONA_API_EPISODIC_SUMMARY_TIER` knob; P7 swaps in
+  later); one `KnowledgeCandidate` per cluster through K7's real merge (idempotency proven
+  against it); tier-and-demote materialization (never delete; K8-D-7: the bound is the
+  FULL-display working set, count-denominated, histogram-monitored). **Wired live** (the A4
+  bar): real turn-end AND run-end producers → real A0 worker claim → engine fires end-to-end;
+  kill-switch `PERSONA_EPISODIC_ENGINE_ENABLED` gates trigger + registration.
+- **Privacy cascade (K8-D-14):** true-deleting raw chunks removes every intersecting gist
+  (derived artifacts never outlive their evidence); survivors regenerate from originals.
+- **Migration `036_episodic_pyramid`** (placeholder off the branch-point head; re-parented at
+  merge-back): 5 lifecycle columns, `episodic_gist` kind, the `recent()` index — reversible,
+  community-SQLite-safe (memory_chunks is dropped there; compat-tested, not assumed).
+- **K9 handover recorded** (`docs/specs/phase3/spec_K8/k9_handover.md`): the read surfaces,
+  collapsed-pool + gist-as-key + reserved-contiguity recommendations, and the decisions left
+  to K9 (drill stop-condition, member reinforcement via gist hits, the final composite).
+
+
 ### Connector Management UI — turn on your messaging platforms behind one coherent flow (Spec C6, 2026-07-03)
 > Close-out of `connector-management-ui` (`persona-web` + a thin `persona-api` front-door + additive `persona-connectors` fields). The web surface that makes the C-series usable: connect Telegram / Discord / Slack / WhatsApp / SMS / email to your Persona account, see what's connected (and *as which identity*), and disconnect. **Closes direction 2.**
 - **One coherent frame over four mechanisms (C6-D-1):** a single `ConnectFlow` state machine — `idle → initiating → awaiting → confirmed` + `failed`/`expired` — where only the middle step varies (deep-link / OAuth / phone & email code). **The connectors list is the sole completion oracle** (a gentle poll; the web never handles the final credential — every mechanism redeems out-of-band). Server-authoritative expiry + one-tap re-issue; no zombie pollers.

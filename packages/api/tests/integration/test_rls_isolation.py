@@ -105,6 +105,37 @@ def test_memory_chunks_isolated_via_persona_fk_chain(
     assert personas == {"pa"}, f"RLS leak via FK chain: user_a saw chunks for {personas}"
 
 
+def test_episodic_gist_rows_inherit_the_persona_fk_policy(
+    migrated_engine: object, app_engine: object
+) -> None:
+    """Spec K8 (K8-D-13): gist rows are ordinary memory_chunks under the SAME policy.
+
+    Non-vacuous under the unprivileged ``persona_app`` role: both tenants get a
+    ``kind='episodic_gist'`` row (with ``member_ids``); each tenant sees exactly
+    their own. No new policy exists for the new kind — this proves none is needed.
+    """
+    _seed_two_tenants(migrated_engine)
+    zero = "[" + ",".join(["0"] * 384) + "]"
+    with migrated_engine.begin() as conn:  # type: ignore[attr-defined]
+        for gid, pid, member in (("ga", "pa", "ma"), ("gb", "pb", "mb")):
+            conn.execute(
+                text(
+                    "INSERT INTO memory_chunks "
+                    "(id, persona_id, kind, text, embedding, content_hash, "
+                    " fidelity_band, member_ids) VALUES "
+                    f"(:id, :pid, 'episodic_gist', 'gist', '{zero}', 'h', 1, "
+                    "ARRAY[:member]::text[])"
+                ),
+                {"id": gid, "pid": pid, "member": member},
+            )
+    with rls_connection(app_engine, "user_b") as conn:  # type: ignore[arg-type]
+        rows = conn.execute(
+            text("SELECT id, persona_id FROM memory_chunks WHERE kind = 'episodic_gist'")
+        ).all()
+    personas = {r.persona_id for r in rows}
+    assert personas == {"pb"}, f"RLS leak on gist rows: user_b saw {personas}"
+
+
 def test_cross_tenant_write_blocked_by_with_check(
     migrated_engine: object, app_engine: object
 ) -> None:

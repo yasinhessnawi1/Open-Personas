@@ -86,7 +86,20 @@ class TypedStore:
             persona_id=persona_id,
         )
 
-        existing = self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND)
+        # Scoped versioning fetch (Spec K8, K8-D-12): version computation only
+        # reads a chunk's own logical chain, so fetch exactly the batch's
+        # chains — never the whole store (the former ``get_all`` here was an
+        # O(N) read on EVERY write). Non-versioning stores fetch nothing.
+        existing: list[PersonaChunk] = []
+        if self.SUPPORTS_VERSIONING:
+            batch_logical_ids = [
+                c.provenance.logical_id if c.provenance is not None else c.id for c in chunks
+            ]
+            existing = self._backend.get_by_logical_ids(
+                persona_id=persona_id,
+                store_kind=self.STORE_KIND,
+                logical_ids=batch_logical_ids,
+            )
 
         prepared: list[PersonaChunk] = []
         supersede_updates: list[PersonaChunk] = []
@@ -206,16 +219,14 @@ class TypedStore:
     def recent(self, persona_id: str, limit: int) -> list[PersonaChunk]:
         """Return up to ``limit`` most-recently-created current chunks, newest first.
 
-        Recency counterpart to :meth:`query`. Sorts the current heads by
-        ``created_at`` in-process — episodic counts are modest in v0.1; a
-        backend-level ``ORDER BY created_at LIMIT`` is the push-down if this
-        ever sits on the hot path for large stores.
+        Recency counterpart to :meth:`query`. Delegates to the backend's
+        ``recent`` push-down (Spec K8, acceptance 1): Postgres serves it as
+        ``ORDER BY (created_at, id) DESC LIMIT``, Chroma sorts in-process.
+        Never materialises the whole store.
         """
         if limit <= 0:
             return []
-        current = self.get_all(persona_id)
-        current.sort(key=lambda c: c.created_at, reverse=True)
-        return current[:limit]
+        return self._backend.recent(persona_id=persona_id, store_kind=self.STORE_KIND, limit=limit)
 
     # ----- delete ----------------------------------------------------------
 

@@ -38,6 +38,7 @@ __all__ = [
     "DEFAULT_RETRIEVE_TOP_K",
     "EARLY_RETRIEVE_TOP_K",
     "dynamic_top_k",
+    "reinforce_recalled",
     "retrieve_context",
 ]
 
@@ -94,7 +95,7 @@ def _recall_episodic(
     k: int,
     *,
     recency: bool,
-) -> list[PersonaChunk]:
+) -> tuple[list[PersonaChunk], tuple[str, ...]]:
     """Episodic recall for one turn: similarity, optionally recency-augmented.
 
     With ``recency=False`` this is the historical behaviour — the top-``k``
@@ -106,14 +107,86 @@ def _recall_episodic(
     """
     similar = store.query(persona_id, user_message, k)
     if not recency:
-        return similar
-    n_recent = min(k, max(_MIN_RECENCY, k // 2))
-    recent = store.recent(persona_id, n_recent)
-    seen = {c.id for c in recent}
-    extra = [c for c in similar if c.id not in seen][: max(0, k - len(recent))]
-    merged = [*recent, *extra]
-    merged.sort(key=lambda c: c.created_at)
-    return merged
+        found = similar
+    else:
+        n_recent = min(k, max(_MIN_RECENCY, k // 2))
+        recent = store.recent(persona_id, n_recent)
+        seen = {c.id for c in recent}
+        extra = [c for c in similar if c.id not in seen][: max(0, k - len(recent))]
+        found = [*recent, *extra]
+        found.sort(key=lambda c: c.created_at)
+    # The FOUND raw ids are recorded before display resolution (reinforcement
+    # targets them — a demoted hit must reinforce to re-promote, K8-D-3/5);
+    # the returned list is the DISPLAYED view (K8-D-11).
+    found_ids = tuple(c.id for c in found if not c.member_ids)
+    return _resolve_display(store, persona_id, found), found_ids
+
+
+def _resolve_display(
+    store: MemoryStore, persona_id: str, chunks: list[PersonaChunk]
+) -> list[PersonaChunk]:
+    """Band-resolved episodic display (Spec K8, K8-D-11) — duck-typed, fail-soft.
+
+    A demoted (band-1) hit renders as its covering gist with the exact
+    ``[older memory — summarized]`` marker; which memories were FOUND is
+    decided above (embeddings are permanent), only display fidelity changes.
+    Duck-typed like the reinforce hook (the D-05-4 discipline): a store/double
+    without ``resolve_display`` — or a resolution failure — falls back to raw
+    display, never to a broken turn.
+    """
+    resolve = getattr(store, "resolve_display", None)
+    if resolve is None:
+        return chunks
+    try:
+        return list(resolve(persona_id, chunks))
+    except Exception:  # noqa: BLE001 — deliberately fail-soft (display only)
+        from persona.logging import get_logger
+
+        get_logger("runtime.retrieval").warning(
+            "band display resolution failed persona={p}; raw display", p=persona_id
+        )
+        return chunks
+
+
+def reinforce_recalled(
+    stores: Mapping[str, MemoryStore],
+    persona_id: str,
+    context: RetrievedContext,
+) -> None:
+    """Reinforce this turn's recalled episodic chunks (Spec K8, K8-D-5).
+
+    The explicit post-retrieval command that keeps :func:`retrieve_context`
+    pure (CQS): ``strength += 1`` + decay-clock reset for every RAW episodic
+    chunk that surfaced this turn (gist rows carry ``member_ids`` and are
+    excluded — reinforcing members through a gist hit is K9's recall-path
+    call). One batched store command per turn; empty recall is a no-op.
+
+    Execution context is the CALLER's obligation (gate ruling): the chat loop
+    calls this synchronously on the request's owner-scoped engine; the voice
+    path calls it inside its retrieval worker thread, which already runs off
+    the event loop (``asyncio.to_thread`` — the starvation rule holds
+    structurally). Fail-soft by construction: reinforcement is an optimisation
+    of future recall, so a store without the command (duck-typed, the D-05-4
+    discipline) or a failed write must never break the turn.
+    """
+    ids = (
+        list(context.episodic_recalled_ids)
+        if context.episodic_recalled_ids
+        else [c.id for c in context.episodic if not c.member_ids]
+    )
+    if not ids:
+        return
+    reinforce = getattr(stores.get("episodic"), "reinforce", None)
+    if reinforce is None:
+        return  # a store/double without the K8 command — reinforcement is optional
+    try:
+        reinforce(persona_id, ids)
+    except Exception:  # noqa: BLE001 — deliberately fail-soft (never break a turn)
+        from persona.logging import get_logger
+
+        get_logger("runtime.retrieval").warning(
+            "episodic reinforcement failed persona={p} ids={n}", p=persona_id, n=len(ids)
+        )
 
 
 def retrieve_context(
@@ -174,11 +247,15 @@ def retrieve_context(
     resolved_identity = identity if identity is not None else stores["identity"].get_all(persona_id)
     dynamic = history_turns is not None
     k = dynamic_top_k(history_turns) if history_turns is not None else top_k
+    episodic_displayed, episodic_found_ids = _recall_episodic(
+        stores["episodic"], persona_id, user_message, k, recency=dynamic
+    )
     context = RetrievedContext(
         identity=resolved_identity,
         self_facts=stores["self_facts"].query(persona_id, user_message, k),
         worldview=stores["worldview"].query(persona_id, user_message, k),
-        episodic=_recall_episodic(stores["episodic"], persona_id, user_message, k, recency=dynamic),
+        episodic=episodic_displayed,
+        episodic_recalled_ids=episodic_found_ids,
         graph=graph_retrieval(user_message) if graph_retrieval is not None else GraphContext(),
     )
     if on_recall is not None:

@@ -98,6 +98,60 @@ class _InMemoryBackend:
         existing = self.store.get(key, [])
         self.store[key] = [c for c in existing if c.id not in set(ids)]
 
+    # Spec K8 (T1a/T1b) additive Backend surface.
+    def set_bands(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        bands: dict[str, int],  # noqa: ARG002 — protocol signature; the fake only logs
+    ) -> None:
+        self.call_log.append(("set_bands", persona_id, store_kind))
+
+    def band_histogram(self, *, persona_id: str, store_kind: str) -> dict[int, int]:
+        self.call_log.append(("band_histogram", persona_id, store_kind))
+        return {}
+
+    def reinforce(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],  # noqa: ARG002 — protocol signature; the fake only logs
+        recalled_at: object,  # noqa: ARG002 — protocol signature
+    ) -> None:
+        self.call_log.append(("reinforce", persona_id, store_kind))
+
+    def count(self, *, persona_id: str, store_kind: str, include_superseded: bool = False) -> int:
+        self.call_log.append(("count", persona_id, store_kind))
+        chunks = self.store.get((persona_id, store_kind), [])
+        if include_superseded:
+            return len(chunks)
+        return len(
+            [c for c in chunks if c.provenance is None or c.provenance.superseded_by is None]
+        )
+
+    def recent(self, *, persona_id: str, store_kind: str, limit: int) -> list[PersonaChunk]:
+        self.call_log.append(("recent", persona_id, store_kind))
+        current = [
+            c
+            for c in self.store.get((persona_id, store_kind), [])
+            if c.provenance is None or c.provenance.superseded_by is None
+        ]
+        current.sort(key=lambda c: (c.created_at, c.id), reverse=True)
+        return current[:limit]
+
+    def get_by_logical_ids(
+        self, *, persona_id: str, store_kind: str, logical_ids: list[str]
+    ) -> list[PersonaChunk]:
+        self.call_log.append(("get_by_logical_ids", persona_id, store_kind))
+        wanted = set(logical_ids)
+        return [
+            c
+            for c in self.store.get((persona_id, store_kind), [])
+            if c.provenance is not None and c.provenance.logical_id in wanted
+        ]
+
 
 def _make_chunk(conv: str, doc_ref: str, index: int, text: str = "hello") -> DocumentChunk:
     return DocumentChunk(

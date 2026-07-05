@@ -30,6 +30,15 @@ class HashEmbedder:
         for text in texts:
             digest = hashlib.sha256(text.encode("utf-8")).digest()
             floats = list(struct.unpack("8f", digest))
+            # Raw IEEE decode of random bytes can yield NaN/Infinity, which
+            # Chroma rejects (surfaced by Spec K8's uuidv7-randomised test
+            # texts — pre-K8 tests used fixed texts that happened to decode
+            # finite). Deterministic finite fallback per lane; unchanged for
+            # every text that already decoded finite.
+            floats = [
+                x if math.isfinite(x) else (digest[i * 4] + 1) / 255.0
+                for i, x in enumerate(floats)
+            ]
             full = (floats * 4)[: self.dimension]
             norm = math.sqrt(sum(x * x for x in full)) or 1.0
             out.append([x / norm for x in full])

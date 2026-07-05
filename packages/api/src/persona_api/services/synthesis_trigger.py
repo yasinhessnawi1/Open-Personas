@@ -15,13 +15,35 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.extraction import InteractionKind
+from persona.stores.lifecycle import EpisodicSettings
 
+from persona_api.jobs.handlers.episodic_consolidation import enqueue_episodic_consolidation
 from persona_api.jobs.handlers.synthesis import enqueue_synthesis
 
 if TYPE_CHECKING:
     from persona_api.jobs.queue import JobQueue
 
 __all__ = ["enqueue_conversation_synthesis", "enqueue_run_synthesis"]
+
+
+def _enqueue_episodic(queue: JobQueue, *, owner_id: str, persona_id: str) -> None:
+    """The K8 turn-tail trigger: the same boundary that dirties memory schedules
+    the sleep-time engine (idle-deferred, bucket-coalesced; kill-switch gated).
+
+    Settings are env-read per call (cheap pydantic-settings construction, no
+    globals); ``engine_enabled=False`` means NO job is ever enqueued — the
+    built-but-inert guard's trigger half (the handler half gates registration).
+    """
+    settings = EpisodicSettings()
+    if not settings.engine_enabled:
+        return
+    enqueue_episodic_consolidation(
+        queue,
+        owner_id=owner_id,
+        persona_id=persona_id,
+        delay_seconds=settings.idle_delay_seconds,
+        bucket_seconds=settings.bucket_seconds,
+    )
 
 
 def enqueue_conversation_synthesis(
@@ -48,6 +70,7 @@ def enqueue_conversation_synthesis(
         persona_id=persona_id,
         message_count=message_count,
     )
+    _enqueue_episodic(queue, owner_id=owner_id, persona_id=persona_id)
 
 
 def enqueue_run_synthesis(
@@ -72,3 +95,4 @@ def enqueue_run_synthesis(
         persona_id=persona_id,
         message_count=1,
     )
+    _enqueue_episodic(queue, owner_id=owner_id, persona_id=persona_id)

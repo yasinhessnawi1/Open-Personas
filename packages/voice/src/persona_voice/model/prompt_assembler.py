@@ -20,7 +20,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona_runtime.prompt import PromptMode
-from persona_runtime.retrieval import DEFAULT_RETRIEVE_TOP_K, retrieve_context
+from persona_runtime.retrieval import (
+    DEFAULT_RETRIEVE_TOP_K,
+    reinforce_recalled,
+    retrieve_context,
+)
 
 if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
@@ -72,7 +76,7 @@ class VoicePromptAssembler:
         previous call's tail — the same unified-memory continuity the text path
         gets (criteria 1+2; no persona-bypass).
         """
-        return retrieve_context(
+        context = retrieve_context(
             self._ctx.stores,
             self._ctx.persona_id,
             user_message,
@@ -80,6 +84,12 @@ class VoicePromptAssembler:
             identity=self._identity(),
             history_turns=history_turns,
         )
+        # Spec K8 (K8-D-5): reinforce the recalled episodic chunks. This method
+        # runs inside the reply producer's ``asyncio.to_thread`` worker, so the
+        # write executes OFF the voice event loop by construction (the
+        # starvation rule); fail-soft inside — never breaks a turn.
+        reinforce_recalled(self._ctx.stores, self._ctx.persona_id, context)
+        return context
 
     def build(
         self,

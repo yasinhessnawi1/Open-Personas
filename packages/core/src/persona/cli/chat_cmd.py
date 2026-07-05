@@ -27,7 +27,7 @@ from persona.config import PersonaCoreConfig
 from persona.history import ConversationHistoryManager
 from persona.logging import get_logger
 from persona.registry import PersonaRegistry
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import Conversation, ConversationMessage
 from persona.stores import (
     ChromaBackend,
@@ -83,7 +83,6 @@ def chat(
         persona_id=persona_id,
     )
     episodic_store = stores["episodic"]
-    turn_index = _next_episodic_index(episodic_store, persona_id)
 
     while True:
         try:
@@ -116,11 +115,9 @@ def chat(
         _write_turn_to_episodic(
             episodic_store,
             persona_id=persona_id,
-            index=turn_index,
             user_text=user_input,
             assistant_text=reply_text,
         )
-        turn_index += 1
 
 
 def _build_backend() -> ChatBackend:
@@ -152,21 +149,16 @@ def _no_op_summariser(messages: list[ConversationMessage]) -> str:
     return " | ".join(f"{m.role}: {m.content[:60]}" for m in messages)
 
 
-def _next_episodic_index(store: TypedStore, persona_id: str) -> int:
-    """Compute the next 4-digit index for episodic chunk IDs."""
-    existing = store.get_all(persona_id, include_superseded=True)
-    return len(existing)
-
-
 def _write_turn_to_episodic(
     store: TypedStore,
     *,
     persona_id: str,
-    index: int,
     user_text: str,
     assistant_text: str,
 ) -> None:
-    chunk_id = make_chunk_id(persona_id, "episodic", index)
+    # Minted uuidv7 id (K8-D-6) — the former store-count index was an O(N)
+    # read per write and raced under concurrent writers.
+    chunk_id = mint_chunk_id(persona_id, "episodic")
     text = f"USER: {user_text}\nASSISTANT: {assistant_text}"
     now = datetime.now(UTC)
     store.write(

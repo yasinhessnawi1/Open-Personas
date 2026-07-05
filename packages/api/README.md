@@ -63,7 +63,10 @@ identical across editions — community just feeds them a constant.
   lease + heartbeat crash-resume, retry/backoff/dead-letter, claim-time fairness
   caps, terminal-job archival, graceful drain. At-least-once delivery with
   idempotent-by-contract handlers; avatar generation is the first tenant (behind
-  `PERSONA_API_AVATAR_VIA_QUEUE`), knowledge-graph **synthesis** the second.
+  `PERSONA_API_AVATAR_VIA_QUEUE`), knowledge-graph **synthesis** the second, and
+  the episodic **sleep-time engine** the third (Spec K8: gists + graph candidates,
+  kill switch `PERSONA_EPISODIC_ENGINE_ENABLED`, summarizer tier
+  `PERSONA_API_EPISODIC_SUMMARY_TIER`, cadence via `PERSONA_EPISODIC_*`).
 - **Knowledge-graph write paths** — the graph fills two ways. A model-callable
   `record_user_fact` tool (on by default) lets a persona record an explicit durable
   fact mid-conversation via one fast inline write; and a durable **synthesis** job —

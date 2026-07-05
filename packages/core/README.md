@@ -123,6 +123,13 @@ per-turn logging — compose `persona-core` with
   write is tagged with its source — `system` / `user` / `persona_self` — under a
   per-store update policy, with SHA-256 `content_hash` and exactly one `AuditEvent`
   per mutation.
+- **Episodic memory is a multi-resolution pyramid.** Raw chunks are kept forever
+  (text + embedding — summaries never replace evidence); a background engine builds
+  gists above them with drill-down pointers back to the untouched originals. Decay
+  is usage-reinforced (`R = exp(−Δt/(τ₀·strength))`, recall reinforces via
+  `EpisodicStore.reinforce`), pinned/important memories never compress, and old
+  memory is down-rankable but never rank-dead. Tunables via `PERSONA_EPISODIC_*`
+  (`persona.stores.lifecycle.EpisodicSettings`).
 - **Eight+ model providers** behind one protocol — native tool calls for Anthropic
   / OpenAI / DeepSeek / Groq / Together / NVIDIA / OpenRouter, plus a prompt-shim
   fallback for local Ollama / HF. Embeddings via `bge-small-en-v1.5` (384-dim),

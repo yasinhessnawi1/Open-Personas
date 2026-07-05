@@ -66,6 +66,75 @@ class _StatefulBackend:
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         self._chunks.pop((persona_id, store_kind), None)
 
+    def reinforce(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],
+        recalled_at: object,
+    ) -> None:
+        from datetime import datetime as _dt
+
+        assert isinstance(recalled_at, _dt)
+        bucket = self._chunks.get((persona_id, store_kind), {})
+        for cid in ids:
+            if cid in bucket:
+                c = bucket[cid]
+                bucket[cid] = c.model_copy(
+                    update={"strength": c.strength + 1, "last_recalled_at": recalled_at}
+                )
+
+    def set_bands(self, *, persona_id: str, store_kind: str, bands: dict[str, int]) -> None:
+        bucket = self._chunks.get((persona_id, store_kind), {})
+        for cid, band in bands.items():
+            if cid in bucket:
+                bucket[cid] = bucket[cid].model_copy(update={"band": band})
+
+    def band_histogram(self, *, persona_id: str, store_kind: str) -> dict[int, int]:
+        histogram: dict[int, int] = {}
+        for c in self._chunks.get((persona_id, store_kind), {}).values():
+            if c.provenance is None or c.provenance.superseded_by is None:
+                histogram[c.band] = histogram.get(c.band, 0) + 1
+        return histogram
+
+    def count(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        include_superseded: bool = False,
+    ) -> int:
+        chunks = self.get_all(persona_id=persona_id, store_kind=store_kind)
+        if include_superseded:
+            return len(chunks)
+        return len(
+            [c for c in chunks if c.provenance is None or c.provenance.superseded_by is None]
+        )
+
+    def recent(self, *, persona_id: str, store_kind: str, limit: int) -> list[PersonaChunk]:
+        current = [
+            c
+            for c in self.get_all(persona_id=persona_id, store_kind=store_kind)
+            if c.provenance is None or c.provenance.superseded_by is None
+        ]
+        current.sort(key=lambda c: (c.created_at, c.id), reverse=True)
+        return current[:limit]
+
+    def get_by_logical_ids(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_ids: list[str],
+    ) -> list[PersonaChunk]:
+        wanted = set(logical_ids)
+        return [
+            c
+            for c in self.get_all(persona_id=persona_id, store_kind=store_kind)
+            if c.provenance is not None and c.provenance.logical_id in wanted
+        ]
+
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         bucket = self._chunks.get((persona_id, store_kind), {})
         for chunk_id in ids:

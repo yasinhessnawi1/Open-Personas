@@ -42,7 +42,7 @@ from persona.autonomy import policy_for, resolve_autonomy
 from persona.backends.types import reasoning_as_text
 from persona.errors import SkillCompositionDepthError, SkillCycleError
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
 from persona.schema.tools import ToolCall, ToolResult, truncated_tool_call_message
 from persona.skills import (
@@ -75,7 +75,7 @@ from persona_runtime.proactive_mcp_gap import build_mcp_gap_question, detect_mcp
 from persona_runtime.proactive_tool_gap import build_tool_gap_question, detect_tool_gap
 from persona_runtime.question_author import TemplateQuestionAuthor
 from persona_runtime.questions import QuestionRegistry
-from persona_runtime.retrieval import retrieve_context
+from persona_runtime.retrieval import reinforce_recalled, retrieve_context
 from persona_runtime.routing import (
     FirstTokenLatencyTracker,
     HeuristicRouter,
@@ -720,6 +720,10 @@ class ConversationLoop:
             history_turns=conversation.turn_count,
             on_recall=(_note_recall if on_event is not None else None),
         )
+        # Spec K8 (K8-D-5): reinforce the recalled episodic chunks — explicit
+        # command, one batched UPDATE, sync on the request's owner-scoped
+        # engine; fail-soft inside (a failed reinforcement never breaks a turn).
+        reinforce_recalled(self._stores, persona_id, context)
         history, compacted = await self._manage_history(conversation)
 
         # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so. Runs first — "cancel that" /
@@ -2050,10 +2054,14 @@ class ConversationLoop:
         return ToolCall(name=name, args=args, call_id=call_id, truncated=truncated)
 
     def _write_episodic(self, persona_id: str, user_text: str, assistant_text: str) -> None:
-        """Write one combined episodic chunk per turn (D-05-12; mirrors the CLI)."""
+        """Write one combined episodic chunk per turn (D-05-12; mirrors the CLI).
+
+        The id is minted (uuidv7, K8-D-6) — never derived from a store count:
+        ``len(get_all(...))`` was an O(N) read per write and raced under
+        concurrent writers (Spec K8 fast-track fix).
+        """
         store = self._stores["episodic"]
-        index = len(store.get_all(persona_id, include_superseded=True))
-        chunk_id = make_chunk_id(persona_id, "episodic", index)
+        chunk_id = mint_chunk_id(persona_id, "episodic")
         now = datetime.now(UTC)
         store.write(
             persona_id,

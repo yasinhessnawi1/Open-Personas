@@ -286,6 +286,13 @@ class APIConfig(BaseSettings):
     routing_intelligent_enabled: bool = Field(
         default=False, validation_alias="PERSONA_ROUTING_INTELLIGENT_ENABLED"
     )
+    # Spec K8 (K8-D-10): the gist summarizer's OWN tier knob — independent of
+    # synthesis so summarization cadence/cost is tunable on its own. The tier's
+    # provider chain must be production-viable (the NIM-free primaries are
+    # dev/test-ToS-bound — an env concern, flagged in the K8 research).
+    episodic_summary_tier: str = Field(
+        default="small", validation_alias="PERSONA_API_EPISODIC_SUMMARY_TIER"
+    )
     # On-by-default ``record_user_fact`` direct-write tool (D-K2-1). The persona's
     # per-persona ``tools`` allow-list is still the final gate inside
     # ``build_default_toolbox``; this flag only governs whether the tool is COMPOSED

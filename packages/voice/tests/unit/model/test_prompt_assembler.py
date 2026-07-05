@@ -162,3 +162,24 @@ class TestConstantBlockCaching:
         assert stores["self_facts"].query_calls == 2
         assert stores["worldview"].query_calls == 2
         assert stores["episodic"].query_calls == 2
+
+
+class TestReinforceWiring:
+    """Spec K8 (K8-D-5): the voice retrieval worker reinforces recalled episodic.
+
+    ``retrieve`` runs inside the reply producer's ``asyncio.to_thread`` worker,
+    so the synchronous reinforce here executes OFF the voice event loop by
+    construction (the starvation rule). A store double without the command is
+    a silent no-op (fail-soft) — proven by every other test in this file
+    passing with the plain ``_FakeStore``.
+    """
+
+    def test_retrieve_reinforces_the_recalled_episodic_ids(self) -> None:
+        ctx, stores = _context()
+        recalls: list[tuple[str, list[str]]] = []
+        stores["episodic"].reinforce = (  # type: ignore[attr-defined]
+            lambda persona_id, chunk_ids: recalls.append((persona_id, chunk_ids))
+        )
+        assembler = VoicePromptAssembler(ctx)
+        context = assembler.retrieve("mould again?")
+        assert recalls == [("astrid", [c.id for c in context.episodic])]

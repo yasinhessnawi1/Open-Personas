@@ -544,6 +544,12 @@ class RetrievedContext(BaseModel):
     worldview: list[PersonaChunk] = Field(default_factory=list)
     episodic: list[PersonaChunk] = Field(default_factory=list)
     graph: GraphContext = Field(default_factory=GraphContext)
+    # Spec K8 (K8-D-5/11): the FOUND raw episodic ids, recorded before band
+    # display resolution replaces demoted hits with gist-rendered entries.
+    # Reinforcement targets these (a demoted hit must reinforce so important
+    # old memory re-promotes); ``episodic`` above is the DISPLAYED list.
+    # Additive + defaulted: pre-K8 constructors are untouched.
+    episodic_recalled_ids: tuple[str, ...] = ()
 
 
 class PromptBuilder:

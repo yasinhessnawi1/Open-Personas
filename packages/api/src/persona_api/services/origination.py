@@ -27,7 +27,7 @@ from persona.schema.chunks import (
     ChunkProvenance,
     PersonaChunk,
     WriteSource,
-    make_chunk_id,
+    mint_chunk_id,
 )
 from persona.schema.conversation import ORIGINATED_METADATA_KEY
 from sqlalchemy import insert, select
@@ -164,8 +164,9 @@ class OriginationRecorder:
         reflects that it reached out. Same store path a reply uses; RLS-scoped via
         ``rls_engine``.
         """
-        index = len(self._episodic.get_all(persona_id, include_superseded=True))
-        chunk_id = make_chunk_id(persona_id, "episodic", index)
+        # Minted uuidv7 id (K8-D-6) — the former store-count index was an
+        # O(N) read per write and raced under concurrent writers.
+        chunk_id = mint_chunk_id(persona_id, "episodic")
         now = message.created_at
         self._episodic.write(
             persona_id,

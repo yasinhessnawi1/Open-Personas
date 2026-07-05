@@ -43,7 +43,7 @@ from persona.audit import AuditAction
 from persona.autonomy import policy_for, resolve_autonomy
 from persona.errors import SkillCompositionDepthError, SkillCycleError
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
 from persona.schema.tools import ToolResult
 from persona.skills import (
@@ -795,8 +795,9 @@ class AgenticLoop:
         is stringified.
         """
         store = self._stores["episodic"]
-        index = len(store.get_all(persona_id, include_superseded=True))
-        chunk_id = make_chunk_id(persona_id, "episodic", index)
+        # Minted uuidv7 id (K8-D-6) — the former store-count index was an
+        # O(N) read per write and raced under concurrent writers.
+        chunk_id = mint_chunk_id(persona_id, "episodic")
         now = datetime.now(UTC)
         tools_used = sorted({call.name for step in run.steps for call in step.tool_calls})
         store.write(

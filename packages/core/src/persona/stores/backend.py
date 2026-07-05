@@ -74,6 +74,107 @@ class Backend(Protocol):
         """Return every chunk for ``(persona_id, store_kind)`` (all versions)."""
         ...
 
+    def count(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        include_superseded: bool = False,
+    ) -> int:
+        """Number of chunks for ``(persona_id, store_kind)`` without materialising them.
+
+        ``include_superseded=False`` counts only current heads (the
+        ``superseded_by IS NULL`` view queries return); ``True`` counts every
+        stored version. The write path and the P8 measurement counters use
+        this instead of ``len(get_all(...))`` (Spec K8, acceptance 1).
+        """
+        ...
+
+    def recent(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        limit: int,
+    ) -> list[PersonaChunk]:
+        """Up to ``limit`` most-recently-created current chunks, newest first.
+
+        Contract: current heads only, ordered ``(created_at, id)`` descending —
+        never by lexicographic id (chunk ids mix count-era and uuidv7-era
+        formats; ``created_at`` is the one honest insertion-order key, K8-D-6).
+        Postgres pushes this down to ``ORDER BY … LIMIT``; Chroma materialises
+        and sorts in-process (documented Liskov: the community/local transport
+        holds modest per-persona volumes).
+        """
+        ...
+
+    def get_by_logical_ids(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_ids: list[str],
+    ) -> list[PersonaChunk]:
+        """Every version of the chunks whose ``provenance.logical_id`` is listed.
+
+        The scoped replacement for the write path's full-store ``get_all``
+        (Spec K8, K8-D-12): version computation only ever reads a chunk's own
+        logical chain, so the write fetches exactly the batch's chains —
+        genuinely-versioned kinds still find their true prior heads; a fresh
+        chain fetches nothing. Chunks without provenance are never returned
+        (they belong to no chain). Empty ``logical_ids`` returns ``[]``.
+        """
+        ...
+
+    def reinforce(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],
+        recalled_at: Any,  # noqa: ANN401 — datetime; Any avoids a runtime import cycle here
+    ) -> None:
+        """Batched lifecycle bump: ``strength += 1``, ``last_recalled_at = recalled_at``.
+
+        The K8-D-5 reinforcement primitive — ONE statement for the whole
+        recalled id-set (Postgres: a single UPDATE; Chroma: a metadata-only
+        update, no re-embed). Lifecycle state is hash-excluded, so this never
+        changes chunk identity. Unknown ids are silently skipped (idempotent
+        against races with deletes). Empty ``ids`` is a no-op.
+        """
+        ...
+
+    def set_bands(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        bands: dict[str, int],
+    ) -> None:
+        """Materialize fidelity bands: ``{chunk_id: band}`` in one batch (K8 T7).
+
+        Lifecycle-only, like ``reinforce``: touches the hash-excluded band
+        state, never text/embedding/metadata — no identity churn, no re-embed.
+        Unknown ids are silently skipped; empty ``bands`` is a no-op. The
+        tiering pass writes what :func:`persona.stores.lifecycle.classify_band`
+        computed — the read path trusts the stored value (K8-D-3 as clarified:
+        materialized, staleness harmless).
+        """
+        ...
+
+    def band_histogram(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+    ) -> dict[int, int]:
+        """Chunk count per fidelity band (the K8-D-7 / P8 counter surface).
+
+        Postgres serves it as ``GROUP BY fidelity_band``; Chroma materialises
+        in-process (documented Liskov, community volumes). Current heads only.
+        """
+        ...
+
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         """Remove every chunk for ``(persona_id, store_kind)``. Idempotent.
 

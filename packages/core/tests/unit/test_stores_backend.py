@@ -43,6 +43,32 @@ class _FakeBackend:
         self.calls.append("get_all")
         return []
 
+    def count(self, *, persona_id: str, store_kind: str, include_superseded: bool = False) -> int:
+        self.calls.append("count")
+        return 0
+
+    def recent(self, *, persona_id: str, store_kind: str, limit: int) -> list[PersonaChunk]:
+        self.calls.append("recent")
+        return []
+
+    def get_by_logical_ids(
+        self, *, persona_id: str, store_kind: str, logical_ids: list[str]
+    ) -> list[PersonaChunk]:
+        self.calls.append("get_by_logical_ids")
+        return []
+
+    def reinforce(
+        self, *, persona_id: str, store_kind: str, ids: list[str], recalled_at: object
+    ) -> None:
+        self.calls.append("reinforce")
+
+    def set_bands(self, *, persona_id: str, store_kind: str, bands: dict[str, int]) -> None:
+        self.calls.append("set_bands")
+
+    def band_histogram(self, *, persona_id: str, store_kind: str) -> dict[int, int]:
+        self.calls.append("band_histogram")
+        return {}
+
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         self.calls.append("delete_persona")
 
@@ -81,7 +107,19 @@ def test_chroma_backend_class_has_the_full_backend_surface() -> None:
     # guards it.
     from persona.stores.chroma import ChromaBackend
 
-    for method in ("upsert", "query", "get_all", "delete_persona", "delete_documents"):
+    for method in (
+        "upsert",
+        "query",
+        "get_all",
+        "delete_persona",
+        "delete_documents",
+        "count",
+        "recent",
+        "get_by_logical_ids",
+        "reinforce",
+        "set_bands",
+        "band_histogram",
+    ):
         assert callable(getattr(ChromaBackend, method, None)), f"ChromaBackend missing {method}"
     assert not hasattr(ChromaBackend, "delete_collection"), "old Chroma-ism name still present"
 

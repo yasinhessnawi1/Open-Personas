@@ -109,7 +109,9 @@ class TestEpisodicStore:
         assert actions == [AuditAction.WRITE] * 3
 
     def test_decay_reranking(self, backend: ChromaBackend, audit: MemoryAuditLogger) -> None:
-        store = EpisodicStore(backend=backend, audit_logger=audit, tau_hours=1.0)
+        # Spec K8 re-baseline: flat-24h tau is gone; ranking is usage-reinforced
+        # retention with a floor (K8-D-4). Recency-ordering property preserved.
+        store = EpisodicStore(backend=backend, audit_logger=audit)
         # Insert with explicit created_at by going through Chroma directly
         # (the base sets created_at = now). We instead write chunks where
         # created_at is far in the past for one of them.

@@ -23,6 +23,7 @@ writers/reader:
 # ruff: noqa: ARG002 — the store double ignores protocol args (persona_id/query) by design.
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -109,7 +110,15 @@ def test_contribution_parity_voice_matches_chat_modulo_the_modality_marker() -> 
     # ... same importance, same write source, same chunk-id scheme ...
     assert chat_chunk.metadata["importance"] == voice_chunk.metadata["importance"] == "0.5"
     assert chat_chunk.provenance.source == voice_chunk.provenance.source == WriteSource.SYSTEM
-    assert chat_chunk.id == voice_chunk.id  # make_chunk_id(persona, "episodic", 0)
+    # Spec K8 re-baseline (K8-D-6, deliberate): both writers mint through the
+    # SAME ``mint_chunk_id`` scheme — ``{persona}::episodic::{uuidv7}``. Ids are
+    # no longer byte-equal (uuidv7 is race-free by being unique); the parity
+    # property is the shared scheme, not id collision. The old count-derived
+    # ``make_chunk_id(persona, "episodic", 0)`` raced between these two writers.
+    _uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    assert re.fullmatch(rf"{_PERSONA}::episodic::{_uuid_re}", chat_chunk.id)
+    assert re.fullmatch(rf"{_PERSONA}::episodic::{_uuid_re}", voice_chunk.id)
+    assert chat_chunk.id != voice_chunk.id  # unique per write — the race fix, not a drift
     # ... differing ONLY by voice's episodic-layer channel marker.
     assert voice_chunk.metadata.get("modality") == "voice"
     assert "modality" not in chat_chunk.metadata

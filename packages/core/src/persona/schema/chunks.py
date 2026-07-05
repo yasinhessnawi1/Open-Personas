@@ -13,6 +13,9 @@ the per-store policy table can decide and the audit log can record. See
 from __future__ import annotations
 
 import hashlib
+import secrets
+import time
+import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -24,6 +27,7 @@ __all__ = [
     "PersonaChunk",
     "WriteSource",
     "make_chunk_id",
+    "mint_chunk_id",
 ]
 
 # Persona-RAG convention (D-01-2): 4-digit zero-padded index per store.
@@ -76,6 +80,35 @@ def make_chunk_id(persona_id: str, store_kind: str, index: int) -> str:
         msg = f"chunk index must be non-negative; got {index!r}"
         raise ValueError(msg)
     return f"{persona_id}::{store_kind}::{index:0{CHUNK_ID_INDEX_WIDTH}d}"
+
+
+def _uuid7() -> uuid.UUID:
+    """A UUIDv7 (RFC 9562): 48-bit unix-ms timestamp + 74 random bits.
+
+    Python 3.11 has no ``uuid.uuid7``; this is the standard construction
+    (time-ordered among v7 ids, collision-free without coordination). Written
+    in-repo per the dependency-minimisation rule (~15 lines beats a package).
+    """
+    ts_ms = time.time_ns() // 1_000_000
+    value = (ts_ms & 0xFFFF_FFFF_FFFF) << 80
+    value |= 0x7 << 76  # version 7
+    value |= secrets.randbits(12) << 64  # rand_a
+    value |= 0b10 << 62  # RFC 4122 variant
+    value |= secrets.randbits(62)  # rand_b
+    return uuid.UUID(int=value)
+
+
+def mint_chunk_id(persona_id: str, store_kind: str) -> str:
+    """Mint a race-free, time-ordered chunk identifier (Spec K8, K8-D-6).
+
+    Format ``{persona_id}::{store_kind}::{uuidv7}``. Replaces the count-derived
+    :func:`make_chunk_id` on the episodic write path: the count index raced
+    under concurrent writers (chat + voice) and its 4-digit padding broke
+    lexicographic order past 9999. Old-format ids remain valid forever — no
+    reader may assume either format; insertion-order consumers sort by
+    ``(created_at, id)``, never by bare id.
+    """
+    return f"{persona_id}::{store_kind}::{_uuid7()}"
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -173,6 +206,24 @@ class PersonaChunk(BaseModel):
         provenance: Audit metadata for mutable-store chunks. ``None`` for
             identity-store chunks.
         created_at: UTC creation timestamp. Naive datetimes are rejected.
+        strength: Usage-reinforcement counter (Spec K8, K8-D-3/5): recall
+            increments it and resets the decay clock. Hash-EXCLUDED lifecycle
+            state — mutating it never changes chunk identity or forces a
+            re-embed (the ``distance``/``provenance`` class, NOT the
+            ``metadata`` class).
+        last_recalled_at: When the chunk last surfaced in recall (the decay
+            clock's reset point; ``created_at`` is the fallback). Hash-excluded.
+        band: The fidelity band of the chunk's DISPLAY (K8-D-3: 0 = FULL/raw
+            text; 1 = gist). Materialized by the background tiering pass; a
+            stale value between passes is harmless (display fidelity only,
+            never correctness — raw text + embedding are permanent).
+            Hash-excluded.
+        pinned: The chunk-level constraint class (K8-D-3 as amended at T2):
+            pinned chunks never demote out of FULL display. First-class and
+            hash-excluded — pin-toggling must never trip the tamper check.
+        member_ids: On gist rows (``store_kind='episodic_gist'``) the ordered
+            ids of the raw member chunks this gist summarises (the drill-down
+            pointers, K8-D-2). Empty on raw chunks. Hash-excluded.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -184,6 +235,13 @@ class PersonaChunk(BaseModel):
     content_hash: str = ""
     provenance: ChunkProvenance | None = None
     created_at: datetime
+    # --- Spec K8 lifecycle state (hash-excluded by construction: the content
+    # hash covers text + metadata only — see _populate_or_verify_content_hash).
+    strength: int = Field(default=1, ge=1)
+    last_recalled_at: datetime | None = None
+    band: int = Field(default=0, ge=0)
+    pinned: bool = False
+    member_ids: tuple[str, ...] = ()
 
     @field_validator("created_at", mode="after")
     @classmethod

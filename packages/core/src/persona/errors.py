@@ -125,6 +125,24 @@ class StoreNotFoundError(PersonaError):
     """Raised when a store kind is requested that the registry does not know."""
 
 
+class SummarizerError(PersonaError):
+    """A gist summarization failed or was fed invalid input (Spec K8, K8-D-10).
+
+    The engine's per-cluster failure boundary: raised for empty/garbage output,
+    provider failures (re-raised at the adapter, never leaked raw), and
+    from-originals violations at input assembly. The engine skips the cluster
+    and reports — a summarizer hiccup degrades to recall-over-raw-chunks.
+    """
+
+
+class GistMembershipError(PersonaError):
+    """A gist write named invalid members (empty, or a gist offered as a member).
+
+    Spec K8 (K8-D-2/8): gists summarise RAW chunks only — a gist may never be
+    another gist's member (from-originals is structural, never summary-of-summary).
+    """
+
+
 class BrokenVersionChainError(PersonaError):
     """Raised when a version chain is malformed.
 

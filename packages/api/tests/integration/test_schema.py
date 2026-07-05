@@ -51,6 +51,12 @@ _EXPECTED_MEMORY_COLS = {
     "written_by",
     "reason",
     "created_at",
+    # Spec K8 lifecycle columns (K8-D-2/13).
+    "strength",
+    "last_recalled_at",
+    "fidelity_band",
+    "pinned",
+    "member_ids",
 }
 
 
@@ -75,6 +81,7 @@ def test_memory_chunks_indexes(pg_engine: Engine) -> None:
         "idx_memory_persona_kind_logical",
         "idx_memory_current_heads",
         "idx_memory_embedding",
+        "idx_memory_persona_kind_created",  # Spec K8: the recent() pushdown index
     }.issubset(names)
 
 

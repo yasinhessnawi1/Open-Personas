@@ -42,7 +42,9 @@ __all__ = [
 # port; existing stores are unaffected) + the skill-injection event sentinel
 # (Spec S1 T4 — skill injection is not a store mutation, so ``"skill"`` is the
 # honest non-store ``store`` value, additive like ``knowledge_graph``).
-StoreKind = Literal["identity", "self_facts", "worldview", "episodic", "knowledge_graph", "skill"]
+StoreKind = Literal[
+    "identity", "self_facts", "worldview", "episodic", "episodic_gist", "knowledge_graph", "skill"
+]
 
 
 class AuditAction(StrEnum):
@@ -59,6 +61,9 @@ class AuditAction(StrEnum):
     DELETE = "delete"
     REMOVE_DOCUMENTS = "remove_documents"
     ROLLBACK = "rollback"
+    # Spec K8 (K8-D-5): one event per batched reinforcement (the per-turn
+    # strength++/clock-reset over the recalled episodic id-set).
+    REINFORCE = "reinforce"
     # Spec S1 (S1-D-7): one event per skill injection; one per consent refusal.
     SKILL_INJECTED = "skill_injected"
     SKILL_REFUSED = "skill_refused"

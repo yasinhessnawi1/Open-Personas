@@ -42,13 +42,14 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    SmallInteger,
     Table,
     Text,
     UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, REAL, TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL, TSVECTOR
 
 
 def _json() -> JSON:
@@ -530,13 +531,29 @@ memory_chunks = Table(
     Column("written_by", Text),
     Column("reason", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # --- Spec K8 lifecycle columns (K8-D-2/3, migration 0NN_episodic_pyramid
+    # for existing DBs; canonical here for fresh create_all — the 033 split-home
+    # discipline). Hash-excluded model fields on PersonaChunk: mutating them
+    # never changes chunk identity. NOT NULL DEFAULTs are metadata-only on
+    # PG11+ (no table rewrite at any N).
+    Column("strength", Integer, nullable=False, server_default=text("1")),
+    Column("last_recalled_at", DateTime(timezone=True)),
+    Column("fidelity_band", SmallInteger, nullable=False, server_default=text("0")),
+    Column("pinned", Boolean, nullable=False, server_default=text("false")),
+    # Ordered raw-member pointers on gist rows (kind='episodic_gist'); NULL on
+    # raw chunks. postgresql.ARRAY never reaches SQLite: community DROPS
+    # memory_chunks from its metadata (vectors live in Chroma) — proven by
+    # test_community_sqlite_compat_k8.py, not assumed.
+    Column("member_ids", ARRAY(Text)),
     # Spec 19 D-19-X-memory-chunks-kind-check-migration (chain entry 23):
     # ``'document'`` is the fifth accepted kind so the DocumentStore path
     # (migration 005 RLS aux policy) survives the CHECK. Migration 006 is the
     # migration of record for existing deployments; this canonical declaration
     # is the source of truth for fresh DBs via ``001_initial`` create_all.
+    # Spec K8: ``'episodic_gist'`` is the sixth (gists-as-chunks, K8-D-2);
+    # its migration of record is 0NN_episodic_pyramid.
     CheckConstraint(
-        "kind IN ('identity', 'self_facts', 'worldview', 'episodic', 'document')",
+        "kind IN ('identity', 'self_facts', 'worldview', 'episodic', 'document', 'episodic_gist')",
         name="memory_chunks_kind_check",
     ),
     CheckConstraint(
@@ -551,6 +568,15 @@ memory_chunks = Table(
         "persona_id",
         "kind",
         postgresql_where=text("superseded_by IS NULL"),
+    ),
+    # Spec K8: the recent() pushdown index — ORDER BY (created_at, id) DESC
+    # LIMIT is index-served (K8-D-6: created_at is the insertion-order key;
+    # ids mix count-era and uuidv7-era formats and must never be sorted bare).
+    Index(
+        "idx_memory_persona_kind_created",
+        "persona_id",
+        "kind",
+        text("created_at DESC"),
     ),
     # HNSW approximate-NN over cosine distance (S07-3).
     Index(

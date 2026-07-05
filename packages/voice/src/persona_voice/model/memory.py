@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
 
 if TYPE_CHECKING:
@@ -152,11 +152,14 @@ class VoiceTurnRecorder:
         self._maybe_schedule_compaction()
 
     def _write_episodic(self, user_text: str, heard_text: str) -> None:
-        """Write one combined episodic chunk per turn (mirrors the text loop)."""
+        """Write one combined episodic chunk per turn (mirrors the text loop).
+
+        Minted uuidv7 id (K8-D-6), never a store-count index — the count read
+        was O(N) per write and raced against the concurrent chat writer.
+        """
         persona_id = self._ctx.persona_id
         store = self._ctx.stores["episodic"]
-        index = len(store.get_all(persona_id, include_superseded=True))
-        chunk_id = make_chunk_id(persona_id, "episodic", index)
+        chunk_id = mint_chunk_id(persona_id, "episodic")
         now = self._clock()
         store.write(
             persona_id,

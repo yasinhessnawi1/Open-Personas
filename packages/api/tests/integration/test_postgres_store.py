@@ -170,8 +170,10 @@ def test_episodic_decay_ranks_recent_above_stale(
     backend: PostgresBackend, audit: MemoryAuditLogger
 ) -> None:
     # Two equally-relevant chunks (identical text → identical embedding), one
-    # 1h old and one 48h old. With tau=24h, the recent one must rank first.
-    store = EpisodicStore(backend=backend, audit_logger=audit, tau_hours=24.0)
+    # 1h old and one 48h old. Under K8-D-4 retention (tau0 168h, strength 1)
+    # the recent one still ranks first — the ordering property survives the
+    # Spec K8 re-baseline off the flat-24h decay.
+    store = EpisodicStore(backend=backend, audit_logger=audit)
     now = datetime.now(UTC)
     recent = _chunk(
         chunk_id="p1::episodic::recent",

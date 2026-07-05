@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 
 if TYPE_CHECKING:
     from persona.stores.protocol import MemoryStore
@@ -136,8 +136,9 @@ class MilestoneRecorder:
     ) -> None:
         """Write a milestone episodic chunk (tagged ``source='task_milestone'``)."""
         now = datetime.now(UTC)
-        index = len(self._store.get_all(persona_id, include_superseded=True))
-        chunk_id = make_chunk_id(persona_id, "episodic", index)
+        # Minted uuidv7 id (K8-D-6) — the former store-count index was an
+        # O(N) read per write and raced under concurrent writers.
+        chunk_id = mint_chunk_id(persona_id, "episodic")
         self._store.write(
             persona_id,
             [

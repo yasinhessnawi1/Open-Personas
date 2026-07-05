@@ -35,6 +35,10 @@ from persona.graph.index import make_graph_index
 from persona.graph.postgres import PostgresGraphBackend
 from persona.jobs import JobRegistry
 from persona.logging import get_logger
+from persona.stores.engine import EpisodicConsolidationEngine
+from persona.stores.lifecycle import EpisodicSettings
+from persona.stores.pyramid import EpisodicPyramid
+from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 
 from persona_api.db.audit_factory import build_audit_logger
@@ -42,6 +46,9 @@ from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.consolidation import (
     enqueue_graph_consolidation,
     register_graph_consolidation_handler,
+)
+from persona_api.jobs.handlers.episodic_consolidation import (
+    register_episodic_consolidation_handler,
 )
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.queue import JobQueue
@@ -167,6 +174,27 @@ def build_worker_registry(
         repository=PgSynthesisRepository(),
         enqueue_consolidation=enqueue_consolidation,
     )
+
+    # The K8 sleep-time engine (Spec K8, K8-D-8) — registered ONLY when enabled
+    # (built-but-inert guard; the turn-tail trigger gates on the same switch).
+    # Composed on the SAME RLS engine + embedder as everything else: the
+    # per-job owner GUC scopes both the episodic transport and the graph merge.
+    episodic_settings = EpisodicSettings()
+    if episodic_settings.engine_enabled and memory_backend is not None:
+        episodic_engine = EpisodicConsolidationEngine(
+            backend=memory_backend,
+            pyramid=EpisodicPyramid(
+                backend=memory_backend,
+                audit_logger=build_audit_logger(config, rls_engine),
+            ),
+            # The interim tier summarizer (K8-D-10): the engine's OWN tier knob;
+            # P7 swaps in behind the same Protocol later.
+            summarizer=TierSummarizer(backend=tier_registry.get(config.episodic_summary_tier)),
+            graph=graph_store,
+            settings=episodic_settings,
+            embedder=embedder,
+        )
+        register_episodic_consolidation_handler(registry, engine=episodic_engine)
     if runtime_factory is not None:
         _register_task_leg_tenant(
             registry,
