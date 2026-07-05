@@ -29,10 +29,12 @@ import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona.config import PersonaCoreConfig
 from persona.graph import ConsolidationPass, PostgresEntityRegistry, build_graph_store
 from persona.graph.config import GraphSettings
 from persona.graph.index import make_graph_index
 from persona.graph.postgres import PostgresGraphBackend
+from persona.initiative import InitiativeDial, InitiativeSettings
 from persona.jobs import JobRegistry
 from persona.logging import get_logger
 from persona.stores.engine import EpisodicConsolidationEngine
@@ -40,8 +42,30 @@ from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.pyramid import EpisodicPyramid
 from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
+from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 
 from persona_api.db.audit_factory import build_audit_logger
+from persona_api.initiative.delivery import InitiativeDeliveryExecutor
+from persona_api.initiative.handler import (
+    InitiativeScanHandler,
+    read_initiative_dial,
+    register_initiative_scan_handler,
+)
+from persona_api.initiative.pipeline_wiring import (
+    ApiGroundingSource,
+    ApiPipelineAuditor,
+    ApiProvenanceReader,
+    ApiUserContextReader,
+    ApiWellbeingSubjectCheck,
+    LedgerAdapter,
+)
+from persona_api.initiative.provisioner import InitiativeProvisioner
+from persona_api.initiative.readers import (
+    ApiScanConversationReader,
+    ApiScanGraphReader,
+    ApiScanTaskReader,
+)
+from persona_api.initiative.store import DeclineStore, InitiativeLedger
 from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.consolidation import (
     enqueue_graph_consolidation,
@@ -206,6 +230,87 @@ def build_worker_registry(
             # config-selected backend; audit_root stays the JSONL fallback path.
             audit_root=Path(config.audit_root),
             audit_logger=build_audit_logger(config, rls_engine),
+        )
+
+    # Initiative scan (Spec A5, T6) — env-gated at the composition root:
+    # PERSONA_INITIATIVE_ENABLED default OFF (the criterion-9 gate — initiative
+    # does not enable until the A5-R-1 judged gate passes). OFF ⇒ the tenant is
+    # NOT registered and the registry is byte-identical to pre-A5 (the
+    # built-but-inert killer is the composition test over this branch). The
+    # scan routes on the SMALL tier directly (no router profile — the K2
+    # synthesis_tier precedent; Phase-1 ruling 1).
+    initiative_settings = InitiativeSettings()
+    if initiative_settings.enabled:
+        initiative_backend = tier_registry.get(initiative_settings.scan_tier)
+        scanner = InitiativeScanner(
+            graph=ApiScanGraphReader(graph_store),
+            conversations=ApiScanConversationReader(rls_engine),
+            tasks=ApiScanTaskReader(TaskStore(rls_engine), CheckpointStore(rls_engine)),
+            backend=initiative_backend,
+            settings=initiative_settings,
+        )
+
+        def _dial_reader(owner: str, persona: str) -> InitiativeDial:
+            return read_initiative_dial(rls_engine, owner, persona)
+
+        # The pipeline (T7) — the ONE enforced path from candidate to disposition.
+        # T8 fills the delivery seam for ACT (the implicit task through the real
+        # A2/A1 doors; the report is the task machinery's alone); PROPOSE still
+        # returns False (held) until T9 wires the propose-first door.
+        initiative_ledger = InitiativeLedger(rls_engine)
+        # The generic-proposal C0 seam (T9): the SAME sender composition A4's
+        # digests use — one origination door. Absent memory backend/edition (the
+        # community no-messaging posture) generic proposals stay HELD, exactly
+        # like the digest path's absence; the A8-door route needs no sender.
+        proposal_sender = None
+        tag_resolver = None
+        if memory_backend is not None and edition is not None:
+            from persona_api.services.origination_adapters import (
+                OriginatorUpdateSender,
+                resolve_persona_tag,
+            )
+
+            proposal_sender = OriginatorUpdateSender(
+                rls_engine=rls_engine,
+                memory_backend=memory_backend,
+                edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
+                audit_root=Path(config.audit_root),
+                audit_logger=build_audit_logger(config, rls_engine),
+            )
+
+            def tag_resolver(persona_id: str) -> object:
+                return resolve_persona_tag(rls_engine, persona_id)
+
+        delivery_executor = InitiativeDeliveryExecutor(
+            ledger=initiative_ledger,
+            tasks=TaskStore(rls_engine),
+            schedules=ScheduleStore(rls_engine),
+            timezone_for=PersonaCoreConfig().default_timezone,
+            proposal_sender=proposal_sender,
+            persona_tag_resolver=tag_resolver,  # type: ignore[arg-type]
+        )
+        pipeline = InitiativePipeline(
+            grounding=GroundingChecker(
+                source=ApiGroundingSource(
+                    rls_engine, TaskStore(rls_engine), CheckpointStore(rls_engine)
+                ),
+                backend=initiative_backend,
+            ),
+            wellbeing=ApiWellbeingSubjectCheck(graph_store),
+            declines=DeclineStore(rls_engine),
+            ledger=LedgerAdapter(initiative_ledger),
+            users=ApiUserContextReader(
+                rls_engine, default_timezone=PersonaCoreConfig().default_timezone
+            ),
+            provenance=ApiProvenanceReader(graph_store, rls_engine),
+            auditor=ApiPipelineAuditor(rls_engine),
+            dial_reader=_dial_reader,
+            settings=initiative_settings,
+            delivery=delivery_executor,
+        )
+        register_initiative_scan_handler(
+            registry,
+            handler=InitiativeScanHandler(scanner=scanner, dial_reader=_dial_reader, sink=pipeline),
         )
     _log.info(
         "worker registry composed",
@@ -416,12 +521,29 @@ def start_in_process_worker(
     def _skill_catalog_sync_builder(dispatch_engine: Engine) -> SkillCatalogSyncTask | None:
         return build_skill_catalog_sync(config, dispatch_engine=dispatch_engine)
 
+    def _initiative_provisioner_builder(
+        dispatch_engine: Engine, worker_rls_engine: Engine
+    ) -> InitiativeProvisioner | None:
+        # Spec A5 (T10): the leader-gated ensure sweep — built ONLY when initiative
+        # is enabled (the same gate as the tenant; OFF ⇒ the worker loop is
+        # byte-identical to pre-A5).
+        settings = InitiativeSettings()
+        if not settings.enabled:
+            return None
+        return InitiativeProvisioner(
+            dispatch_engine=dispatch_engine,
+            store=ScheduleStore(worker_rls_engine),
+            settings=settings,
+            default_timezone=PersonaCoreConfig().default_timezone,
+        )
+
     worker = build_worker(
         config,
         registry,
         scheduler_tick_builder=_tick_builder,
         catalog_sync_builder=_catalog_sync_builder,
         skill_catalog_sync_builder=_skill_catalog_sync_builder,
+        initiative_provisioner_builder=_initiative_provisioner_builder,
     )
     handle = InProcessWorker(worker)
     handle.start()

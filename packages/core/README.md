@@ -39,6 +39,16 @@ you can drive from Python or the terminal. It ships:
   instant; fall-back fold → fire once), the missed-fire policy decision, and the
   `schedule_id + fire_time` idempotency-key/handoff contract (the durable store +
   the single-leader tick live in `persona-api`).
+- an **initiative contract** (`persona.initiative`) — the restraint-first policy
+  core for a persona that notices and acts unprompted: the frozen, source-tagged
+  `InitiativeCandidate` (min-one grounding citations, a CLOSED trigger catalogue,
+  a required concrete next step), the act-within-envelope/propose-at-gates
+  decision (fail-closed: borderline proposes), the pure restraint policy (value
+  threshold + an acceptance SUPPRESSOR, per-persona/per-user cadence caps over
+  trailing windows, quiet-hours-absolute delivery resolution, hold-staleness),
+  the per-persona dial (`off / propose_only / act_within_envelope`, default
+  propose-only), and deterministic duplicate-suppression arbitration (the scan,
+  pipeline, and durable stores live in `persona-runtime` / `persona-api`).
 - a **task contract** (`persona.tasks`) — the durable entity *above* runs: the
   frozen `TaskCheckpoint` (conclusions/intent/pointers, size-bounded — never
   transcripts) + the `Task` state machine

@@ -494,6 +494,20 @@ class GraphStore(Protocol):
         """
         ...
 
+    def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The A5 noticing pool — the owner's most-salient, most-recent nodes.
+
+        Additive read (Spec A5, A5-D-X-reads; the ``flagged_nodes`` precedent).
+        Ordered by evidence salience then ``updated_at``, both descending — an
+        ORDERING use of K7's salience column only, never a retrieval gate
+        (K7-D-6's boundary holds: no field is added to :class:`ConceptNode`).
+        Excludes, at the read: the SELF anchor, merged members
+        (``merged_into`` set), and EVERY wellbeing-tagged node — the initiative
+        subject-exclusion enforced where the pool is born
+        (A5-D-X-k4-initiative-side). RLS-scoped; a read (CQS — no writes).
+        """
+        ...
+
     def neighbors(
         self,
         owner_id: str,

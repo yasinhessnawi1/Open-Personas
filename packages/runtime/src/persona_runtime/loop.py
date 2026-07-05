@@ -64,6 +64,14 @@ from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should
 from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
 from persona_runtime.errors import ScheduleParseError
 from persona_runtime.graph_window import set_recent_window_from_messages
+from persona_runtime.initiative.verbs import (
+    InitiativeVerb,
+    InitiativeVerbInterpreter,
+    detect_initiative_cue,
+)
+from persona_runtime.initiative.verbs import (
+    resolve_verb_for_pending as resolve_initiative_pending,
+)
 from persona_runtime.logging import (
     SkillInvocation,
     TurnLog,
@@ -219,6 +227,17 @@ def _final_chunk(usage: TokenUsage | None) -> StreamChunk:
 _CONTRACT_CONFIRMED_TEXT = "Done — I've set that up. I'll keep you posted."
 
 #: Steering acknowledgements (Spec A4, T9b). The actual mutation happens api-side off the event.
+# Spec A5 (T10): the initiative-verb acknowledgements (module constants; A5-R-1 tunes tone).
+_INITIATIVE_CONFIRMED_TEXT = "On it — I'll get started and let you know."
+_INITIATIVE_DECLINED_TEXT = "Understood — I'll leave it and won't bring it up again."
+_INITIATIVE_DIAL_TEXT = {
+    InitiativeVerb.DIAL_OFF: "Done — I'll stop suggesting things on my own.",
+    InitiativeVerb.DIAL_PROPOSE_ONLY: "Done — I'll suggest things but always ask before acting.",
+    InitiativeVerb.DIAL_ACT: (
+        "Done — I'll handle safe things on my own and still ask before anything consequential."
+    ),
+}
+
 _STEER_PAUSED_TEXT = "Paused — just say the word when you want it going again."
 _STEER_RESUMED_TEXT = "Done — it's running again."
 _STEER_CANCELLED_TEXT = "Cancelled — I've stopped that task."
@@ -443,6 +462,8 @@ class ConversationLoop:
         reschedule_interpreter: RescheduleInterpreter | None = None,
         timezone_provider: Callable[[], str] | None = None,
         quiet_hours_provider: Callable[[], QuietHours | None] | None = None,
+        initiative_verb_interpreter: InitiativeVerbInterpreter | None = None,
+        initiative_pending_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
@@ -470,6 +491,12 @@ class ConversationLoop:
         self._reschedule_interpreter = reschedule_interpreter
         self._timezone_provider = timezone_provider
         self._quiet_hours_provider = quiet_hours_provider
+        # Spec A5 (T10): the initiative-verb family on the same steering seam. Both ``None`` →
+        # the gate is inert (additive). The pending provider is a LEDGER read bound to
+        # owner+persona at composition (reload-durable — never conversation metadata); the
+        # interpreter is the conservative dial decision. Emits ``initiative_verb`` events only.
+        self._initiative_verb_interpreter = initiative_verb_interpreter
+        self._initiative_pending_provider = initiative_pending_provider
         # Spec S1 (S1-D-2 / S1-D-X-nonce-injection): the per-injection delimiter
         # nonce source for the subordination guard. ``None`` defaults to the
         # production ``default_nonce`` (secrets-backed); tests pin it for
@@ -915,6 +942,50 @@ class ConversationLoop:
                         yield _final_chunk(None)
                         return
                 # NOT_FOUND / no reader → fall through to the contract gate / chat.
+
+        # Spec A5 (T10): the initiative-verb family — confirm/decline a LEDGER-pending
+        # proposal + the dial verbs, one seam. Pending-first (a clean yes to a pending
+        # initiative proposal is a confirmation, not a dial instruction); then the cue-gated
+        # conservative dial interpreter. Falls through unchanged on ambiguity — the dial
+        # never moves and nothing confirms on a guess.
+        if self._initiative_pending_provider is not None:
+            resolved = resolve_initiative_pending(user_message, self._initiative_pending_provider())
+            if resolved is not None:
+                verb, notice_id = resolved
+                if on_event is not None:
+                    await on_event(RunEvent.initiative_verb(verb=verb.value, notice_id=notice_id))
+                ack = (
+                    _INITIATIVE_CONFIRMED_TEXT
+                    if verb is InitiativeVerb.CONFIRM_PROPOSAL
+                    else _INITIATIVE_DECLINED_TEXT
+                )
+                yield _text_chunk(ack)
+                now_iv = datetime.now(UTC)
+                conversation.messages.append(
+                    ConversationMessage(role="user", content=user_message, created_at=now_iv)
+                )
+                conversation.messages.append(
+                    ConversationMessage(role="assistant", content=ack, created_at=now_iv)
+                )
+                yield _final_chunk(None)
+                return
+        if self._initiative_verb_interpreter is not None and detect_initiative_cue(user_message):
+            dial_verb = await self._initiative_verb_interpreter.interpret(user_message)
+            if dial_verb is not None:
+                if on_event is not None:
+                    await on_event(RunEvent.initiative_verb(verb=dial_verb.value))
+                ack = _INITIATIVE_DIAL_TEXT[dial_verb]
+                yield _text_chunk(ack)
+                now_id = datetime.now(UTC)
+                conversation.messages.append(
+                    ConversationMessage(role="user", content=user_message, created_at=now_id)
+                )
+                conversation.messages.append(
+                    ConversationMessage(role="assistant", content=ack, created_at=now_id)
+                )
+                yield _final_chunk(None)
+                return
+            # No clear dial instruction → fall through to the contract gate / chat.
 
         # Spec A4 (A4-D-X): the contract flow runs BEFORE the proactive gate — a clean
         # confirm reply to a pending proposal must be read as a confirmation, not re-analysed

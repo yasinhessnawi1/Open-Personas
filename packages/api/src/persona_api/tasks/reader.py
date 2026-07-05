@@ -43,3 +43,14 @@ class APITaskStateReader:
     def list_active(self) -> list[Task]:
         """The owner's non-terminal tasks (what the persona is actually working on)."""
         return [t for t in self._tasks.list_for_owner(self._owner_id) if not is_terminal(t.state)]
+
+    def list_recent_terminal(self, *, limit: int) -> list[Task]:
+        """The owner's most-recently-finished tasks, newest first (Spec A5, A5-D-X-reads).
+
+        The initiative scan's task-history lens: terminal tasks ordered by
+        ``updated_at`` descending, bounded. Rides the same RLS-scoped
+        ``list_for_owner`` read (no new SQL surface).
+        """
+        terminal = [t for t in self._tasks.list_for_owner(self._owner_id) if is_terminal(t.state)]
+        terminal.sort(key=lambda t: t.updated_at, reverse=True)
+        return terminal[:limit]

@@ -71,6 +71,17 @@ class TaskStateReader(Protocol):
         """The caller's own non-terminal-by-default tasks (for list-then-introspect)."""
         ...
 
+    def list_recent_terminal(self, *, limit: int) -> list[Task]:
+        """The caller's most-recently-finished tasks, newest first (Spec A5, A5-D-X-reads).
+
+        Additive read for the initiative scan's task-history lens: completed
+        missions whose results suggest follow-ups (spec A5 §2). Terminal tasks
+        only (``completed | failed | cancelled``), ordered by ``updated_at``
+        descending, bounded by ``limit``. Transcript-free by construction like
+        every read here (conclusions live on checkpoints/reports, never events).
+        """
+        ...
+
 
 class TaskSummary(BaseModel):
     """A one-line task summary for the list view (id + goal + status)."""

@@ -399,6 +399,38 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             schedule_store=ScheduleStore(rls_engine),
             engine=rls_engine,
         )
+    # Spec A5 (T10): the worker side of the initiative-verb family — dial writes
+    # (+ the lazy schedule ensure) and the LEDGER-anchored confirm/decline. Built
+    # only when initiative is enabled (PERSONA_INITIATIVE_ENABLED, default OFF).
+    initiative_verb_service = None
+    if rls_engine is not None:
+        from persona.initiative import InitiativeSettings as _InitiativeSettings
+
+        _initiative_settings = _InitiativeSettings()
+        if _initiative_settings.enabled:
+            from persona.config import PersonaCoreConfig
+
+            from persona_api.initiative.delivery import InitiativeDeliveryExecutor
+            from persona_api.initiative.store import DeclineStore, InitiativeLedger
+            from persona_api.initiative.verb_service import InitiativeVerbService
+            from persona_api.schedules.store import ScheduleStore as _A5ScheduleStore
+            from persona_api.tasks.store import TaskStore as _A5TaskStore
+
+            _a5_ledger = InitiativeLedger(rls_engine)
+            initiative_verb_service = InitiativeVerbService(
+                rls_engine=rls_engine,
+                schedules=_A5ScheduleStore(rls_engine),
+                ledger=_a5_ledger,
+                declines=DeclineStore(rls_engine),
+                executor=InitiativeDeliveryExecutor(
+                    ledger=_a5_ledger,
+                    tasks=_A5TaskStore(rls_engine),
+                    schedules=_A5ScheduleStore(rls_engine),
+                    timezone_for=PersonaCoreConfig().default_timezone,
+                    rls_engine=rls_engine,
+                ),
+                settings=_initiative_settings,
+            )
     chat_turn_registry = (
         ChatTurnRegistry(
             sink=chat_turn_sink,
@@ -409,6 +441,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             origination_service=origination_service,
             task_steering_service=task_steering_service,
             task_reschedule_service=task_reschedule_service,
+            initiative_verb_service=initiative_verb_service,
         )
         if chat_turn_sink is not None and rls_engine is not None
         else None

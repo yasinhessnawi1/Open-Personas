@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.editions.credits_policy import CreditsPolicy
+    from persona_api.initiative.verb_service import InitiativeVerbService
     from persona_api.jobs.queue import JobQueue
     from persona_api.services.origination_service import OriginationService
     from persona_api.services.task_reschedule_service import TaskRescheduleService
@@ -154,6 +155,7 @@ class ChatTurnRegistry:
         origination_service: OriginationService | None = None,
         task_steering_service: TaskSteeringService | None = None,
         task_reschedule_service: TaskRescheduleService | None = None,
+        initiative_verb_service: InitiativeVerbService | None = None,
     ) -> None:
         self._sink = sink
         self._engine = rls_engine
@@ -171,6 +173,9 @@ class ChatTurnRegistry:
         self._task_steering_service = task_steering_service
         # Spec A8 (T6): apply a user-confirmed conversational reschedule through the CAS door.
         self._task_reschedule_service = task_reschedule_service
+        # Spec A5 (T10): applies the initiative-verb family (dial + ledger-anchored
+        # confirm/decline). None → the events are ignored (the pre-activation posture).
+        self._initiative_verb_service = initiative_verb_service
         self._handles: dict[str, ChatTurnHandle] = {}
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
@@ -252,9 +257,10 @@ class ChatTurnRegistry:
         originated: Mapping[str, Any] | None = None
         steered: Mapping[str, Any] | None = None
         rescheduled: Mapping[str, Any] | None = None
+        initiative_verbed: Mapping[str, Any] | None = None
 
         async def _on_event(event: RunEvent) -> None:
-            nonlocal tier, routing, originated, steered, rescheduled
+            nonlocal tier, routing, originated, steered, rescheduled, initiative_verbed
             if event.type == "tier":
                 # The router's tier choice rides the terminal `done` payload — it
                 # is NOT a frame and NOT in the persisted event-log (it lives on
@@ -282,6 +288,15 @@ class ChatTurnRegistry:
                     **event.data,
                     "owner_id": handle.owner_id,
                     "conversation_id": handle.conversation_id,
+                    "persona_id": conversation.persona_id,
+                }
+                return
+            if event.type == "initiative_verb":
+                # Spec A5 (T10): a dial/confirm/decline instruction — the worker injects the
+                # tenant + persona and applies it on the clean-completion path.
+                initiative_verbed = {
+                    **event.data,
+                    "owner_id": handle.owner_id,
                     "persona_id": conversation.persona_id,
                 }
                 return
@@ -337,6 +352,7 @@ class ChatTurnRegistry:
                 await self._originate_task(originated)
                 await self._apply_steering(steered)
                 await self._apply_reschedule(rescheduled)
+                await self._apply_initiative_verb(initiative_verbed)
                 await self._run_on_complete(on_complete, handle)
                 await handle.events.put(
                     ("done", self._done_payload(loop, last_chunk, tier, routing))
@@ -473,6 +489,20 @@ class ChatTurnRegistry:
             await self._origination_service.originate(originated)
         except Exception as exc:  # noqa: BLE001 — the service self-reports failures; never crash the turn
             _log.error("task origination raised unexpectedly: {err}", err=str(exc))
+
+    async def _apply_initiative_verb(self, verbed: Mapping[str, Any] | None) -> None:
+        """Spec A5 (T10): apply a captured initiative verb (dial / confirm / decline)."""
+        if verbed is None or self._initiative_verb_service is None:
+            return
+        try:
+            await self._initiative_verb_service.apply(
+                owner_id=str(verbed["owner_id"]),
+                persona_id=str(verbed["persona_id"]),
+                verb=str(verbed["verb"]),
+                notice_id=(str(verbed["notice_id"]) if verbed.get("notice_id") else None),
+            )
+        except Exception as exc:  # noqa: BLE001 — a verb miss must not crash the turn
+            _log.warning("initiative verb application failed: {err}", err=str(exc))
 
     async def _apply_steering(self, steered: Mapping[str, Any] | None) -> None:
         """Spec A4 (T9b): apply a captured pause/resume/cancel to the live task (best-effort)."""

@@ -235,6 +235,9 @@ class _StubStore:
     def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
         return []
 
+    def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        return []
+
     def neighbors(
         self,
         owner_id: str,

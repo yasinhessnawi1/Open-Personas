@@ -179,6 +179,14 @@ personas = Table(
     # transition also emits an AuditEvent at the route).
     Column("consent_to_auto_dispatch", Boolean),
     Column("consent_updated_at", DateTime(timezone=True)),
+    # Spec A5 (A5-D-5): the per-persona initiative dial — 'off' | 'propose_only' |
+    # 'act_within_envelope'. App-gated TEXT (the avatar_source lesson; the core
+    # ``InitiativeDial`` StrEnum is the gate). The server default backfills every
+    # existing row to the RATIFIED propose-only default. A user-safety setting on
+    # the API row, NOT part of the persona YAML schema (does not move
+    # ``schema_version``). ``initiative_dial_updated_at`` NULL = never changed.
+    Column("initiative_dial", Text, nullable=False, server_default=text("'propose_only'")),
+    Column("initiative_dial_updated_at", DateTime(timezone=True)),
     # Lets conversations/runs reference (persona_id, owner_id) as a composite FK
     # so a row can never attach to another tenant's persona (defence-in-depth
     # beyond RLS — see spec-07 closeout / security review finding 1).
@@ -1651,4 +1659,91 @@ notifications = Table(
     UniqueConstraint("owner_id", "kind", "ref_id", name="uq_notifications_owner_kind_ref"),
     # The feed query: newest-first for the current owner (RLS scopes the owner).
     Index("idx_notifications_owner_created", "owner_id", text("created_at DESC")),
+)
+
+
+# Spec A5 (A5-D-X-migration) — the initiative restraint stores. Two RLS-owner-scoped
+# tables: ``initiative_declines`` (dismissal is durable user communication — a live
+# decline suppresses its opportunity for ALL personas until an EXPLICIT user revival,
+# never a timer) and ``initiative_notices`` (the user-level opportunity ledger: the
+# duplicate-suppression arbiter, the cadence-cap counting substrate, the batch-hold
+# buffer, and the disposition audit A6 later renders). Dispositions/dial values are
+# app-gated TEXT (the avatar_source lesson — no SQL ENUM; community SQLite stays
+# byte-identical). Both uniques are PARTIAL (live-rows-only): an absolute unique
+# would make a legitimately revived topic permanently un-noticeable — the partial
+# form keeps one-LIVE-per-opportunity while revival re-opens the slot with history
+# intact (T3 gate ruling 1). RLS policies live entirely in the ``0NN_initiative``
+# migration (post-001 split-home template, like day_spend/inflight_ops).
+initiative_declines = Table(
+    "initiative_declines",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # The persona the decline was said TO (audit/A6 context only). Nullable — the
+    # SUPPRESSION is user-level regardless (A5-D-4: one decline binds all personas).
+    Column("persona_id", Text),
+    # ``{trigger}:{kind}/{ref}`` — the user-level opportunity identity (A5-D-4).
+    Column("opportunity_key", Text, nullable=False),
+    Column("trigger", Text, nullable=False),
+    # 'declined_reply' | 'stop_verb' | 'ignored_expiry' (app-gated TEXT).
+    Column("source", Text, nullable=False),
+    Column("declined_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # Explicit-revival-only (never a timer): NULL = suppression LIVE; set = revived.
+    # Revival is an UPDATE, never a DELETE — the audit-honest un-suppression.
+    Column("revived_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("idx_initiative_declines_owner", "owner_id"),
+    # ONE LIVE decline per (owner, opportunity) — partial unique (see block comment).
+    Index(
+        "uq_initiative_declines_live",
+        "owner_id",
+        "opportunity_key",
+        unique=True,
+        postgresql_where=text("revived_at IS NULL"),
+        sqlite_where=text("revived_at IS NULL"),
+    ),
+)
+
+initiative_notices = Table(
+    "initiative_notices",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # The ARBITRATED voicing persona (A5-D-6) — may differ from the scanning persona.
+    Column("persona_id", Text, nullable=False),
+    Column("opportunity_key", Text, nullable=False),
+    Column("trigger", Text, nullable=False),
+    # 'scan' | 'event' — the A7 seam rides through to the ledger.
+    Column("source", Text, nullable=False),
+    # 'held' | 'delivered' | 'suppressed_stale' (app-gated TEXT). Duplicates never
+    # insert (the partial unique arbitrates); decline-suppressed candidates never
+    # insert (the decline check precedes the claim) — both leave audit_log rows.
+    Column("disposition", Text, nullable=False),
+    # The envelope route at delivery: 'act' | 'propose'; NULL while held.
+    Column("envelope_action", Text),
+    # The frozen InitiativeCandidate snapshot — the audit record and the
+    # re-grounding source when a held notice flushes (T7 re-resolves citations).
+    Column("candidate", _json(), nullable=False),
+    # Hold bookkeeping: when the hold releases (quiet-edge instant / next flush).
+    Column("held_until", DateTime(timezone=True)),
+    Column("delivered_at", DateTime(timezone=True)),
+    # NULL = this row OWNS its opportunity slot; set = superseded (user revival
+    # re-opened the topic — a future notice may claim the slot; history stays).
+    Column("superseded_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("idx_initiative_notices_owner", "owner_id"),
+    # The cadence-caps windows (A5-D-3, counted at delivery): owner + delivered_at
+    # range scan; persona filtering rides it (row counts are ≤2/user/day by design).
+    Index("idx_initiative_notices_delivered", "owner_id", "delivered_at"),
+    # THE race-arbitration invariant (A5-D-6): one LIVE notice per (owner,
+    # opportunity); the arbitration loser's insert conflicts and no-ops.
+    Index(
+        "uq_initiative_notices_live",
+        "owner_id",
+        "opportunity_key",
+        unique=True,
+        postgresql_where=text("superseded_at IS NULL"),
+        sqlite_where=text("superseded_at IS NULL"),
+    ),
 )

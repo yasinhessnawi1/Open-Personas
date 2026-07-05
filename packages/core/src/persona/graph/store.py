@@ -103,6 +103,7 @@ class _StoreBackend(Protocol):
     ) -> None: ...
     def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
     def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]: ...
+    def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
     def fts_query(self, owner_id: str, query: str, top_k: int) -> list[ConceptNode]: ...
     def neighbors(
         self,
@@ -555,6 +556,16 @@ class PostgresGraphStore:
         on-the-fly via :meth:`neighbors`, not here). RLS-scoped; a read (CQS).
         """
         return self._backend.edges_among(owner_id, node_ids)
+    def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The A5 noticing pool — salience+recency ordered, subject-safe at the read.
+
+        Delegates to the transport, which owns the exclusions (SELF anchor,
+        merged members, EVERY wellbeing-tagged node — the initiative
+        subject-exclusion born at the read, A5-D-X-k4-initiative-side) and the
+        ordering (salience DESC, updated_at DESC — an ordering use of K7's
+        column, never a retrieval gate). RLS-scoped; a read (CQS — no writes).
+        """
+        return self._backend.recent_nodes(owner_id, limit=limit)
 
     def neighbors(
         self,

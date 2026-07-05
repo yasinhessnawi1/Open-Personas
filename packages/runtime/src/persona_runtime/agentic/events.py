@@ -462,6 +462,26 @@ class RunEvent(BaseModel):
         )
 
     @classmethod
+    def initiative_verb(cls, *, verb: str, notice_id: str | None = None) -> RunEvent:
+        """A conversational initiative verb — dial set / proposal confirm / decline (Spec A5, T10).
+
+        Emitted by the runtime's initiative-verb gate; the chat-turn worker consumes it and
+        applies the verb via the owner-scoped initiative service (dial write + schedule ensure,
+        or the ledger-anchored proposal resolution — the reload-durable confirmation surface,
+        the T9 Option-C consolidation). ``notice_id`` rides only on confirm/decline (the pending
+        proposal the LEDGER identified — never conversation metadata). Data only; runtime ⊥ api.
+        """
+        data: dict[str, Any] = {"verb": verb}
+        if notice_id is not None:
+            data["notice_id"] = notice_id
+        return cls(
+            type="initiative_verb",
+            step=-1,
+            data=data,
+            timestamp=datetime.now(UTC),
+        )
+
+    @classmethod
     def task_rescheduled(
         cls,
         *,

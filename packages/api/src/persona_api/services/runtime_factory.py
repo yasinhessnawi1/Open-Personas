@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from persona.tools.mcp.catalog import MCPCatalog
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.crisis_encoder import CrisisScorer
+    from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import GraphContext
     from persona_runtime.task_origination import (
@@ -1096,6 +1097,55 @@ class RuntimeFactory:
             ModelRescheduleInterpreter(backend=backend),
         )
 
+    def _build_initiative_verb_interpreter(self) -> InitiativeVerbInterpreter | None:
+        """The conservative dial-verb interpreter (Spec A5, T10) — None when disabled."""
+        from persona.initiative import InitiativeSettings
+        from persona_runtime.initiative.verbs import ModelInitiativeVerbInterpreter
+
+        settings = InitiativeSettings()
+        if not settings.enabled:
+            return None
+        try:
+            backend = self._tier_registry.get(settings.scan_tier)
+        except Exception:  # noqa: BLE001 — keyless env: the gate stays inert, never breaks chat
+            return None
+        return ModelInitiativeVerbInterpreter(backend)
+
+    def _build_initiative_pending_provider(
+        self, persona_id: str | None
+    ) -> Callable[[], str | None] | None:
+        """The LEDGER pending-proposal read for the confirm/decline floors (Spec A5, T10).
+
+        A closure over the RLS ``current_user_id`` contextvar (the owner-scoped-
+        closure precedent): the loop asks "is a proposal pending for THIS
+        owner+persona?" per turn; the answer comes from the durable notice row —
+        never conversation metadata (reload-durable; the state.md A4 finding is
+        exactly what this sidesteps). Fail-soft: any error reads as no-pending.
+        """
+        from persona.initiative import InitiativeSettings
+
+        from persona_api.initiative.store import InitiativeLedger
+        from persona_api.middleware.rls_context import current_user_id
+
+        settings = InitiativeSettings()
+        if not settings.enabled or persona_id is None:
+            return None
+        ledger = InitiativeLedger(self._engine)
+
+        def _pending() -> str | None:
+            owner = current_user_id.get()
+            if not owner:
+                return None
+            try:
+                notice = ledger.latest_pending_proposal(
+                    owner, persona_id, max_age_days=settings.hold_max_days
+                )
+            except Exception:  # noqa: BLE001 — a pending read must never break a turn
+                return None
+            return notice.id if notice is not None else None
+
+        return _pending
+
     def _build_user_timezone_provider(self) -> Callable[[], str]:
         """The per-user cadence-timezone provider (Spec A8, A8-D-9 — the K6 seam realised).
 
@@ -1284,6 +1334,12 @@ class RuntimeFactory:
             reschedule_interpreter=reschedule_interpreter,
             timezone_provider=self._build_user_timezone_provider(),
             quiet_hours_provider=self._build_user_quiet_hours_provider(),
+            # Spec A5 (T10): the initiative-verb family — the dial verbs + the
+            # LEDGER-anchored confirm/decline (reload-durable; the T9 Option-C
+            # consolidation). Both None when PERSONA_INITIATIVE_ENABLED is off —
+            # the gate stays inert, chat byte-unchanged (criterion 9's posture).
+            initiative_verb_interpreter=self._build_initiative_verb_interpreter(),
+            initiative_pending_provider=self._build_initiative_pending_provider(persona.persona_id),
         )
         # Replace the loop's default-empty deferred_input_files with the
         # SHARED holder (same identity), so the use_skill intercept's

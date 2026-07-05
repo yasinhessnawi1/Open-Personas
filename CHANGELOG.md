@@ -195,6 +195,47 @@ Per-spec entries are added by the close-out phase of each spec.
   separately, `CRISIS_ENCODER_VERSION` v1). The encoder is factory-wired into the chat +
   agentic loops (`RuntimeFactory`) and the voice path (`InProcessAgentLauncher` →
   `VoiceTurnContext`), warmed off-loop at boot; voice runs the score off the event loop.
+### Initiative — the persona that notices, decides, and acts unprompted (Spec A5, 2026-07-05)
+
+> Close-out of `feat/persona-initiative` (`persona-core` + `persona-runtime` + `persona-api`). The
+> autonomy capstone, organised around one conviction: **restraint is the product**. A daily per-persona
+> scan over the graph/conversations/task-history produces grounded candidates; ONE enforced pipeline
+> (grounding → wellbeing-subject rule → dial → envelope → restraint) decides act-then-report vs
+> propose-first; everything ships **default-OFF** behind `PERSONA_INITIATIVE_ENABLED` until the
+> A5-R-1 precision-weighted judged gate passes.
+
+- **The scan** — an A0/A1 durable job (daily, the user's-morning window, per-persona schedule) on the
+  small tier over three read surfaces (the salience-ordered `recent_nodes` noticing pool + typed-link
+  lenses; conversation summaries; task history incl. the additive `list_recent_terminal`), with a
+  versioned prompt whose few-shots make the EMPTY scan a first-class answer; thin material ⇒ zero
+  candidates without a model call; synthesis-style metering (`credits_charged=0`) per fire.
+- **Mechanical grounding** — citations resolve through the real stores (merged/deleted refs fail) +
+  a small-tier entailment judge whose YES counts only with a verbatim-in-excerpts quote (anti-conjure
+  substring check); no grounding, no candidate; every failure discards (silence is the safe state).
+- **The one pipeline** — the pinned gate order with NO silent skips (every discard audited); the
+  closed 4-shape trigger catalogue (engagement shapes inexpressible); p(accept) is a SUPPRESSOR only;
+  cadence caps 1/persona/day · 3/persona/week · 2/user/day over trailing windows; quiet hours
+  ABSOLUTE; a user-level opportunity ledger (partial-unique arbitration — one notice per opportunity
+  across personas) + durable decline memory (user-level, indefinite, explicit-revival-only).
+- **Act-then-report** — an all-safe candidate becomes a lightweight implicit A2 task (run-once
+  schedule, Option B) executed under the gated toolbox; the REPORT is authored solely by the existing
+  task machinery (A5 owns no message surface — confabulation structurally impossible).
+- **Propose-first** — schedule-change proposals ride A8's propose-first CAS door verbatim
+  (`PERSONA_PROPOSED`; zero writes until a user-resolved apply); generic proposals deliver as
+  persona-voiced C0 messages (the digest sender composition) and create NOTHING until confirmed.
+- **The verb family** — one conversational seam: dial verbs ("stop suggesting things" →
+  off/propose-only/act) + the LEDGER-anchored confirm/decline (reload-durable across requests —
+  pending state is never conversation metadata); a leader-gated provisioning sweep closes the
+  existing-population gap at flag-flip.
+- **The evaluation instrument** — a committed 26-scenario corpus (must-catch / must-not-fire ≥50% /
+  judged tone) with TWO independent gates (zero false alarms; ≥5/6 catches — never blended) and an
+  owner-run judged pass as the shipping gate; adversarial fixtures make criterion 6 (wellbeing
+  content never the unprompted subject) and criterion 10 (anti-engagement incl. the high-acceptance
+  bait) automatic-fail CI.
+- Migration `038_initiative` (PLACEHOLDER off 034 — renumbers at merge-back): `initiative_declines` +
+  `initiative_notices` (RLS, partial LIVE uniques) + the `personas.initiative_dial` column pair.
+
+
 ### Schedules, Calendar & Time — one schedule mechanism, two twin interfaces (Spec A8, 2026-07-03)
 
 > Close-out of `feat/schedules-calendar` (`persona-core` + `persona-api` + `persona-web`). A4 made every

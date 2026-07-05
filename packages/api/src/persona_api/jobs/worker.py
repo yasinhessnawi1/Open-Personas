@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
     # N2's catalog auto-sync plugs into the loop the same additive way (Spec N2, T3):
     # a third ownerless periodic task; None on a worker without it → behaves as before.
+    from persona_api.initiative.provisioner import InitiativeProvisioner
     from persona_api.jobs.catalog_sync import CatalogSyncTask
 
     # S2's skill-catalog auto-sync plugs in the same additive way (Spec S2, C1): a fourth
@@ -114,6 +115,8 @@ class Worker:
         catalog_sync_interval_seconds: float = 86_400.0,
         skill_catalog_sync: SkillCatalogSyncTask | None = None,
         skill_catalog_sync_interval_seconds: float = 86_400.0,
+        initiative_provisioner: InitiativeProvisioner | None = None,
+        initiative_provisioner_interval_seconds: float = 3_600.0,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._rls_engine = rls_engine
@@ -145,6 +148,10 @@ class Worker:
         # ownerless periodic on the same substrate, distinct leader key).
         self._skill_catalog_sync = skill_catalog_sync
         self._skill_catalog_sync_interval = skill_catalog_sync_interval_seconds
+        # Spec A5 (T10): the leader-gated schedule-provisioning sweep (population-level
+        # built-but-inert killer). None → inert (initiative disabled).
+        self._initiative_provisioner = initiative_provisioner
+        self._initiative_provisioner_interval = initiative_provisioner_interval_seconds
         self._draining = asyncio.Event()
         self._in_flight: set[asyncio.Task[object]] = set()
         self._last_maintenance = 0.0
@@ -154,6 +161,7 @@ class Worker:
         # full interval, since the monotonic clock starts small on a fresh container.
         self._last_catalog_sync: float | None = None
         self._last_skill_catalog_sync: float | None = None
+        self._last_initiative_provision: float | None = None
 
     @property
     def worker_id(self) -> str:
@@ -207,6 +215,7 @@ class Worker:
             self._maybe_run_scheduler_tick()
             await self._maybe_run_catalog_sync()
             await self._maybe_run_skill_catalog_sync()
+            await self._maybe_run_initiative_provisioner()
             free = self._concurrency - len(self._in_flight)
             # Claim ONE at a time (not a batch of ``free``): the fairness count is
             # evaluated against committed state, so a batch would let all its
@@ -315,6 +324,29 @@ class Worker:
             _log.exception("catalog sync failed", worker_id=self._worker_id)
         self._last_catalog_sync = time.monotonic()
 
+    async def _maybe_run_initiative_provisioner(self) -> None:
+        """Run the A5 schedule-provisioning sweep if wired + its cadence elapsed (T10).
+
+        The catalog-sync shape: a no-op when unwired (None); leader-gated on its OWN
+        advisory key inside ``run_once``; DB-bound work offloaded to a thread; a failure
+        is logged, never crashing the loop (fail-soft; retried next cadence).
+        """
+        if self._initiative_provisioner is None:
+            return
+        if (
+            self._last_initiative_provision is not None
+            and time.monotonic() - self._last_initiative_provision
+            < self._initiative_provisioner_interval
+        ):
+            return
+        from datetime import UTC, datetime
+
+        try:
+            await asyncio.to_thread(self._initiative_provisioner.run_once, now=datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — a sweep failure must not crash the worker loop
+            _log.exception("initiative provisioning failed", worker_id=self._worker_id)
+        self._last_initiative_provision = time.monotonic()
+
     async def _maybe_run_skill_catalog_sync(self) -> None:
         """Run the S2 skill-catalog auto-sync if wired + its (daily-ish) cadence has elapsed.
 
@@ -404,6 +436,8 @@ def build_worker(
     scheduler_tick_builder: Callable[[Engine, Engine], SchedulerTick] | None = None,
     catalog_sync_builder: Callable[[Engine], CatalogSyncTask | None] | None = None,
     skill_catalog_sync_builder: Callable[[Engine], SkillCatalogSyncTask | None] | None = None,
+    initiative_provisioner_builder: Callable[[Engine, Engine], InitiativeProvisioner | None]
+    | None = None,
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -460,6 +494,11 @@ def build_worker(
         scheduler_tick_wired=scheduler_tick is not None,
         catalog_sync_wired=catalog_sync is not None,
     )
+    initiative_provisioner = (
+        initiative_provisioner_builder(dispatch_engine, rls_engine)
+        if initiative_provisioner_builder is not None
+        else None
+    )
     return Worker(
         dispatch_engine=dispatch_engine,
         rls_engine=rls_engine,
@@ -470,6 +509,7 @@ def build_worker(
         catalog_sync_interval_seconds=config.mcp_catalog_sync_interval_seconds,
         skill_catalog_sync=skill_catalog_sync,
         skill_catalog_sync_interval_seconds=config.skill_catalog_sync_interval_seconds,
+        initiative_provisioner=initiative_provisioner,
         concurrency=config.worker_concurrency,
         poll_interval_seconds=config.worker_poll_interval_seconds,
         poll_jitter_seconds=config.worker_poll_jitter_seconds,

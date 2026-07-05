@@ -220,6 +220,29 @@ class PostgresGraphBackend:
         with self._engine.connect() as conn:
             return [str(r[0]) for r in conn.execute(stmt)]
 
+    def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
+        """The A5 noticing pool (Spec A5, A5-D-X-reads; the ``flagged_nodes`` shape).
+
+        Salience DESC then ``updated_at`` DESC (K7's evidence signal as the pool
+        ORDERING — never a retrieval gate), excluding at the read: the SELF
+        anchor, merged members, and every wellbeing-tagged node (the initiative
+        subject-exclusion, A5-D-X-k4-initiative-side). Owner-scoped (RLS in prod).
+        """
+        stmt = (
+            select(graph_nodes)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.node_kind != NodeKind.SELF.value,
+                graph_nodes.c.merged_into.is_(None),
+                graph_nodes.c.wellbeing_category.is_(None),
+            )
+            .order_by(graph_nodes.c.salience.desc(), graph_nodes.c.updated_at.desc())
+            .limit(limit)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_node(dict(r)) for r in rows]
+
     def delete_node(self, owner_id: str, node_id: str) -> int | None:
         """Delete a node (edges cascade); return its ``surrogate`` for index removal."""
         stmt = (
