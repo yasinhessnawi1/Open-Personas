@@ -81,7 +81,7 @@ export function SidebarBody({
         <div className="mt-auto">
           <Separator className="mb-2 bg-sidebar-border" />
           {/* Account footer — custom account menu (Spec 35 D-35-16). */}
-          <AccountMenu />
+          <AccountMenu name={data.ownerName} />
         </div>
       </div>
     </TooltipProvider>

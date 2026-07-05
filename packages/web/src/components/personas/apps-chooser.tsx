@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { AppSetupForm } from "./app-setup-form";
 import { type AppState, deriveAppState, isAppEnabled } from "./app-state";
+import { CAPABILITY_SCROLL_LIST_CLASS } from "./capability-list";
 import type { McpCatalogEntry } from "./persona-form";
 
 const MCP_PREFIX = "mcp:";
@@ -102,7 +103,10 @@ export function AppsChooser({
           {t("searchEmpty", { query: query.trim() })}
         </p>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <ul
+          className={cn("flex flex-col gap-2", CAPABILITY_SCROLL_LIST_CLASS)}
+          data-slot="apps-list"
+        >
           {filtered.map((app) => (
             <li key={app.name}>
               <AppCard

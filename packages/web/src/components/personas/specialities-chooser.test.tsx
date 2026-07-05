@@ -78,11 +78,17 @@ async function renderChooser(props: {
   return { ...result, onChange };
 }
 
-function cardFor(container: HTMLElement, text: string): HTMLElement {
+function cardFor(container: HTMLElement, name: string): HTMLElement {
+  // Skill names are normalised to friendly labels in the card (R4 T5), so match
+  // on the stable `data-speciality-name` id hook rather than the display copy.
   const card = Array.from(
     container.querySelectorAll<HTMLElement>('[data-slot="speciality-card"]'),
-  ).find((c) => c.textContent?.includes(text));
-  if (!card) throw new Error(`no speciality card for ${text}`);
+  ).find(
+    (c) =>
+      c.getAttribute("data-speciality-name") === name ||
+      c.textContent?.includes(name),
+  );
+  if (!card) throw new Error(`no speciality card for ${name}`);
   return card;
 }
 

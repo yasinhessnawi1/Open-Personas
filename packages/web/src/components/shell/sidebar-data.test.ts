@@ -20,11 +20,16 @@ const convo = (
   id: string,
   persona_id: string,
   updated_at: string,
+  extra: Partial<SidebarConversationInput> = {},
 ): SidebarConversationInput => ({
   id,
   persona_id,
   title: `t-${id}`,
   updated_at,
+  // A "real" chat conversation by default: origin chat + ≥1 message.
+  origin: "chat",
+  last_message_role: "assistant",
+  ...extra,
 });
 
 describe("rankPersonasByRecency", () => {
@@ -75,6 +80,36 @@ describe("resolveConversations", () => {
     expect(rows[0].persona?.id).toBe("a");
     expect(rows[1].persona).toBeNull();
     expect(rows.map((r) => r.id)).toEqual(["1", "2"]);
+  });
+
+  it("excludes call + empty conversations from the Messages list (R4 T4)", () => {
+    const personas = [persona("a", "2026-01-01")];
+    const rows = resolveConversations(
+      [
+        convo("real", "a", "2026-06-10"), // chat + has messages → kept
+        convo("call", "a", "2026-06-09", { origin: "call" }), // call → excluded
+        convo("empty", "a", "2026-06-08", { last_message_role: null }), // no messages → excluded
+      ],
+      personas,
+    );
+    expect(rows.map((r) => r.id)).toEqual(["real"]);
+  });
+
+  it("treats a conversation with no origin marker as chat (legacy rows) (R4 T4)", () => {
+    const personas = [persona("a", "2026-01-01")];
+    const rows = resolveConversations(
+      [
+        {
+          id: "legacy",
+          persona_id: "a",
+          title: "t-legacy",
+          updated_at: "2026-06-10",
+          last_message_role: "user",
+        },
+      ],
+      personas,
+    );
+    expect(rows.map((r) => r.id)).toEqual(["legacy"]);
   });
 });
 

@@ -386,6 +386,28 @@ def test_auto_title_set_on_first_message(client: tuple[TestClient, str, str]) ->
     assert len(titled) == 1
 
 
+def test_auto_title_rejects_prompt_echo(client: tuple[TestClient, str, str]) -> None:
+    """R4 T3: a title_builder that echoes the titling INSTRUCTION (a reasoning
+    leak) is NOT stored as the title — the sanitiser falls back to the user's
+    own opening words, so no conversation ever shows the titling prompt."""
+    c, uid, persona_id = client
+
+    async def _echo_title(_first: str) -> str:
+        return "We need to output a title of at most 5 words, no quotes, no punctuation, no prose"
+
+    c.app.state.title_builder = _echo_title  # type: ignore[attr-defined]
+    conv_id = _new_conversation(c, uid, persona_id)
+    c.post(
+        f"/v1/conversations/{conv_id}/messages",
+        json={"content": "help me understand my Norwegian lease agreement today"},
+        headers=_auth(uid),
+    )
+    title = c.get(f"/v1/conversations/{conv_id}", headers=_auth(uid)).json()["title"]
+    assert "at most" not in title.lower()
+    assert "no punctuation" not in title.lower()
+    assert title == "help me understand my Norwegian lease"
+
+
 def test_auto_title_failure_is_best_effort(client: tuple[TestClient, str, str]) -> None:
     """A title_builder that raises must not break the turn — the default title
     is kept and the message still persists."""

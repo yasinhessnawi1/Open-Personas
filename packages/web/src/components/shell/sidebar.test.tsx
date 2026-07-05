@@ -70,6 +70,7 @@ const data: SidebarData = {
   personas: [],
   conversations: manyConversations,
   calls: [],
+  ownerName: null,
   memoryAvailable: false,
 };
 
@@ -103,6 +104,25 @@ describe("Sidebar layout contract", () => {
     expect(scrollArea).not.toBeNull();
     expect(scrollArea?.className).toContain("min-h-0");
     expect(scrollArea?.className).toContain("flex-1");
+  });
+
+  it("does NOT render a Calls preview list even when calls exist (R4 T2)", () => {
+    const withCalls: SidebarData = {
+      ...data,
+      calls: [
+        {
+          callId: "call1",
+          conversationId: "conv1",
+          startedAt: "2026-06-10T00:00:00Z",
+          durationS: 90,
+          persona: null,
+        },
+      ],
+    };
+    const { container } = wrap(<Sidebar data={withCalls} />);
+    expect(
+      container.querySelector('[data-slot="sidebar-calls-list"]'),
+    ).toBeNull();
   });
 
   it("pins the account footer (non-shrinking) so it stays present with a long list", () => {

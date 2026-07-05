@@ -14,6 +14,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
+import { presentApp } from "@/lib/apps/app-labels";
 import { parsePersonaYaml } from "@/lib/persona";
 import { cn } from "@/lib/utils";
 import { startChat, startRun } from "./actions";
@@ -60,6 +61,22 @@ export default async function PersonaDetailPage({
   if (res.response.status === 404) notFound();
   const detail = await unwrap(res);
   const p = parsePersonaYaml(detail.yaml);
+
+  // R4 T5: resolve the persona's capabilities (built-in tools + skills + MCP
+  // apps, all stored in the YAML tool/skill lists) to friendly "Apps" labels.
+  // MCP display names come from the catalog (`display_name`); a fail-soft empty
+  // catalog just falls back to a humanised name.
+  const tApps = await getTranslations("apps");
+  const mcpCatalog = (await api.GET("/v1/mcp-catalog")).data ?? [];
+  const mcpByName = new Map(mcpCatalog.map((e) => [e.name, e]));
+  const apps = [...p.tools, ...p.skills].map((id) =>
+    presentApp(id, tApps, (name) => {
+      const entry = mcpByName.get(name);
+      return entry
+        ? { displayName: entry.display_name, description: entry.description }
+        : undefined;
+    }),
+  );
 
   const headerPersona = {
     id: detail.id,
@@ -178,70 +195,45 @@ export default async function PersonaDetailPage({
             <StartRunForm action={startRun.bind(null, id)} name={p.name} />
           </Card>
 
-          <Card className="gap-5 p-5">
+          {/* R4 T5: "What <persona> can do" — the three capability sources
+              (built-in tools, skills, MCP apps) unified as friendly "Apps" by
+              label + a one-line what-it-does. No raw ids, no dev routing framing:
+              the old TOOLS/SKILLS/ROUTING dev block is replaced by one plain,
+              non-technical explainer a non-dev can read. */}
+          <Card className="gap-4 p-5">
             <div>
-              <p className="type-caption font-mono text-muted-foreground">
-                {t("detail.routing")}
-              </p>
-              <p className="mt-2">
-                <span className="v-chip">
-                  <span
-                    className="size-1.5 rounded-full bg-primary"
-                    aria-hidden="true"
-                  />
-                  {t("detail.routingValue")}
-                </span>
-              </p>
-              <p className="mt-2 max-w-prose type-caption normal-case tracking-normal text-muted-foreground">
-                {t("detail.routingHint")}
-              </p>
-            </div>
-
-            <div>
-              <p className="type-caption font-mono text-muted-foreground">
-                {t("tools")}
-              </p>
-              {p.tools.length === 0 ? (
+              <h2 className="type-heading">
+                {t("detail.canDo", { name: p.name })}
+              </h2>
+              {apps.length === 0 ? (
                 <p className="mt-2 type-ui text-muted-foreground">
-                  {t("none")}
+                  {t("detail.canDoEmpty")}
                 </p>
               ) : (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {p.tools.map((i) => (
-                    <Badge
-                      key={i}
-                      variant="secondary"
-                      className="type-caption font-mono"
-                    >
-                      {i}
-                    </Badge>
+                <ul
+                  className="mt-3 flex flex-col gap-3"
+                  data-slot="persona-apps"
+                >
+                  {apps.map((app) => (
+                    <li key={app.id} className="flex flex-col gap-0.5">
+                      <span className="type-ui font-medium text-foreground">
+                        {app.label}
+                      </span>
+                      {app.description ? (
+                        <span className="type-caption normal-case tracking-normal text-muted-foreground">
+                          {app.description}
+                        </span>
+                      ) : null}
+                    </li>
                   ))}
-                </div>
+                </ul>
               )}
             </div>
-
-            <div>
-              <p className="type-caption font-mono text-muted-foreground">
-                {t("skills")}
-              </p>
-              {p.skills.length === 0 ? (
-                <p className="mt-2 type-ui text-muted-foreground">
-                  {t("none")}
-                </p>
-              ) : (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {p.skills.map((i) => (
-                    <Badge
-                      key={i}
-                      variant="secondary"
-                      className="type-caption font-mono"
-                    >
-                      {i}
-                    </Badge>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* At most one calm, human line about model routing (the dev
+                "Smart · automatic" copy is gone). */}
+            <p className="type-caption normal-case tracking-normal text-muted-foreground">
+              {t("detail.modelNote")}
+            </p>
           </Card>
 
           {/* N3 (Task 5): graceful tombstones for apps this persona enabled that

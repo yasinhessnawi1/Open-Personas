@@ -25,6 +25,7 @@ import { voiceLanguageWarning } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
 import { SpecialitiesChooser } from "./specialities-chooser";
+import { ToolsChooser } from "./tools-chooser";
 
 // Spec 30 T11 — a built-in MCP server in the capability-management catalog.
 // A persona enables a server by carrying `mcp:<name>` in its `tools` list.
@@ -363,36 +364,48 @@ export function PersonaForm({
           {t("capabilityCount", { count: capabilityCount })} ·{" "}
           {t("capabilityCapHint")}
         </p>
-        <Subsection title={t("toolsTitle")}>
-          <ChipToggle
-            available={tools}
-            selected={declaredTools}
-            empty={t("noTools")}
-            onChange={(list) => onChange(writeStringList(doc, "tools", list))}
-          />
+        {/* R4 T5 — "Apps": ONE unified surface for what the persona can do,
+            fed by two sources under the same see-then-grant grammar: built-in
+            tools (simple, always-available abilities) + catalog apps (MCP). Both
+            write the persona's `tools:` list (bare names / `mcp:<name>`). Raw
+            ids are gone — each renders by friendly label + a one-line
+            what-it-does. Specialities (skills, S-track) stay a SEPARATE surface
+            (the ratified not-unified decision). */}
+        <Subsection title={tApps("title")}>
+          <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-2">
+              <p className="text-xs text-muted-foreground">
+                {tApps("builtinSubtitle")}
+              </p>
+              <ToolsChooser
+                tools={tools}
+                declaredTools={declaredTools}
+                empty={t("noTools")}
+                onChange={(list) =>
+                  onChange(writeStringList(doc, "tools", list))
+                }
+              />
+            </div>
+            {/* N3: the MCP catalog reframed as "apps" — per-persona enablement
+                stays the `mcp:<name>` tools-list mechanism. */}
+            <AppsChooser
+              apps={mcpServers}
+              declaredTools={declaredTools}
+              personaId={personaId}
+              onChange={(list) => onChange(writeStringList(doc, "tools", list))}
+            />
+          </div>
         </Subsection>
-        {/* Spec S3 — Specialities: skills surfaced with trust tiers + a consent flow,
-            a SEPARATE surface from the apps chooser below (the not-unified decision).
-            Enable/disable drives the persona's `skills:` declaration (the existing YAML
-            path); the chooser self-fetches the tier-aware catalog + this persona's
-            consent state. */}
+        {/* Spec S3 — Specialities: skills surfaced with trust tiers + a consent
+            flow, a SEPARATE surface from the apps chooser above (the not-unified
+            decision). Enable/disable drives the persona's `skills:` declaration;
+            the chooser self-fetches the tier-aware catalog + this persona's
+            consent state. Skill names are normalised to friendly labels (R4 T5). */}
         <Subsection title={tSpecialities("title")}>
           <SpecialitiesChooser
             personaId={personaId}
             declaredSkills={declaredSkills}
             onChange={(list) => onChange(writeStringList(doc, "skills", list))}
-          />
-        </Subsection>
-        <Subsection title={tApps("title")}>
-          {/* N3: the apps experience — the MCP catalog reframed as "apps" with a
-              searchable chooser + per-app detail. Per-persona enablement stays
-              the `mcp:<name>` tools-list mechanism (same onChange path the old
-              McpToggle used). */}
-          <AppsChooser
-            apps={mcpServers}
-            declaredTools={declaredTools}
-            personaId={personaId}
-            onChange={(list) => onChange(writeStringList(doc, "tools", list))}
           />
         </Subsection>
       </Section>
@@ -560,48 +573,6 @@ function ListEditor({
         );
       })}
       <AddButton label={addLabel} onClick={() => onChange([...items, ""])} />
-    </div>
-  );
-}
-
-function ChipToggle({
-  available,
-  selected,
-  empty,
-  onChange,
-}: {
-  available: string[];
-  selected: string[];
-  empty: string;
-  onChange: (list: string[]) => void;
-}) {
-  if (available.length === 0) {
-    return <p className="text-sm text-muted-foreground">{empty}</p>;
-  }
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {available.map((name) => {
-        const on = selected.includes(name);
-        return (
-          <button
-            key={name}
-            type="button"
-            onClick={() =>
-              onChange(
-                on ? selected.filter((x) => x !== name) : [...selected, name],
-              )
-            }
-            className={cn(
-              "rounded border px-2 py-1 font-mono text-xs transition-colors",
-              on
-                ? "border-primary/40 bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:border-primary/30",
-            )}
-          >
-            {name}
-          </button>
-        );
-      })}
     </div>
   );
 }

@@ -34,6 +34,18 @@ export interface SidebarConversationInput {
   readonly persona_id: string;
   readonly title: string;
   readonly updated_at: string;
+  /**
+   * The conversation's immutable birth-marker (Spec V9): `'chat'` or `'call'`.
+   * Call conversations belong under the Calls surface, not the Messages list
+   * (R4 T4) — they render there as empty entries.
+   */
+  readonly origin?: "chat" | "call";
+  /**
+   * Speaker role of the most recent message; `null`/absent when the conversation
+   * has no messages yet. The presence of a role is the "has ≥1 message" signal
+   * used to hide empty conversations from the Messages list (R4 T4).
+   */
+  readonly last_message_role?: "user" | "assistant" | "system" | "tool" | null;
 }
 
 /** A resolved message row: a conversation joined to its persona (if known). */
@@ -75,6 +87,13 @@ export interface SidebarData {
   readonly conversations: readonly SidebarConversation[];
   readonly calls: readonly SidebarCall[];
   /**
+   * R4 T1 / Spec K6: the account owner's display name resolved server-side from
+   * our own DB (`/v1/me/profile`, given_name + family_name) — the source of
+   * truth for the name shown in the account menu, surfaced in BOTH editions.
+   * `null` when the owner has set no name.
+   */
+  readonly ownerName: string | null;
+  /**
    * Spec K5: whether this deployment has a usable knowledge-graph (Memory). A
    * runtime signal — the API's window reports `available: false` when there is no
    * Postgres graph store (community-on-SQLite / graph off) — so the nav gates the
@@ -111,15 +130,34 @@ export function rankPersonasByRecency(
 }
 
 /**
+ * Whether a conversation belongs in the MESSAGES list (R4 T4).
+ *
+ * Two exclusions, both signalled by the `ConversationSummary` the list already
+ * returns — no extra fetch:
+ *   - CALL conversations (`origin === 'call'`) belong under the Calls surface;
+ *     in Messages they render as empty, persona-less rows.
+ *   - EMPTY conversations (no messages yet → `last_message_role` is null/absent)
+ *     are noise: a started-but-never-used thread.
+ * A conversation with `origin` absent (older rows / pre-V9) defaults to chat.
+ */
+export function isMessagesListConversation(
+  c: SidebarConversationInput,
+): boolean {
+  if (c.origin === "call") return false;
+  return c.last_message_role != null;
+}
+
+/**
  * Resolve conversation summaries into message rows joined to their persona.
- * Order is preserved (the API already returns `updated_at DESC`).
+ * Order is preserved (the API already returns `updated_at DESC`). Call + empty
+ * conversations are filtered out of the Messages list (R4 T4).
  */
 export function resolveConversations(
   conversations: readonly SidebarConversationInput[],
   personas: readonly SidebarPersona[],
 ): readonly SidebarConversation[] {
   const byId = new Map(personas.map((p) => [p.id, p]));
-  return conversations.map((c) => ({
+  return conversations.filter(isMessagesListConversation).map((c) => ({
     id: c.id,
     title: c.title,
     updated_at: c.updated_at,

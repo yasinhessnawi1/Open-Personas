@@ -11,12 +11,14 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { presentApp } from "@/lib/apps/app-labels";
 import {
   fetchSpecialities,
   recordSpecialityConsent,
   type SpecialityEntry,
 } from "@/lib/specialities/specialities";
 import { cn } from "@/lib/utils";
+import { CAPABILITY_SCROLL_LIST_CLASS } from "./capability-list";
 import {
   deriveSpecialityState,
   isSpecialityEnabled,
@@ -154,7 +156,10 @@ export function SpecialitiesChooser({
           {t("searchEmpty", { query: query.trim() })}
         </p>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <ul
+          className={cn("flex flex-col gap-2", CAPABILITY_SCROLL_LIST_CLASS)}
+          data-slot="specialities-list"
+        >
           {filtered.map((s) => (
             <li key={s.name}>
               <SpecialityCard
@@ -267,14 +272,24 @@ function SpecialityCard({
   tokenGetter: () => Promise<string | null>;
 }) {
   const t = useTranslations("specialities");
+  const tApps = useTranslations("apps");
   const enabled = state === "enabled";
+  // R4 T5: normalise the skill's display name — a built-in skill id
+  // (`document_generation`) resolves to its friendly label; an external skill
+  // keeps its own name (humanised only if it looks like a raw id).
+  const label = presentApp(entry.name, tApps).label;
 
   return (
-    <Card size="sm" data-slot="speciality-card" data-state={state}>
+    <Card
+      size="sm"
+      data-slot="speciality-card"
+      data-state={state}
+      data-speciality-name={entry.name}
+    >
       <Collapsible>
         <CollapsibleTrigger
           className="flex w-full items-center gap-3 px-3 text-left"
-          aria-label={t("open", { name: entry.name })}
+          aria-label={t("open", { name: label })}
         >
           <span
             aria-hidden="true"
@@ -285,7 +300,7 @@ function SpecialityCard({
           </span>
           <span className="flex min-w-0 flex-col">
             <span className="truncate font-heading text-sm font-semibold">
-              {entry.name}
+              {label}
             </span>
             <span className="truncate text-xs text-muted-foreground">
               {entry.description}

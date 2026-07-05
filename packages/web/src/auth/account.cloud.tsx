@@ -17,7 +17,11 @@ export function useAccount(): Account {
   const clerk = useClerk();
   const email = user?.primaryEmailAddress?.emailAddress ?? null;
   return {
-    name: user?.fullName || user?.username || email || "",
+    // A REAL display name only (never the email as a fallback) — the account
+    // menu shows the email once on its own line, so seeding `name` from the
+    // email here made the button render the address twice (R4 T1). When the
+    // user has no name set, `name` is empty and the menu shows the email once.
+    name: user?.fullName || user?.username || "",
     email,
     imageUrl: user?.imageUrl ?? null,
     available: Boolean(user),

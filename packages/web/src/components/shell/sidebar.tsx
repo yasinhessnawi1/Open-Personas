@@ -44,7 +44,7 @@ import { CommandTrigger } from "./command-palette";
 import { Nav } from "./nav";
 import { NotificationBell } from "./notification-bell";
 import type { SidebarData } from "./sidebar-data";
-import { CallsList, MessagesList, PersonasRail } from "./sidebar-sections";
+import { MessagesList, PersonasRail } from "./sidebar-sections";
 
 /** Width bounds + the default (px). Collapsed snaps to the icon rail. */
 const MIN_WIDTH = 224;
@@ -237,17 +237,9 @@ export function Sidebar({ data }: { data: SidebarData }) {
             <PersonasRail personas={data.personas} collapsed={collapsed} />
           </SidebarSection>
 
-          {/* (4b) CALLS — Spec V9: a fixed compact list of recent voice calls.
-              Each row links to its saved transcript (/chat/:conversationId).
-              Renders nothing when the caller has no calls (no empty rail). The
-              full paginated history is at /calls. */}
-          {data.calls.length > 0 ? (
-            <SidebarSection heading={t("sidebar.calls")} collapsed={collapsed}>
-              <CallsList calls={data.calls} collapsed={collapsed} />
-            </SidebarSection>
-          ) : null}
-
-          {/* (5) MESSAGES — the flexible, growing, scrolling region. */}
+          {/* (5) MESSAGES — the flexible, growing, scrolling region.
+              (R4 T2: the CALLS recent-list preview was removed from the sidebar
+              — the Calls *nav item* stays and the full history lives at /calls.) */}
           <SidebarSection
             heading={t("sidebar.messages")}
             collapsed={collapsed}
@@ -266,7 +258,7 @@ export function Sidebar({ data }: { data: SidebarData }) {
            * and scrolls internally. */}
           <div className="mt-auto shrink-0">
             <Separator className="mb-2 bg-sidebar-border" />
-            <AccountMenu collapsed={collapsed} />
+            <AccountMenu collapsed={collapsed} name={data.ownerName} />
           </div>
         </div>
 

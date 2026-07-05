@@ -68,6 +68,51 @@ describe("AccountMenu", () => {
     expect(signOut).toHaveBeenCalled();
   });
 
+  it("cloud without a name: renders the email ONCE, not twice (R4 T1)", () => {
+    account = {
+      name: "",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut: vi.fn(),
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+    const trigger = screen.getByRole("button", { name: "Account" });
+    const occurrences = (trigger.textContent?.match(/ada@example\.com/g) ?? [])
+      .length;
+    expect(occurrences).toBe(1);
+  });
+
+  it("cloud with a name: shows the name as primary + the email once (R4 T1)", () => {
+    account = {
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut: vi.fn(),
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+    const trigger = screen.getByRole("button", { name: "Account" });
+    expect(trigger.textContent).toContain("Ada Lovelace");
+    expect((trigger.textContent?.match(/ada@example\.com/g) ?? []).length).toBe(
+      1,
+    );
+  });
+
+  it("prefers the server-resolved K6 name prop over the account name (R4 T1)", () => {
+    account = {
+      name: "",
+      email: "owner@example.com",
+      imageUrl: null,
+      available: false,
+    };
+    wrap(<AccountMenu name="Ola Nordmann" />);
+    const trigger = screen.getByRole("button", { name: "Account" });
+    expect(trigger.textContent).toContain("Ola Nordmann");
+  });
+
   it("community: falls back to a label and shows NO sign-out", () => {
     wrap(<AccountMenu />);
     // No name → the menu trigger falls back to the "Account" label.

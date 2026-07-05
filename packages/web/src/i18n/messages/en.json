@@ -240,7 +240,10 @@
       "files": "Files",
       "routing": "Routing",
       "routingValue": "Smart · automatic",
-      "routingHint": "Each turn is routed to a right-sized model automatically — small → frontier. The tier is never set per persona."
+      "routingHint": "Each turn is routed to a right-sized model automatically — small → frontier. The tier is never set per persona.",
+      "canDo": "What {name} can do",
+      "canDoEmpty": "No apps enabled yet.",
+      "modelNote": "Answers are routed to a right-sized model automatically."
     },
     "memory": {
       "heading": "Typed memory",
@@ -739,6 +742,86 @@
     "defaultBadge": "default",
     "capability": "Adds tools your persona can use — available once enabled.",
     "toolsHeading": "What this app adds",
+    "builtinHeading": "Built-in apps",
+    "builtinSubtitle": "Simple, always-available abilities — expand one to see what it does before you turn it on.",
+    "catalog": {
+      "web_search": {
+        "label": "Web search",
+        "description": "Looks things up on the web for you."
+      },
+      "web_fetch": {
+        "label": "Read a web page",
+        "description": "Opens a link and reads what's on the page."
+      },
+      "file_read": {
+        "label": "Read a file",
+        "description": "Opens and reads a file you've shared."
+      },
+      "file_write": {
+        "label": "Save a file",
+        "description": "Writes results out to a file you can keep."
+      },
+      "code_execution": {
+        "label": "Run code",
+        "description": "Runs small pieces of code to work something out."
+      },
+      "calculator": {
+        "label": "Calculator",
+        "description": "Does exact sums and arithmetic."
+      },
+      "datetime": {
+        "label": "Date & time",
+        "description": "Checks today's date and the current time."
+      },
+      "regex_match": {
+        "label": "Find patterns in text",
+        "description": "Searches text for a specific pattern."
+      },
+      "text_diff": {
+        "label": "Compare text",
+        "description": "Shows what changed between two pieces of text."
+      },
+      "text_summarize": {
+        "label": "Summarise text",
+        "description": "Boils long text down to the key points."
+      },
+      "mcp_search": {
+        "label": "Discover apps",
+        "description": "Searches the app catalogue for new capabilities."
+      },
+      "json_query": {
+        "label": "Query data",
+        "description": "Pulls specific values out of structured data."
+      },
+      "currency_convert": {
+        "label": "Convert currency",
+        "description": "Converts money between currencies."
+      },
+      "generate_image": {
+        "label": "Create an image",
+        "description": "Generates a picture from a description."
+      },
+      "render_diagram": {
+        "label": "Draw a diagram",
+        "description": "Turns a description into a diagram."
+      },
+      "code_review": {
+        "label": "Review code",
+        "description": "Reads code and suggests improvements."
+      },
+      "data_analysis": {
+        "label": "Analyse data",
+        "description": "Explores a dataset and surfaces the insights."
+      },
+      "document_generation": {
+        "label": "Create a document",
+        "description": "Produces a polished, formatted document."
+      },
+      "web_research": {
+        "label": "Research the web",
+        "description": "Digs across sources to answer a question."
+      }
+    },
     "state": {
       "available": "Available",
       "needsSetup": "Needs setup",

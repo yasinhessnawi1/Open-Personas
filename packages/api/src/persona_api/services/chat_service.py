@@ -85,6 +85,72 @@ Role = Literal["user", "assistant", "system", "tool"]
 # A title builder turns the first user message into a short conversation title.
 TitleBuilder = "Callable[[str], Awaitable[str]]"
 _MAX_TITLE_LEN = 120
+# A short title is a few words; the prompt asks for ≤5, we allow a little slack
+# and hard-cap so a reasoning leak can never become a paragraph-long "title".
+_MAX_TITLE_WORDS = 8
+_FALLBACK_TITLE_WORDS = 6
+_DEFAULT_TITLE = "New conversation"
+
+# R4 T3: substrings that betray the titling INSTRUCTION being echoed back (or a
+# small/background-tier model leaking chain-of-thought about it) instead of an
+# actual title — e.g. "We need to output a title of at most 5 words, no quotes,
+# no punctuation, no prose…". Matched case-insensitively; a hit means "not a
+# title" → fall back. Kept deliberately instruction-specific so a genuine short
+# title is not caught.
+_TITLE_ECHO_MARKERS: tuple[str, ...] = (
+    "at most",
+    "no quotes",
+    "no punctuation",
+    "no prose",
+    "conversation title",
+    "output only",
+    "a title of",
+    "5 words",
+    "five words",
+    "we need to",
+    "the user's message",
+    "summarise the user",
+    "summarize the user",
+    "as a title",
+)
+
+
+def _fallback_title(first_message: str) -> str:
+    """A sensible title when the model's output is unusable: the first few words
+    of the user's own message, else a neutral default."""
+    words = first_message.split()
+    if not words:
+        return _DEFAULT_TITLE
+    return " ".join(words[:_FALLBACK_TITLE_WORDS])
+
+
+def sanitize_conversation_title(raw: str, *, first_message: str) -> str:
+    """Turn a title-model's raw output into a safe conversation title (R4 T3).
+
+    Root cause of the reported bug: the titling PROMPT is not stored — a
+    small/background-tier model echoes its own instruction (or leaks reasoning
+    about it) into ``message.content``, and that echo was stored verbatim as the
+    title. This rejects such an echo, strips wrapping quotes + trailing
+    punctuation the prompt asked to avoid, caps the word count, and falls back to
+    the first words of the user's message (or a default) on a bad generation.
+    Always returns a non-empty, human-readable title.
+    """
+    fallback = _fallback_title(first_message)
+    if not raw:
+        return fallback
+    # First non-empty line only — a model may wrap the title in prose.
+    line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+    cleaned = line.strip("\"'“”‘’`").strip()
+    if any(marker in cleaned.lower() for marker in _TITLE_ECHO_MARKERS):
+        return fallback
+    cleaned = cleaned.rstrip(".!?,;:").strip()
+    if not cleaned:
+        return fallback
+    words = cleaned.split()
+    if len(words) > _MAX_TITLE_WORDS:
+        cleaned = " ".join(words[:_MAX_TITLE_WORDS])
+    return cleaned or fallback
+
 
 # Server-side cap on the last-message preview returned by the LIST endpoint, so
 # the sidebar never has to ship/trim a full message body. Longer messages are
@@ -769,7 +835,11 @@ async def _maybe_set_title(
     failure (model error, timeout) is logged and swallowed — the conversation
     keeps its default title rather than breaking the turn."""
     try:
-        title = (await title_builder(first_message)).strip()
+        raw = await title_builder(first_message)
+        # R4 T3: sanitise the model output (reject an instruction echo, strip
+        # quotes/punctuation, cap words, fall back to the user's words) so the
+        # stored title is a real title, never the titling prompt.
+        title = sanitize_conversation_title(raw, first_message=first_message)
         if title:
             set_title(
                 rls_engine=rls_engine, conversation_id=conversation_id, title=title[:_MAX_TITLE_LEN]

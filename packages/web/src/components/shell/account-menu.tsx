@@ -45,15 +45,37 @@ function initials(name: string): string {
   return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
 }
 
-export function AccountMenu({ collapsed = false }: { collapsed?: boolean }) {
+export function AccountMenu({
+  collapsed = false,
+  name,
+}: {
+  collapsed?: boolean;
+  /**
+   * K6 display name resolved server-side from our own DB (`/v1/me/profile`,
+   * given_name + family_name), threaded through `SidebarData`. Preferred over
+   * the edition account surface so the persona's owner name shows in BOTH
+   * editions — community has no Clerk identity but does have a K6 name.
+   */
+  name?: string | null;
+}) {
   const account = useAccount();
   const t = useTranslations("nav.account");
   const tn = useTranslations("nav");
   const tt = useTranslations("theme");
   const { setTheme } = useTheme();
 
-  const label = account.name || t("menu");
-  const sub = account.email || t("plan");
+  // Identity, deduplicated (R4 T1). A real name is the K6 name (server) or the
+  // edition account name; the email is a SEPARATE line shown at most once.
+  const displayName = (name?.trim() || account.name.trim()) ?? "";
+  const email = account.email?.trim() ?? "";
+  const hasName = displayName.length > 0;
+
+  // Primary line: the name when we have one, else the email once, else a label.
+  const label = hasName ? displayName : email || t("menu");
+  // Secondary line: the email — but only when the name is the primary line, so
+  // a nameless-but-emailed user never sees the address twice. Community (no name,
+  // no email) keeps a two-line look via the plan label.
+  const sub = hasName ? email : email ? "" : t("plan");
 
   return (
     <DropdownMenu>
@@ -78,20 +100,20 @@ export function AccountMenu({ collapsed = false }: { collapsed?: boolean }) {
         {!collapsed && (
           <span className="flex min-w-0 flex-col text-left">
             <span className="v-acct__name truncate">{label}</span>
-            <span className="v-acct__plan truncate">{sub}</span>
+            {sub ? <span className="v-acct__plan truncate">{sub}</span> : null}
           </span>
         )}
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" side="top" className="w-56">
-        {account.available && account.name ? (
+        {hasName ? (
           <>
             <DropdownMenuGroup>
               <DropdownMenuLabel className="flex flex-col gap-0.5">
-                <span className="truncate text-foreground">{account.name}</span>
-                {account.email ? (
+                <span className="truncate text-foreground">{displayName}</span>
+                {email ? (
                   <span className="truncate font-normal text-muted-foreground">
-                    {account.email}
+                    {email}
                   </span>
                 ) : null}
               </DropdownMenuLabel>

@@ -59,6 +59,7 @@ const DATA: SidebarData = {
     },
   ],
   calls: [],
+  ownerName: null,
   memoryAvailable: false,
 };
 

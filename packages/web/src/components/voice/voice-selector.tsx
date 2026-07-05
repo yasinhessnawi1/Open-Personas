@@ -16,6 +16,7 @@ import { Pause, Play } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/auth";
+import { CAPABILITY_SCROLL_LIST_CLASS } from "@/components/personas/capability-list";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -136,7 +137,7 @@ export function VoiceSelector({
   const provider = load.provider;
 
   return (
-    <ul className="flex flex-col gap-1.5">
+    <ul className={cn("flex flex-col gap-1.5", CAPABILITY_SCROLL_LIST_CLASS)}>
       {/* Default option — clears the persona's voice (global default). */}
       <li>
         <VoiceRow
