@@ -132,7 +132,7 @@ async def test_candidates_merge_with_system_provenance_and_grounding() -> None:
     owner, kc = store.merges[0]
     assert owner == "u1"
     assert kc.content == "is vegetarian"
-    assert kc.provenance.source is WriteSource.SYSTEM  # synthesis
+    assert kc.provenance.source is WriteSource.PERSONA_SELF  # learned from conversation (R4)
     assert kc.provenance.grounding == "I'm vegetarian"  # the candidate's evidence span
     assert kc.provenance.interaction_id == "conv-1"
     assert kc.provenance.persona_id == "persona-a"

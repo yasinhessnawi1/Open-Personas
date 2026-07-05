@@ -364,11 +364,14 @@ class EpisodicConsolidationEngine:
     ) -> KnowledgeCandidate:
         """One minimal, contract-conformant candidate per cluster (K8-D-9)."""
         return KnowledgeCandidate(
-            concept_name=f"episode {window_end:%Y-%m-%d %H:%M}",
+            concept_name=_episode_label(gist_text, window_end),
             content=gist_text,
             node_kind=NodeKind.CONCEPT,
             provenance=NodeProvenance(
-                source=WriteSource.SYSTEM,
+                # PERSONA_SELF, not SYSTEM: a consolidation node is the persona's own
+                # memory of its conversations, not a platform seed — so the K5 panel
+                # reads "learned by <persona>, from your conversations" (R4).
+                source=WriteSource.PERSONA_SELF,
                 persona_id=persona_id,
                 written_at=window_end,
                 grounding="episodic cluster gist (from originals)",
@@ -376,6 +379,27 @@ class EpisodicConsolidationEngine:
             ),
             valid_at=window_end,
         )
+
+
+def _episode_label(gist_text: str, window_end: datetime) -> str:
+    """A human-readable memory-item name from the gist's first sentence (R4).
+
+    An episode node used to be named ``episode 2026-07-05 09:20`` — a timestamp that
+    clutters the graph and reads as noise. Derive the name from the gist's opening
+    sentence instead ("User is training with their husky dog named Balto") so it
+    appears as a real memory. Falls back to the timestamp only when the gist is blank,
+    so an episode node always has a name.
+    """
+    head = gist_text.strip()
+    for end in (". ", "! ", "? "):
+        idx = head.find(end)
+        if idx != -1:
+            head = head[:idx]
+            break
+    head = head.split("\n", 1)[0].strip().rstrip(".!?").strip()
+    if len(head) > 60:  # noqa: PLR2004 — a label cap, not a domain constant
+        head = head[:59].rstrip() + "…"
+    return head or f"episode {window_end:%Y-%m-%d %H:%M}"
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:

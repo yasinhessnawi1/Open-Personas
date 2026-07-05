@@ -74,7 +74,10 @@ class Synthesizer:
             return []
 
         base_provenance = NodeProvenance(
-            source=WriteSource.SYSTEM,
+            # PERSONA_SELF, not SYSTEM: a synthesised fact is something the persona
+            # learned FROM the conversation, not a platform seed — so the K5 panel
+            # reads "learned by <persona>, from your conversations" (R4).
+            source=WriteSource.PERSONA_SELF,
             persona_id=interaction.persona_id,
             interaction_id=interaction.interaction_id,
             # Record WHICH kind of interaction the id names so the K5 panel can tell a

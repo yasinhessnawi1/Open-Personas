@@ -27,7 +27,7 @@ from persona.errors import SummarizerError
 from persona.graph.models import NodeKind
 from persona.graph.protocol import UpdateIntent
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
-from persona.stores.engine import EpisodicConsolidationEngine
+from persona.stores.engine import EpisodicConsolidationEngine, _episode_label
 from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.pyramid import EpisodicPyramid
 from persona.stores.summarizer import StubSummarizer, assemble_summarizer_input
@@ -331,6 +331,25 @@ def test_candidate_shape_is_the_minimal_k8_d9_contract() -> None:
     assert candidate.target_node_id is None
     assert candidate.close_link_ids == ()
     assert candidate.valid_at is not None  # the window end (world event time)
-    assert candidate.provenance.source == WriteSource.SYSTEM
+    assert candidate.provenance.source == WriteSource.PERSONA_SELF  # learned in conversation (R4)
     assert candidate.provenance.persona_id == "p1"
-    assert candidate.concept_name.startswith("episode ")
+    # R4: named from the gist's first sentence (a memory item), never a bare timestamp.
+    assert not candidate.concept_name.startswith("episode ")
+    assert candidate.concept_name == _episode_label(candidate.content, _NOW)
+
+
+def test_episode_label_reads_from_the_gist_not_a_timestamp() -> None:
+    """R4: the episode node's name is the gist's first sentence, capped; blank ⇒ timestamp."""
+    when = datetime(2026, 7, 5, 9, 20, tzinfo=UTC)
+    assert (
+        _episode_label("User is training with their husky dog named Balto. Assistant nods.", when)
+        == "User is training with their husky dog named Balto"
+    )
+    assert _episode_label("Short note", when) == "Short note"
+    # blank gist ⇒ the timestamp fallback, so a node always has a name.
+    assert _episode_label("   ", when) == "episode 2026-07-05 09:20"
+    # over-long first sentence is capped with an ellipsis.
+    long = "x" * 80 + ". tail"
+    label = _episode_label(long, when)
+    assert len(label) == 60  # noqa: PLR2004 — the 60-char label cap
+    assert label.endswith("…")

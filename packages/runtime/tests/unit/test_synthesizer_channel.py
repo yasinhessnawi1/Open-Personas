@@ -91,9 +91,9 @@ async def test_voice_channel_reaches_the_minted_node_provenance() -> None:
     assert store.merged, "the voice candidate should have been merged"
     prov = store.merged[0].provenance
     assert prov.channel == CHANNEL_VOICE  # attributable as a call-minted fact
-    # ``source`` stays SYSTEM — synthesis is a system reflection pass, not a voice
-    # write source; ``channel`` is the finer marker.
-    assert prov.source.value == "system"
+    # ``source`` is PERSONA_SELF — a synthesised fact is learned from the conversation
+    # (R4), whether chat or voice; ``channel`` is the finer voice/text marker.
+    assert prov.source.value == "persona_self"
 
 
 @pytest.mark.asyncio
