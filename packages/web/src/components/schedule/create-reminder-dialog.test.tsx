@@ -77,6 +77,20 @@ beforeEach(() => {
 });
 
 describe("CreateReminderDialog", () => {
+  it("emits the default cadence on mount so Preview enables with an untouched picker (R4-C1-24)", () => {
+    makeDialog();
+    // subject + persona ONLY — do NOT touch the recurrence builder.
+    fireEvent.change(screen.getByLabelText(/what should i remind you/i), {
+      target: { value: "stretch for five minutes" },
+    });
+    fireEvent.change(screen.getByLabelText(/who should run it/i), {
+      target: { value: "p1" },
+    });
+    // The builder announced "Every day at 09:00" on mount, so the cadence gate passes
+    // without the user touching the picker (R4-C1-24: Preview/Create was dead otherwise).
+    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
   it("reuses A8's builder and gates Preview on subject + persona + cadence", () => {
     makeDialog();
     expect(screen.getByTestId("recurrence-builder")).toBeInTheDocument();

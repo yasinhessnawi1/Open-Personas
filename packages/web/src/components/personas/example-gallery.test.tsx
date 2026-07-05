@@ -11,7 +11,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it, vi } from "vitest";
 import messages from "@/i18n/messages/en.json";
 import { PERSONA_EXAMPLE_CATEGORIES } from "@/lib/persona-examples";
-import { ExampleGallery } from "./example-gallery";
+import { CATEGORY_LABEL_KEY, ExampleGallery } from "./example-gallery";
 
 function renderWith(ui: React.ReactNode) {
   return render(
@@ -20,6 +20,26 @@ function renderWith(ui: React.ReactNode) {
     </NextIntlClientProvider>,
   );
 }
+
+it("every starter category maps to a non-fallback label (R4-C1-1)", () => {
+  // The Spec-36 roster grew categories faster than the label map/en.json; an
+  // unmapped id renders the bare "author" namespace fallback + a MISSING_MESSAGE
+  // console error. This pins the contract: every category id resolves a real label.
+  const gallery = (messages as { author: { gallery: Record<string, string> } })
+    .author.gallery;
+  for (const category of PERSONA_EXAMPLE_CATEGORIES) {
+    const key = CATEGORY_LABEL_KEY[category.id];
+    expect(
+      key,
+      `category "${category.id}" has no label-key mapping`,
+    ).toBeTruthy();
+    const suffix = key.split(".")[1]; // "gallery.categoryX" -> "categoryX"
+    expect(
+      gallery[suffix],
+      `label "${key}" missing from en.json (would render the "author" fallback)`,
+    ).toBeTruthy();
+  }
+});
 
 const ALL_EXAMPLES = PERSONA_EXAMPLE_CATEGORIES.flatMap((c) => c.examples);
 

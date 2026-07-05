@@ -30,14 +30,19 @@ import { cn } from "@/lib/utils";
  * `var(--…)`, which does not trip the colour-literal regex.
  */
 
-const CATEGORY_LABEL_KEY: Record<PersonaExampleCategory["id"], string> = {
-  work: "gallery.categoryWork",
-  learning: "gallery.categoryLearning",
-  creative: "gallery.categoryCreative",
-  wellness: "gallery.categoryWellness",
-  experts: "gallery.categoryExperts",
-  companionship: "gallery.categoryCompanionship",
-};
+export const CATEGORY_LABEL_KEY: Record<PersonaExampleCategory["id"], string> =
+  {
+    work: "gallery.categoryWork",
+    learning: "gallery.categoryLearning",
+    creative: "gallery.categoryCreative",
+    wellness: "gallery.categoryWellness",
+    experts: "gallery.categoryExperts",
+    companionship: "gallery.categoryCompanionship",
+    mentors: "gallery.categoryMentors",
+    companions: "gallery.categoryCompanions",
+    voices: "gallery.categoryVoices",
+    "life-coaches": "gallery.categoryLifeCoaches",
+  };
 
 /**
  * Pre-composed accent custom properties for a category rail. `--accent` is the

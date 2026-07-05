@@ -15,7 +15,7 @@
  * ships one, this swaps behind the same props.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -91,6 +91,15 @@ export function RecurrenceBuilder({
     else pattern = { kind: "daily", ...base };
     onChange({ pattern, one_time_at: null });
   }
+
+  // R4-C1-24: emit the VISIBLE default cadence ("Every day at 09:00") on mount so a
+  // user who accepts the shown default without touching the picker still satisfies the
+  // parent's ``cadence !== null`` gate — otherwise Preview/Create stayed dead until the
+  // picker was touched. The picker owns its default and announces it (single source).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: emit-once-on-mount is intentional.
+  useEffect(() => {
+    emit({});
+  }, []);
 
   function toggleWeekday(token: string) {
     const next = weekdays.includes(token)

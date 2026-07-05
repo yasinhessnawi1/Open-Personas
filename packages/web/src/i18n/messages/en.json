@@ -346,7 +346,11 @@
       "categoryCreative": "Creative & writing",
       "categoryWellness": "Health & wellness",
       "categoryExperts": "Domain experts",
-      "categoryCompanionship": "Personal & companionship"
+      "categoryCompanionship": "Personal & companionship",
+      "categoryMentors": "Mentors & guides",
+      "categoryCompanions": "Companions & friends",
+      "categoryVoices": "Voices & characters",
+      "categoryLifeCoaches": "Life & mindset coaches"
     },
     "generate": "Generate persona",
     "authorError": "Authoring failed. Try rephrasing your description.",
