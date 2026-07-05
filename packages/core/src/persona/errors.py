@@ -43,6 +43,7 @@ __all__ = [
     "RuntimeWriteForbiddenError",
     "SandboxViolationError",
     "ScheduleConcurrentEditError",
+    "ScheduleNeverFiresError",
     "ScheduleNotFoundError",
     "ScheduleStateError",
     "SchemaVersionMismatchError",
@@ -527,6 +528,17 @@ class ScheduleStateError(PersonaError):
     Spec A1. E.g. recording a fire against a one-time schedule that has already
     completed, or otherwise driving a schedule through a transition its current
     state forbids. ``context`` carries the schedule id and the rejected operation.
+    """
+
+
+class ScheduleNeverFiresError(PersonaError):
+    """Raised when a proposed cadence has no future occurrence at creation time.
+
+    Spec A10 (A10-D-1, fail-fast). A create whose engine ``next_fire_after(now)``
+    is ``None`` — a one-time instant already in the past, or a bounded rule whose
+    ``until``/``count`` is already exhausted — is rejected at the boundary rather
+    than persisted as a dead row the tick would ignore forever. ``context`` carries
+    the offending cadence description.
     """
 
 

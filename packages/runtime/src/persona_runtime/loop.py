@@ -86,6 +86,11 @@ from persona_runtime.routing import (
     tier_for,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
+from persona_runtime.schedule_claim import (
+    SCHEDULE_CLAIM_LEXICON_VERSION,
+    detect_schedule_claim,
+    render_schedule_correction,
+)
 from persona_runtime.task_origination import (
     Clause,
     ContractDraft,
@@ -1407,6 +1412,27 @@ class ConversationLoop:
         mcp_unavailable_requested = (
             [mcp_gap_signal.server_name] if mcp_gap_signal is not None else []
         )
+
+        # Spec A10 (A10-D-4): the confabulation safety net. Reaching this seam proves no
+        # ``task_originated`` fired this turn (every creating branch early-returns before
+        # generation, and no chat tool can create a schedule) — the PRIMARY gate is that
+        # structural grounding. The detector only spots the claimed∧¬created mismatch: the
+        # model's free text voicing a new-schedule success it cannot have performed. On a
+        # hit, the LOOP appends the deterministic honest correction — streamed AND folded
+        # into ``assistant_text`` BEFORE write-back, so the persisted message, episodic
+        # write, and the synthesis tail all see the corrected text (the graph can never
+        # mint a confabulated "I scheduled it" fact from this turn).
+        claim_signal = detect_schedule_claim(assistant_text)
+        if claim_signal is not None:
+            correction = render_schedule_correction()
+            yield _text_chunk(f"\n\n{correction}")
+            assistant_text = f"{assistant_text}\n\n{correction}"
+            _logger.info(
+                "schedule-claim correction appended (claimed without task_originated) "
+                "matched={matched} lexicon={version}",
+                matched=claim_signal.matched,
+                version=SCHEDULE_CLAIM_LEXICON_VERSION,
+            )
 
         # 7. Post-generation write-back — the LAST step before the final chunk
         #    (D-05-12). An early consumer-exit mid-stream never reaches here

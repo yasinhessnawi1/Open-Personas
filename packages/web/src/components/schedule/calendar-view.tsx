@@ -20,7 +20,6 @@ import {
   applyReschedule,
   fetchOccurrences,
   previewReschedule,
-  type RecurrencePatternInput,
   type ReschedulePreview,
 } from "@/lib/api/schedule-client";
 import { personaIdentityStyle } from "@/lib/persona-identity";
@@ -37,7 +36,11 @@ import {
   truncationNotice,
   weekDays,
 } from "@/lib/schedule/agenda";
-import { RecurrenceBuilder } from "./recurrence-builder";
+import {
+  CreateReminderDialog,
+  type ReminderPersona,
+} from "./create-reminder-dialog";
+import { type CadenceInput, RecurrenceBuilder } from "./recurrence-builder";
 
 const DISPLAY_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const WINDOW_DAYS = 45;
@@ -46,12 +49,24 @@ type View = "agenda" | "week" | "month";
 const _cellStyle = (occ: Occurrence) =>
   occ.persona_id ? personaIdentityStyle({ id: occ.persona_id }) : undefined;
 
-export function CalendarView() {
+export interface CalendarViewProps {
+  /** The owner's personas — the create dialog's executor picker (Spec A10, A10-D-3). */
+  personas?: ReminderPersona[];
+  /** The profile timezone the create flow anchors to (browser tz when unset). */
+  defaultTimezone?: string | null;
+}
+
+export function CalendarView({
+  personas = [],
+  defaultTimezone,
+}: CalendarViewProps) {
   const { getToken } = useAuth();
   const [data, setData] = useState<OccurrencesResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Occurrence | null>(null);
+  const [creating, setCreating] = useState(false);
   const [view, setView] = useState<View>("agenda");
+  const createTz = defaultTimezone || DISPLAY_TZ;
 
   const [from, to] = useMemo(() => {
     const now = new Date();
@@ -87,6 +102,11 @@ export function CalendarView() {
       <header className="v-schedule-head">
         <h1>Calendar</h1>
         <span className="v-schedule-tz">Times shown in {DISPLAY_TZ}</span>
+        {/* Spec A10 (T5): the user's direct create door (A10-D-9 — preview→confirm IS
+            the one explicit confirmation; the write path stays A8's ScheduleStore). */}
+        <Button type="button" onClick={() => setCreating(true)}>
+          New reminder
+        </Button>
         <div className="v-schedule-views">
           {(["agenda", "week", "month"] as const).map((v) => (
             <Button
@@ -106,7 +126,12 @@ export function CalendarView() {
       {notice && <output className="v-schedule-truncation">{notice}</output>}
 
       {view === "agenda" && (
-        <AgendaView data={data} hist={hist} onEdit={setEditing} />
+        <AgendaView
+          data={data}
+          hist={hist}
+          onEdit={setEditing}
+          onCreate={() => setCreating(true)}
+        />
       )}
       {view === "week" && (
         <GridView
@@ -135,6 +160,18 @@ export function CalendarView() {
           }}
         />
       )}
+
+      {creating && (
+        <CreateReminderDialog
+          personas={personas}
+          defaultTimezone={createTz}
+          onClose={() => setCreating(false)}
+          onCreated={async () => {
+            setCreating(false);
+            await load(); // the new occurrence appears immediately — same engine read
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -158,15 +195,22 @@ function AgendaView({
   data,
   hist,
   onEdit,
+  onCreate,
 }: {
   data: OccurrencesResult;
   hist: Map<string, FireStatus[]>;
   onEdit: (o: Occurrence) => void;
+  onCreate: () => void;
 }) {
   const groups = groupByDay(data.occurrences, DISPLAY_TZ);
   if (groups.length === 0)
     return (
-      <p className="v-schedule-empty">Nothing scheduled in this window.</p>
+      <p className="v-schedule-empty">
+        Nothing scheduled in this window.{" "}
+        <Button type="button" variant="outline" onClick={onCreate}>
+          Create your first reminder
+        </Button>
+      </p>
     );
   return (
     <>
@@ -255,25 +299,27 @@ interface RescheduleDialogProps {
   onApplied: () => Promise<void>;
 }
 
-/** The calendar's edit twin: build cadence → preview (engine) → confirm → apply (same door). */
+/** The calendar's edit twin: build cadence → preview (engine) → confirm → apply (same door).
+ * Inherits the one-time kind from the shared builder (Spec A10, A10-D-5) for free. */
 function RescheduleDialog({
   occurrence,
   onClose,
   onApplied,
 }: RescheduleDialogProps) {
   const { getToken } = useAuth();
-  const [pattern, setPattern] = useState<RecurrencePatternInput | null>(null);
+  const [cadence, setCadence] = useState<CadenceInput | null>(null);
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const tz = occurrence.timezone;
 
   async function doPreview() {
-    if (!pattern) return;
+    if (!cadence) return;
     setBusy(true);
     try {
       setPreview(
         await previewReschedule(await getToken(), occurrence.schedule_id, {
-          pattern,
+          pattern: cadence.pattern,
+          one_time_at: cadence.one_time_at,
           timezone: tz,
         }),
       );
@@ -283,11 +329,12 @@ function RescheduleDialog({
   }
 
   async function doApply() {
-    if (!pattern) return;
+    if (!cadence) return;
     setBusy(true);
     try {
       await applyReschedule(await getToken(), occurrence.schedule_id, {
-        pattern,
+        pattern: cadence.pattern,
+        one_time_at: cadence.one_time_at,
         timezone: tz,
       });
       await onApplied();
@@ -298,7 +345,7 @@ function RescheduleDialog({
 
   return (
     <div className="v-reschedule-dialog" role="dialog" aria-label="Reschedule">
-      <RecurrenceBuilder timezone={tz} onChange={setPattern} />
+      <RecurrenceBuilder timezone={tz} onChange={setCadence} />
       {/* The confirm echo — the SAME full clause chat re-echoes, from the engine preview. */}
       {preview && (
         <p className="v-reschedule-preview">
@@ -319,11 +366,11 @@ function RescheduleDialog({
           Cancel
         </Button>
         {preview ? (
-          <Button type="button" onClick={doApply} disabled={busy || !pattern}>
+          <Button type="button" onClick={doApply} disabled={busy || !cadence}>
             Confirm
           </Button>
         ) : (
-          <Button type="button" onClick={doPreview} disabled={busy || !pattern}>
+          <Button type="button" onClick={doPreview} disabled={busy || !cadence}>
             Preview
           </Button>
         )}

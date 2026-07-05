@@ -83,7 +83,11 @@ identical across editions — community just feeds them a constant.
   (the user's 7am across both transitions), a missed-fire policy
   (`fire-late-once` within a grace window / `skip-and-note`) that never
   burst-replays, and one `AuditEvent` per mutation. Scheduler knobs are
-  `PERSONA_SCHEDULER_*` env vars.
+  `PERSONA_SCHEDULER_*` env vars. One store, three verbs: the calendar reads
+  computed occurrences, edits go through the single CAS-guarded reschedule door,
+  and the user can **create** a schedule directly (`POST /v1/me/schedule` —
+  picker-state in, engine-previewed, quiet-hours-warned, idempotent on a
+  client key) with a backing task the named persona executes at each fire.
 - **The autonomous task model** — RLS-scoped, audited `tasks` + `task_checkpoints`
   tables and the durable stores (`persona_api.tasks`): a task spans days through
   many bounded **legs**, each a leg-job hosted additively in the worker. The

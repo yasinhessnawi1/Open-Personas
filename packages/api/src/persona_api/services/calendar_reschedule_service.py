@@ -35,7 +35,12 @@ if TYPE_CHECKING:
 
     from persona_api.schedules.store import ScheduleStore
 
-__all__ = ["ReschedulePreview", "apply_calendar_reschedule", "preview_calendar_reschedule"]
+__all__ = [
+    "ReschedulePreview",
+    "apply_calendar_reschedule",
+    "preview_calendar_reschedule",
+    "preview_schedule_cadence",
+]
 
 
 class ReschedulePreview(BaseModel):
@@ -89,6 +94,12 @@ def preview_calendar_reschedule(
         next_fire=next_fire,
         quiet_hours_offer=offer,
     )
+
+
+# The cadence preview was always schedule-independent (a pure engine computation over the
+# proposed cadence); Spec A10 shares it as the CREATE preview too — one echo, two twins
+# (A10-D-1). ``preview_calendar_reschedule`` stays as the A8-era name for existing callers.
+preview_schedule_cadence = preview_calendar_reschedule
 
 
 def apply_calendar_reschedule(

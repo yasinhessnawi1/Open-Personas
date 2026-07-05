@@ -1638,7 +1638,8 @@ notifications = Table(
     Column("read", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
-        "kind IN ('run_terminal', 'persona_ready')",
+        # 'schedule_executor_missing' = the A10-D-7 deleted-executor bell (migration 038).
+        "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing')",
         name="notifications_kind_check",
     ),
     CheckConstraint(

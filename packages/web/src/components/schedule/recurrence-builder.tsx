@@ -2,8 +2,11 @@
 
 /**
  * Spec A8 (T9) — the humane recurrence builder + time picker.
+ * Spec A10 (A10-D-5) — the additive "Once, at…" kind: the builder now emits a CADENCE
+ * (pattern XOR one_time_at) so one-time reminders are expressible from the same picker;
+ * the reschedule dialog inherits one-time re-timing for free.
  *
- * Builds a `RecurrencePatternInput` (the humane vocabulary, A8-D-1) — the client NEVER produces a
+ * Builds a `CadenceInput` (the humane vocabulary, A8-D-1) — the client NEVER produces a
  * raw RRULE; the server maps pattern → rule (bar 1). The timezone is shown explicitly (bar 3).
  *
  * F2 GAP (A8-D-5): there is no shared F2 calendar/time-picker primitive yet. This composes the
@@ -28,11 +31,17 @@ const WEEKDAYS: readonly { token: string; label: string }[] = [
   { token: "SU", label: "Sun" },
 ];
 
-type Kind = RecurrencePatternInput["kind"];
+/** The builder's output: exactly one of a recurring pattern or a one-time instant (ISO UTC). */
+export interface CadenceInput {
+  pattern: RecurrencePatternInput | null;
+  one_time_at: string | null;
+}
+
+type Kind = RecurrencePatternInput["kind"] | "once";
 
 export interface RecurrenceBuilderProps {
   timezone: string;
-  onChange: (pattern: RecurrencePatternInput) => void;
+  onChange: (cadence: CadenceInput) => void;
 }
 
 /** A controlled recurrence + time picker; emits picker-state (never a raw RRULE). */
@@ -45,6 +54,7 @@ export function RecurrenceBuilder({
   const [weekdays, setWeekdays] = useState<string[]>(["MO"]);
   const [monthDay, setMonthDay] = useState(1);
   const [time, setTime] = useState("09:00");
+  const [onceAt, setOnceAt] = useState("");
 
   function emit(
     next: Partial<{
@@ -53,22 +63,33 @@ export function RecurrenceBuilder({
       weekdays: string[];
       monthDay: number;
       time: string;
+      onceAt: string;
     }>,
   ) {
     const k = next.kind ?? kind;
     const iv = next.interval ?? interval;
     const wd = next.weekdays ?? weekdays;
     const md = next.monthDay ?? monthDay;
+    if (k === "once") {
+      const raw = next.onceAt ?? onceAt;
+      // datetime-local is the BROWSER's wall clock; Date converts it to the absolute
+      // instant. A one-time is an instant — the server renders it in the schedule tz.
+      const instant = raw ? new Date(raw).toISOString() : null;
+      onChange({ pattern: null, one_time_at: instant });
+      return;
+    }
     const [h, m] = (next.time ?? time)
       .split(":")
       .map((s) => Number.parseInt(s, 10));
     const base = { hour: h, minute: m, interval: iv };
-    if (k === "weekly") onChange({ kind: "weekly", weekdays: wd, ...base });
+    let pattern: RecurrencePatternInput;
+    if (k === "weekly") pattern = { kind: "weekly", weekdays: wd, ...base };
     else if (k === "monthly_day")
-      onChange({ kind: "monthly_day", month_day: md, ...base });
+      pattern = { kind: "monthly_day", month_day: md, ...base };
     else if (k === "hourly")
-      onChange({ kind: "hourly", interval: iv, minute: m });
-    else onChange({ kind: "daily", ...base });
+      pattern = { kind: "hourly", interval: iv, minute: m };
+    else pattern = { kind: "daily", ...base };
+    onChange({ pattern, one_time_at: null });
   }
 
   function toggleWeekday(token: string) {
@@ -101,10 +122,29 @@ export function RecurrenceBuilder({
           <option value="weekly">Weekly on…</option>
           <option value="monthly_day">Monthly on a date</option>
           <option value="hourly">Every N hours</option>
+          <option value="once">Once, at…</option>
         </select>
       </label>
 
-      {kind === "hourly" ? (
+      {kind === "once" && (
+        <label htmlFor="recur-once">
+          At
+          <Input
+            id="recur-once"
+            type="datetime-local"
+            value={onceAt}
+            onChange={(e) => {
+              setOnceAt(e.target.value);
+              emit({ onceAt: e.target.value });
+            }}
+          />
+          <span className="v-recur-tz">
+            (your local time — shown on the calendar in {timezone})
+          </span>
+        </label>
+      )}
+
+      {kind === "hourly" && (
         <label htmlFor="recur-interval">
           Every
           <Input
@@ -121,7 +161,9 @@ export function RecurrenceBuilder({
           />
           hours (wall-clock — at these local times, {timezone})
         </label>
-      ) : (
+      )}
+
+      {kind !== "hourly" && kind !== "once" && (
         <label htmlFor="recur-time">
           At
           <Input

@@ -186,18 +186,22 @@ class ScheduleStore:
 
     # --- mutations (CQS: return the post-mutation state as confirmation) ----
 
-    def create(self, schedule: Schedule, *, now: datetime) -> Schedule:
+    def create(
+        self, schedule: Schedule, *, now: datetime, extra: dict[str, str] | None = None
+    ) -> Schedule:
         """Persist a new schedule with its initial ``next_fire_at`` computed.
 
         The first fire is the next occurrence strictly after the creation anchor
         (``schedule.created_at``); the store sets it so the tick picks the row up.
-        Audits ``schedule.create``.
+        Audits ``schedule.create``; ``extra`` carries door-specific audit context
+        (e.g. A10's ``actor=user_via_ui`` + ``originator=user`` — additive, default
+        unchanged for the A4 confirm-seam caller).
         """
         first_fire = next_fire_after(schedule, after=schedule.created_at)
         stored = schedule.with_next_fire(first_fire, now=now)
         with rls_connection(self._engine, schedule.owner_id) as conn:
             conn.execute(insert(schedules_t).values(**_values(stored)))
-        self._audit(schedule.owner_id, "schedule.create", stored)
+        self._audit(schedule.owner_id, "schedule.create", stored, extra=extra)
         return stored
 
     def edit(self, proposed: Schedule, *, now: datetime) -> Schedule:

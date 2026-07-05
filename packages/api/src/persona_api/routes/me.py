@@ -6,7 +6,12 @@ from datetime import datetime  # noqa: TC003 — used in cast() + Query at runti
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from persona.errors import InvalidTimezoneError, ScheduleNotFoundError
+from persona.errors import (
+    InvalidTimezoneError,
+    PersonaNotFoundError,
+    ScheduleNeverFiresError,
+    ScheduleNotFoundError,
+)
 from persona.timezone import validate_timezone
 
 from persona_api.auth import AuthenticatedUser, get_current_user
@@ -19,16 +24,18 @@ from persona_api.schemas import (
     UsageEntry,
     UserProfileResponse,
 )
-from persona_api.schemas.requests import ScheduleRescheduleRequest
+from persona_api.schemas.requests import ScheduleCreateRequest, ScheduleRescheduleRequest
 from persona_api.services import (
     calendar_reschedule_service,
     credits_service,
     notifications_service,
     occurrences_service,
+    schedule_create_service,
     user_service,
 )
 from persona_api.services.calendar_reschedule_service import ReschedulePreview
 from persona_api.services.occurrences_service import OccurrencesResult
+from persona_api.services.schedule_create_service import ScheduleCreateResult
 
 router = APIRouter(prefix="/v1/me", tags=["me"])
 
@@ -177,8 +184,12 @@ def _validate_quiet_hours(provided: dict[str, object]) -> None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _reschedule_body(body: ScheduleRescheduleRequest) -> None:
-    """Validate a calendar reschedule body: exactly one cadence kind + a valid IANA tz (422s)."""
+def _reschedule_body(body: ScheduleRescheduleRequest | ScheduleCreateRequest) -> None:
+    """Validate a cadence body: exactly one cadence kind + a valid IANA tz (422s).
+
+    Shared by the reschedule twin (A8) and the create door (A10) — both carry the same
+    picker-state cadence envelope.
+    """
     if (body.pattern is None) == (body.one_time_at is None):
         raise HTTPException(
             status_code=422, detail="send exactly one of 'pattern' or 'one_time_at'"
@@ -186,6 +197,75 @@ def _reschedule_body(body: ScheduleRescheduleRequest) -> None:
     try:
         validate_timezone(body.timezone)
     except InvalidTimezoneError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/schedule/preview", response_model=ReschedulePreview)
+async def preview_schedule_create(
+    request: Request,
+    body: ScheduleRescheduleRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> ReschedulePreview:
+    """Preview a schedule CREATE — the engine's next-fire + full clause + quiet-hours warn.
+
+    No write (Spec A10, criterion 2/7): the create dialog shows this as the confirm echo
+    before the user confirms — the SAME shape (and the same shared engine preview,
+    ``preview_schedule_cadence``) as A8's reschedule preview; the twins never fabricate a
+    time the DST gap/fold policy would shift. The body is the bare cadence envelope
+    (pattern XOR one_time_at + tz) — a preview needs no executor/subject/key.
+    """
+    _reschedule_body(body)
+    from datetime import UTC, datetime
+
+    return calendar_reschedule_service.preview_schedule_cadence(
+        request.app.state.rls_engine,
+        owner_id=user.id,
+        pattern=body.pattern,
+        one_time_at=body.one_time_at,
+        timezone=body.timezone,
+        now=datetime.now(UTC),
+    )
+
+
+@router.post("/schedule", response_model=ScheduleCreateResult)
+async def create_schedule(
+    request: Request,
+    body: ScheduleCreateRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> ScheduleCreateResult:
+    """Create a schedule + its backing task — the user's direct door (Spec A10, A10-D-1/2/6).
+
+    Deterministic and model-free: picker-state in (no raw RRULE), A8's ``ScheduleStore``
+    CAS door + the A2 task path underneath (one mechanism, A10-D-9). The named persona is
+    the executor; the user is the originator. Idempotent on the client-minted
+    ``idempotency_key`` (a double-click converges; two deliberate submits stay distinct).
+    422 on a never-firing cadence; 404 on an executor persona that isn't the caller's.
+    """
+    _reschedule_body(body)
+    from datetime import UTC, datetime
+
+    from persona_api.tasks.store import TaskStore
+
+    engine = request.app.state.rls_engine
+    try:
+        return schedule_create_service.create_user_schedule(
+            engine,
+            ScheduleStore(engine),
+            TaskStore(engine),
+            owner_id=user.id,
+            pattern=body.pattern,
+            one_time_at=body.one_time_at,
+            timezone=body.timezone,
+            persona_id=body.persona_id,
+            subject=body.subject,
+            idempotency_key=body.idempotency_key,
+            now=datetime.now(UTC),
+        )
+    except PersonaNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="executor persona not found") from exc
+    except ScheduleNeverFiresError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

@@ -21,7 +21,6 @@ with fakes and the real stores plug in at composition.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,10 +30,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from persona.errors import PersonaError
 from persona.logging import get_logger
 from persona.schedules import RecurrenceRule, Schedule
-from persona.tasks import Contract, Task, TaskState, WaitKind
+from persona.tasks import Contract, Task
 
 from persona_api.approvals.failure import FailureAccount, account_for_origination_failure
-from persona_api.tasks.scheduled_fire import TASK_SCHEDULED_FIRE_JOB_TYPE
+from persona_api.tasks.scheduled_task_builders import (
+    build_backing_schedule,
+    build_backing_task,
+    derive_task_and_schedule_ids,
+)
 
 if TYPE_CHECKING:
     from persona.schema.origination import PersonaIdentityTag
@@ -137,11 +140,6 @@ def derive_origination_key(
     return f"originate:{conversation_id}:{anchor}"
 
 
-def _derive_id(prefix: str, key: str) -> str:
-    """A deterministic id from the origination key (stable across replays)."""
-    return f"{prefix}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:32]}"
-
-
 class OriginationService:
     """Create the A2 task + A1 schedule from a confirmed contract, idempotently and visibly."""
 
@@ -171,8 +169,7 @@ class OriginationService:
             assistant_message_id=str(data.get("assistant_message_id", "")),
             draft_hash=str(data.get("draft_hash", "")),
         )
-        task_id = _derive_id("task", key)
-        schedule_id = _derive_id("sched", key)
+        task_id, schedule_id = derive_task_and_schedule_ids(key)
 
         existing = self._tasks.get_optional(owner_id, task_id)
         if existing is not None:
@@ -261,25 +258,15 @@ def _build_task(
     schedule_id: str | None,
     now: datetime,
 ) -> Task:
-    """Construct the A2 task carrying the A4 contract (the matrix rides ``contract``).
-
-    A schedule-backed task is born **WAITING(until_time)** — dormant at zero cost, awaiting its
-    first scheduled fire, which the leg handler resumes (the existing WAITING→ACTIVE resume). This
-    is what makes an A4 task actually execute (Spec A4 schedule-attach): without a runnable state
-    the task would sit inert forever. A scheduleless task stays DEFINED (the pre-schedule shape).
-    """
-    scheduled = schedule_id is not None
-    return Task(
-        id=task_id,
+    """The A2 task for a confirmed contract — the shared builder (A10-D-8), A4 anchors."""
+    return build_backing_task(
+        task_id=task_id,
         owner_id=owner_id,
         persona_id=persona_id,
         contract=contract,
         conversation_id=conversation_id,
         schedule_id=schedule_id,
-        state=TaskState.WAITING if scheduled else TaskState.DEFINED,
-        wait_kind=WaitKind.UNTIL_TIME if scheduled else None,
-        created_at=now,
-        updated_at=now,
+        now=now,
     )
 
 
@@ -291,21 +278,21 @@ def _build_schedule(
     task_id: str,
     now: datetime,
 ) -> Schedule:
-    """Construct the A1 schedule that fires the task's legs (target the A1→A2 fire bridge)."""
+    """Parse the event's JSON cadence payload, then build via the shared builder (A10-D-8).
+
+    The JSON-payload parsing is A4's (the runtime→api event crosses as data); the
+    fire-bridge/one-mechanism construction is the shared module's.
+    """
     recurrence_payload = payload.get("recurrence")
     one_time_raw = payload.get("one_time_at")
-    return Schedule(
-        id=schedule_id,
+    return build_backing_schedule(
+        schedule_id=schedule_id,
         owner_id=owner_id,
         timezone=str(payload["timezone"]),
         recurrence=RecurrenceRule.model_validate(recurrence_payload)
         if recurrence_payload
         else None,
         one_time_at=datetime.fromisoformat(one_time_raw) if isinstance(one_time_raw, str) else None,
-        # Fire the schedule→leg bridge, NOT task_leg directly: the leg needs a ScheduledFire trigger
-        # + the head-at-fire predecessor_seq the bridge computes (a static template can't carry it).
-        target_job_type=TASK_SCHEDULED_FIRE_JOB_TYPE,
-        payload_template={"task_id": task_id},
-        created_at=now,
-        updated_at=now,
+        task_id=task_id,
+        now=now,
     )

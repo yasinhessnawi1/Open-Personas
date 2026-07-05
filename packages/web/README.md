@@ -63,6 +63,10 @@ build never pulls `@clerk/*` into the bundle (enforced by CI gates +
   from anywhere; active-call indicators mark the on-call persona; one call at a
   time (end-and-switch); best-effort resume-after-reload (prompt, never silent);
   mute + push-to-talk; and a post-call recap in the chat thread.
+- **Calendar & reminders** (`/schedule`) — agenda/week/month views over the
+  server's occurrences engine (no client recurrence math); **New reminder**
+  creates a schedule directly (humane picker → engine preview → confirm, with
+  a quiet-hours warn/offer), and reschedules ride the same single edit door.
 - **Settings** — credit balance + per-turn usage, theme, tier-badge
   visibility, language toggle, conversations list.
 - **Connectors** (`/settings/connectors`) — link messaging platforms (Telegram,

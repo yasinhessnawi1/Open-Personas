@@ -103,3 +103,44 @@ export function applyReschedule(
     { method: "POST", body: JSON.stringify(body) },
   );
 }
+
+/** A user-initiated schedule create (Spec A10, A10-D-1) — the reschedule envelope + create fields. */
+export interface ScheduleCreateBody extends RescheduleBody {
+  persona_id: string;
+  subject: string;
+  /** Minted once per dialog-open (A10-D-6): retries converge, deliberate submits stay distinct. */
+  idempotency_key: string;
+}
+
+/** The create confirmation — ids + the same echo shape the preview showed. */
+export interface ScheduleCreateResult {
+  task_id: string;
+  schedule_id: string;
+  created: boolean;
+  human_terms: string;
+  timezone: string;
+  next_fire: string | null;
+  quiet_hours_offer: string | null;
+}
+
+/** Preview a CREATE — the same engine preview as the reschedule twin (no write; Spec A10 T2). */
+export function previewCreate(
+  token: string | null | undefined,
+  body: RescheduleBody,
+): Promise<ReschedulePreview> {
+  return authFetch<ReschedulePreview>("/v1/me/schedule/preview", token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Create a schedule + backing task through the ONE door (`ScheduleStore`, Spec A10 T1). */
+export function createSchedule(
+  token: string | null | undefined,
+  body: ScheduleCreateBody,
+): Promise<ScheduleCreateResult> {
+  return authFetch<ScheduleCreateResult>("/v1/me/schedule", token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}

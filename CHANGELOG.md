@@ -62,6 +62,50 @@ Per-spec entries are added by the close-out phase of each spec.
 - Latent fail-soft gap: two sibling `TierNotConfiguredError` classes exist and
   the interpreter/text_summarize composition only caught one — an unconfigured
   tier crashed loop construction instead of failing soft. Both now caught.
+### Scheduling — the user's own create door + the confabulation close (Spec A10)
+
+> The missing verb on the one schedule mechanism: the USER creates a schedule
+> directly — deterministic, model-free — and the persona can no longer claim a
+> schedule it didn't create.
+
+#### Added
+- **`POST /v1/me/schedule`** — create a schedule + its backing task through the
+  existing `ScheduleStore` CAS door and the A2 task path (picker-state in, the
+  server maps the rule; never-firing cadences 422 fail-fast; audited
+  `actor=user_via_ui`, originator=user). Idempotent on a required client-minted
+  key: a double-click converges on one task+schedule, two deliberate submits
+  stay distinct (no content-hash dedup — a form submit is intent).
+- **`POST /v1/me/schedule/preview`** — the create's confirm echo from the SAME
+  shared engine preview as the reschedule twin (full tz-framed clause, the
+  engine's next fire, the quiet-hours warn/offer; no write).
+- **"New reminder" on the calendar** (`/schedule`) — subject + required executor
+  persona + the reused A8 picker (now with an additive "Once, at…" kind the
+  reschedule dialog inherits) → engine preview → confirm; the created occurrence
+  renders immediately from the same occurrences read. Quiet-hours offer is
+  actionable (one tap re-times to the nearest edge and re-previews) and never
+  blocks.
+- **The honesty gate** (`persona_runtime/schedule_claim.py`) — grounding-first:
+  every legitimate schedule voice is emission-coupled, and ordinary generation
+  structurally cannot create — so a free-text "I've scheduled it" there is false
+  by construction. A precision-first trilingual (EN/NO/AR) claim detector (the
+  third post-generation lexical net, after refusals + tool/MCP-gap) appends a
+  deterministic, actionable correction, folded into the persisted text BEFORE
+  write-back — episodic and the graph synthesis tail see the corrected turn
+  (closes the phantom "scheduled routine" graph-node leak).
+- **Deleted-executor degrade** — a persona deletion CASCADE-deletes its tasks
+  while schedules survived, firing forever into a silent retry void (a latent
+  A4-era orphan). The fire bridge now pauses the orphaned schedule (audited)
+  and tells the user via a durable bell notification; never a system-voiced
+  fire, never a tick crash. Migration `038_notifications_schedule_kind` widens
+  the notifications kind CHECK for the new bell entry.
+
+#### Proven
+- A user-created recurring schedule fires ≥2 times through the REAL scheduler
+  tick → worker → executor-persona delivery (no hand-invoked step); a one-time
+  fires exactly once; the stored next-fire equals an independent engine walk and
+  appears in the calendar read immediately.
+- The confabulation negative through the real composed loop: the recognizer
+  misses, the model claims — the correction lands, `tasks=0, schedules=0`.
 
 ### Memory — the interactive knowledge-graph UI (Spec K5)
 

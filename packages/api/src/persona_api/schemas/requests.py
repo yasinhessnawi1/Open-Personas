@@ -17,6 +17,7 @@ __all__ = [
     "AuthorPersonaRequest",
     "ChannelContext",
     "CreateConversationRequest",
+    "ScheduleCreateRequest",
     "ScheduleRescheduleRequest",
     "CreateMCPServerRequest",
     "CreatePersonaRequest",
@@ -332,3 +333,22 @@ class ScheduleRescheduleRequest(_Input):
     pattern: RecurrencePattern | None = None
     one_time_at: datetime | None = None
     timezone: str = Field(min_length=1, max_length=64)
+
+
+class ScheduleCreateRequest(_Input):
+    """A user-initiated schedule create (Spec A10, A10-D-1 — the third verb on A8's door).
+
+    The A8 reschedule envelope + the create-only fields. **Picker-state in — NO raw RRULE
+    from the client** (the A8 bar): exactly one of ``pattern`` / ``one_time_at`` (XOR,
+    checked in the route); the SERVER maps pattern → rule. The user is the originator; the
+    named persona is the executor who delivers each fire. ``idempotency_key`` is minted by
+    the client once per create dialog (A10-D-6): retries/double-clicks converge on one
+    task+schedule, while two deliberate submits (two dialog-opens) stay distinct.
+    """
+
+    pattern: RecurrencePattern | None = None
+    one_time_at: datetime | None = None
+    timezone: str = Field(min_length=1, max_length=64)
+    persona_id: str = Field(min_length=1, max_length=128)
+    subject: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=8, max_length=128)

@@ -252,8 +252,13 @@ def _register_task_leg_tenant(
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
+    # ScheduleStore + engine feed the A10-D-7 deleted-executor degrade (pause + P6 notification).
     register_scheduled_task_fire_handler(
-        registry, task_store=task_store, queue=JobQueue(rls_engine)
+        registry,
+        task_store=task_store,
+        queue=JobQueue(rls_engine),
+        schedule_store=ScheduleStore(rls_engine),
+        rls_engine=rls_engine,
     )
 
 
