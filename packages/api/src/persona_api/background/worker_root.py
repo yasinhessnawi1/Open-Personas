@@ -45,6 +45,7 @@ from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 
 from persona_api.db.audit_factory import build_audit_logger
+from persona_api.errors import CommunityDbError
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
 from persona_api.initiative.handler import (
     InitiativeScanHandler,
@@ -489,7 +490,23 @@ def start_in_process_worker(
     (the worker's loop calls it on its cadence — at most one process actually ticks
     under the advisory lock), starts the loop, and returns the handle for the
     lifespan to drain on shutdown.
+
+    Spec K10 (T3): REFUSES a non-Postgres engine. The worker's substrate — the
+    ``PostgresGraphBackend`` it composes for synthesis/consolidation and the
+    ``FOR UPDATE SKIP LOCKED`` job queue — is Postgres-only. On a community
+    legacy-SQLite engine there is no graph and no claimable queue, so starting the
+    worker would compose a Postgres-typed backend over SQLite and fail on first use.
+    Refuse loudly at boot instead (a self-hoster who force-enabled the worker on the
+    deprecated SQLite path is told to move to the managed Postgres mode).
     """
+    if rls_engine.dialect.name != "postgresql":
+        raise CommunityDbError(
+            "the in-process worker requires a Postgres engine — its graph store and durable "
+            "job queue are Postgres-only. The community legacy-SQLite path has neither. Set "
+            "PERSONA_COMMUNITY_DB_MODE=auto to run on the bundled managed Postgres, or unset "
+            "PERSONA_API_IN_PROCESS_WORKER.",
+            context={"reason": "worker_requires_postgres", "dialect": rls_engine.dialect.name},
+        )
     registry = build_worker_registry(
         rls_engine=rls_engine,
         embedder=embedder,

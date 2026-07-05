@@ -44,6 +44,13 @@ from persona_api.db.community import (
     ensure_owner,
     make_community_engine,
 )
+from persona_api.db.community_import import maybe_run_community_import
+from persona_api.db.community_managed import (
+    CommunityDbManager,
+    CommunityDbMode,
+    resolve_managed_external_url,
+    run_migrations,
+)
 from persona_api.db.engine import create_db_engine
 from persona_api.editions import (
     build_credits_policy,
@@ -215,24 +222,67 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the community Chroma memory backend can compose it.
     app.state.embedder = persona_service.default_embedder(config.embedder_model)
 
-    # Spec 33 (Cluster B): the persistence backends are edition-selected.
+    # Spec 33 (Cluster B) + Spec K10 (T2): the persistence backends are
+    # edition-selected; within community, ``PERSONA_COMMUNITY_DB_MODE`` selects the
+    # legacy SQLite path or the K10 managed-Postgres substrate.
     rls_engine: Engine | None = None
     admin_engine: Engine | None = None
     memory_backend: Backend | None = None
+    community_db_manager: CommunityDbManager | None = None
     if config.edition is Edition.community:
-        # Zero-infra: a single SQLite file (no RLS — single owner) + Chroma for
-        # typed-memory vectors. No superuser/admin engine; the fixed owner is
-        # seeded so the app-table FKs hold (D-33-7 / D-33-8 / D-33-X-owner-seed).
-        rls_engine = make_community_engine(config.community_db_path)
-        create_community_schema(rls_engine)
-        ensure_owner(
-            rls_engine, owner_id=config.community_owner_id, email=config.community_owner_email
-        )
-        community_memory_dir = Path(config.community_memory_path)
-        community_memory_dir.mkdir(parents=True, exist_ok=True)
-        memory_backend = ChromaBackend(
-            persist_path=community_memory_dir, embedder=app.state.embedder
-        )
+        db_mode = CommunityDbMode(config.community_db_mode)
+        if db_mode is CommunityDbMode.legacy_sqlite:
+            # Zero-infra legacy path (Spec 33): a single SQLite file (no RLS —
+            # single owner) + Chroma for typed-memory vectors. No superuser/admin
+            # engine; the fixed owner is seeded so the app-table FKs hold (D-33-7 /
+            # D-33-8 / D-33-X-owner-seed). DEPRECATED (Spec K10 D-K10-5): retained
+            # one release as the auto-import source + rollback target — warn on use.
+            _LOG.warning(
+                "PERSONA_COMMUNITY_DB_MODE=legacy-sqlite is DEPRECATED (Spec K10 D-K10-5): "
+                "the community edition now runs an invisible managed Postgres. This path is "
+                "retained one release as the migration source; set PERSONA_COMMUNITY_DB_MODE="
+                "auto to move onto managed Postgres."
+            )
+            rls_engine = make_community_engine(config.community_db_path)
+            create_community_schema(rls_engine)
+            ensure_owner(
+                rls_engine, owner_id=config.community_owner_id, email=config.community_owner_email
+            )
+            community_memory_dir = Path(config.community_memory_path)
+            community_memory_dir.mkdir(parents=True, exist_ok=True)
+            memory_backend = ChromaBackend(
+                persist_path=community_memory_dir, embedder=app.state.embedder
+            )
+        else:
+            # Spec K10 (D-K10-1/-2/-3/-6/-8): the invisible product-managed Postgres.
+            # Resolution order external DATABASE_URL → embedded (D-K10-1); connect as
+            # the instance superuser (D-K10-2 — RLS inert, single-owner correctness by
+            # the owner predicate); reuse ``make_rls_engine`` (D-K10-6 — the GUC
+            # listener is harmless under superuser); run the SAME Alembic chain every
+            # boot (D-K10-8); typed memory on Postgres/``memory_chunks`` (D-K10-3).
+            external_url = resolve_managed_external_url(db_mode, config.database_url)
+            community_db_manager = CommunityDbManager(
+                external_url=external_url, base_dir=config.community_managed_db_dir
+            )
+            managed_url = community_db_manager.start()
+            run_migrations(managed_url)
+            rls_engine = make_rls_engine(managed_url, pool_size=config.db_pool_size)
+            # Spec K10 (T8, D-K10-4): auto-import a legacy SQLite + Chroma install on
+            # the first managed boot — the legacy-data branching (data present →
+            # import-first, then boot managed; absent → fresh embedded). A no-op when
+            # no legacy store is found; crash-safe + resumable (D-K10-11). Runs AFTER
+            # the schema is migrated (targets exist) and BEFORE ensure_owner (which is
+            # idempotent, so an imported owner row is fine).
+            maybe_run_community_import(
+                sqlite_path=config.community_db_path,
+                chroma_path=config.community_memory_path,
+                target_engine=rls_engine,
+                embedder=app.state.embedder,
+            )
+            ensure_owner(
+                rls_engine, owner_id=config.community_owner_id, email=config.community_owner_email
+            )
+            memory_backend = PostgresBackend(engine=rls_engine, embedder=app.state.embedder)
     else:
         # Cloud: Postgres + RLS (today's behavior, unchanged).
         if config.effective_app_database_url:
@@ -253,6 +303,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             memory_backend = PostgresBackend(engine=rls_engine, embedder=app.state.embedder)
     app.state.rls_engine = rls_engine
     app.state.admin_engine = admin_engine
+    # Spec K10 (D-K10-9): the managed-Postgres lifecycle owner (None unless the
+    # community managed path is active). The finally block stops an embedded
+    # postmaster on shutdown; external mode makes it a no-op.
+    app.state.community_db_manager = community_db_manager
     # Spec 33 (D-33-X-memory-chroma-community): expose the edition's typed-memory
     # backend so the persona-create/update service composes its four typed stores
     # over the edition-appropriate transport (Chroma for community, Postgres for
@@ -590,13 +644,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # worker + A1 scheduler tick run as an in-process background task. Composes the
     # synthesis handler on the wired ``synthesis_tier`` (the eval-re-run gate's
     # tier, NOT frontier) + A1's leader-gated tick, then runs the claim→execute
-    # loop alongside the API. Gated on ``in_process_worker`` (the orchestrator's
-    # activation flag) AND the presence of an RLS engine + tier registry — keyless /
-    # community boots keep the producers' enqueues no-op-consumed.
+    # loop alongside the API. Spec K10 (D-K10-7): the switch is now edition-derived —
+    # ON by default for community-on-managed-Postgres (so K2 synthesis / K7
+    # consolidation / K8 gist actually RUN — real parity), an explicit env flag still
+    # wins. The keyless fail-safe is UNTOUCHED: this also requires an RLS engine +
+    # tier registry, so a keyless / legacy-sqlite boot keeps the producers' enqueues
+    # no-op-consumed. (``start_in_process_worker`` additionally REFUSES a non-Postgres
+    # engine — the worker's graph/jobs substrate is Postgres-only.)
     in_process_worker = None
     _worker_tier_registry = getattr(app.state, "tier_registry", None)
+    _worker_enabled = config.effective_in_process_worker(
+        community_managed=community_db_manager is not None
+    )
     if (
-        config.in_process_worker
+        _worker_enabled
         and rls_engine is not None
         and runtime_factory is not None
         and _worker_tier_registry is not None
@@ -651,6 +712,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             admin_engine.dispose()
         if rls_engine is not None:
             rls_engine.dispose()
+        # Spec K10 (D-K10-9): stop an embedded managed Postgres AFTER the engine
+        # pools are disposed (connections closed first). Best-effort + a no-op in
+        # external mode; a teardown failure never crashes shutdown.
+        if community_db_manager is not None:
+            community_db_manager.stop()
 
 
 def create_app(config: APIConfig | None = None) -> FastAPI:

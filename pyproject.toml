@@ -160,6 +160,14 @@ ignore_missing_imports = true
 module = ["turbovec", "turbovec.*"]
 ignore_missing_imports = true
 
+# pixeltable-pgserver (Spec K10, the community edition's embedded managed Postgres)
+# ships no py.typed marker. It is lazy-imported only on the community embedded path
+# (db/community_managed.py, behind an ``_EmbeddedServer`` Protocol); ignore missing
+# imports rather than vendoring stubs.
+[[tool.mypy.overrides]]
+module = ["pixeltable_pgserver", "pixeltable_pgserver.*"]
+ignore_missing_imports = true
+
 # python-jose (persona-api, spec 08 auth) ships no stubs. Ignore missing imports
 # rather than depend on the partial third-party types-python-jose stubs.
 [[tool.mypy.overrides]]

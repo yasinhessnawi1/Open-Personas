@@ -42,6 +42,7 @@ _log = get_logger("api.errors")
 __all__ = [
     "AuthenticationError",
     "CloudConfigRefusedError",
+    "CommunityDbError",
     "ConcurrencyCappedError",
     "ConnectorServiceUnavailableError",
     "ConversationNotFoundError",
@@ -116,6 +117,21 @@ class CloudConfigRefusedError(PersonaError):
     tripped). There is intentionally NO request-time exception handler: like its
     sibling guards (:class:`PublicNoAuthRefusedError`,
     :class:`CloudGatewayNotVettedError`) this must crash the boot, never degrade.
+    """
+
+
+class CommunityDbError(PersonaError):
+    """Raised when the community managed-Postgres substrate cannot be provisioned (Spec K10, T1).
+
+    The fail-fast for the invisible product-managed database (D-K10-1/-9/-10): a
+    misconfigured mode (``PERSONA_COMMUNITY_DB_MODE=external`` with no
+    ``DATABASE_URL``), a datadir whose ``PG_VERSION`` disagrees with the bundled
+    Postgres major (refuse-don't-corrupt — D-K10-10), a unix-socket datadir path
+    that would exceed the AF_UNIX ``sun_path`` cap (D-K10-10), or the embedded
+    Postgres package being unavailable. ``context`` carries the offending
+    ``reason`` (+ the ``mode`` / ``path`` / ``major`` at fault). Like the sibling
+    startup guards this crashes the boot rather than degrading to an unusable
+    store.
     """
 
 

@@ -180,6 +180,46 @@ uv run persona init                                       # interactive → a pe
 uv run persona chat packages/core/examples/astrid_tenancy_law.yaml
 ```
 
+### Community storage: the invisible managed Postgres (Spec K10)
+
+The community edition is moving to a **product-managed Postgres + pgvector** so the
+community build gets the **full memory stack** — knowledge graph, node versioning,
+the episodic pyramid engine, consolidation, and graph-backed recall — the same code
+paths the cloud edition runs, in single-owner mode. You still install nothing: a
+Postgres 16 + pgvector is **bundled in the Python package** and provisioned for you.
+
+`PERSONA_COMMUNITY_DB_MODE` selects the store:
+
+| mode | what it does |
+| --- | --- |
+| `legacy-sqlite` (current default) | the original zero-infra SQLite + Chroma. **Deprecated** (retained one release as the auto-import source + rollback target); prints a deprecation notice at boot. |
+| `auto` | detect a legacy SQLite store → **auto-import it** into managed Postgres → boot managed; no legacy store → a fresh bundled Postgres. *(Becomes the default once the migration is field-verified.)* |
+| `embedded` | always the bundled Postgres (datadir under `~/.persona/pg16/`). |
+| `external` | use your own `DATABASE_URL`. |
+
+The bundled database is genuinely invisible: it runs **rootless over a unix socket
+with no TCP listener** (so it can never conflict with a port or be network-exposed),
+is created + migrated on first boot (**~4.2 s first boot**, **~2.2 s** every boot
+after), and is stopped cleanly when the app exits. Upgrading the app auto-applies any
+new migrations on the next boot — you never run a migration command.
+
+**Existing SQLite users:** on the first managed boot the app **imports your data
+automatically** (typed memory is re-embedded; relational rows are copied in FK order)
+and renames the old files to `*.migrated-<date>` as a rollback marker. The import is
+crash-safe and resumable — if it is interrupted it simply resumes and imports every
+record exactly once. To run it by hand:
+
+```bash
+python -m persona_api.db.community_import \
+  --sqlite .persona_community.db --chroma .persona_chroma \
+  --database-url postgresql+psycopg://…/persona
+```
+
+> **FAQ — I already self-host on Postgres.** Then you already have full parity today:
+> point the community build at your DB with `PERSONA_COMMUNITY_DB_MODE=external` +
+> `DATABASE_URL=…`. The graph and all worker-driven memory passes light up on any
+> Postgres engine (the gate is the engine, not the edition).
+
 ### Cloud edition — the owner's commercial hosting
 
 `PERSONA_EDITION=cloud` reproduces the hosted behavior: Clerk auth, multi-tenant

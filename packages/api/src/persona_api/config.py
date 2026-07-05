@@ -122,6 +122,31 @@ class APIConfig(BaseSettings):
     # file-based Chroma persist path. Read from ``PERSONA_API_COMMUNITY_MEMORY_PATH``.
     community_memory_path: Path = Field(default_factory=lambda: Path.cwd() / ".persona_chroma")
 
+    # Spec K10 (D-K10-1/-5): how the community edition sources its store.
+    #   ``legacy-sqlite`` — today's zero-infra SQLite + Chroma (DEPRECATED, D-K10-5;
+    #     retained one release as the auto-import source + rollback target).
+    #   ``external``      — use ``DATABASE_URL`` (a self-host power-user's Postgres).
+    #   ``embedded``      — the bundled invisible Postgres 16 + pgvector.
+    #   ``auto``          — detect a legacy SQLite store → auto-import it first
+    #                       (T6/D-K10-4), then boot managed; absent → fresh embedded
+    #                       (external ``DATABASE_URL`` when set, else the bundled PG).
+    # The managed path (auto-import + full worker parity) is complete and validated
+    # (T1–T8). The final one-line flip of this default from ``legacy-sqlite`` to
+    # ``auto`` is GUARDED (D-K10-4/-5): it must NOT reach the owner's deployment until
+    # the two real-data operator passes — a fresh managed install AND an
+    # existing-install upgrade-with-import — are verified. Until then the default
+    # stays ``legacy-sqlite`` so existing installs are byte-unchanged and no unit/CI
+    # boot silently provisions Postgres; ``auto``/``embedded``/``external`` are opt-in.
+    # Read from ``PERSONA_COMMUNITY_DB_MODE`` (no prefix — mirrors ``PERSONA_EDITION``).
+    community_db_mode: str = Field(
+        default="legacy-sqlite", validation_alias="PERSONA_COMMUNITY_DB_MODE"
+    )
+
+    # Spec K10 (D-K10-10): the base dir for the embedded managed-Postgres datadir.
+    # The versioned datadir is ``<dir>/pg16`` — short so the unix-socket path stays
+    # under the AF_UNIX cap. Read from ``PERSONA_API_COMMUNITY_MANAGED_DB_DIR``.
+    community_managed_db_dir: Path = Field(default_factory=lambda: Path.home() / ".persona")
+
     # DB DSNs — read WITHOUT the prefix (spec-07 convention: DATABASE_URL /
     # APP_DATABASE_URL). validation_alias overrides the env_prefix per field.
     database_url: str = Field(default="", validation_alias="DATABASE_URL", repr=False)
@@ -261,12 +286,17 @@ class APIConfig(BaseSettings):
     # Spec K2 (T8d) — the synthesis-pipeline activation flags. The deploy is a
     # single uvicorn process (D-08-5), so the durable A0 worker + A1 scheduler tick
     # run as an IN-PROCESS background task started in the lifespan worker root
-    # (``background.worker_root``), not a separate machine. OFF (default) keeps the
-    # producer enqueues no-op-consumed (the pre-activation state); ON composes the
-    # consumer (synthesis + avatar handlers + the scheduler tick) and runs the
-    # claim→execute loop alongside the API. The orchestrator flips this on the
-    # wired tier once the eval re-run gate is green.
-    in_process_worker: bool = Field(default=False, validation_alias="PERSONA_API_IN_PROCESS_WORKER")
+    # (``background.worker_root``), not a separate machine. When unset the effective
+    # value is edition-derived (Spec K10 D-K10-7): ON for community-on-managed-Postgres
+    # (the worker is what makes K2 synthesis / K7 consolidation / K8 gist REAL parity),
+    # OFF otherwise (cloud/legacy keep the pre-activation posture — the orchestrator
+    # flips it via env on the wired tier). An explicit ``PERSONA_API_IN_PROCESS_WORKER``
+    # (``true``/``false``) always wins; ``None`` (unset) means "auto per edition". The
+    # keyless fail-safe is preserved downstream: the worker still self-gates on a
+    # ``tier_registry``, so a keyless boot never starts it (:func:`effective_in_process_worker`).
+    in_process_worker: bool | None = Field(
+        default=None, validation_alias="PERSONA_API_IN_PROCESS_WORKER"
+    )
     # The tier the synthesis extractor + entity judge run on (D-K2-3). The hard
     # pre-live gate #2 re-runs the extraction corpus eval on THIS tier (NOT the
     # frontier/sonnet tier). ``small`` by default (cheap reflection pass).
@@ -457,6 +487,22 @@ class APIConfig(BaseSettings):
     # ceiling). On timeout the build fail-softs to ``avatar_url=null`` (D-29-X-
     # fail-soft). Read from ``PERSONA_API_AVATAR_GEN_TIMEOUT_S``.
     avatar_gen_timeout_s: float = Field(default=25.0, gt=0.0)
+
+    def effective_in_process_worker(self, *, community_managed: bool) -> bool:
+        """The effective in-process-worker switch (Spec K10 D-K10-7).
+
+        An explicit ``PERSONA_API_IN_PROCESS_WORKER`` (``true``/``false``) always
+        wins. When unset, default ON for community-on-managed-Postgres (the worker
+        is what makes K2 synthesis / K7 consolidation / K8 gist actually run — real
+        parity), OFF otherwise (cloud/legacy keep the pre-activation posture).
+
+        This encodes ONLY the default-on policy; the keyless fail-safe is a separate
+        downstream gate (the lifespan still requires a ``tier_registry``), so a
+        keyless community boot never starts the worker even when this returns True.
+        """
+        if self.in_process_worker is not None:
+            return self.in_process_worker
+        return self.edition is Edition.community and community_managed
 
     @property
     def effective_app_database_url(self) -> str:
