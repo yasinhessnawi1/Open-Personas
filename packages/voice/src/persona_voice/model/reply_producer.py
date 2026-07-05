@@ -518,11 +518,20 @@ class VoiceModelReplyProducer:
             is_identity_sensitive=classifiers.is_persona_critical(user_message, self._ctx.persona),
             is_boilerplate=classifiers.is_boilerplate(user_message),
             conversation_phase="opening" if is_first else "middle",
-            profile="text_default",
+            # Spec P9 (P9-D-3): the VOICE profile — the policy resolves the named
+            # LATENCY tier. The reason is the turn-taking budget (800 ms P50 /
+            # 1.5 s P95 end-to-end, R-V1-3), NOT cost: measured 2026-07-04
+            # (P9-R-2), no configured frontier model's first token fits the
+            # budget's model hop (GLM 5.2 median TTFT 6 565 ms, sonnet-4-6
+            # 857 ms, vs the mid primary's 57 ms). A future fast-enough frontier
+            # swaps in via PERSONA_MID_MODELS (ops) — no code change here.
+            profile="voice",
         )
 
     def _choose_tier(self, routing_context: RoutingContext) -> str:
-        """Pick the tier — persona override wins, else the rule-based router."""
+        """Pick the tier — persona pin wins (a deliberate override, P9-D-7),
+        else the policy router: the voice profile resolves the latency tier
+        (P9-D-3 — see the ``profile="voice"`` note in :meth:`_routing_context`)."""
         override = self._ctx.persona.routing.tier_for_generation
         if override != "auto":
             return override

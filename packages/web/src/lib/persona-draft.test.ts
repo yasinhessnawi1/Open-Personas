@@ -1,17 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SCORING_WEIGHTS,
   docToYaml,
   type PersonaDoc,
-  PRESET_WEIGHTS,
-  presetToWeights,
   readIdentity,
-  readRouting,
   readSelfFacts,
   readWorldview,
-  weightsToPreset,
   writeIdentityField,
-  writeRouting,
   writeSelfFacts,
   writeStringList,
   writeWorldview,
@@ -107,121 +101,56 @@ describe("persona-draft writers preserve sibling keys", () => {
   });
 });
 
-describe("persona-draft routing (Spec 31)", () => {
-  it("readRouting fills schema defaults when routing is absent", () => {
-    const doc = yamlToDoc(SAMPLE); // has only routing.tier_for_generation
-    const r = readRouting(doc);
-    // Automatic routing defaults ON when the intelligent block is absent
-    // (unset → enabled; an explicit `enabled: false` is still respected).
-    expect(r.intelligentEnabled).toBe(true);
-    expect(r.weights).toEqual(DEFAULT_SCORING_WEIGHTS);
-    expect(r.fallbackOnMiss).toBe(true);
-    expect(r.budget).toEqual({
-      maxCentsPerTurn: null,
-      maxCentsPerSession: null,
-      maxCentsPerDay: null,
-    });
-  });
-
-  it("readRouting respects an explicit intelligent.enabled: false (opt-out)", () => {
-    const doc = yamlToDoc(`schema_version: "1.0"
+describe("stored routing blocks survive untouched (Spec P9, P9-D-5 back-compat)", () => {
+  // The tuning surface is retired: persona-draft no longer reads or writes
+  // `routing.*`. Criterion 5's load-bearing half — an old persona carrying a
+  // pinned tier (a deliberate override, P9-D-7) must load byte-identically and
+  // keep its pin through every editor write path, so the server keeps honoring
+  // it. (That the pin still ROUTES is proven server-side in
+  // test_loop_policy_routing.py / test_reply_producer_routing.py.)
+  const PINNED = `schema_version: "1.0"
+identity:
+  name: Old-Timer
+  role: Legacy persona
+  background: Authored before P9.
+  constraints:
+    - Keep the pin.
 routing:
-  intelligent:
-    enabled: false
-`);
-    expect(readRouting(doc).intelligentEnabled).toBe(false);
-  });
-
-  it("readRouting reads an enabled persona with weights + budget caps", () => {
-    const doc = yamlToDoc(`schema_version: "1.0"
-routing:
-  tier_for_generation: auto
+  tier_for_generation: mid
+  tier_for_tools: small
   intelligent:
     enabled: true
     weights: { cost: 0.7, quality: 0.25, latency: 0.05 }
-    fallback_to_rule_based_on_miss: false
   budget:
     max_cents_per_turn: 2.5
-    max_cents_per_session: 50
-`);
-    const r = readRouting(doc);
-    expect(r.intelligentEnabled).toBe(true);
-    expect(r.weights).toEqual({ cost: 0.7, quality: 0.25, latency: 0.05 });
-    expect(r.fallbackOnMiss).toBe(false);
-    expect(r.budget.maxCentsPerTurn).toBe(2.5);
-    expect(r.budget.maxCentsPerSession).toBe(50);
-    expect(r.budget.maxCentsPerDay).toBeNull();
-  });
+`;
 
-  it("preset ↔ weights round-trips for every locked preset", () => {
-    for (const preset of ["balanced", "cost", "quality", "speed"] as const) {
-      expect(presetToWeights(preset)).toEqual(PRESET_WEIGHTS[preset]);
-      expect(weightsToPreset(PRESET_WEIGHTS[preset])).toBe(preset);
-    }
-  });
-
-  it("balanced preset equals the ModelScoringWeights() default", () => {
-    expect(PRESET_WEIGHTS.balanced).toEqual(DEFAULT_SCORING_WEIGHTS);
-    expect(weightsToPreset(DEFAULT_SCORING_WEIGHTS)).toBe("balanced");
-  });
-
-  it("weightsToPreset returns 'custom' for a non-preset vector (no normalisation)", () => {
-    expect(weightsToPreset({ cost: 0.33, quality: 0.34, latency: 0.33 })).toBe(
-      "custom",
-    );
-    // A vector that does not sum to 1 is still valid (D-23-1) and reads custom.
-    expect(weightsToPreset({ cost: 1, quality: 1, latency: 1 })).toBe("custom");
-  });
-
-  it("writeRouting omits unset caps and drops an all-unset budget block", () => {
-    const doc = yamlToDoc(SAMPLE);
-    const next = writeRouting(doc, {
-      intelligentEnabled: true,
-      weights: presetToWeights("cost"),
-      fallbackOnMiss: true,
-      budget: {
-        maxCentsPerTurn: 2.5,
-        maxCentsPerSession: null,
-        maxCentsPerDay: null,
-      },
-    });
-    const routing = next.routing as Record<string, unknown>;
-    // sibling tier key preserved
-    expect(routing.tier_for_generation).toBe("auto");
-    const budget = routing.budget as Record<string, unknown>;
-    expect(budget).toEqual({ max_cents_per_turn: 2.5 }); // session/day omitted
-
-    // clearing all caps drops the budget block entirely
-    const cleared = writeRouting(next, {
-      ...readRouting(next),
-      budget: {
-        maxCentsPerTurn: null,
-        maxCentsPerSession: null,
-        maxCentsPerDay: null,
-      },
-    });
-    expect((cleared.routing as Record<string, unknown>).budget).toBeUndefined();
-  });
-
-  it("writeRouting → readRouting round-trips the view", () => {
-    const doc = yamlToDoc(SAMPLE);
-    const view = {
-      intelligentEnabled: true,
-      weights: presetToWeights("quality"),
-      fallbackOnMiss: false,
-      budget: {
-        maxCentsPerTurn: 3,
-        maxCentsPerSession: 40,
-        maxCentsPerDay: null,
-      },
-    };
-    expect(readRouting(writeRouting(doc, view))).toEqual(view);
-  });
-
-  it("an untouched routing section never rewrites the doc (controlled-form invariant)", () => {
-    // The form only calls writeRouting on user interaction; reading must be pure.
-    const doc = yamlToDoc(SAMPLE);
-    readRouting(doc);
+  it("a pinned persona round-trips byte-identically (load + save changes nothing)", () => {
+    const doc = yamlToDoc(PINNED);
     expect(yamlToDoc(docToYaml(doc))).toEqual(doc);
+    const routing = doc.routing as Record<string, unknown>;
+    expect(routing.tier_for_generation).toBe("mid");
+  });
+
+  it("every editor write path preserves the stored routing block verbatim", () => {
+    const doc = yamlToDoc(PINNED);
+    const afterIdentity = writeIdentityField(doc, "name", "Renamed");
+    const afterFacts = writeSelfFacts(afterIdentity, [
+      { fact: "New fact.", confidence: 0.5 },
+    ]);
+    const afterTools = writeStringList(afterFacts, "tools", ["web_search"]);
+    const afterWorldview = writeWorldview(afterTools, []);
+    expect(afterWorldview.routing).toEqual(doc.routing);
+  });
+
+  it("the editor never authors a routing block into a fresh draft", () => {
+    const doc = yamlToDoc(SAMPLE);
+    const edited = writeIdentityField(doc, "name", "Bjorn");
+    // SAMPLE carries only the legacy `tier_for_generation: auto` — no writer
+    // adds intelligent/budget config the user never asked for.
+    expect(edited.routing).toEqual(doc.routing);
+    expect(
+      (edited.routing as Record<string, unknown>).intelligent,
+    ).toBeUndefined();
   });
 });

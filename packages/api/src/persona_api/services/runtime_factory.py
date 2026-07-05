@@ -46,10 +46,15 @@ from persona.tools import (
 )
 from persona.tools.mcp.mirror import load_mirror_catalog
 from persona_runtime.agentic.loop import AgenticLoop
+from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
 from persona_runtime.loop import ConversationLoop
 from persona_runtime.prompt import PromptBuilder
-from persona_runtime.router import Router
-from persona_runtime.routing import FirstTokenLatencyTracker, IntelligentRouter
+from persona_runtime.routing import (
+    FirstTokenLatencyTracker,
+    IntelligentRouter,
+    PolicyRouter,
+    tier_for,
+)
 from sqlalchemy import select, text
 
 from persona_api.db.models import personas as personas_t
@@ -221,8 +226,19 @@ class RuntimeFactory:
         # loop actually consults the router — existing personas (default off)
         # route byte-identically (criterion 11).
         self._latency_tracker = FirstTokenLatencyTracker()
-        self._intelligent_router = self._build_intelligent_router(
-            tier_registry, self._latency_tracker
+        # Spec P9 (P9-D-4/D-7): the Spec-23 scorer is DORMANT by default — the
+        # global gate (``PERSONA_ROUTING_INTELLIGENT_ENABLED``, default off) is
+        # consulted BEFORE the persona flag ever is. The stored per-persona
+        # ``intelligent.enabled: true`` is a web-form artifact (written
+        # unset-as-enabled), not a deliberate choice — it only means something
+        # when an operator turns the global gate on. NB re-enable prerequisite:
+        # repopulate the model-metadata tables first, or every pick silently
+        # degrades to rule-based slot-0 (metadata covers zero deployed models,
+        # measured at P9 Phase 2).
+        self._intelligent_router = (
+            self._build_intelligent_router(tier_registry, self._latency_tracker)
+            if api_config is not None and getattr(api_config, "routing_intelligent_enabled", False)
+            else None
         )
         # Spec K2 (T8d) — the user-scoped graph store for the ``record_user_fact``
         # direct-write tool (D-K2-1). ``None`` until ``enable_graph_writes`` composes
@@ -701,10 +717,16 @@ class RuntimeFactory:
         # to generate.
         if self._tier_registry is not None:
             try:
-                small_backend = self._tier_registry.get("small")
-            except (ProviderError, TierNotConfiguredError) as exc:
+                # Spec P9: summarization is the background surface (small) —
+                # stated via the policy instead of an incidental literal.
+                small_backend = self._tier_registry.get(tier_for("background"))
+            except (
+                ProviderError,
+                TierNotConfiguredError,
+                RegistryTierNotConfiguredError,  # the sibling-class latent gap (T3 finding)
+            ) as exc:
                 _logger.warning(
-                    "text_summarize not wired — small-tier backend unavailable: {error}",
+                    "text_summarize not wired — background-tier backend unavailable: {error}",
                     error=type(exc).__name__,
                 )
             else:
@@ -1024,17 +1046,31 @@ class RuntimeFactory:
         """Build the A4/A8 loop-side interpreters (standing + amendment + steering + reschedule).
 
         The precision layer of the contract flow (A4-D-2/T9/T9b + A8-T6) — all four share one
-        small-tier backend. **Fail-soft** (the text_summarize precedent): if the small backend is
-        unavailable (keyless env / no tier), returns all ``None`` so the loop's A4/A8 gates stay
-        inert and ordinary chat is byte-unchanged — never a construction failure.
+        recognition-tier backend (Spec P9, P9-D-2: ``mid`` minimum via
+        ``PERSONA_API_RECOGNITION_TIER`` — small was the R4 confabulation root; recognition
+        gates whether the persona can ACT). **Fail-soft** (the text_summarize precedent): if
+        the backend is unavailable (keyless env / no tier), returns all ``None`` so the loop's
+        A4/A8 gates stay inert and ordinary chat is byte-unchanged — never a construction
+        failure.
         """
         if self._tier_registry is None:
             return None, None, None, None
+        recognition_tier = tier_for(
+            "recognition",
+            override=(self._api_config.recognition_tier if self._api_config is not None else None),
+        )
         try:
-            backend = self._tier_registry.get("small")
-        except (ProviderError, TierNotConfiguredError) as exc:
+            backend = self._tier_registry.get(recognition_tier)
+        # Both TierNotConfiguredError flavours: the registry's own (tier name
+        # unresolvable, persona_runtime.errors) AND the MODELS-list all-fail
+        # (persona.backends.errors) — sibling classes, not aliases. Catching
+        # only the backends one left the registry's raise a latent
+        # construction crash (found by the T3 composition test).
+        except (ProviderError, TierNotConfiguredError, RegistryTierNotConfiguredError) as exc:
             _logger.warning(
-                "task origination not wired — small-tier backend unavailable: {error}",
+                "task origination not wired — recognition-tier ({tier}) backend unavailable: "
+                "{error}",
+                tier=recognition_tier,
                 error=type(exc).__name__,
             )
             return None, None, None, None
@@ -1186,7 +1222,11 @@ class RuntimeFactory:
             scanned_skills=scanned,  # type: ignore[arg-type]
             history_manager=ConversationHistoryManager(),
             prompt_builder=PromptBuilder(),
-            router=Router(),
+            # Spec P9 (P9-D-1): the deliberate surface→tier policy — chat
+            # resolves frontier every turn (pin still honored at the loop's
+            # override short-circuit). The heuristic cascade is retired from
+            # the default path, retained dormant.
+            router=PolicyRouter(tier_registry=self._tier_registry),
             tier_registry=self._tier_registry,
             turn_log_writer=self._turn_log_writer,
             # Spec 23 T13: app-scoped intelligent-routing wiring. The shared
@@ -1274,7 +1314,9 @@ class RuntimeFactory:
             skill_injector=SkillInjector(),
             scanned_skills=scanned,  # type: ignore[arg-type]
             prompt_builder=PromptBuilder(),
-            router=Router(),
+            # Spec P9 (P9-D-1): step tiers come from _tier_for_step (D-06-6),
+            # not this router — composed for Protocol parity with the chat loop.
+            router=PolicyRouter(tier_registry=self._tier_registry),
             tier_registry=self._tier_registry,
             # Spec S1 (S1-D-7): injection audit sink (R5: backend-selected).
             audit_logger=self._resolve_audit_logger(),
@@ -1288,13 +1330,13 @@ class RuntimeFactory:
 
     async def build_title(self, first_message: str) -> str:
         """Generate a short (≤5-word) conversation title from the first message,
-        using the **small** tier (pure boilerplate — architecture §5.1.1). Returns
+        using the background tier (Spec P9: unread, narrow — small). Returns
         the title text; the caller (chat_service) applies it best-effort."""
         from datetime import UTC, datetime
 
         from persona.schema.conversation import ConversationMessage
 
-        backend = self._tier_registry.get("small")
+        backend = self._tier_registry.get(tier_for("background"))
         now = datetime.now(UTC)
         prompt = [
             ConversationMessage(

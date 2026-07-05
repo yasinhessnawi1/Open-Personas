@@ -271,6 +271,21 @@ class APIConfig(BaseSettings):
     # pre-live gate #2 re-runs the extraction corpus eval on THIS tier (NOT the
     # frontier/sonnet tier). ``small`` by default (cheap reflection pass).
     synthesis_tier: str = Field(default="small", validation_alias="PERSONA_API_SYNTHESIS_TIER")
+    # Spec P9 (P9-D-2): the tier the A4/A8 intent interpreters (standing-intent /
+    # amendment / steering / reschedule) run on. ``mid`` minimum — small was the R4
+    # confabulation root (the recognizer never fired) and is measurably slower than
+    # mid (P9-R-2). Override to ``frontier`` for reliability-critical deploys.
+    recognition_tier: str = Field(default="mid", validation_alias="PERSONA_API_RECOGNITION_TIER")
+    # Spec P9 (P9-D-4/D-7): the GLOBAL gate for the Spec-23 intelligent
+    # (model-within-tier) routing machinery. Default OFF — the deliberate
+    # surface→tier policy is the path; the scorer is a dormant, reversible
+    # lever. When off, the per-persona ``routing.intelligent.enabled`` flag is
+    # never consulted (it is a web-form artifact, not a deliberate opt-in).
+    # ⚠ Before enabling: repopulate the model-metadata tables for the deployed
+    # models, or every pick silently degrades to rule-based slot-0.
+    routing_intelligent_enabled: bool = Field(
+        default=False, validation_alias="PERSONA_ROUTING_INTELLIGENT_ENABLED"
+    )
     # On-by-default ``record_user_fact`` direct-write tool (D-K2-1). The persona's
     # per-persona ``tools`` allow-list is still the final gate inside
     # ``build_default_toolbox``; this flag only governs whether the tool is COMPOSED

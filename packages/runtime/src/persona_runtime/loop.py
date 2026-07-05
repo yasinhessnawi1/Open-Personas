@@ -83,6 +83,7 @@ from persona_runtime.routing import (
     RoutingDecision,
     classifiers,
     reorder_primary,
+    tier_for,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 from persona_runtime.task_origination import (
@@ -1758,8 +1759,12 @@ class ConversationLoop:
         return boundary > conversation.compacted_up_to
 
     async def _summarise(self, messages: list[ConversationMessage]) -> str:
-        """Summarise an excerpt on the small tier (the one async summary call)."""
-        backend = self._tiers.get("small")
+        """Summarise an excerpt on the background tier (the one async summary call).
+
+        Spec P9: an unread, narrow, high-volume job — the background surface
+        (small), now stated via the policy instead of an incidental literal.
+        """
+        backend = self._tiers.get(tier_for("background"))
         rendered = "\n".join(f"{m.role}: {m.content}" for m in messages)
         prompt = [
             ConversationMessage(

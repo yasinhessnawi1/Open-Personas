@@ -11,6 +11,58 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Routing — deliberate surface→tier policy; the tuning surface retired (Spec P9)
+
+> The router stops guessing: a turn's model tier is a function of its SURFACE,
+> stated once — not of turn counts or keyword-matching. Closes the mid/small
+> confabulation root the R4 operator pass surfaced, at the tier level.
+
+#### Added
+- **`routing/policy.py`** (`persona-runtime`) — the policy table
+  (chat/authoring/agentic = frontier · voice = the latency tier · background =
+  small · recognition = mid), `tier_for(surface, pin, override)` (precedence
+  pin > env-override > table) and `PolicyRouter` behind the Spec-18 Router
+  Protocol (Layer-1 vision constraints still filter first, fail-loud preserved).
+- `PERSONA_API_RECOGNITION_TIER` (default `mid`) — the A4/A8 intent interpreters
+  (standing-intent / amendment / steering / reschedule) now compose on the
+  recognition tier, never small (the confabulation root; small also measured
+  SLOWER than mid — 926 ms vs 57 ms median TTFT).
+- `PERSONA_ROUTING_INTELLIGENT_ENABLED` (default `false`) — the Spec-23
+  model-within-tier scorer + budget machinery is globally DORMANT; the
+  per-persona `intelligent.enabled` flag is only consulted when this gate is on
+  (a stored `true` was a web-form artifact, not a choice). Structural test
+  proves the hot path never touches the Spec-18/23 scorers.
+
+#### Changed
+- **Chat generation is frontier, deterministically** — no turn-1-only frontier,
+  no mid downgrade, no boilerplate/persona-critical keyword tier-flipping
+  (classifiers retired from the routing path; still computed for TurnLog
+  observability). A pinned `tier_for_generation` still wins (deliberate
+  override, honored — just no longer surfaced).
+- **Voice generation routes the latency tier deterministically** — voice turn 1
+  no longer rides frontier (a live latency hazard: no configured frontier model
+  fits the 800 ms voice budget — measured), and boilerplate turns no longer dip
+  to small. Fixed en route: the voice reply producer built its routing context
+  with the TEXT profile — the Spec-18 voice profile never reached the real seam.
+- **Agentic run steps are frontier for every step** (user-read output;
+  supersedes the D-06-6 tool-continuation→mid grading).
+- Authoring recommenders (`/recommend-tools`, `/recommend-capabilities`) moved
+  off hardcoded mid onto the authoring tier (frontier); the author/refine
+  routes' silent mid fallback now falls back to the policy default instead.
+- Background surfaces (titles, compaction summaries, text_summarize) resolve
+  via `tier_for("background")` — explicit, not incidental.
+
+#### Removed
+- **The per-persona routing tuning UI** (`RoutingSection`, Spec 31) + its
+  persona-draft plumbing + 32 i18n keys. The `RoutingConfig` schema fields stay
+  (old personas load byte-identically; stored pins survive every editor write
+  verbatim — proven); no migration.
+
+#### Fixed
+- Latent fail-soft gap: two sibling `TierNotConfiguredError` classes exist and
+  the interpreter/text_summarize composition only caught one — an unconfigured
+  tier crashed loop construction instead of failing soft. Both now caught.
+
 ### Memory — the interactive knowledge-graph UI (Spec K5)
 
 > The user-facing surface for the shared-brain knowledge graph: **everything your

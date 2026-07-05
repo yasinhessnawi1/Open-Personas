@@ -32,13 +32,16 @@ the CLI for local use, the tests in CI. The loop itself is stateless per request
   conditioning rather than reimplementing it. Optionally enriched with an
   owner-scoped graph retrieval (`graph_selection.make_graph_retrieval`), queried
   independently of the persona stores.
-- **Routing** — `Router` (a `@runtime_checkable` Protocol) with `HeuristicRouter`
-  (rule-based, per-turn, per-persona-overridable) and `UnifiedRouter` (two-layer:
-  hard constraint-filter then sweet-spot scoring with bounded fallback). Plus the
-  opt-in **`IntelligentRouter`**: after the rules pick a tier, it scores the
-  candidate models in that tier on cost / quality / latency (with a hard capability
-  gate) using published metadata — deterministic, no ML, off by default, and
-  degrading to the slot-0 model on any metadata miss.
+- **Routing** — a deliberate **surface→tier policy** (`routing/policy.py`, Spec P9):
+  `PolicyRouter` behind the `Router` Protocol resolves each surface's stated tier
+  (chat/authoring/agentic = frontier, voice = the latency tier, background = small,
+  recognition = mid) — a persona's pinned `tier_for_generation` still wins
+  (deliberate override, honored). Layer-1 capability constraints (vision) still
+  filter first. The earlier machinery is retained **dormant**: `HeuristicRouter`
+  (the Spec-05 rules), `UnifiedRouter` (constraint-filter + sweet-spot scoring),
+  and the `IntelligentRouter` model-within-tier scorer — the latter gated globally
+  by `PERSONA_ROUTING_INTELLIGENT_ENABLED` (default off; repopulate model metadata
+  before re-enabling).
 - **`TierRegistry`** — a lazy-cached backend registry per tier (`frontier` / `mid`
   / `small`), configured via `PERSONA_{TIER}_*` env triples, with
   small→mid→frontier fallback and cross-provider multi-model per tier.

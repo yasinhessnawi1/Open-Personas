@@ -39,6 +39,13 @@ from persona_runtime.routing.nvidia_models import (
     NVIDIA_LAUNCH_MODEL_METADATA,
     nvidia_metadata_for_model,
 )
+from persona_runtime.routing.policy import (
+    SURFACE_TIER_POLICY,
+    PolicyRouter,
+    Surface,
+    surface_for_profile,
+    tier_for,
+)
 from persona_runtime.routing.protocol import Router, RouterScorer
 from persona_runtime.routing.types import (
     RoutingContext,
@@ -54,15 +61,20 @@ __all__ = [
     "ModelSelection",
     "NVIDIA_LAUNCH_MODEL_METADATA",
     "NoVisionTierConfiguredError",
+    "PolicyRouter",
     "Router",
     "RouterScorer",
     "RoutingConstraintsUnsatisfiableError",
     "RoutingContext",
     "RoutingDecision",
     "RoutingProfile",
+    "SURFACE_TIER_POLICY",
+    "Surface",
     "UnifiedRouter",
     "apply_constraint_filter",
     "canonical_model_id",
     "nvidia_metadata_for_model",
     "reorder_primary",
+    "surface_for_profile",
+    "tier_for",
 ]

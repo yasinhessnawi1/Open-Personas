@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from persona.imagegen import ContentRejectedError, ImageGenError, craft_avatar_prompt
 from persona.logging import get_logger
 from persona.tools.audit import JSONLToolAuditLogger, ToolAuditEvent
+from persona_runtime.routing import tier_for
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.config import Edition
@@ -494,7 +495,12 @@ async def author_persona(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(request, getattr(request.app.state, "authoring_tier", "mid"))
+    backend = require_model_backend(
+        request,
+        # Spec P9: authoring is a frontier surface; an unset app.state falls
+        # back to the POLICY default, never a silent mid downgrade.
+        getattr(request.app.state, "authoring_tier", None) or tier_for("authoring"),
+    )
     events = authoring_service.stream_authoring_draft(
         backend,
         body.description,
@@ -533,7 +539,12 @@ async def refine_persona(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(request, getattr(request.app.state, "authoring_tier", "mid"))
+    backend = require_model_backend(
+        request,
+        # Spec P9: authoring is a frontier surface; an unset app.state falls
+        # back to the POLICY default, never a silent mid downgrade.
+        getattr(request.app.state, "authoring_tier", None) or tier_for("authoring"),
+    )
     events = authoring_service.stream_refine_authoring_draft(
         backend,
         body.current_yaml,
@@ -568,7 +579,11 @@ async def recommend_tools(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(request, "mid")
+    # Spec P9 (Phase 2 gate ruling): the recommenders are authoring surface →
+    # frontier (negligible volume; quality-first), not a hardcoded mid.
+    backend = require_model_backend(
+        request, getattr(request.app.state, "authoring_tier", None) or tier_for("authoring")
+    )
     recommendations = await authoring_service.recommend_tools_for_persona(backend, body.description)
     _deduct_and_audit(
         request,
@@ -605,7 +620,10 @@ async def recommend_capabilities(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(request, "mid")
+    # Spec P9: authoring surface → frontier (same ruling as recommend-tools).
+    backend = require_model_backend(
+        request, getattr(request.app.state, "authoring_tier", None) or tier_for("authoring")
+    )
     recommendations = await authoring_service.recommend_capabilities_for_persona(
         backend,
         body.description,

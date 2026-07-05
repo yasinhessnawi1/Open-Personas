@@ -67,6 +67,7 @@ from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.prompt import RetrievedContext
 from persona_runtime.question_author import TemplateQuestionAuthor
 from persona_runtime.questions import QuestionRegistry
+from persona_runtime.routing import tier_for
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 if TYPE_CHECKING:
@@ -559,17 +560,20 @@ class AgenticLoop:
     # ----- tier policy (D-06-6) --------------------------------------------
 
     def _tier_for_step(self, step_num: int, last_action: StepType | None) -> str:
-        """Grade the model tier for this step (D-06-6).
+        """The tier for this step — the agentic_step policy surface (P9-D-1).
 
-        ``force_frontier_tier`` (the spec §11 marker-mitigation) overrides to
-        frontier for every step. Otherwise: the first/planning step → frontier;
-        a step continuing after a tool call → mid; default → mid.
+        Spec P9 supersedes the D-06-6 step-grading (first/planning → frontier,
+        tool-continuation → mid): every agentic step produces USER-READ run
+        output, so all steps route through ``tier_for("agentic_step")``
+        (frontier — the Phase 1 gate ruling). ``force_frontier_tier`` (the
+        spec §11 marker-mitigation) is retained and now coincides with the
+        policy default. ``step_num``/``last_action`` stay in the signature so
+        a future non-user-read step class can re-grade without a caller change.
         """
         if self._force_frontier:
             return "frontier"
-        if step_num == 0 or last_action == StepType.REASONING:
-            return "frontier"
-        return "mid"
+        del step_num, last_action  # P9: every step is user-read — one surface
+        return tier_for("agentic_step")
 
     # ----- compaction bridge (D-06-4; the loop owns the async pre-compute) --
 
@@ -592,8 +596,11 @@ class AgenticLoop:
         return self._compactor.compact_if_needed(context, budget, summary=summary)
 
     async def _summarise(self, messages: list[ConversationMessage]) -> str:
-        """Summarise an excerpt on the small tier (the one async summary call)."""
-        backend = self._tiers.get("small")
+        """Summarise an excerpt on the background tier (the one async summary call).
+
+        Spec P9: internal compaction — unread — the background surface (small).
+        """
+        backend = self._tiers.get(tier_for("background"))
         rendered = "\n".join(f"{m.role}: {m.content}" for m in messages)
         prompt = [self._system(_SUMMARISE_INSTRUCTION), self._user(rendered)]
         response = await backend.chat(prompt)

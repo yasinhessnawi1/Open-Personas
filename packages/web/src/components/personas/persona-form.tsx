@@ -11,12 +11,10 @@ import {
   EPISTEMIC_OPTIONS,
   type PersonaDoc,
   readIdentity,
-  readRouting,
   readSelfFacts,
   readStringList,
   readWorldview,
   writeIdentityField,
-  writeRouting,
   writeSelfFacts,
   writeStringList,
   writeWorldview,
@@ -26,7 +24,6 @@ import { cn } from "@/lib/utils";
 import { voiceLanguageWarning } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
-import { RoutingSection } from "./routing-section";
 import { SpecialitiesChooser } from "./specialities-chooser";
 
 // Spec 30 T11 — a built-in MCP server in the capability-management catalog.
@@ -400,11 +397,10 @@ export function PersonaForm({
         </Subsection>
       </Section>
 
-      {/* Routing (Spec 31, regional — D-31-X-routing-section-regional) */}
-      <RoutingSection
-        value={readRouting(doc)}
-        onChange={(view) => onChange(writeRouting(doc, view))}
-      />
+      {/* Spec P9 (P9-D-5): the Spec-31 RoutingSection is retired — surface→tier
+          is a deliberate product policy, not a per-persona tuning surface. A
+          stored `routing:` block (pins, flags) is preserved untouched by every
+          writer in persona-draft (back-compat: pins stay honored server-side). */}
     </div>
   );
 }

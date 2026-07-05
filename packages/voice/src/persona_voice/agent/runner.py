@@ -54,8 +54,7 @@ from persona.stores import (
 from persona.stores.postgres import PostgresBackend
 from persona.tools import build_default_toolbox
 from persona_runtime.prompt import PromptBuilder
-from persona_runtime.router import Router
-from persona_runtime.routing import FirstTokenLatencyTracker
+from persona_runtime.routing import FirstTokenLatencyTracker, PolicyRouter
 from persona_runtime.tier import tier_registry_from_env
 from sqlalchemy import text
 
@@ -465,7 +464,9 @@ async def build_agent_session(
         stores=stores,
         conversation=conversation,
         prompt_builder=PromptBuilder(),
-        router=Router(),
+        # Spec P9 (P9-D-1/D-3): voice resolves the latency tier via the policy
+        # (no turn-1 frontier — the model hop must fit the 800ms voice budget).
+        router=PolicyRouter(tier_registry=tier_registry),
         tier_registry=tier_registry,
         history_manager=ConversationHistoryManager(),
         latency_tracker=tracker,
