@@ -113,6 +113,7 @@ def create_user_schedule(
     subject: str,
     idempotency_key: str,
     now: datetime,
+    notify_on_fire: bool = True,
 ) -> ScheduleCreateResult:
     """Create the backing task + schedule for a user-initiated reminder (A10-D-1/2/6).
 
@@ -120,6 +121,10 @@ def create_user_schedule(
     :class:`ScheduleNeverFiresError` (→ 422) when the cadence has no future occurrence,
     :class:`PersonaNotFoundError` (→ 404) when the executor isn't the owner's, and
     ``ValueError`` (→ 422) when the subject is empty after normalisation.
+
+    ``notify_on_fire`` (default True — this is a reminder; you want reminding) opts the
+    schedule into the coalesced fire bell; the subject rides the schedule so each fire can
+    title its bell entry. The user can turn it off in the create dialog.
     """
     cleaned_subject = normalize_subject(subject)
     if not cleaned_subject:
@@ -139,6 +144,8 @@ def create_user_schedule(
         one_time_at=one_time,
         task_id=task_id,
         now=now,
+        notify_on_fire=notify_on_fire,
+        subject=cleaned_subject,
     )
     if next_fire_after(schedule, after=now) is None:
         raise ScheduleNeverFiresError(

@@ -122,6 +122,44 @@ describe("CreateReminderDialog", () => {
     expect(body.idempotency_key).toMatch(/[0-9a-f-]{36}/); // minted once per dialog-open
   });
 
+  it("threads notify_on_fire=true by default (the bell checkbox is checked)", async () => {
+    const onCreated = vi.fn().mockResolvedValue(undefined);
+    makeDialog(onCreated);
+    fillRequired();
+    // Default ON — it's a reminder; you want reminding.
+    expect(
+      screen.getByRole("checkbox", { name: /notify me in the bell/i }),
+    ).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("create-preview")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(client.createSchedule.mock.calls[0][1].notify_on_fire).toBe(true);
+  });
+
+  it("sends notify_on_fire=false when the bell checkbox is unchecked", async () => {
+    const onCreated = vi.fn().mockResolvedValue(undefined);
+    makeDialog(onCreated);
+    fillRequired();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /notify me in the bell/i }),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: /notify me in the bell/i }),
+    ).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("create-preview")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(client.createSchedule.mock.calls[0][1].notify_on_fire).toBe(false);
+  });
+
   it("offers the quiet-hours edge; accepting re-times and re-previews (never blocks)", async () => {
     client.previewCreate.mockResolvedValueOnce({
       ..._PREVIEW,

@@ -727,6 +727,10 @@
     },
     "persona": {
       "ready": "{persona} is ready"
+    },
+    "schedule": {
+      "fired": "{persona} ran your reminder: {subject}",
+      "executor_missing": "A reminder was paused — its persona is no longer available"
     }
   },
   "apps": {

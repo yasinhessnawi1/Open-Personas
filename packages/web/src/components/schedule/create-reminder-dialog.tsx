@@ -65,6 +65,9 @@ export function CreateReminderDialog({
   const { getToken } = useAuth();
   const [subject, setSubject] = useState("");
   const [personaId, setPersonaId] = useState("");
+  // Default ON: it's a reminder — you want reminding. Unchecking keeps the schedule but
+  // silences its bell (the fire still runs; it just doesn't ping).
+  const [notifyOnFire, setNotifyOnFire] = useState(true);
   const [cadence, setCadence] = useState<CadenceInput | null>(null);
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +117,7 @@ export function CreateReminderDialog({
         persona_id: personaId,
         subject: subject.trim(),
         idempotency_key: idempotencyKey,
+        notify_on_fire: notifyOnFire,
       });
       await onCreated();
     } catch {
@@ -172,6 +176,19 @@ export function CreateReminderDialog({
           setPreview(null); // a changed cadence invalidates the shown echo — re-preview
         }}
       />
+
+      {/* Default ON — it's a reminder, so ping the bell when it runs; unset to keep it quiet. */}
+      <label className="v-create-notify" htmlFor="reminder-notify">
+        <input
+          id="reminder-notify"
+          type="checkbox"
+          checked={notifyOnFire}
+          onChange={(e) => {
+            setNotifyOnFire(e.target.checked);
+          }}
+        />
+        Notify me in the bell when it runs
+      </label>
 
       {/* The confirm echo — the SAME engine-framed clause the reschedule twin shows. */}
       {preview && (

@@ -262,6 +262,7 @@ async def create_schedule(
             subject=body.subject,
             idempotency_key=body.idempotency_key,
             now=datetime.now(UTC),
+            notify_on_fire=body.notify_on_fire,
         )
     except PersonaNotFoundError as exc:
         raise HTTPException(status_code=404, detail="executor persona not found") from exc

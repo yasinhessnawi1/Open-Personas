@@ -91,7 +91,10 @@ def test_backing_schedule_targets_the_fire_bridge_with_the_task_payload() -> Non
         now=_NOW,
     )
     assert schedule.target_job_type == TASK_SCHEDULED_FIRE_JOB_TYPE
+    # Default (no notify/subject passed): the template is byte-unchanged and notify_on_fire
+    # is off — a background schedule stays quiet and snapshots nothing extra.
     assert schedule.payload_template == {"task_id": "task-x"}
+    assert schedule.notify_on_fire is False
 
 
 # --- subject hygiene (A10-D-1, the K6-D-8 posture) ------------------------------------

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from persona.schedules import RecurrenceRule
     from persona.tasks import Contract
+    from pydantic import JsonValue
 
 __all__ = [
     "build_backing_schedule",
@@ -94,13 +95,30 @@ def build_backing_schedule(
     one_time_at: datetime | None,
     task_id: str,
     now: datetime,
+    notify_on_fire: bool = False,
+    subject: str | None = None,
 ) -> Schedule:
     """Construct the A1 schedule that fires the task's legs (the A1→A2 fire bridge).
 
     Targets the schedule→leg bridge, NOT ``task_leg`` directly: the leg needs a
     ScheduledFire trigger + the head-at-fire ``predecessor_seq`` the bridge computes
     (a static template can't carry it).
+
+    ``notify_on_fire`` opts the schedule into the coalesced fire bell (default False for
+    A4/background schedules; the user reminder door sets it True). It is written to the
+    ``notify_on_fire`` column (the authoritative store value + DEFAULT source) AND — only
+    when True — snapshotted into ``payload_template`` (absence there means False, so a
+    background schedule's template is byte-unchanged). The tick merges the template into
+    each fire job, so the handler gates WITHOUT a schedule read (surfacing as
+    ``TaskScheduledFirePayload.notify_on_fire``). ``subject`` (the reminder's goal line)
+    rides the template the same way so the handler can title the bell entry; omitted when
+    there is no user subject.
     """
+    template: dict[str, JsonValue] = {"task_id": task_id}
+    if notify_on_fire:
+        template["notify_on_fire"] = True
+    if subject is not None:
+        template["subject"] = subject
     return Schedule(
         id=schedule_id,
         owner_id=owner_id,
@@ -108,7 +126,8 @@ def build_backing_schedule(
         recurrence=recurrence,
         one_time_at=one_time_at,
         target_job_type=TASK_SCHEDULED_FIRE_JOB_TYPE,
-        payload_template={"task_id": task_id},
+        payload_template=template,
+        notify_on_fire=notify_on_fire,
         created_at=now,
         updated_at=now,
     )

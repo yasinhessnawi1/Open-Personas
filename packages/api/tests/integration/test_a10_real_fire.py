@@ -34,6 +34,7 @@ from persona.tasks import TaskState, is_terminal
 from persona_api.config import APIConfig, Edition
 from persona_api.jobs import Worker
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
+from persona_api.realtime.channel import UserEventChannel
 from persona_api.schedules import ScheduleStore
 from persona_api.schedules.leadership import SchedulerLeader
 from persona_api.schedules.tick import SchedulerTick
@@ -215,7 +216,10 @@ def _notifications(su_url: str, owner: str) -> list[dict[str, object]]:
     with su.begin() as conn:
         rows = (
             conn.execute(
-                text("SELECT kind, ref_id, level, params FROM notifications WHERE owner_id = :o"),
+                text(
+                    "SELECT kind, ref_id, level, params, read, created_at "
+                    "FROM notifications WHERE owner_id = :o"
+                ),
                 {"o": owner},
             )
             .mappings()
@@ -233,6 +237,8 @@ def _create_via_door(
     pattern: RecurrencePattern | None = None,
     one_time_at: datetime | None = None,
     key: str = "dialog-fire-01",
+    notify_on_fire: bool = True,
+    subject: str = "the morning check",
 ) -> ScheduleCreateResult:
     return create_user_schedule(
         app_engine,
@@ -243,14 +249,19 @@ def _create_via_door(
         one_time_at=one_time_at,
         timezone="Europe/Oslo",
         persona_id=persona_id,
-        subject="the morning check",
+        subject=subject,
         idempotency_key=key,
         now=datetime.now(UTC),
+        notify_on_fire=notify_on_fire,
     )
 
 
 def _build_machinery(
-    app_engine: Engine, dispatch_engine: Engine, embedder: HashEmbedder384
+    app_engine: Engine,
+    dispatch_engine: Engine,
+    embedder: HashEmbedder384,
+    *,
+    event_channel: UserEventChannel | None = None,
 ) -> tuple[SchedulerTick, Worker, SchedulerLeader]:
     from persona_api.background.worker_root import build_worker_registry
 
@@ -271,6 +282,7 @@ def _build_machinery(
         runtime_factory=factory,
         memory_backend=memory,
         edition=Edition.cloud,
+        event_channel=event_channel,
     )
     leader = SchedulerLeader(dispatch_engine, lock_key=_LOCK_KEY)
     tick = SchedulerTick(dispatch_engine=dispatch_engine, rls_engine=app_engine, leader=leader)
@@ -432,6 +444,137 @@ async def test_deleted_executor_degrades_to_pause_plus_notification_never_a_cras
 
         # A later tick finds nothing due (paused schedules are skipped).
         assert tick.run_once(now=f1 + timedelta(days=1)) == 0
+    finally:
+        leader.resign()
+        current_user_id.reset(token)
+        _cleanup(su_url, owner)
+
+
+def _mark_read(su_url: str, owner: str, kind: str) -> None:
+    """Simulate the user opening the bell: mark this owner's rows of ``kind`` read."""
+    su = make_rls_engine(su_url)
+    with su.begin() as conn:
+        conn.execute(
+            text("UPDATE notifications SET read = true WHERE owner_id = :o AND kind = :k"),
+            {"o": owner, "k": kind},
+        )
+    su.dispose()
+
+
+async def _drain_fired_pings(sub: object) -> int:
+    """Count ``schedule_fired`` notification.created frames already queued on a subscription.
+
+    Drains only what is queued (``qsize``): ``publish`` enqueues synchronously during the
+    fire, so by the time the worker drain returns the ping is present. (``next`` returns a
+    HEARTBEAT — not ``None`` — on an idle timeout, so a ``next``-until-``None`` loop would
+    spin forever; the ``qsize`` bound is the correct stop.)
+    """
+    count = 0
+    while sub.qsize() > 0:  # type: ignore[attr-defined]
+        frame = await sub.next(timeout=0)  # type: ignore[attr-defined]
+        if frame is not None and b"schedule_fired" in frame:
+            count += 1
+    return count
+
+
+@pytest.mark.asyncio
+async def test_notify_on_fire_writes_one_coalesced_bell_entry_that_realerts(
+    app_engine: Engine, dispatch_engine: Engine, embedder: HashEmbedder384
+) -> None:
+    """The reminder bell: a fire with ``notify_on_fire=true`` pings ONE moving, re-alerting row.
+
+    Nothing forced — the REAL tick+worker chain fires. Fire 1 writes exactly one
+    ``schedule_fired`` row (ref_id=schedule_id, params carry the persona name + subject, unread)
+    and publishes a live ping. After the user reads it, fire 2 COALESCES onto the SAME row —
+    still one row, ``read`` reset to false (re-alerts), ``created_at`` bumped — and pings again.
+    """
+    su_url = os.environ["DATABASE_URL"]
+    owner, persona_id = "user_bell_recur", "persona_bell_recur"
+    _seed(su_url, embedder, owner, persona_id)
+    token = current_user_id.set(owner)
+    channel = UserEventChannel(epoch="bell")
+    sub = channel.subscribe(owner)
+    tick, worker, leader = _build_machinery(
+        app_engine, dispatch_engine, embedder, event_channel=channel
+    )
+    try:
+        created = _create_via_door(
+            app_engine,
+            owner=owner,
+            persona_id=persona_id,
+            pattern=RecurrencePattern(kind=RecurrenceKind.DAILY, hour=6, minute=0),
+            key="dialog-bell-01",
+            notify_on_fire=True,
+            subject="the morning check",
+        )
+        schedules = ScheduleStore(app_engine)
+
+        # Fire 1 — the real chain.
+        f1 = schedules.get(owner, created.schedule_id).next_fire_at
+        assert f1 is not None
+        await _fire_and_run(tick, worker, at=f1)
+
+        fired = [n for n in _notifications(su_url, owner) if n["kind"] == "schedule_fired"]
+        assert len(fired) == 1, "exactly one schedule_fired row after the first fire"
+        row1 = fired[0]
+        assert row1["ref_id"] == created.schedule_id  # coalescing key = the schedule
+        assert row1["params"]["subject"] == "the morning check"
+        assert row1["params"]["persona"] == "Astrid"  # the executor's display name
+        assert row1["read"] is False  # unread → the bell alerts
+        assert await _drain_fired_pings(sub) >= 1, "fire 1 pinged the bell live"
+        created_at_1 = row1["created_at"]
+
+        # The user opens the bell (marks it read); then it fires again.
+        _mark_read(su_url, owner, "schedule_fired")
+
+        f2 = schedules.get(owner, created.schedule_id).next_fire_at
+        assert f2 is not None
+        assert f2 > f1
+        await _fire_and_run(tick, worker, at=f2)
+
+        fired2 = [n for n in _notifications(su_url, owner) if n["kind"] == "schedule_fired"]
+        assert len(fired2) == 1, "still ONE row after the second fire (coalesced, never 24)"
+        row2 = fired2[0]
+        assert row2["read"] is False, "the re-fire re-alerts (read reset)"
+        assert row2["created_at"] > created_at_1, "the re-fire bumps created_at (floats to top)"
+        assert await _drain_fired_pings(sub) >= 1, "fire 2 pinged the bell live too"
+    finally:
+        leader.resign()
+        current_user_id.reset(token)
+        _cleanup(su_url, owner)
+
+
+@pytest.mark.asyncio
+async def test_no_notify_on_fire_writes_no_bell_entry_and_no_ping(
+    app_engine: Engine, dispatch_engine: Engine, embedder: HashEmbedder384
+) -> None:
+    """The default-quiet path: ``notify_on_fire=false`` fires normally, never touching the bell."""
+    su_url = os.environ["DATABASE_URL"]
+    owner, persona_id = "user_bell_quiet", "persona_bell_quiet"
+    _seed(su_url, embedder, owner, persona_id)
+    token = current_user_id.set(owner)
+    channel = UserEventChannel(epoch="bell")
+    sub = channel.subscribe(owner)
+    tick, worker, leader = _build_machinery(
+        app_engine, dispatch_engine, embedder, event_channel=channel
+    )
+    try:
+        created = _create_via_door(
+            app_engine,
+            owner=owner,
+            persona_id=persona_id,
+            pattern=RecurrencePattern(kind=RecurrenceKind.DAILY, hour=6, minute=0),
+            key="dialog-bell-02",
+            notify_on_fire=False,
+        )
+        schedules = ScheduleStore(app_engine)
+        f1 = schedules.get(owner, created.schedule_id).next_fire_at
+        assert f1 is not None
+        await _fire_and_run(tick, worker, at=f1)  # the fire itself still runs
+
+        fired = [n for n in _notifications(su_url, owner) if n["kind"] == "schedule_fired"]
+        assert fired == [], "notify_on_fire=false → no bell entry"
+        assert await _drain_fired_pings(sub) == 0, "notify_on_fire=false → no live ping"
     finally:
         leader.resign()
         current_user_id.reset(token)

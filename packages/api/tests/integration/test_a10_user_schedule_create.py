@@ -137,7 +137,14 @@ def test_create_lands_waiting_task_and_fire_bridge_schedule(
 
     schedule = store.get("user_a", result.schedule_id)
     assert schedule.target_job_type == TASK_SCHEDULED_FIRE_JOB_TYPE
-    assert schedule.payload_template == {"task_id": result.task_id}
+    # The reminder door opts into the fire bell (default) — the template snapshots
+    # notify_on_fire + the subject so each fire can title its coalesced bell entry.
+    assert schedule.payload_template == {
+        "task_id": result.task_id,
+        "notify_on_fire": True,
+        "subject": "hydration",
+    }
+    assert schedule.notify_on_fire is True
     # The stored next fire is the ENGINE's, and the response echoed it.
     assert schedule.next_fire_at is not None
     assert schedule.next_fire_at == next_fire_after(schedule, after=schedule.created_at)

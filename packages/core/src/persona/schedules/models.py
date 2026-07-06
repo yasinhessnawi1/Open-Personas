@@ -303,6 +303,12 @@ class Schedule(BaseModel):
             the handoff anchor ``schedule_id`` + ``fire_time``, added by the tick).
         enabled: Master on/off; a disabled schedule never fires.
         paused: A soft stop that preserves the rule (resume recomputes next-fire).
+        notify_on_fire: Opt-in — when set, a fire writes a coalesced P6 bell
+            notification for the owner (one moving entry per schedule, re-alerting
+            on each fire). Defaults ``False`` so background/programmatic schedules
+            (A4-authored) stay quiet; the user's reminder create door sets it True.
+            Preserved across a reschedule (the edit copies from the current row and
+            only overrides cadence fields, never this flag).
         missed_fire_policy: How a fire missed during downtime is handled (D-A1-2).
         grace_seconds: Per-schedule grace override (None → the kind-relative
             config default, resolved at tick time in persona-api — D-A1-2).
@@ -332,6 +338,7 @@ class Schedule(BaseModel):
     payload_template: dict[str, JsonValue] = Field(default_factory=dict)
     enabled: bool = True
     paused: bool = False
+    notify_on_fire: bool = False
     missed_fire_policy: MissedFirePolicy = MissedFirePolicy.FIRE_LATE_ONCE
     grace_seconds: int | None = Field(default=None, ge=0)
     last_fire_at: datetime | None = None

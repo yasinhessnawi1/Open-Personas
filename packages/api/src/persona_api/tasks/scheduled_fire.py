@@ -42,7 +42,9 @@ from persona_api.db.engine import rls_connection
 from persona_api.services.notifications_service import (
     create_notification,
     publish_notification_created,
+    upsert_coalesced_notification,
 )
+from persona_api.services.origination_adapters import resolve_persona_tag
 from persona_api.tasks.handler import enqueue_task_leg
 
 if TYPE_CHECKING:
@@ -67,11 +69,23 @@ _log = get_logger("api.tasks.scheduled_fire")
 
 
 class TaskScheduledFirePayload(JobPayload):
-    """A schedule fire targeting a task — the A1 anchor + the task id (the schedule's template)."""
+    """A schedule fire targeting a task — the A1 anchor + the task id (the schedule's template).
+
+    ``notify_on_fire`` + ``subject`` are SNAPSHOTTED here from the schedule at create time
+    (they ride ``payload_template``, merged into the fire job by the tick), so the fire
+    handler can gate + title the coalesced bell entry WITHOUT a schedule read on the hot
+    path. The ``schedules.notify_on_fire`` column stays the authoritative store value; a
+    reschedule preserves it (the edit copies from the current row). If a post-create
+    *toggle* UI is ever added, it must re-thread this into the payload (rebuild the
+    schedule's ``payload_template``) or switch the handler to a live schedule read — a bare
+    column update would not reach this snapshot.
+    """
 
     task_id: str
     schedule_id: str
     fire_time: datetime
+    notify_on_fire: bool = False
+    subject: str | None = None
 
 
 class ScheduledTaskFireHandler:
@@ -121,6 +135,56 @@ class ScheduledTaskFireHandler:
             "scheduled fire → task leg enqueued",
             task_id=payload.task_id,
             schedule_id=payload.schedule_id,
+        )
+        if payload.notify_on_fire:
+            # Post-commit (the leg enqueue above is the durable fire): write the coalesced bell
+            # entry AFTER it, so a client refetch always finds a consistent feed (the A11 rule,
+            # mirroring _degrade_missing_executor). Gated on the opt-in flag snapshotted into
+            # the payload.
+            self._notify_fired(
+                owner_id=context.owner_id,
+                persona_id=task.persona_id,
+                schedule_id=payload.schedule_id,
+                subject=payload.subject,
+            )
+
+    def _notify_fired(
+        self, *, owner_id: str, persona_id: str, schedule_id: str, subject: str | None
+    ) -> None:
+        """Write/UPSERT the ONE coalesced ``schedule_fired`` bell entry for this fire, then ping.
+
+        Keyed ``(owner, 'schedule_fired', schedule_id)`` with DO UPDATE (not DO NOTHING): a
+        re-fire moves the SAME row — ``created_at`` bumped, ``read`` reset so the bell
+        re-alerts — so a per-hour reminder shows one moving entry, never N rows. The persona's
+        display name titles it (``resolve_persona_tag``; omitted → the web's "your persona"
+        fallback). Post-commit + best-effort: the write commits on the ``with`` exit, then the
+        live ping fires so the client's refetch finds the row (never pre-commit).
+        """
+        tag = resolve_persona_tag(self._engine, persona_id)
+        params: dict[str, str] = {}
+        if tag is not None:
+            params["persona"] = tag.display_name
+        if subject is not None:
+            params["subject"] = subject
+        with rls_connection(self._engine, owner_id) as conn:
+            upsert_coalesced_notification(
+                conn=conn,
+                owner_id=owner_id,
+                kind="schedule_fired",
+                ref_id=schedule_id,
+                level="info",
+                message_key="notifications.schedule.fired",
+                params=params,
+            )
+        publish_notification_created(
+            self._event_channel,
+            owner_id=owner_id,
+            kind="schedule_fired",
+            ref_id=schedule_id,
+        )
+        _log.info(
+            "scheduled fire → coalesced bell notification written",
+            schedule_id=schedule_id,
         )
 
     def _degrade_missing_executor(self, *, owner_id: str, task_id: str, schedule_id: str) -> None:

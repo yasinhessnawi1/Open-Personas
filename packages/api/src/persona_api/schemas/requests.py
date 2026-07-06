@@ -352,3 +352,6 @@ class ScheduleCreateRequest(_Input):
     persona_id: str = Field(min_length=1, max_length=128)
     subject: str = Field(min_length=1, max_length=500)
     idempotency_key: str = Field(min_length=8, max_length=128)
+    # Opt into the coalesced fire bell (default True — this door is always a user reminder;
+    # the dialog's "Notify me in the bell" checkbox is checked by default and can be unset).
+    notify_on_fire: bool = True

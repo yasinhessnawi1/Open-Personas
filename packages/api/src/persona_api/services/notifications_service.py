@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import notifications as notifications_t
@@ -99,6 +99,49 @@ def create_notification(
             params=params or {},
         )
         .on_conflict_do_nothing(constraint="uq_notifications_owner_kind_ref")
+    )
+    conn.execute(stmt)
+
+
+def upsert_coalesced_notification(
+    *,
+    conn: Connection,
+    owner_id: str,
+    kind: str,
+    ref_id: str | None,
+    level: str,
+    message_key: str,
+    params: dict[str, str] | None = None,
+) -> None:
+    """Coalescing server-authored write — ONE re-alerting row per ``(owner, kind, ref_id)``.
+
+    The DO-UPDATE sibling of :func:`create_notification` (which DO-NOTHINGs). Used for the
+    ``schedule_fired`` bell: a schedule that fires every hour must show ONE moving entry, not
+    24 rows. On a re-fire the conflicting row is UPDATED in place — ``created_at`` bumped to
+    now (it floats back to the top of the newest-first feed / relative-time re-reads "just
+    now"), ``read`` reset to ``False`` so the bell RE-ALERTS, and the copy (``level`` /
+    ``message_key`` / ``params``) refreshed. The uniqueness/coalescing key is the existing
+    ``uq_notifications_owner_kind_ref`` constraint. Takes a ``Connection`` so the write runs
+    in the caller's owner-scoped transaction (RLS); the caller wraps it best-effort so a feed
+    write never fails the authoritative fire.
+    """
+    values = {
+        "owner_id": owner_id,
+        "kind": kind,
+        "ref_id": ref_id,
+        "level": level,
+        "message_key": message_key,
+        "params": params or {},
+    }
+    stmt = pg_insert(notifications_t).values(**values).on_conflict_do_update(
+        constraint="uq_notifications_owner_kind_ref",
+        set_={
+            "created_at": func.now(),  # bump: re-sort to the top + relative-time "just now"
+            "read": False,  # re-alert: the bell shows the fresh fire as unread
+            "level": level,
+            "message_key": message_key,
+            "params": params or {},
+        },
     )
     conn.execute(stmt)
 

@@ -461,6 +461,12 @@ schedules = Table(
     Column("payload_template", _json(), nullable=False, server_default=text("'{}'")),
     Column("enabled", Boolean, nullable=False, server_default=text("true")),
     Column("paused", Boolean, nullable=False, server_default=text("false")),
+    # Opt-in coalesced P6 bell notification on each fire. DEFAULT false — background/
+    # programmatic (A4-authored) schedules stay quiet; the user reminder create door sets
+    # it true. The fire path snapshots this flag into the fire-job payload
+    # (TaskScheduledFirePayload) so the handler stays read-free; this column is the
+    # authoritative store value + DEFAULT source.
+    Column("notify_on_fire", Boolean, nullable=False, server_default=text("false")),
     Column(
         "missed_fire_policy",
         Text,
@@ -1646,8 +1652,10 @@ notifications = Table(
     Column("read", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
-        # 'schedule_executor_missing' = the A10-D-7 deleted-executor bell (migration 038).
-        "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing')",
+        # 'schedule_executor_missing' = the A10-D-7 deleted-executor bell (migration 037).
+        # 'schedule_fired' = the opt-in coalesced fire bell (this feature's migration).
+        "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing', "
+        "'schedule_fired')",
         name="notifications_kind_check",
     ),
     CheckConstraint(

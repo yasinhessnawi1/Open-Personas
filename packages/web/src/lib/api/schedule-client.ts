@@ -110,6 +110,8 @@ export interface ScheduleCreateBody extends RescheduleBody {
   subject: string;
   /** Minted once per dialog-open (A10-D-6): retries converge, deliberate submits stay distinct. */
   idempotency_key: string;
+  /** Opt into the coalesced fire bell (server default true; the dialog checkbox is default-on). */
+  notify_on_fire: boolean;
 }
 
 /** The create confirmation — ids + the same echo shape the preview showed. */

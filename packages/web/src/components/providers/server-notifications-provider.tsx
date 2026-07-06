@@ -96,6 +96,9 @@ function hrefFor(kind: string, refId: string | null): string | undefined {
   if (!refId) return undefined;
   if (kind === "run_terminal") return `/runs/${refId}`;
   if (kind === "persona_ready") return `/personas/${refId}`;
+  // A fired reminder → the schedule/calendar page. (Follow-up: deep-link to the fire's
+  // conversation by carrying conversation_id in params, so the row opens the actual update.)
+  if (kind === "schedule_fired") return "/schedule";
   return undefined;
 }
 
