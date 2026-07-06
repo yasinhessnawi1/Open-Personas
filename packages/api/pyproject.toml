@@ -36,6 +36,15 @@ dependencies = [
     # python-jose[cryptography] to a DIRECT dep (we use it directly now);
     # already resolved in uv.lock, so this pulls nothing new.
     "cryptography>=43,<49",
+    # Spec K10 (T1, D-K10-1) — the community edition's INVISIBLE managed-Postgres
+    # substrate: a pip-bundled Postgres 16 + pgvector with no root/Docker/system
+    # install, run rootless over a unix socket (no TCP listener → no port
+    # conflicts). Apache-2.0; actively maintained by Pixeltable, which runs it in
+    # production; bundles pgvector 0.8.1 (Phase-2 spike verified PG 16.11 + the
+    # full 38-migration chain + a real graph write/read + cold-restart durability).
+    # Lazy-imported only on the embedded community path (db/community_managed.py);
+    # cloud + legacy-sqlite + external-DSN boots never touch it.
+    "pixeltable-pgserver==0.5.1",
 ]
 
 # Portable console entrypoint — `uv run persona-api` / `python -m persona_api`.
