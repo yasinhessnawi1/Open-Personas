@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.config import Edition
+    from persona_api.services.web_deliverer import LiveSessionRegistry
 
 __all__ = ["TaskOriginationServices", "compose_task_origination_services"]
 
@@ -48,6 +49,7 @@ def compose_task_origination_services(
     memory_backend: Backend,
     edition: Edition,
     audit_root: Path,
+    live_sessions: LiveSessionRegistry | None = None,
 ) -> TaskOriginationServices:
     """Build the A4 worker-side services over the real stores + C0 composition (A4-D-X).
 
@@ -55,6 +57,10 @@ def compose_task_origination_services(
     conversation via the real :class:`Originator`; the origination service creates task + schedule
     idempotently through the store adapters; the steering service mutates through the owner-scoped
     ``TaskStore`` and surfaces a cancel-failure account when a cancel leaves the task active.
+
+    ``live_sessions`` (Spec A11) is the channel-backed registry that lets an open tab receive an
+    originated failure account live (``message.delivered``); ``None`` keeps the persist-only
+    behaviour.
     """
     tasks = TaskStore(rls_engine)
     notifier = OriginatorFailureNotifier(
@@ -62,6 +68,7 @@ def compose_task_origination_services(
         memory_backend=memory_backend,
         edition=edition,
         audit_root=audit_root,
+        sessions=live_sessions,
     )
     origination = OriginationService(
         tasks=TaskCreatorAdapter(tasks),

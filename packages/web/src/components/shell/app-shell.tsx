@@ -14,6 +14,8 @@ import type { ReactNode } from "react";
 import { ToastProvider } from "@/components/patterns/toast";
 import { NameNudge } from "@/components/profile/name-nudge";
 import { ConfirmProvider } from "@/components/providers/confirm-provider";
+import { MeEventsProvider } from "@/components/providers/me-events-provider";
+import { MeLiveRefresh } from "@/components/providers/me-live-refresh";
 import { NotificationProvider } from "@/components/providers/notification-provider";
 import { ServerNotificationsProvider } from "@/components/providers/server-notifications-provider";
 import { CommandPalette } from "@/components/shell/command-palette";
@@ -62,58 +64,68 @@ export async function AppShell({
     // HARD GUARD: the call's Room + <audio> + mic live inside CallSessionProvider,
     // never a route. The mini-bar (T2) renders inside it, bound to the session.
     <NotificationProvider>
-      {/* Spec P6 (D4-e): the durable cross-device feed, polled once for the app;
-          the bell renders it unioned with the client useNotify() feed. */}
-      <ServerNotificationsProvider>
-        <ConfirmProvider>
-          <CallSessionProvider>
-            {/* Spec P1 D-P1-v7-indicator: the chat/run "active work" session — the
+      {/* Spec A11: the persistent user-level live channel (GET /v1/me/events),
+          subscribed ONCE. Wraps ServerNotificationsProvider so the bell goes live
+          (notification.created → refetch), and the open chat consumes message.delivered.
+          Fail-soft: a dropped/unwired channel degrades to P6's poll below. */}
+      <MeEventsProvider>
+        {/* Spec A11: a background message.delivered re-orders the sidebar list (soft
+            refresh; client chat state preserved). */}
+        <MeLiveRefresh />
+        {/* Spec P6 (D4-e): the durable cross-device feed, polled once for the app;
+            the bell renders it unioned with the client useNotify() feed. A11 makes
+            this feed LIVE (the bell updates without waiting for the poll). */}
+        <ServerNotificationsProvider>
+          <ConfirmProvider>
+            <CallSessionProvider>
+              {/* Spec P1 D-P1-v7-indicator: the chat/run "active work" session — the
               additive sibling of the voice CallSessionProvider (voice mechanics
               untouched). Tracks in-progress detached chat turns so the
               conversation row + the global ActiveWorkBar advertise resumable work. */}
-            <ActiveWorkProvider>
-              <div
-                className={cn("flex min-h-svh", className)}
-                data-slot="app-shell"
-              >
-                <Sidebar data={data} />
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <ShellHeader data={data} />
-                  <main
-                    className="flex flex-1 flex-col"
-                    data-slot="app-shell-main"
-                  >
-                    {children}
-                  </main>
-                </div>
-                {/* F2 T23: single toast surface for the auth'd app. */}
-                <ToastProvider />
-                {/* Spec P6 (P6-D-6): low-balance-at-load — headless; reads
+              <ActiveWorkProvider>
+                <div
+                  className={cn("flex min-h-svh", className)}
+                  data-slot="app-shell"
+                >
+                  <Sidebar data={data} />
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <ShellHeader data={data} />
+                    <main
+                      className="flex flex-1 flex-col"
+                      data-slot="app-shell-main"
+                    >
+                      {children}
+                    </main>
+                  </div>
+                  {/* F2 T23: single toast surface for the auth'd app. */}
+                  <ToastProvider />
+                  {/* Spec P6 (P6-D-6): low-balance-at-load — headless; reads
                 /v1/me/credits once per session and warns via useNotify(). */}
-                <LowBalanceWatcher />
-                {/* Spec 35 D-35-14: the ⌘K command palette, mounted once for the app. */}
-                <CommandPalette data={data} />
-                {/* Spec K6 (T5): the optional "what should we call you?" nudge —
+                  <LowBalanceWatcher />
+                  {/* Spec 35 D-35-14: the ⌘K command palette, mounted once for the app. */}
+                  <CommandPalette data={data} />
+                  {/* Spec K6 (T5): the optional "what should we call you?" nudge —
                 shown only when our DB has no name for the caller; skippable, no
                 dark pattern; dismissed for the session. */}
-                <NameNudge />
-                {/* Spec V7 D-V7-2: the persistent mini call-bar — hidden until a call is
+                  <NameNudge />
+                  {/* Spec V7 D-V7-2: the persistent mini call-bar — hidden until a call is
                 active; binds the hoisted session, never owns a Room. */}
-                <MiniCallBar />
-                {/* Spec P1 D-P1-v7-indicator: the global "working — return to it" bar,
+                  <MiniCallBar />
+                  {/* Spec P1 D-P1-v7-indicator: the global "working — return to it" bar,
                 alongside the call pill (additive). Hidden unless a chat turn runs. */}
-                <ActiveWorkBar />
-                {/* Spec V7 D-V7-4: the end-and-switch confirm — shown only when a call is
+                  <ActiveWorkBar />
+                  {/* Spec V7 D-V7-4: the end-and-switch confirm — shown only when a call is
                 requested while a different one is active. */}
-                <SwitchCallDialog />
-                {/* Spec V7 D-V7-3: the resume-after-reload prompt — shown only when a
+                  <SwitchCallDialog />
+                  {/* Spec V7 D-V7-3: the resume-after-reload prompt — shown only when a
                 recent call is found in sessionStorage on load. */}
-                <ResumeCallPrompt />
-              </div>
-            </ActiveWorkProvider>
-          </CallSessionProvider>
-        </ConfirmProvider>
-      </ServerNotificationsProvider>
+                  <ResumeCallPrompt />
+                </div>
+              </ActiveWorkProvider>
+            </CallSessionProvider>
+          </ConfirmProvider>
+        </ServerNotificationsProvider>
+      </MeEventsProvider>
     </NotificationProvider>
   );
 }

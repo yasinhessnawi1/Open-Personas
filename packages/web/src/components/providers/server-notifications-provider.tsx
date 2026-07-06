@@ -37,6 +37,7 @@ import {
 } from "react";
 import { useAuth } from "@/auth";
 import { toast } from "@/components/patterns/toast";
+import { useMeEvent } from "@/components/providers/me-events-provider";
 import type { NotifyLevel } from "@/components/providers/notification-provider";
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -185,7 +186,9 @@ export function ServerNotificationsProvider({
     setRows(next);
   }, [authFetch, resolveTitle]);
 
-  // Poll: on mount, on window focus, and a light interval.
+  // Poll: on mount, on window focus, and a light interval. This is the DURABLE FLOOR
+  // (P6) + the A11 fail-soft: if the live channel is down, the bell still catches up
+  // on the interval / focus (reload-to-see degrade), just not instantly.
   useEffect(() => {
     void refresh();
     const onFocus = () => void refresh();
@@ -196,6 +199,15 @@ export function ServerNotificationsProvider({
       clearInterval(timer);
     };
   }, [refresh]);
+
+  // Spec A11: make the bell LIVE. A `notification.created` ping (data-only) triggers a
+  // refetch of the authoritative feed — never trusting the pushed payload (the client
+  // reconciles by id, toasts newly-seen unread). A `resync` (the server couldn't honour
+  // our resume cursor) triggers the same full refetch. The union with P6 + read-state
+  // is unchanged; A11 only removes the poll-latency.
+  const onLiveNotification = useCallback(() => void refresh(), [refresh]);
+  useMeEvent("notification.created", onLiveNotification);
+  useMeEvent("resync", onLiveNotification);
 
   const markAllRead = useCallback(() => {
     setRows((cur) => cur.map((r) => (r.read ? r : { ...r, read: true })));
