@@ -731,9 +731,11 @@
   },
   "apps": {
     "title": "Apps",
+    "titleCombined": "Apps & Tools",
     "subtitle": "Apps your persona can use — each one a real integration running real code.",
     "searchPlaceholder": "Search apps",
-    "empty": "No apps available.",
+    "searchCombined": "Search apps & tools",
+    "empty": "No apps or tools available.",
     "searchEmpty": "No apps match “{query}”.",
     "open": "Open {name}",
     "back": "All apps",
@@ -742,8 +744,6 @@
     "defaultBadge": "default",
     "capability": "Adds tools your persona can use — available once enabled.",
     "toolsHeading": "What this app adds",
-    "builtinHeading": "Built-in apps",
-    "builtinSubtitle": "Simple, always-available abilities — expand one to see what it does before you turn it on.",
     "catalog": {
       "web_search": {
         "label": "Web search",

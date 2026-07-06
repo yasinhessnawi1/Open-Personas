@@ -25,7 +25,6 @@ import { voiceLanguageWarning } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
 import { SpecialitiesChooser } from "./specialities-chooser";
-import { ToolsChooser } from "./tools-chooser";
 
 // Spec 30 T11 — a built-in MCP server in the capability-management catalog.
 // A persona enables a server by carrying `mcp:<name>` in its `tools` list.
@@ -364,37 +363,20 @@ export function PersonaForm({
           {t("capabilityCount", { count: capabilityCount })} ·{" "}
           {t("capabilityCapHint")}
         </p>
-        {/* R4 T5 — "Apps": ONE unified surface for what the persona can do,
-            fed by two sources under the same see-then-grant grammar: built-in
-            tools (simple, always-available abilities) + catalog apps (MCP). Both
-            write the persona's `tools:` list (bare names / `mcp:<name>`). Raw
-            ids are gone — each renders by friendly label + a one-line
-            what-it-does. Specialities (skills, S-track) stay a SEPARATE surface
-            (the ratified not-unified decision). */}
-        <Subsection title={tApps("title")}>
-          <div className="flex flex-col gap-5">
-            <div className="flex flex-col gap-2">
-              <p className="text-xs text-muted-foreground">
-                {tApps("builtinSubtitle")}
-              </p>
-              <ToolsChooser
-                tools={tools}
-                declaredTools={declaredTools}
-                empty={t("noTools")}
-                onChange={(list) =>
-                  onChange(writeStringList(doc, "tools", list))
-                }
-              />
-            </div>
-            {/* N3: the MCP catalog reframed as "apps" — per-persona enablement
-                stays the `mcp:<name>` tools-list mechanism. */}
-            <AppsChooser
-              apps={mcpServers}
-              declaredTools={declaredTools}
-              personaId={personaId}
-              onChange={(list) => onChange(writeStringList(doc, "tools", list))}
-            />
-          </div>
+        {/* R4 T5 — ONE unified "Apps & Tools" menu: built-in tools + MCP apps in
+            a SINGLE searchable list (one header, one search box), each by friendly
+            label + a one-line what-it-does under the same see-then-grant grammar.
+            Both write the persona's `tools:` list (bare names / `mcp:<name>`).
+            Specialities (skills, S-track) stay a SEPARATE surface (the ratified
+            not-unified decision). */}
+        <Subsection title={tApps("titleCombined")}>
+          <AppsChooser
+            apps={mcpServers}
+            tools={tools}
+            declaredTools={declaredTools}
+            personaId={personaId}
+            onChange={(list) => onChange(writeStringList(doc, "tools", list))}
+          />
         </Subsection>
         {/* Spec S3 — Specialities: skills surfaced with trust tiers + a consent
             flow, a SEPARATE surface from the apps chooser above (the not-unified
