@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/auth";
 import type { AvatarPersona } from "@/components/persona/persona-avatar";
+import { useMeEvent } from "@/components/providers/me-events-provider";
 import { useNotify } from "@/components/providers/notification-provider";
 import { buttonVariants } from "@/components/ui/button";
 import { DocumentChip } from "@/components/ui/document-chip";
@@ -87,11 +88,25 @@ export function ChatWindow({
   // transient validation passes persist:false so it toasts without the bell.
   const { notify } = useNotify();
   const { getToken } = useAuth();
-  const { messages, streaming, error, send, respondToProactive } = useChat(
-    conversationId,
-    initialMessages,
-    persona.id,
+  const { messages, streaming, error, send, respondToProactive, reload } =
+    useChat(conversationId, initialMessages, persona.id);
+  // Spec A11: a BACKGROUND message.delivered for THIS open conversation appears live —
+  // refetch the authoritative conversation (never trust the pushed payload; `reload`
+  // reconciles by message id, so an already-rendered message is not doubled — A11-D-4).
+  // Skip while a turn is streaming: the in-turn active-run stream is authoritative for
+  // its own turn; the background message reconciles on the next natural reload/reattach.
+  // A `resync` (the channel couldn't honour our resume cursor) also refetches.
+  const onMessageDelivered = useCallback(
+    (data: Record<string, unknown>) => {
+      if (!streaming && data.conversation_id === conversationId) void reload();
+    },
+    [streaming, conversationId, reload],
   );
+  const onResync = useCallback(() => {
+    if (!streaming) void reload();
+  }, [streaming, reload]);
+  useMeEvent("message.delivered", onMessageDelivered);
+  useMeEvent("resync", onResync);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState<ApiError | null>(null);
   // Spec 35: documents attached for the NEXT message (so they ride that turn's

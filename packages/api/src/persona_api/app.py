@@ -69,6 +69,8 @@ from persona_api.middleware.rate_limit import (
 )
 from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware, TelemetryBuffer
 from persona_api.middleware.rls_context import make_rls_engine
+from persona_api.realtime.channel import UserEventChannel
+from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
     artifacts,
     calls,
@@ -396,6 +398,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # R5-D-2: the app-selected audit backend (Postgres when multi-worker).
             audit_logger=app.state.audit_logger,
         )
+    # Spec A11 (A11-D-1) — the persistent user-level SSE channel's in-process bus.
+    # One per process; its fresh ``epoch`` makes a stale cross-restart Last-Event-ID
+    # detectable (A11-D-3). Both editions run in-process today (community SQLite;
+    # cloud single Fly Machine), so this bus is the whole fan-out mechanism; a future
+    # api/worker split adds a cross-process transport behind the same publish seam.
+    # Built HERE (before the run/A4/worker composition) so a background delivery fans out
+    # through the channel-backed ``LiveSessionRegistry`` (message.delivered) and a
+    # committed notification pings the bell (notification.created) — both live.
+    event_channel = UserEventChannel()
+    app.state.event_channel = event_channel
+    live_sessions = ChannelLiveSessions(event_channel)
+
     # Spec K2 (T8d): thread the durable ``job_queue`` so a completed agentic run
     # enqueues synthesis (the producer was inert — ``job_queue=None`` — until now).
     # ``None`` queue keeps the producer a no-op (the community / no-dispatch path).
@@ -404,6 +418,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             rls_engine,
             job_queue=app.state.job_queue,
             origination=within_runtime_originator,
+            # Spec A11: a completed run's run_terminal notification pings the bell live.
+            event_channel=event_channel,
         )
         if rls_engine is not None
         else None
@@ -437,6 +453,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             memory_backend=memory_backend,
             edition=config.edition,
             audit_root=app.state.audit_root,
+            live_sessions=live_sessions,
         )
         origination_service = _a4_services.origination
         task_steering_service = _a4_services.steering
@@ -678,6 +695,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # (R5: audit_root param removed — the worker selects its audit backend from config.)
                 runtime_factory=runtime_factory,
                 memory_backend=memory_backend,
+                # Spec A11: the in-process worker's background deliveries fan out through the
+                # SAME channel the SSE endpoint serves (shared process) → an open tab gets
+                # message.delivered live; the raw channel also pings the bell live on a
+                # committed executor-missing notification (notification.created). A future
+                # api/worker split swaps these for the cross-process transport behind the
+                # unchanged seams.
+                live_sessions=live_sessions,
+                event_channel=event_channel,
             )
         except AuthenticationError:
             # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,

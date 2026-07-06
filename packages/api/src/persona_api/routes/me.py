@@ -6,6 +6,7 @@ from datetime import datetime  # noqa: TC003 — used in cast() + Query at runti
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from persona.errors import (
     InvalidTimezoneError,
     PersonaNotFoundError,
@@ -15,6 +16,7 @@ from persona.errors import (
 from persona.timezone import validate_timezone
 
 from persona_api.auth import AuthenticatedUser, get_current_user
+from persona_api.realtime.stream import stream_user_events
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schemas import (
     CreditsResponse,
@@ -384,6 +386,40 @@ async def mark_notification_read(
         rls_engine=request.app.state.rls_engine, notification_id=notification_id
     )
     return NotificationMarkReadResult(updated=updated)
+
+
+@router.get("/events")
+async def stream_events(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> StreamingResponse:
+    """The persistent, RLS-scoped live channel (Spec A11) — the out-of-turn SSE feed
+    that makes a background delivery surface live (the bell + the open chat, no
+    reload; closes R4-C1-23).
+
+    The me-scope is the **verified token's** user id (``get_current_user``), never a
+    param. One connection per open tab, heartbeat-kept, ``Last-Event-ID``-resumable
+    (A11-D-3). Fail-soft: an unwired channel returns 503 so the web app degrades to
+    P6's poll (never a broken shell); the active-run token stream is untouched (this
+    is the out-of-turn channel).
+    """
+    channel = getattr(request.app.state, "event_channel", None)
+    if channel is None:
+        raise HTTPException(status_code=503, detail="realtime channel unavailable")
+    # The client (fetch + ReadableStream, not EventSource — it must carry the Clerk
+    # Bearer header) sends the resume cursor as a header, keeping it out of logs /
+    # proxy caches (A11-D-3).
+    last_event_id = request.headers.get("last-event-id")
+    return StreamingResponse(
+        stream_user_events(channel, user.id, last_event_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Defeat proxy/edge response buffering so frames flush immediately.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 __all__ = ["router"]

@@ -8,14 +8,20 @@ import { ApiError, type ApiErrorBody, readRateLimit } from "./api/client";
  * use different envelopes.
  */
 
-/** One parsed SSE frame: the `event:` name (default "message") + raw `data:` string. */
+/**
+ * One parsed SSE frame: the `event:` name (default "message") + raw `data:` string
+ * + the optional `id:` (the `Last-Event-ID` cursor — surfaced for A11's persistent
+ * `/v1/me/events` channel, which resumes by it; the chat/run streams ignore it).
+ */
 export interface RawSSEEvent {
   event: string;
   data: string;
+  id?: string;
 }
 
 function parseFrame(frame: string): RawSSEEvent | null {
   let event = "message";
+  let id: string | undefined;
   const dataLines: string[] = [];
   for (const line of frame.split("\n")) {
     if (line === "" || line.startsWith(":")) continue; // blank / comment
@@ -25,10 +31,15 @@ function parseFrame(frame: string): RawSSEEvent | null {
     if (value.startsWith(" ")) value = value.slice(1); // SSE strips one leading space
     if (field === "event") event = value;
     else if (field === "data") dataLines.push(value);
-    // id / retry ignored — not used by either stream
+    else if (field === "id") id = value;
+    // retry ignored — not used by any stream
   }
   if (dataLines.length === 0) return null;
-  return { event, data: dataLines.join("\n") };
+  return {
+    event,
+    data: dataLines.join("\n"),
+    ...(id !== undefined ? { id } : {}),
+  };
 }
 
 /**

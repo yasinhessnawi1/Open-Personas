@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.jobs.queue import JobQueue
+    from persona_api.realtime.channel import UserEventChannel
     from persona_api.services.within_runtime_origination import WithinRuntimeOriginator
 
 _log = get_logger("api.run_worker")
@@ -99,9 +100,13 @@ class RunRegistry:
         *,
         job_queue: JobQueue | None = None,
         origination: WithinRuntimeOriginator | None = None,
+        event_channel: UserEventChannel | None = None,
     ) -> None:
         self._engine = rls_engine
         self._handles: dict[str, RunHandle] = {}
+        # Spec A11: the in-process SSE bus. A committed run_terminal notification pings
+        # the owner's open tabs live (notification.created); ``None`` → durable-only.
+        self._event_channel = event_channel
         # Spec K2 (T8d): durable queue for off-critical-path synthesis at run-end
         # (None until composed → safe no-op). Additive to the registry.
         self._job_queue = job_queue
@@ -311,6 +316,12 @@ class RunRegistry:
                     message_key=message_key,
                     params=params,
                 )
+            # Spec A11: the write above COMMITS on the `with` block exit; emit the live
+            # bell ping AFTER commit so the client's refetch finds the row (post-commit
+            # rule). Still inside the advisory guard — a publish never fails the persist.
+            notifications_service.publish_notification_created(
+                self._event_channel, owner_id=owner_id, kind="run_terminal", ref_id=run_id
+            )
         except Exception as exc:  # noqa: BLE001 — advisory; never fail the run persist
             _log.warning(
                 "run-terminal notification write failed run={rid}: {err}",

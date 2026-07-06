@@ -18,9 +18,12 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import notifications as notifications_t
+from persona_api.realtime.events import NotificationCreatedEvent
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
+
+    from persona_api.realtime.channel import UserEventChannel
 
 
 def list_notifications(*, rls_engine: Engine, limit: int, offset: int) -> list[dict[str, object]]:
@@ -98,3 +101,25 @@ def create_notification(
         .on_conflict_do_nothing(constraint="uq_notifications_owner_kind_ref")
     )
     conn.execute(stmt)
+
+
+def publish_notification_created(
+    channel: UserEventChannel | None,
+    *,
+    owner_id: str,
+    kind: str,
+    ref_id: str | None,
+) -> None:
+    """Ping the owner's open tabs that their bell changed (Spec A11, notification.created).
+
+    Call this **after** the durable :func:`create_notification` write has COMMITTED — the
+    event is a data-only signal (``kind`` + ``ref_id``) and the client refetches
+    ``/v1/me/notifications`` (unioned with P6, read-state honoured) to reconcile by id
+    (A11-D-2). Emitting pre-commit would race the refetch to an empty read (the
+    surface-lags-truth rule). Best-effort: no channel or no open tab → a durable-only
+    no-op (present on next connect); a publish never fails the authoritative write (the
+    caller wraps it, and the in-process bus does not raise for a normal publish).
+    """
+    if channel is None:
+        return
+    channel.publish(owner_id, NotificationCreatedEvent(kind=kind, ref_id=ref_id))

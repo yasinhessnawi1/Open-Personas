@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from persona_api.approvals.failure import FailureAccount
     from persona_api.config import Edition
     from persona_api.schedules.store import ScheduleStore
-    from persona_api.services.web_deliverer import LiveSessionSink
+    from persona_api.services.web_deliverer import LiveSessionRegistry, LiveSessionSink
     from persona_api.tasks.store import TaskStore
 
 __all__ = [
@@ -80,6 +80,7 @@ async def _originate_on_conversation(
     conversation_id: str,
     now: datetime,
     channel: str | None = None,
+    sessions: LiveSessionRegistry | None = None,
 ) -> None:
     """Originate one persona message on ``conversation_id`` via the real C0 composition.
 
@@ -87,8 +88,14 @@ async def _originate_on_conversation(
     over the RLS-scoped :class:`OriginationRecorder` (durable conversation + episodic write) and a
     :class:`DeliveryRouter` (best-effort live delivery; ``channel`` feeds ``resolve_channel``,
     falling back to the web home when that channel has no deliverer here).
+
+    ``sessions`` is the live-session registry the ``WebAppDeliverer`` consults (Spec A11): with
+    the real channel-backed registry an OPEN tab receives the message live (``message.delivered``);
+    ``None`` keeps the pre-A11 ``_NoLiveSessions`` behaviour (persist-only → present-on-next-open).
+    The recorder persists the message BEFORE ``deliver`` runs, so the live event is always emitted
+    AFTER the durable commit (the client's refetch finds the row — A11 post-commit rule).
     """
-    web = WebAppDeliverer(rls_engine=engine, sessions=_NoLiveSessions())
+    web = WebAppDeliverer(rls_engine=engine, sessions=sessions or _NoLiveSessions())
     router = DeliveryRouter(
         deliverers={"web": web}, rls_engine=engine, resolve_channel=lambda _m: channel
     )
@@ -220,9 +227,11 @@ class OriginatorFailureNotifier:
         edition: Edition,
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
+        sessions: LiveSessionRegistry | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
+        self._sessions = sessions
         # R5-D-2: backend-selected audit when supplied (worker parity);
         # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
@@ -247,6 +256,7 @@ class OriginatorFailureNotifier:
             content=render_failure_account(account),
             conversation_id=conversation_id,
             now=datetime.now(UTC),
+            sessions=self._sessions,
         )
 
 
@@ -267,9 +277,11 @@ class OriginatorUpdateSender:
         edition: Edition,
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
+        sessions: LiveSessionRegistry | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
+        self._sessions = sessions
         # R5-D-2: backend-selected audit when supplied (worker parity);
         # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
@@ -298,4 +310,5 @@ class OriginatorUpdateSender:
             conversation_id=conversation_id or "",
             now=now,
             channel=channel,
+            sessions=self._sessions,
         )

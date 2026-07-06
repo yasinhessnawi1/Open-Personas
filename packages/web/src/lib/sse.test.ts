@@ -87,6 +87,21 @@ describe("consumeSSE", () => {
     expect(err.code).toBe("rate_limit_exceeded");
     expect(err.rateLimit.retryAfter).toBe(30);
   });
+
+  it("surfaces the id: field (A11 Last-Event-ID cursor) and omits it when absent", async () => {
+    mockOkStream([
+      "id: e1:7\nevent: notification.created\ndata: {}\n\n",
+      "event: chunk\ndata: {}\n\n",
+    ]);
+    const events = await collect();
+    expect(events[0]).toEqual({
+      event: "notification.created",
+      data: "{}",
+      id: "e1:7",
+    });
+    expect(events[1]).toEqual({ event: "chunk", data: "{}" }); // no id key
+    expect("id" in events[1]).toBe(false);
+  });
 });
 
 describe("parseChatEvent (bare payload)", () => {

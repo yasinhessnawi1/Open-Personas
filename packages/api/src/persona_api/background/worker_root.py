@@ -102,8 +102,10 @@ if TYPE_CHECKING:
     from persona_api.jobs.catalog_sync import CatalogSyncTask
     from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
     from persona_api.jobs.worker import Worker
+    from persona_api.realtime.channel import UserEventChannel
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.services.runtime_factory import RuntimeFactory
+    from persona_api.services.web_deliverer import LiveSessionRegistry
 
 __all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
 
@@ -120,6 +122,8 @@ def build_worker_registry(
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
     edition: object | None = None,
+    live_sessions: LiveSessionRegistry | None = None,
+    event_channel: UserEventChannel | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -231,6 +235,8 @@ def build_worker_registry(
             # config-selected backend; audit_root stays the JSONL fallback path.
             audit_root=Path(config.audit_root),
             audit_logger=build_audit_logger(config, rls_engine),
+            live_sessions=live_sessions,
+            event_channel=event_channel,
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -277,6 +283,7 @@ def build_worker_registry(
                 edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
                 audit_root=Path(config.audit_root),
                 audit_logger=build_audit_logger(config, rls_engine),
+                sessions=live_sessions,
             )
 
             def tag_resolver(persona_id: str) -> object:
@@ -330,6 +337,8 @@ def _register_task_leg_tenant(
     edition: object | None,
     audit_root: Path,
     audit_logger: AuditLogger | None = None,
+    live_sessions: LiveSessionRegistry | None = None,
+    event_channel: UserEventChannel | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4)."""
     task_store = TaskStore(rls_engine)
@@ -347,6 +356,7 @@ def _register_task_leg_tenant(
         edition=edition,
         audit_root=audit_root,
         audit_logger=audit_logger,
+        live_sessions=live_sessions,
     )
     register_task_leg_handler(
         registry,
@@ -365,6 +375,7 @@ def _register_task_leg_tenant(
         queue=JobQueue(rls_engine),
         schedule_store=ScheduleStore(rls_engine),
         rls_engine=rls_engine,
+        event_channel=event_channel,
     )
 
 
@@ -375,6 +386,7 @@ def _build_milestone_hook(
     edition: object | None,
     audit_root: Path,
     audit_logger: AuditLogger | None = None,
+    live_sessions: LiveSessionRegistry | None = None,
 ) -> Callable[[LegOutcome, datetime], Awaitable[None]] | None:
     """Build the digest-on-milestone closure, or ``None`` when the digest can't be delivered.
 
@@ -402,6 +414,7 @@ def _build_milestone_hook(
         edition=edition,  # type: ignore[arg-type]  # Edition; typed as object to avoid an import cycle
         audit_root=audit_root,
         audit_logger=audit_logger,
+        sessions=live_sessions,
     )
     publisher = TaskUpdatePublisher(sender=sender)
     tasks = TaskStore(rls_engine)
@@ -481,6 +494,8 @@ def start_in_process_worker(
     tier_registry: TierRegistry,
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
+    live_sessions: LiveSessionRegistry | None = None,
+    event_channel: UserEventChannel | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -516,6 +531,8 @@ def start_in_process_worker(
         runtime_factory=runtime_factory,
         memory_backend=memory_backend,
         edition=config.edition,
+        live_sessions=live_sessions,
+        event_channel=event_channel,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines

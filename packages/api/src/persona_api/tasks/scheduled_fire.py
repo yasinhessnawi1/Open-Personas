@@ -39,7 +39,10 @@ from persona.logging import get_logger
 from persona.tasks import ScheduledFire
 
 from persona_api.db.engine import rls_connection
-from persona_api.services.notifications_service import create_notification
+from persona_api.services.notifications_service import (
+    create_notification,
+    publish_notification_created,
+)
 from persona_api.tasks.handler import enqueue_task_leg
 
 if TYPE_CHECKING:
@@ -47,6 +50,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.jobs.queue import JobQueue
+    from persona_api.realtime.channel import UserEventChannel
     from persona_api.schedules.store import ScheduleStore
     from persona_api.tasks.store import TaskStore
 
@@ -80,11 +84,14 @@ class ScheduledTaskFireHandler:
         queue: JobQueue,
         schedule_store: ScheduleStore,
         rls_engine: Engine,
+        event_channel: UserEventChannel | None = None,
     ) -> None:
         self._tasks = task_store
         self._queue = queue
         self._schedules = schedule_store
         self._engine = rls_engine
+        # Spec A11: a committed executor-missing notification pings the bell live.
+        self._event_channel = event_channel
 
     async def handle(self, payload: TaskScheduledFirePayload, context: JobContext) -> None:
         """Read the task head + enqueue the leg carrying a ``ScheduledFire`` trigger.
@@ -137,6 +144,14 @@ class ScheduledTaskFireHandler:
                 message_key="notifications.schedule.executor_missing",
                 params={"task_id": task_id, "schedule_id": schedule_id},
             )
+        # Spec A11: the write COMMITS on the `with` block exit; ping the bell live AFTER
+        # commit so the client's refetch finds the row (post-commit rule). Best-effort.
+        publish_notification_created(
+            self._event_channel,
+            owner_id=owner_id,
+            kind="schedule_executor_missing",
+            ref_id=schedule_id,
+        )
         _log.warning(
             "scheduled fire's task is gone (executor persona deleted) — schedule paused + "
             "user notified",
@@ -152,6 +167,7 @@ def register_scheduled_task_fire_handler(
     queue: JobQueue,
     schedule_store: ScheduleStore,
     rls_engine: Engine,
+    event_channel: UserEventChannel | None = None,
 ) -> None:
     """Register the ``task_scheduled_fire`` tenant (the schedule→leg bridge)."""
     registry.register(
@@ -163,6 +179,7 @@ def register_scheduled_task_fire_handler(
                 queue=queue,
                 schedule_store=schedule_store,
                 rls_engine=rls_engine,
+                event_channel=event_channel,
             ),
             idempotency_key=lambda p: f"schedfire:{p.task_id}:{p.fire_time.isoformat()}",
             retry=RetryPolicy(max_attempts=3),
