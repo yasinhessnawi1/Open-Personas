@@ -135,6 +135,11 @@ def test_community_app_boots_on_managed_embedded_postgres(
         edition=Edition.community,
         community_db_mode="embedded",
         community_managed_db_dir=short_base_dir,
+        # Isolate the legacy-import source: this is a FRESH-boot test, so point the
+        # legacy SQLite/Chroma paths at nonexistent locations (never the host's real
+        # cwd/.persona_community.db default) → has_legacy_data() is False, no import.
+        community_db_path=short_base_dir / "no-legacy.db",
+        community_memory_path=short_base_dir / "no-legacy-chroma",
         workspace_root=work / "work",
         audit_root=str(work / "audit"),
     )

@@ -371,3 +371,38 @@ def test_fresh_install_has_nothing_to_import(
     )
     assert report is None  # nothing to migrate
     target.dispose()
+
+
+def test_import_tolerates_legacy_schema_drift_missing_columns(
+    tmp_path: Path, target_url: str, embedder: HashEmbedder384
+) -> None:
+    # THE REAL UPGRADE SCENARIO the same-schema synthetic fixtures never exercised
+    # (found by the operator pass on a real host): a legacy SQLite predating a later
+    # migration — here K6's users.first_name/last_name (migration 029) — must import,
+    # not crash on select(current_model). The columns absent in the SOURCE take their
+    # (nullable) target defaults.
+    sqlite_path, chroma_path, _ = _build_legacy_store(tmp_path, embedder)
+    src = make_community_engine(sqlite_path)
+    with src.begin() as conn:  # simulate a pre-K6 install
+        conn.execute(text("ALTER TABLE users DROP COLUMN first_name"))
+        conn.execute(text("ALTER TABLE users DROP COLUMN last_name"))
+    src.dispose()
+
+    target = create_engine(target_url)
+    report = maybe_run_community_import(
+        sqlite_path=sqlite_path,
+        chroma_path=chroma_path,
+        target_engine=target,
+        embedder=embedder,
+    )
+    assert report is not None
+    assert report.journal_complete is True
+    with target.connect() as conn:
+        row = conn.execute(
+            text("SELECT id, first_name, last_name FROM users WHERE id = :o"),
+            {"o": _OWNER},
+        ).one()
+    assert row.id == _OWNER
+    assert row.first_name is None  # absent in the source → target default
+    assert row.last_name is None
+    target.dispose()

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from sqlalchemy import Table, create_engine, select, text
+from sqlalchemy import Table, create_engine, inspect as sa_inspect, select, text
 
 from persona_api.db.community import build_community_metadata, make_community_engine
 from persona_api.db.models import metadata as _canonical_metadata
@@ -152,8 +152,21 @@ class CommunityImporter:
             self._on_unit_committed(unit_id)  # test seam: a real abort point
 
     def _read_table(self, source: Engine, community_table: Table) -> list[dict[str, object]]:
+        # A legacy SQLite may predate columns/tables added by later migrations (e.g.
+        # K6's users.first_name/last_name, migration 029). Read only what the SOURCE
+        # actually has — reflect its columns and select the intersection with the
+        # canonical table; the target's newer columns take their (nullable) defaults.
+        # A table absent from the source (added after this legacy install existed)
+        # yields no rows. This keeps the upgrade robust to cross-version schema drift.
+        inspector = sa_inspect(source)
+        if not inspector.has_table(community_table.name):
+            return []
+        source_cols = {c["name"] for c in inspector.get_columns(community_table.name)}
+        cols = [community_table.c[n] for n in community_table.columns.keys() if n in source_cols]
+        if not cols:
+            return []
         with source.connect() as conn:
-            return [dict(r) for r in conn.execute(select(community_table)).mappings().all()]
+            return [dict(r) for r in conn.execute(select(*cols)).mappings().all()]
 
     def _write_table_unit(self, name: str, rows: list[dict[str, object]], unit_id: str) -> None:
         """One transaction: the table's rows AND its journal marker (D-K10-11).

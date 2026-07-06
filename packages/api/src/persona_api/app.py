@@ -662,21 +662,35 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         and runtime_factory is not None
         and _worker_tier_registry is not None
     ):
+        from persona.backends.errors import AuthenticationError
         from persona_api.background.worker_root import start_in_process_worker
 
-        in_process_worker = start_in_process_worker(
-            config=config,
-            rls_engine=rls_engine,
-            embedder=app.state.embedder,
-            tier_registry=_worker_tier_registry,
-            # Spec A4 (composition-root activation): the task-leg tenant + digest hook. The leg
-            # runner is the SAME AgenticLoop the chat path uses (the no-bypass guarantee); the
-            # digest publisher rides the real C0 sender. ``memory_backend`` present → digest is
-            # live; absent → the leg still runs, updates are simply not delivered.
-            # (R5: audit_root param removed — the worker selects its audit backend from config.)
-            runtime_factory=runtime_factory,
-            memory_backend=memory_backend,
-        )
+        try:
+            in_process_worker = start_in_process_worker(
+                config=config,
+                rls_engine=rls_engine,
+                embedder=app.state.embedder,
+                tier_registry=_worker_tier_registry,
+                # Spec A4 (composition-root activation): the task-leg tenant + digest hook. The leg
+                # runner is the SAME AgenticLoop the chat path uses (the no-bypass guarantee); the
+                # digest publisher rides the real C0 sender. ``memory_backend`` present → digest is
+                # live; absent → the leg still runs, updates are simply not delivered.
+                # (R5: audit_root param removed — the worker selects its audit backend from config.)
+                runtime_factory=runtime_factory,
+                memory_backend=memory_backend,
+            )
+        except AuthenticationError:
+            # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,
+            # so the presence guard above can't distinguish "has a usable key" — the
+            # synthesis/consolidation backends only fail to authenticate here. Boot
+            # worker-less rather than crash; producers' enqueues are no-op-consumed
+            # until a model key is configured (a wrong/expired key degrades the same
+            # honest way, surfaced by this warning).
+            _LOG.warning(
+                "in-process worker disabled: no usable model API key (keyless boot); "
+                "background synthesis/consolidation/gist will not run until a key is set"
+            )
+            in_process_worker = None
     app.state.in_process_worker = in_process_worker
 
     # Restart sweep (Spec P1, D-P1-restart-sweep): BEFORE serving, reconcile any
