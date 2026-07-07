@@ -22,8 +22,8 @@ orchestrator RENUMBERS onto the then-current head (local global head is already
 ``038_initiative``; A7 holds a provisional ``039``; N6 lands ``040+`` per merge order).
 Do NOT treat ``037`` as the permanent parent.
 
-Revision ID: 040_mcp_runtime_instances
-Revises: 037_notifications_schedule_kind
+Revision ID: 041_mcp_runtime_instances
+Revises: 040_core_memory_kind
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from __future__ import annotations
 from alembic import op
 from persona_api.db.models import mcp_runtime_instances
 
-revision = "040_mcp_runtime_instances"
-down_revision = "037_notifications_schedule_kind"
+revision = "041_mcp_runtime_instances"
+down_revision = "040_core_memory_kind"
 branch_labels = None
 depends_on = None
 
