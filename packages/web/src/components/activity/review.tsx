@@ -12,11 +12,21 @@ import { kr } from "@/components/tasks/task-row";
 import { Badge } from "@/components/ui/badge";
 import {
   type DigestItem,
+  type DigestRef,
   type DigestSection,
   fetchReview,
   type MorningDigest,
 } from "@/lib/api/review-client";
 import { personaIdentityStyle } from "@/lib/persona-identity";
+import { useTaskSignal } from "@/lib/task-signal";
+
+/** The per-item deep-link target (A6-D-6): approval → the inbox item, task → the task detail. */
+function refHref(ref: DigestRef | null): string | null {
+  if (!ref) return null;
+  if (ref.kind === "approval")
+    return `/approvals?id=${encodeURIComponent(ref.id)}`;
+  return `/tasks/${encodeURIComponent(ref.id)}`;
+}
 
 /** persona voice: an identity dot + the persona's name, then their own words (A6-D-2). */
 function PersonaLine({
@@ -28,6 +38,10 @@ function PersonaLine({
   name: string;
   voiced?: boolean;
 }) {
+  const href = refHref(item.ref);
+  const cls = voiced
+    ? "type-body font-[family-name:var(--font-display)] italic"
+    : "type-body";
   return (
     <div
       className="flex flex-col gap-0.5"
@@ -41,15 +55,13 @@ function PersonaLine({
         />
         {name}
       </span>
-      <p
-        className={
-          voiced
-            ? "type-body font-[family-name:var(--font-display)] italic"
-            : "type-body"
-        }
-      >
-        {item.title}
-      </p>
+      {href ? (
+        <Link href={href} className={`${cls} hover:underline`}>
+          {item.title}
+        </Link>
+      ) : (
+        <p className={cls}>{item.title}</p>
+      )}
       {item.detail ? (
         <p className="type-caption text-muted-foreground">{item.detail}</p>
       ) : null}
@@ -89,7 +101,7 @@ function StuckItem({
         <p className="type-caption text-muted-foreground">{item.ran_because}</p>
       ) : null}
       <Link
-        href="/tasks"
+        href={refHref(item.ref) ?? "/tasks"}
         className="inline-flex w-fit items-center gap-1 text-sm text-foreground hover:underline"
       >
         {resolveLabel}
@@ -98,13 +110,6 @@ function StuckItem({
     </div>
   );
 }
-
-const SECTION_HREF: Record<string, string | null> = {
-  waiting: "/approvals",
-  stuck: null, // per-item resolve link
-  done: null,
-  initiatives: null,
-};
 
 export function Review() {
   const t = useTranslations("review");
@@ -122,6 +127,9 @@ export function Review() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // W8: on a task.updated signal, refetch the durable digest — never trust a pushed state (A6-R-4).
+  useTaskSignal(() => void load());
 
   if (digest === null) {
     return (
@@ -188,7 +196,6 @@ function Section({
   name: (id: string | null) => string;
   t: ReturnType<typeof useTranslations>;
 }) {
-  const href = SECTION_HREF[section.kind];
   const isWaiting = section.kind === "waiting";
   const isDone = section.kind === "done";
   return (
@@ -227,7 +234,16 @@ function Section({
               className="type-body flex flex-wrap gap-x-2 text-muted-foreground"
             >
               <span className="text-foreground">{name(item.persona_id)}</span>
-              <span>{item.title}</span>
+              {refHref(item.ref) ? (
+                <Link
+                  href={refHref(item.ref) as string}
+                  className="hover:underline"
+                >
+                  {item.title}
+                </Link>
+              ) : (
+                <span>{item.title}</span>
+              )}
               {item.detail ? <span>— {item.detail}</span> : null}
               {item.ran_because ? (
                 <span className="text-muted-foreground/70">
@@ -254,16 +270,6 @@ function Section({
         <p className="type-caption text-muted-foreground">
           {t("overflow", { count: section.overflow })}
         </p>
-      ) : null}
-
-      {href ? (
-        <Link
-          href={href}
-          className="inline-flex w-fit items-center gap-1 text-sm text-foreground hover:underline"
-        >
-          {t("reviewInApprovals")}
-          <ArrowRight className="size-3.5" />
-        </Link>
       ) : null}
     </section>
   );

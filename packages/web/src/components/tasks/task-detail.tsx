@@ -22,6 +22,7 @@ import {
   type TaskDetail as TaskDetailData,
 } from "@/lib/api/tasks-client";
 import { personaIdentityStyle } from "@/lib/persona-identity";
+import { useTaskSignal } from "@/lib/task-signal";
 import { cn } from "@/lib/utils";
 
 import { InitiativeDialControl } from "./initiative-dial-control";
@@ -74,6 +75,11 @@ export function TaskDetail({
       /* keep the last-known detail; the reflection still shows */
     }
   }, [getToken, taskId]);
+
+  // W8: a task.updated signal refetches THIS task only when it's the one that changed (targeted).
+  useTaskSignal((signal) => {
+    if (signal.taskId === taskId) void refetch();
+  });
 
   const runCommand = useCallback(
     async (

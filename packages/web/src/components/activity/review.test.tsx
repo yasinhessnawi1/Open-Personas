@@ -7,12 +7,13 @@
  * - **Under a minute** — an over-cap section shows an honest "+N more", not a wall.
  * - **Truthful state** — an empty digest reads "a quiet night"; A7 provenance renders when present.
  */
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import messages from "@/i18n/messages/en.json";
 import type { MorningDigest } from "@/lib/api/review-client";
+import { emitTaskSignal } from "@/lib/task-signal";
 
 import { Review } from "./review";
 
@@ -40,6 +41,7 @@ function item(over: Partial<MorningDigest["sections"][0]["items"][0]> = {}) {
     persona_id: "kai",
     title: "the thing",
     detail: "",
+    ref: null,
     ran_because: null,
     ...over,
   };
@@ -106,6 +108,37 @@ describe("Review", () => {
     api.fetchReview.mockResolvedValue(digest());
     renderReview();
     expect(await screen.findByText("A quiet night")).toBeInTheDocument();
+  });
+
+  it("deep-links a stuck item to its own task (DigestItem.ref, criterion-10)", async () => {
+    api.fetchReview.mockResolvedValue(
+      digest({
+        sections: [
+          {
+            kind: "stuck",
+            items: [
+              item({
+                title: "book dentist",
+                ref: { kind: "task", id: "t_stuck" },
+              }),
+            ],
+            overflow: 0,
+          },
+        ],
+      }),
+    );
+    renderReview();
+    const link = await screen.findByRole("link", { name: /resolve/i });
+    expect(link.getAttribute("href")).toBe("/tasks/t_stuck");
+  });
+
+  it("refetches the durable digest on a task.updated signal (W8, refetch-not-trust)", async () => {
+    api.fetchReview.mockResolvedValue(digest());
+    renderReview();
+    await screen.findByText("A quiet night");
+    expect(api.fetchReview).toHaveBeenCalledTimes(1);
+    act(() => emitTaskSignal({ id: "s1", taskId: "t1" }));
+    await waitFor(() => expect(api.fetchReview).toHaveBeenCalledTimes(2));
   });
 
   it("renders A7 'ran because' provenance when present (the W8 wiring target)", async () => {

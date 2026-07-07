@@ -10,11 +10,19 @@
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+/** The durable referent a line deep-links to (A6-D-6): approval → inbox, task → detail. */
+export interface DigestRef {
+  kind: "approval" | "task";
+  id: string;
+}
+
 /** One line in a section — persona-voiced; verbatim-safe as text. */
 export interface DigestItem {
   persona_id: string;
   title: string;
   detail: string;
+  /** The per-item deep-link target (A6-D-6); null when there's no actionable target. */
+  ref: DigestRef | null;
   /** A7 "ran because …" provenance — null until W8 wires it (the source now exists post-A7-merge). */
   ran_because: string | null;
 }

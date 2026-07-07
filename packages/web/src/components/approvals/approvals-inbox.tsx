@@ -16,6 +16,7 @@ import {
   fetchApprovals,
   getApproval,
 } from "@/lib/api/approvals-client";
+import { useTaskSignal } from "@/lib/task-signal";
 
 import { ApprovalCard, type CardResolution } from "./approval-card";
 
@@ -48,6 +49,9 @@ export function ApprovalsInbox({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // W8: a task parking on the user (an approval) refetches the durable pending list (A6-R-4).
+  useTaskSignal(() => void load());
 
   const onDecide = useCallback(
     async (proposalId: string, req: ApprovalDecisionRequest) => {

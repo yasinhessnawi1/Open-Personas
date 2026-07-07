@@ -104,6 +104,16 @@ def test_build_composes_and_orders_the_sections(
     assert digest.sections[1].items[0].title == "book the dentist"
     assert digest.sections[2].items[0].title == "summarise the newsletters"
     assert digest.persona_names["kai"] == "Kai"  # self-contained for rendering
+    # per-item deep-link refs (A6-D-6, W8): waiting → the approval; stuck/done → the task.
+    waiting_ref = digest.sections[0].items[0].ref
+    assert waiting_ref is not None
+    assert (waiting_ref.kind, waiting_ref.id) == ("approval", "p1")
+    stuck_ref = digest.sections[1].items[0].ref
+    assert stuck_ref is not None
+    assert (stuck_ref.kind, stuck_ref.id) == ("task", "t_stuck")
+    done_ref = digest.sections[2].items[0].ref
+    assert done_ref is not None
+    assert (done_ref.kind, done_ref.id) == ("task", "t_done")
 
     text_render = render_digest_message(digest)
     assert text_render.index("Waiting on you") < text_render.index("Stuck")

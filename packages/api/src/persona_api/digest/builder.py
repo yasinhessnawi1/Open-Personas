@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DigestItem",
+    "DigestRef",
     "DigestSection",
     "MorningDigest",
     "UpcomingItem",
@@ -62,6 +63,20 @@ _SECTION_LABEL = {
 }
 
 
+class DigestRef(BaseModel):
+    """The durable referent a Review line deep-links to (A6-D-6; criterion-10 glance→approve).
+
+    ``kind="approval"`` → the proposal (``/approvals?id=``); ``kind="task"`` → the task
+    (``/tasks/{id}``). ``None`` on an item with no actionable target (a noticed initiative, a
+    deferred one-liner).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str  # approval | task
+    id: str
+
+
 class DigestItem(BaseModel):
     """One line in a section — persona-voiced where the persona speaks; verbatim-safe as text."""
 
@@ -70,6 +85,8 @@ class DigestItem(BaseModel):
     persona_id: str
     title: str
     detail: str = ""
+    #: The durable referent for a per-item deep-link (A6-D-6); ``None`` when there is no target.
+    ref: DigestRef | None = None
     #: A7 provenance ("ran because: …") — flag-gated; ``None`` until A7 lands (no source yet).
     ran_because: str | None = None
 
@@ -134,7 +151,11 @@ def build_morning_digest(
     Pure composition over the RLS engine + ``config`` (for occurrences) — no RuntimeFactory.
     """
     waiting = [
-        DigestItem(persona_id=p.persona_id, title=p.description)
+        DigestItem(
+            persona_id=p.persona_id,
+            title=p.description,
+            ref=DigestRef(kind="approval", id=p.proposal_id),
+        )
         for p in ApprovalStore(engine).list_pending_for_owner(owner_id)
     ]
 
@@ -152,6 +173,7 @@ def build_morning_digest(
                     persona_id=task.persona_id,
                     title=task.contract.goal,
                     detail=_first(completion.conclusions),
+                    ref=DigestRef(kind="task", id=task.id),
                 )
             )
         elif task.state is TaskState.FAILED:
@@ -163,6 +185,7 @@ def build_morning_digest(
                     persona_id=task.persona_id,
                     title=task.contract.goal,
                     detail=stuck_report.cause,
+                    ref=DigestRef(kind="task", id=task.id),
                 )
             )
     # secondary: the deferred chatter, as one-liners under "done" (never load-bearing).
@@ -216,7 +239,7 @@ def _resolve_names(
     """Resolve each persona's display name so the digest is self-contained for both renderings.
 
     Self-scoped (``rls_connection``) like every other read here, so the builder is correct even off
-    a request (a background C0 build) — not reliant on an ambient GUC. One query, id as the fallback.
+    a request (a background C0 build) — not reliant on an ambient GUC. One query; id is fallback.
     """
     ids = {item.persona_id for s in sections for item in s.items}
     ids |= {u.persona_id for u in upcoming if u.persona_id is not None}

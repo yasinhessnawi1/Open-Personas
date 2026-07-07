@@ -14,6 +14,7 @@ import {
   fetchTasks,
   type TaskSummary,
 } from "@/lib/api/tasks-client";
+import { useTaskSignal } from "@/lib/task-signal";
 
 import { TaskRow } from "./task-row";
 
@@ -59,6 +60,9 @@ export function TasksList({ personaNames }: { personaNames: PersonaNames }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // W8: refetch the durable list on a task.updated signal (refetch-not-trust, A6-R-4).
+  useTaskSignal(() => void load());
 
   const onCancel = useCallback(
     async (taskId: string) => {
