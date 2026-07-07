@@ -109,6 +109,17 @@ class VoiceConfig(BaseSettings):
     # spoken-surfacing risk and are not gated by it.
     graph_memory_enabled: bool = Field(default=False)
 
+    # --- Voice task origination / delegation (Spec A9, A9-D-1) ---
+    # Gates whether the A9 origination gate is composed into the voice runner. ``False``
+    # (default): the runner wires no gate ⇒ ``VoiceTurnContext.origination_gate`` stays
+    # ``None`` ⇒ a **byte-identical** voice turn (a spoken task/schedule ask is handled as
+    # ordinary conversation, today's behaviour). ``True``: compose the gate (the A4 recognizer
+    # + VOICE echo/confirm) behind the cheap cue regex; a recognized ask is echoed + confirmed
+    # for the ear and DELEGATED to the chat pipeline (voice never executes with the mid model —
+    # A9-D-5/D-7). Ship OFF; flip ON in-env only after the T11 real-transition proof + operator
+    # pass. The delegation crossing (T4) + hand-back (T6) are the execution half behind this.
+    delegation_enabled: bool = Field(default=False)
+
     # --- Greet-first turn-0 bounds (Spec 32 A3, D-32-X-degrade-timeout-env-config) ---
     # The ring degrade ladder, env-tunable per the config-via-env standard.
     # ``greet_warmup_timeout_s`` caps how long turn 0 waits on the embedder warm-up

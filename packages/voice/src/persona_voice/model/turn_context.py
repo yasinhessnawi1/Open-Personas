@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from persona_runtime.tier import TierRegistry
 
     from persona_voice.agent.language import CallLanguagePlan
+    from persona_voice.model.origination_gate import VoiceOriginationGate
 
 __all__ = ["REQUIRED_STORE_KINDS", "VoiceTurnContext"]
 
@@ -130,6 +131,13 @@ class VoiceTurnContext:
     lexical-only (V11). The reply producer runs the composed classify OFF the event loop
     (``asyncio.to_thread``) so the CPU-bound score never starves the voice loop; fail-soft→
     R0 (encoder error / not-yet-warm / timeout ⇒ lexical) lives in ``classify_user_message``."""
+    origination_gate: VoiceOriginationGate | None = None
+    """The A9 voice task-origination gate (A9-D-1). ``None`` ⇒ **byte-identical** voice turn
+    (the gate is never consulted). When wired, the reply producer runs it AFTER the R1-hard
+    safety bypass (crisis precedence) and BEFORE routing/retrieval: a recognized task/schedule
+    ask is echoed + confirmed for the ear and then **delegated** to the chat pipeline (voice
+    never executes with the mid model — A9-D-5/D-7); a no-cue turn pays only the cheap regex
+    and proceeds unchanged (A9-D-1, criterion 2). Graph stays OFF; the gate never reads it."""
 
     def __post_init__(self) -> None:
         missing = [kind for kind in REQUIRED_STORE_KINDS if kind not in self.stores]

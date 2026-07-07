@@ -29,7 +29,10 @@ if TYPE_CHECKING:
 __all__ = [
     "ECHO_PROMPT",
     "ECHO_PROMPT_VERSION",
+    "ECHO_PROMPT_VOICE",
+    "ECHO_PROMPT_VOICE_VERSION",
     "Clause",
+    "EchoMode",
     "amend_goal",
     "amend_schedule",
     "amend_scope",
@@ -39,6 +42,21 @@ __all__ = [
     "render_echo",
     "set_grant",
 ]
+
+
+class EchoMode(StrEnum):
+    """The channel the echo is rendered for (Spec A9, A9-D-2).
+
+    One renderer, two modes — mirroring how the prompt system gained ``PromptMode`` (V11-D-1).
+    ``CHAT`` is the A4 echo, **byte-identical** to before A9 (snapshot-pinned). ``VOICE`` renders
+    the *same* clauses (no grant dropped — the completeness guarantee is unchanged) phrased for
+    the ear: sentence-shaped, no markdown/bullets, grants folded into one spoken clause, the
+    schedule's ``·`` separator spoken as a comma, ending in a single explicit confirm ask.
+    """
+
+    CHAT = "chat"
+    VOICE = "voice"
+
 
 #: Version of the persona-voicing prompt artifact (Spec 10 discipline). Bump on any change
 #: to ``ECHO_PROMPT`` so an echo's wording is traceable to the artifact that produced it.
@@ -52,6 +70,24 @@ ECHO_PROMPT = (
     "assistant playing back an instruction. Keep every line: the goal, the schedule, EACH "
     "permission line exactly as written (never merge, drop, or soften a permission), and how "
     "you'll keep them posted. End by asking them to confirm or adjust. Do not add new terms.\n\n"
+    "{structured_echo}"
+)
+
+#: Version of the VOICE persona-voicing artifact (Spec A9, A9-D-2). Bump on any change to
+#: ``ECHO_PROMPT_VOICE`` so a spoken echo's wording is traceable to the artifact that produced it.
+ECHO_PROMPT_VOICE_VERSION = "a9-echo-voice-v1"
+
+#: The VOICE prompt artifact: voice the structured contract for the ear — short spoken sentences,
+#: no lists, every permission still spoken (completeness is load-bearing on voice too). The confirm
+#: ask is already in the structured echo; the persona keeps it. Same completeness contract as the
+#: chat artifact, tuned to the voice register (V11): one idea per sentence, plain speech, no markup.
+ECHO_PROMPT_VOICE = (
+    "You are about to take on a standing task, and you are on a voice call. Say the contract "
+    "below back to the user in your own voice, in a few short spoken sentences — warm and plain, "
+    "like a capable assistant playing back an instruction out loud. Speak every part: the goal, "
+    "the schedule, EACH permission exactly as meant (never merge, drop, or soften a permission), "
+    "and how you'll keep them posted. Do not read it as a list and do not add new terms. Keep the "
+    "closing question that asks them to confirm or change it.\n\n"
     "{structured_echo}"
 )
 
@@ -70,6 +106,22 @@ _GRANULARITY_HUMAN: dict[UpdateGranularity, str] = {
     UpdateGranularity.QUIET: "quietly — I'll only reach out if I need you or something goes wrong",
 }
 
+#: The VOICE granularity phrasings (A9-D-2) — no parentheticals or em-dashes (the V11 register:
+#: short clauses, no asides), so the spoken updates line reads as one clean sentence.
+_GRANULARITY_HUMAN_VOICE: dict[UpdateGranularity, str] = {
+    UpdateGranularity.EVERY_LEG: "after every step",
+    UpdateGranularity.MILESTONES: "at milestones, and when it's done",
+    UpdateGranularity.COMPLETION_ONLY: "only when it's done",
+    UpdateGranularity.QUIET: (
+        "quietly, and I'll only reach out if I need you or something goes wrong"
+    ),
+}
+
+#: The spoken confirm ask that closes a VOICE echo (A9-D-2 — a single explicit ask). The render
+#: layer bakes it into the structured echo so the persona always speaks it (the chat path relies on
+#: ``ECHO_PROMPT`` to add the ask; on voice it is part of the structure, so it cannot be dropped).
+_VOICE_CONFIRM_ASK = "Say yes to confirm, or tell me what to change."
+
 
 class Clause(StrEnum):
     """The amendable clauses of a contract draft (adjust-by-reply addresses one at a time)."""
@@ -81,12 +133,16 @@ class Clause(StrEnum):
     UPDATES = "updates"
 
 
-def render_echo(draft: ContractDraft) -> str:
-    """Lay out the complete, grant-prominent structured echo (A4-D-1, criterion 4).
+def render_echo(draft: ContractDraft, mode: EchoMode = EchoMode.CHAT) -> str:
+    """Lay out the complete, grant-prominent structured echo (A4-D-1, criterion 4; A9-D-2).
 
-    Every clause present in the draft is rendered; every beyond-default grant gets its own
-    line. This is the completeness guarantee the persona then voices (:data:`ECHO_PROMPT`).
+    Every clause present in the draft is rendered; every beyond-default grant is spoken (its own
+    line in ``CHAT``, folded into one clause in ``VOICE``). This is the completeness guarantee the
+    persona then voices (:data:`ECHO_PROMPT` / :data:`ECHO_PROMPT_VOICE`). ``CHAT`` is unchanged
+    from the A4 echo; ``VOICE`` renders the same clauses for the ear + the spoken confirm ask.
     """
+    if mode is EchoMode.VOICE:
+        return _render_echo_voice(draft)
     lines = [render_clause(draft, Clause.GOAL)]
     if draft.scope:
         lines.append(render_clause(draft, Clause.SCOPE))
@@ -96,8 +152,32 @@ def render_echo(draft: ContractDraft) -> str:
     return "\n".join(lines)
 
 
-def render_clause(draft: ContractDraft, clause: Clause) -> str:
-    """Render one clause line (used for the full echo and the adjust-by-reply re-echo)."""
+def _render_echo_voice(draft: ContractDraft) -> str:
+    """The VOICE echo — the same clauses, sentence-shaped, ending in the confirm ask (A9-D-2).
+
+    No markdown/bullets (a bulleted structure tempts the model to read a list — the V11 register
+    forbids spoken lists); grants fold into one clause; the schedule ``·`` is spoken as a comma.
+    Every grant still appears (the completeness guarantee holds on voice), and the closing ask is
+    part of the structure so it is never dropped.
+    """
+    sentences = [render_clause(draft, Clause.GOAL, EchoMode.VOICE)]
+    if draft.scope:
+        sentences.append(render_clause(draft, Clause.SCOPE, EchoMode.VOICE))
+    sentences.append(render_clause(draft, Clause.SCHEDULE, EchoMode.VOICE))
+    sentences.append(render_clause(draft, Clause.BOUNDS, EchoMode.VOICE))
+    sentences.append(render_clause(draft, Clause.UPDATES, EchoMode.VOICE))
+    sentences.append(_VOICE_CONFIRM_ASK)
+    return " ".join(s for s in sentences if s)
+
+
+def render_clause(draft: ContractDraft, clause: Clause, mode: EchoMode = EchoMode.CHAT) -> str:
+    """Render one clause (used for the full echo and the adjust-by-reply re-echo), per mode.
+
+    ``CHAT`` is byte-identical to the A4 clause line; ``VOICE`` renders the same content
+    sentence-shaped for the ear (A9-D-2). An amendment re-echoes one clause in the caller's mode.
+    """
+    if mode is EchoMode.VOICE:
+        return _render_clause_voice(draft, clause)
     if clause is Clause.GOAL:
         return f"Goal: {draft.goal}"
     if clause is Clause.SCOPE:
@@ -123,6 +203,32 @@ def render_clause(draft: ContractDraft, clause: Clause) -> str:
     raise ValueError(msg)
 
 
+def _render_clause_voice(draft: ContractDraft, clause: Clause) -> str:
+    """Render one clause for the ear (A9-D-2) — the same content, spoken-sentence-shaped.
+
+    The schedule's ``·`` timezone separator is spoken as a comma; the updates granularity uses the
+    parenthetical-free VOICE phrasings; grants fold into one clause (each still named).
+    """
+    if clause is Clause.GOAL:
+        return f"Here's what I'll do: {draft.goal}."
+    if clause is Clause.SCOPE:
+        return f"Scope: {draft.scope}." if draft.scope else ""
+    if clause is Clause.SCHEDULE:
+        sched = draft.schedule
+        if sched is None:
+            return "It runs once, with no recurring schedule."
+        when = f"{sched.human_terms}, {sched.timezone}"
+        if sched.recurrence is None:  # one-time — the now-honest recurring upgrade, spoken plainly
+            return f"When: {when}. It runs once — tell me if you'd like it recurring."
+        return f"When: {when}."
+    if clause is Clause.BOUNDS:
+        return _render_bounds_voice(draft)
+    if clause is Clause.UPDATES:
+        return _render_updates_voice(draft.updates)
+    msg = f"unknown clause {clause!r}"  # pragma: no cover - exhaustive enum
+    raise ValueError(msg)
+
+
 def _render_bounds(draft: ContractDraft) -> str:
     """The bounds clause — each beyond-default grant on its own prominent line."""
     if not draft.grants:
@@ -133,11 +239,30 @@ def _render_bounds(draft: ContractDraft) -> str:
     return f"Within bounds:\n{grant_lines}"
 
 
+def _render_bounds_voice(draft: ContractDraft) -> str:
+    """The bounds clause for the ear (A9-D-2) — grants folded into one spoken clause.
+
+    Each beyond-default grant is still named (the completeness guarantee — no grant dropped on
+    voice); they are joined into one sentence rather than a bulleted block (a list is not spoken).
+    """
+    if not draft.grants:
+        return "This stays within your usual permissions."
+    spoken = "; ".join(grant.human or _default_grant_text(grant) for grant in draft.grants)
+    return f"I'll also be allowed to: {spoken}."
+
+
 def _render_updates(updates: UpdatePreference) -> str:
     """The updates clause — granularity + channel."""
     granularity = _GRANULARITY_HUMAN[updates.granularity]
     where = f" on {updates.channel}" if updates.channel else ""
     return f"Updates: {granularity}{where}"
+
+
+def _render_updates_voice(updates: UpdatePreference) -> str:
+    """The updates clause for the ear (A9-D-2) — parenthetical-free, sentence-shaped."""
+    granularity = _GRANULARITY_HUMAN_VOICE[updates.granularity]
+    where = f" on {updates.channel}" if updates.channel else ""
+    return f"I'll keep you posted {granularity}{where}."
 
 
 def _default_grant_text(grant: GrantSpec) -> str:

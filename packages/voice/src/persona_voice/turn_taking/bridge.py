@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CompositeStateListener",
+    "CompositeTurnTranscriptListener",
     "HeardWordsBridge",
     "LoopTurnActions",
     "SessionEventBridge",
@@ -155,6 +156,24 @@ class CompositeStateListener:
     async def on_state_changed(self, transition: ConversationalTransition) -> None:
         for listener in self._listeners:
             await listener.on_state_changed(transition)
+
+
+class CompositeTurnTranscriptListener:
+    """Fans one committed (heard) reply out to several :class:`TurnTranscriptListener`s.
+
+    Lets more than one seam observe each turn's commit off the single loop
+    ``turn_transcript_listener`` slot — the V5 memory recorder AND (Spec A9) the
+    origination gate's barge-aware commit hook (``note_spoken_turn_committed``,
+    adapted to this Protocol). Listeners are notified in order; each MUST NOT raise
+    (the loop runs the commit in its ``finally``).
+    """
+
+    def __init__(self, listeners: Sequence[TurnTranscriptListener]) -> None:
+        self._listeners = tuple(listeners)
+
+    async def on_reply_committed(self, reply: BargedReply) -> None:
+        for listener in self._listeners:
+            await listener.on_reply_committed(reply)
 
 
 class HeardWordsBridge:

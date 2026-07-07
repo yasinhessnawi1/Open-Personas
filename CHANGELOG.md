@@ -11,6 +11,65 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Voice task origination — one grammar, both channels, via delegation (Spec A9)
+
+> "remind me every morning" spoken in a call now works like typed in chat — but
+> **voice never executes with the mid model**. A recognized task/schedule/autonomy
+> ask is echoed + confirmed for the ear, then DELEGATED verbatim to the chat
+> pipeline (frontier tier, full tools/K4/approvals/R7 — one audited execution
+> path); voice says "I'm preparing that in the background" and speaks the grounded
+> result back when it's done. Recognition sits off the realtime path behind a cheap
+> cue regex — a no-intent turn's latency is unchanged (measured p95 0.07 ms). Ships
+> **OFF** (`PERSONA_VOICE_DELEGATION_ENABLED=false`).
+
+#### Added
+- **`persona_voice.model.origination_gate`** — the voice origination gate: A4's
+  grammar reused VERBATIM (recognizer + `is_affirmative_confirmation` + amendment
+  interpreter) behind a VOICE echo mode; pure decision logic (no I/O / store /
+  graph). The confabulation guarantee is structural — the gate creates nothing; a
+  clean spoken confirm only returns the verbatim ask to delegate. Confirmation
+  window (next-turn-only, barge-invalidated, timeout — A9-D-3); one amendment round
+  then finish-in-chat (A9-D-4). Steering (pause/resume/cancel/reschedule) rides the
+  same crossing (A9-T7).
+- **`render_echo` VOICE mode** (`persona-runtime`, A9-D-2) — an additive
+  `EchoMode{CHAT,VOICE}` on the A4 echo (mirroring V11's `PromptMode`); CHAT
+  byte-identical (snapshot-pinned), VOICE speaks the same clauses for the ear
+  (short sentences, no lists/markdown, grants as one clause, a single confirm ask).
+- **`persona.jobs.delegation`** — the core-canonical `DelegatedTurnPayload`
+  {`conversation_id`, `verbatim_ask`, `provenance`, `persona_id`, `dedup_token`} +
+  `delegated_turn_idempotency_key` (draft-hash-primary over the verbatim ask +
+  conversation; the gate-minted token escape hatch) — the one contract both writers
+  share (A9-D-5).
+- **`persona_voice.session.delegation_enqueue`** — the voice-side twin raw-INSERT
+  writer (the `enqueue_voice_synthesis` discipline: column-parity + real-worker
+  transition tested); **`delegation_dispatch`** — enqueue off-loop, track the
+  hand-back on success, fail-soft (spoken "couldn't set it up", untracked) on an
+  enqueue failure (A9-T10); **`delegation_handback`** — the voice-side poll of the
+  `delegated_turn` job's terminal row → the grounded spoken hand-back at an idle
+  floor (succeeded → what was actually done; blocked-on-approval → the honest
+  "needs your OK in chat"; failed → fail-soft) (A9-D-5/D-7, T6).
+- **`persona_api.jobs.handlers.delegated_turn`** — the api-side A0 handler: runs
+  the verbatim ask through `RuntimeFactory.build_conversation_loop` on the frontier
+  (the one audited path), creates a recognized standing intent via the unchanged
+  `OriginationService` (voice's confirm stands in for the chat "yes" — loop.py
+  untouched, no fake user turn), applies a delegated pause/resume via the unchanged
+  `TaskSteeringService`, records the durable outcome (a final assistant message +
+  `provenance=voice` + a `delegated_turn.execute` audit row, actor `voice_delegated`).
+  Registered in `worker_root` as the task-leg tenant's sibling (built-but-inert
+  until voice enqueues).
+- **`PERSONA_VOICE_DELEGATION_ENABLED`** (default `false`) — the kill-switch; OFF
+  ⇒ a byte-identical voice turn (the gate is never composed).
+
+#### Changed
+- The voice reply producer (`VoiceModelReplyProducer`) runs the gate strictly
+  AFTER the R1-hard safety bypass (crisis precedence preserved — the gate is never
+  consulted on a crisis turn) and BEFORE routing/retrieval; graph stays OFF; a gate
+  failure degrades to today's clean ordinary turn (fail-soft). The A10 confabulation
+  guard (`detect_schedule_claim`, reused verbatim) now also runs on the voice
+  reply's non-delegated ordinary path — a hallucinated "I scheduled it" is corrected
+  (spoken tail + folded into episodic), so the graph never learns a false create
+  (A9-D-6).
+
 ### Routing — deliberate surface→tier policy; the tuning surface retired (Spec P9)
 
 > The router stops guessing: a turn's model tier is a function of its SURFACE,
