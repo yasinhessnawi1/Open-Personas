@@ -24,6 +24,7 @@ reply-injection is the defined ``UserReply`` path.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from persona.errors import ScheduleNotFoundError, TaskLegFailedError
@@ -56,7 +57,12 @@ if TYPE_CHECKING:
     from persona_api.schedules.store import ScheduleStore
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
-__all__ = ["TaskContinuation"]
+#: The A11/A6 task.updated signal seam (owner_id, task_id, state) → best-effort live ping. The
+#: worker binds it to ``publish_task_updated`` over the user event channel; routes/tests leave it
+#: ``None`` (the surface catches up on its next poll/navigation — the durable floor).
+TaskStateSignal = Callable[[str, str, str], None]
+
+__all__ = ["TaskContinuation", "TaskStateSignal"]
 
 _log = get_logger("api.tasks.continuation")
 
@@ -71,6 +77,7 @@ class TaskContinuation:
         queue: JobQueue,
         checkpoint_store: CheckpointStore | None = None,
         schedule_store: ScheduleStore | None = None,
+        on_state_change: TaskStateSignal | None = None,
     ) -> None:
         self._tasks = task_store
         self._queue = queue
@@ -80,6 +87,19 @@ class TaskContinuation:
         # scheduled fire (the schedule drives it) instead of terminating. Without a schedule store
         # a completed leg always terminates (the pre-recurrence A2 shape).
         self._schedules = schedule_store
+        # Spec A11/A6 (W8): the task.updated live-refetch ping, fired on the transitions A6's
+        # surfaces care about — terminal + waiting(on_user). Best-effort + AFTER the durable write
+        # (surface-lags-truth). None → no ping (the surface catches up on its next poll).
+        self._on_state_change = on_state_change
+
+    def _signal(self, owner_id: str, task_id: str, state: str) -> None:
+        """Best-effort task.updated ping — a subscriber failure never breaks the transition."""
+        if self._on_state_change is None:
+            return
+        try:
+            self._on_state_change(owner_id, task_id, state)
+        except Exception:  # noqa: BLE001 — a live-ping failure must not fail the state write
+            _log.warning("task.updated signal failed; degrading to poll", task_id=task_id)
 
     def apply(
         self,
@@ -97,7 +117,7 @@ class TaskContinuation:
         ``fire_time``), used to decide recurrence — "is there a fire strictly AFTER this one?" —
         independent of when the leg executes; defaults to ``now`` for non-scheduled continuations.
         ``event_fired`` (Spec A7, A7-D-X-event-standing) marks a leg the A7 dispatcher fired via an
-        :class:`~persona.tasks.EventFire`: a COMPLETED such leg returns the task to WAITING(on_event)
+        :class:`~persona.tasks.EventFire`: a COMPLETED such leg returns to WAITING(on_event)
         — a standing "whenever X" watch keeps reacting (the echo said "whenever"; a one-fire death
         would break echo-honesty). It carries no schedule, so ``_recurs`` is moot.
 
@@ -110,7 +130,7 @@ class TaskContinuation:
                 # A7 standing watch: the event-fired occurrence is done → back to WAITING(on_event),
                 # ready for the next matching event (the dispatcher's door-a fires the next leg).
                 self._tasks.begin_wait(owner_id, task.id, WaitKind.ON_EVENT, now=now)
-                _log.info("event-triggered occurrence complete → waiting(on_event)", task_id=task.id)
+                _log.info("event occurrence complete → waiting(on_event)", task_id=task.id)
             elif self._recurs(owner_id, task, after=fired_at if fired_at is not None else now):
                 # One occurrence done, but the schedule has a future fire — return to
                 # WAITING(until_time); the next scheduled fire resumes it (no enqueue here, the
@@ -120,6 +140,7 @@ class TaskContinuation:
             else:
                 self._tasks.complete(owner_id, task.id, now=now)
                 _log.info("task completed", task_id=task.id)
+                self._signal(owner_id, task.id, TaskState.COMPLETED.value)  # terminal — A11 ping
             return
         if outcome.disposition == LegDisposition.WAITING_APPROVAL:
             # A3 gate: the leg recorded a durable proposal and ended (no append). Park the task
@@ -169,6 +190,7 @@ class TaskContinuation:
         """
         self._tasks.begin_wait(owner_id, task_id, WaitKind.ON_USER, now=now)
         _log.info("task waiting(on_user)", task_id=task_id)
+        self._signal(owner_id, task_id, TaskState.WAITING.value)  # waiting_on_user — A11 ping
 
     def resume(
         self,
@@ -218,6 +240,7 @@ class TaskContinuation:
         report = build_stuck_report(task, checkpoint, cause=cause, now=now)
         self._tasks.begin_wait(owner_id, task_id, WaitKind.ON_USER, now=now)
         _log.info("task stuck → waiting(on_user)", task_id=task_id, cause=cause)
+        self._signal(owner_id, task_id, TaskState.WAITING.value)  # stuck→waiting_on_user — A11 ping
         return report
 
     def sweep_dead_legs(
@@ -255,6 +278,7 @@ class TaskContinuation:
         )
         self._tasks.cancel(owner_id, task_id, now=now)
         _log.info("task cancelled", task_id=task_id)
+        self._signal(owner_id, task_id, TaskState.CANCELLED.value)  # terminal — A11 ping
         return summary
 
     def _latest_checkpoint(self, owner_id: str, task_id: str) -> TaskCheckpoint | None:

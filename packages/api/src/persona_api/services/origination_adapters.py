@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from persona.approvals import ActionProposal
     from persona.schedules import Schedule
     from persona.schema.origination import OriginatedMessage
     from persona.stores.backend import Backend
@@ -57,11 +58,13 @@ if TYPE_CHECKING:
     from persona_api.tasks.store import TaskStore
 
 __all__ = [
+    "OriginatorApprovalNotifier",
     "OriginatorFailureNotifier",
     "OriginatorUpdateSender",
     "ScheduleCreatorAdapter",
     "TaskCreatorAdapter",
     "make_persona_tag_resolver",
+    "render_approval_message",
     "render_failure_account",
     "resolve_persona_tag",
 ]
@@ -257,6 +260,85 @@ class OriginatorFailureNotifier:
             conversation_id=conversation_id,
             now=datetime.now(UTC),
             sessions=self._sessions,
+        )
+
+
+def render_approval_message(kind: str, proposal: ActionProposal) -> str:
+    """Render an approval-loop C0 line deterministically (no model) from the proposal (A6 T-seam).
+
+    ``kind`` ∈ {ask, reconfirm, clarify, remind, expired}. Honest + glanceable: it names what the
+    persona wants to do (``proposal.description``, verbatim) — never a paraphrase of the action.
+    """
+    d = proposal.description
+    desc = (d[0].lower() + d[1:]) if d else f"run {proposal.tool_name}"
+    lines = {
+        "ask": f"I'd like to {desc}. Reply to approve, deny, or tell me what to change.",
+        "reconfirm": f"Updated — I'd now {desc}. Approve the change, or deny.",
+        "clarify": f"To be sure: should I go ahead and {desc}? Please reply yes or no.",
+        "remind": f"Still waiting on you: I'd like to {desc}.",
+        "expired": f"The request to {desc} expired, so I did not do it.",
+    }
+    return lines.get(kind, lines["ask"])
+
+
+class OriginatorApprovalNotifier:
+    """The C0 plug for the A3 approval loop (Spec A6, T-seam) — persona-voiced ask/reconfirm/
+    clarify/remind/expired on the task's conversation, via the real :class:`Originator`.
+
+    Satisfies the resolver's ``ApprovalNotifier`` Protocol (each method takes only the proposal),
+    so it resolves the persona tag (from ``proposal.persona_id``) and the conversation
+    (``Task.conversation_id`` for ``proposal.task_id``) itself. Deterministic render (no model) —
+    the same honest-template approach as :class:`OriginatorFailureNotifier`. A deleted persona
+    (no tag) is a graceful no-op (nothing to voice); a task with no conversation starts a fresh one
+    (the :class:`Originator` handles ``conversation_id=None``).
+    """
+
+    def __init__(
+        self,
+        *,
+        rls_engine: Engine,
+        episodic: EpisodicStore,
+        edition: Edition,
+        tasks: TaskStore,
+    ) -> None:
+        self._engine = rls_engine
+        self._episodic = episodic
+        self._edition = edition
+        self._tasks = tasks
+
+    async def ask(self, proposal: ActionProposal) -> None:
+        await self._post("ask", proposal)
+
+    async def reconfirm(self, proposal: ActionProposal) -> None:
+        await self._post("reconfirm", proposal)
+
+    async def clarify(self, proposal: ActionProposal) -> None:
+        await self._post("clarify", proposal)
+
+    async def remind(self, proposal: ActionProposal) -> None:
+        await self._post("remind", proposal)
+
+    async def expired(self, proposal: ActionProposal) -> None:
+        await self._post("expired", proposal)
+
+    async def _post(self, kind: str, proposal: ActionProposal) -> None:
+        tag = resolve_persona_tag(self._engine, proposal.persona_id)
+        if tag is None:  # deleted persona → nothing to voice
+            _logger.info("approval notify skipped (no persona tag)", persona_id=proposal.persona_id)
+            return
+        try:
+            conversation_id = self._tasks.get(proposal.owner_id, proposal.task_id).conversation_id
+        except TaskNotFoundError:
+            conversation_id = None
+        await _originate_on_conversation(
+            engine=self._engine,
+            episodic=self._episodic,
+            edition=self._edition,
+            persona=tag,
+            owner_id=proposal.owner_id,
+            content=render_approval_message(kind, proposal),
+            conversation_id=conversation_id or "",
+            now=datetime.now(UTC),
         )
 
 

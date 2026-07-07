@@ -31,14 +31,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from persona.approvals import (
     ActionProposal,
     ApprovalDecision,
     DecisionType,
+    InterpretedIntent,
     Materiality,
     ProposalStatus,
+    RawInterpretation,
     resolve_reply,
 )
 from persona.logging import get_logger
@@ -59,8 +62,22 @@ __all__ = [
     "ActionExecutor",
     "ApprovalNotifier",
     "ApprovalResolver",
+    "InboxDecision",
     "ResolutionOutcome",
 ]
+
+
+class InboxDecision(StrEnum):
+    """An explicit, structured approval decision from the A6 inbox (no NL, no model).
+
+    Maps to a deterministic :class:`RawInterpretation` at confidence 1.0 — the click IS the
+    interpretation — which runs through the SAME :func:`resolve_reply` floor as a chat reply.
+    (No ``clarify``: the inbox never asks a question back at itself.)
+    """
+
+    APPROVE = "approve"
+    DENY = "deny"
+    MODIFY = "modify"
 
 _log = get_logger("api.approvals.resolver")
 
@@ -131,7 +148,11 @@ class ApprovalResolver:
     async def resolve(
         self, owner_id: str, proposal_id: str, reply: str, channel: str, *, now: datetime
     ) -> ResolutionOutcome:
-        """Resolve a reply against the pending proposal (idempotent; floor never bypassed)."""
+        """Resolve a natural-language reply against the pending proposal (the chat twin).
+
+        Idempotent; the floor is never bypassed. The model interpretation is the ONLY difference
+        from the inbox path — both converge on :meth:`_apply_resolved` (same floor, CAS, record).
+        """
         proposal = self._approvals.get_proposal(owner_id, proposal_id)
         if proposal.status is not ProposalStatus.PENDING:
             # A reply for an already-resolved proposal (a re-delivered C1 webhook) — no-op.
@@ -139,40 +160,88 @@ class ApprovalResolver:
                 "resolve no-op (not pending)", proposal_id=proposal_id, status=proposal.status
             )
             return ResolutionOutcome(outcome=None, note="not_pending")
+        raw = await self._interpreter.interpret(reply, proposal)
+        return await self._apply_resolved(
+            owner_id, proposal, raw, verbatim_reply=reply, channel=channel, now=now
+        )
 
-        # The floor — never bypassed (A3-D-X-reply-parsing). clarifications_used drives
-        # clarify-once-then-deny.
+    async def resolve_structured(
+        self,
+        owner_id: str,
+        proposal_id: str,
+        *,
+        decision: InboxDecision,
+        edited_arguments: Mapping[str, JsonValue] | None = None,
+        verbatim_reply: str,
+        channel: str,
+        now: datetime,
+    ) -> ResolutionOutcome:
+        """Resolve an explicit, structured decision from the A6 inbox (the twin of :meth:`resolve`).
+
+        The click IS the interpretation: a deterministic :class:`RawInterpretation` at confidence
+        1.0, fed through the SAME :func:`resolve_reply` floor — genuine twin-parity, not a divergent
+        path (a material modify still re-confirms; the model cannot manufacture an approval). No
+        model call. Idempotent + exactly-one-winner identically to :meth:`resolve` (the status
+        pre-check + the ``transition_proposal`` CAS): a concurrent chat+inbox double-resolve has one
+        winner; the loser is a clean ``not_pending`` no-op (the surface reflects 'already handled'
+        from the durable record).
+        """
+        proposal = self._approvals.get_proposal(owner_id, proposal_id)
+        if proposal.status is not ProposalStatus.PENDING:
+            _log.info(
+                "resolve_structured no-op (not pending)",
+                proposal_id=proposal_id,
+                status=proposal.status,
+            )
+            return ResolutionOutcome(outcome=None, note="not_pending")
+        raw = _raw_from_decision(decision, edited_arguments)
+        return await self._apply_resolved(
+            owner_id, proposal, raw, verbatim_reply=verbatim_reply, channel=channel, now=now
+        )
+
+    async def _apply_resolved(
+        self,
+        owner_id: str,
+        proposal: ActionProposal,
+        raw: RawInterpretation,
+        *,
+        verbatim_reply: str,
+        channel: str,
+        now: datetime,
+    ) -> ResolutionOutcome:
+        """Apply an interpretation through the floor → record → dispatch (shared by both twins).
+
+        The one path both the NL reply and the structured inbox decision converge on: the floor
+        (never bypassed), the durable verbatim decision record, and the outcome dispatch.
+        """
         clarifications_used = sum(
             1
-            for d in self._approvals.list_decisions(owner_id, proposal_id)
+            for d in self._approvals.list_decisions(owner_id, proposal.proposal_id)
             if d.type is DecisionType.CLARIFY
         )
-        raw = await self._interpreter.interpret(reply, proposal)
         resolved = resolve_reply(
             raw, original_arguments=proposal.arguments, clarifications_used=clarifications_used
         )
-
         self._approvals.record_decision(
             owner_id,
             ApprovalDecision(
                 decision_id=f"dec_{uuid.uuid4().hex}",
-                proposal_id=proposal_id,
+                proposal_id=proposal.proposal_id,
                 type=resolved.outcome,
-                verbatim_reply=reply,
+                verbatim_reply=verbatim_reply,
                 channel=channel,
                 edited_arguments=resolved.edited_arguments,
                 decided_at=now,
             ),
         )
-
         if resolved.outcome is DecisionType.APPROVE:
             return await self._execute_and_resume(
-                owner_id, proposal, proposal.arguments, reply, now
+                owner_id, proposal, proposal.arguments, verbatim_reply, now
             )
         if resolved.outcome is DecisionType.MODIFY:
-            return await self._handle_modify(owner_id, proposal, resolved, reply, now)
+            return await self._handle_modify(owner_id, proposal, resolved, verbatim_reply, now)
         if resolved.outcome is DecisionType.DENY:
-            return self._deny_and_resume(owner_id, proposal, reply, now)
+            return self._deny_and_resume(owner_id, proposal, verbatim_reply, now)
         # CLARIFY — ask once more; the proposal stays pending (the floor caps this at one).
         await self._notifier.clarify(proposal)
         return ResolutionOutcome(outcome=DecisionType.CLARIFY, note="clarified")
@@ -297,3 +366,24 @@ class ApprovalResolver:
             updated_at=now,
         )
         self._checkpoints.append(task, checkpoint, spend={}, now=now)
+
+
+def _raw_from_decision(
+    decision: InboxDecision, edited_arguments: Mapping[str, JsonValue] | None
+) -> RawInterpretation:
+    """Build the deterministic confidence-1.0 interpretation for a structured inbox decision.
+
+    The inbox click is unambiguous, so it enters the floor at full confidence — but the floor still
+    governs (a material modify re-confirms; there is no way to skip it). A ``modify`` without edits
+    is a caller error (the inbox must supply the edited payload).
+    """
+    if decision is InboxDecision.APPROVE:
+        return RawInterpretation(intent=InterpretedIntent.APPROVE, confidence=1.0)
+    if decision is InboxDecision.DENY:
+        return RawInterpretation(intent=InterpretedIntent.DENY, confidence=1.0)
+    if edited_arguments is None:
+        msg = "a MODIFY inbox decision requires edited_arguments"
+        raise ValueError(msg)
+    return RawInterpretation(
+        intent=InterpretedIntent.MODIFY, confidence=1.0, edited_arguments=edited_arguments
+    )

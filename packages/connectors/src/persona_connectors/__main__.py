@@ -31,6 +31,7 @@ from persona.events import EventTriggerSettings
 from persona.logging import get_logger
 from persona.stores.chroma import ChromaBackend
 from persona.stores.postgres import PostgresBackend
+from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.config import APIConfig, Edition
 from persona_api.editions.factory import build_credits_policy
 from persona_api.events import (
@@ -600,7 +601,13 @@ async def _amain() -> None:
     emit_message_received = None
     emit_linked = None
     if EventTriggerSettings().enabled:
-        _a7_dispatcher = build_event_dispatcher(rls_engine=rls_engine, config=api_config)
+        # A6-D-8 completeness: the inbound event path consults the owner pause (a read-only
+        # kill-switch store on the connector's RLS engine) so a paused owner's triggers never fire.
+        _a7_dispatcher = build_event_dispatcher(
+            rls_engine=rls_engine,
+            config=api_config,
+            pause_check=KillSwitchStore(rls_engine).is_owner_autonomy_paused,
+        )
         emit_message_received = make_message_received_emit(_a7_dispatcher)
         emit_linked = make_connector_linked_emit(_a7_dispatcher)
     linking_service = LinkingService(link_store, emit_linked=emit_linked)

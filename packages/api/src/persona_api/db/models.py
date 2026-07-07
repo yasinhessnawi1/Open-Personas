@@ -1680,6 +1680,50 @@ platform_controls = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# Spec A6 (A6-D-8, Ruling 1) — the per-owner autonomy pause. Presence-based, like
+# ``suspended_personas``: a row means this owner's autonomy is paused; resume DELETEs it
+# (the who/when history lives in ``audit_log`` via ``autonomy.owner_pause``/``owner_resume``).
+# Owner-LEVEL (one PK row per owner) so it covers personas created WHILE paused — the
+# completeness the fan-out alternative would leak. Owner-scoped + RLS. The
+# ``is_owner_autonomy_paused`` predicate SELF-SCOPES its read (sets the owner GUC) so a
+# background origination gate outside the owner's RLS context can never false-negative into
+# leaking origination — the pause contract's teeth (A6-D-8).
+owner_autonomy_pause = Table(
+    "owner_autonomy_pause",
+    metadata,
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    # Who paused (e.g. 'user_via_ui'); audit-on-the-row + the audit_log event.
+    Column("actor", Text, nullable=False),
+    Column("paused_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Spec A6 (A6-D-10) — the deferred-digest sink. Captures the over-cap PROGRESS chatter that
+# ``CadenceGate`` routes to ``DIGEST`` (which, pre-A6, DROPPED silently — nothing implemented
+# the ``DigestSink`` seam). A SECONDARY input to the morning-review builder (the main sections
+# compose from approvals/stuck/completions/held-initiatives/upcoming regardless). The build
+# marks-delivered ATOMICALLY (``UPDATE ... SET delivered_at=now() WHERE delivered_at IS NULL
+# RETURNING``) — no read-then-mark window, no double-deliver, no silent drop. Owner-scoped + RLS.
+deferred_digest = Table(
+    "deferred_digest",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    Column("content", Text, nullable=False),
+    # The cadence/``MessagePriority`` class that deferred it (e.g. 'progress'); app-gated TEXT.
+    Column("deferred_reason", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # NULL = undelivered (the hot read); set atomically when the morning build consumes it.
+    Column("delivered_at", DateTime(timezone=True)),
+    # The only hot query: undelivered rows for an owner (the morning build). Partial index.
+    Index(
+        "ix_deferred_digest_owner_undelivered",
+        "owner_id",
+        postgresql_where=text("delivered_at IS NULL"),
+        sqlite_where=text("delivered_at IS NULL"),
+    ),
+)
+
 # Spec P6 (P6-D-11) — the durable, cross-device notification feed.
 #
 # Backs the bell's server-authored entries (run-terminal, persona-ready) so a

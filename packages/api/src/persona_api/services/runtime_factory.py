@@ -57,6 +57,7 @@ from persona_runtime.routing import (
 )
 from sqlalchemy import select, text
 
+from persona_api.approvals.action_executor import ToolboxActionExecutor
 from persona_api.db.models import personas as personas_t
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.mcp import BuiltinMCPSupervisor
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from persona.tasks.reader import TaskStateReader
     from persona.tools.mcp.catalog import MCPCatalog, MCPServerCatalogEntry
     from persona.tools.mcp.client import MCPClient
+    from persona.tools.toolbox import Toolbox
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.graph_selection import GatingContext
     from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
@@ -1617,6 +1619,25 @@ class RuntimeFactory:
         )
         loop.deferred_input_files = deferred_holder
         return loop
+
+    def build_action_executor(self, persona_id: str) -> ToolboxActionExecutor:
+        """The un-gated single-tool executor for approved-action replay (Spec A6, T-seam).
+
+        Returns a :class:`ToolboxActionExecutor` that, on ``execute``, builds the persona's real
+        toolbox (the SAME ``_build_toolbox`` the chat/agentic loops use — plain, *un-gated*; A3's
+        ``PolicyGatedToolbox`` is a leg-only wrapper) and dispatches the EXACT recorded
+        ``(tool_name, arguments)`` verbatim. The approval is the authorization, so no re-gate; the
+        model never re-derives. The toolbox build is deferred to the first ``execute`` (only an
+        actual APPROVE of a pending proposal pays it). Must run inside the owner's RLS scope — the
+        approvals route binds it via middleware; an off-request driver must set the owner GUC.
+        """
+
+        async def _build() -> Toolbox:
+            persona = self._load_persona(persona_id)
+            _scanner, scanned = self._scan_skills(persona)
+            return cast("Toolbox", await self._build_toolbox(persona, scanned))
+
+        return ToolboxActionExecutor(_build)
 
     async def build_title(self, first_message: str) -> str:
         """Generate a short (≤5-word) conversation title from the first message,

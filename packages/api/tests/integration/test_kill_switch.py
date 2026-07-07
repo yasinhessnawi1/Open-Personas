@@ -163,6 +163,80 @@ def test_persona_suspend_is_owner_scoped(migrated_engine: Engine, app_engine: En
     assert ks.is_persona_suspended("user_b", "persona_a") is False
 
 
+# --- per-owner autonomy pause (A6-D-8; owner-scoped, RLS; the completeness teeth) -----------
+
+
+def test_owner_pause_and_resume_presence_based_and_audited(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    _seed(migrated_engine, "user_a", "persona_a")
+    ks = _kill_switch(app_engine)
+    assert ks.is_owner_autonomy_paused("user_a") is False
+    ks.pause_owner("user_a", actor="user_via_ui", now=_NOW)
+    ks.pause_owner("user_a", actor="user_via_ui", now=_NOW)  # idempotent (presence-based)
+    assert ks.is_owner_autonomy_paused("user_a") is True
+    with app_engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT user_id FROM audit_log WHERE action = 'autonomy.owner_pause' "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+        ).first()
+    assert row is not None
+    assert row.user_id == "user_a"
+    ks.resume_owner("user_a", now=_NOW)  # presence-based → row deleted
+    assert ks.is_owner_autonomy_paused("user_a") is False
+
+
+def test_owner_pause_makes_task_non_runnable(migrated_engine: Engine, app_engine: Engine) -> None:
+    _seed(migrated_engine, "user_a", "persona_a")
+    tasks = TaskStore(app_engine)
+    _active_task(tasks, owner="user_a", persona="persona_a", task_id="t1")
+    ks = _kill_switch(app_engine)
+    assert ks.is_runnable("user_a", tasks.get("user_a", "t1")) is True
+    ks.pause_owner("user_a", actor="user_via_ui", now=_NOW)  # the task-leg origination gate
+    assert ks.is_runnable("user_a", tasks.get("user_a", "t1")) is False
+    ks.resume_owner("user_a", now=_NOW)
+    assert ks.is_runnable("user_a", tasks.get("user_a", "t1")) is True
+
+
+def test_owner_pause_is_owner_scoped(migrated_engine: Engine, app_engine: Engine) -> None:
+    _seed(migrated_engine, "user_a", "persona_a")
+    _seed(migrated_engine, "user_b", "persona_b")
+    ks = _kill_switch(app_engine)
+    ks.pause_owner("user_a", actor="user_via_ui", now=_NOW)
+    # user_b is NOT paused by user_a's pause (RLS isolation; owner-level, but per-owner).
+    assert ks.is_owner_autonomy_paused("user_b") is False
+
+
+def test_owner_pause_self_scopes_past_a_foreign_guc(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The completeness teeth (A6-D-8): a paused owner reads True even when the caller's ambient
+    RLS context is ANOTHER owner's — because the predicate self-scopes. A naive ambient-GUC read
+    fails CLOSED and would leak origination past the paused owner. This test proves both the
+    hazard (the naive read is hidden) and that the predicate defeats it.
+    """
+    _seed(migrated_engine, "user_a", "persona_a")
+    _seed(migrated_engine, "user_b", "persona_b")
+    ks = _kill_switch(app_engine)
+    ks.pause_owner("user_a", actor="user_via_ui", now=_NOW)
+
+    # The hazard is real: under user_b's RLS context, a naive read of user_a's row is HIDDEN
+    # (RLS fails closed). A background gate that trusted the ambient GUC would see "not paused".
+    with app_engine.begin() as conn:
+        conn.execute(text("SELECT set_config('app.current_user_id', 'user_b', true)"))
+        naive = conn.execute(
+            text("SELECT owner_id FROM owner_autonomy_pause WHERE owner_id = 'user_a'")
+        ).first()
+    assert naive is None
+
+    # The predicate SELF-SCOPES → still True for user_a regardless of any ambient context,
+    # and correctly False for user_b (RLS isolation holds the other direction too).
+    assert ks.is_owner_autonomy_paused("user_a") is True
+    assert ks.is_owner_autonomy_paused("user_b") is False
+
+
 # --- global-pause (operational, audited) ------------------------------------
 
 

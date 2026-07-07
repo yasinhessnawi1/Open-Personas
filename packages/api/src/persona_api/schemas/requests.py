@@ -11,10 +11,12 @@ from datetime import datetime  # noqa: TC003 — a runtime Pydantic field type
 from typing import Literal
 
 from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
+    "ApprovalDecisionRequest",
     "AuthorPersonaRequest",
+    "BudgetExtendRequest",
     "ChannelContext",
     "CreateConversationRequest",
     "ScheduleCreateRequest",
@@ -355,3 +357,35 @@ class ScheduleCreateRequest(_Input):
     # Opt into the coalesced fire bell (default True — this door is always a user reminder;
     # the dialog's "Notify me in the bell" checkbox is checked by default and can be unset).
     notify_on_fire: bool = True
+
+
+class BudgetExtendRequest(_Input):
+    """Raise a budget-paused task's cap by ``amount_micros`` (Spec A6, B2) — bounded server-side."""
+
+    amount_micros: int = Field(gt=0)
+
+
+class InitiativeDialRequest(_Input):
+    """Set a persona's initiative restraint level (Spec A6, B4 — the dial switch).
+
+    ``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``
+    lets all-safe plans execute. The level persists regardless of the platform initiative flag; the
+    route reflects whether initiative is globally enabled so the UX is honest about when it acts.
+    """
+
+    dial: Literal["off", "propose_only", "act_within_envelope"]
+
+
+class ApprovalDecisionRequest(_Input):
+    """An inbox approval decision (Spec A6, criterion 5) — the structured twin of a chat reply.
+
+    ``edited_arguments`` is required for (and only meaningful on) a ``modify`` — the inbox's
+    modify-inline edit; the resolver's floor decides materiality (a material edit re-confirms). A
+    material change presented as instantly-applied would be a lie, so the client reflects the
+    resolver's outcome, never assumes. ``note`` is optional free text, recorded as the decision's
+    durable verbatim reply.
+    """
+
+    decision: Literal["approve", "deny", "modify"]
+    edited_arguments: dict[str, JsonValue] | None = None
+    note: str = Field(default="", max_length=2000)

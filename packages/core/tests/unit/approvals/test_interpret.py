@@ -206,3 +206,35 @@ class TestLexiconThroughFloorIsSafe:
         )
         assert out.outcome is not DecisionType.APPROVE
         assert out.outcome in (DecisionType.CLARIFY, DecisionType.DENY)
+
+
+# --- the A6 chat-twin decision cue (deterministic, reuses the same lexicon) ------------------
+
+
+@pytest.mark.parametrize(
+    ("reply", "is_cue"),
+    [
+        # affirmatives / negatives → a decision reply (route to the resolver)
+        ("yes", True),
+        ("no", True),
+        ("approve", True),
+        ("deny it", True),
+        ("ja", True),
+        ("nei", True),
+        ("godkjenn", True),
+        ("yes please", True),  # filler stripped
+        # explicit change/edit markers → a decision reply (the user is engaging the approval)
+        ("change the amount to 100", True),
+        ("modify the recipient", True),
+        ("endre beløpet", True),
+        # off-topic / non-decision → NOT a cue → a normal chat turn, proposal stays pending
+        ("what's the weather in Bergen?", False),
+        ("tell me about germany", False),
+        ("how are you today", False),
+        ("", False),
+    ],
+)
+def test_is_decision_cue(reply: str, is_cue: bool) -> None:
+    from persona.approvals import is_decision_cue
+
+    assert is_decision_cue(reply) is is_cue

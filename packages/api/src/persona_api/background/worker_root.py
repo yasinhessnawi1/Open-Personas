@@ -45,6 +45,7 @@ from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 
+from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger
 from persona_api.errors import CommunityDbError
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
@@ -83,8 +84,9 @@ from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
 from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
+from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
-from persona_api.tasks.handler import register_task_leg_handler
+from persona_api.tasks.handler import RunnableGuard, register_task_leg_handler
 from persona_api.tasks.leg_runner import RuntimeFactoryLegRunnerBuilder
 from persona_api.tasks.scheduled_fire import register_scheduled_task_fire_handler
 from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -245,11 +247,21 @@ def build_worker_registry(
     # lifecycle event through the dispatcher, INHERITING the ``EventFire`` causal chain (the
     # cross-process loop guard, A7-D-4/D-6). The A6-D-8 autonomy-pause reader injects at
     # merge-back; here it is the frozen default never-paused no-op.
+    # A6-D-8 completeness: ONE read-only kill-switch store binds the owner-pause / persona-suspend
+    # predicates to the worker's RLS engine. It feeds EVERY origination gate — the task-leg runner
+    # (``is_runnable``), the A7 dispatcher, the A5 scan, and (in ``start_in_process_worker``) the
+    # A10 tick — so a paused owner leaks NO origination path. Read-only: no continuation (cancel is
+    # a route concern, not a worker one).
+    kill_switch = KillSwitchStore(rls_engine)
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None
     if EventTriggerSettings().enabled:
         from persona_api.events import LifecycleEmitter, build_event_dispatcher
 
-        event_dispatcher = build_event_dispatcher(rls_engine=rls_engine, config=config)
+        event_dispatcher = build_event_dispatcher(
+            rls_engine=rls_engine,
+            config=config,
+            pause_check=kill_switch.is_owner_autonomy_paused,
+        )
         on_leg_settled = LifecycleEmitter(dispatcher=event_dispatcher).on_leg_settled
     if runtime_factory is not None:
         _register_task_leg_tenant(
@@ -265,6 +277,7 @@ def build_worker_registry(
             live_sessions=live_sessions,
             event_channel=event_channel,
             on_leg_settled=on_leg_settled,
+            runnable_guard=kill_switch,
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -346,7 +359,12 @@ def build_worker_registry(
         )
         register_initiative_scan_handler(
             registry,
-            handler=InitiativeScanHandler(scanner=scanner, dial_reader=_dial_reader, sink=pipeline),
+            handler=InitiativeScanHandler(
+                scanner=scanner,
+                dial_reader=_dial_reader,
+                sink=pipeline,
+                pause_check=kill_switch.is_owner_autonomy_paused,
+            ),
         )
         # Spec A9 (A9-D-5/D-7): the ``delegated_turn`` tenant — voice's confirmed spoken ask
         # executed on the frontier chat pipeline through the ONE audited path (the same loop the
@@ -419,13 +437,25 @@ def _register_task_leg_tenant(
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
+    runnable_guard: RunnableGuard | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
 
     ``on_leg_settled`` (Spec A7, T6) — the A7 lifecycle emitter, wired only when event triggers are
     enabled; a settled leg emits its A2 lifecycle event through the dispatcher (chain-inheriting).
+
+    ``runnable_guard`` (Spec A3/A6-D-8) — the kill-switch guard consulted before every leg: a
+    terminal / budget-paused / persona-suspended / globally-paused / owner-autonomy-paused task
+    runs no new leg. The primary origination gate for the owner pause — wired live at merge-back.
     """
     task_store = TaskStore(rls_engine)
+
+    # Spec A11/A6 (W8): a background task transition pings the owner's open tabs (task.updated),
+    # which refetch A6's Review/Tasks/Approvals live. Best-effort over the A11 channel; no channel
+    # (community / no open tab) → the surface catches up on its next poll (the durable floor).
+    def _emit_task_updated(owner: str, task_id: str, state: str) -> None:
+        publish_task_updated(event_channel, owner_id=owner, task_id=task_id, state=state)
+
     continuation = TaskContinuation(
         task_store=task_store,
         queue=JobQueue(rls_engine),
@@ -433,6 +463,7 @@ def _register_task_leg_tenant(
         # Spec A4 recurrence: the continuation reads the schedule to decide occurrence-complete →
         # WAITING (recurring, more fires) vs task-complete (one-time / exhausted).
         schedule_store=ScheduleStore(rls_engine),
+        on_state_change=_emit_task_updated,
     )
     on_milestone = _build_milestone_hook(
         rls_engine=rls_engine,
@@ -450,6 +481,7 @@ def _register_task_leg_tenant(
         continuation=continuation,
         on_milestone=on_milestone,
         on_leg_settled=on_leg_settled,
+        runnable_guard=runnable_guard,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
@@ -657,8 +689,14 @@ def start_in_process_worker(
     # the worker owns engine lifecycle; the worker's loop calls ``tick.run_once`` on
     # its cadence (at most one process actually ticks under the advisory lock).
     def _tick_builder(dispatch_engine: Engine, tick_rls_engine: Engine) -> SchedulerTick:
+        # A6-D-8: the tick consults the owner pause on its OWN rls engine (a read-only kill-switch
+        # store) so a paused owner's schedules are held — the completeness the leg runner + A5 + A7
+        # gates share (each on its own engine, all reading the same owner_autonomy_pause row).
         return build_scheduler_tick(
-            config, dispatch_engine=dispatch_engine, rls_engine=tick_rls_engine
+            config,
+            dispatch_engine=dispatch_engine,
+            rls_engine=tick_rls_engine,
+            autonomy_pause_check=KillSwitchStore(tick_rls_engine).is_owner_autonomy_paused,
         )
 
     # N2 catalog auto-sync — additive, leader-gated, on the worker's cross-tenant dispatch

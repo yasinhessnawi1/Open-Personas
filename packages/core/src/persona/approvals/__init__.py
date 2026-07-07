@@ -26,6 +26,7 @@ from persona.approvals.interpret import (
     RawInterpretation,
     ReplyInterpreter,
     ResolvedReply,
+    is_decision_cue,
     resolve_reply,
 )
 from persona.approvals.records import (
@@ -53,5 +54,6 @@ __all__ = [
     "ReplyInterpreter",
     "ResolvedReply",
     "classify_modification",
+    "is_decision_cue",
     "resolve_reply",
 ]

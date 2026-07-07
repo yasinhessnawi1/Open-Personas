@@ -8,12 +8,14 @@ RLS-scoped via ``get_current_user``. The per-request loop builder comes from
 from __future__ import annotations
 
 import json
-from datetime import datetime  # noqa: TC003 — used in cast() at runtime
-from typing import Any, cast
+from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import StreamingResponse
+from persona.approvals import is_decision_cue
 
+from persona_api.approvals import ApprovalStore
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import TurnNotActiveError
 from persona_api.middleware.rate_limit import rate_limit
@@ -27,6 +29,13 @@ from persona_api.schemas import (
     PostMessageRequest,
 )
 from persona_api.services import audit_service, chat_service, document_service
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from persona.approvals import ProposalStatus
+
+    from persona_api.approvals.resolver import ResolutionOutcome
 
 router = APIRouter(prefix="/v1", tags=["conversations"])
 
@@ -174,6 +183,59 @@ async def delete_conversation(
     )
 
 
+async def _maybe_resolve_pending_approval(
+    request: Request, *, owner_id: str, conversation_id: str, reply: str
+) -> StreamingResponse | None:
+    """A6 chat-twin: resolve a decision reply against a pending approval on this conversation.
+
+    Returns a minimal resolution SSE when ALL hold: the reply is a decision cue (deterministic —
+    no model), the resolution service is wired, and a pending approval exists on the conversation's
+    ``waiting(on_user)`` task. Otherwise returns ``None`` → the caller runs a normal chat turn and
+    the proposal stays PENDING. The reply goes through the SAME ``resolve(channel="chat")`` as the
+    chat twin (identical floor → CAS → execute); the durable status is read back for the honest
+    reflection (the persona's clarify/re-confirm + any resumed-leg output arrive via the C0 message
+    + the A11 ``task.updated`` refetch, per A6-D-3/D-9).
+    """
+    if not is_decision_cue(reply):
+        return None
+    build = getattr(request.app.state, "build_approval_resolver", None)
+    if build is None:  # keyless / community-without-C0 boot — fall through to a normal turn
+        return None
+    engine = request.app.state.rls_engine
+    store = ApprovalStore(engine)
+    proposal = store.get_pending_for_conversation(owner_id, conversation_id)
+    if proposal is None:  # a cued reply with nothing pending → a normal turn
+        return None
+    # Persist the user's reply so the transcript shows it (no assistant row — the persona's voice
+    # is the C0 clarify/reconfirm message + the resumed leg).
+    request.app.state.chat_turn_sink.append_user_message(
+        conversation_id=conversation_id, content=reply
+    )
+    outcome = await build().resolve(
+        owner_id, proposal.proposal_id, reply, channel="chat", now=datetime.now(UTC)
+    )
+    status_after = store.get_proposal(owner_id, proposal.proposal_id).status
+    return _approval_resolution_response(outcome, status_after)
+
+
+def _approval_resolution_response(
+    outcome: ResolutionOutcome, status_after: ProposalStatus
+) -> StreamingResponse:
+    """A minimal, immediately-ending SSE reflecting the durable resolution (A6-D-3 calm reflect)."""
+    payload = {
+        "kind": "approval_resolved",
+        "outcome": outcome.outcome.value if outcome.outcome is not None else None,
+        "executed": outcome.executed,
+        "note": outcome.note,
+        "status": status_after.value,  # the DURABLE post-state — the reflection anchor
+    }
+
+    async def _gen() -> AsyncIterator[bytes]:
+        yield f"event: done\ndata: {json.dumps(payload)}\n\n".encode()
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
 @router.post(
     "/conversations/{conversation_id}/messages",
     dependencies=[Depends(rate_limit("messages"))],
@@ -200,6 +262,17 @@ async def post_message(
     chat_service.get_conversation(
         rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
     )
+    # Spec A6 chat-twin: a DECISION reply to a pending approval is NOT a model turn — route it to
+    # the shared resolver (the SAME service the inbox uses), BEFORE the credits/runtime/long-op
+    # guards (it is not a model turn), and reflect the durable outcome as a minimal SSE. Only a
+    # decision-like message (the deterministic cue) that matches a pending approval on THIS
+    # conversation is diverted; anything else falls through to the normal turn, leaving the proposal
+    # PENDING (never auto-denied — the cue-gate's strictly-safer failure mode).
+    approval_response = await _maybe_resolve_pending_approval(
+        request, owner_id=user.id, conversation_id=conversation_id, reply=body.content
+    )
+    if approval_response is not None:
+        return approval_response
     # Pre-flight credit guard: 402 BEFORE streaming starts (D-11-12 / spec 11 §5).
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id

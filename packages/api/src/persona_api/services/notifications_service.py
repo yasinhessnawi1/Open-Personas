@@ -18,7 +18,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import notifications as notifications_t
-from persona_api.realtime.events import NotificationCreatedEvent
+from persona_api.realtime.events import NotificationCreatedEvent, TaskUpdatedEvent
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
@@ -133,15 +133,19 @@ def upsert_coalesced_notification(
         "message_key": message_key,
         "params": params or {},
     }
-    stmt = pg_insert(notifications_t).values(**values).on_conflict_do_update(
-        constraint="uq_notifications_owner_kind_ref",
-        set_={
-            "created_at": func.now(),  # bump: re-sort to the top + relative-time "just now"
-            "read": False,  # re-alert: the bell shows the fresh fire as unread
-            "level": level,
-            "message_key": message_key,
-            "params": params or {},
-        },
+    stmt = (
+        pg_insert(notifications_t)
+        .values(**values)
+        .on_conflict_do_update(
+            constraint="uq_notifications_owner_kind_ref",
+            set_={
+                "created_at": func.now(),  # bump: re-sort to the top + relative-time "just now"
+                "read": False,  # re-alert: the bell shows the fresh fire as unread
+                "level": level,
+                "message_key": message_key,
+                "params": params or {},
+            },
+        )
     )
     conn.execute(stmt)
 
@@ -166,3 +170,23 @@ def publish_notification_created(
     if channel is None:
         return
     channel.publish(owner_id, NotificationCreatedEvent(kind=kind, ref_id=ref_id))
+
+
+def publish_task_updated(
+    channel: UserEventChannel | None,
+    *,
+    owner_id: str,
+    task_id: str,
+    state: str,
+) -> None:
+    """Ping the owner's open tabs that a task transitioned (Spec A11/A6, task.updated).
+
+    Data-only (``task_id`` + ``state``): A6's Review/Tasks/Approvals surfaces refetch their
+    durable data via the W8 ``useTaskSignal`` seam — never trusting the pushed state. Call it
+    AFTER the durable state write has committed (surface-lags-truth: a pre-commit ping would race
+    the refetch to a stale read). Best-effort: no channel / no open tab → a no-op (the surface
+    catches up on its next navigation/poll); a publish never fails the authoritative transition.
+    """
+    if channel is None:
+        return
+    channel.publish(owner_id, TaskUpdatedEvent(task_id=task_id, state=state))

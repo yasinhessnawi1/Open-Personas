@@ -34,8 +34,10 @@ from persona_api.approvals.failure import (
 )
 from persona_api.approvals.kill_switch import (
     GLOBAL_PAUSE_KEY,
+    AutonomyPauseCheck,
     KillSwitchCommand,
     KillSwitchStore,
+    never_paused,
     parse_kill_switch,
 )
 from persona_api.approvals.metric import GateFatigueMetric
@@ -43,6 +45,7 @@ from persona_api.approvals.resolver import (
     ActionExecutor,
     ApprovalNotifier,
     ApprovalResolver,
+    InboxDecision,
     ResolutionOutcome,
 )
 from persona_api.approvals.store import ApprovalStore
@@ -66,6 +69,7 @@ __all__ = [
     "ApprovalResolver",
     "ApprovalStore",
     "ApprovalSweeper",
+    "AutonomyPauseCheck",
     "BudgetEnforcer",
     "BudgetState",
     "CadenceDecision",
@@ -74,6 +78,7 @@ __all__ = [
     "FailureAccount",
     "FailureKind",
     "GateFatigueMetric",
+    "InboxDecision",
     "KillSwitchCommand",
     "KillSwitchStore",
     "MessagePriority",
@@ -86,6 +91,7 @@ __all__ = [
     "account_for_stuck",
     "all_failure_kinds_have_a_builder",
     "bypasses_cap",
+    "never_paused",
     "parse_extension_micros",
     "parse_kill_switch",
 ]

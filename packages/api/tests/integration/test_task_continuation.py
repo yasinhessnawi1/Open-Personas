@@ -131,6 +131,26 @@ def test_completed_completes_task_with_no_next_job(
     assert len(_leg_jobs(migrated_engine)) == 0
 
 
+def test_on_state_change_fires_task_updated_on_terminal_post_write(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Spec A11/A6 (W8): the injected signal fires once on a terminal transition, AFTER the write.
+
+    Surface-lags-truth: the ping fires after the state row is written, so a refetch reads truth.
+    The waiting(on_user) path calls the same ``_signal`` seam (proven by ``test_wait_on_user_*``).
+    """
+    signals: list[tuple[str, str, str]] = []
+    task = _seed_active_task(migrated_engine)
+    cont = TaskContinuation(
+        task_store=TaskStore(app_engine),
+        queue=JobQueue(app_engine),
+        on_state_change=lambda owner, tid, state: signals.append((owner, tid, state)),
+    )
+    cont.apply("user_a", _outcome(task, LegDisposition.COMPLETED), now=_NOW)
+    assert signals == [("user_a", "t1", TaskState.COMPLETED.value)]  # terminal, exactly once
+    assert TaskStore(app_engine).get("user_a", "t1").state == TaskState.COMPLETED
+
+
 # --- Spec A4 recurrence: occurrence-complete → WAITING (recurring) vs terminal (one-time) ------
 
 

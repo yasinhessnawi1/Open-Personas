@@ -12,7 +12,10 @@ import json
 
 import pytest
 from persona_api.realtime.channel import UserEventChannel
-from persona_api.services.notifications_service import publish_notification_created
+from persona_api.services.notifications_service import (
+    publish_notification_created,
+    publish_task_updated,
+)
 
 
 @pytest.mark.asyncio
@@ -45,3 +48,31 @@ async def test_publish_is_owner_scoped() -> None:
     ch.subscribe("tenant_b")
     publish_notification_created(ch, owner_id="tenant_b", kind="run_terminal", ref_id="r")
     assert a.qsize() == 0  # A never sees B's bell ping
+
+
+# --- task.updated (Spec A11/A6 W8) -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_publish_task_updated_emits_to_the_open_tab() -> None:
+    ch = UserEventChannel(epoch="pub")
+    tab = ch.subscribe("u1")
+    publish_task_updated(ch, owner_id="u1", task_id="t1", state="completed")
+    frame = (await tab.next()).decode()
+    assert "event: task.updated\n" in frame
+    body = json.loads(frame.split("data: ", 1)[1].rstrip("\n"))
+    assert body["task_id"] == "t1"
+    assert body["state"] == "completed"  # data-only; the surface refetches by task_id
+
+
+def test_publish_task_updated_with_none_channel_is_a_noop() -> None:
+    publish_task_updated(None, owner_id="u1", task_id="t1", state="cancelled")
+
+
+@pytest.mark.asyncio
+async def test_publish_task_updated_is_owner_scoped() -> None:
+    ch = UserEventChannel(epoch="pub")
+    a = ch.subscribe("tenant_a")
+    ch.subscribe("tenant_b")
+    publish_task_updated(ch, owner_id="tenant_b", task_id="t9", state="waiting")
+    assert a.qsize() == 0  # A never sees B's task ping

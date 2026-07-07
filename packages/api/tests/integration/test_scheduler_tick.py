@@ -218,6 +218,35 @@ def test_due_schedule_materialises_one_job_with_handoff_payload(
     assert anchor.fire_time == _DUE.isoformat()
 
 
+def test_owner_autonomy_paused_holds_the_due_schedule(
+    migrated_engine: Engine,
+    dispatch_engine: Engine,
+    app_engine: Engine,
+    store: ScheduleStore,
+    leader: SchedulerLeader,
+) -> None:
+    """A6-D-8 completeness: a paused owner's due schedule is HELD — not fired, not advanced.
+
+    The tick is an origination path, so it consults ``is_owner_autonomy_paused`` (here a stub
+    that pauses ``user_a``). No job materialises and next_fire stays put, so firing resumes
+    cleanly the moment the owner unpauses — no lost fire, no burst, no leaked origination.
+    """
+    _seed_user(migrated_engine)
+    _make_due_schedule(migrated_engine, store)
+    paused_tick = SchedulerTick(
+        dispatch_engine=dispatch_engine,
+        rls_engine=app_engine,
+        leader=leader,
+        default_grace_seconds=_TEST_GRACE_SECONDS,
+        autonomy_pause_check=lambda owner: owner == "user_a",
+    )
+    assert paused_tick.run_once(now=_NOW) == 0  # held → nothing fired
+    assert _jobs_for(migrated_engine, "user_a") == []  # no origination
+    held = store.get("user_a", "s1")
+    assert held.fire_count == 0  # bookkeeping untouched
+    assert held.next_fire_at == _DUE  # not advanced — resumes cleanly on unpause
+
+
 def test_fire_advances_bookkeeping_to_future(
     migrated_engine: Engine, store: ScheduleStore, tick: SchedulerTick
 ) -> None:

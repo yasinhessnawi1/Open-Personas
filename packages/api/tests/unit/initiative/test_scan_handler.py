@@ -11,7 +11,7 @@ fallbacks hold.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -113,8 +113,14 @@ def _handler(
     *,
     dial: InitiativeDial = InitiativeDial.PROPOSE_ONLY,
     sink: _FakeSink | None = None,
+    pause_check: Callable[[str], bool] | None = None,
 ) -> InitiativeScanHandler:
-    return InitiativeScanHandler(scanner=scanner, dial_reader=lambda _o, _p: dial, sink=sink)
+    kwargs: dict[str, Any] = {}
+    if pause_check is not None:
+        kwargs["pause_check"] = pause_check
+    return InitiativeScanHandler(
+        scanner=scanner, dial_reader=lambda _o, _p: dial, sink=sink, **kwargs
+    )
 
 
 @pytest.mark.asyncio
@@ -125,6 +131,28 @@ async def test_dial_off_is_a_handler_exit_scanner_never_invoked() -> None:
     await _handler(scanner, dial=InitiativeDial.OFF).handle(_payload(), context)  # type: ignore[arg-type]
     assert scanner.calls == 0
     assert context.meters == []  # no scan, no metering row — nothing ran
+
+
+@pytest.mark.asyncio
+async def test_owner_autonomy_paused_exits_before_dial_or_spend() -> None:
+    """A6-D-8 completeness: a paused owner originates no initiative, even dial-on.
+
+    The pause is checked BEFORE the dial read + scan + metering — a paused owner leaks nothing
+    (no scanner call, no metering row, no sink submit). This is the injected origination gate.
+    """
+    scanner = _FakeScanner((_candidate(),))
+    sink = _FakeSink()
+    context = _FakeContext(owner_id="paused-owner")
+    handler = _handler(
+        scanner,
+        dial=InitiativeDial.ACT_WITHIN_ENVELOPE,  # dial fully ON — only the pause holds it
+        sink=sink,
+        pause_check=lambda owner: owner == "paused-owner",
+    )
+    await handler.handle(_payload(), context)  # type: ignore[arg-type]
+    assert scanner.calls == 0  # never scanned
+    assert context.meters == []  # no spend row
+    assert sink.received == []  # no proposal originated
 
 
 @pytest.mark.asyncio

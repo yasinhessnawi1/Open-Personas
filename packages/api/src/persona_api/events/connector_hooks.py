@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from persona.events import ConnectorLinked, ConnectorMessageReceived, ConnectorUnlinked
 from persona.events import EventTriggerSettings as _Settings
 
+from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.events.store import EventTriggerStore
 from persona_api.events.wiring import build_event_dispatcher
 
@@ -129,7 +130,11 @@ def on_connector_unlinked(
     """
     if not _Settings().enabled:
         return 0
-    dispatcher = build_event_dispatcher(rls_engine=rls_engine, config=config)
+    dispatcher = build_event_dispatcher(
+        rls_engine=rls_engine,
+        config=config,
+        pause_check=KillSwitchStore(rls_engine).is_owner_autonomy_paused,
+    )
     dispatcher.dispatch(
         ConnectorUnlinked(
             event_id=f"connector.unlinked:{platform}:{owner_id}:{now.isoformat()}",

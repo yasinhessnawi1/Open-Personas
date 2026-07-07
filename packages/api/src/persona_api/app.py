@@ -76,7 +76,9 @@ from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.realtime.channel import UserEventChannel
 from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
+    approvals,
     artifacts,
+    autonomy,
     calls,
     connectors,
     conversations,
@@ -88,6 +90,7 @@ from persona_api.routes import (
     memory,
     personas,
     runs,
+    tasks,
     tools,
     uploads,
 )
@@ -705,6 +708,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # graph isn't composed (no-Postgres engine) ⇒ the Memory area reads as
             # empty + the nav row gates (the routes fall back gracefully).
             app.state.graph_store = runtime_factory.graph_store
+            # Spec A6 (T-seam): the shared approval-resolution service — the ONE live path that
+            # completes A3's loop (a parked proposal → floor → verbatim replay → resume). Both the
+            # approvals inbox and the chat reply path consume it (one floor, one CAS, one durable
+            # record → dual-resolution has exactly one winner). It needs the C0 episodic recorder,
+            # so it rides ``memory_backend`` (absent on a keyless boot ⇒ the loop stays inert, like
+            # within_runtime_origination). Built once + app-scoped; RLS is per-request via the
+            # engine's checkout listener, so the closure matches the build_*_loop idiom.
+            if memory_backend is not None:
+                from persona_api.services.approval_resolution_service import (
+                    ApprovalResolutionService,
+                )
+
+                _approval_resolution_service = ApprovalResolutionService(
+                    engine=rls_engine,
+                    factory=runtime_factory,
+                    edition=config.edition,
+                    memory_backend=memory_backend,
+                    audit_root=app.state.audit_root,
+                    audit_logger=app.state.audit_logger,
+                )
+
+                def _build_approval_resolver(
+                    _svc: ApprovalResolutionService = _approval_resolution_service,
+                ) -> ApprovalResolutionService:
+                    return _svc
+
+                app.state.build_approval_resolver = _build_approval_resolver
             # R6 (T8): pay the crisis-encoder cold load (~40 s) OFF the event loop at
             # boot, so the first user never pays it (the built-but-inert failure class).
             # Non-blocking: the warm window is fail-soft (encoder score times out → the
@@ -932,3 +962,6 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(mcp_servers.router)  # spec 30: bring-your-own MCP
     app.include_router(memory.router)  # spec K5: the knowledge-graph UI ("Memory")
     app.include_router(connectors.router)  # spec C6: connector management front-door
+    app.include_router(approvals.router)  # spec A6: the approvals inbox (dual-resolution twin)
+    app.include_router(autonomy.router)  # spec A6: the morning review (the shared digest)
+    app.include_router(tasks.router)  # spec A6: the tasks read surface (list / detail / audit)

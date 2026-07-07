@@ -42,6 +42,7 @@ from persona_api.approvals.serde import (
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import approval_decisions as decisions_t
 from persona_api.db.models import approval_proposals as proposals_t
+from persona_api.db.models import tasks as tasks_t
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -90,6 +91,56 @@ class ApprovalStore:
                         proposals_t.c.task_id == task_id,
                         proposals_t.c.status == ProposalStatus.PENDING.value,
                     )
+                )
+                .mappings()
+                .first()
+            )
+        return row_to_proposal(row) if row is not None else None
+
+    def list_pending_for_owner(self, owner_id: str) -> list[ActionProposal]:
+        """Every pending proposal across the owner's tasks (the A6 inbox), oldest first.
+
+        RLS-scoped to the owner. Ordered by ``created_at`` so the longest-waiting (nearest to the
+        expiry sweep) sits first — the inbox's triage order.
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            rows = (
+                conn.execute(
+                    select(proposals_t)
+                    .where(proposals_t.c.status == ProposalStatus.PENDING.value)
+                    .order_by(proposals_t.c.created_at.asc())
+                )
+                .mappings()
+                .all()
+            )
+        return [row_to_proposal(r) for r in rows]
+
+    def get_pending_for_conversation(
+        self, owner_id: str, conversation_id: str
+    ) -> ActionProposal | None:
+        """The pending proposal for a conversation's waiting-on-user task (the A6 chat-twin reader).
+
+        Joins ``approval_proposals`` → ``tasks`` on ``task_id`` and scopes to the task tied to
+        ``conversation_id`` that is parked ``waiting(on_user)`` with a pending proposal (the shape a
+        gated leg leaves). RLS-scoped through both tables. No schema invariant forbids >1 task per
+        conversation, so the most recent proposal wins — the one the user is most plausibly replying
+        to (``state='waiting'`` / ``wait_kind='on_user'`` mirror ``TaskState.WAITING`` /
+        ``WaitKind.ON_USER``).
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            row = (
+                conn.execute(
+                    select(proposals_t)
+                    .select_from(
+                        proposals_t.join(tasks_t, proposals_t.c.task_id == tasks_t.c.id)
+                    )
+                    .where(
+                        tasks_t.c.conversation_id == conversation_id,
+                        proposals_t.c.status == ProposalStatus.PENDING.value,
+                        tasks_t.c.state == "waiting",
+                        tasks_t.c.wait_kind == "on_user",
+                    )
+                    .order_by(proposals_t.c.created_at.desc())
                 )
                 .mappings()
                 .first()

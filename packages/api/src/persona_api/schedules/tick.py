@@ -48,6 +48,7 @@ from persona.schedules import (
 )
 from sqlalchemy import select
 
+from persona_api.approvals import AutonomyPauseCheck, never_paused
 from persona_api.db.models import schedules as schedules_t
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.leadership import SchedulerLeader
@@ -92,6 +93,7 @@ class SchedulerTick:
         default_grace_seconds: float = 10_800.0,
         one_time_grace_seconds: float = 3_600.0,
         on_time_tolerance_seconds: float = 120.0,
+        autonomy_pause_check: AutonomyPauseCheck = never_paused,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._leader = leader
@@ -101,6 +103,11 @@ class SchedulerTick:
         self._default_grace_seconds = default_grace_seconds
         self._one_time_grace_seconds = one_time_grace_seconds
         self._on_time_tolerance_seconds = on_time_tolerance_seconds
+        # A6-D-8 completeness: the per-owner autonomy-pause gate. A paused owner's due schedules
+        # are held (not fired, not advanced) so firing resumes cleanly on unpause — the tick is an
+        # origination path, so it must consult the pause like A5/A7. Default no-op (green pre-A6);
+        # the worker binds ``KillSwitchStore.is_owner_autonomy_paused``.
+        self._autonomy_pause_check = autonomy_pause_check
 
     def run_once(self, *, now: datetime | None = None) -> int:
         """Run one tick. Returns the number of schedules fired (0 if not leader).
@@ -116,7 +123,14 @@ class SchedulerTick:
         due = self._claim_due(now)
         fired = 0
         skipped = 0
+        paused = 0
         for schedule in due:
+            # A6-D-8: an owner who paused all autonomy fires nothing — the due schedule is HELD,
+            # not advanced, so it resumes cleanly on unpause (the missed-fire policy then decides
+            # catch-up vs skip). No new origination while paused; the pause is the honest floor.
+            if self._autonomy_pause_check(schedule.owner_id):
+                paused += 1
+                continue
             try:
                 action = self._materialise(schedule, now=now)
                 if action is FireAction.SKIP:
@@ -129,8 +143,13 @@ class SchedulerTick:
                     schedule_id=schedule.id,
                     owner_id=schedule.owner_id,
                 )
-        if fired or skipped:
-            _log.info("scheduler tick processed due schedules", fired=fired, skipped=skipped)
+        if fired or skipped or paused:
+            _log.info(
+                "scheduler tick processed due schedules",
+                fired=fired,
+                skipped=skipped,
+                paused=paused,
+            )
         return fired
 
     def _claim_due(self, now: datetime) -> list[Schedule]:
@@ -227,7 +246,11 @@ class SchedulerTick:
 
 
 def build_scheduler_tick(
-    config: APIConfig, *, dispatch_engine: Engine, rls_engine: Engine
+    config: APIConfig,
+    *,
+    dispatch_engine: Engine,
+    rls_engine: Engine,
+    autonomy_pause_check: AutonomyPauseCheck = never_paused,
 ) -> SchedulerTick:
     """Compose a :class:`SchedulerTick` from config — the tick's composition seam.
 
@@ -237,6 +260,9 @@ def build_scheduler_tick(
     root calls this and passes the result to :class:`~persona_api.jobs.worker.Worker`
     (the additive ``scheduler_tick`` param). The api→worker scheduler deploy is the
     orchestrator's, exactly like A0's worker cutover.
+
+    ``autonomy_pause_check`` (A6-D-8) — the per-owner pause gate; the worker binds
+    ``KillSwitchStore.is_owner_autonomy_paused`` so a paused owner's schedules are held.
     """
     leader = SchedulerLeader(dispatch_engine)
     return SchedulerTick(
@@ -247,4 +273,5 @@ def build_scheduler_tick(
         default_grace_seconds=config.scheduler_default_grace_seconds,
         one_time_grace_seconds=config.scheduler_one_time_grace_seconds,
         on_time_tolerance_seconds=config.scheduler_on_time_tolerance_seconds,
+        autonomy_pause_check=autonomy_pause_check,
     )

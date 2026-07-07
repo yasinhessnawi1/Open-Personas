@@ -114,6 +114,56 @@ def test_get_pending_for_task(migrated_engine: Engine, app_engine: Engine) -> No
     assert pending.proposal_id == "p1"
 
 
+def test_list_pending_for_owner_across_tasks_and_rls_scoped(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The A6 inbox read: every pending proposal across the owner's tasks, oldest-first (RLS)."""
+    _seed(migrated_engine, "user_a", "persona_a", "t1")
+    _seed(migrated_engine, "user_b", "persona_b", "t3")  # another tenant
+    with migrated_engine.begin() as conn:  # a second task for user_a
+        conn.execute(
+            text(
+                "INSERT INTO tasks (id, owner_id, persona_id, contract_json) "
+                f"VALUES ('t2', 'user_a', 'persona_a', {_CONTRACT}::jsonb)"
+            )
+        )
+    store = ApprovalStore(app_engine)
+    store.create_proposal(_proposal(pid="p1", owner="user_a", task="t1", persona="persona_a"))
+    store.create_proposal(_proposal(pid="p2", owner="user_a", task="t2", persona="persona_a"))
+    store.create_proposal(_proposal(pid="p3", owner="user_b", task="t3", persona="persona_b"))
+
+    pending = store.list_pending_for_owner("user_a")
+    # both of user_a's, oldest-first, and NOT user_b's (RLS scopes the read).
+    assert [p.proposal_id for p in pending] == ["p1", "p2"]
+
+
+def test_get_pending_for_conversation(migrated_engine: Engine, app_engine: Engine) -> None:
+    """The A6 chat-twin reader: the pending proposal on a conversation's waiting(on_user) task."""
+    _seed(migrated_engine, "user_a", "persona_a", "t1")
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO conversations (id, owner_id, persona_id) VALUES ('c1','user_a',:p)"),
+            {"p": "persona_a"},
+        )
+        conn.execute(
+            text("UPDATE tasks SET conversation_id='c1', state='waiting', wait_kind='on_user' "
+                 "WHERE id='t1'")
+        )
+    store = ApprovalStore(app_engine)
+    assert store.get_pending_for_conversation("user_a", "c1") is None  # nothing pending yet
+    store.create_proposal(_proposal(pid="p1", owner="user_a", task="t1", persona="persona_a"))
+
+    found = store.get_pending_for_conversation("user_a", "c1")
+    assert found is not None
+    assert found.proposal_id == "p1"
+    assert store.get_pending_for_conversation("user_a", "c_other") is None  # wrong conversation
+
+    # once the task leaves waiting(on_user), the reader no longer matches (defensive qualifier).
+    with migrated_engine.begin() as conn:
+        conn.execute(text("UPDATE tasks SET state='active', wait_kind=NULL WHERE id='t1'"))
+    assert store.get_pending_for_conversation("user_a", "c1") is None
+
+
 # --- one-pending-aware create (idempotent, no raw IntegrityError) -----------
 
 

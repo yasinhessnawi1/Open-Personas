@@ -28,11 +28,13 @@ from persona.initiative import DEFAULT_INITIATIVE_DIAL, InitiativeDial
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.schedules import MissedFirePolicy, RecurrenceFreq, RecurrenceRule, Schedule
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from persona_api.approvals import AutonomyPauseCheck, never_paused
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import personas as personas_t
+from persona_api.services import audit_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,6 +55,7 @@ __all__ = [
     "initiative_schedule_id",
     "read_initiative_dial",
     "register_initiative_scan_handler",
+    "set_initiative_dial",
 ]
 
 INITIATIVE_SCAN_JOB_TYPE = "initiative_scan"
@@ -102,6 +105,35 @@ def read_initiative_dial(engine: Engine, owner_id: str, persona_id: str) -> Init
         return DEFAULT_INITIATIVE_DIAL
 
 
+def set_initiative_dial(
+    engine: Engine, owner_id: str, persona_id: str, dial: InitiativeDial, *, now: datetime
+) -> bool:
+    """The SINGLE durable dial-write path (A5-D-5) — write ``initiative_dial`` (+ ts) + audit.
+
+    Both the T10 dial verb (:meth:`InitiativeVerbService._apply_dial`) and the A6 autonomy-controls
+    route call this — never a second UPDATE. RLS-scoped: returns whether a persona row matched
+    (``False`` = missing/foreign under RLS). Audits ``initiative.dial_set`` on a real write. The
+    durable level persists here regardless of whether initiative is globally enabled; the lazy
+    schedule-ensure (A5-D-1) is the verb-path's own concern layered on top by the caller.
+    """
+    with rls_connection(engine, owner_id) as conn:
+        result = conn.execute(
+            update(personas_t)
+            .where(personas_t.c.id == persona_id)
+            .values(initiative_dial=dial.value, initiative_dial_updated_at=now)
+        )
+    if result.rowcount == 0:
+        return False
+    audit_service.record(
+        engine=engine,
+        user_id=owner_id,
+        action="initiative.dial_set",
+        target=persona_id,
+        metadata={"dial": dial.value},
+    )
+    return True
+
+
 class InitiativeScanHandler:
     """Dial gate → scan → meter → sink. Every failure path is silence + the audit row."""
 
@@ -111,18 +143,30 @@ class InitiativeScanHandler:
         scanner: InitiativeScanner,
         dial_reader: Callable[[str, str], InitiativeDial],
         sink: CandidateSink | None = None,
+        pause_check: AutonomyPauseCheck = never_paused,
     ) -> None:
         """Inject the runtime scanner, the dial read (owner, persona → dial), the T7 sink.
 
         The composition root binds ``dial_reader`` to :func:`read_initiative_dial`
         over the RLS engine; tests inject a plain callable (DI, no DB).
+
+        ``pause_check`` (A6-D-8 completeness) — the per-owner autonomy-pause gate the scan
+        consults BEFORE reading the dial or spending: a paused owner originates no initiative,
+        even for personas whose dial is on. Default :func:`never_paused` (green pre-A6); the
+        worker composition binds ``KillSwitchStore.is_owner_autonomy_paused``.
         """
         self._scanner = scanner
         self._dial_reader = dial_reader
         self._sink = sink
+        self._pause_check = pause_check
 
     async def handle(self, payload: InitiativeScanPayload, context: JobContext) -> None:
         """One scan fire; never raises a user-facing error (silence is the safe state)."""
+        if self._pause_check(context.owner_id):
+            # A6-D-8: the owner paused all autonomy — no scan, no spend, no proposal. Checked
+            # before the dial so a paused owner leaks nothing (completeness is non-negotiable).
+            _log.info("owner autonomy paused; scan exits", persona_id=payload.persona_id)
+            return
         dial = self._dial_reader(context.owner_id, payload.persona_id)
         if dial is InitiativeDial.OFF:
             # The handler exit (Phase-1 ruling): the schedule stays; the dial is

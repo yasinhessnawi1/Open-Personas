@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.jobs.queue import JobQueue
+    from persona_api.tasks.continuation import TaskStateSignal
     from persona_api.tasks.store import TaskStore
 
 __all__ = [
@@ -97,11 +98,16 @@ class BudgetEnforcer:
         tasks: TaskStore,
         queue: JobQueue,
         default_micros: int = PLATFORM_DEFAULT_BUDGET_MICROS,
+        on_state_change: TaskStateSignal | None = None,
     ) -> None:
         self._engine = engine
         self._tasks = tasks
         self._queue = queue
         self._default = default_micros
+        # Spec A11/A6 (W8): the task.updated live ping for the budget-paused transition. The A6
+        # Tasks surface shows a budget-paused task's "extend?" affordance — so a pause at cap
+        # refetches live. Best-effort, None → poll. (Fires once ``enforce`` has a live caller.)
+        self._on_state_change = on_state_change
 
     def effective_cap(self, owner_id: str, task: Task) -> int:
         """The contract cap (or platform default) + the SUM of granted extensions (audit rows)."""
@@ -165,6 +171,11 @@ class BudgetEnforcer:
         self._tasks.pause(owner_id, task.id, now=now)
         self._audit(owner_id, _BUDGET_REACHED, task.id, self._usage_meta(owner_id, task))
         _log.info("task paused at budget cap", task_id=task.id, spent=task.ledger.total_micros)
+        if self._on_state_change is not None:  # A11 budget-paused ping (best-effort, post-write)
+            try:
+                self._on_state_change(owner_id, task.id, "budget_paused")
+            except Exception:  # noqa: BLE001 — a live-ping failure must not fail the pause
+                _log.warning("task.updated signal failed; degrading to poll", task_id=task.id)
         return True
 
     def _usage_meta(self, owner_id: str, task: Task) -> dict[str, str]:

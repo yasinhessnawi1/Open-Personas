@@ -43,6 +43,7 @@ __all__ = [
     "RawInterpretation",
     "ReplyInterpreter",
     "ResolvedReply",
+    "is_decision_cue",
     "resolve_reply",
 ]
 
@@ -246,6 +247,12 @@ _HEDGE: frozenset[str] = frozenset(
 _FILLER: frozenset[str] = frozenset(
     {"please", "thanks", "thank", "you", "it", "that", "this", "takk", "vær", "så", "snill", "den"}
 )
+#: Explicit change/edit markers (NO/EN) — a *deliberate* modify signal on a pending approval,
+#: distinct from the softer hedges (but/wait/maybe) so an off-topic aside is not mistaken for a
+#: decision. Used only by :func:`is_decision_cue` (the A6 chat-twin gate), never by the floor.
+_MODIFY_MARKERS: frozenset[str] = frozenset(
+    {"change", "modify", "edit", "instead", "endre", "bytt", "rediger", "heller"}
+)
 
 _AFFIRM_CONFIDENCE = 0.95
 _AMBIGUOUS_CONFIDENCE = 0.2
@@ -255,6 +262,25 @@ def _tokenise(reply: str) -> list[str]:
     """Lower-case word tokens, punctuation stripped (apostrophes kept for don't/don´t)."""
     cleaned = "".join(ch.lower() if (ch.isalnum() or ch in "' ") else " " for ch in reply)
     return cleaned.split()
+
+
+def is_decision_cue(reply: str) -> bool:
+    """True if a reply reads as a DECISION on a pending approval — affirm, deny, or modify.
+
+    The A6 chat-twin's cue-gate: deterministic (no model), reusing the SAME NO/EN lexicon the floor
+    uses, so twin-parity holds (the cue only supplies the "is this a reply to the approval?"
+    determination the inbox gets structurally from a click; the resolver's floor then classifies).
+
+    Only a decision-like message is routed to the resolver — anything else runs a normal chat turn
+    and leaves the proposal PENDING (never auto-denied; the cue-gate's strictly-safer failure mode).
+    A deliberate change/edit marker counts (the user is engaging the approval); the floor then
+    governs (clarify / re-confirm — v1's lexicon can't extract NL edits, so a structured edit stays
+    an inbox action).
+    """
+    content = [token for token in _tokenise(reply) if token not in _FILLER]
+    return any(
+        token in _AFFIRM or token in _DENY or token in _MODIFY_MARKERS for token in content
+    )
 
 
 class LexiconReplyInterpreter:
