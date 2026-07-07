@@ -53,6 +53,7 @@ __all__ = [
     "MCPOAuthError",
     "MCPOAuthProviderError",
     "MCPOAuthStateError",
+    "MCPRuntimeCapacityError",
     "MCPServerNotFoundError",
     "MemoryNodeNotFoundError",
     "MCPServerValidationError",
@@ -128,6 +129,20 @@ class CloudGatewayNotVettedError(PersonaError):
     posture via ``PERSONA_ALLOW_CLOUD_GATEWAY=1``; per-tenant gateways, per-tenant
     container-running, and per-user secret injection are deferred (D-N1-7). Unset the
     gateway URL or set the ack flag.
+    """
+
+
+class PerTenantMCPNotAckedError(PersonaError):
+    """Raised at startup when cloud has the per-tenant MCP runtime on but no ack (N6, N6-D-5).
+
+    The per-tenant runtime runs a user's chosen image-MCP server per tenant (a Fly Machine)
+    with their secret injected — third-party code executed per-tenant, at a per-active-tenant
+    cost. Like :class:`CloudGatewayNotVettedError` / :class:`PublicNoAuthRefusedError`, cloud
+    refuses to start with the runtime configured (a Fly app set) unless the operator
+    acknowledges the vetted, per-active-tenant-cost posture via
+    ``PERSONA_ALLOW_PER_TENANT_MCP=1``. Community is never gated (no per-tenant runtime).
+    Unset the Fly app or set the ack flag. There is NO request handler — this crashes the
+    boot, never degrades.
     """
 
 
@@ -224,6 +239,17 @@ class MCPCredentialError(PersonaError):
     """
 
 
+class MCPRuntimeSubstrateError(PersonaError):
+    """Raised when the per-tenant MCP runtime substrate (Fly Machines) fails (Spec N6, T2b).
+
+    A transport/API failure creating, starting, stopping, or querying a per-tenant
+    Machine. The runtime catches this and fails SOFT to
+    ``not_connected(reason="fly_outage")`` (N6-D-6) — it never propagates into the persona
+    load. ``context`` carries only the method + HTTP status; **never a response body**
+    (a Machine-create echoes its ``env``, which holds the injected secret).
+    """
+
+
 class MCPAppNotAdoptableError(PersonaError):
     """Raised when a persona may not self-adopt a catalog app (→ 403; Spec N4, N4-D-6).
 
@@ -231,6 +257,16 @@ class MCPAppNotAdoptableError(PersonaError):
     ``type: remote`` app with a ``remote_url`` (local-container / deferred, N4-D-2), or —
     in cloud — it is not in the operator allowlist (``PERSONA_MCP_ADOPT_VETTED``). Nothing
     was written or assigned. ``context`` names the app; never a secret.
+    """
+
+
+class MCPRuntimeCapacityError(PersonaError):
+    """Raised when a tenant is at its per-tenant image-runtime cap (→ 409; Spec N6, N6-D-3).
+
+    Enforced at ASSIGN (enable), never lazily at spawn: the (N+1)th image-runtime enable is
+    denied here BEFORE any row/Machine is created, so a single tenant can't trigger a
+    spawn-storm. The user-facing state is ``not_connected(reason="runtime_capacity")``
+    (N6-D-6). ``context`` carries the cap; disable/remove another image server first.
     """
 
 
@@ -466,6 +502,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_409_CONFLICT,
             content=_body(
                 "mcp_app_already_adopted", exc.message or "app already adopted", exc.context
+            ),
+        )
+
+    @app.exception_handler(MCPRuntimeCapacityError)
+    async def _mcp_runtime_capacity_409(
+        _: Request, exc: MCPRuntimeCapacityError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=_body(
+                "mcp_runtime_capacity", exc.message or "per-tenant runtime cap reached", exc.context
             ),
         )
 

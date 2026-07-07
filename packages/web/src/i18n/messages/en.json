@@ -771,6 +771,17 @@
       "tombstone": "{name} — no longer available (removed from the catalog).",
       "note": "The persona keeps running; this capability is simply gone."
     },
+    "connection": {
+      "connected": "Connected",
+      "starting": "Starting…",
+      "spawnFailed": "Couldn't start",
+      "stopped": "Idle",
+      "flyOutage": "Temporarily unavailable",
+      "noKey": "Needs setup",
+      "unvetted": "Not available",
+      "runtimeCapacity": "Limit reached",
+      "notEnabled": "Not connected"
+    },
     "trust": {
       "heading": "What this app is",
       "honest": "An app is a real integration that runs real code on the persona's behalf.",

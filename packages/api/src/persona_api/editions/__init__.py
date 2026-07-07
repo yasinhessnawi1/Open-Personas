@@ -23,6 +23,7 @@ from persona_api.editions.owner_resolver import (
     CommunityOwnerResolver,
     OwnerResolver,
 )
+from persona_api.editions.per_tenant_mcp_guard import check_per_tenant_mcp_posture
 
 __all__ = [
     "CloudOwnerResolver",
@@ -35,5 +36,6 @@ __all__ = [
     "build_owner_resolver",
     "check_cloud_config_guard",
     "check_gateway_edition_posture",
+    "check_per_tenant_mcp_posture",
     "check_public_noauth_guard",
 ]

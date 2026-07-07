@@ -50,10 +50,14 @@ from persona_api.editions import (
     build_owner_resolver,
     check_cloud_config_guard,
     check_gateway_edition_posture,
+    check_per_tenant_mcp_posture,
     check_public_noauth_guard,
 )
 from persona_api.errors import register_exception_handlers
 from persona_api.jobs import JobQueue
+from persona_api.mcp.fly import HttpxFlyMachinesClient
+from persona_api.mcp.fly_runtime import FlyPerTenantMCPRuntime
+from persona_api.mcp.runtime_config import FlyRuntimeConfig
 from persona_api.middleware.rate_limit import (
     InMemoryRateLimitStore,
     PostgresRateLimitStore,
@@ -443,6 +447,53 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await sandbox_pool.start()  # spawns the pool-owned background reaper
     app.state.sandbox_pool = sandbox_pool
 
+    # Spec N6 (N6-D-1/3/5): the per-tenant image-MCP runtime (a Fly Machine per
+    # (tenant, server)). Built ONLY in cloud, with a Fly app+token configured, AND the
+    # operator ack — the startup guard (N6-D-5) refuses cloud+configured without the ack.
+    # Community / CLI / unconfigured ⇒ ``None`` (image-runtime servers report not-connected,
+    # T6). The reaper sweeps CROSS-TENANT under the admin (RLS-bypassing) engine (N6-D-7a).
+    fly_runtime_cfg = FlyRuntimeConfig()
+    check_per_tenant_mcp_posture(config, runtime_configured=fly_runtime_cfg.configured)
+    app.state.mcp_runtime_max_per_tenant = fly_runtime_cfg.max_per_tenant
+    mcp_runtime: FlyPerTenantMCPRuntime | None = None
+    if (
+        fly_runtime_cfg.configured
+        and config.edition is Edition.cloud
+        and config.allow_per_tenant_mcp
+        and rls_engine is not None
+    ):
+        import httpx
+
+        from persona.tools.mcp.catalog import MCPCatalog
+
+        from persona_api.mcp import run_policy
+        from persona_api.services import catalog_service
+
+        def _is_runnable_image(image: str) -> bool:
+            catalog = MCPCatalog(servers={e.name: e for e in catalog_service.merged_mcp_catalog()})
+            return image in run_policy.runnable_images(
+                edition=config.edition, vetted=config.mcp_run_vetted_list, catalog=catalog
+            )
+
+        fly_client = HttpxFlyMachinesClient(
+            app=fly_runtime_cfg.fly_app,
+            token=fly_runtime_cfg.fly_token.get_secret_value(),
+            client=httpx.AsyncClient(),
+        )
+        mcp_runtime = FlyPerTenantMCPRuntime(
+            rls_engine=rls_engine,
+            # CROSS-TENANT reaper needs the RLS-bypassing engine (admin), never persona_app.
+            bypass_engine=admin_engine if admin_engine is not None else rls_engine,
+            fly=fly_client,
+            app=fly_runtime_cfg.fly_app,
+            port=fly_runtime_cfg.port,
+            is_runnable_image=_is_runnable_image,
+            idle_timeout_s=fly_runtime_cfg.idle_timeout_s,
+            reap_interval_s=fly_runtime_cfg.reap_interval_s,
+        )
+        await mcp_runtime.start()  # spawns the cross-tenant idle-reaper
+    app.state.mcp_runtime = mcp_runtime
+
     # Image-generation backend (spec 15 T16). Composed at startup so the
     # route layer can dispatch through ``app.state.image_backend`` without
     # re-reading env vars per request. ``None`` when no provider is
@@ -525,6 +576,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # document_generation skill assembly so it teaches full pdf/pptx
                 # fidelity vs the offline-degrade fallback. Core never reads the env.
                 docgen_full_fidelity=sandbox_template_cfg.docgen_full_fidelity,
+                # Spec N6 (N6-D-1): the per-tenant image-MCP runtime (None unless cloud +
+                # Fly configured + ack). The factory resolves a persona's assigned
+                # image-runtime servers through it to per-tenant /mcp URLs (acceptance #4).
+                mcp_runtime=mcp_runtime,
             )
             app.state.tier_registry = tier_registry
             app.state.authoring_tier = config.authoring_tier
@@ -614,6 +669,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Cancels the reaper, drains sessions, closes substrate
             # (D-12-12 Gate 4 mid-exec-kill cleanliness inherits).
             await sandbox_pool.aclose()
+        if mcp_runtime is not None:
+            await mcp_runtime.aclose()  # Spec N6: cancel the cross-tenant idle-reaper
         if admin_engine is not None:
             admin_engine.dispose()
         if rls_engine is not None:

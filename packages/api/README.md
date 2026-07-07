@@ -49,8 +49,10 @@ identical across editions — community just feeds them a constant.
 - **Image generation** — pre-deduct credits + per-user advisory-lock cap;
   artifacts served back through the API.
 - **Tools & MCP** — toolbox introspection; bring-your-own MCP servers with
-  encrypted-at-rest credentials (Fernet); code execution via the E2B Code
-  Interpreter sandbox (lazy-imported; absent without a key).
+  encrypted-at-rest credentials (Fernet); a per-tenant image-MCP runtime (cloud;
+  a Fly Machine per tenant with the user's secret injected, isolated — behind
+  `PERSONA_ALLOW_PER_TENANT_MCP`); code execution via the E2B Code Interpreter
+  sandbox (lazy-imported; absent without a key).
 - **Credits & usage** — balance + per-turn usage (`/me`), pre-deduct + refund
   (cloud); unlimited no-op (community).
 - **Safety guard** — a community/no-auth process refuses to start on a

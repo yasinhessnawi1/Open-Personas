@@ -17,6 +17,7 @@ from persona_api.middleware.rate_limit import rate_limit
 from persona_api.schemas import (
     AdoptCatalogAppRequest,
     CreateMCPServerRequest,
+    MCPConnectionStatus,
     MCPOAuthAuthorizeRequest,
     MCPOAuthAuthorizeResponse,
     MCPOAuthCallbackRequest,
@@ -25,7 +26,7 @@ from persona_api.schemas import (
     MCPServerTestResult,
     UpdateMCPServerRequest,
 )
-from persona_api.services import adoption_service, audit_service
+from persona_api.services import adoption_service, audit_service, mcp_status_service
 
 router = APIRouter(prefix="/v1", tags=["mcp"])
 
@@ -242,6 +243,31 @@ async def list_persona_mcp_servers(
     ]
 
 
+@router.get(
+    "/personas/{persona_id}/mcp-connections",
+    response_model=list[MCPConnectionStatus],
+)
+async def list_persona_mcp_connections(
+    persona_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> list[MCPConnectionStatus]:
+    """Per-assigned-server connection status for a persona (Spec N6, N6-D-6; R4-C1-21).
+
+    Surfaces "assigned but not connected" so the UI shows it distinctly from "working".
+    One RLS-scoped read path (``persona_app``); no secret. Image-runtime servers report
+    through their per-tenant runtime state; remote/BYO servers report connected (unaffected).
+    """
+    return [
+        MCPConnectionStatus(server_name=c.server_name, connected=c.connected, reason=c.reason)
+        for c in mcp_status_service.persona_mcp_connection_status(
+            rls_engine=request.app.state.rls_engine,
+            owner_id=user.id,
+            persona_id=persona_id,
+        )
+    ]
+
+
 @router.put(
     "/personas/{persona_id}/mcp-servers/{server_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -293,6 +319,8 @@ async def adopt_catalog_app(
         persona_id=persona_id,
         catalog_name=body.catalog_name,
         credential=body.credential,
+        # Spec N6 (N6-D-3): the per-tenant image-runtime cap, enforced at ASSIGN.
+        max_image_runtime=getattr(request.app.state, "mcp_runtime_max_per_tenant", 3),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,
