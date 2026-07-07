@@ -11,6 +11,50 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Autonomy UI — "what did my personas do while I slept?" (Spec A6)
+
+> The web surfaces for autonomy: the morning **Review**, the **Approvals** inbox,
+> and **Tasks** list/detail — plus the thin RLS endpoints they render. One digest
+> builder feeds both the surface and C0's morning message; the approval inbox and
+> chat resolve the SAME durable proposal (idempotent dual resolution); controls
+> ride the real A2/A3/A5/A8 doors. Calm by default, loud only where loudness is
+> information (stuck states). Backend minimalism: thin endpoints over existing
+> stores, one migration pair.
+
+#### Added
+- **Activity area** — one nav row landing on the **Review** (`/review`); `Tasks`
+  (`/tasks`, `/tasks/{id}`) + `Approvals` (`/approvals`) as siblings via
+  `ActivityTabs`; `/runs` demoted to the task-detail "Open run" drill (A6-D-1).
+- **Morning Review** (`GET /v1/autonomy/review`) — the shared `MorningDigest`
+  builder (`digest/builder.py`), ordered waiting→stuck→done→initiatives + an
+  upcoming strip, per-section caps with an honest overflow; one builder, two
+  renderings (web + C0's `render_digest_message`). Dateline-spine render, the
+  five-test calm rubric.
+- **Approvals inbox** (`routes/approvals.py`, W4) — pending proposals rendered
+  *verbatim* (see-then-grant); approve/deny/modify through the ONE shared
+  `ApprovalResolutionService` chat also uses — **idempotent dual resolution**,
+  the chat-vs-inbox race resolves once on the durable record (A6-D-3).
+- **Tasks** (`routes/tasks.py`) — the cross-persona list (B1) with `stuck_cause`
+  at list level (one `DISTINCT ON` query); the detail (contract+grants, budget+
+  ledger, checkpoints as progress+next-step — never raw transcripts, A6-D-4, the
+  terminal report as its own projection); commands (B2): pause/resume/cancel/
+  budget-extend — audited, idempotent, bounded.
+- **Autonomy controls** (B4, `routes/autonomy.py`) — owner-wide pause + per-
+  persona suspend + the initiative dial; the W7 kill-switch panel (owner pause at
+  the area root). Honest copy scoped to the task-leg path (origination
+  completeness lands at merge-back).
+- **Live-refetch seam** (W8) — `useTaskSignal`, transport-agnostic: refetch-not-
+  trust, advance-only dedup, targeted refetch. Inert until merge-back points it
+  at the A11 `task.updated` SSE. `DigestItem.ref` → per-item deep-links.
+- **Persistence** — migrations `039_owner_autonomy_pause` + `040_deferred_digest`
+  (placeholder-numbered; renumber at merge-back); the `DeferredDigestStore`
+  closes the over-cap chatter drop-gap (A6-D-10, atomic consume-and-mark).
+
+#### Notes
+- `ran_because` provenance renders when present; the B5 builder wiring to A7's
+  `EventFire.human` is a **merge-back** task (A7's `persona_api.events` is on main,
+  which this branch predates). A6 adds no new env vars.
+
 ### Routing — deliberate surface→tier policy; the tuning surface retired (Spec P9)
 
 > The router stops guessing: a turn's model tier is a function of its SURFACE,
