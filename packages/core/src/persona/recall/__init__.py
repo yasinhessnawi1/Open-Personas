@@ -51,6 +51,7 @@ from persona.recall.rerank import (
     Scorer,
     build_reranker,
 )
+from persona.recall.scorer import CrossEncoderScorer, build_scorer, shared_scorer
 from persona.recall.scoring import apply_composite_score, composite_components
 from persona.recall.sources import gather_legs, graph_legs
 
@@ -60,6 +61,7 @@ __all__ = [
     "AbstentionReason",
     "CoreBlock",
     "CrossEncoderReranker",
+    "CrossEncoderScorer",
     "DeadlineReranker",
     "DrillStop",
     "Episode",
@@ -81,6 +83,7 @@ __all__ = [
     "apply_diffusion",
     "build_core_block",
     "build_reranker",
+    "build_scorer",
     "classify_question_type",
     "compose_gate",
     "compose_recall",
@@ -96,4 +99,5 @@ __all__ = [
     "read_core_block",
     "refresh_core_block",
     "run_recall",
+    "shared_scorer",
 ]

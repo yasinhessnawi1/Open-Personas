@@ -83,8 +83,8 @@ if TYPE_CHECKING:
     from persona.tools.mcp.catalog import MCPCatalog
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.crisis_encoder import CrisisScorer
-    from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
     from persona_runtime.graph_selection import GatingContext
+    from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import GraphContext
     from persona_runtime.task_origination import (
@@ -449,14 +449,17 @@ class RuntimeFactory:
 
         Fuses the K8 pyramid AND the K7 graph into one reranked+gated path, projected into the
         existing ``episodic`` / ``graph`` seam. Returns ``None`` (today's two-path recall) unless
-        ``unified_enabled`` is flipped. The reranker is the fail-soft shell with **no P7 scorer**
-        (fused order, the D-12 stub-safe path) until P7 lands; K4 gating is the SAME allowlist the
-        graph path uses (single-sourced). Owner is resolved per turn (fail-closed graph scope).
+        ``unified_enabled`` is flipped. The reranker is the fail-soft shell over the CPU
+        cross-encoder scorer (``rerank_enabled``-gated; absent/failed ⇒ fused order, the D-12
+        stub-safe path — P7 later swaps a stronger model behind the same seam); K4 gating is the
+        SAME allowlist the graph path uses (single-sourced). Owner is resolved per turn
+        (fail-closed graph scope).
         """
         from persona.graph.config import GraphSettings
         from persona.graph.retrieval import HybridRetriever
         from persona.recall.config import RecallSettings
         from persona.recall.rerank import build_reranker
+        from persona.recall.scorer import build_scorer
         from persona.stores.lifecycle import EpisodicSettings
         from persona_runtime.graph_window import get_recent_window
         from persona_runtime.recall_adapters import GraphNeighbourProvider, PyramidEpisodeProvider
@@ -489,9 +492,13 @@ class RuntimeFactory:
                 owner = current_user_id.get()
                 return retriever.retrieve(owner, q) if owner else []
 
-        # P7 scorer absent ⇒ fused-order fail-soft shell (D-12 stub-safe); chat sync deadline.
+        # The CPU cross-encoder scorer (persona.recall.scorer) behind the chat sync
+        # deadline: process-shared, lazy-loaded on the first rerank inside the
+        # DeadlineReranker's worker thread. ``rerank_enabled`` off or construction
+        # failure ⇒ ``None`` ⇒ the fused-order fail-soft shell (byte-identical to
+        # the D-12 stub path).
         reranker = build_reranker(
-            scorer=None,
+            scorer=build_scorer(settings),
             settings=settings,
             timeout_s=settings.rerank_timeout_ms_chat / 1000.0,
         )

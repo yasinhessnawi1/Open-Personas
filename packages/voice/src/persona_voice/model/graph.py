@@ -223,12 +223,14 @@ def build_voice_unified_recall(
     the voice profile (traversal-off graph settings + a tighter node budget, V13-D-3), and a
     voice reranker bounded by the measured voice deadline (K9-D-4 — a rerank stall degrades to
     fused). The K4 gate is IDENTICAL to chat's (``_voice_allowlist_provider`` + the recent-window
-    lift + surfacing) — the standing voice-safety identity (V13-D-5). No P7 scorer yet ⇒ the
-    fail-soft shell yields the fused order (D-12 stub-safe). Runs OFF the loop inside the reply
+    lift + surfacing) — the standing voice-safety identity (V13-D-5). The scorer is the
+    process-shared CPU cross-encoder (``rerank_enabled``-gated; absent/failed ⇒ the fail-soft
+    shell yields the fused order, D-12 stub-safe). Runs OFF the loop inside the reply
     producer's ``to_thread``.
     """
     from persona.recall.config import RecallSettings
     from persona.recall.rerank import build_reranker
+    from persona.recall.scorer import build_scorer
     from persona.stores.lifecycle import EpisodicSettings
     from persona_runtime.recall_adapters import GraphNeighbourProvider, PyramidEpisodeProvider
     from persona_runtime.unified_recall import make_unified_recall
@@ -236,10 +238,14 @@ def build_voice_unified_recall(
     graph_settings: GraphSettings = voice_graph_settings(GraphSettings())
     retriever = HybridRetriever(store=graph_store, settings=graph_settings)
     # Voice profile: fewer, surer nodes (V13-D-3 VOICE_NODE_BUDGET); the voice-deadline reranker
-    # (stub ⇒ fused now; a P7 tiny encoder later, bounded so a stall degrades to fused).
+    # over the process-shared CPU cross-encoder (lazy-loaded on the first rerank, inside the
+    # deadline's worker thread — NEVER on the event loop). ``rerank_enabled`` off or scorer
+    # construction failure ⇒ fused order; a stall degrades to fused within the deadline.
     settings = RecallSettings(result_budget=VOICE_NODE_BUDGET)
     reranker = build_reranker(
-        scorer=None, settings=settings, timeout_s=settings.rerank_timeout_ms_voice / 1000.0
+        scorer=build_scorer(settings),
+        settings=settings,
+        timeout_s=settings.rerank_timeout_ms_voice / 1000.0,
     )
     retrieval = make_unified_recall(
         reranker=reranker,

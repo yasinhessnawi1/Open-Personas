@@ -56,6 +56,10 @@ class RecallSettings(BaseSettings):
         rerank_timeout_ms_voice: Deadline the voice path applies off the event loop (T9);
             120 ms sits ~2.3× above the measured top-12 p95 (51 ms) so a normal rerank
             never trips it, but a stall degrades to fused within the spoken-turn slack.
+        rerank_model: HuggingFace hub id of the cross-encoder behind the reranker seam
+            (:mod:`persona.recall.scorer`). Default is the K9-measured MiniLM-L6-class
+            reference (top-12 p95 ~51 ms / top-20 p95 ~111 ms on CPU); P7 swaps a
+            stronger chat-tier model here behind the same ``Scorer`` Protocol.
     """
 
     model_config = SettingsConfigDict(env_prefix="PERSONA_RECALL_", extra="ignore")
@@ -88,6 +92,7 @@ class RecallSettings(BaseSettings):
     rerank_enabled: bool = Field(default=False)
     rerank_timeout_ms_chat: int = Field(default=800, gt=0)
     rerank_timeout_ms_voice: int = Field(default=120, gt=0)
+    rerank_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L6-v2", min_length=1)
 
     # --- composite score (T4, K9-D-5, refined) ------------------------------
     # Additive over ABSOLUTE [0,1] components (relevance = reranked score, recency,
