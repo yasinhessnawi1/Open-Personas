@@ -57,9 +57,15 @@ from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.routing import RoutingContext, classifiers
 from persona_runtime.routing.model_selection import reorder_primary
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
+from persona_runtime.schedule_claim import (
+    SCHEDULE_CLAIM_LEXICON_VERSION,
+    detect_schedule_claim,
+    render_schedule_correction,
+)
 
 from persona_voice.model.expressivity import VoiceExpressivity, resolve_expressivity
 from persona_voice.model.history import VoiceHistoryCompactor
+from persona_voice.model.origination_gate import DelegatedTurnIntent, VoiceOriginationDecision
 from persona_voice.model.prompt_assembler import VoicePromptAssembler
 from persona_voice.model.routing import VoiceRoutingPolicy
 from persona_voice.model.tools import (
@@ -149,6 +155,7 @@ class VoiceModelReplyProducer:
         expressivity_listener: Callable[[VoiceExpressivity | None], None] | None = None,
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
         turn_recorder: VoiceTurnRecorder | None = None,
+        delegation_listener: Callable[[DelegatedTurnIntent], None] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._ctx = context
@@ -181,6 +188,11 @@ class VoiceModelReplyProducer:
         # commit (D-V5-X-memory-write-on-commit); the actual write happens on V4's
         # on_reply_committed, never here (no speculative mid-stream write).
         self._turn_recorder = turn_recorder
+        # A9 (A9-D-5/D-7): the delegation sink. When the origination gate confirms a spoken
+        # task/schedule ask, the confirmed VERBATIM ask is handed here to be delegated to the
+        # chat pipeline (the durable ``delegated_turn`` job — T4). ``None`` ⇒ the gate still runs
+        # (echo/confirm for the ear) but nothing is delegated (T3 placement; T4 wires it live).
+        self._delegation_listener = delegation_listener
         self._clock = clock or (lambda: datetime.now(UTC))
         # Rotates the preamble across turns so the filler is not robotic (D-V5-5).
         self._preamble_index = 0
@@ -217,6 +229,46 @@ class VoiceModelReplyProducer:
                 self._turn_recorder.note_user_message(user_message)
             yield safety_verdict.completion.voice_text
             return
+
+        # A9 (A9-D-1/D-5/D-7): the voice task-origination gate — placed HERE, strictly AFTER the
+        # R1-hard safety bypass (a crisis turn returned above; origination is never consulted —
+        # criterion 3) and BEFORE routing/retrieval/generation. The gate's cheap
+        # ``detect_standing_cue`` regex gates the model judge, so a no-cue turn (the overwhelming
+        # case) pays only microseconds and falls through unchanged — nothing model-judged runs on
+        # the loop for it (criterion 2). When the gate OWNS the turn it speaks the echo/confirm for
+        # the ear and, on a clean confirm, DELEGATES the verbatim ask to the chat pipeline (voice
+        # never executes with the mid model — the create runs off this loop, frontier tier, one
+        # audited path). Graph stays OFF (the gate never reads it). ``None`` gate ⇒ byte-identical.
+        gate = ctx.origination_gate
+        if gate is not None:
+            # Fail-soft (T10): a gate failure (a keyless/over-budget judge that escapes the
+            # recognizer's own ask-once degrade, or any bug) must degrade to TODAY's clean call —
+            # ordinary generation — never a broken or stalled turn. The gate is additive; it can
+            # only ever add a spoken echo, never break the conversation.
+            try:
+                decision: VoiceOriginationDecision | None = await gate.on_user_turn(user_message)
+            except Exception:  # noqa: BLE001 — a gate failure degrades to today's clean call
+                _logger.warning("voice origination gate failed; falling through to ordinary turn")
+                decision = None
+            if decision is not None and decision.owns_turn:
+                if self._turn_recorder is not None:
+                    self._turn_recorder.note_user_message(user_message)
+                if decision.verbatim_ask is not None and self._delegation_listener is not None:
+                    # Delegate the VERBATIM ask (never the mid-model draft) for the frontier to
+                    # re-parse + execute. Set on an origination CONFIRM (the spoken echo + "yes" was
+                    # the confirmation — A9-D-7) OR a spoken STEERING ask (pause/resume/cancel/
+                    # reschedule — T7, the same crossing).
+                    self._delegation_listener(
+                        DelegatedTurnIntent(
+                            conversation_id=ctx.conversation.conversation_id,
+                            verbatim_ask=decision.verbatim_ask,
+                            persona_id=ctx.persona_id,
+                        )
+                    )
+                assert decision.spoken is not None  # owns_turn ⇒ spoken is not None
+                yield decision.spoken
+                return
+            # ORDINARY → the gate did not own the turn; proceed to normal generation unchanged.
 
         # K4 (K4-D-2): publish this turn's recent-conversation window BEFORE the graph
         # query is kicked off, so the gate reads the conversation (not the bare query) and
@@ -292,22 +344,53 @@ class VoiceModelReplyProducer:
         timing = _RoundTiming(t_start=time.perf_counter())
         tools = self._offered_specs(backend)
 
+        # A9 (T8, A9-D-6): accumulate the complete spoken reply so the confabulation guard can run
+        # on it once at end-of-stream. Reaching THIS (ordinary generation) path proves the turn did
+        # NOT delegate — the gate-owned echo/confirm/delegate turns all early-returned above — so a
+        # new-schedule success CLAIM here is a hallucination (voice never creates a schedule).
+        spoken_out: list[str] = []
+
         # First round: stream the reply (and any tool call the model decides on).
         round_text: list[str] = []
         calls: list[ToolCall] = []
         async for delta in self._stream(
             backend, prompt, tools, max_tokens, timing, round_text, calls
         ):
+            spoken_out.append(delta)
             yield delta
 
-        if not calls:
-            return  # plain answer — already streamed
+        if calls:
+            # Conservative v1: at most one tool, one re-prompt round (D-V5-4).
+            async for delta in self._handle_tool_call(
+                backend, prompt, max_tokens, timing, round_text, calls[0]
+            ):
+                spoken_out.append(delta)
+                yield delta
 
-        # Conservative v1: at most one tool, one re-prompt round (D-V5-4).
-        async for delta in self._handle_tool_call(
-            backend, prompt, max_tokens, timing, round_text, calls[0]
-        ):
-            yield delta
+        # T8: the confabulation guard (A10's detector, reused verbatim) on the COMPLETE reply. On a
+        # claimed-but-not-created hit, the honest correction is spoken as the stream tail — so it is
+        # HEARD, and the unified-memory recorder folds it into episodic on commit (the graph can
+        # never mint a confabulated "I scheduled it" fact from a non-delegated voice turn).
+        correction = self._schedule_claim_correction("".join(spoken_out))
+        if correction is not None:
+            yield correction
+
+    def _schedule_claim_correction(self, reply_text: str) -> str | None:
+        """The honest correction if this non-delegated reply falsely claims a schedule (A9-D-6).
+
+        Reuses A10's ``detect_schedule_claim`` / ``render_schedule_correction`` verbatim (one
+        detector, one lexicon — anti-fork). ``None`` when the reply makes no new-schedule claim.
+        """
+        signal = detect_schedule_claim(reply_text)
+        if signal is None:
+            return None
+        _logger.info(
+            "voice schedule-claim correction appended (claimed without a delegation) "
+            "matched={matched} lexicon={version}",
+            matched=signal.matched,
+            version=SCHEDULE_CLAIM_LEXICON_VERSION,
+        )
+        return f"\n\n{render_schedule_correction()}"
 
     async def _handle_tool_call(
         self,

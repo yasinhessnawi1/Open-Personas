@@ -10,6 +10,13 @@ See ``docs/specs/phase3/spec_A0/`` for the spec, decisions, and research.
 
 from __future__ import annotations
 
+from persona.jobs.delegation import (
+    DELEGATED_TURN_JOB_TYPE,
+    PROVENANCE_VOICE,
+    DelegatedTurnPayload,
+    delegated_turn_idempotency_key,
+    make_delegated_turn_payload,
+)
 from persona.jobs.models import (
     LONG_LEASE,
     MEDIUM_LEASE,
@@ -37,11 +44,14 @@ from persona.jobs.synthesis import (
 __all__ = [
     "CHANNEL_CHAT",
     "CHANNEL_VOICE",
+    "DELEGATED_TURN_JOB_TYPE",
     "LONG_LEASE",
     "MEDIUM_LEASE",
+    "PROVENANCE_VOICE",
     "SHORT_LEASE",
     "SYNTHESIS_JOB_TYPE",
     "TERMINAL_STATES",
+    "DelegatedTurnPayload",
     "Job",
     "JobContext",
     "JobHandler",
@@ -53,8 +63,10 @@ __all__ = [
     "RetryPolicy",
     "SynthesisJobPayload",
     "can_transition",
+    "delegated_turn_idempotency_key",
     "is_terminal",
     "make_conversation_synthesis_payload",
+    "make_delegated_turn_payload",
     "synthesis_idempotency_key",
     "validate_transition",
 ]

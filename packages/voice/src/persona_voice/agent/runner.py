@@ -70,8 +70,15 @@ from persona_voice.model import (
     make_small_tier_summariser,
 )
 from persona_voice.model.expressivity import VoiceExpressivityChannel
+from persona_voice.model.origination_gate import (
+    DelegatedTurnIntent,
+    GateCommitListener,
+    VoiceOriginationGate,
+)
 from persona_voice.model.transcript import VoiceTranscriptWriter
 from persona_voice.session.call_record import CallRecorder, EndReason
+from persona_voice.session.delegation_dispatch import DelegationDispatcher
+from persona_voice.session.delegation_handback import DelegationHandbackPoller
 from persona_voice.session.state_machine import SessionStateMachine, make_session_rls_engine
 from persona_voice.stt import StreamingSTTConfig, load_streaming_stt
 from persona_voice.stt.cost_gate import DEFAULT_REOPEN_PREROLL_MS, IdleAwareGate
@@ -83,6 +90,7 @@ from persona_voice.transport.room import VoiceRoom, build_voice_room
 from persona_voice.tts._factory import load_streaming_tts
 from persona_voice.tts.config import StreamingTTSConfig
 from persona_voice.tts.seam_adapter import build_seam_adapter
+from persona_voice.turn_taking.bridge import CompositeTurnTranscriptListener
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -101,6 +109,7 @@ if TYPE_CHECKING:
 
     from persona_voice.config import VoiceConfig
     from persona_voice.loop.streaming import StreamingLoop
+    from persona_voice.turn_taking.heard_words import TurnTranscriptListener
 
 __all__ = [
     "AgentSession",
@@ -199,6 +208,35 @@ def _build_stores(engine: Engine, embedder: Embedder, audit_root: Path) -> dict[
     }
 
 
+def _build_origination_gate(
+    config: VoiceConfig, persona: Persona, tier_registry: TierRegistry
+) -> VoiceOriginationGate | None:
+    """Compose the A9 origination gate when delegation is enabled (A9-D-1), else ``None``.
+
+    Reuses A4's grammar VERBATIM: the two-step :class:`StandingIntentRecognizer` (the cheap cue
+    net gates the small-tier :class:`ModelStandingIntentJudge`) + the ``ModelAmendmentInterpreter``,
+    over the ``small`` tier (boilerplate work — the same tier the text origination path uses; the
+    judge runs off the live path behind the cue gate, so it never starves the loop). ``None``
+    ⇒ a byte-identical voice turn (the gate is never consulted). The gate holds no DB/graph handle —
+    execution is the chat pipeline's (delegated off this loop).
+    """
+    if not config.delegation_enabled:
+        return None
+    from persona_runtime.task_origination import (
+        ModelAmendmentInterpreter,
+        ModelStandingIntentJudge,
+        StandingIntentRecognizer,
+    )
+
+    backend = tier_registry.get("small")
+    recognizer = StandingIntentRecognizer(ModelStandingIntentJudge(backend=backend))
+    return VoiceOriginationGate(
+        recognizer=recognizer,
+        amendment_interpreter=ModelAmendmentInterpreter(backend=backend),
+        language=persona.identity.language_default,
+    )
+
+
 class AgentSession:
     """One voice call's running session — connect, run the loop, tear down.
 
@@ -228,6 +266,8 @@ class AgentSession:
         call_recorder: CallRecorder | None = None,
         call_record_engine: Engine | None = None,
         async_lane: AsyncArtifactLane | None = None,
+        handback_poller: DelegationHandbackPoller | None = None,
+        delegation_dispatcher: DelegationDispatcher | None = None,
         on_call_complete: Callable[[], None] | None = None,
     ) -> None:
         self._voice_room = voice_room
@@ -239,6 +279,12 @@ class AgentSession:
         # V10 (T4): the off-turn async-artifact production lane — cancelled at
         # teardown so no production task outlives the call (V10-D-4/5).
         self._async_lane = async_lane
+        # A9 (T6): the delegation hand-back poller — cancelled at teardown so no poll
+        # task outlives the call (the durable result self-heals — nothing is lost).
+        self._handback_poller = handback_poller
+        # A9 (T10): the delegation dispatcher — cancelled at teardown so no in-flight enqueue
+        # outlives the call.
+        self._delegation_dispatcher = delegation_dispatcher
         self._livekit_url = livekit_url
         self._agent_token = agent_token
         self._ended = ended
@@ -307,6 +353,13 @@ class AgentSession:
         if self._async_lane is not None:
             with contextlib.suppress(Exception):
                 await self._async_lane.shutdown()
+        # A9 (T6/T10): stop the hand-back poll loop + the dispatcher — the durable outcome heals.
+        if self._delegation_dispatcher is not None:
+            with contextlib.suppress(Exception):
+                await self._delegation_dispatcher.shutdown()
+        if self._handback_poller is not None:
+            with contextlib.suppress(Exception):
+                await self._handback_poller.shutdown()
         for step in (
             self._loop.stop(),
             self._stt_seam.close(),
@@ -476,6 +529,13 @@ async def build_agent_session(
     # teardown.
     toolbox, mcp_clients = await build_default_toolbox(core_config, persona)
 
+    # --- A9 voice task-origination gate (A9-D-1) — OFF by default (byte-identical turn) ---
+    # Composed only when delegation is enabled: the A4 recognizer (cue net + small-tier judge)
+    # + the amendment interpreter, reused VERBATIM (never forked), behind the VOICE echo/confirm.
+    # A recognized spoken ask is echoed + confirmed for the ear and DELEGATED to the chat pipeline
+    # (the create runs off this loop — A9-D-5/D-7). ``None`` ⇒ the reply producer skips the gate.
+    origination_gate = _build_origination_gate(config, persona, tier_registry)
+
     # --- V5 persona-conditioned, streaming, cancellable producer ---
     conversation = Conversation(conversation_id=conversation_id, persona_id=persona_id)
     tracker = FirstTokenLatencyTracker()
@@ -501,6 +561,7 @@ async def build_agent_session(
         graph_surfacing_guidance=graph_surfacing_guidance,
         unified_recall=unified_recall,
         core_block_provider=core_block_provider,
+        origination_gate=origination_gate,
     )
     recorder = VoiceTurnRecorder(
         ctx,
@@ -519,6 +580,11 @@ async def build_agent_session(
     # which point both holders are populated.
     broadcaster_holder: list[DataChannelBroadcaster] = []
     lane_holder: list[AsyncArtifactLane] = []
+    # A9 (T6): the hand-back poller, late-bound (needs the orchestrator's floor-gated narration,
+    # built further down) — the same holder pattern.
+    poller_holder: list[DelegationHandbackPoller] = []
+    # A9 (T10): the delegation dispatcher, late-bound (needs the poller + orchestrator narration).
+    dispatcher_holder: list[DelegationDispatcher] = []
 
     async def _emit_run_event(event: RunEvent) -> None:
         if broadcaster_holder:
@@ -527,6 +593,18 @@ async def build_agent_session(
     def _submit_async_artifact(call: ToolCall) -> None:
         if lane_holder:
             lane_holder[0].submit(call)
+
+    # A9 (A9-D-5/D-7/T10): the delegation sink — LIVE when the gate is wired. On a confirmed spoken
+    # ask the reply producer hands the VERBATIM ask here; the dispatcher enqueues the durable
+    # ``delegated_turn`` job OFF the loop, registers it with the hand-back poller on success, and
+    # FAILS SOFT (a spoken "couldn't set it up") if the enqueue fails — no half-created state (voice
+    # never creates; the create is the worker's, keyed idempotently). ``None`` gate ⇒ ``None``
+    # listener (the gate is inert, nothing delegated).
+    def _delegate_turn(intent: DelegatedTurnIntent) -> None:
+        if dispatcher_holder:
+            dispatcher_holder[0].dispatch(intent)
+
+    delegation_listener = _delegate_turn if origination_gate is not None else None
 
     # V12 (V12-D-4): the per-session expressivity hand-off — the producer publishes the
     # persona's stance, the Cartesia backend reads it to drive generation_config. Created
@@ -544,6 +622,9 @@ async def build_agent_session(
         async_artifact_listener=_submit_async_artifact,
         # V12: publish the resolved per-utterance expressivity to the TTS backend.
         expressivity_listener=expressivity_channel.publish,
+        # A9 (A9-D-5/D-7): the LIVE delegation sink — enqueues the durable ``delegated_turn`` job
+        # off-loop on a confirmed spoken ask (``None`` when the gate is unwired / delegation OFF).
+        delegation_listener=delegation_listener,
     )
 
     # --- session state machine ---
@@ -617,13 +698,22 @@ async def build_agent_session(
         if broadcaster_factory
         else (DataChannelBroadcaster(voice_room))
     )
+    # A9 (A9-D-3): when the gate is wired, its barge-aware commit hook observes each turn's
+    # commit alongside the V5 memory recorder — a barged (truncated) echo does not arm a
+    # confirmable proposal. Fan the single loop transcript-listener slot to both; ``None`` gate ⇒
+    # just the recorder (byte-identical to today).
+    turn_listener: TurnTranscriptListener = recorder
+    if origination_gate is not None:
+        turn_listener = CompositeTurnTranscriptListener(
+            [recorder, GateCommitListener(origination_gate)]
+        )
     # Greet-first (Spec 32 A3): the orchestrator opens in PREPARING so the
     # persona generates turn 0 (the greeting) before any user input.
     orchestrator = wire_orchestrated_loop(
         loop=loop,
         session=session,
         state_listener=broadcaster,
-        turn_transcript_listener=recorder,
+        turn_transcript_listener=turn_listener,
         initial_state=ConversationalState.PREPARING,
     )
     loop.caption_listener = broadcaster
@@ -640,6 +730,45 @@ async def build_agent_session(
         on_event=broadcaster.on_run_event,
     )
     lane_holder.append(async_lane)
+    # A9 (T6): the delegation hand-back poller — LIVE only when the gate is wired. It watches each
+    # delegated turn's terminal job row and speaks the grounded result at the next idle floor via
+    # the SAME floor-gated narration the async-artifact lane uses (never over the user). The
+    # delegation listener above registers each key with it; it is cancelled at teardown (the durable
+    # result self-heals). ``None`` gate ⇒ no poller (nothing is delegated).
+    handback_poller: DelegationHandbackPoller | None = None
+    delegation_dispatcher: DelegationDispatcher | None = None
+    if origination_gate is not None:
+        handback_poller = DelegationHandbackPoller(
+            engine=rls_engine,
+            owner_id=user_id,
+            conversation_id=conversation_id,
+            on_handback=orchestrator.notify_artifact_ready,
+        )
+        poller_holder.append(handback_poller)
+
+        async def _speak_delegation_failed() -> None:
+            """Fail-soft narration (T10): the enqueue failed, so tell the user it couldn't be set.
+
+            Spoken at the next idle floor through the same floor-gated seam the hand-back uses — no
+            half-created state (nothing was created; the durable job never landed)."""
+            await orchestrator.notify_artifact_ready(
+                Transcript(
+                    is_final=True,
+                    text=(
+                        "A task the user just asked for by voice could not be set up. In one "
+                        "short, kind sentence, let them know you weren't able to set it up."
+                    ),
+                    confidence=1.0,
+                )
+            )
+
+        delegation_dispatcher = DelegationDispatcher(
+            engine=rls_engine,
+            owner_id=user_id,
+            poller=handback_poller,
+            on_failed=_speak_delegation_failed,
+        )
+        dispatcher_holder.append(delegation_dispatcher)
 
     async def _greet() -> None:
         """Run turn 0 — gate on the warm-up, then have the persona greet first."""
@@ -741,6 +870,8 @@ async def build_agent_session(
         call_recorder=call_recorder,
         call_record_engine=call_record_engine,
         async_lane=async_lane,
+        handback_poller=handback_poller,
+        delegation_dispatcher=delegation_dispatcher,
         on_call_complete=_enqueue_synthesis_on_end,
     )
 

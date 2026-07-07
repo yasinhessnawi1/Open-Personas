@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from persona_runtime.unified_recall import UnifiedProjection
 
     from persona_voice.agent.language import CallLanguagePlan
+    from persona_voice.model.origination_gate import VoiceOriginationGate
 
 __all__ = ["REQUIRED_STORE_KINDS", "VoiceTurnContext"]
 
@@ -142,6 +143,13 @@ class VoiceTurnContext:
     """The K9 core-memory block reader (K9-D-10). ``None`` ⇒ no block, byte-identical. The
     block is background-refreshed on the K8 engine cadence (never the turn path); the voice turn
     only READS it for injection, inside the same off-loop retrieval (acceptance-7)."""
+    origination_gate: VoiceOriginationGate | None = None
+    """The A9 voice task-origination gate (A9-D-1). ``None`` ⇒ **byte-identical** voice turn
+    (the gate is never consulted). When wired, the reply producer runs it AFTER the R1-hard
+    safety bypass (crisis precedence) and BEFORE routing/retrieval: a recognized task/schedule
+    ask is echoed + confirmed for the ear and then **delegated** to the chat pipeline (voice
+    never executes with the mid model — A9-D-5/D-7); a no-cue turn pays only the cheap regex
+    and proceeds unchanged (A9-D-1, criterion 2). Graph stays OFF; the gate never reads it."""
 
     def __post_init__(self) -> None:
         missing = [kind for kind in REQUIRED_STORE_KINDS if kind not in self.stores]

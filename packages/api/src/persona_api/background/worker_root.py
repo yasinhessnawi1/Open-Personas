@@ -333,6 +333,21 @@ def build_worker_registry(
             registry,
             handler=InitiativeScanHandler(scanner=scanner, dial_reader=_dial_reader, sink=pipeline),
         )
+        # Spec A9 (A9-D-5/D-7): the ``delegated_turn`` tenant — voice's confirmed spoken ask
+        # executed on the frontier chat pipeline through the ONE audited path (the same loop the
+        # task-leg tenant + interactive chat use). Built-but-inert until voice enqueues (gated on
+        # the voice-side ``delegation_enabled``); the create rides the unchanged origination svc.
+        # Needs a memory backend for the origination failure notifier (as the task-leg digest does);
+        # a backend-less worker path simply does not register it (no delegation without a backend).
+        if memory_backend is not None:
+            _register_delegated_turn_tenant(
+                registry,
+                rls_engine=rls_engine,
+                runtime_factory=runtime_factory,
+                memory_backend=memory_backend,
+                edition=edition,
+                audit_root=Path(config.audit_root),
+            )
     _log.info(
         "worker registry composed",
         synthesis_tier=synthesis_tier,
@@ -389,6 +404,37 @@ def _register_task_leg_tenant(
         schedule_store=ScheduleStore(rls_engine),
         rls_engine=rls_engine,
         event_channel=event_channel,
+    )
+
+
+def _register_delegated_turn_tenant(
+    registry: JobRegistry,
+    *,
+    rls_engine: Engine,
+    runtime_factory: RuntimeFactory,
+    memory_backend: Backend,
+    edition: object | None,
+    audit_root: Path,
+) -> None:
+    """Register the A9 ``delegated_turn`` handler over the real origination composition (A9-D-5)."""
+    from persona_api.config import Edition
+    from persona_api.jobs.handlers.delegated_turn import register_delegated_turn_handler
+    from persona_api.services.task_origination_composition import (
+        compose_task_origination_services,
+    )
+
+    services = compose_task_origination_services(
+        rls_engine=rls_engine,
+        memory_backend=memory_backend,
+        edition=edition if isinstance(edition, Edition) else Edition.community,
+        audit_root=audit_root,
+    )
+    register_delegated_turn_handler(
+        registry,
+        runtime_factory=runtime_factory,
+        origination_service=services.origination,
+        steering_service=services.steering,
+        rls_engine=rls_engine,
     )
 
 
