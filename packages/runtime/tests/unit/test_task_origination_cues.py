@@ -73,3 +73,38 @@ def test_cue_reports_category() -> None:
 def test_everything_does_not_falsely_fire_recurrence() -> None:
     # "everything" must not trip the "every <timeword>" recurrence pattern.
     assert detect_standing_cue("tell me everything about Rome") is None
+
+
+# --- R4 operator-pass find (2026-07-07): numeric intervals + the schedule verb ---
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The exact operator-pass utterance that fell through to a model refusal.
+        "hello , can you schedule a task for me every 15 min , to check my email inbox",
+        "schedule a task every 15 minutes to check my email",
+        "every 2 hours, look at the queue",
+        "check the price every 30 mins",
+        "schedule a reminder for the standup",
+        "can you schedule a daily report",
+        "hvert 15. minutt, sjekk innboksen",
+        "hver 2 timer, se over køen",
+    ],
+)
+def test_numeric_intervals_and_schedule_verb_fire_a_cue(message: str) -> None:
+    assert detect_standing_cue(message) is not None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # "schedule" small-talk without a schedulable object stays cheap.
+        "what does my schedule look like today",
+        "my schedule is packed",
+        # bare numbers without a time unit stay cheap.
+        "give me 15 ideas for the trip",
+    ],
+)
+def test_schedule_smalltalk_stays_on_cheap_path(message: str) -> None:
+    assert detect_standing_cue(message) is None

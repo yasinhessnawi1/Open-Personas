@@ -51,6 +51,18 @@ _CUE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("recurrence", r"\beach\s+(morning|day|week|month|time)\b"),
     ("recurrence", r"\b(daily|weekly|monthly|hourly|nightly)\b"),
     ("recurrence", r"\b(recurring|recurrent|on\s+a\s+schedule|on\s+a\s+regular\s+basis)\b"),
+    # Numeric intervals ("every 15 min", "every 2 hours") — found missing in the R4
+    # operator pass: "schedule a task every 15 min" fell through to a model refusal.
+    (
+        "recurrence",
+        r"\bevery\s+\d+\s*(minutes?|mins?|min|hours?|hrs?|hr|days?|weeks?|months?)\b",
+    ),
+    # The explicit schedule-verb ask ("schedule a task/reminder/check…"). Generous by
+    # design — a false positive costs one small-tier judge call (the precision layer).
+    (
+        "recurrence",
+        r"\bschedul(e|ing)\b.{0,40}\b(task|reminder|check|report|summary|message|call)\b",
+    ),
     # --- ongoing / monitoring (English) ---
     (
         "ongoing",
@@ -70,6 +82,9 @@ _CUE_PATTERNS: tuple[tuple[str, str], ...] = (
         r"torsdag|fredag|lørdag|søndag)\b",
     ),
     ("recurrence", r"\b(daglig|ukentlig|månedlig|hver\s+gang)\b"),
+    # Norwegian numeric intervals ("hvert 15. minutt", "hver 2 timer", "hvert kvarter").
+    ("recurrence", r"\bhver(t)?\s+\d+\.?\s*(minutt(er)?|min|time(r)?|dag(er)?|uke(r)?)\b"),
+    ("recurrence", r"\bhvert\s+kvarter\b"),
     # --- ongoing / monitoring (Norwegian) ---
     ("ongoing", r"\b(følg\s+med|hold\s+øye\s+med|hold\s+meg\s+oppdatert|overvåk|følg\s+opp)\b"),
     ("ongoing", r"\b(fremover|fra\s+nå\s+av|løpende|kontinuerlig)\b"),
