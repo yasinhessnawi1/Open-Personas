@@ -15,6 +15,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it, vi } from "vitest";
 import messages from "@/i18n/messages/en.json";
 import { AppsChooser } from "./apps-chooser";
+import type { McpConnectionStatus } from "./mcp-connection-label";
 import type { McpCatalogEntry, McpCatalogSecret } from "./persona-form";
 
 const secret: McpCatalogSecret = {
@@ -49,6 +50,7 @@ function renderChooser(props: {
   apps: McpCatalogEntry[];
   declaredTools?: string[];
   unavailableMcpServers?: string[];
+  connections?: McpConnectionStatus[];
   onChange?: (tools: string[]) => void;
 }) {
   const onChange = props.onChange ?? vi.fn();
@@ -58,6 +60,7 @@ function renderChooser(props: {
         apps={props.apps}
         declaredTools={props.declaredTools ?? []}
         unavailableMcpServers={props.unavailableMcpServers ?? []}
+        connections={props.connections}
         onChange={onChange}
       />
     </NextIntlClientProvider>,
@@ -238,5 +241,67 @@ describe("AppsChooser", () => {
       messages.apps.open.replace("{name}", "GitHub"),
     );
     expect(trigger).toBeTruthy();
+  });
+
+  // N6 merge-back — the per-server connection badge on the edit cards.
+  describe("connection badge", () => {
+    const connBadge = (card: HTMLElement) =>
+      card.querySelector('[data-slot="mcp-connection-badge"]');
+
+    it("renders the friendly badge per status next to the state badge", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "github", displayName: "GitHub" }),
+          app({ name: "time" }),
+          app({ name: "fetch" }),
+        ],
+        declaredTools: ["mcp:github", "mcp:time", "mcp:fetch"],
+        connections: [
+          { server_name: "github", connected: true, reason: null },
+          { server_name: "time", connected: false, reason: "starting" },
+          { server_name: "fetch", connected: false, reason: "no_key" },
+        ],
+      });
+      expect(connBadge(cardFor(container, "GitHub"))?.textContent).toBe(
+        messages.apps.connection.connected,
+      );
+      expect(connBadge(cardFor(container, "time"))?.textContent).toBe(
+        messages.apps.connection.starting,
+      );
+      expect(connBadge(cardFor(container, "fetch"))?.textContent).toBe(
+        messages.apps.connection.noKey,
+      );
+      // The state badge is still there — connection is shown NEXT to it.
+      expect(
+        cardFor(container, "GitHub").querySelector(
+          '[data-slot="app-state-badge"]',
+        )?.textContent,
+      ).toBe(messages.apps.state.enabled);
+      // Never the raw enum.
+      expect(container.textContent).not.toContain("no_key");
+    });
+
+    it("renders NO badge for an app without a status row", () => {
+      const { container } = renderChooser({
+        apps: [app({ name: "github" }), app({ name: "time" })],
+        connections: [
+          { server_name: "time", connected: false, reason: "stopped" },
+        ],
+      });
+      expect(connBadge(cardFor(container, "github"))).toBeNull();
+      expect(connBadge(cardFor(container, "time"))).not.toBeNull();
+    });
+
+    it("fail-soft: no connections prop (fetch failed / older api) renders clean", () => {
+      const { container } = renderChooser({
+        apps: [app({ name: "github" })],
+        declaredTools: ["mcp:github"],
+      });
+      expect(
+        container.querySelector('[data-slot="mcp-connection-badge"]'),
+      ).toBeNull();
+      // The card itself is untouched.
+      expect(cardFor(container, "github")).toBeTruthy();
+    });
   });
 });

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { mapMcpCatalog } from "@/components/personas/mcp-catalog";
+import { fetchMcpConnections } from "@/components/personas/mcp-connections";
 import { PersonaEditor } from "@/components/personas/persona-editor";
 import { type ToolSummary, unwrap } from "@/lib/api";
 import type { components } from "@/lib/api/schema";
@@ -26,10 +27,13 @@ export default async function EditPersonaPage({
   if (personaRes.response.status === 404) notFound();
   const detail = await unwrap(personaRes);
 
-  const [tools, skills, mcpCatalog] = await Promise.all([
+  // N6 merge-back: the per-assigned-server connection status is FAIL-SOFT — an
+  // error (older api, community without the runtime) yields [] → no badges.
+  const [tools, skills, mcpCatalog, mcpConnections] = await Promise.all([
     unwrap(await api.GET("/v1/tools")),
     unwrap(await api.GET("/v1/skills")),
     unwrap(await api.GET("/v1/mcp-catalog")),
+    fetchMcpConnections(api, id),
   ]);
 
   const doc = yamlToDoc(detail.yaml);
@@ -59,6 +63,7 @@ export default async function EditPersonaPage({
         mcpServers={mapMcpCatalog(
           mcpCatalog as components["schemas"]["MCPCatalogServer"][],
         )}
+        mcpConnections={mcpConnections}
         personaId={id}
         onSave={savePersona.bind(null, id)}
         saveLabel={t("save")}

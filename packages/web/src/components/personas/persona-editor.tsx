@@ -34,6 +34,7 @@ import {
   SectionGroup,
   SectionTimelineNav,
 } from "./collapsible-section";
+import type { McpConnectionStatus } from "./mcp-connection-label";
 import { type McpCatalogEntry, PersonaForm } from "./persona-form";
 import {
   applyRecommendation,
@@ -91,6 +92,7 @@ export function PersonaEditor({
   tools,
   skills,
   mcpServers = [],
+  mcpConnections = [],
   personaId,
   onSave,
   saveLabel,
@@ -104,6 +106,11 @@ export function PersonaEditor({
   skills: string[];
   // Spec 30 T11 — built-in MCP servers for the unified capability section.
   mcpServers?: McpCatalogEntry[];
+  // N6 merge-back — per-assigned-server connection status (GET /personas/{id}/
+  // mcp-connections), threaded to the form's apps chooser for the friendly
+  // connection badge. Optional: the author/new flow (no persona yet) and any
+  // fail-soft fetch (older api, community without the runtime) pass nothing.
+  mcpConnections?: McpConnectionStatus[];
   // Spec 30 T12 — the saved persona's id; enables the BYO-MCP manager (needs an
   // id to assign servers to). Absent in the author/new flow (no id yet). Spec 31
   // (D-31-X-autonomy-placement): also gates the autonomy + consent section —
@@ -242,6 +249,7 @@ export function PersonaEditor({
             tools={tools}
             skills={skills}
             mcpServers={mcpServers}
+            mcpConnections={mcpConnections}
             personaId={personaId}
           />
 
