@@ -154,6 +154,17 @@ class EpisodicPyramid:
         """Every gist row for the persona."""
         return self._backend.get_all(persona_id=persona_id, store_kind=GIST_KIND)
 
+    def query(self, persona_id: str, query: str, top_k: int) -> list[PersonaChunk]:
+        """Dense recall over the gist rows — K9's gist leg (the RAPTOR collapsed pool).
+
+        Gists carry their own embeddings (K8-D-2), so they are searched as peers of the raw
+        chunks in K9's fused candidate set (fuse-don't-route; K8 handover §3 — gist-as-key).
+        Returned gists carry ``distance``.
+        """
+        return self._backend.query(
+            persona_id=persona_id, store_kind=GIST_KIND, text=query, top_k=top_k
+        )
+
     def covering_gists(self, persona_id: str, chunk_ids: Iterable[str]) -> dict[str, PersonaChunk]:
         """Map each listed raw-chunk id to the gist that covers it (if any).
 

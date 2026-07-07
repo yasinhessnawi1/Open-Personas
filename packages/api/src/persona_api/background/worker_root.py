@@ -73,6 +73,7 @@ from persona_api.jobs.handlers.consolidation import (
     register_graph_consolidation_handler,
 )
 from persona_api.jobs.handlers.episodic_consolidation import (
+    build_core_block_refresher,
     register_episodic_consolidation_handler,
 )
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
@@ -210,20 +211,32 @@ def build_worker_registry(
     # per-job owner GUC scopes both the episodic transport and the graph merge.
     episodic_settings = EpisodicSettings()
     if episodic_settings.engine_enabled and memory_backend is not None:
+        # The interim tier summarizer (K8-D-10): the engine's OWN tier knob; P7 swaps in
+        # behind the same Protocol later. Shared with the K9 core-block refresher below.
+        episodic_summarizer = TierSummarizer(
+            backend=tier_registry.get(config.episodic_summary_tier)
+        )
         episodic_engine = EpisodicConsolidationEngine(
             backend=memory_backend,
             pyramid=EpisodicPyramid(
                 backend=memory_backend,
                 audit_logger=build_audit_logger(config, rls_engine),
             ),
-            # The interim tier summarizer (K8-D-10): the engine's OWN tier knob;
-            # P7 swaps in behind the same Protocol later.
-            summarizer=TierSummarizer(backend=tier_registry.get(config.episodic_summary_tier)),
+            summarizer=episodic_summarizer,
             graph=graph_store,
             settings=episodic_settings,
             embedder=embedder,
         )
-        register_episodic_consolidation_handler(registry, engine=episodic_engine)
+        # K9 (K9-D-10): the always-in-context core block is refreshed on THIS background job
+        # (never the turn path — acceptance-7), using the same summarizer + owner-scoped backend.
+        core_refresher = build_core_block_refresher(
+            summarizer=episodic_summarizer,
+            backend=memory_backend,
+            audit_logger=build_audit_logger(config, rls_engine),
+        )
+        register_episodic_consolidation_handler(
+            registry, engine=episodic_engine, core_refresher=core_refresher
+        )
     if runtime_factory is not None:
         _register_task_leg_tenant(
             registry,

@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
     from persona.stores.protocol import MemoryStore
 
+    from persona_runtime.unified_recall import UnifiedProjection
+
 #: The four typed stores, in the fixed order they are consulted each turn — the
 #: order ``retrieve_context`` reports them through the ``on_recall`` hook (Spec
 #: 35 D-35-4, the chat "thinking / remembering" staged state).
@@ -199,6 +201,8 @@ def retrieve_context(
     history_turns: int | None = None,
     on_recall: Callable[[str, int], None] | None = None,
     graph_retrieval: Callable[[str], GraphContext] | None = None,
+    core_block_provider: Callable[[], str | None] | None = None,
+    unified_recall: Callable[[str], UnifiedProjection] | None = None,
 ) -> RetrievedContext:
     """Retrieve this turn's conditioning context from the typed stores.
 
@@ -240,6 +244,17 @@ def retrieve_context(
             graph, so the text loop and A2's legs are byte-identical until graph
             retrieval is composed in. The graph is an **independent** source: it
             does not touch, reorder, or gate the persona-store retrieval above.
+        core_block_provider: The K9 core-memory seam (K9-D-10) — a ``() -> str | None``
+            callable that reads the persona's current always-in-context block (built by
+            :func:`~persona.recall.core_memory.read_core_block`). ``None`` (the default) ⇒
+            no block, byte-identical. The block is background-refreshed elsewhere; this
+            only READS it for injection — no build/summarise on the turn path (acceptance-7).
+        unified_recall: The K9 unified recall (K9-D-1/D-11) — a ``query -> UnifiedProjection``
+            callable (built by :func:`~persona_runtime.unified_recall.make_unified_recall`)
+            that fuses the pyramid AND the graph into one reranked+gated path and projects it
+            back into ``episodic`` + ``graph``. When given, it REPLACES the separate episodic
+            recall and graph retrieval (identity/self-facts/worldview unchanged); ``None`` (the
+            default) ⇒ today's two-path behaviour, byte-identical (K9-D-X-backcompat).
 
     Returns:
         The :class:`RetrievedContext` the prompt builder conditions on.
@@ -247,16 +262,31 @@ def retrieve_context(
     resolved_identity = identity if identity is not None else stores["identity"].get_all(persona_id)
     dynamic = history_turns is not None
     k = dynamic_top_k(history_turns) if history_turns is not None else top_k
-    episodic_displayed, episodic_found_ids = _recall_episodic(
-        stores["episodic"], persona_id, user_message, k, recency=dynamic
-    )
+
+    # K9 (T8/T9): when the unified recall is composed, ONE fused+reranked+gated path over the
+    # pyramid AND the graph replaces the separate episodic recall and graph retrieval — the
+    # fuse-don't-route evolution (K9-D-1/D-11), projected back into these same fields. Identity
+    # / self-facts / worldview are unchanged (not part of the fuse). ``None`` ⇒ today's two-path
+    # behaviour, byte-identical (K9-D-X-backcompat).
+    if unified_recall is not None:
+        projection = unified_recall(user_message)
+        episodic_displayed = projection.episodic
+        episodic_found_ids = projection.episodic_recalled_ids
+        graph_context = projection.graph
+    else:
+        episodic_displayed, episodic_found_ids = _recall_episodic(
+            stores["episodic"], persona_id, user_message, k, recency=dynamic
+        )
+        graph_context = graph_retrieval(user_message) if graph_retrieval is not None else GraphContext()
+
     context = RetrievedContext(
         identity=resolved_identity,
         self_facts=stores["self_facts"].query(persona_id, user_message, k),
         worldview=stores["worldview"].query(persona_id, user_message, k),
         episodic=episodic_displayed,
         episodic_recalled_ids=episodic_found_ids,
-        graph=graph_retrieval(user_message) if graph_retrieval is not None else GraphContext(),
+        graph=graph_context,
+        core_block=core_block_provider() if core_block_provider is not None else None,
     )
     if on_recall is not None:
         counts = {

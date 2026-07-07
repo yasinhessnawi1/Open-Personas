@@ -24,8 +24,13 @@ from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from persona.audit import AuditLogger
     from persona.jobs import JobContext, JobRegistry
+    from persona.stores.backend import Backend
     from persona.stores.engine import EpisodicConsolidationReport
+    from persona.stores.summarizer import Summarizer
 
     from persona_api.jobs.queue import JobQueue
 
@@ -34,6 +39,7 @@ __all__ = [
     "EpisodicConsolidationHandler",
     "EpisodicConsolidationJobPayload",
     "EpisodicEngineRunner",
+    "build_core_block_refresher",
     "enqueue_episodic_consolidation",
     "episodic_consolidation_idempotency_key",
     "register_episodic_consolidation_handler",
@@ -71,14 +77,33 @@ class EpisodicEngineRunner(Protocol):
 class EpisodicConsolidationHandler:
     """Owner-scoped engine run: cluster → gists + graph candidates, metered."""
 
-    def __init__(self, *, engine: EpisodicEngineRunner) -> None:
+    def __init__(
+        self,
+        *,
+        engine: EpisodicEngineRunner,
+        core_refresher: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> None:
         self._engine = engine
+        # K9 (K9-D-10): the always-in-context core block is refreshed on THIS background
+        # cadence — never the turn path (acceptance-7). ``None`` ⇒ no refresh (byte-identical);
+        # a refresh failure must NOT fail the consolidation job (fail-soft below).
+        self._core_refresher = core_refresher
 
     async def handle(self, payload: EpisodicConsolidationJobPayload, context: JobContext) -> None:
         # The engine is async end-to-end (summarizer awaits; the sync graph
         # merge is to_thread'd inside) — the RLS contextvar the executor bound
         # propagates through both, so every write stays owner-scoped.
         report = await self._engine.run(context.owner_id, payload.persona_id)
+        if self._core_refresher is not None:
+            try:
+                await self._core_refresher(context.owner_id, payload.persona_id)
+            except Exception:  # noqa: BLE001 — a core-block refresh must never fail the job
+                _logger.warning(
+                    "core-block refresh failed; prior block stays",
+                    owner_id=context.owner_id,
+                    persona_id=payload.persona_id,
+                    exc_info=True,
+                )
         _logger.info(
             "episodic_consolidation ran",
             owner_id=context.owner_id,
@@ -101,15 +126,54 @@ class EpisodicConsolidationHandler:
         )
 
 
+def build_core_block_refresher(
+    *, summarizer: Summarizer, backend: Backend, audit_logger: AuditLogger
+) -> Callable[[str, str], Awaitable[None]]:
+    """The K9 core-block background refresher (K9-D-10) — rides the K8 engine cadence.
+
+    Selects the persona's most-recent RAW episodic chunks (from-originals; K8's ``recent``) as
+    the summary sources and appends a new core-block version. Gated by ``core_enabled``; a
+    persona with no episodic memory yet is a no-op (empty sources ⇒ prior block stays).
+    """
+    from datetime import UTC, datetime
+
+    from persona.recall.config import RecallSettings
+    from persona.recall.core_memory import refresh_core_block
+    from persona.stores.core_memory import CoreMemoryStore
+
+    settings = RecallSettings()
+
+    async def refresh(owner_id: str, persona_id: str) -> None:  # noqa: ARG001 — owner via RLS GUC
+        if not settings.core_enabled:
+            return
+        sources = backend.recent(
+            persona_id=persona_id, store_kind="episodic", limit=settings.core_max_sources
+        )
+        store = CoreMemoryStore(backend=backend, audit_logger=audit_logger)
+        await refresh_core_block(
+            persona_id,
+            summarizer=summarizer,
+            sources=sources,
+            store=store,
+            target_tokens=settings.core_token_budget,
+            now=datetime.now(UTC),
+        )
+
+    return refresh
+
+
 def register_episodic_consolidation_handler(
-    registry: JobRegistry, *, engine: EpisodicEngineRunner
+    registry: JobRegistry,
+    *,
+    engine: EpisodicEngineRunner,
+    core_refresher: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> None:
-    """Register the sleep-time engine tenant (Spec K8, K8-D-8)."""
+    """Register the sleep-time engine tenant (Spec K8, K8-D-8; K9-D-10 core-block refresh)."""
     registry.register(
         JobTypeSpec(
             type=EPISODIC_CONSOLIDATION_JOB_TYPE,
             payload_model=EpisodicConsolidationJobPayload,
-            handler=EpisodicConsolidationHandler(engine=engine),
+            handler=EpisodicConsolidationHandler(engine=engine, core_refresher=core_refresher),
             idempotency_key=episodic_consolidation_idempotency_key,
             retry=RetryPolicy(max_attempts=2),
             lease=MEDIUM_LEASE,
