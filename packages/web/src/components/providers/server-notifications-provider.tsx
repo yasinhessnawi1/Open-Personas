@@ -152,7 +152,14 @@ export function ServerNotificationsProvider({
   const resolveTitle = useCallback((row: ServerNotificationRow): string => {
     const persona =
       row.params.persona ?? tRef.current("notifications.personaFallback");
-    return tRef.current(row.message_key, { ...row.params, persona });
+    const title = tRef.current(row.message_key, { ...row.params, persona });
+    // Guard: next-intl returns the raw message key when the key is missing OR an
+    // interpolation param is absent (e.g. a schedule_fired notification with no subject).
+    // Never surface a raw dotted key in the bell — fall back to a persona-scoped generic.
+    if (title === row.message_key || title.startsWith("notifications.")) {
+      return tRef.current("notifications.genericUpdate", { persona });
+    }
+    return title;
   }, []);
 
   const refresh = useCallback(async () => {

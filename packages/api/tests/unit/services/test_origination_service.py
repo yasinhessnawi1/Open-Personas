@@ -340,5 +340,10 @@ def test_origination_built_schedule_opts_into_the_fire_bell() -> None:
         },
         task_id="task_1",
         now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC),
+        subject="check email inbox",
     )
     assert sched.notify_on_fire is True
+    # The subject must snapshot into the fire payload so the bell reads
+    # "{persona} ran your reminder: {subject}" — without it the {subject} interpolation
+    # fails and the client falls back to the raw message key (operator-pass find).
+    assert sched.payload_template.get("subject") == "check email inbox"

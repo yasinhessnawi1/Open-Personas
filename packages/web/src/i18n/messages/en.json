@@ -719,6 +719,7 @@
       "body": "{count} credits left"
     },
     "personaFallback": "your persona",
+    "genericUpdate": "{persona} has an update",
     "run": {
       "completed": "Task finished · {persona}",
       "failed": "Task failed · {persona}",

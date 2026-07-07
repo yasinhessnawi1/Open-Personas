@@ -208,12 +208,19 @@ class OriginationService:
         trigger_id = derive_trigger_id(key) if triggered else None
         try:
             if scheduled:
+                _contract = data.get("contract")
+                _subject = (
+                    str(_contract["goal"])
+                    if isinstance(_contract, Mapping) and _contract.get("goal")
+                    else None
+                )
                 schedule = _build_schedule(
                     schedule_id=schedule_id,
                     owner_id=owner_id,
                     payload=data["schedule"],
                     task_id=task_id,
                     now=now,
+                    subject=_subject,
                 )
                 self._schedules.create_if_absent(schedule, now=now)
             task = _build_task(
@@ -336,6 +343,7 @@ def _build_schedule(
     payload: Mapping[str, Any],
     task_id: str,
     now: datetime,
+    subject: str | None = None,
 ) -> Schedule:
     """Parse the event's JSON cadence payload, then build via the shared builder (A10-D-8).
 
@@ -360,6 +368,10 @@ def _build_schedule(
         # ask", not "which door": a fire writes the coalesced schedule_fired bell (one
         # re-alerting entry per schedule — never 96 rows). Operator-pass find, 2026-07-07.
         notify_on_fire=True,
+        # …and carry the contract goal as the reminder subject, so the bell reads
+        # "{persona} ran your reminder: {subject}" — without it the {subject} interpolation
+        # fails and the client falls back to the raw message key (operator-pass find).
+        subject=subject,
     )
 
 
