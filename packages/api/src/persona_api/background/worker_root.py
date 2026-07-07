@@ -687,7 +687,8 @@ def _build_milestone_hook(
     from persona.tasks import is_terminal
     from persona_runtime.legs import LegDisposition
 
-    from persona_api.approvals.cadence import MessagePriority
+    from persona_api.approvals.cadence import CadenceGate, MessagePriority
+    from persona_api.digest.store import DeferredDigestStore
     from persona_api.services.origination_adapters import (
         OriginatorUpdateSender,
         resolve_persona_tag,
@@ -703,7 +704,14 @@ def _build_milestone_hook(
         audit_logger=audit_logger,
         sessions=live_sessions,
     )
-    publisher = TaskUpdatePublisher(sender=sender)
+    # A3-D-4 / A6-D-10: the per-persona/day chatter cap batches over-cap PROGRESS updates to the
+    # DeferredDigestStore (the morning review) instead of dropping them — the digest's "deferred
+    # chatter" reader (routes/autonomy.py) finally has a producer.
+    publisher = TaskUpdatePublisher(
+        sender=sender,
+        cadence=CadenceGate(rls_engine),
+        digest_sink=DeferredDigestStore(rls_engine),
+    )
     tasks = TaskStore(rls_engine)
 
     async def _publish(outcome: LegOutcome, now: datetime) -> None:

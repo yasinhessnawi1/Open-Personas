@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 from persona.schema.origination import PersonaIdentityTag
 from persona.tasks import Contract, Task, UpdateGranularity, UpdatePreference
-from persona_api.approvals.cadence import MessagePriority
+from persona_api.approvals.cadence import CadenceDecision, MessagePriority
 from persona_api.tasks.updates import TaskUpdatePublisher, should_deliver_update
 
 if TYPE_CHECKING:
@@ -139,6 +139,79 @@ async def test_publisher_suppresses_progress_on_quiet() -> None:
     )
     assert delivered is False
     assert sender.sent == []
+
+
+class _FakeCadence:
+    """A cadence stub returning a scripted decision (no DB)."""
+
+    def __init__(self, decision: CadenceDecision) -> None:
+        self._decision = decision
+        self.admit_calls: list[tuple[str, str]] = []
+
+    def admit(
+        self, owner_id: str, persona_id: str, priority: MessagePriority, *, now: _dt
+    ) -> CadenceDecision:
+        _ = (priority, now)
+        self.admit_calls.append((owner_id, persona_id))
+        return self._decision
+
+
+class _FakeDigestSink:
+    def __init__(self) -> None:
+        self.deferred: list[tuple[str, str, str]] = []
+
+    def defer(self, owner_id: str, persona_id: str, content: str, *, now: _dt) -> None:
+        _ = now
+        self.deferred.append((owner_id, persona_id, content))
+
+
+@pytest.mark.asyncio
+async def test_over_cap_progress_batches_to_the_digest_sink_not_delivered() -> None:
+    """A3-D-4 / A6-D-10: a granularity-admitted progress update over the daily cap DIGESTs.
+
+    The audit gap: CadenceGate + DeferredDigestStore.defer had no producer, so the morning
+    review's deferred-chatter section was permanently empty. Now an over-cap progress update
+    batches to the sink instead of being dropped or delivered.
+    """
+    sender = _FakeSender()
+    cadence = _FakeCadence(CadenceDecision.DIGEST)  # over the cap
+    sink = _FakeDigestSink()
+    task = _task(updates=UpdatePreference(granularity=UpdateGranularity.EVERY_LEG))
+    delivered = await TaskUpdatePublisher(sender=sender, cadence=cadence, digest_sink=sink).publish(
+        task=task,
+        persona=_TAG,
+        priority=MessagePriority.PROGRESS,
+        is_milestone=False,
+        is_completion=False,
+        content="still scanning fares",
+        now=_NOW,
+    )
+    assert delivered is False  # not delivered now
+    assert sender.sent == []  # …not sent…
+    assert sink.deferred == [
+        ("user-a", "astrid", "still scanning fares")
+    ]  # …deferred to the digest
+    assert cadence.admit_calls == [("user-a", "astrid")]
+
+
+@pytest.mark.asyncio
+async def test_under_cap_progress_delivers_and_counts() -> None:
+    sender = _FakeSender()
+    cadence = _FakeCadence(CadenceDecision.DELIVER)  # under the cap
+    sink = _FakeDigestSink()
+    task = _task(updates=UpdatePreference(granularity=UpdateGranularity.EVERY_LEG))
+    delivered = await TaskUpdatePublisher(sender=sender, cadence=cadence, digest_sink=sink).publish(
+        task=task,
+        persona=_TAG,
+        priority=MessagePriority.PROGRESS,
+        is_milestone=False,
+        is_completion=False,
+        content="found a fare",
+        now=_NOW,
+    )
+    assert delivered is True
+    assert len(sender.sent) == 1  # delivered now
+    assert sink.deferred == []  # nothing batched
 
 
 @pytest.mark.asyncio

@@ -17,13 +17,15 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.tasks import UpdateGranularity
 
-from persona_api.approvals.cadence import MessagePriority, bypasses_cap
+from persona_api.approvals.cadence import CadenceDecision, MessagePriority, bypasses_cap
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from persona.schema.origination import PersonaIdentityTag
     from persona.tasks import Task
+
+    from persona_api.approvals.cadence import CadenceGate, DigestSink
 
 __all__ = ["TaskUpdatePublisher", "UpdateSender", "should_deliver_update"]
 
@@ -77,9 +79,23 @@ class UpdateSender(Protocol):
 class TaskUpdatePublisher:
     """Publishes a task update iff granularity admits it, on the contract's channel (A4-D-3/6)."""
 
-    def __init__(self, *, sender: UpdateSender) -> None:
-        """Inject the C0-composed sender."""
+    def __init__(
+        self,
+        *,
+        sender: UpdateSender,
+        cadence: CadenceGate | None = None,
+        digest_sink: DigestSink | None = None,
+    ) -> None:
+        """Inject the C0-composed sender + (optionally) the A3-D-4 cadence cap and its digest sink.
+
+        With ``cadence`` + ``digest_sink`` wired, a *progress* update that the granularity filter
+        admits is still capped per persona/day: over the cap it batches to the sink (A6's morning
+        review) instead of delivering now — the "chatter batches to the digest" contract. Without
+        them (unit tests / a plain worker) the pre-cadence behaviour holds: admitted → delivered.
+        """
         self._sender = sender
+        self._cadence = cadence
+        self._digest_sink = digest_sink
 
     async def publish(
         self,
@@ -107,6 +123,15 @@ class TaskUpdatePublisher:
             is_completion=is_completion,
         ):
             return False
+        # A3-D-4 cadence: a progress message the granularity admits is still capped per persona/day.
+        # Over the cap it batches to the digest sink (the morning review) rather than delivering now
+        # — so a chatty task's routine progress never spams, but nothing is silently dropped. The
+        # bypass classes (approval/failure/safety) always DELIVER (admit never counts them).
+        if self._cadence is not None and self._digest_sink is not None:
+            decision = self._cadence.admit(task.owner_id, task.persona_id, priority, now=now)
+            if decision is CadenceDecision.DIGEST:
+                self._digest_sink.defer(task.owner_id, task.persona_id, content, now=now)
+                return False
         await self._sender.send(
             persona=persona,
             owner_id=task.owner_id,
