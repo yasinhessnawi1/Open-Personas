@@ -8,7 +8,11 @@
 
 import { describe, expect, it } from "vitest";
 import enMessages from "@/i18n/messages/en.json";
-import { type ConnectionReason, connectionBadge } from "./mcp-connection-label";
+import {
+  type ConnectionReason,
+  connectionBadge,
+  toConnectionStatus,
+} from "./mcp-connection-label";
 
 const ALL_REASONS: ConnectionReason[] = [
   "starting",
@@ -74,5 +78,32 @@ describe("connectionBadge", () => {
         "warn",
       );
     }
+  });
+});
+
+describe("toConnectionStatus", () => {
+  it.each(ALL_REASONS)("keeps the known wire reason %s", (reason) => {
+    const s = toConnectionStatus({
+      server_name: "github",
+      connected: false,
+      reason,
+    });
+    expect(s).toEqual({ server_name: "github", connected: false, reason });
+  });
+
+  it("narrows an unknown future reason to null (safe fallback, no raw enum)", () => {
+    const s = toConnectionStatus({
+      server_name: "github",
+      connected: false,
+      reason: "brand_new_backend_reason",
+    });
+    expect(s.reason).toBeNull();
+    // …and the badge resolver degrades that to the safe not-connected label.
+    expect(connectionBadge(s).labelKey).toBe("apps.connection.notEnabled");
+  });
+
+  it("narrows a missing reason to null", () => {
+    const s = toConnectionStatus({ server_name: "time", connected: true });
+    expect(s).toEqual({ server_name: "time", connected: true, reason: null });
   });
 });

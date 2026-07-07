@@ -22,6 +22,8 @@ import { cn } from "@/lib/utils";
 import { AppSetupForm } from "./app-setup-form";
 import { type AppState, deriveAppState, isAppEnabled } from "./app-state";
 import { CAPABILITY_SCROLL_LIST_CLASS } from "./capability-list";
+import { McpConnectionBadge } from "./mcp-connection-badge";
+import type { McpConnectionStatus } from "./mcp-connection-label";
 import type { McpCatalogEntry } from "./persona-form";
 
 const MCP_PREFIX = "mcp:";
@@ -57,6 +59,7 @@ export function AppsChooser({
   tools = [],
   declaredTools,
   unavailableMcpServers = [],
+  connections = [],
   personaId,
   onChange,
 }: {
@@ -66,6 +69,14 @@ export function AppsChooser({
   declaredTools: string[];
   /** PersonaDetail.unavailable_mcp_servers — empty on surfaces without it. */
   unavailableMcpServers?: string[];
+  /**
+   * N6 merge-back — per-assigned-server connection status
+   * (`GET /personas/{id}/mcp-connections`). An MCP app card with a status shows
+   * the friendly badge ("Connected" / "Starting…" / "Needs setup" / …) next to
+   * its Enabled/Available state, so "assigned" reads distinctly from "working"
+   * (R4-C1-21). Empty (author/new flow, older api, fetch failure) → no badges.
+   */
+  connections?: McpConnectionStatus[];
   /**
    * Spec N4 (Group D) — the persona being edited. Present in the edit flow only;
    * absent in author/new (no id to adopt against). When present, a remote app that
@@ -82,6 +93,12 @@ export function AppsChooser({
   const toolItems = useMemo(
     () => tools.map((name) => ({ name, ...presentApp(name, t) }) as ToolItem),
     [tools, t],
+  );
+
+  // server_name → connection status, for the per-card badge lookup.
+  const connectionByServer = useMemo(
+    () => new Map(connections.map((c) => [c.server_name, c])),
+    [connections],
   );
 
   const q = query.trim().toLowerCase();
@@ -171,6 +188,7 @@ export function AppsChooser({
                   declaredTools,
                   unavailableMcpServers,
                 )}
+                connection={connectionByServer.get(app.name)}
                 personaId={personaId}
                 onToggle={() => toggleApp(app)}
               />
@@ -195,11 +213,14 @@ function appInitials(label: string): string {
 function AppCard({
   app,
   state,
+  connection,
   personaId,
   onToggle,
 }: {
   app: McpCatalogEntry;
   state: AppState;
+  /** N6 merge-back — this server's connection status; absent → no badge. */
+  connection?: McpConnectionStatus;
   personaId?: string;
   onToggle: () => void;
 }) {
@@ -239,6 +260,15 @@ function AppCard({
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <StateBadge state={state} />
+            {/* N6 merge-back: "assigned" reads distinctly from "working" —
+                the runtime's per-server connection status as a friendly badge
+                (R4-C1-21). Absent status (author flow, fetch failure) → nothing. */}
+            {connection ? (
+              <McpConnectionBadge
+                connected={connection.connected}
+                reason={connection.reason}
+              />
+            ) : null}
             <CardTrustSignal app={app} />
           </span>
         </CollapsibleTrigger>

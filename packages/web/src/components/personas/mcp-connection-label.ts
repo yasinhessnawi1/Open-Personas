@@ -22,6 +22,17 @@ export type ConnectionReason =
   | "runtime_capacity"
   | "not_enabled";
 
+const CONNECTION_REASONS: readonly ConnectionReason[] = [
+  "starting",
+  "spawn_failed",
+  "stopped",
+  "fly_outage",
+  "no_key",
+  "unvetted",
+  "runtime_capacity",
+  "not_enabled",
+];
+
 /** One assigned server's connection status, as returned by the API. */
 export interface McpConnectionStatus {
   readonly server_name: string;
@@ -57,6 +68,26 @@ const CONNECTED_BADGE: ConnectionBadge = {
   labelKey: "apps.connection.connected",
   tone: "ok",
 };
+
+/**
+ * Normalise one wire row (`GET /personas/{id}/mcp-connections`, where `reason`
+ * is an open `string | null`) to a typed {@link McpConnectionStatus}: a known
+ * reason is kept, anything unknown/missing narrows to `null` — which
+ * {@link connectionBadge} renders as the safe `not_enabled` fallback, so a
+ * newer backend vocabulary can never leak a raw enum (or crash the page).
+ */
+export function toConnectionStatus(raw: {
+  server_name: string;
+  connected: boolean;
+  reason?: string | null;
+}): McpConnectionStatus {
+  const reason = (CONNECTION_REASONS as readonly string[]).includes(
+    raw.reason ?? "",
+  )
+    ? (raw.reason as ConnectionReason)
+    : null;
+  return { server_name: raw.server_name, connected: raw.connected, reason };
+}
 
 /**
  * Resolve a connection status to its friendly badge (i18n key + tone).

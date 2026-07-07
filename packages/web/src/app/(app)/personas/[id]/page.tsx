@@ -7,6 +7,8 @@ import { PageBody, Section } from "@/components/layout";
 import { MemoryStores } from "@/components/persona/memory-stores";
 import { PersonaDetailManageMenu } from "@/components/persona/persona-detail-manage-menu";
 import { PersonaIdentityHeaderLive } from "@/components/persona/persona-identity-header-live";
+import { McpConnectionHint } from "@/components/personas/mcp-connection-hint";
+import { fetchMcpConnections } from "@/components/personas/mcp-connections";
 import { StartRunForm } from "@/components/personas/start-run-form";
 import { UnavailableApps } from "@/components/personas/unavailable-apps";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +71,10 @@ export default async function PersonaDetailPage({
   const tApps = await getTranslations("apps");
   const mcpCatalog = (await api.GET("/v1/mcp-catalog")).data ?? [];
   const mcpByName = new Map(mcpCatalog.map((e) => [e.name, e]));
+  // N6 merge-back: per-assigned-server connection status, for the SUBTLE
+  // not-connected-only hint on MCP-sourced apps below (a connected app shows
+  // nothing here — don't clutter the happy path). FAIL-SOFT: errors → [].
+  const mcpConnections = await fetchMcpConnections(api, id);
   const apps = [...p.tools, ...p.skills].map((id) =>
     presentApp(id, tApps, (name) => {
       const entry = mcpByName.get(name);
@@ -216,8 +222,16 @@ export default async function PersonaDetailPage({
                 >
                   {apps.map((app) => (
                     <li key={app.id} className="flex flex-col gap-0.5">
-                      <span className="type-ui font-medium text-foreground">
-                        {app.label}
+                      <span className="flex items-center gap-2">
+                        <span className="type-ui font-medium text-foreground">
+                          {app.label}
+                        </span>
+                        {/* N6 merge-back: subtle not-connected-only hint on
+                            MCP-sourced apps (connected apps show nothing). */}
+                        <McpConnectionHint
+                          appId={app.id}
+                          connections={mcpConnections}
+                        />
                       </span>
                       {app.description ? (
                         <span className="type-caption normal-case tracking-normal text-muted-foreground">

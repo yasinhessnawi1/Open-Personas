@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { voiceLanguageWarning } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
+import type { McpConnectionStatus } from "./mcp-connection-label";
 import { SpecialitiesChooser } from "./specialities-chooser";
 
 // Spec 30 T11 — a built-in MCP server in the capability-management catalog.
@@ -73,6 +74,7 @@ export function PersonaForm({
   onChange,
   tools,
   mcpServers = [],
+  mcpConnections = [],
   personaId,
 }: {
   doc: PersonaDoc;
@@ -85,6 +87,10 @@ export function PersonaForm({
   // Spec 30 T11 — built-in MCP servers (from GET /v1/mcp-catalog). Optional so
   // existing callers/tests that don't pass it render tools+skills unchanged.
   mcpServers?: McpCatalogEntry[];
+  // N6 merge-back — per-assigned-server connection status, threaded to the apps
+  // chooser so each MCP app card shows its friendly connection badge. Optional so
+  // existing callers/tests (and the author/new flow) render unchanged.
+  mcpConnections?: McpConnectionStatus[];
   // Spec N4 (Group D) — the persona being edited, threaded to the apps chooser so a
   // remote app that declares a credential can render the setup form. Absent in the
   // author/new flow (no id yet) → the read-honest needs-setup disclosure.
@@ -374,6 +380,7 @@ export function PersonaForm({
             apps={mcpServers}
             tools={tools}
             declaredTools={declaredTools}
+            connections={mcpConnections}
             personaId={personaId}
             onChange={(list) => onChange(writeStringList(doc, "tools", list))}
           />
