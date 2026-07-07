@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Engine
 
+    # A3 lifecycle sweeps plug in the same additive way (Spec A3, T9/T13): the approval
+    # reminder/expiry sweep + the dead-leg voicing sweep, each leader-gated on its own
+    # advisory key. None on a worker without them → behaves exactly as before.
+    from persona_api.approvals.sweep import ApprovalSweepRunner
     from persona_api.config import APIConfig
 
     # N2's catalog auto-sync plugs into the loop the same additive way (Spec N2, T3):
@@ -61,6 +65,7 @@ if TYPE_CHECKING:
     # under TYPE_CHECKING only, so the A0 worker keeps ZERO runtime dependency on
     # A1 — a worker built without a tick behaves exactly as A0 shipped.
     from persona_api.schedules.tick import SchedulerTick
+    from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
 
 # Signals that initiate a graceful drain: Fly sends SIGINT by default and
 # SIGTERM when configured (we trap both — D-A0-5).
@@ -117,6 +122,10 @@ class Worker:
         skill_catalog_sync_interval_seconds: float = 86_400.0,
         initiative_provisioner: InitiativeProvisioner | None = None,
         initiative_provisioner_interval_seconds: float = 3_600.0,
+        approval_sweep: ApprovalSweepRunner | None = None,
+        approval_sweep_interval_seconds: float = 300.0,
+        dead_leg_sweep: DeadLegSweeper | None = None,
+        dead_leg_sweep_interval_seconds: float = 120.0,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._rls_engine = rls_engine
@@ -152,6 +161,14 @@ class Worker:
         # built-but-inert killer). None → inert (initiative disabled).
         self._initiative_provisioner = initiative_provisioner
         self._initiative_provisioner_interval = initiative_provisioner_interval_seconds
+        # Spec A3 (T9/T13): the two lifecycle sweeps — approval reminder/expiry + dead-leg
+        # voicing. Additive; None on a worker without them → the loop is unchanged. Each is
+        # leader-gated on its OWN advisory key inside run_once and best-effort (a failure is
+        # logged, never crashing the loop).
+        self._approval_sweep = approval_sweep
+        self._approval_sweep_interval = approval_sweep_interval_seconds
+        self._dead_leg_sweep = dead_leg_sweep
+        self._dead_leg_sweep_interval = dead_leg_sweep_interval_seconds
         self._draining = asyncio.Event()
         self._in_flight: set[asyncio.Task[object]] = set()
         self._last_maintenance = 0.0
@@ -162,6 +179,8 @@ class Worker:
         self._last_catalog_sync: float | None = None
         self._last_skill_catalog_sync: float | None = None
         self._last_initiative_provision: float | None = None
+        self._last_approval_sweep: float | None = None
+        self._last_dead_leg_sweep: float | None = None
 
     @property
     def worker_id(self) -> str:
@@ -216,6 +235,8 @@ class Worker:
             await self._maybe_run_catalog_sync()
             await self._maybe_run_skill_catalog_sync()
             await self._maybe_run_initiative_provisioner()
+            await self._maybe_run_approval_sweep()
+            await self._maybe_run_dead_leg_sweep()
             free = self._concurrency - len(self._in_flight)
             # Claim ONE at a time (not a batch of ``free``): the fairness count is
             # evaluated against committed state, so a batch would let all its
@@ -347,6 +368,49 @@ class Worker:
             _log.exception("initiative provisioning failed", worker_id=self._worker_id)
         self._last_initiative_provision = time.monotonic()
 
+    async def _maybe_run_approval_sweep(self) -> None:
+        """Run the A3 approval reminder/expiry sweep if wired + its cadence has elapsed (T9).
+
+        A no-op when unwired (None). Leader-gated inside ``run_once`` (its own advisory key —
+        at most one process sweeps), so every worker may call this safely. The sweep's DB work
+        + best-effort C0 voicing are async; a failure is logged, never crashing the loop. The
+        state changes (remind-once CAS, terminal expiry + auto-pause) always happen before any
+        voice, so a voicing degrade never leaves an approval un-expired.
+        """
+        if self._approval_sweep is None:
+            return
+        if (
+            self._last_approval_sweep is not None
+            and time.monotonic() - self._last_approval_sweep < self._approval_sweep_interval
+        ):
+            return
+        try:
+            await self._approval_sweep.run_once(now=datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — a sweep failure must not crash the worker loop
+            _log.exception("approval sweep failed", worker_id=self._worker_id)
+        self._last_approval_sweep = time.monotonic()
+
+    async def _maybe_run_dead_leg_sweep(self) -> None:
+        """Run the A3 dead-leg voicing sweep if wired + its cadence has elapsed (T13).
+
+        A no-op when unwired (None). Leader-gated inside ``run_once`` (a DISTINCT advisory key
+        from the approval sweep + the scheduler tick), so every worker may call it safely. Parks
+        each retry-exhausted task ``active → waiting(on_user)`` + voices its StuckReport
+        best-effort; a failure is logged, never crashing the loop.
+        """
+        if self._dead_leg_sweep is None:
+            return
+        if (
+            self._last_dead_leg_sweep is not None
+            and time.monotonic() - self._last_dead_leg_sweep < self._dead_leg_sweep_interval
+        ):
+            return
+        try:
+            await self._dead_leg_sweep.run_once(now=datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — a sweep failure must not crash the worker loop
+            _log.exception("dead-leg sweep failed", worker_id=self._worker_id)
+        self._last_dead_leg_sweep = time.monotonic()
+
     async def _maybe_run_skill_catalog_sync(self) -> None:
         """Run the S2 skill-catalog auto-sync if wired + its (daily-ish) cadence has elapsed.
 
@@ -438,6 +502,8 @@ def build_worker(
     skill_catalog_sync_builder: Callable[[Engine], SkillCatalogSyncTask | None] | None = None,
     initiative_provisioner_builder: Callable[[Engine, Engine], InitiativeProvisioner | None]
     | None = None,
+    approval_sweep_builder: Callable[[Engine, Engine], ApprovalSweepRunner | None] | None = None,
+    dead_leg_sweep_builder: Callable[[Engine, Engine], DeadLegSweeper | None] | None = None,
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -499,6 +565,19 @@ def build_worker(
         if initiative_provisioner_builder is not None
         else None
     )
+    # A3 lifecycle sweeps — additive, each leader-gated on its own advisory key, built on the
+    # worker's two engines (dispatch for the leader session + cross-tenant scans; RLS for the
+    # owner-scoped store actions + persona-tag voicing). None when unwired → the loop is unchanged.
+    approval_sweep = (
+        approval_sweep_builder(dispatch_engine, rls_engine)
+        if approval_sweep_builder is not None
+        else None
+    )
+    dead_leg_sweep = (
+        dead_leg_sweep_builder(dispatch_engine, rls_engine)
+        if dead_leg_sweep_builder is not None
+        else None
+    )
     return Worker(
         dispatch_engine=dispatch_engine,
         rls_engine=rls_engine,
@@ -510,6 +589,10 @@ def build_worker(
         skill_catalog_sync=skill_catalog_sync,
         skill_catalog_sync_interval_seconds=config.skill_catalog_sync_interval_seconds,
         initiative_provisioner=initiative_provisioner,
+        approval_sweep=approval_sweep,
+        approval_sweep_interval_seconds=config.approval_sweep_interval_seconds,
+        dead_leg_sweep=dead_leg_sweep,
+        dead_leg_sweep_interval_seconds=config.dead_leg_sweep_interval_seconds,
         concurrency=config.worker_concurrency,
         poll_interval_seconds=config.worker_poll_interval_seconds,
         poll_jitter_seconds=config.worker_poll_jitter_seconds,

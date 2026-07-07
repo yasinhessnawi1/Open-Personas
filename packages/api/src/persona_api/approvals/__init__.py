@@ -54,6 +54,8 @@ from persona_api.approvals.sweep import (
     EXPIRE_AFTER_DEFAULT,
     REMIND_AFTER_DEFAULT,
     ApprovalSweeper,
+    ApprovalSweepRunner,
+    ApprovalSweepVoicer,
     SweepResult,
 )
 
@@ -68,6 +70,8 @@ __all__ = [
     "ApprovalNotifier",
     "ApprovalResolver",
     "ApprovalStore",
+    "ApprovalSweepRunner",
+    "ApprovalSweepVoicer",
     "ApprovalSweeper",
     "AutonomyPauseCheck",
     "BudgetEnforcer",

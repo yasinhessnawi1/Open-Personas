@@ -22,7 +22,7 @@ import pytest
 from persona.approvals import ActionProposal, ProposalStatus
 from persona.tasks import Contract, Task, WaitKind
 from persona.tools import ActionCategory
-from persona_api.approvals import ApprovalStore, ApprovalSweeper
+from persona_api.approvals import ApprovalStore, ApprovalSweeper, ApprovalSweepRunner
 from persona_api.tasks.store import TaskStore
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -190,3 +190,127 @@ def test_fresh_proposal_untouched(migrated_engine: Engine, app_engine: Engine) -
     assert result.reminded == ()
     assert result.expired == ()
     assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.PENDING
+
+
+# --- the worker runner: leader-gating + best-effort C0 voicing (GAP #1a wiring) ----------------
+
+
+class _FakeLeader:
+    """A stand-in for ``SchedulerLeader`` (its real advisory-lock election is separately tested)."""
+
+    def __init__(self, *, is_leader: bool = True) -> None:
+        self._is_leader = is_leader
+
+    def try_become_leader(self) -> bool:
+        return self._is_leader
+
+
+class _SpyApprovalNotifier:
+    """Records the proposals voiced, so the wiring test asserts the C0 path fired (once each).
+
+    The call-log attributes are named distinctly from the ``remind`` / ``expired`` methods so an
+    instance attribute never shadows the coroutine the runner invokes.
+    """
+
+    def __init__(self) -> None:
+        self.reminded_ids: list[str] = []
+        self.expired_ids: list[str] = []
+
+    async def remind(self, proposal: ActionProposal) -> None:
+        self.reminded_ids.append(proposal.proposal_id)
+
+    async def expired(self, proposal: ActionProposal) -> None:
+        self.expired_ids.append(proposal.proposal_id)
+
+
+@pytest.mark.asyncio
+async def test_runner_voices_expiry_and_pauses_and_is_idempotent(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    # A >72h proposal → the runner expires it + auto-pauses the task + voices ONE expiry C0.
+    # A double run_once (the cadence firing twice) voices exactly once (the expiry CAS is spent).
+    _seed_waiting_task(migrated_engine, "user_a", "persona_a", "t1")
+    ApprovalStore(app_engine).create_proposal(
+        _proposal("user_a", "persona_a", "t1", "p1", created_at=_T0)
+    )
+    spy = _SpyApprovalNotifier()
+    runner = ApprovalSweepRunner(
+        sweeper=_sweeper(migrated_engine, app_engine),
+        leader=_FakeLeader(),  # type: ignore[arg-type]  # duck-typed try_become_leader
+        notifier=spy,
+    )
+
+    await runner.run_once(now=_AT_73H)
+    await runner.run_once(now=_AT_73H)  # the cadence double-fire
+
+    assert spy.expired_ids == ["p1"]  # voiced exactly once
+    assert spy.reminded_ids == []
+    assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.EXPIRED
+    assert TaskStore(app_engine).get("user_a", "t1").paused is True
+
+
+@pytest.mark.asyncio
+async def test_runner_voices_reminder_once(migrated_engine: Engine, app_engine: Engine) -> None:
+    # A >24h (but <72h) proposal → reminded once; the double run_once does not re-voice.
+    _seed_waiting_task(migrated_engine, "user_a", "persona_a", "t1")
+    ApprovalStore(app_engine).create_proposal(
+        _proposal("user_a", "persona_a", "t1", "p1", created_at=_T0)
+    )
+    spy = _SpyApprovalNotifier()
+    runner = ApprovalSweepRunner(
+        sweeper=_sweeper(migrated_engine, app_engine),
+        leader=_FakeLeader(),  # type: ignore[arg-type]
+        notifier=spy,
+    )
+
+    await runner.run_once(now=_AT_25H)
+    await runner.run_once(now=_AT_25H)
+
+    assert spy.reminded_ids == ["p1"]  # reminded exactly once
+    assert spy.expired_ids == []
+    assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_runner_non_leader_is_a_no_op(migrated_engine: Engine, app_engine: Engine) -> None:
+    # A follower (not the leader) neither sweeps nor voices — leader-gating holds.
+    _seed_waiting_task(migrated_engine, "user_a", "persona_a", "t1")
+    ApprovalStore(app_engine).create_proposal(
+        _proposal("user_a", "persona_a", "t1", "p1", created_at=_T0)
+    )
+    spy = _SpyApprovalNotifier()
+    runner = ApprovalSweepRunner(
+        sweeper=_sweeper(migrated_engine, app_engine),
+        leader=_FakeLeader(is_leader=False),  # type: ignore[arg-type]
+        notifier=spy,
+    )
+
+    result = await runner.run_once(now=_AT_73H)
+
+    assert result is None  # not the leader → nothing happened
+    assert spy.expired_ids == []
+    assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_runner_without_backend_still_expires_no_voice(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    # The memory-backend gate: notifier=None (community / keyless) still expires + auto-pauses;
+    # the voiced C0 degrades to the persist-only floor (no voicer to call).
+    _seed_waiting_task(migrated_engine, "user_a", "persona_a", "t1")
+    ApprovalStore(app_engine).create_proposal(
+        _proposal("user_a", "persona_a", "t1", "p1", created_at=_T0)
+    )
+    runner = ApprovalSweepRunner(
+        sweeper=_sweeper(migrated_engine, app_engine),
+        leader=_FakeLeader(),  # type: ignore[arg-type]
+        notifier=None,
+    )
+
+    result = await runner.run_once(now=_AT_73H)
+
+    assert result is not None
+    assert [p.proposal_id for p in result.expired] == ["p1"]  # state change still happened
+    assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.EXPIRED
+    assert TaskStore(app_engine).get("user_a", "t1").paused is True

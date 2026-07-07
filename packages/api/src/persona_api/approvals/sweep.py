@@ -25,7 +25,7 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from persona.approvals import ProposalStatus
 from persona.logging import get_logger
@@ -46,6 +46,8 @@ __all__ = [
     "APPROVAL_SWEEP_LOCK_KEY",
     "EXPIRE_AFTER_DEFAULT",
     "REMIND_AFTER_DEFAULT",
+    "ApprovalSweepRunner",
+    "ApprovalSweepVoicer",
     "ApprovalSweeper",
     "SweepResult",
 ]
@@ -163,3 +165,77 @@ class ApprovalSweeper:
         task = self._tasks.get(owner_id, task_id)
         if not task.paused and not is_terminal(task.state):
             self._tasks.pause(owner_id, task_id, now=now)
+
+
+class ApprovalSweepVoicer(Protocol):
+    """The narrow C0 voice the runner drives — a persona-voiced reminder / expiry note.
+
+    Satisfied by :class:`~persona_api.services.origination_adapters.OriginatorApprovalNotifier`
+    (each method takes only the proposal — it resolves the persona tag + conversation itself).
+    Structural so ``sweep.py`` keeps ZERO import of the heavy origination composition.
+    """
+
+    async def remind(self, proposal: ActionProposal) -> None: ...
+    async def expired(self, proposal: ActionProposal) -> None: ...
+
+
+class ApprovalSweepRunner:
+    """The leader-gated worker periodic that runs the sweep + voices its claimed proposals.
+
+    The worker loop calls :meth:`run_once` on the approval-sweep cadence. It is leader-gated
+    (the :class:`ApprovalSweeper.maybe_sweep` gate on this runner's own advisory lock — at most
+    one process actually sweeps), and every voiced message is **best-effort**: a C0 origination
+    failure is logged and never crashes the sweep, and the state changes (remind-once CAS,
+    terminal expiry + auto-pause) have ALREADY happened inside ``maybe_sweep`` before any voice.
+
+    ``notifier`` is ``None`` on a community / keyless boot (no memory backend / no C0 transport):
+    the STATE changes still apply — approvals still expire + auto-pause — but the voiced message
+    degrades to the persist-only floor (no-op here). This is the memory-backend gate.
+    """
+
+    def __init__(
+        self,
+        *,
+        sweeper: ApprovalSweeper,
+        leader: SchedulerLeader,
+        notifier: ApprovalSweepVoicer | None = None,
+    ) -> None:
+        self._sweeper = sweeper
+        self._leader = leader
+        self._notifier = notifier
+
+    async def run_once(self, *, now: datetime) -> SweepResult | None:
+        """Sweep (if leader) then voice each reminded / expired proposal (best-effort)."""
+        result = self._sweeper.maybe_sweep(self._leader, now=now)
+        if result is None:
+            return None  # not the leader this tick — a follower does no work
+        if self._notifier is None:
+            return result  # persist-only floor: state changed, no C0 voice (no backend)
+        for proposal in result.reminded:
+            await self._voice(self._notifier.remind, proposal, kind="remind")
+        for proposal in result.expired:
+            await self._voice(self._notifier.expired, proposal, kind="expired")
+        return result
+
+    @staticmethod
+    async def _voice(deliver: object, proposal: ActionProposal, *, kind: str) -> None:
+        """Originate one approval C0 message; a voicing failure never fails the sweep.
+
+        Runs bound to the proposal's owner scope: the sweep loop has no ambient tenant context
+        (unlike a per-job handler), so the notifier's RLS reads (persona tag, task conversation)
+        + its recorder writes are scoped by setting the ``current_user_id`` contextvar here — the
+        worker's RLS engine checkout listener reads it. Reset in ``finally`` so no scope leaks.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+
+        token = current_user_id.set(proposal.owner_id)
+        try:
+            await deliver(proposal)  # type: ignore[operator]
+        except Exception:  # noqa: BLE001 — a voice failure must not crash the sweep
+            _log.warning(
+                "approval sweep voicing failed",
+                kind=kind,
+                proposal_id=proposal.proposal_id,
+            )
+        finally:
+            current_user_id.reset(token)

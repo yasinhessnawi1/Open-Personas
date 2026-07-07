@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
+    from persona_api.approvals.sweep import ApprovalSweepRunner
     from persona_api.config import APIConfig
     from persona_api.jobs.catalog_sync import CatalogSyncTask
     from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
@@ -111,6 +112,7 @@ if TYPE_CHECKING:
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.web_deliverer import LiveSessionRegistry
+    from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
 
 __all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
 
@@ -793,6 +795,89 @@ def start_in_process_worker(
     def _skill_catalog_sync_builder(dispatch_engine: Engine) -> SkillCatalogSyncTask | None:
         return build_skill_catalog_sync(config, dispatch_engine=dispatch_engine)
 
+    # Spec A3 (T9) — the approval reminder/expiry sweep, leader-gated on APPROVAL_SWEEP_LOCK_KEY.
+    # Always wired (the reminder/expiry state changes are un-gated — an approval must never rot);
+    # the C0 voice is memory-backend-gated (absent ⇒ the persist-only floor: it still expires +
+    # auto-pauses, just doesn't voice). Built on the worker's OWN two engines.
+    def _approval_sweep_builder(
+        dispatch_engine: Engine, worker_rls_engine: Engine
+    ) -> ApprovalSweepRunner | None:
+        from datetime import timedelta
+
+        from persona.stores.episodic import EpisodicStore
+
+        from persona_api.approvals import (
+            APPROVAL_SWEEP_LOCK_KEY,
+            ApprovalStore,
+            ApprovalSweeper,
+            ApprovalSweepRunner,
+        )
+        from persona_api.schedules.leadership import SchedulerLeader
+        from persona_api.services.origination_adapters import OriginatorApprovalNotifier
+
+        sweeper = ApprovalSweeper(
+            dispatch_engine=dispatch_engine,
+            approvals=ApprovalStore(worker_rls_engine),
+            tasks=TaskStore(worker_rls_engine),
+            remind_after=timedelta(hours=config.approval_remind_after_hours),
+            expire_after=timedelta(hours=config.approval_expire_after_hours),
+        )
+        notifier = None
+        if memory_backend is not None:
+            notifier = OriginatorApprovalNotifier(
+                rls_engine=worker_rls_engine,
+                episodic=EpisodicStore(
+                    backend=memory_backend,
+                    audit_logger=build_audit_logger(config, worker_rls_engine),
+                ),
+                edition=config.edition,
+                tasks=TaskStore(worker_rls_engine),
+            )
+        return ApprovalSweepRunner(
+            sweeper=sweeper,
+            leader=SchedulerLeader(dispatch_engine, lock_key=APPROVAL_SWEEP_LOCK_KEY),
+            notifier=notifier,
+        )
+
+    # Spec A3 (T13) — the dead-leg voicing sweep, leader-gated on DEAD_LEG_SWEEP_LOCK_KEY (its own
+    # distinct key). Always wired (a retry-exhausted task must never orphan silently); the C0 voice
+    # is memory-backend-gated (absent ⇒ the persist-only floor: it still parks waiting(on_user)).
+    def _dead_leg_sweep_builder(
+        dispatch_engine: Engine, worker_rls_engine: Engine
+    ) -> DeadLegSweeper | None:
+        from persona_api.schedules.leadership import SchedulerLeader
+        from persona_api.services.origination_adapters import OriginatorFailureNotifier
+        from persona_api.tasks.dead_leg_sweep import DEAD_LEG_SWEEP_LOCK_KEY, DeadLegSweeper
+
+        def _emit_task_updated(owner: str, task_id: str, state: str) -> None:
+            publish_task_updated(event_channel, owner_id=owner, task_id=task_id, state=state)
+
+        continuation = TaskContinuation(
+            task_store=TaskStore(worker_rls_engine),
+            queue=JobQueue(worker_rls_engine),
+            checkpoint_store=CheckpointStore(worker_rls_engine),
+            on_state_change=_emit_task_updated,
+        )
+        notifier = (
+            OriginatorFailureNotifier(
+                rls_engine=worker_rls_engine,
+                memory_backend=memory_backend,
+                edition=config.edition,
+                audit_root=Path(config.audit_root),
+                audit_logger=build_audit_logger(config, worker_rls_engine),
+            )
+            if memory_backend is not None
+            else None
+        )
+        return DeadLegSweeper(
+            continuation=continuation,
+            dead_letter_queue=JobQueue(dispatch_engine),
+            leader=SchedulerLeader(dispatch_engine, lock_key=DEAD_LEG_SWEEP_LOCK_KEY),
+            rls_engine=worker_rls_engine,
+            task_store=TaskStore(worker_rls_engine),
+            notifier=notifier,
+        )
+
     def _initiative_provisioner_builder(
         dispatch_engine: Engine, worker_rls_engine: Engine
     ) -> InitiativeProvisioner | None:
@@ -816,6 +901,8 @@ def start_in_process_worker(
         catalog_sync_builder=_catalog_sync_builder,
         skill_catalog_sync_builder=_skill_catalog_sync_builder,
         initiative_provisioner_builder=_initiative_provisioner_builder,
+        approval_sweep_builder=_approval_sweep_builder,
+        dead_leg_sweep_builder=_dead_leg_sweep_builder,
     )
     handle = InProcessWorker(worker)
     handle.start()

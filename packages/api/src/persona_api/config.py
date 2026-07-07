@@ -261,6 +261,25 @@ class APIConfig(BaseSettings):
     schedule_occurrences_max_count: int = Field(
         default=500, ge=1, validation_alias="PERSONA_SCHEDULE_OCCURRENCES_MAX_COUNT"
     )
+    # Spec A3 (T9/T13) — the two lifecycle sweeps hosted in the worker loop, each leader-gated
+    # on its own advisory key. The approval sweep reminds a pending proposal at ~24h and
+    # auto-expires (+ auto-pauses the task) at ~72h; the dead-leg sweep parks a retry-exhausted
+    # task waiting(on_user) + voices an honest failure account. Both cadences are the outer poll
+    # of a coarse, at-most-once operation, so a few minutes is ample (the CAS/idempotency is the
+    # correctness spine, not the cadence). The remind/expire THRESHOLDS are the platform defaults
+    # (24h/72h) overridable here.
+    approval_sweep_interval_seconds: float = Field(
+        default=300.0, gt=0, validation_alias="PERSONA_APPROVAL_SWEEP_INTERVAL_SECONDS"
+    )
+    approval_remind_after_hours: float = Field(
+        default=24.0, gt=0, validation_alias="PERSONA_APPROVAL_REMIND_AFTER_HOURS"
+    )
+    approval_expire_after_hours: float = Field(
+        default=72.0, gt=0, validation_alias="PERSONA_APPROVAL_EXPIRE_AFTER_HOURS"
+    )
+    dead_leg_sweep_interval_seconds: float = Field(
+        default=120.0, gt=0, validation_alias="PERSONA_DEAD_LEG_SWEEP_INTERVAL_SECONDS"
+    )
     # Spec N2 — the MCP catalog auto-sync (hosted in the worker loop, leader-gated;
     # N2-D-1/2/3). A daily-ish periodic task re-pulls Docker's catalog and reconciles
     # the writable mirror (PERSONA_MCP_MIRROR_PATH). ``enabled`` is the opt-out for
