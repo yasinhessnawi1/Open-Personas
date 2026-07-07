@@ -127,6 +127,7 @@ class TaskLegHandler:
         on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]]
         | None = None,
         budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
+        on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -149,6 +150,10 @@ class TaskLegHandler:
         # caller must NOT continue); the gate voices the "budget reached; extend?" ask. Optional —
         # a plain A2 worker wires none, and the pre-A3 no-cap behaviour holds.
         self._budget_gate = budget_gate
+        # Spec A3 (notify-on-park): the proactive C0 "may I do X?" voice for a freshly-parked
+        # approval. Given (owner_id, proposal_id), the wired closure loads the proposal + voices
+        # via the approval notifier. Optional + best-effort; None → the inbox/chat is the floor.
+        self._on_approval_parked = on_approval_parked
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -227,6 +232,21 @@ class TaskLegHandler:
                 fired_at=fired_at,
                 event_fired=isinstance(trigger, EventFire),
             )
+            # A3 notify-on-park: the leg gated an action and the task just parked waiting(on_user).
+            # Proactively voice the persona's "may I do X?" ask so the user isn't left to discover
+            # the pending approval only in the inbox. Best-effort — the durable proposal + the inbox
+            # are the floor; a voice hiccup never fails the (already-parked) leg.
+            if (
+                outcome.disposition is LegDisposition.WAITING_APPROVAL
+                and outcome.proposal_id is not None
+                and self._on_approval_parked is not None
+            ):
+                try:
+                    await self._on_approval_parked(owner, outcome.proposal_id)
+                except Exception as exc:  # noqa: BLE001 — additive; never fail the parked leg
+                    _log.warning(
+                        "approval announce failed task_id={tid}: {err}", tid=task.id, err=str(exc)
+                    )
         # Spec A4 (T10): after the state settles, publish a granularity-gated digest update. The
         # post-leg task carries the settled state; the hook decides milestone/completion + gating.
         # Best-effort — a delivery hiccup must never fail or re-deliver the (already-done) leg.
@@ -262,6 +282,7 @@ def register_task_leg_handler(
     on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
     budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
+    on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -279,6 +300,7 @@ def register_task_leg_handler(
                 on_milestone=on_milestone,
                 on_leg_settled=on_leg_settled,
                 budget_gate=budget_gate,
+                on_approval_parked=on_approval_parked,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

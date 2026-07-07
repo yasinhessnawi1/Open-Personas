@@ -283,6 +283,50 @@ async def _false() -> bool:
     return False
 
 
+class _GatedRunner:
+    """A leg whose toolbox proposed a gated action → the executor parks WAITING_APPROVAL."""
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+        from persona.errors import GatedActionProposedError
+
+        raise GatedActionProposedError(
+            "gated action awaiting approval",
+            context={"proposal_id": "prop-1", "tool": "send_email"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_announce_on_park_fires_when_a_leg_gates_an_approval(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Spec A3 (notify-on-park): a leg that parks on an approval proactively voices the ask.
+
+    The wiring the audit found missing: on a WAITING_APPROVAL outcome the handler fires the
+    on_approval_parked hook with the proposal id, so the persona voices "may I do X?" instead of
+    leaving the user to find the pending approval only in the inbox. Best-effort — the hook never
+    fails the (already-parked) leg.
+    """
+    _seed_active_task(migrated_engine)
+    tasks = TaskStore(app_engine)
+    announced: list[tuple[str, str]] = []
+
+    async def _spy(owner_id: str, proposal_id: str) -> None:
+        announced.append((owner_id, proposal_id))
+
+    handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=CheckpointStore(app_engine),
+        runner_builder=_FakeRunnerBuilder(_GatedRunner()),  # type: ignore[arg-type]
+        continuation=TaskContinuation(task_store=tasks, queue=JobQueue(app_engine)),
+        on_approval_parked=_spy,
+    )
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+    assert tasks.get("user_a", "t1").state == TaskState.WAITING  # parked on the user
+    assert announced == [("user_a", "prop-1")]  # the ask was voiced proactively
+
+
 @pytest.mark.asyncio
 async def test_handler_resumes_a_waiting_task_on_pickup(
     migrated_engine: Engine, app_engine: Engine

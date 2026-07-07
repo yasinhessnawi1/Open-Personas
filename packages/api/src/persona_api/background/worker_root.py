@@ -486,6 +486,13 @@ def _register_task_leg_tenant(
         live_sessions=live_sessions,
         emit_task_updated=_emit_task_updated,
     )
+    on_approval_parked = _build_approval_announce_hook(
+        rls_engine=rls_engine,
+        memory_backend=memory_backend,
+        edition=edition,
+        audit_root=audit_root,
+        audit_logger=audit_logger,
+    )
     register_task_leg_handler(
         registry,
         task_store=task_store,
@@ -496,6 +503,7 @@ def _register_task_leg_tenant(
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
         budget_gate=budget_gate,
+        on_approval_parked=on_approval_parked,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
@@ -580,6 +588,51 @@ def _build_budget_gate(
         return True
 
     return _gate
+
+
+def _build_approval_announce_hook(
+    *,
+    rls_engine: Engine,
+    memory_backend: Backend | None,
+    edition: object | None,
+    audit_root: Path,
+    audit_logger: AuditLogger | None,
+) -> Callable[[str, str], Awaitable[None]] | None:
+    """The A3 notify-on-park hook — proactively voice a freshly-parked approval's "may I do X?".
+
+    Returns an async ``(owner_id, proposal_id)`` callback the leg handler fires when a leg gates an
+    action and the task parks ``waiting(on_user)``. It loads the durable proposal and voices the
+    persona's ask via the deterministic :class:`OriginatorApprovalNotifier` (the SAME notifier the
+    inbox/chat resolution loop uses). Runs inside the per-job tenant context (``current_user_id``
+    is set by the executor), so the notifier's RLS reads resolve. ``None`` without a memory backend
+    (community / keyless) — the durable proposal + the Approvals inbox stay the floor.
+    """
+    if memory_backend is None or edition is None:
+        return None
+    from persona.audit import JSONLAuditLogger
+    from persona.stores.episodic import EpisodicStore
+
+    from persona_api.approvals import ApprovalStore
+    from persona_api.services.origination_adapters import OriginatorApprovalNotifier
+
+    notifier = OriginatorApprovalNotifier(
+        rls_engine=rls_engine,
+        episodic=EpisodicStore(
+            backend=memory_backend,
+            audit_logger=audit_logger or JSONLAuditLogger(audit_root),
+        ),
+        edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
+        tasks=TaskStore(rls_engine),
+    )
+    approvals = ApprovalStore(rls_engine)
+
+    async def _announce(owner_id: str, proposal_id: str) -> None:
+        # Load the durable proposal + voice the ask; a deleted persona / gone proposal is a
+        # graceful no-op inside the notifier. Best-effort — the handler wraps + never fails the leg.
+        proposal = approvals.get_proposal(owner_id, proposal_id)
+        await notifier.ask(proposal)
+
+    return _announce
 
 
 def _register_delegated_turn_tenant(
