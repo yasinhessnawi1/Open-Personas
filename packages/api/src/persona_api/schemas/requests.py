@@ -362,6 +362,17 @@ class BudgetExtendRequest(_Input):
     amount_micros: int = Field(gt=0)
 
 
+class InitiativeDialRequest(_Input):
+    """Set a persona's initiative restraint level (Spec A6, B4 — the dial switch).
+
+    ``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``
+    lets all-safe plans execute. The level persists regardless of the platform initiative flag; the
+    route reflects whether initiative is globally enabled so the UX is honest about when it acts.
+    """
+
+    dial: Literal["off", "propose_only", "act_within_envelope"]
+
+
 class ApprovalDecisionRequest(_Input):
     """An inbox approval decision (Spec A6, criterion 5) — the structured twin of a chat reply.
 

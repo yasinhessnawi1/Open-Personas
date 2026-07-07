@@ -1094,3 +1094,60 @@ class BudgetExtendResult(_Output):
     new_cap_micros: int
     state: str  # ok | approaching | reached
     note: str = ""
+
+
+class AutonomyStateOut(_Output):
+    """The owner's autonomy-pause state — the durable presence read, reflect never error (B4).
+
+    ``paused`` is read from the ``owner_autonomy_pause`` row (RLS-scoped). ``changed`` is false on
+    an idempotent no-op — pausing an already-paused owner, or resuming one who isn't paused.
+    """
+
+    paused: bool  # the durable presence: True iff an owner_autonomy_pause row exists
+    changed: bool = False  # false = an idempotent no-op (already in the target state)
+    note: str = ""  # an honest server-side note (the no-op reason / the suspend-all reach)
+
+
+class PersonaSuspensionOut(_Output):
+    """A single persona's autonomy-suspension state — presence-based, reflect never error (B4).
+
+    Rides the existing ``suspended_personas`` mechanism (the same row ``is_runnable`` consults).
+    ``suspended`` is the durable presence read (RLS-scoped); ``changed`` is false on an idempotent
+    no-op — suspending an already-suspended persona, or resuming one that isn't suspended.
+    """
+
+    persona_id: str
+    suspended: bool  # the durable presence: True iff a suspended_personas row exists
+    changed: bool = False  # false = an idempotent no-op (already in the target state)
+    note: str = ""  # an honest server-side note (the no-op reason)
+
+
+class InitiativeDialOut(_Output):
+    """A persona's initiative restraint level — the durable dial, honest about the flag (B4).
+
+    ``dial`` is the durable ``personas.initiative_dial`` (reflected, never assumed). ``changed`` is
+    false when the requested level already matched. ``initiative_enabled`` mirrors the platform
+    ``PERSONA_INITIATIVE_ENABLED`` flag: the level persists regardless, but when it is false the UX
+    must be honest that initiative won't act until it is enabled.
+    """
+
+    persona_id: str
+    dial: str  # off | propose_only | act_within_envelope (the durable level)
+    changed: bool = False  # false = an idempotent no-op (already at the requested level)
+    initiative_enabled: bool = False  # the platform flag — honest UX, not a second gate
+    note: str = ""
+
+
+class InitiativeDeclineOut(_Output):
+    """A declined initiative opportunity — user-level, LEDGER-anchored, reflect never error (B4).
+
+    Anchored on the durable A5 ledger notice (never conversation metadata). A decline suppresses the
+    opportunity for ALL personas until an explicit revival. ``changed`` is false when the topic was
+    already live-declined (an idempotent calm no-op).
+    """
+
+    notice_id: str
+    opportunity_key: str
+    declined: bool  # the durable outcome: the opportunity is suppressed
+    changed: bool = False  # false = already live-declined (nothing added)
+    note: str = ""

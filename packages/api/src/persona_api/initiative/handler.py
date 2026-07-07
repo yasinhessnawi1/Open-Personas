@@ -28,11 +28,12 @@ from persona.initiative import DEFAULT_INITIATIVE_DIAL, InitiativeDial
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.schedules import MissedFirePolicy, RecurrenceFreq, RecurrenceRule, Schedule
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import personas as personas_t
+from persona_api.services import audit_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,6 +54,7 @@ __all__ = [
     "initiative_schedule_id",
     "read_initiative_dial",
     "register_initiative_scan_handler",
+    "set_initiative_dial",
 ]
 
 INITIATIVE_SCAN_JOB_TYPE = "initiative_scan"
@@ -100,6 +102,35 @@ def read_initiative_dial(engine: Engine, owner_id: str, persona_id: str) -> Init
         return InitiativeDial(str(row[0]))
     except ValueError:
         return DEFAULT_INITIATIVE_DIAL
+
+
+def set_initiative_dial(
+    engine: Engine, owner_id: str, persona_id: str, dial: InitiativeDial, *, now: datetime
+) -> bool:
+    """The SINGLE durable dial-write path (A5-D-5) — write ``initiative_dial`` (+ ts) + audit.
+
+    Both the T10 dial verb (:meth:`InitiativeVerbService._apply_dial`) and the A6 autonomy-controls
+    route call this — never a second UPDATE. RLS-scoped: returns whether a persona row matched
+    (``False`` = missing/foreign under RLS). Audits ``initiative.dial_set`` on a real write. The
+    durable level persists here regardless of whether initiative is globally enabled; the lazy
+    schedule-ensure (A5-D-1) is the verb-path's own concern layered on top by the caller.
+    """
+    with rls_connection(engine, owner_id) as conn:
+        result = conn.execute(
+            update(personas_t)
+            .where(personas_t.c.id == persona_id)
+            .values(initiative_dial=dial.value, initiative_dial_updated_at=now)
+        )
+    if result.rowcount == 0:
+        return False
+    audit_service.record(
+        engine=engine,
+        user_id=owner_id,
+        action="initiative.dial_set",
+        target=persona_id,
+        metadata={"dial": dial.value},
+    )
+    return True
 
 
 class InitiativeScanHandler:

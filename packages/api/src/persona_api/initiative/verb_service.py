@@ -25,11 +25,8 @@ from typing import TYPE_CHECKING
 from persona.initiative import InitiativeDial
 from persona.logging import get_logger
 from persona_runtime.initiative.verbs import InitiativeVerb
-from sqlalchemy import update
 
-from persona_api.db.engine import rls_connection
-from persona_api.db.models import personas as personas_t
-from persona_api.initiative.handler import ensure_initiative_schedule
+from persona_api.initiative.handler import ensure_initiative_schedule, set_initiative_dial
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -94,24 +91,11 @@ class InitiativeVerbService:
             _log.warning("initiative verb application failed (fail-soft) verb={verb}", verb=verb)
 
     def _apply_dial(self, owner_id: str, persona_id: str, dial: InitiativeDial) -> None:
-        """Write the dial + audit; ensure the scan schedule when not OFF (A5-D-1)."""
+        """Write the dial + audit (shared path); ensure the scan schedule when not OFF (A5-D-1)."""
         now = datetime.now(UTC)
-        with rls_connection(self._engine, owner_id) as conn:
-            result = conn.execute(
-                update(personas_t)
-                .where(personas_t.c.id == persona_id)
-                .values(initiative_dial=dial.value, initiative_dial_updated_at=now)
-            )
-        if result.rowcount == 0:
+        if not set_initiative_dial(self._engine, owner_id, persona_id, dial, now=now):
             _log.warning("dial write matched no persona; ignoring")
             return
-        audit_service.record(
-            engine=self._engine,
-            user_id=owner_id,
-            action="initiative.dial_set",
-            target=persona_id,
-            metadata={"dial": dial.value},
-        )
         if dial is not InitiativeDial.OFF:
             timezone = "UTC"
             if callable(self._timezone_resolver):
