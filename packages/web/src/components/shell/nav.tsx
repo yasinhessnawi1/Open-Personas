@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   CalendarClock,
   Home,
   ListChecks,
@@ -34,6 +35,10 @@ const ITEMS = [
   // Spec V9: the voice-call history surface.
   { href: "/calls", key: "calls", icon: Phone, count: undefined },
   { href: "/runs", key: "tasks", icon: ListChecks, count: undefined },
+  // Spec A6 (W2): the autonomy Tasks list — the cross-persona state matrix. Interim entry under
+  // the area name "Activity" (A6-D-1); the full Activity re-home (Review landing + Tasks/Approvals
+  // siblings, folding /approvals in) lands with W5.
+  { href: "/tasks", key: "activity", icon: Activity, count: undefined },
   // Spec A6 (W4): the approvals inbox — pending decisions across tasks, the chat-twin's surface.
   { href: "/approvals", key: "approvals", icon: ShieldCheck, count: undefined },
   // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."

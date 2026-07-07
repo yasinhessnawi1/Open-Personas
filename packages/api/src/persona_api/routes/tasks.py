@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Request
 from persona.errors import TaskNotFoundError, TaskStateError
 from persona.tasks import TaskState, is_terminal
-from persona.tasks.reader import project_task_state, summarise_task
+from persona.tasks.reader import IntrospectionStatus, project_task_state, summarise_task
 from persona.tasks.reports import (
     build_cancellation_summary,
     build_completion_report,
@@ -29,6 +29,7 @@ from persona_api.approvals.budget import PLATFORM_DEFAULT_BUDGET_MICROS, BudgetE
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import audit_log as audit_log_t
+from persona_api.db.models import task_checkpoints as checkpoints_t
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schemas.requests import BudgetExtendRequest
@@ -86,7 +87,13 @@ def _command_result(
     )
 
 
-def _summary(task: Task, budget: BudgetEnforcer, owner_id: str) -> TaskSummaryOut:
+#: The derived statuses that make a task "stuck" (A6-D-5) — the only rows that carry a cause.
+_STUCK_STATUSES = frozenset({IntrospectionStatus.WAITING_ON_USER, IntrospectionStatus.FAILED})
+
+
+def _summary(
+    task: Task, budget: BudgetEnforcer, owner_id: str, *, stuck_cause: str | None = None
+) -> TaskSummaryOut:
     return TaskSummaryOut(
         task_id=task.id,
         persona_id=task.persona_id,
@@ -96,7 +103,29 @@ def _summary(task: Task, budget: BudgetEnforcer, owner_id: str) -> TaskSummaryOu
         spent_micros=task.ledger.total_micros,
         budget_cap_micros=budget.effective_cap(owner_id, task),
         updated_at=task.updated_at,
+        stuck_cause=stuck_cause,
     )
+
+
+def _stuck_causes(engine: Engine, owner_id: str, task_ids: list[str]) -> dict[str, str]:
+    """The head checkpoint's ``blocked_on`` per stuck task, in ONE query (no N; A6-D-5).
+
+    ``DISTINCT ON (task_id) … ORDER BY task_id, checkpoint_seq DESC`` reads exactly the head
+    checkpoint of each task in the (small) stuck subset; ``blocked_on`` lives in the checkpoint
+    JSON. RLS-scoped; a task with no checkpoint or a null reason simply has no entry (→ ``None``
+    at the summary, an honestly thin loud card).
+    """
+    if not task_ids:
+        return {}
+    blocked_on = checkpoints_t.c.checkpoint_json["blocked_on"].as_string()
+    with rls_connection(engine, owner_id) as conn:
+        rows = conn.execute(
+            select(checkpoints_t.c.task_id, blocked_on.label("cause"))
+            .where(checkpoints_t.c.task_id.in_(task_ids), blocked_on.isnot(None))
+            .distinct(checkpoints_t.c.task_id)
+            .order_by(checkpoints_t.c.task_id, checkpoints_t.c.checkpoint_seq.desc())
+        ).all()
+    return {r.task_id: r.cause for r in rows}
 
 
 def _report(task: Task, checkpoint: TaskCheckpoint | None, now: datetime) -> TaskReportOut | None:
@@ -133,7 +162,10 @@ async def list_tasks(
     reader = APITaskStateReader(TaskStore(engine), CheckpointStore(engine), user.id)
     budget = BudgetEnforcer(engine=engine, tasks=TaskStore(engine), queue=JobQueue(engine))
     tasks = [*reader.list_active(), *reader.list_recent_terminal(limit=_LIST_LIMIT)]
-    return [_summary(t, budget, user.id) for t in tasks]
+    # the stuck subset carries a cause at list level (A6-D-5) — derived in ONE query, not N.
+    stuck_ids = [t.id for t in tasks if summarise_task(t).status in _STUCK_STATUSES]
+    causes = _stuck_causes(engine, user.id, stuck_ids)
+    return [_summary(t, budget, user.id, stuck_cause=causes.get(t.id)) for t in tasks]
 
 
 @router.get("/{task_id}", response_model=TaskDetailOut)

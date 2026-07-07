@@ -1033,6 +1033,10 @@ class TaskSummaryOut(_Output):
     spent_micros: int
     budget_cap_micros: int
     updated_at: datetime
+    #: The wait/blocked reason for a stuck task — the head checkpoint's ``blocked_on`` (A6-D-5),
+    #: populated only for the waiting_on_user/failed subset so the list is loud-WITH-information.
+    #: ``None`` for every non-stuck row (additive to the B1 contract).
+    stuck_cause: str | None = None
 
 
 class TaskDetailOut(_Output):

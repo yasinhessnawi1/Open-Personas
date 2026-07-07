@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from persona.tasks import Contract, Task
+from persona.tasks import Contract, Task, TaskCheckpoint, WaitKind
 from persona_api.auth import AuthenticatedUser
 from persona_api.routes.tasks import (
     cancel_task,
@@ -27,7 +27,7 @@ from persona_api.routes.tasks import (
     resume_task,
 )
 from persona_api.schemas.requests import BudgetExtendRequest
-from persona_api.tasks.store import TaskStore
+from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -138,6 +138,35 @@ async def test_task_audit_trail_reads_the_target_rows(
     assert "budget.extended" in actions
     extended = next(e for e in entries if e.action == "budget.extended")
     assert extended.metadata == {"amount_micros": 500}
+
+
+async def test_list_populates_stuck_cause_only_for_the_stuck_subset(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    _seed(migrated_engine)
+    tasks = TaskStore(app_engine)
+    _task(tasks, "t_active", "watch the fares")  # healthy active — no cause
+    # a stuck task: waiting on the user, with a head checkpoint carrying the blocked_on reason.
+    _task(tasks, "t_stuck", "book the dentist")
+    CheckpointStore(app_engine).append(
+        tasks.get("u", "t_stuck"),
+        TaskCheckpoint(
+            task_id="t_stuck",
+            leg_id="leg1",
+            checkpoint_seq=0,
+            blocked_on="needs your clinic login",
+            next_step="share the login",
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+    tasks.begin_wait("u", "t_stuck", WaitKind.ON_USER, now=_NOW)
+
+    by_id = {s.task_id: s for s in await list_tasks(_request(app_engine), _USER)}
+
+    assert by_id["t_stuck"].status == "waiting_on_user"
+    assert by_id["t_stuck"].stuck_cause == "needs your clinic login"  # loud-with-information
+    assert by_id["t_active"].stuck_cause is None  # non-stuck rows carry no cause (additive)
 
 
 # --- B2: commands (mutations — audited, idempotent, bounded) ---------------------------------

@@ -76,6 +76,7 @@
     "conversations": "Conversations",
     "calls": "Calls",
     "tasks": "Tasks",
+    "activity": "Activity",
     "approvals": "Approvals",
     "memory": "Memory",
     "schedule": "Schedule",
@@ -181,6 +182,97 @@
     "empty": "No calls yet",
     "emptyHint": "Start a voice call with a persona to see it here.",
     "unknownPersona": "Unknown persona"
+  },
+  "taskList": {
+    "title": "Tasks",
+    "subtitle": "What your personas are working on — waiting on you first, then in progress, then done.",
+    "spend": "kr {spent} / {cap}",
+    "resolve": "Resolve",
+    "cancel": "Cancel",
+    "emptyTitle": "No tasks yet",
+    "emptyBody": "When a persona takes on a longer job, it shows up here — with its state, spend, and anything waiting on you.",
+    "loadFailed": "Couldn't load your tasks. Try again in a moment.",
+    "cancelFailed": "That didn't go through. Try again in a moment.",
+    "status": {
+      "just_created": "Just started",
+      "progressing": "In progress",
+      "waiting_on_user": "Waiting on you",
+      "scheduled": "Scheduled",
+      "paused": "Paused",
+      "completed": "Done",
+      "failed": "Stuck",
+      "cancelled": "Cancelled"
+    }
+  },
+  "taskDetail": {
+    "title": "Task",
+    "back": "All tasks",
+    "spend": "kr {spent} / {cap}",
+    "whereItStands": "Where it stands",
+    "nextStep": "Next:",
+    "openQuestions": "Open questions",
+    "budget": "Budget",
+    "grants": "Allowed to",
+    "history": "Progress so far",
+    "controls": "Controls",
+    "pause": "Pause",
+    "resume": "Resume",
+    "cancel": "Cancel",
+    "reschedule": "Reschedule",
+    "preview": "Preview",
+    "applyReschedule": "Apply",
+    "extend": "Raise cap",
+    "extendPlaceholder": "kr",
+    "extendLabel": "Amount to add, in kroner",
+    "openRun": "Open run",
+    "loadFailed": "Couldn't load this task. Try again in a moment.",
+    "commandFailed": "That didn't go through. Try again in a moment.",
+    "dialLabel": "Initiative",
+    "dialDisabled": "Saved — initiative is off platform-wide, so this won't act until it's enabled.",
+    "dialFailed": "Couldn't change the dial. Try again in a moment.",
+    "rescheduleFailed": "Couldn't preview that change. Try again in a moment.",
+    "rescheduleConflict": "This schedule changed since you opened it — showing the current plan.",
+    "budgetExtended": "Budget raised from kr {from} to kr {to}.",
+    "reflect": {
+      "pause": "Paused.",
+      "resume": "Resumed.",
+      "cancel": "Cancelling — a running step finishes first."
+    },
+    "status": {
+      "just_created": "Just started",
+      "progressing": "In progress",
+      "waiting_on_user": "Waiting on you",
+      "scheduled": "Scheduled",
+      "paused": "Paused",
+      "completed": "Done",
+      "failed": "Stuck",
+      "cancelled": "Cancelled"
+    },
+    "report": {
+      "completed": "Done",
+      "stuck": "Stuck",
+      "cancelled": "Cancelled"
+    },
+    "dial": {
+      "off": "Off",
+      "propose_only": "Propose first",
+      "act_within_envelope": "Act within limits"
+    },
+    "grant": {
+      "observe": "Observe",
+      "compute": "Compute",
+      "draft": "Draft",
+      "notify_user": "Notify you",
+      "communicate_as_user": "Message as you",
+      "spend": "Spend",
+      "external_mutate": "Change things",
+      "credentialed_access": "Use your logins"
+    },
+    "decision": {
+      "allow": "allowed",
+      "gate": "asks first",
+      "deny": "blocked"
+    }
   },
   "approvals": {
     "title": "Approvals",
