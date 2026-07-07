@@ -110,6 +110,30 @@ class MessagesTurnSink:
             )
         return assistant_id
 
+    def append_user_message(self, *, conversation_id: str, content: str) -> None:
+        """Persist a single user message — no assistant row (Spec A6 chat-twin approval reply).
+
+        The chat twin routes a decision reply to the resolver rather than a model turn, so there is
+        no streaming assistant row to open — but the user's reply must still appear in the
+        transcript. Bumps ``conversations.updated_at`` so the conversation surfaces as active.
+        """
+        now = datetime.now(UTC)
+        with self._engine.begin() as conn:
+            conn.execute(
+                insert(messages_t).values(
+                    id=f"msg_{uuid.uuid4().hex}",
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=content,
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                update(conversations_t)
+                .where(conversations_t.c.id == conversation_id)
+                .values(updated_at=now)
+            )
+
     def checkpoint(
         self,
         *,

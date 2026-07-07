@@ -76,6 +76,7 @@
     "conversations": "Conversations",
     "calls": "Calls",
     "tasks": "Tasks",
+    "approvals": "Approvals",
     "memory": "Memory",
     "schedule": "Schedule",
     "settings": "Settings",
@@ -180,6 +181,33 @@
     "empty": "No calls yet",
     "emptyHint": "Start a voice call with a persona to see it here.",
     "unknownPersona": "Unknown persona"
+  },
+  "approvals": {
+    "title": "Approvals",
+    "subtitle": "Decisions your personas are waiting on — the exact action, before you approve it.",
+    "needsApproval": "Needs approval",
+    "review": "Review the request",
+    "hideDetails": "Hide",
+    "whatWillHappen": "What will happen — {tool}",
+    "approve": "Approve",
+    "deny": "Deny",
+    "modify": "Change",
+    "submitChange": "Save & re-confirm",
+    "cancel": "Cancel",
+    "expired": "expired",
+    "expiresInHours": "expires in {hours}h",
+    "expiresInDays": "expires in {days} days",
+    "emptyTitle": "Nothing waiting on you",
+    "emptyBody": "When a persona needs your go-ahead, it shows up here — with the exact action to approve.",
+    "loadFailed": "Couldn't load your approvals. Try again in a moment.",
+    "decideFailed": "That didn't go through. Try again in a moment.",
+    "reflection": {
+      "approved": "Approved.",
+      "denied": "Denied.",
+      "reconfirm": "Updated — please re-confirm the change.",
+      "alreadyHandled": "Already handled.",
+      "resolvedGeneric": "Done."
+    }
   },
   "tasks": {
     "kicker": "Agentic runs",

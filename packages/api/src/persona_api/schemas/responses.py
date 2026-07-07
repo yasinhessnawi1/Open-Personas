@@ -11,11 +11,24 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — Pydantic needs it at runtime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
+    "AcceptanceCriterionOut",
+    "ApprovalDecisionResult",
+    "ApprovalOut",
     "ArtifactItem",
     "ArtifactListResponse",
+    "BudgetExtendResult",
+    "BudgetOut",
+    "GrantOut",
+    "LedgerOut",
+    "TaskAuditEntryOut",
+    "TaskCheckpointOut",
+    "TaskCommandResult",
+    "TaskDetailOut",
+    "TaskReportOut",
+    "TaskSummaryOut",
     "ArtifactMetadataView",
     "AuthoringDraft",
     "ChunkEvent",
@@ -918,3 +931,166 @@ class MemorySearchResponse(_Output):
 
     query: str
     results: list[MemorySearchResult]
+
+
+class ApprovalOut(_Output):
+    """One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
+
+    The proposal's exact ``arguments`` + ``description`` are returned VERBATIM — the inbox is a
+    safety surface, not a summary (approving a paraphrase would approve a different action). The
+    web client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content).
+    """
+
+    proposal_id: str
+    task_id: str
+    persona_id: str
+    tool_name: str
+    #: The EXACT recorded payload (email body, amount, payee, …) — verbatim, never paraphrased.
+    arguments: dict[str, JsonValue]
+    description: str
+    categories: list[str]
+    created_at: datetime
+    #: ``created_at`` + the 72h expiry — the inbox's countdown (the sweep auto-pauses past it).
+    expires_at: datetime
+
+
+class ApprovalDecisionResult(_Output):
+    """The result of an inbox decision — the outcome + the DURABLE post-state (A6-D-3).
+
+    ``status`` is read back from the durable A3 record after resolution, so a chat-vs-inbox race is
+    honest: the loser gets ``outcome=None`` / ``note="not_pending"`` while ``status`` shows what
+    actually won (``approved``/``denied``/…). The surface reflects 'already handled', never errors.
+    """
+
+    outcome: str | None  # approve|deny|modify|clarify, or null on an idempotent no-op
+    executed: bool
+    note: str
+    status: str  # the durable ProposalStatus after resolution — the reflection anchor
+
+
+# --- Spec A6 (B1): the task read surfaces (list / detail / audit) --------------------------
+
+
+class GrantOut(_Output):
+    """One row of "what you authorised" — a category and its effective decision (grants visible)."""
+
+    category: str  # observe / spend / communicate_as_user / …
+    decision: str  # allow | gate | deny
+
+
+class AcceptanceCriterionOut(_Output):
+    id: str
+    statement: str
+    status: str
+
+
+class LedgerOut(_Output):
+    """The cost ledger, per kind + total (µ-dollars)."""
+
+    model_micros: int
+    sandbox_micros: int
+    external_micros: int
+    total_micros: int
+
+
+class BudgetOut(_Output):
+    """Spend against the effective cap (contract bound + any extensions)."""
+
+    cap_micros: int
+    spent_micros: int
+    state: str  # ok | approaching | reached
+
+
+class TaskCheckpointOut(_Output):
+    """A checkpoint rendered as the human "where it is / what's next" (never raw transcripts)."""
+
+    seq: int
+    progress_conclusions: list[str]
+    next_step: str
+    open_questions: list[str]
+    blocked_on: str | None
+    updated_at: datetime
+
+
+class TaskReportOut(_Output):
+    """The terminal outcome — a distinct projection so a failure never renders as a success."""
+
+    kind: str  # completed | stuck | cancelled
+    cause: str = ""  # stuck: the honest why
+    conclusions: list[str] = []  # completed: the findings
+    where_it_stood: list[str] = []  # stuck / cancelled
+    next_step: str = ""
+
+
+class TaskSummaryOut(_Output):
+    """One task in the cross-persona list — state, spend, and whether it's paused (the matrix)."""
+
+    task_id: str
+    persona_id: str
+    goal: str
+    status: str  # IntrospectionStatus (just_created/progressing/waiting_on_user/scheduled/…)
+    paused: bool
+    spent_micros: int
+    budget_cap_micros: int
+    updated_at: datetime
+
+
+class TaskDetailOut(_Output):
+    """The task, above the run viewer: contract + grants, state, ledger, budget, report, waits."""
+
+    task_id: str
+    persona_id: str
+    goal: str
+    scope: str
+    status: str
+    paused: bool
+    grants: list[GrantOut]  # the contract's category policy — what you authorised
+    acceptance_criteria: list[AcceptanceCriterionOut]
+    deadline: datetime | None
+    max_legs: int | None
+    budget: BudgetOut
+    ledger: LedgerOut
+    progress: list[str]  # the human "where it is" (checkpoint conclusions)
+    next_step: str
+    open_questions: list[str]
+    wait_reason: str | None
+    report: TaskReportOut | None  # present once terminal
+    checkpoints: list[TaskCheckpointOut]  # recent, human-readable
+    conversation_id: str | None
+    schedule_id: str | None
+    run_ids: list[str]  # the Spec 08 runs the leg timeline drills into
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskAuditEntryOut(_Output):
+    """One audit-trail row for a task (budget / lifecycle / trigger provenance), readable."""
+
+    action: str
+    target: str
+    metadata: dict[str, JsonValue]
+    created_at: datetime
+
+
+class TaskCommandResult(_Output):
+    """The durable result of a task command (pause/resume/cancel) — reflect, never error (B2)."""
+
+    task_id: str
+    status: str  # the durable IntrospectionStatus after the command
+    paused: bool
+    changed: bool  # false = an idempotent no-op (already in the target state)
+    #: True on a resume while the owner's autonomy is paused — resumed the overlay, but it won't
+    #: run until autonomy resumes (reflect the pause, never silently arm).
+    owner_autonomy_paused: bool = False
+    note: str = ""  # an honest server-side note (the in-flight fate / the no-op reason)
+
+
+class BudgetExtendResult(_Output):
+    """The result of a budget extension — bounded, at-most-once, with the old → new cap (B2)."""
+
+    task_id: str
+    applied: bool  # false = a clean no-op (not budget-paused, or the extend race lost)
+    old_cap_micros: int
+    new_cap_micros: int
+    state: str  # ok | approaching | reached
+    note: str = ""

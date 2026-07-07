@@ -6,6 +6,7 @@ import {
   ListChecks,
   MessagesSquare,
   Phone,
+  ShieldCheck,
   Sparkles,
   Waypoints,
 } from "lucide-react";
@@ -33,6 +34,8 @@ const ITEMS = [
   // Spec V9: the voice-call history surface.
   { href: "/calls", key: "calls", icon: Phone, count: undefined },
   { href: "/runs", key: "tasks", icon: ListChecks, count: undefined },
+  // Spec A6 (W4): the approvals inbox — pending decisions across tasks, the chat-twin's surface.
+  { href: "/approvals", key: "approvals", icon: ShieldCheck, count: undefined },
   // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."
   { href: "/memory", key: "memory", icon: Waypoints, count: undefined },
   // Spec A8: the schedule/calendar surface (time's view of the personas'

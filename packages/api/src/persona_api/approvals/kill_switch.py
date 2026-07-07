@@ -25,6 +25,7 @@ handler consults before running a leg.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.engine import rls_connection
+from persona_api.db.models import owner_autonomy_pause as owner_pause_t
 from persona_api.db.models import platform_controls as controls_t
 from persona_api.db.models import suspended_personas as suspended_t
 from persona_api.services import audit_service
@@ -46,12 +48,32 @@ if TYPE_CHECKING:
 
     from persona_api.tasks.continuation import TaskContinuation
 
-__all__ = ["GLOBAL_PAUSE_KEY", "KillSwitchCommand", "KillSwitchStore", "parse_kill_switch"]
+__all__ = [
+    "GLOBAL_PAUSE_KEY",
+    "AutonomyPauseCheck",
+    "KillSwitchCommand",
+    "KillSwitchStore",
+    "never_paused",
+    "parse_kill_switch",
+]
 
 _log = get_logger("api.approvals.kill_switch")
 
 #: The single ``platform_controls`` row key for the platform-wide autonomy pause.
 GLOBAL_PAUSE_KEY = "global_autonomy_paused"
+
+#: The per-owner pause check every origination gate consults (A6-D-8, frozen seam). Given an
+#: ``owner_id``, returns ``True`` iff that owner's autonomy is paused. Injected into each
+#: origination handler; the default (:func:`never_paused`) is the no-op so A7/A10 wire the call
+#: site green against it before A6's real impl (``KillSwitchStore.is_owner_autonomy_paused``,
+#: bound to the RLS engine) is composed in. Completeness — every gate MUST consult it — is the
+#: contract; a gate that skips it silently leaks origination past a paused owner.
+AutonomyPauseCheck = Callable[[str], bool]
+
+
+def never_paused(_owner_id: str) -> bool:
+    """The default :data:`AutonomyPauseCheck` — autonomy is never paused (A6-D-8 no-op seam)."""
+    return False
 
 
 class KillSwitchCommand(StrEnum):
@@ -145,6 +167,45 @@ class KillSwitchStore:
             ).first()
         return row is not None
 
+    # --- per-owner autonomy pause (owner-scoped, RLS; resumable) -----------
+
+    def pause_owner(self, owner_id: str, *, actor: str, now: datetime) -> None:
+        """Pause ALL of this owner's autonomy origination (A6-D-8). Presence-based, idempotent.
+
+        Owner-LEVEL, so it also holds personas created while paused (the completeness a
+        per-persona fan-out would leak). Every origination gate consults
+        :meth:`is_owner_autonomy_paused` before originating.
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            conn.execute(
+                pg_insert(owner_pause_t)
+                .values(owner_id=owner_id, actor=actor, paused_at=now)
+                .on_conflict_do_nothing(index_elements=["owner_id"])
+            )
+        self._audit(owner_id, "autonomy.owner_pause", owner_id)
+
+    def resume_owner(self, owner_id: str, *, now: datetime) -> None:  # noqa: ARG002
+        """Resume this owner's autonomy — delete the pause row. Idempotent."""
+        with rls_connection(self._engine, owner_id) as conn:
+            conn.execute(delete(owner_pause_t).where(owner_pause_t.c.owner_id == owner_id))
+        self._audit(owner_id, "autonomy.owner_resume", owner_id)
+
+    def is_owner_autonomy_paused(self, owner_id: str) -> bool:
+        """True iff this owner's autonomy is paused (a presence read).
+
+        SELF-SCOPES the read to ``owner_id`` — ``rls_connection`` sets the transaction-local
+        ``app.current_user_id`` — so a background origination gate running OUTSIDE this owner's
+        RLS context (a scheduler tick, a trigger match, the initiative scan) still reads the
+        row. Never a false "not paused": the RLS predicate fails CLOSED (unset GUC → no row),
+        so trusting the ambient GUC would leak origination past a genuinely-paused owner
+        (A6-D-8 completeness — the contract's teeth).
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            row = conn.execute(
+                select(owner_pause_t.c.owner_id).where(owner_pause_t.c.owner_id == owner_id)
+            ).first()
+        return row is not None
+
     # --- global-pause (operational, ownerless; resumable) -----------------
 
     def global_pause(self, *, actor: str, now: datetime) -> None:
@@ -170,15 +231,19 @@ class KillSwitchStore:
     def is_runnable(self, owner_id: str, task: Task) -> bool:
         """A task is runnable only when NO pause source holds it (the T11 invariant).
 
-        Independent sources: terminal state, the budget ``paused`` overlay (T10),
-        persona-suspend, global-pause. Clearing any one (e.g. a budget extension) leaves the
-        others holding — so the task does not resume while another source still applies.
+        Independent sources: terminal state, the budget ``paused`` overlay (T10), the per-owner
+        autonomy pause (A6-D-8), persona-suspend, global-pause. Clearing any one (e.g. a budget
+        extension) leaves the others holding — so the task does not resume while another source
+        still applies. This is the task-leg origination gate consulting the owner pause (the one
+        A6 owns directly; A5/A7/A10 consult the injected :data:`AutonomyPauseCheck` at theirs).
         """
         if is_terminal(task.state):
             return False
         if task.paused:  # budget (T10) — task-level overlay
             return False
         if self.is_globally_paused():
+            return False
+        if self.is_owner_autonomy_paused(owner_id):
             return False
         return not self.is_persona_suspended(owner_id, task.persona_id)
 

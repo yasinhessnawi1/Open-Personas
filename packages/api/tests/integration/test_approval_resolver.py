@@ -28,7 +28,7 @@ from persona.approvals import (
 )
 from persona.tasks import Contract, Task
 from persona.tools import ActionCategory
-from persona_api.approvals import ApprovalResolver, ApprovalStore
+from persona_api.approvals import ApprovalResolver, ApprovalStore, InboxDecision
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
@@ -309,4 +309,113 @@ async def test_immaterial_modify_executes_edited_payload(
 
     # The EDITED payload executes verbatim (the immaterial phrasing change).
     assert executor.calls == [("send_email", edited)]
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+
+
+# --- the A6 inbox twin: resolve_structured through the SAME floor (Spec A6, B3) -------------
+
+
+async def test_structured_approve_replays_exact_payload(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The inbox APPROVE (no model) executes the EXACT recorded payload — twin of the NL approve."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, _cp, executor, _n, _q = _resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    out = await resolver.resolve_structured(
+        "user_a",
+        "p1",
+        decision=InboxDecision.APPROVE,
+        verbatim_reply="approve",
+        channel="web",
+        now=_NOW,
+    )
+
+    assert out.executed is True
+    assert executor.calls == [("send_email", _ARGS)]  # verbatim — no model re-derivation
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+
+
+async def test_structured_material_modify_reconfirms_without_executing(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """A structured MODIFY still hits the floor: a material edit re-confirms, never executes."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, _cp, executor, notifier, _q = _resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    edited = {**_ARGS, "to": "eve@example.com"}  # a material change (recipient)
+    out = await resolver.resolve_structured(
+        "user_a",
+        "p1",
+        decision=InboxDecision.MODIFY,
+        edited_arguments=edited,
+        verbatim_reply="change recipient",
+        channel="web",
+        now=_NOW,
+    )
+
+    assert out.outcome is not None
+    assert out.outcome.value == "modify"
+    assert notifier.reconfirms == 1
+    assert executor.calls == []  # the floor governs the inbox too — no bypass
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.PENDING
+
+
+async def test_dual_resolution_inbox_then_chat_resolves_once(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Idempotent convergence: inbox approves, a later chat reply is a clean 'already handled'."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, _cp, executor, _n, _q = _resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    inbox = await resolver.resolve_structured(
+        "user_a",
+        "p1",
+        decision=InboxDecision.APPROVE,
+        verbatim_reply="approve",
+        channel="web",
+        now=_NOW,
+    )
+    chat = await resolver.resolve("user_a", "p1", "yes", "chat", now=_NOW)  # the twin, second
+
+    assert inbox.executed is True
+    assert chat.outcome is None  # reflects, never errors
+    assert chat.note == "not_pending"
+    assert executor.calls == [("send_email", _ARGS)]  # executed EXACTLY once
+
+
+async def test_concurrent_chat_and_inbox_resolve_execute_once(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The race, run TRULY concurrently: both surfaces past the pre-check contend the CAS →
+    exactly one winner executes, the loser reflects; one execution, one resolution checkpoint."""
+    import asyncio
+
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, checkpoints, executor, _n, _q = _resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    inbox, chat = await asyncio.gather(
+        resolver.resolve_structured(
+            "user_a",
+            "p1",
+            decision=InboxDecision.APPROVE,
+            verbatim_reply="approve",
+            channel="web",
+            now=_NOW,
+        ),
+        resolver.resolve("user_a", "p1", "yes", "chat", now=_NOW),
+    )
+
+    executed = [r for r in (inbox, chat) if r.executed]
+    assert len(executed) == 1  # exactly one winner
+    assert len(executor.calls) == 1  # one execution — the CAS held under concurrency
+    assert len(checkpoints.list_recent("user_a", "t1", limit=10)) == 1  # one resolution checkpoint
     assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
