@@ -4,5447 +4,5720 @@
  */
 
 export interface paths {
-  "/v1/personas": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Personas
+         * @description List the caller's personas (paginated; RLS-scoped).
+         */
+        get: operations["list_personas_v1_personas_get"];
+        put?: never;
+        /**
+         * Create Persona
+         * @description Create a persona from YAML; populate memory stores; return immediately.
+         *
+         *     The row + memory chunks are written synchronously (so the persona exists the
+         *     moment this returns), then the response is sent with ``avatar_url=null`` (F1's
+         *     default renders) and any auto-voice unset (the global default voices it). The
+         *     voice auto-pick and the avatar auto-generation — which together added ~30s to
+         *     the critical path — run in a ``BackgroundTasks`` job AFTER the response
+         *     (:func:`_enrich_persona_after_create`), which re-establishes the owner's RLS
+         *     scope before its writes (cloud) and fills in voice + avatar. The web detail
+         *     surface bounded-polls ``GET /v1/personas/{id}`` until they appear.
+         *
+         *     Auto-generation only runs when the builder supplied no avatar (D-29-3); a
+         *     user-supplied ``avatar_url`` always wins (criterion 6) and short-circuits the
+         *     background avatar hook. Everything stays fail-soft (D-29-X-fail-soft).
+         */
+        post: operations["create_persona_v1_personas_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Personas
-     * @description List the caller's personas (paginated; RLS-scoped).
-     */
-    get: operations["list_personas_v1_personas_get"];
-    put?: never;
-    /**
-     * Create Persona
-     * @description Create a persona from YAML; populate memory stores; return immediately.
-     *
-     *     The row + memory chunks are written synchronously (so the persona exists the
-     *     moment this returns), then the response is sent with ``avatar_url=null`` (F1's
-     *     default renders) and any auto-voice unset (the global default voices it). The
-     *     voice auto-pick and the avatar auto-generation — which together added ~30s to
-     *     the critical path — run in a ``BackgroundTasks`` job AFTER the response
-     *     (:func:`_enrich_persona_after_create`), which re-establishes the owner's RLS
-     *     scope before its writes (cloud) and fills in voice + avatar. The web detail
-     *     surface bounded-polls ``GET /v1/personas/{id}`` until they appear.
-     *
-     *     Auto-generation only runs when the builder supplied no avatar (D-29-3); a
-     *     user-supplied ``avatar_url`` always wins (criterion 6) and short-circuits the
-     *     background avatar hook. Everything stays fail-soft (D-29-X-fail-soft).
-     */
-    post: operations["create_persona_v1_personas_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/author": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/author": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Author Persona
+         * @description SSE-stream a DRAFT persona from a description for review (D-10-2, spec P0).
+         *
+         *     Streams the model output as it generates (``chunk`` events), then emits the
+         *     validated ``AuthoringDraft`` as the terminal ``draft`` event followed by
+         *     ``done``. Creates NO persona row — the user reviews/refines, then saves via
+         *     ``POST /v1/personas``. The flat authoring credit is deducted ONLY after a
+         *     successful terminal draft (D-P0-deduct-after-validate / D-08-6); the
+         *     pre-flight 402 (D-11-12) + rate-limit run BEFORE streaming begins.
+         */
+        post: operations["author_persona_v1_personas_author_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Author Persona
-     * @description SSE-stream a DRAFT persona from a description for review (D-10-2, spec P0).
-     *
-     *     Streams the model output as it generates (``chunk`` events), then emits the
-     *     validated ``AuthoringDraft`` as the terminal ``draft`` event followed by
-     *     ``done``. Creates NO persona row — the user reviews/refines, then saves via
-     *     ``POST /v1/personas``. The flat authoring credit is deducted ONLY after a
-     *     successful terminal draft (D-P0-deduct-after-validate / D-08-6); the
-     *     pre-flight 402 (D-11-12) + rate-limit run BEFORE streaming begins.
-     */
-    post: operations["author_persona_v1_personas_author_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/author/refine": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/author/refine": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refine Persona
+         * @description SSE-stream a refined draft by answering a clarifying question (§4, D-10-2, spec P0).
+         *
+         *     Stateless: the request carries ``round`` (refinements already applied); the
+         *     server rejects ``round >= 3`` as the backstop on the 3-round cap (D-10-5)
+         *     BEFORE streaming begins. Streams the same way as ``/author``; deducts the
+         *     flat authoring credit only after the terminal draft.
+         */
+        post: operations["refine_persona_v1_personas_author_refine_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Refine Persona
-     * @description SSE-stream a refined draft by answering a clarifying question (§4, D-10-2, spec P0).
-     *
-     *     Stateless: the request carries ``round`` (refinements already applied); the
-     *     server rejects ``round >= 3`` as the backstop on the 3-round cap (D-10-5)
-     *     BEFORE streaming begins. Streams the same way as ``/author``; deducts the
-     *     flat authoring credit only after the terminal draft.
-     */
-    post: operations["refine_persona_v1_personas_author_refine_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/recommend-tools": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/recommend-tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recommend Tools
+         * @description Recommend a ranked tool subset for a persona description (spec 26 T09).
+         *
+         *     Authoring-time assist: given the natural-language description, a single
+         *     mid-tier call (D-26-2) returns up to 10 catalog-valid tool recommendations,
+         *     highest-confidence first. Reuses the description-only ``AuthorPersonaRequest``
+         *     body. Deducts the flat authoring credit (a mid-tier LLM call).
+         */
+        post: operations["recommend_tools_v1_personas_recommend_tools_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Recommend Tools
-     * @description Recommend a ranked tool subset for a persona description (spec 26 T09).
-     *
-     *     Authoring-time assist: given the natural-language description, a single
-     *     mid-tier call (D-26-2) returns up to 10 catalog-valid tool recommendations,
-     *     highest-confidence first. Reuses the description-only ``AuthorPersonaRequest``
-     *     body. Deducts the flat authoring credit (a mid-tier LLM call).
-     */
-    post: operations["recommend_tools_v1_personas_recommend_tools_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/recommend-capabilities": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/recommend-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recommend Capabilities
+         * @description Recommend a unified, provider-tagged capability set (spec 27 T10).
+         *
+         *     The D-26-10 generalisation of ``/recommend-tools``: one mid-tier call ranks
+         *     built-in tools, skills, and MCP servers together (each tagged with its
+         *     provider), capped at the combined maximum (D-27-13). Deducts the same flat
+         *     authoring credit (a mid-tier LLM call).
+         */
+        post: operations["recommend_capabilities_v1_personas_recommend_capabilities_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Recommend Capabilities
-     * @description Recommend a unified, provider-tagged capability set (spec 27 T10).
-     *
-     *     The D-26-10 generalisation of ``/recommend-tools``: one mid-tier call ranks
-     *     built-in tools, skills, and MCP servers together (each tagged with its
-     *     provider), capped at the combined maximum (D-27-13). Deducts the same flat
-     *     authoring credit (a mid-tier LLM call).
-     */
-    post: operations["recommend_capabilities_v1_personas_recommend_capabilities_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/tools": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Grant Tool
+         * @description Enable a tool on the persona's allow-list via runtime consent (spec 26 T11).
+         *
+         *     Called when the user accepts a runtime tool-gap offer (T10). Adds the tool to
+         *     the persona's ``tools`` list (persisted in the YAML column — no migration)
+         *     and records the grant as a versioned ``persona_self`` self-fact (force +
+         *     confidence ≥ 0.8 + reason, D-26-X-self-facts-consent-write-contract). Returns
+         *     the updated persona detail. Idempotent: re-granting an already-enabled tool
+         *     is a no-op that still returns 200.
+         */
+        post: operations["grant_tool_v1_personas__persona_id__tools_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Grant Tool
-     * @description Enable a tool on the persona's allow-list via runtime consent (spec 26 T11).
-     *
-     *     Called when the user accepts a runtime tool-gap offer (T10). Adds the tool to
-     *     the persona's ``tools`` list (persisted in the YAML column — no migration)
-     *     and records the grant as a versioned ``persona_self`` self-fact (force +
-     *     confidence ≥ 0.8 + reason, D-26-X-self-facts-consent-write-contract). Returns
-     *     the updated persona detail. Idempotent: re-granting an already-enabled tool
-     *     is a no-op that still returns 200.
-     */
-    post: operations["grant_tool_v1_personas__persona_id__tools_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Persona
+         * @description Get a persona's YAML + metadata (404 if not the caller's).
+         */
+        get: operations["get_persona_v1_personas__persona_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Persona
+         * @description Delete a persona + all its conversations and memory (cascade).
+         */
+        delete: operations["delete_persona_v1_personas__persona_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Persona
+         * @description Replace a persona's YAML (re-validated) and re-index its memory.
+         */
+        patch: operations["update_persona_v1_personas__persona_id__patch"];
+        trace?: never;
     };
-    /**
-     * Get Persona
-     * @description Get a persona's YAML + metadata (404 if not the caller's).
-     */
-    get: operations["get_persona_v1_personas__persona_id__get"];
-    put?: never;
-    post?: never;
-    /**
-     * Delete Persona
-     * @description Delete a persona + all its conversations and memory (cascade).
-     */
-    delete: operations["delete_persona_v1_personas__persona_id__delete"];
-    options?: never;
-    head?: never;
-    /**
-     * Update Persona
-     * @description Replace a persona's YAML (re-validated) and re-index its memory.
-     */
-    patch: operations["update_persona_v1_personas__persona_id__patch"];
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/consent": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Set Consent
+         * @description Set the persona's auto-dispatch consent (grant / decline / revoke).
+         *
+         *     Spec 21 T09 (D-21-2/7/8): only this ``user``-sourced settings write may
+         *     change consent; ``persona_self`` never can. Each transition stamps
+         *     ``consent_updated_at`` and emits an ``AuditEvent`` naming the transition.
+         */
+        patch: operations["set_consent_v1_personas__persona_id__consent_patch"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /**
-     * Set Consent
-     * @description Set the persona's auto-dispatch consent (grant / decline / revoke).
-     *
-     *     Spec 21 T09 (D-21-2/7/8): only this ``user``-sourced settings write may
-     *     change consent; ``persona_self`` never can. Each transition stamps
-     *     ``consent_updated_at`` and emits an ``AuditEvent`` naming the transition.
-     */
-    patch: operations["set_consent_v1_personas__persona_id__consent_patch"];
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/specialities": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/specialities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Persona Specialities
+         * @description List the specialities catalog with THIS persona's consent state (Spec S3, S3-D-3).
+         *
+         *     The catalog facts (tier + ``content_hash``, T1) enriched with the server-computed
+         *     ``consent_state`` per skill — the one security-authoritative bit the client cannot
+         *     derive (it needs the consent store + the current hash). Enablement (the ``skills:``
+         *     declaration) and ``unavailable`` stay client-derived from the edited draft.
+         *     RLS-scoped: a persona the caller does not own → 404.
+         */
+        get: operations["list_persona_specialities_v1_personas__persona_id__specialities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Persona Specialities
-     * @description List the specialities catalog with THIS persona's consent state (Spec S3, S3-D-3).
-     *
-     *     The catalog facts (tier + ``content_hash``, T1) enriched with the server-computed
-     *     ``consent_state`` per skill — the one security-authoritative bit the client cannot
-     *     derive (it needs the consent store + the current hash). Enablement (the ``skills:``
-     *     declaration) and ``unavailable`` stay client-derived from the edited draft.
-     *     RLS-scoped: a persona the caller does not own → 404.
-     */
-    get: operations["list_persona_specialities_v1_personas__persona_id__specialities_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/skills/{skill_name}/consent": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/skills/{skill_name}/consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Skill Consent
+         * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+         *
+         *     The client sends ONLY ``{granted}``. The ``content_hash`` consent binds to and the
+         *     trust tier are resolved SERVER-SIDE from the catalog on every request — never from
+         *     the client (forge-prevention: a stale/forged hash can't bypass the gate or the
+         *     re-gating, S1-D-5; a claimed ``vetted`` tier can't skip the gate, S1-D-3). The
+         *     request model forbids extra fields, so a client that tries to supply either → 422.
+         *     Append-only consent event + an audit row naming the transition.
+         */
+        post: operations["set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Set Skill Consent
-     * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
-     *
-     *     The client sends ONLY ``{granted}``. The ``content_hash`` consent binds to and the
-     *     trust tier are resolved SERVER-SIDE from the catalog on every request — never from
-     *     the client (forge-prevention: a stale/forged hash can't bypass the gate or the
-     *     re-gating, S1-D-5; a claimed ``vetted`` tier can't skip the gate, S1-D-3). The
-     *     request model forbids extra fields, so a client that tries to supply either → 422.
-     *     Append-only consent event + an audit row naming the transition.
-     */
-    post: operations["set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/conversations": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Conversation
+         * @description Start a new conversation against a persona.
+         */
+        post: operations["create_conversation_v1_personas__persona_id__conversations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Create Conversation
-     * @description Start a new conversation against a persona.
-     */
-    post: operations["create_conversation_v1_personas__persona_id__conversations_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Conversations
+         * @description List the caller's conversations (paginated; RLS-scoped).
+         */
+        get: operations["list_conversations_v1_conversations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Conversations
-     * @description List the caller's conversations (paginated; RLS-scoped).
-     */
-    get: operations["list_conversations_v1_conversations_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Conversation
+         * @description Get a conversation's full message history (404 if not the caller's).
+         */
+        get: operations["get_conversation_v1_conversations__conversation_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Conversation
+         * @description Delete a conversation + all its messages + workspace artefacts.
+         *
+         *     Cascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):
+         *
+         *     1. DB rows (existing): the ``conversations`` row + its ``messages`` /
+         *        ``turn_logs`` via FK cascade.
+         *     2. **Document workspace + DocumentStore chunks** (T19): every doc
+         *        attached to the conversation, via
+         *        :func:`document_service.remove_all_for_conversation` — the
+         *        cascade-helper T13 introduced specifically for this reuse.
+         *     3. **Image workspace files** (Spec 13 T12): each image referenced by
+         *        the conversation's messages. Spec 13 owns this branch; the two
+         *        cascade extensions coexist additively in this same handler per
+         *        the D-14-X-cascade-coordination locking decision.
+         *
+         *     404 if not the caller's conversation (RLS-scoped).
+         */
+        delete: operations["delete_conversation_v1_conversations__conversation_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Conversation
-     * @description Get a conversation's full message history (404 if not the caller's).
-     */
-    get: operations["get_conversation_v1_conversations__conversation_id__get"];
-    put?: never;
-    post?: never;
-    /**
-     * Delete Conversation
-     * @description Delete a conversation + all its messages + workspace artefacts.
-     *
-     *     Cascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):
-     *
-     *     1. DB rows (existing): the ``conversations`` row + its ``messages`` /
-     *        ``turn_logs`` via FK cascade.
-     *     2. **Document workspace + DocumentStore chunks** (T19): every doc
-     *        attached to the conversation, via
-     *        :func:`document_service.remove_all_for_conversation` — the
-     *        cascade-helper T13 introduced specifically for this reuse.
-     *     3. **Image workspace files** (Spec 13 T12): each image referenced by
-     *        the conversation's messages. Spec 13 owns this branch; the two
-     *        cascade extensions coexist additively in this same handler per
-     *        the D-14-X-cascade-coordination locking decision.
-     *
-     *     404 if not the caller's conversation (RLS-scoped).
-     */
-    delete: operations["delete_conversation_v1_conversations__conversation_id__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/messages": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Message
+         * @description Send a message; stream the response as SSE (§5.2, KEYSTONE 1).
+         *
+         *     Multimodal (spec 13 T20): when ``body.images`` is non-empty the route
+         *     constructs a multimodal :class:`ConversationMessage` content list
+         *     (``[TextContent, ImageContent, ...]``) and passes ``turn_has_image=True``
+         *     through to the runtime so :meth:`Router.choose` restricts to vision-capable
+         *     tiers. The text-only path (``body.images is None``) is unchanged
+         *     byte-for-byte — T03/T13 regression invariants hold.
+         */
+        post: operations["post_message_v1_conversations__conversation_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Post Message
-     * @description Send a message; stream the response as SSE (§5.2, KEYSTONE 1).
-     *
-     *     Multimodal (spec 13 T20): when ``body.images`` is non-empty the route
-     *     constructs a multimodal :class:`ConversationMessage` content list
-     *     (``[TextContent, ImageContent, ...]``) and passes ``turn_has_image=True``
-     *     through to the runtime so :meth:`Router.choose` restricts to vision-capable
-     *     tiers. The text-only path (``body.images is None``) is unchanged
-     *     byte-for-byte — T03/T13 regression invariants hold.
-     */
-    post: operations["post_message_v1_conversations__conversation_id__messages_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/active-turn": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/active-turn": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Active Turn
+         * @description The in-progress assistant turn for a conversation, for reattach-on-return (P1, T4).
+         *
+         *     The web client calls this on return to detect a live turn and seed the partial
+         *     (content + the tool/text interleave in ``stream_events``) before resubscribing
+         *     to the live tail. 404 (``TurnNotActiveError``) when no turn is in flight — the
+         *     client then reconciles via the conversation history. RLS-scoped → 404 if the
+         *     conversation isn't the caller's.
+         */
+        get: operations["read_active_turn_v1_conversations__conversation_id__active_turn_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Read Active Turn
-     * @description The in-progress assistant turn for a conversation, for reattach-on-return (P1, T4).
-     *
-     *     The web client calls this on return to detect a live turn and seed the partial
-     *     (content + the tool/text interleave in ``stream_events``) before resubscribing
-     *     to the live tail. 404 (``TurnNotActiveError``) when no turn is in flight — the
-     *     client then reconciles via the conversation history. RLS-scoped → 404 if the
-     *     conversation isn't the caller's.
-     */
-    get: operations["read_active_turn_v1_conversations__conversation_id__active_turn_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/active-turn/events": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/active-turn/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Active Turn Events
+         * @description Resubscribe to a live turn's SSE tail (reattach) — the SAME ``stream_turn``
+         *     generator the originating POST streams (P1, T4; don't fork the transport).
+         *
+         *     RLS-scoped ownership pre-check → 404 if the conversation isn't the caller's.
+         *     404 (``TurnNotActiveError``) if no live turn is registered in-process (it
+         *     finished / was interrupted / never started) — checked BEFORE the SSE response
+         *     starts, so the client gets a clean 404 (then reconciles) rather than a
+         *     half-open stream.
+         */
+        get: operations["stream_active_turn_events_v1_conversations__conversation_id__active_turn_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Stream Active Turn Events
-     * @description Resubscribe to a live turn's SSE tail (reattach) — the SAME ``stream_turn``
-     *     generator the originating POST streams (P1, T4; don't fork the transport).
-     *
-     *     RLS-scoped ownership pre-check → 404 if the conversation isn't the caller's.
-     *     404 (``TurnNotActiveError``) if no live turn is registered in-process (it
-     *     finished / was interrupted / never started) — checked BEFORE the SSE response
-     *     starts, so the client gets a clean 404 (then reconciles) rather than a
-     *     half-open stream.
-     */
-    get: operations["stream_active_turn_events_v1_conversations__conversation_id__active_turn_events_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/active-turn/cancel": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/active-turn/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Active Turn
+         * @description Explicitly cancel a live chat turn (mirrors ``/runs/{id}/cancel``; P1, T4).
+         *
+         *     Flips the turn's task cancel (``ChatTurnRegistry.request_cancel``): the worker
+         *     finalizes the partial as ``cancelled`` and does NOT bill (D-P1-billing-contract).
+         *     RLS-scoped → 404 if the conversation isn't the caller's; 404 if no live turn.
+         */
+        post: operations["cancel_active_turn_v1_conversations__conversation_id__active_turn_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Cancel Active Turn
-     * @description Explicitly cancel a live chat turn (mirrors ``/runs/{id}/cancel``; P1, T4).
-     *
-     *     Flips the turn's task cancel (``ChatTurnRegistry.request_cancel``): the worker
-     *     finalizes the partial as ``cancelled`` and does NOT bill (D-P1-billing-contract).
-     *     RLS-scoped → 404 if the conversation isn't the caller's; 404 if no live turn.
-     */
-    post: operations["cancel_active_turn_v1_conversations__conversation_id__active_turn_cancel_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/calls": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Calls
+         * @description List the caller's voice calls (newest-first, paginated; RLS-scoped).
+         */
+        get: operations["list_calls_v1_calls_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Calls
-     * @description List the caller's voice calls (newest-first, paginated; RLS-scoped).
-     */
-    get: operations["list_calls_v1_calls_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/runs": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Run
+         * @description Start an agentic run (returns the run_id immediately; runs in background).
+         */
+        post: operations["start_run_v1_personas__persona_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Start Run
-     * @description Start an agentic run (returns the run_id immediately; runs in background).
-     */
-    post: operations["start_run_v1_personas__persona_id__runs_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/runs": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Runs
+         * @description List the caller's runs, newest first (RLS-scoped). Backs the Tasks page.
+         */
+        get: operations["list_runs_v1_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Runs
-     * @description List the caller's runs, newest first (RLS-scoped). Backs the Tasks page.
-     */
-    get: operations["list_runs_v1_runs_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/runs/{run_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run
+         * @description Get a run's status + accumulated steps (RLS-scoped → 404).
+         */
+        get: operations["get_run_v1_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Run
-     * @description Get a run's status + accumulated steps (RLS-scoped → 404).
-     */
-    get: operations["get_run_v1_runs__run_id__get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/runs/{run_id}/events": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/runs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Events
+         * @description Stream the run's events as SSE (live, from the in-process event bus).
+         */
+        get: operations["stream_events_v1_runs__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Stream Events
-     * @description Stream the run's events as SSE (live, from the in-process event bus).
-     */
-    get: operations["stream_events_v1_runs__run_id__events_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/runs/{run_id}/respond": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/runs/{run_id}/respond": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Respond
+         * @description Deliver an answer to a run awaiting an ask-user question.
+         */
+        post: operations["respond_v1_runs__run_id__respond_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Respond
-     * @description Deliver an answer to a run awaiting an ask-user question.
-     */
-    post: operations["respond_v1_runs__run_id__respond_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/runs/{run_id}/cancel": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel
+         * @description Cancel a running run (stops at the next step boundary → cancelled).
+         */
+        post: operations["cancel_v1_runs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Cancel
-     * @description Cancel a running run (stops at the next step boundary → cancelled).
-     */
-    post: operations["cancel_v1_runs__run_id__cancel_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/credits": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/credits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Credits
+         * @description The caller's current credit balance (stub counter; §5.5).
+         *
+         *     ``low_balance`` is surfaced inline so the web app shows the under-limit
+         *     warning without a second round-trip (D-11-12).
+         */
+        get: operations["get_credits_v1_me_credits_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Credits
-     * @description The caller's current credit balance (stub counter; §5.5).
-     *
-     *     ``low_balance`` is surfaced inline so the web app shows the under-limit
-     *     warning without a second round-trip (D-11-12).
-     */
-    get: operations["get_credits_v1_me_credits_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/usage": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Usage
+         * @description The caller's per-turn token usage (§5.5; turn_logs, RLS-scoped).
+         */
+        get: operations["get_usage_v1_me_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Usage
-     * @description The caller's per-turn token usage (§5.5; turn_logs, RLS-scoped).
-     */
-    get: operations["get_usage_v1_me_usage_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/profile": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Profile
+         * @description The caller's own profile — identity + optional name (Spec K6, K6-D-1).
+         *
+         *     Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
+         *     The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
+         *     means a genuine invariant break rather than a first-time user.
+         */
+        get: operations["get_profile_v1_me_profile_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Profile
+         * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH — omitted = unchanged.
+         *
+         *     Only the fields the client actually sent are written (``exclude_unset``): a
+         *     string sets, an explicit ``null`` clears, an omitted field is left untouched.
+         *     Names are normalised (control-char strip, whitespace-only → unset) in the
+         *     service (K6-D-8). A provided ``timezone`` is validated as an IANA zone here
+         *     (Spec A8, A8-D-9) — an unknown zone is a fail-fast 422, never stored to
+         *     mis-fire in the tick; ``null`` clears it (→ falls back to the config default).
+         *     Scoped to the caller's own row — never another user's.
+         */
+        patch: operations["update_profile_v1_me_profile_patch"];
+        trace?: never;
     };
-    /**
-     * Get Profile
-     * @description The caller's own profile — identity + optional name (Spec K6, K6-D-1).
-     *
-     *     Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
-     *     The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
-     *     means a genuine invariant break rather than a first-time user.
-     */
-    get: operations["get_profile_v1_me_profile_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /**
-     * Update Profile
-     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH — omitted = unchanged.
-     *
-     *     Only the fields the client actually sent are written (``exclude_unset``): a
-     *     string sets, an explicit ``null`` clears, an omitted field is left untouched.
-     *     Names are normalised (control-char strip, whitespace-only → unset) in the
-     *     service (K6-D-8). A provided ``timezone`` is validated as an IANA zone here
-     *     (Spec A8, A8-D-9) — an unknown zone is a fail-fast 422, never stored to
-     *     mis-fire in the tick; ``null`` clears it (→ falls back to the config default).
-     *     Scoped to the caller's own row — never another user's.
-     */
-    patch: operations["update_profile_v1_me_profile_patch"];
-    trace?: never;
-  };
-  "/v1/me/schedule/occurrences": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/schedule/occurrences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Schedule Occurrences
+         * @description The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).
+         *
+         *     Computed from the engine's own recurrence path (never a client reimplementation), RLS-scoped
+         *     to the caller. The window is server-capped (horizon + count); the response's ``truncated``
+         *     marker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.
+         */
+        get: operations["get_schedule_occurrences_v1_me_schedule_occurrences_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Schedule Occurrences
-     * @description The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).
-     *
-     *     Computed from the engine's own recurrence path (never a client reimplementation), RLS-scoped
-     *     to the caller. The window is server-capped (horizon + count); the response's ``truncated``
-     *     marker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.
-     */
-    get: operations["get_schedule_occurrences_v1_me_schedule_occurrences_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/schedule/{schedule_id}/reschedule/preview": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/schedule/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Schedule Create
+         * @description Preview a schedule CREATE — the engine's next-fire + full clause + quiet-hours warn.
+         *
+         *     No write (Spec A10, criterion 2/7): the create dialog shows this as the confirm echo
+         *     before the user confirms — the SAME shape (and the same shared engine preview,
+         *     ``preview_schedule_cadence``) as A8's reschedule preview; the twins never fabricate a
+         *     time the DST gap/fold policy would shift. The body is the bare cadence envelope
+         *     (pattern XOR one_time_at + tz) — a preview needs no executor/subject/key.
+         */
+        post: operations["preview_schedule_create_v1_me_schedule_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Preview Schedule Reschedule
-     * @description Preview a calendar reschedule — the engine's next-fire + full clause + quiet-hours warn.
-     *
-     *     No write (Spec A8, T9, bars 3/5): the picker shows this as the confirm echo (the SAME full
-     *     clause chat re-echoes) before the user confirms. The next fire is the ENGINE's, so the picker
-     *     never fabricates a time the DST gap/fold policy would shift.
-     */
-    post: operations["preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/schedule/{schedule_id}/reschedule": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Schedule
+         * @description Create a schedule + its backing task — the user's direct door (Spec A10, A10-D-1/2/6).
+         *
+         *     Deterministic and model-free: picker-state in (no raw RRULE), A8's ``ScheduleStore``
+         *     CAS door + the A2 task path underneath (one mechanism, A10-D-9). The named persona is
+         *     the executor; the user is the originator. Idempotent on the client-minted
+         *     ``idempotency_key`` (a double-click converges; two deliberate submits stay distinct).
+         *     422 on a never-firing cadence; 404 on an executor persona that isn't the caller's.
+         */
+        post: operations["create_schedule_v1_me_schedule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Apply Schedule Reschedule
-     * @description Apply a calendar reschedule through the SAME CAS door as chat (Spec A8, T9, bar 4).
-     *
-     *     ``actor=user_via_ui``; the client sends picker-state (no raw RRULE — the server maps it). RLS-
-     *     scoped to the caller. Returns the applied clause + the engine's next fire (the twin's confirm).
-     */
-    post: operations["apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/notifications": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/schedule/{schedule_id}/reschedule/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Schedule Reschedule
+         * @description Preview a calendar reschedule — the engine's next-fire + full clause + quiet-hours warn.
+         *
+         *     No write (Spec A8, T9, bars 3/5): the picker shows this as the confirm echo (the SAME full
+         *     clause chat re-echoes) before the user confirms. The next fire is the ENGINE's, so the picker
+         *     never fabricates a time the DST gap/fold policy would shift.
+         */
+        post: operations["preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Notifications
-     * @description The caller's durable bell feed (Spec P6, RLS-scoped, newest-first, paginated).
-     */
-    get: operations["get_notifications_v1_me_notifications_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/notifications/read-all": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/schedule/{schedule_id}/reschedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Schedule Reschedule
+         * @description Apply a calendar reschedule through the SAME CAS door as chat (Spec A8, T9, bar 4).
+         *
+         *     ``actor=user_via_ui``; the client sends picker-state (no raw RRULE — the server maps it). RLS-
+         *     scoped to the caller. Returns the applied clause + the engine's next fire (the twin's confirm).
+         */
+        post: operations["apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Mark All Notifications Read
-     * @description Mark every unread notification read (bell-open, Spec P6).
-     */
-    post: operations["mark_all_notifications_read_v1_me_notifications_read_all_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/notifications/{notification_id}/read": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Notifications
+         * @description The caller's durable bell feed (Spec P6, RLS-scoped, newest-first, paginated).
+         */
+        get: operations["get_notifications_v1_me_notifications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Mark Notification Read
-     * @description Mark one notification read (deep-link click, Spec P6). 0 if not owned/absent.
-     */
-    post: operations["mark_notification_read_v1_me_notifications__notification_id__read_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/healthz": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/notifications/read-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark All Notifications Read
+         * @description Mark every unread notification read (bell-open, Spec P6).
+         */
+        post: operations["mark_all_notifications_read_v1_me_notifications_read_all_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Healthz
-     * @description Liveness + DB connectivity check.
-     */
-    get: operations["healthz_healthz_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/livez": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/notifications/{notification_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Notification Read
+         * @description Mark one notification read (deep-link click, Spec P6). 0 if not owned/absent.
+         */
+        post: operations["mark_notification_read_v1_me_notifications__notification_id__read_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Livez
-     * @description Liveness probe — process is up; no dependency checks.
-     */
-    get: operations["livez_livez_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/tools": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/me/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Events
+         * @description The persistent, RLS-scoped live channel (Spec A11) — the out-of-turn SSE feed
+         *     that makes a background delivery surface live (the bell + the open chat, no
+         *     reload; closes R4-C1-23).
+         *
+         *     The me-scope is the **verified token's** user id (``get_current_user``), never a
+         *     param. One connection per open tab, heartbeat-kept, ``Last-Event-ID``-resumable
+         *     (A11-D-3). Fail-soft: an unwired channel returns 503 so the web app degrades to
+         *     P6's poll (never a broken shell); the active-run token stream is untouched (this
+         *     is the out-of-turn channel).
+         */
+        get: operations["stream_events_v1_me_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Tools
-     * @description List the available tools (name + description).
-     */
-    get: operations["list_tools_v1_tools_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/skills": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/healthz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Healthz
+         * @description Liveness + DB connectivity check.
+         */
+        get: operations["healthz_healthz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Skills
-     * @description List the available skills (name + description).
-     */
-    get: operations["list_skills_v1_skills_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/specialities": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Livez
+         * @description Liveness probe — process is up; no dependency checks.
+         */
+        get: operations["livez_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Specialities
-     * @description List the available specialities (skills) with trust tier + content hash (Spec S3).
-     *
-     *     The catalog-level surface — the builtin floor + S2's synced external tiers — carrying
-     *     each skill's source-assigned ``trust`` (S1-D-3), whether it ``requires_consent``
-     *     (S1-D-4), and its ``content_hash`` (the version consent binds to, S1-D-5). The
-     *     new-persona flow reads this (no persona context yet); the edit flow reads the
-     *     persona-scoped variant that adds the per-persona declared + consent state.
-     */
-    get: operations["list_specialities_v1_specialities_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/mcp-catalog": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tools
+         * @description List the available tools (name + description).
+         */
+        get: operations["list_tools_v1_tools_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Mcp Catalog
-     * @description List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1).
-     *
-     *     The mirror's display metadata + credential schema ride additive fields; the
-     *     secret schema is display-only (no value, D-N1-5).
-     */
-    get: operations["list_mcp_catalog_v1_mcp_catalog_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/documents": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Skills
+         * @description List the available skills (name + description).
+         */
+        get: operations["list_skills_v1_skills_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Documents
-     * @description List documents attached to a conversation (RLS-scoped; 404 if not the caller's).
-     */
-    get: operations["list_documents_v1_conversations__conversation_id__documents_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/conversations/{conversation_id}/documents/{doc_ref}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/specialities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Specialities
+         * @description List the available specialities (skills) with trust tier + content hash (Spec S3).
+         *
+         *     The catalog-level surface — the builtin floor + S2's synced external tiers — carrying
+         *     each skill's source-assigned ``trust`` (S1-D-3), whether it ``requires_consent``
+         *     (S1-D-4), and its ``content_hash`` (the version consent binds to, S1-D-5). The
+         *     new-persona flow reads this (no persona context yet); the edit flow reads the
+         *     persona-scoped variant that adds the per-persona declared + consent state.
+         */
+        get: operations["list_specialities_v1_specialities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    /**
-     * Delete Document
-     * @description Remove a document from a conversation (workspace files + chunks).
-     *
-     *     Idempotent — removing a non-existent ``doc_ref`` is a no-op (204).
-     */
-    delete: operations["delete_document_v1_conversations__conversation_id__documents__doc_ref__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/uploads": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mcp Catalog
+         * @description List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1).
+         *
+         *     The mirror's display metadata + credential schema ride additive fields; the
+         *     secret schema is display-only (no value, D-N1-5).
+         */
+        get: operations["list_mcp_catalog_v1_mcp_catalog_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Create Upload
-     * @description Validate + store an upload under the caller's persona.
-     *
-     *     Dispatches by content-type per CSA-2 + D-14-X-uploads-coordination:
-     *
-     *     - ``image/*`` (PNG / JPEG / WebP / GIF) → :func:`image_service.upload`
-     *       (Spec 13). Returns ``{"workspace_path", "media_type", "size_bytes"}``.
-     *     - **Document MIME types** (PDF / DOCX / XLSX / CSV / TXT / MD / code)
-     *       → :func:`document_service.upload` (Spec 14). Requires a
-     *       ``conversation_id`` form field (documents are conversation-scoped per
-     *       Dominant Concern #1; the conversation existence + ownership are
-     *       verified via :func:`chat_service.get_conversation`). Returns the
-     *       :class:`document_service.DocumentRef` as JSON.
-     *     - Anything else → 415 Unsupported Media Type.
-     *
-     *     Cross-tenant persona id → 404 (persona pre-flight); cross-tenant
-     *     conversation_id → 404 (chat_service.get_conversation under RLS).
-     *     Validation errors → 422 with structured body. Scanned PDFs raise
-     *     :exc:`VisionHandoffRequiredError` → 422 ``"vision_handoff_required"``
-     *     (T13 / T21 interim contract — Spec 13 fail-loud at Spec 14's interim
-     *     state).
-     */
-    post: operations["create_upload_v1_personas__persona_id__uploads_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/uploads/{ref}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Documents
+         * @description List documents attached to a conversation (RLS-scoped; 404 if not the caller's).
+         */
+        get: operations["list_documents_v1_conversations__conversation_id__documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Upload
-     * @description Read an uploaded image by its workspace-relative ref.
-     *
-     *     Cross-tenant access returns 404 by design (existence-disclosure-safe).
-     *     Path-traversal attempts (``..``) reject as 404 via the sandbox resolver.
-     */
-    get: operations["get_upload_v1_personas__persona_id__uploads__ref__get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/imagegen": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/conversations/{conversation_id}/documents/{doc_ref}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Document
+         * @description Remove a document from a conversation (workspace files + chunks).
+         *
+         *     Idempotent — removing a non-existent ``doc_ref`` is a no-op (204).
+         */
+        delete: operations["delete_document_v1_conversations__conversation_id__documents__doc_ref__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Post Imagegen
-     * @description Generate one or more images for a persona; persist to workspace; audit.
-     *
-     *     Returns 201 + an ImageRef-shape payload on success. The bytes land at
-     *     ``{workspace_root}/{user_id}/{persona_id}/uploads/{blake2b}.{ext}``
-     *     (D-13-4 layout reused per D-15-X-workspace-coordination) and are
-     *     fetched via the existing ``GET /v1/personas/:id/uploads/:ref`` route.
-     *
-     *     Args:
-     *         persona_id: Persona id from the path; pre-flight RLS-checked so
-     *             cross-tenant ids surface as 404.
-     *         body: Validated :class:`ImageGenRequest` (Pydantic 422 on shape
-     *             violations before we get here).
-     *         request: FastAPI request — used for ``app.state`` access to the
-     *             RLS engine, the workspace root, and the composed image backend.
-     *         user: Authenticated principal from the bearer token.
-     *
-     *     Returns:
-     *         ImageRef-shape JSON payload (mirrors the Spec 13 upload response
-     *         but as a list since ``count`` can be 2).
-     *
-     *     Raises:
-     *         ImageGenUnavailableError: The provider is not configured at all
-     *             (no ``PERSONA_IMAGEGEN_API_KEY`` at startup) → 503 via the
-     *             app exception handler.
-     *         HTTPException: 502 for upstream provider failures; 422 for
-     *             content rejection (provider moderation or hard-line filter);
-     *             403 for ``ToolNotAllowedError``; 404 for cross-tenant; 402 for
-     *             credits exhaustion; 429 for concurrency cap or rate limit.
-     */
-    post: operations["post_imagegen_v1_personas__persona_id__imagegen_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/artifacts": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Upload
+         * @description Validate + store an upload under the caller's persona.
+         *
+         *     Dispatches by content-type per CSA-2 + D-14-X-uploads-coordination:
+         *
+         *     - ``image/*`` (PNG / JPEG / WebP / GIF) → :func:`image_service.upload`
+         *       (Spec 13). Returns ``{"workspace_path", "media_type", "size_bytes"}``.
+         *     - **Document MIME types** (PDF / DOCX / XLSX / CSV / TXT / MD / code)
+         *       → :func:`document_service.upload` (Spec 14). Requires a
+         *       ``conversation_id`` form field (documents are conversation-scoped per
+         *       Dominant Concern #1; the conversation existence + ownership are
+         *       verified via :func:`chat_service.get_conversation`). Returns the
+         *       :class:`document_service.DocumentRef` as JSON.
+         *     - Anything else → 415 Unsupported Media Type.
+         *
+         *     Cross-tenant persona id → 404 (persona pre-flight); cross-tenant
+         *     conversation_id → 404 (chat_service.get_conversation under RLS).
+         *     Validation errors → 422 with structured body. Scanned PDFs raise
+         *     :exc:`VisionHandoffRequiredError` → 422 ``"vision_handoff_required"``
+         *     (T13 / T21 interim contract — Spec 13 fail-loud at Spec 14's interim
+         *     state).
+         */
+        post: operations["create_upload_v1_personas__persona_id__uploads_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Artifacts
-     * @description List the persona's workspace artifacts (D-F5-1).
-     *
-     *     - Walks ``workspace_root/<owner_id>/<persona_id>/**`` for non-sidecar
-     *       files; reads ``.meta.json`` sidecars where present.
-     *     - Filters by source / type / conversation_id / q (all optional).
-     *     - Sorts by ``created_at`` DESC, paginates by ``offset``/``limit``.
-     *     - ``limit`` is hard-capped at 200 via Pydantic ``Query(le=200)`` —
-     *       requesting more returns ``422`` with a structured error (NOT silent
-     *       truncation), per D-F5-X-artifact-list-pagination.
-     *
-     *     Cross-tenant persona ids return 404 via the pre-flight RLS check.
-     */
-    get: operations["list_artifacts_v1_personas__persona_id__artifacts_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/artifacts/{ref}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/uploads/{ref}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Upload
+         * @description Read an uploaded image by its workspace-relative ref.
+         *
+         *     Cross-tenant access returns 404 by design (existence-disclosure-safe).
+         *     Path-traversal attempts (``..``) reject as 404 via the sandbox resolver.
+         */
+        get: operations["get_upload_v1_personas__persona_id__uploads__ref__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    /**
-     * Delete Artifact
-     * @description Delete a workspace artifact (bytes + sidecar) per D-F5-X-artifact-delete-shape.
-     *
-     *     Atomic invariant: bytes deleted BEFORE sidecar. A failure at the sidecar
-     *     step surfaces 500 with structured detail so the operator can investigate;
-     *     the bytes are already gone (ghost-sidecar state is recoverable).
-     *
-     *     Cross-tenant persona ids return 404 via the pre-flight RLS check.
-     */
-    delete: operations["delete_artifact_v1_personas__persona_id__artifacts__ref__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/mcp-servers": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/imagegen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Imagegen
+         * @description Generate one or more images for a persona; persist to workspace; audit.
+         *
+         *     Returns 201 + an ImageRef-shape payload on success. The bytes land at
+         *     ``{workspace_root}/{user_id}/{persona_id}/uploads/{blake2b}.{ext}``
+         *     (D-13-4 layout reused per D-15-X-workspace-coordination) and are
+         *     fetched via the existing ``GET /v1/personas/:id/uploads/:ref`` route.
+         *
+         *     Args:
+         *         persona_id: Persona id from the path; pre-flight RLS-checked so
+         *             cross-tenant ids surface as 404.
+         *         body: Validated :class:`ImageGenRequest` (Pydantic 422 on shape
+         *             violations before we get here).
+         *         request: FastAPI request — used for ``app.state`` access to the
+         *             RLS engine, the workspace root, and the composed image backend.
+         *         user: Authenticated principal from the bearer token.
+         *
+         *     Returns:
+         *         ImageRef-shape JSON payload (mirrors the Spec 13 upload response
+         *         but as a list since ``count`` can be 2).
+         *
+         *     Raises:
+         *         ImageGenUnavailableError: The provider is not configured at all
+         *             (no ``PERSONA_IMAGEGEN_API_KEY`` at startup) → 503 via the
+         *             app exception handler.
+         *         HTTPException: 502 for upstream provider failures; 422 for
+         *             content rejection (provider moderation or hard-line filter);
+         *             403 for ``ToolNotAllowedError``; 404 for cross-tenant; 402 for
+         *             credits exhaustion; 429 for concurrency cap or rate limit.
+         */
+        post: operations["post_imagegen_v1_personas__persona_id__imagegen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Mcp Servers
-     * @description List the caller's BYO MCP servers (credential redacted).
-     */
-    get: operations["list_mcp_servers_v1_mcp_servers_get"];
-    put?: never;
-    /**
-     * Create Mcp Server
-     * @description Add a bring-your-own MCP server (SSRF-validated; credential encrypted).
-     */
-    post: operations["create_mcp_server_v1_mcp_servers_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/mcp-servers/{server_id}/oauth/authorize": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Artifacts
+         * @description List the persona's workspace artifacts (D-F5-1).
+         *
+         *     - Walks ``workspace_root/<owner_id>/<persona_id>/**`` for non-sidecar
+         *       files; reads ``.meta.json`` sidecars where present.
+         *     - Filters by source / type / conversation_id / q (all optional).
+         *     - Sorts by ``created_at`` DESC, paginates by ``offset``/``limit``.
+         *     - ``limit`` is hard-capped at 200 via Pydantic ``Query(le=200)`` —
+         *       requesting more returns ``422`` with a structured error (NOT silent
+         *       truncation), per D-F5-X-artifact-list-pagination.
+         *
+         *     Cross-tenant persona ids return 404 via the pre-flight RLS check.
+         */
+        get: operations["list_artifacts_v1_personas__persona_id__artifacts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Start Mcp Oauth
-     * @description Begin the OAuth flow for a BYO MCP server (Spec R8, T4).
-     *
-     *     RLS-scoped (the server must be the caller's → 404). Mints a server-side
-     *     state + PKCE pair and returns the provider authorize URL (challenge + opaque
-     *     state on it — no secret). ``redirect_after`` is stored against the state.
-     */
-    post: operations["start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/mcp-servers/oauth/callback": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/artifacts/{ref}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Artifact
+         * @description Delete a workspace artifact (bytes + sidecar) per D-F5-X-artifact-delete-shape.
+         *
+         *     Atomic invariant: bytes deleted BEFORE sidecar. A failure at the sidecar
+         *     step surfaces 500 with structured detail so the operator can investigate;
+         *     the bytes are already gone (ghost-sidecar state is recoverable).
+         *
+         *     Cross-tenant persona ids return 404 via the pre-flight RLS check.
+         */
+        delete: operations["delete_artifact_v1_personas__persona_id__artifacts__ref__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Complete Mcp Oauth
-     * @description Complete the OAuth flow (Spec R8, T5): consume state, exchange code, store tokens.
-     *
-     *     The authenticated web callback relays ``state`` + ``code``. ``consume_state`` runs
-     *     RLS-scoped to the caller (a stolen/foreign/expired state → fail-closed 400); the
-     *     code is exchanged on the back channel and the tokens are persisted encrypted. No
-     *     token is ever returned. Fail-closed on any error — the server stays not connected.
-     */
-    post: operations["complete_mcp_oauth_v1_mcp_servers_oauth_callback_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/mcp-servers/{server_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mcp Servers
+         * @description List the caller's BYO MCP servers (credential redacted).
+         */
+        get: operations["list_mcp_servers_v1_mcp_servers_get"];
+        put?: never;
+        /**
+         * Create Mcp Server
+         * @description Add a bring-your-own MCP server (SSRF-validated; credential encrypted).
+         */
+        post: operations["create_mcp_server_v1_mcp_servers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Mcp Server
-     * @description Get one BYO MCP server (RLS-scoped → 404).
-     */
-    get: operations["get_mcp_server_v1_mcp_servers__server_id__get"];
-    put?: never;
-    post?: never;
-    /**
-     * Delete Mcp Server
-     * @description Delete a BYO MCP server (assignments cascade; RLS-scoped → 404).
-     */
-    delete: operations["delete_mcp_server_v1_mcp_servers__server_id__delete"];
-    options?: never;
-    head?: never;
-    /**
-     * Update Mcp Server
-     * @description Patch a BYO MCP server (re-validates a new URL; re-encrypts credentials).
-     */
-    patch: operations["update_mcp_server_v1_mcp_servers__server_id__patch"];
-    trace?: never;
-  };
-  "/v1/mcp-servers/{server_id}/test": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-servers/{server_id}/oauth/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Mcp Oauth
+         * @description Begin the OAuth flow for a BYO MCP server (Spec R8, T4).
+         *
+         *     RLS-scoped (the server must be the caller's → 404). Mints a server-side
+         *     state + PKCE pair and returns the provider authorize URL (challenge + opaque
+         *     state on it — no secret). ``redirect_after`` is stored against the state.
+         */
+        post: operations["start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Check Mcp Server Connection
-     * @description Test-connect to the server (SSRF-pinned) and discover its tools (D-30-5).
-     */
-    post: operations["check_mcp_server_connection_v1_mcp_servers__server_id__test_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/mcp-servers": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-servers/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete Mcp Oauth
+         * @description Complete the OAuth flow (Spec R8, T5): consume state, exchange code, store tokens.
+         *
+         *     The authenticated web callback relays ``state`` + ``code``. ``consume_state`` runs
+         *     RLS-scoped to the caller (a stolen/foreign/expired state → fail-closed 400); the
+         *     code is exchanged on the back channel and the tokens are persisted encrypted. No
+         *     token is ever returned. Fail-closed on any error — the server stays not connected.
+         */
+        post: operations["complete_mcp_oauth_v1_mcp_servers_oauth_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Persona Mcp Servers
-     * @description List the BYO MCP servers assigned to a persona (RLS-scoped).
-     */
-    get: operations["list_persona_mcp_servers_v1_personas__persona_id__mcp_servers_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/mcp-servers/{server_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-servers/{server_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Mcp Server
+         * @description Get one BYO MCP server (RLS-scoped → 404).
+         */
+        get: operations["get_mcp_server_v1_mcp_servers__server_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Mcp Server
+         * @description Delete a BYO MCP server (assignments cascade; RLS-scoped → 404).
+         */
+        delete: operations["delete_mcp_server_v1_mcp_servers__server_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Mcp Server
+         * @description Patch a BYO MCP server (re-validates a new URL; re-encrypts credentials).
+         */
+        patch: operations["update_mcp_server_v1_mcp_servers__server_id__patch"];
+        trace?: never;
     };
-    get?: never;
-    /**
-     * Assign Mcp Server
-     * @description Assign a BYO MCP server to a persona (D-30-6; idempotent; RLS both ends).
-     */
-    put: operations["assign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__put"];
-    post?: never;
-    /**
-     * Unassign Mcp Server
-     * @description Remove a persona↔server assignment (idempotent; RLS-scoped).
-     */
-    delete: operations["unassign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/personas/{persona_id}/adopted-apps": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/mcp-servers/{server_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Mcp Server Connection
+         * @description Test-connect to the server (SSRF-pinned) and discover its tools (D-30-5).
+         */
+        post: operations["check_mcp_server_connection_v1_mcp_servers__server_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Adopt Catalog App
-     * @description Self-adopt a catalog app for a persona (Spec N4, B2-③).
-     *
-     *     Owner-scoped (the persona must be the caller's → 404) and vetted (N4-D-6 → 403),
-     *     both BEFORE any write. The connection url/auth are derived from the catalog entry
-     *     (N4-D-10); the caller supplies only ``credential`` (a ``repr=False`` field, encrypted
-     *     at rest, never returned/logged). The audit records name + provenance only.
-     */
-    post: operations["adopt_catalog_app_v1_personas__persona_id__adopted_apps_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/memory/graph": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Persona Mcp Servers
+         * @description List the BYO MCP servers assigned to a persona (RLS-scoped).
+         */
+        get: operations["list_persona_mcp_servers_v1_personas__persona_id__mcp_servers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Graph Window
-     * @description A windowed slice of the caller's graph — the seed, or a focus neighbourhood (K5-D-2).
-     */
-    get: operations["get_graph_window_v1_memory_graph_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/memory/nodes/{node_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/mcp-connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Persona Mcp Connections
+         * @description Per-assigned-server connection status for a persona (Spec N6, N6-D-6; R4-C1-21).
+         *
+         *     Surfaces "assigned but not connected" so the UI shows it distinctly from "working".
+         *     One RLS-scoped read path (``persona_app``); no secret. Image-runtime servers report
+         *     through their per-tenant runtime state; remote/BYO servers report connected (unaffected).
+         */
+        get: operations["list_persona_mcp_connections_v1_personas__persona_id__mcp_connections_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get Node Detail
-     * @description A node's full detail: content, provenance, evolution, typed links (criterion 3).
-     */
-    get: operations["get_node_detail_v1_memory_nodes__node_id__get"];
-    put?: never;
-    post?: never;
-    /**
-     * Delete Node
-     * @description Delete a node — gone from Postgres + index + every persona's retrieval (criterion 7).
-     *
-     *     The trust-critical action (K5 §7). 204 on success; 404 when the node is not the
-     *     caller's (existence-disclosure-safe — never reveals another tenant's node exists).
-     */
-    delete: operations["delete_node_v1_memory_nodes__node_id__delete"];
-    options?: never;
-    head?: never;
-    /**
-     * Correct Node
-     * @description Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
-     *
-     *     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
-     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
-     */
-    patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
-    trace?: never;
-  };
-  "/v1/memory/search": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/mcp-servers/{server_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Assign Mcp Server
+         * @description Assign a BYO MCP server to a persona (D-30-6; idempotent; RLS both ends).
+         */
+        put: operations["assign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__put"];
+        post?: never;
+        /**
+         * Unassign Mcp Server
+         * @description Remove a persona↔server assignment (idempotent; RLS-scoped).
+         */
+        delete: operations["unassign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Search Memory
-     * @description Search-to-navigate over the caller's graph — K1 hybrid retrieval (criterion 5).
-     */
-    get: operations["search_memory_v1_memory_search_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/connectors": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/personas/{persona_id}/adopted-apps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt Catalog App
+         * @description Self-adopt a catalog app for a persona (Spec N4, B2-③).
+         *
+         *     Owner-scoped (the persona must be the caller's → 404) and vetted (N4-D-6 → 403),
+         *     both BEFORE any write. The connection url/auth are derived from the catalog entry
+         *     (N4-D-10); the caller supplies only ``credential`` (a ``repr=False`` field, encrypted
+         *     at rest, never returned/logged). The audit records name + provenance only.
+         */
+        post: operations["adopt_catalog_app_v1_personas__persona_id__adopted_apps_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List Connectors
-     * @description The caller's active platform connections (Spec C6, RLS-scoped).
-     *
-     *     Only the caller's OWN active bindings (criterion 11); absence of a platform
-     *     from the list ⇒ not connected. The web merges this against its static
-     *     six-platform catalogue to render connected / not-connected state + the
-     *     connected identity.
-     */
-    get: operations["list_connectors_v1_me_connectors_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/connectors/{platform}/{platform_identity}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/memory/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Graph Window
+         * @description A windowed slice of the caller's graph — the seed, or a focus neighbourhood (K5-D-2).
+         */
+        get: operations["get_graph_window_v1_memory_graph_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    /**
-     * Disconnect Connector
-     * @description Sever the caller's binding for ``(platform, platform_identity)`` (Spec C6).
-     *
-     *     Drives C1's real unlink (``revoke_identity``) under RLS — the platform stops
-     *     reaching the caller's personas (criterion 9), not just a greyed UI chip.
-     *     Idempotent: ``severed=false`` when there was no active binding of the caller's
-     *     to sever (already disconnected / never existed / not owned — RLS makes a
-     *     foreign binding a no-op, never a leaking 404). ``platform_identity`` arrives
-     *     URL-encoded (phone ``+E164`` / email / Slack ``team:user``); FastAPI decodes it.
-     */
-    delete: operations["disconnect_connector_v1_me_connectors__platform___platform_identity__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/v1/me/connectors/{platform}/link": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/memory/nodes/{node_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Node Detail
+         * @description A node's full detail: content, provenance, evolution, typed links (criterion 3).
+         */
+        get: operations["get_node_detail_v1_memory_nodes__node_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Node
+         * @description Delete a node — gone from Postgres + index + every persona's retrieval (criterion 7).
+         *
+         *     The trust-critical action (K5 §7). 204 on success; 404 when the node is not the
+         *     caller's (existence-disclosure-safe — never reveals another tenant's node exists).
+         */
+        delete: operations["delete_node_v1_memory_nodes__node_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Correct Node
+         * @description Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
+         *
+         *     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
+         *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
+         */
+        patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Initiate Link
-     * @description Initiate a platform link — proxy to the connector service (Spec C6, C6-D-0).
-     *
-     *     The web's single front-door for link initiation. persona-api does not issue tokens
-     *     (no linking logic here); it forwards to the separate connector service, which owns the
-     *     per-platform carriers + platform secrets. **The owner crosses the boundary as the
-     *     verified Clerk bearer, never a parameter** — the connector service re-verifies the same
-     *     token and derives the owner from its ``sub``, so no ``owner_id`` is spoofable (an
-     *     attacker hitting the connector service directly can still only mint for their own sub).
-     *
-     *     Fails soft: an unset ``connector_service_url``, an unreachable service, a timeout, or a
-     *     non-2xx upstream all raise :class:`ConnectorServiceUnavailableError` (503) so the surface
-     *     shows "temporarily unavailable" — never a dead spinner. Returns exactly the normalized
-     *     :class:`ConnectorLinkArtifact` (``extra="forbid"``) so no upstream field leaks.
-     */
-    post: operations["initiate_link_v1_me_connectors__platform__link_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
+    "/v1/memory/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Memory
+         * @description Search-to-navigate over the caller's graph — K1 hybrid retrieval (criterion 5).
+         */
+        get: operations["search_memory_v1_memory_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Connectors
+         * @description The caller's active platform connections (Spec C6, RLS-scoped).
+         *
+         *     Only the caller's OWN active bindings (criterion 11); absence of a platform
+         *     from the list ⇒ not connected. The web merges this against its static
+         *     six-platform catalogue to render connected / not-connected state + the
+         *     connected identity.
+         */
+        get: operations["list_connectors_v1_me_connectors_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/connectors/{platform}/{platform_identity}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect Connector
+         * @description Sever the caller's binding for ``(platform, platform_identity)`` (Spec C6).
+         *
+         *     Drives C1's real unlink (``revoke_identity``) under RLS — the platform stops
+         *     reaching the caller's personas (criterion 9), not just a greyed UI chip.
+         *     Idempotent: ``severed=false`` when there was no active binding of the caller's
+         *     to sever (already disconnected / never existed / not owned — RLS makes a
+         *     foreign binding a no-op, never a leaking 404). ``platform_identity`` arrives
+         *     URL-encoded (phone ``+E164`` / email / Slack ``team:user``); FastAPI decodes it.
+         */
+        delete: operations["disconnect_connector_v1_me_connectors__platform___platform_identity__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/connectors/{platform}/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Initiate Link
+         * @description Initiate a platform link — proxy to the connector service (Spec C6, C6-D-0).
+         *
+         *     The web's single front-door for link initiation. persona-api does not issue tokens
+         *     (no linking logic here); it forwards to the separate connector service, which owns the
+         *     per-platform carriers + platform secrets. **The owner crosses the boundary as the
+         *     verified Clerk bearer, never a parameter** — the connector service re-verifies the same
+         *     token and derives the owner from its ``sub``, so no ``owner_id`` is spoofable (an
+         *     attacker hitting the connector service directly can still only mint for their own sub).
+         *
+         *     Fails soft: an unset ``connector_service_url``, an unreachable service, a timeout, or a
+         *     non-2xx upstream all raise :class:`ConnectorServiceUnavailableError` (503) so the surface
+         *     shows "temporarily unavailable" — never a dead spinner. Returns exactly the normalized
+         *     :class:`ConnectorLinkArtifact` (``extra="forbid"``) so no upstream field leaks.
+         */
+        post: operations["initiate_link_v1_me_connectors__platform__link_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    /**
-     * ActiveTurnResponse
-     * @description The in-progress assistant turn for a conversation (Spec P1 reattach surface).
-     *
-     *     Returned by ``GET /conversations/{id}/active-turn`` so the web client detects
-     *     a live turn on return and seeds the partial — the accumulated ``content`` plus
-     *     the tool/text interleave in ``stream_events`` (the persisted checkpoint shape)
-     *     — before resubscribing to the live tail at ``…/active-turn/events``. A 404
-     *     means there is no active turn (all messages are terminal). ``stream_events``
-     *     is the DB checkpoint shape, NOT the core ``ConversationMessage`` model (the
-     *     byte-for-byte dump corpus is untouched).
-     */
-    ActiveTurnResponse: {
-      /** Message Id */
-      message_id: string;
-      /** Streaming Status */
-      streaming_status: string;
-      /** Content */
-      content: string;
-      /** Stream Events */
-      stream_events?: {
-        [key: string]: unknown;
-      }[];
-    };
-    /**
-     * AdoptCatalogAppRequest
-     * @description Self-adopt a catalog app for a persona (Spec N4, the B2-③ setup-form target).
-     *
-     *     The connection ``url`` and ``auth_method`` are derived from the catalog entry
-     *     server-side (N4-D-10 — the catalog is the trust anchor for *where* it connects); the
-     *     caller supplies ONLY ``credential`` (when the app declares a secret). ``credential`` is
-     *     ``repr=False`` (redacted in logs), encrypted at rest via the store, and NEVER returned.
-     */
-    AdoptCatalogAppRequest: {
-      /** Catalog Name */
-      catalog_name: string;
-      /** Credential */
-      credential?: string | null;
-    };
-    /**
-     * ArtifactItem
-     * @description A single workspace artifact in the F5 list view.
-     *
-     *     The ``ref`` is the workspace-relative path the existing
-     *     ``GET /v1/personas/{id}/uploads/{ref}`` route already knows how to
-     *     serve — F5 reuses that route for downloads + inline rendering.
-     */
-    ArtifactItem: {
-      /** Ref */
-      ref: string;
-      /** Size Bytes */
-      size_bytes: number;
-      /** Media Type */
-      media_type: string;
-      metadata?: components["schemas"]["ArtifactMetadataView"] | null;
-    };
-    /**
-     * ArtifactListResponse
-     * @description Paginated artifact-list response for D-F5-1.
-     *
-     *     ``total`` is the post-filter count; ``items`` is the window of size
-     *     ``limit`` starting at ``offset``. The client computes ``hasMore`` from
-     *     ``offset + items.length < total``.
-     */
-    ArtifactListResponse: {
-      /** Total */
-      total: number;
-      /** Limit */
-      limit: number;
-      /** Offset */
-      offset: number;
-      /** Items */
-      items: components["schemas"]["ArtifactItem"][];
-    };
-    /**
-     * ArtifactMetadataView
-     * @description Sidecar metadata surfaced through the artifact list endpoint.
-     *
-     *     Mirrors ``services.artifact_metadata.WorkspaceArtifactMetadata`` at the
-     *     API surface. Kept as a distinct response model (rather than re-exporting
-     *     the service shape) so the OpenAPI schema is self-contained and the
-     *     web client gets stable types.
-     */
-    ArtifactMetadataView: {
-      /** Source */
-      source: string;
-      /** Ai Generated */
-      ai_generated?: boolean | null;
-      /** Type */
-      type: string;
-      /** Producing Spec */
-      producing_spec: string;
-      /** Conversation Id */
-      conversation_id: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /** Original Name */
-      original_name: string | null;
-    };
-    /**
-     * AuthorPersonaRequest
-     * @description LLM-assisted authoring from a natural-language description (§5.1, §6.3).
-     */
-    AuthorPersonaRequest: {
-      /** Description */
-      description: string;
-    };
-    /**
-     * AuthoringDraft
-     * @description The draft envelope returned by ``/author`` and ``/author/refine`` (D-10-2).
-     *
-     *     A draft is NOT a persona row — the user reviews/refines it, then saves via
-     *     ``POST /v1/personas`` (which creates the row). ``errors`` is populated only
-     *     when validation retries are exhausted (best-effort YAML returned for the form
-     *     to fix, §3.3); ``None`` on success.
-     */
-    AuthoringDraft: {
-      /** Yaml */
-      yaml: string;
-      /** Questions */
-      questions?: components["schemas"]["ClarifyingQuestion"][];
-      /** Prompt Version */
-      prompt_version: string;
-      /** Errors */
-      errors?: string[] | null;
-    };
-    /** Body_create_upload_v1_personas__persona_id__uploads_post */
-    Body_create_upload_v1_personas__persona_id__uploads_post: {
-      /** File */
-      file: string;
-      /** Conversation Id */
-      conversation_id?: string | null;
-    };
-    /**
-     * CallSummary
-     * @description A finished (or in-progress) voice call in the Calls history (Spec V9, V9-D-5).
-     *
-     *     The durable call envelope read from the ``calls`` table (V9-D-3: the
-     *     call-record is the Calls-membership key, NOT ``origin``). ``conversation_id``
-     *     wires each call to its saved transcript — the spoken turns now persist as
-     *     ``messages`` (V9-D-1/D-2), so ``GET /v1/conversations/{conversation_id}``
-     *     renders them under the same thread UI as a text chat.
-     *
-     *     Attributes:
-     *         call_id: The call-record id.
-     *         conversation_id: The conversation this call ran on — the transcript link.
-     *         persona_id: The persona on the call (the web resolves the display name /
-     *             avatar, as it does for ``ConversationSummary``).
-     *         started_at: When the call went active (UTC-aware); list order is by this
-     *             field descending.
-     *         ended_at: When the call ended; ``None`` while live / on a crash.
-     *         duration_s: Stored whole-second duration; ``None`` until the call ends.
-     *         end_reason: Why the call ended; ``None`` while live.
-     */
-    CallSummary: {
-      /** Call Id */
-      call_id: string;
-      /** Conversation Id */
-      conversation_id: string;
-      /** Persona Id */
-      persona_id: string;
-      /**
-       * Started At
-       * Format: date-time
-       */
-      started_at: string;
-      /** Ended At */
-      ended_at?: string | null;
-      /** Duration S */
-      duration_s?: number | null;
-      /** End Reason */
-      end_reason?: ("user_hangup" | "switched" | "error" | "disconnect") | null;
-    };
-    /**
-     * ChannelContext
-     * @description Opaque connector context passed through the chat endpoint (D-08-3).
-     *
-     *     The API stores this on the message row and never interprets it — ``platform``
-     *     is a free-form string, NEVER an enum the API branches on. All connector logic
-     *     lives in the future spec-12 connectors. Null/absent is the web-UI case.
-     */
-    ChannelContext: {
-      /** Platform */
-      platform: string;
-      /** Platform User Id */
-      platform_user_id?: string | null;
-      /** Platform Chat Id */
-      platform_chat_id?: string | null;
-      /** Metadata */
-      metadata?: {
-        [key: string]: string;
-      };
-    };
-    /**
-     * ClarifyingQuestion
-     * @description One suggested question the user can answer to improve a draft persona.
-     *
-     *     ``section`` is a free-form hint (expected: identity | self_facts | worldview
-     *     | constraints | tools | skills) — NOT an enum, so a model that names a
-     *     section we don't anticipate doesn't sink the parse.
-     */
-    ClarifyingQuestion: {
-      /** Section */
-      section: string;
-      /** Question */
-      question: string;
-    };
-    /**
-     * ConnectorConnectionOut
-     * @description One active platform connection (Spec C6), owner-scoped + RLS.
-     *
-     *     Returned by ``GET /v1/me/connectors`` — the caller's live bindings only;
-     *     absence of a platform ⇒ not connected. ``platform_identity`` is the bound
-     *     envelope: a phone number / email address (human-recognisable) or an opaque
-     *     platform user id (Telegram/Discord/Slack numeric id) — the web formats it
-     *     per platform. No token or secret is ever exposed here (only the public
-     *     identity + when it linked).
-     */
-    ConnectorConnectionOut: {
-      /** Platform */
-      platform: string;
-      /** Platform Identity */
-      platform_identity: string;
-      /**
-       * Linked At
-       * Format: date-time
-       */
-      linked_at: string;
-    };
-    /**
-     * ConnectorDisconnectResult
-     * @description The outcome of a disconnect (Spec C6, DELETE ``…/connectors/{p}/{id}``).
-     *
-     *     ``severed`` is ``True`` iff an active binding of the caller was revoked;
-     *     ``False`` is the **idempotent no-op** — the binding was already disconnected,
-     *     never existed, or isn't the caller's (RLS hides a foreign binding, so it is a
-     *     no-op, never a ``404`` that would leak whether it exists). Disconnect is
-     *     idempotent by design: a repeat is a clean ``severed=false``.
-     */
-    ConnectorDisconnectResult: {
-      /** Severed */
-      severed: boolean;
-    };
-    /**
-     * ConnectorLinkArtifact
-     * @description A link-initiation artifact (Spec C6, POST ``…/connectors/{platform}/link``).
-     *
-     *     The front-door normalizes the connector service's issue response into ONE shape the
-     *     web renders, regardless of mechanism: exactly one of ``deep_link`` (Telegram),
-     *     ``authorize_url`` (Discord/Slack OAuth), or ``code`` (WhatsApp/SMS/email OTP) is set;
-     *     ``destination`` accompanies ``code`` for the reversed flow ("text/email it to …",
-     *     C6-D-7); ``expires_at`` is the server-authoritative token expiry (C6-D-8) the web's
-     *     countdown + re-issue key off. ``extra="forbid"`` guarantees no token, secret, or stray
-     *     upstream field can ride along — the front-door copies only these known keys.
-     */
-    ConnectorLinkArtifact: {
-      /** Deep Link */
-      deep_link?: string | null;
-      /** Authorize Url */
-      authorize_url?: string | null;
-      /** Code */
-      code?: string | null;
-      /** Destination */
-      destination?: string | null;
-      /**
-       * Expires At
-       * Format: date-time
-       */
-      expires_at: string;
-    };
-    /**
-     * ConnectorPlatform
-     * @description The six linkable platforms — a closed set (C6-D-1).
-     *
-     *     Used as the ``link`` path-param type so FastAPI rejects any other value with a 422
-     *     BEFORE it can reach the proxy: the value is interpolated into the upstream URL path,
-     *     so a closed enum forecloses path-injection / SSRF into other connector-service routes.
-     * @enum {string}
-     */
-    ConnectorPlatform:
-      | "telegram"
-      | "discord"
-      | "slack"
-      | "whatsapp"
-      | "sms"
-      | "email";
-    /**
-     * ConversationDetail
-     * @description Full conversation history.
-     */
-    ConversationDetail: {
-      /** Id */
-      id: string;
-      /** Persona Id */
-      persona_id: string;
-      /** Title */
-      title: string;
-      /**
-       * Origin
-       * @default chat
-       * @enum {string}
-       */
-      origin: "chat" | "call";
-      /** Messages */
-      messages: components["schemas"]["MessageView"][];
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-    };
-    /**
-     * ConversationSummary
-     * @description A conversation in a list view.
-     *
-     *     The two ``last_message_*`` fields let the sidebar render a real preview of
-     *     the most recent turn instead of falling back to the title. They are
-     *     populated in a single set-based LIST query (a ``ROW_NUMBER()`` window over
-     *     the RLS-scoped ``messages`` rows — no per-row fan-out) and are ``None`` for
-     *     a conversation that has no messages yet.
-     *
-     *     Attributes:
-     *         id: The conversation id.
-     *         persona_id: The persona this conversation belongs to.
-     *         title: The conversation's display title.
-     *         created_at: Creation timestamp (UTC-aware).
-     *         updated_at: Last-activity timestamp (UTC-aware); list order is by this
-     *             field descending.
-     *         last_message_preview: The most recent message's text, trimmed and
-     *             truncated server-side to :data:`LAST_MESSAGE_PREVIEW_MAX_LEN`
-     *             characters (an ellipsis replaces the tail when it overflows).
-     *             ``None`` when the conversation has no messages.
-     *         last_message_role: Speaker role of the most recent message, using the
-     *             existing message-role vocabulary (``user`` is the human; every
-     *             other role is the persona/assistant side). ``None`` when the
-     *             conversation has no messages. The UI switches on this to attribute
-     *             the preview ("You: …" vs the persona).
-     */
-    ConversationSummary: {
-      /** Id */
-      id: string;
-      /** Persona Id */
-      persona_id: string;
-      /** Title */
-      title: string;
-      /**
-       * Origin
-       * @default chat
-       * @enum {string}
-       */
-      origin: "chat" | "call";
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-      /** Last Message Preview */
-      last_message_preview?: string | null;
-      /** Last Message Role */
-      last_message_role?: ("user" | "assistant" | "system" | "tool") | null;
-    };
-    /**
-     * CreateConversationRequest
-     * @description Start a new conversation against a persona.
-     *
-     *     ``origin`` is the conversation's immutable birth-marker (Spec V9, V9-D-3):
-     *     ``'chat'`` (the default — every text-path conversation) or ``'call'`` (the
-     *     web sets this when it creates a conversation to host a voice call,
-     *     V9-D-X-marker-writer-web). It is the ONLY seam between chat and voice; the
-     *     closed ``Literal`` keeps the vocabulary shut at the request boundary
-     *     (``extra="forbid"`` means the field must be declared, not silently passed).
-     */
-    CreateConversationRequest: {
-      /**
-       * Title
-       * @default
-       */
-      title: string;
-      /**
-       * Origin
-       * @default chat
-       * @enum {string}
-       */
-      origin: "chat" | "call";
-    };
-    /**
-     * CreateMCPServerRequest
-     * @description Add a bring-your-own MCP server (spec 30, D-30-3/4).
-     *
-     *     ``url`` is SSRF-validated (https-only, public target) at the route AND on
-     *     every live connect. ``credential`` (a bearer token for ``auth_method =
-     *     "bearer"``) is encrypted at rest (T07) and NEVER returned or logged; it is
-     *     required when ``auth_method`` is not ``"none"``.
-     */
-    CreateMCPServerRequest: {
-      /** Name */
-      name: string;
-      /** Url */
-      url: string;
-      /**
-       * Auth Method
-       * @default none
-       * @enum {string}
-       */
-      auth_method: "none" | "bearer" | "oauth";
-      /** Credential */
-      credential?: string | null;
-      /** Oauth Provider */
-      oauth_provider?: string | null;
-    };
-    /**
-     * CreatePersonaRequest
-     * @description Create a persona from a YAML document (validated against the v1.0 schema).
-     *
-     *     ``avatar_url`` is an optional presentation field (not part of the YAML
-     *     schema) — the persona-list / chat-header visual identity.
-     */
-    CreatePersonaRequest: {
-      /** Yaml */
-      yaml: string;
-      /** Avatar Url */
-      avatar_url?: string | null;
-    };
-    /**
-     * CreditsResponse
-     * @description The user's current credit balance (stub counter).
-     *
-     *     ``low_balance`` is True when the balance is below
-     *     :data:`credits_service.LOW_BALANCE_THRESHOLD` (10 000 by default) — the web
-     *     app uses it to surface the under-limit warning (D-11-12).
-     */
-    CreditsResponse: {
-      /** Balance */
-      balance: number;
-      /**
-       * Low Balance
-       * @default false
-       */
-      low_balance: boolean;
-    };
-    /**
-     * DocumentRef
-     * @description Reference to an attached document — the API-boundary type.
-     *
-     *     Persisted alongside the original file as a ``{doc_ref}.meta.json``
-     *     sidecar in the workspace. Returned by :func:`upload`,
-     *     :func:`list_for_conversation`, and (via JSON) the API GET endpoint
-     *     (T18). Carries the metadata T14/T15/T16 need to render the prompt
-     *     sections + the synopsis.
-     */
-    DocumentRef: {
-      /** Doc Ref */
-      doc_ref: string;
-      /** Filename */
-      filename: string;
-      /** Title */
-      title: string;
-      /** Format */
-      format: string;
-      /** Workspace Path */
-      workspace_path: string;
-      strategy: components["schemas"]["IngestStrategy"];
-      /** Token Count */
-      token_count: number;
-      /** Page Count */
-      page_count?: number | null;
-      /** Sheet Names */
-      sheet_names?: string[] | null;
-      /** Size Bytes */
-      size_bytes?: number | null;
-      /**
-       * Images
-       * @default []
-       */
-      images: components["schemas"]["ImageContent"][];
-    };
-    /**
-     * FireEvent
-     * @description One past fire/miss from the audit trail (the calendar's ran/missed markers).
-     */
-    FireEvent: {
-      /** Schedule Id */
-      schedule_id: string;
-      /**
-       * At
-       * Format: date-time
-       */
-      at: string;
-      /** Status */
-      status: string;
-    };
-    /**
-     * GrantToolRequest
-     * @description Enable a tool on a persona's allow-list via runtime consent (spec 26 T11).
-     *
-     *     Sent when the user accepts a runtime tool-gap offer. ``turn_index`` is the
-     *     conversation turn the offer came from (recorded in the persona_self audit).
-     */
-    GrantToolRequest: {
-      /** Tool Name */
-      tool_name: string;
-      /** Turn Index */
-      turn_index?: number | null;
-    };
-    /** HTTPValidationError */
-    HTTPValidationError: {
-      /** Detail */
-      detail?: components["schemas"]["ValidationError"][];
-    };
-    /**
-     * ImageContent
-     * @description An image *reference* block within a multimodal message ``content`` list.
-     *
-     *     Per Spec 13 D-13-X-now option (c), the message store carries only the
-     *     workspace reference — image bytes live exactly once under the persona's
-     *     Spec 03 workspace and are resolved at send time by the backend
-     *     serialisers (Spec 13 T05/T06). This is the structural guard behind
-     *     Dominant Concern #2: the ``messages`` table size grows with reference
-     *     count, not with image bytes. See
-     *     ``docs/specs/phase2/spec_13/decisions.md`` (D-13-X-now) and the T13
-     *     store-by-reference regression test.
-     *
-     *     Attributes:
-     *         type: Discriminator tag — always the literal ``"image"`` so the
-     *             :data:`MessageContent` tagged union can resolve this block by
-     *             its ``type`` field on deserialisation.
-     *         workspace_path: The reference into the persona workspace (Spec 03).
-     *             Resolved to bytes only at backend-send time; the message store
-     *             never holds the bytes themselves.
-     *         media_type: One of the four supported image MIME types per
-     *             **D-13-3**: ``image/png``, ``image/jpeg``, ``image/webp``,
-     *             ``image/gif``. Any other value is rejected at validation time.
-     *         inline_bytes: Optional already-resolved raw image bytes. When a caller
-     *             (e.g. the hosted ``chat_service``, which resolves upload bytes at
-     *             the API boundary) sets this, the backend vision serialisers
-     *             base64-encode it DIRECTLY and skip both the ``workspace_root``
-     *             filesystem read and the ``workspace_root is None`` guard. This is
-     *             the transport for the live image-workspace cascade: the chat tier
-     *             backend is app-scoped/cached and never receives a per-request
-     *             ``workspace_root``, so without inline bytes the image would never
-     *             reach the model. ``None`` keeps the legacy workspace-path resolution
-     *             path (used by the persisted-history replay path). This field is
-     *             NEVER persisted — the API collapses message content to its
-     *             :class:`TextContent` blocks at the store boundary (D-13-X-now
-     *             option c keeps the ``messages`` table bounded by reference count,
-     *             not image bytes), so the store invariant is unaffected.
-     */
-    ImageContent: {
-      /**
-       * Type
-       * @default image
-       * @constant
-       */
-      type: "image";
-      /** Workspace Path */
-      workspace_path: string;
-      /**
-       * Media Type
-       * @enum {string}
-       */
-      media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
-    };
-    /**
-     * ImageGenRequest
-     * @description Body of ``POST /v1/personas/:id/imagegen``.
-     *
-     *     The closed Literal surface on ``size`` and ``quality`` ensures invalid
-     *     values land as 422 Pydantic validation errors before any service-
-     *     layer work happens; ``count`` is bounded by D-15-3 (``le=2``).
-     *
-     *     Attributes:
-     *         prompt: The user-supplied text prompt. Required, min length 1.
-     *             The visual_style merge runs at the service layer
-     *             (:func:`persona_api.imagegen.service.generate`) so the prompt
-     *             here is the raw user input — NOT yet merged.
-     *         size: One of the three closed presets per D-15-3. Defaults to
-     *             ``"1024x1024"``. The OpenAI backend rounds non-square presets
-     *             per D-15-X-size-rounding; the audit captures the REQUESTED
-     *             value (this field's literal), not the rounded one.
-     *         count: Number of images to generate. ``Field(ge=1, le=2)`` enforces
-     *             the D-15-3 cap. Defaults to 1.
-     *         quality: One of the two closed presets per D-15-3. Defaults to
-     *             ``"standard"``.
-     */
-    ImageGenRequest: {
-      /** Prompt */
-      prompt: string;
-      /**
-       * Size
-       * @default 1024x1024
-       * @enum {string}
-       */
-      size: "1024x1024" | "1024x1792" | "1792x1024";
-      /**
-       * Count
-       * @default 1
-       */
-      count: number;
-      /**
-       * Quality
-       * @default standard
-       * @enum {string}
-       */
-      quality: "standard" | "high";
-    };
-    /**
-     * ImageRef
-     * @description Image reference carried on a chat message (spec 13, D-13-X-now option c).
-     *
-     *     Refers to a previously-uploaded image in the persona's workspace (Spec 03).
-     *     Image bytes live exactly once in the workspace; the chat body and the
-     *     persisted ``messages`` row carry only ``workspace_path`` + ``media_type``
-     *     so storage scales with reference count, not with image bytes.
-     *
-     *     Attributes:
-     *         workspace_path: Workspace-relative path returned by the uploads route
-     *             (``uploads/<ref>.<ext>``). Resolved against
-     *             ``workspace_root/owner_id/persona_id`` at backend send time.
-     *         media_type: One of the four supported image MIME types per D-13-3:
-     *             ``image/png``, ``image/jpeg``, ``image/webp``, ``image/gif``.
-     *             Any other value is rejected at validation time.
-     */
-    ImageRef: {
-      /** Workspace Path */
-      workspace_path: string;
-      /**
-       * Media Type
-       * @enum {string}
-       */
-      media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
-    };
-    /**
-     * IngestStrategy
-     * @description The ingestion paths a document can take.
-     *
-     *     ``VISION_HANDOFF_REQUIRED`` is what :func:`ingest_document` returns when
-     *     the parser sets ``needs_vision_handoff=True`` — the caller (T13's
-     *     :func:`persona_api.services.document_service.upload`) detects this and
-     *     performs the actual rasterisation + ImageContent creation (T21). The
-     *     caller-side outcome ``VISION_HANDOFF`` records the completed handoff
-     *     on the persisted :class:`DocumentRef`.
-     * @enum {string}
-     */
-    IngestStrategy:
-      | "whole_inject"
-      | "retrieval"
-      | "vision_handoff_required"
-      | "vision_handoff";
-    /**
-     * MCPCatalogSecret
-     * @description A credential an MCP server requires — DISPLAY-ONLY schema (Spec N1, D-N1-5).
-     *
-     *     Carries **no value field by construction**: the catalog API exposes WHICH secret a
-     *     server needs (so the apps UX can render the setup form), never a secret value. The
-     *     credential isolation property (user → secret store → Gateway, never an LLM turn) is
-     *     upheld at the API boundary, not just internally.
-     */
-    MCPCatalogSecret: {
-      /** Name */
-      name: string;
-      /** Env */
-      env: string;
-      /**
-       * Example
-       * @default
-       */
-      example: string;
-      /**
-       * Description
-       * @default
-       */
-      description: string;
-    };
-    /**
-     * MCPCatalogServer
-     * @description An MCP server in the management catalog (spec 30 T11 + N1).
-     *
-     *     A persona enables a server by adding ``mcp:<name>`` to its ``tools``
-     *     allow-list. ``provider`` is the recommender tag (``mcp:builtin`` /
-     *     ``mcp:optional``); ``required_env`` lists env vars an operator must set.
-     *
-     *     The N1 fields below carry the Docker catalog-mirror display metadata the apps UX
-     *     (N3) renders. They are **additive-with-default** so the existing five-field
-     *     contract is unchanged — a client written against spec 30 sees no break.
-     */
-    MCPCatalogServer: {
-      /** Name */
-      name: string;
-      /** Description */
-      description: string;
-      /** Provider */
-      provider: string;
-      /** Default Enabled */
-      default_enabled: boolean;
-      /** Required Env */
-      required_env?: string[];
-      /**
-       * Display Name
-       * @default
-       */
-      display_name: string;
-      /**
-       * Icon Url
-       * @default
-       */
-      icon_url: string;
-      /**
-       * Image
-       * @default
-       */
-      image: string;
-      /**
-       * Server Type
-       * @default builtin
-       */
-      server_type: string;
-      /**
-       * Risk
-       * @default low
-       */
-      risk: string;
-      /**
-       * Source Project
-       * @default
-       */
-      source_project: string;
-      /**
-       * Source Commit
-       * @default
-       */
-      source_commit: string;
-      /**
-       * Signed
-       * @default false
-       */
-      signed: boolean;
-      /** Allow Hosts */
-      allow_hosts?: string[];
-      /** Secrets */
-      secrets?: components["schemas"]["MCPCatalogSecret"][];
-    };
-    /**
-     * MCPOAuthAuthorizeRequest
-     * @description Start an OAuth flow for a BYO MCP server (Spec R8, T4).
-     *
-     *     ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
-     *     user to once connected — it is stored SERVER-SIDE against the state (never encoded
-     *     in the OAuth ``state`` value) and is never an external redirect target.
-     */
-    MCPOAuthAuthorizeRequest: {
-      /** Redirect After */
-      redirect_after?: string | null;
-    };
-    /**
-     * MCPOAuthAuthorizeResponse
-     * @description The provider authorize URL to redirect the user to (Spec R8, T4).
-     *
-     *     ``authorize_url`` carries the PKCE ``code_challenge`` + opaque ``state`` — no
-     *     secret. The flow completes at the web callback → ``POST /mcp-servers/oauth/callback``.
-     */
-    MCPOAuthAuthorizeResponse: {
-      /** Authorize Url */
-      authorize_url: string;
-    };
-    /**
-     * MCPOAuthCallbackRequest
-     * @description Complete an OAuth flow (Spec R8, T5): the web callback relays ``state`` + ``code``.
-     *
-     *     Sent by the authenticated web callback page (which received the provider redirect).
-     *     ``state`` is the opaque CSRF token minted at authorize; ``code`` the provider's
-     *     one-time authorization code. Both are consumed server-side and never returned.
-     */
-    MCPOAuthCallbackRequest: {
-      /** State */
-      state: string;
-      /** Code */
-      code: string;
-    };
-    /**
-     * MCPOAuthCallbackResponse
-     * @description Result of completing an OAuth flow (Spec R8, T5).
-     *
-     *     ``server`` is the now-connected server (``has_credential`` true). ``redirect_after``
-     *     is the server-side-stored app path to return the user to (or ``None``).
-     */
-    MCPOAuthCallbackResponse: {
-      server: components["schemas"]["MCPServerDetail"];
-      /** Redirect After */
-      redirect_after?: string | null;
-    };
-    /**
-     * MCPServerDetail
-     * @description A bring-your-own MCP server as returned to its owner (spec 30, D-30-3).
-     *
-     *     The credential is NEVER included — only ``has_credential`` (whether one is
-     *     stored). ``discovered_tools`` is the cached eager-discovery result (D-30-5),
-     *     ``None`` until a successful test-connection.
-     */
-    MCPServerDetail: {
-      /** Id */
-      id: string;
-      /** Name */
-      name: string;
-      /** Url */
-      url: string;
-      /** Auth Method */
-      auth_method: string;
-      /** Enabled */
-      enabled: boolean;
-      /** Has Credential */
-      has_credential: boolean;
-      /** Discovered Tools */
-      discovered_tools?: string[] | null;
-      /** Catalog Source */
-      catalog_source?: string | null;
-      /** Oauth Provider */
-      oauth_provider?: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-    };
-    /**
-     * MCPServerTestResult
-     * @description Outcome of a BYO-MCP test-connection (spec 30, D-30-5).
-     *
-     *     ``ok`` true → ``tools`` lists the discovered tool names (cached on the row).
-     *     ``ok`` false → ``error`` is a short, non-sensitive reason category.
-     */
-    MCPServerTestResult: {
-      /** Ok */
-      ok: boolean;
-      /** Tools */
-      tools?: string[];
-      /** Error */
-      error?: string | null;
-    };
-    /**
-     * MemoryCorrectionRequest
-     * @description Correct a Memory node's content (Spec K5, K5-D-7 / K5-D-5).
-     *
-     *     The user's edit to what a node says — the highest-quality write the graph gets.
-     *     Content-only (per K5-D-7): it flows through K0's update path (re-embed, re-index,
-     *     semantic links re-evaluated) and records provenance as ``user``-edited.
-     */
-    MemoryCorrectionRequest: {
-      /** Content */
-      content: string;
-    };
-    /**
-     * MemoryEvolutionEntry
-     * @description One step in how a memory grew — a provenance contribution (oldest first).
-     */
-    MemoryEvolutionEntry: {
-      /** Source */
-      source: string;
-      /**
-       * Written At
-       * Format: date-time
-       */
-      written_at: string;
-      /** Reason */
-      reason?: string | null;
-      /** Superseded Content */
-      superseded_content?: string | null;
-    };
-    /**
-     * MemoryLinkEdge
-     * @description A typed edge for the canvas — one of the four LinkType relationships.
-     */
-    MemoryLinkEdge: {
-      /** Src Node Id */
-      src_node_id: string;
-      /** Dst Node Id */
-      dst_node_id: string;
-      /** Link Type */
-      link_type: string;
-      /** Weight */
-      weight?: number | null;
-    };
-    /**
-     * MemoryLinkView
-     * @description A traversable typed link in the detail panel — the edge plus the neighbour.
-     */
-    MemoryLinkView: {
-      /** Link Type */
-      link_type: string;
-      /** Weight */
-      weight?: number | null;
-      /**
-       * Direction
-       * @enum {string}
-       */
-      direction: "out" | "in";
-      neighbor: components["schemas"]["MemoryNodeSummary"];
-    };
-    /**
-     * MemoryNodeDetail
-     * @description A node's full detail: content, provenance-as-story, evolution, typed links.
-     */
-    MemoryNodeDetail: {
-      /** Id */
-      id: string;
-      /** Kind */
-      kind: string;
-      /** Label */
-      label: string;
-      /** Content */
-      content: string;
-      /** Wellbeing Category */
-      wellbeing_category?: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      origin: components["schemas"]["MemoryProvenanceView"];
-      /** Evolution */
-      evolution: components["schemas"]["MemoryEvolutionEntry"][];
-      /** Links */
-      links: components["schemas"]["MemoryLinkView"][];
-    };
-    /**
-     * MemoryNodeSummary
-     * @description A node as drawn on the canvas — no content/provenance (that is the detail).
-     *
-     *     ``degree`` is the node's connectedness within the returned window (0 when not
-     *     computed for this view) — the "size by connectedness, lightly" signal (K5-D-3).
-     */
-    MemoryNodeSummary: {
-      /** Id */
-      id: string;
-      /** Kind */
-      kind: string;
-      /** Label */
-      label: string;
-      /** Wellbeing Category */
-      wellbeing_category?: string | null;
-      /**
-       * Degree
-       * @default 0
-       */
-      degree: number;
-    };
-    /**
-     * MemoryProvenanceView
-     * @description Where a memory came from — the structured basis the UI renders as story.
-     */
-    MemoryProvenanceView: {
-      /** Source */
-      source: string;
-      /** Persona Id */
-      persona_id?: string | null;
-      /** Persona Name */
-      persona_name?: string | null;
-      /** Interaction Id */
-      interaction_id?: string | null;
-      /** Conversation Id */
-      conversation_id?: string | null;
-      /**
-       * Written At
-       * Format: date-time
-       */
-      written_at: string;
-      /** Reason */
-      reason?: string | null;
-      /** Grounding */
-      grounding?: string | null;
-    };
-    /**
-     * MemorySearchResponse
-     * @description The matches for a Memory search query, best-first (criterion 5).
-     */
-    MemorySearchResponse: {
-      /** Query */
-      query: string;
-      /** Results */
-      results: components["schemas"]["MemorySearchResult"][];
-    };
-    /**
-     * MemorySearchResult
-     * @description One search hit — exact-term and paraphrase ranks both visible (K1 hybrid).
-     */
-    MemorySearchResult: {
-      /** Node Id */
-      node_id: string;
-      /** Label */
-      label: string;
-      /** Kind */
-      kind: string;
-      /** Score */
-      score: number;
-      /** Dense Rank */
-      dense_rank?: number | null;
-      /** Sparse Rank */
-      sparse_rank?: number | null;
-    };
-    /**
-     * MemoryWindowResponse
-     * @description A windowed slice of the graph — the seed (no focus) or a focus neighbourhood.
-     *
-     *     Never the whole graph (K5-D-2): ``total_nodes`` is the owner's full tally for the
-     *     header; ``nodes``/``links`` are only the loaded window.
-     *
-     *     ``available`` distinguishes *no graph store* (this deployment has no usable graph —
-     *     e.g. community-on-SQLite, the K0 graph being Postgres-only) from *an empty graph*
-     *     (a real but as-yet-unpopulated map). The UI must not show the "no memories yet"
-     *     invite when the truth is "Memory isn't available here" — so the nav is gated and
-     *     the page shows a distinct unavailable state when this is ``False`` (Spec K5).
-     */
-    MemoryWindowResponse: {
-      /**
-       * Available
-       * @default true
-       */
-      available: boolean;
-      /** Focus Id */
-      focus_id?: string | null;
-      /** Is Seed */
-      is_seed: boolean;
-      /** Total Nodes */
-      total_nodes: number;
-      /** Nodes */
-      nodes: components["schemas"]["MemoryNodeSummary"][];
-      /** Links */
-      links: components["schemas"]["MemoryLinkEdge"][];
-    };
-    /**
-     * MessageView
-     * @description A single message in a conversation history.
-     */
-    MessageView: {
-      /** Id */
-      id: string;
-      /** Role */
-      role: string;
-      /** Content */
-      content: string;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /** Channel */
-      channel?: {
-        [key: string]: unknown;
-      } | null;
-      /** Tier Used */
-      tier_used?: string | null;
-      /** Events */
-      events?:
-        | {
-            [key: string]: unknown;
-          }[]
-        | null;
-    };
-    /**
-     * NotificationMarkReadResult
-     * @description How many feed rows a mark-read touched (0 = nothing unread / not owned).
-     */
-    NotificationMarkReadResult: {
-      /** Updated */
-      updated: number;
-    };
-    /**
-     * NotificationOut
-     * @description One durable bell notification (Spec P6 feed), owner-scoped + RLS.
-     *
-     *     Copy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``
-     *     via next-intl at render. ``kind`` + ``ref_id`` drive the deep-link
-     *     (``run_terminal`` → ``/runs/{ref_id}``, ``persona_ready`` → ``/personas/{ref_id}``).
-     */
-    NotificationOut: {
-      /** Id */
-      id: string;
-      /** Kind */
-      kind: string;
-      /** Ref Id */
-      ref_id?: string | null;
-      /** Level */
-      level: string;
-      /** Message Key */
-      message_key: string;
-      /**
-       * Params
-       * @default {}
-       */
-      params: {
-        [key: string]: string;
-      };
-      /** Read */
-      read: boolean;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-    };
-    /**
-     * Occurrence
-     * @description One computed future fire (tz-aware UTC instant) + its schedule/task context.
-     */
-    Occurrence: {
-      /** Schedule Id */
-      schedule_id: string;
-      /** Task Id */
-      task_id: string | null;
-      /** Persona Id */
-      persona_id: string | null;
-      /**
-       * Fire At
-       * Format: date-time
-       */
-      fire_at: string;
-      /** Timezone */
-      timezone: string;
-      /** Human Terms */
-      human_terms: string;
-    };
-    /**
-     * OccurrencesResult
-     * @description The windowed occurrences + fire history + the honest truncation marker (A8-D-11).
-     */
-    OccurrencesResult: {
-      /** Occurrences */
-      occurrences: components["schemas"]["Occurrence"][];
-      /** History */
-      history: components["schemas"]["FireEvent"][];
-      /**
-       * Window From
-       * Format: date-time
-       */
-      window_from: string;
-      /**
-       * Window To
-       * Format: date-time
-       */
-      window_to: string;
-      /** Truncated */
-      truncated: boolean;
-    };
-    /**
-     * PersonaCapabilities
-     * @description Deployment-derived capability flags surfaced with the persona detail.
-     *
-     *     Hydrated from the runtime :class:`persona_runtime.tier.TierRegistry` so the
-     *     UI can answer "does this persona support image attachments?" BEFORE the
-     *     user attempts to send (Spec 13 fail-loud made visible — Spec F3 §10 #7;
-     *     D-F3-X-no-vision-surface-shape). At v0.1 the answer is deployment-wide:
-     *     every persona under a given deployment shares the same registry, so
-     *     ``vision`` is identical across personas — see D-F3-X-deployment-vs-persona-
-     *     capability-framing. The field's shape survives the v0.2 inflection where
-     *     per-persona tier pins make the answer genuinely per-persona; only the
-     *     hydration source changes (from registry to per-persona lookup).
-     *
-     *     Attributes:
-     *         vision: ``True`` iff at least one configured tier resolves to a
-     *             backend whose ``supports_vision`` is ``True``. Read via the
-     *             public :meth:`TierRegistry.supports_vision_for` method
-     *             (D-F3-X-tier-registry-public-contract).
-     *         configured_tiers: Tier names registered on the active deployment
-     *             in insertion order (``("small", "mid", "frontier")`` for the
-     *             typical three-tier deployment). The UI may surface these in a
-     *             disabled-attach tooltip to explain *which* models the deployment
-     *             has configured.
-     */
-    PersonaCapabilities: {
-      /** Vision */
-      vision: boolean;
-      /** Configured Tiers */
-      configured_tiers: string[];
-    };
-    /**
-     * PersonaDetail
-     * @description A persona's full detail (YAML + metadata).
-     *
-     *     The optional :attr:`capabilities` field (D-F3-X-capability-endpoint) is
-     *     additive on top of the Spec 08 / Spec 09 surface: tests + composition
-     *     roots that do not wire a :class:`TierRegistry` (e.g. unit fixtures
-     *     without the runtime) omit the field and the API returns ``None`` so the
-     *     persona-detail surface stays usable without runtime composition.
-     */
-    PersonaDetail: {
-      /** Id */
-      id: string;
-      /** Yaml */
-      yaml: string;
-      /** Schema Version */
-      schema_version: string;
-      /** Avatar Url */
-      avatar_url?: string | null;
-      /** Avatar Source */
-      avatar_source?: string | null;
-      /** Avatar Ai Generated */
-      avatar_ai_generated?: boolean | null;
-      capabilities?: components["schemas"]["PersonaCapabilities"] | null;
-      /** Consent To Auto Dispatch */
-      consent_to_auto_dispatch?: boolean | null;
-      /** Consent Updated At */
-      consent_updated_at?: string | null;
-      /** Unavailable Mcp Servers */
-      unavailable_mcp_servers?: string[];
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-      /**
-       * Conversation Count
-       * @default 0
-       */
-      conversation_count: number;
-    };
-    /**
-     * PersonaSpecialitySummary
-     * @description A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
-     *
-     *     The persona-scoped surface adds the server-computed ``consent_state`` — the one
-     *     security-authoritative bit the client cannot derive (it needs the consent store +
-     *     the current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the
-     *     current hash), ``stale`` (consented at an old body hash → re-gate, S1-D-5), or
-     *     ``none`` (never/revoked → default-deny). Enablement (the ``skills:`` declaration)
-     *     and ``unavailable`` stay client-derived from the edited persona draft.
-     */
-    PersonaSpecialitySummary: {
-      /** Name */
-      name: string;
-      /** Description */
-      description: string;
-      /** When To Use */
-      when_to_use?: string | null;
-      /** Trust */
-      trust: string;
-      /** Requires Consent */
-      requires_consent: boolean;
-      /** Content Hash */
-      content_hash?: string | null;
-      /** Source */
-      source?: string | null;
-      /** Source Uri */
-      source_uri?: string | null;
-      /** Source Ref */
-      source_ref?: string | null;
-      /** Consent State */
-      consent_state: string;
-    };
-    /**
-     * PersonaSummary
-     * @description A persona in a list view (no full YAML).
-     *
-     *     Spec 35: the library card surfaces a capability + identity glance. The
-     *     counts below are parsed from the SAME stored YAML the list query already
-     *     loads (so they cost nothing extra), and ``conversation_count`` is a single
-     *     GROUP-BY over the RLS-scoped conversations — not an N+1.
-     */
-    PersonaSummary: {
-      /** Id */
-      id: string;
-      /** Name */
-      name: string;
-      /** Role */
-      role: string;
-      /** Avatar Url */
-      avatar_url?: string | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-      /**
-       * Updated At
-       * Format: date-time
-       */
-      updated_at: string;
-      /**
-       * Language
-       * @default en
-       */
-      language: string;
-      /**
-       * Tools Count
-       * @default 0
-       */
-      tools_count: number;
-      /**
-       * Skills Count
-       * @default 0
-       */
-      skills_count: number;
-      /**
-       * Constraints Count
-       * @default 0
-       */
-      constraints_count: number;
-      /**
-       * Conversation Count
-       * @default 0
-       */
-      conversation_count: number;
-    };
-    /**
-     * PostMessageRequest
-     * @description Send a user message; the response streams over SSE (§5.2).
-     *
-     *     ``channel`` is the optional connector passthrough (D-08-3) — null for the
-     *     web UI. The runtime ignores it in v0.1; the API just stores it on the
-     *     message row and echoes ``format_hints`` on the ``done`` event.
-     *
-     *     ``images`` is the optional spec-13 multimodal extension (D-13-X-now option
-     *     c, D-13-5): up to 4 :class:`ImageRef` per message. ``None`` (the default)
-     *     keeps the text-only path byte-for-byte unchanged. An empty list is
-     *     equivalent to ``None`` semantically but rejected as a validation error so
-     *     callers don't accidentally send ``images=[]`` and skip the cap check; pass
-     *     ``None`` or omit the field.
-     *
-     *     The cap is enforced via :class:`Field`'s built-in ``min_length`` /
-     *     ``max_length`` (D-13-5) so the failure surfaces as a structured
-     *     ``too_long`` / ``too_short`` Pydantic v2 error — JSON-serialisable through
-     *     the API's ``_request_422`` handler in :mod:`persona_api.errors` (a custom
-     *     ``field_validator`` would attach a raw :class:`ValueError` to ``ctx`` and
-     *     break the response body's ``json.dumps``).
-     */
-    PostMessageRequest: {
-      /** Content */
-      content: string;
-      channel?: components["schemas"]["ChannelContext"] | null;
-      /** Images */
-      images?: components["schemas"]["ImageRef"][] | null;
-    };
-    /**
-     * RecurrenceKind
-     * @description The picker's top-level recurrence categories (the humane vocabulary, A8-D-1).
-     * @enum {string}
-     */
-    RecurrenceKind:
-      | "daily"
-      | "weekly"
-      | "monthly_day"
-      | "monthly_weekday"
-      | "hourly"
-      | "yearly";
-    /**
-     * RecurrencePattern
-     * @description The RRULE-free picker-state for a recurring cadence (A8-D-1).
-     *
-     *     A structured, UI-bindable view of the v1 vocabulary — the calendar's recurrence
-     *     builder reads/writes THIS, never an RRULE string. Round-trips losslessly with
-     *     :class:`~persona.schedules.RecurrenceRule` via :func:`pattern_to_rule` /
-     *     :func:`rule_to_pattern` for the supported set.
-     *
-     *     Attributes:
-     *         kind: The recurrence category.
-     *         interval: Stride — days (DAILY), weeks (WEEKLY), months (MONTHLY_*), hours
-     *             (HOURLY, must divide 24 for a clean wall-clock cadence); 1 for YEARLY.
-     *         weekdays: WEEKLY — the selected weekdays (BYDAY tokens ``MO``..``SU``, canonical
-     *             week order, no ordinal). The 5-weekday preset renders "every weekday".
-     *         month_day: MONTHLY_DAY — the day of month (1..31, or -1 for the last day).
-     *         weekday: MONTHLY_WEEKDAY — the weekday token (``MO``..``SU``).
-     *         ordinal: MONTHLY_WEEKDAY — which occurrence (1..4, or -1 for the last).
-     *         month: YEARLY — the month (1..12).
-     *         day_of_month: YEARLY — the day of month (1..31).
-     *         hour: Local hour-of-day (0..23). Required for every kind except HOURLY (whose
-     *             marks come from ``interval``); ``None`` only for HOURLY.
-     *         minute: Local minute-of-hour (0..59).
-     *         count: Bound — total occurrences (XOR ``until``).
-     *         until: Bound — last instant, tz-aware UTC (XOR ``count``).
-     */
-    RecurrencePattern: {
-      kind: components["schemas"]["RecurrenceKind"];
-      /**
-       * Interval
-       * @default 1
-       */
-      interval: number;
-      /**
-       * Weekdays
-       * @default []
-       */
-      weekdays: string[];
-      /** Month Day */
-      month_day?: number | null;
-      /** Weekday */
-      weekday?: string | null;
-      /** Ordinal */
-      ordinal?: number | null;
-      /** Month */
-      month?: number | null;
-      /** Day Of Month */
-      day_of_month?: number | null;
-      /** Hour */
-      hour?: number | null;
-      /**
-       * Minute
-       * @default 0
-       */
-      minute: number;
-      /** Count */
-      count?: number | null;
-      /** Until */
-      until?: string | null;
-    };
-    /**
-     * RefinePersonaRequest
-     * @description Refine a draft persona by answering a clarifying question (spec 10, §4 / D-10-2).
-     *
-     *     Stateless: ``round`` is the count of refinements already applied (the UI owns
-     *     the counter); the server rejects ``round > 3`` as the backstop on the
-     *     3-round cap (D-10-5).
-     */
-    RefinePersonaRequest: {
-      /** Current Yaml */
-      current_yaml: string;
-      /** Question */
-      question: string;
-      /** Answer */
-      answer: string;
-      /**
-       * Round
-       * @default 0
-       */
-      round: number;
-    };
-    /**
-     * ReschedulePreview
-     * @description The engine's preview of a proposed calendar reschedule (no write).
-     */
-    ReschedulePreview: {
-      /** Human Terms */
-      human_terms: string;
-      /** Timezone */
-      timezone: string;
-      /** Next Fire */
-      next_fire: string | null;
-      /** Quiet Hours Offer */
-      quiet_hours_offer: string | null;
-    };
-    /**
-     * RespondToRunRequest
-     * @description Answer an ask-user question raised by a running agentic loop (§5.3).
-     */
-    RespondToRunRequest: {
-      /** Answer */
-      answer: string;
-    };
-    /**
-     * RunListResponse
-     * @description The caller's runs, newest first (Spec 35 Tasks page index).
-     */
-    RunListResponse: {
-      /** Items */
-      items?: components["schemas"]["RunSummary"][];
-    };
-    /**
-     * RunStatusResponse
-     * @description A run's status + its accumulated steps (JSON-serialised Run/Step).
-     */
-    RunStatusResponse: {
-      /** Id */
-      id: string;
-      /** Persona Id */
-      persona_id: string;
-      /** Task */
-      task: string;
-      /** Status */
-      status: string;
-      /** Steps */
-      steps?: {
-        [key: string]: unknown;
-      }[];
-      /** Output */
-      output?: string | null;
-      /** Error */
-      error?: string | null;
-    };
-    /**
-     * RunSummary
-     * @description A run in the Tasks index — a light projection without the steps JSON.
-     */
-    RunSummary: {
-      /** Id */
-      id: string;
-      /** Persona Id */
-      persona_id: string;
-      /** Task */
-      task: string;
-      /** Status */
-      status: string;
-      /**
-       * Started At
-       * Format: date-time
-       */
-      started_at: string;
-      /** Finished At */
-      finished_at?: string | null;
-    };
-    /**
-     * ScheduleRescheduleRequest
-     * @description A calendar-initiated reschedule (Spec A8, T9 — the twin of the chat verb).
-     *
-     *     **Picker-state in — NO raw RRULE from the client** (bar 1): the web sends a structured
-     *     :class:`~persona.schedules.RecurrencePattern` (or a one-time instant) and the SERVER maps it to
-     *     the rule, so there is no client-side recurrence math. Exactly one of ``pattern`` /
-     *     ``one_time_at`` (XOR, checked in the route). Applied through the SAME CAS door as chat.
-     */
-    ScheduleRescheduleRequest: {
-      pattern?: components["schemas"]["RecurrencePattern"] | null;
-      /** One Time At */
-      one_time_at?: string | null;
-      /** Timezone */
-      timezone: string;
-    };
-    /**
-     * SetConsentRequest
-     * @description Set a persona's auto-dispatch consent (spec 21 T09, D-21-7/2).
-     *
-     *     ``granted``: ``True`` = grant (auto-dispatch), ``False`` = decline (stable,
-     *     no re-prompt), ``None`` = revoke back to "ask" (the settings-toggle OFF
-     *     path, which re-arms the prompt on the next autonomous dispatch).
-     */
-    SetConsentRequest: {
-      /** Granted */
-      granted?: boolean | null;
-    };
-    /**
-     * SetSkillConsentRequest
-     * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
-     *
-     *     ``granted``: ``True`` = grant (the skill may inject at its current body hash),
-     *     ``False`` = revoke. That is the ONLY field a client may send — the
-     *     ``content_hash`` consent binds to and the trust ``tier`` are **server-derived**
-     *     from the catalog on every request, never accepted from the client (the
-     *     forge-prevention invariant, S3-D-2). ``extra="forbid"`` (inherited from
-     *     ``_Input``) rejects a client that tries to supply either → 422.
-     */
-    SetSkillConsentRequest: {
-      /** Granted */
-      granted: boolean;
-    };
-    /**
-     * SpecialitySummary
-     * @description A speciality (skill) catalog entry with its trust tier + version handle (Spec S3).
-     *
-     *     The user-facing "Specialities" surface renders skills with their source-assigned
-     *     trust tier (S1-D-3 — never self-declared) and binds consent to ``content_hash``
-     *     (S1-D-5: a synced body change → new hash → prior consent is stale → re-gate).
-     *     ``requires_consent`` is the enablement gate (S1-D-4: ``community``/``third_party``
-     *     need owner consent before injection; ``builtin``/``vetted`` activate freely).
-     */
-    SpecialitySummary: {
-      /** Name */
-      name: string;
-      /** Description */
-      description: string;
-      /** When To Use */
-      when_to_use?: string | null;
-      /** Trust */
-      trust: string;
-      /** Requires Consent */
-      requires_consent: boolean;
-      /** Content Hash */
-      content_hash?: string | null;
-      /** Source */
-      source?: string | null;
-      /** Source Uri */
-      source_uri?: string | null;
-      /** Source Ref */
-      source_ref?: string | null;
-    };
-    /**
-     * StartRunRequest
-     * @description Start an agentic run for a task (§5.3).
-     */
-    StartRunRequest: {
-      /** Task */
-      task: string;
-    };
-    /**
-     * ToolRecommendation
-     * @description One recommended capability for a persona (spec 26 T09 / spec 27 T10).
-     *
-     *     Spec 27 realises the D-26-10 unification: the same shape now carries a
-     *     provider tag so built-in tools, skills, and MCP servers rank together. The
-     *     ``provider`` field defaults to ``"builtin"`` so the Spec-26 shape (and its
-     *     callers/tests) stay a forward-compatible strict subset.
-     *
-     *     Attributes:
-     *         tool_name: The capability name — a built-in tool name from
-     *             ``persona.tools.TOOL_CATALOG``, a skill id, or an ``mcp:<server>``
-     *             reference. Hallucinated names are filtered out post-hoc.
-     *         rationale: One-line reason the capability fits this persona.
-     *         confidence: Recommender confidence in [0, 1]; entries below the floor
-     *             are dropped before return.
-     *         provider: Where the capability comes from — ``"builtin"`` (tool),
-     *             ``"skill"``, ``"mcp:builtin"`` (default-enabled MCP server), or
-     *             ``"mcp:optional"`` (opt-in / BYO MCP server). The UI groups by
-     *             provider but ranks across all (spec 27 §2.3 / D-27-13).
-     */
-    ToolRecommendation: {
-      /** Tool Name */
-      tool_name: string;
-      /** Rationale */
-      rationale: string;
-      /** Confidence */
-      confidence: number;
-      /**
-       * Provider
-       * @default builtin
-       */
-      provider: string;
-    };
-    /**
-     * ToolRecommendationResponse
-     * @description The ranked tool-recommendation list returned by ``/personas/recommend-tools``.
-     */
-    ToolRecommendationResponse: {
-      /** Recommendations */
-      recommendations?: components["schemas"]["ToolRecommendation"][];
-      /** Prompt Version */
-      prompt_version: string;
-    };
-    /**
-     * ToolSummary
-     * @description A tool or skill name + description (read-only listing).
-     */
-    ToolSummary: {
-      /** Name */
-      name: string;
-      /** Description */
-      description: string;
-    };
-    /**
-     * UpdateMCPServerRequest
-     * @description Patch a BYO MCP server (spec 30). All fields optional; omitted = unchanged.
-     *
-     *     Setting ``credential`` replaces the stored secret (re-encrypted); to clear a
-     *     credential, set ``auth_method = "none"``. ``enabled`` toggles the server
-     *     without deleting it.
-     */
-    UpdateMCPServerRequest: {
-      /** Name */
-      name?: string | null;
-      /** Url */
-      url?: string | null;
-      /** Auth Method */
-      auth_method?: ("none" | "bearer" | "oauth") | null;
-      /** Credential */
-      credential?: string | null;
-      /** Enabled */
-      enabled?: boolean | null;
-    };
-    /**
-     * UpdatePersonaRequest
-     * @description Replace a persona's YAML (re-validated against the v1.0 schema).
-     */
-    UpdatePersonaRequest: {
-      /** Yaml */
-      yaml: string;
-      /** Avatar Url */
-      avatar_url?: string | null;
-    };
-    /**
-     * UpdateProfileRequest
-     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
-     *
-     *     All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
-     *     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
-     *     fails fast at the boundary on egregious input; the service then strips control
-     *     characters and treats whitespace-only as unset (names,
-     *     :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
-     *     A8-D-9) is an IANA zone name whose validity is checked in the route handler
-     *     (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
-     *     only a cheap egregious-input guard, not the IANA check (a custom ``field_validator``
-     *     would break the 422 body's ``json.dumps``, cf. ``SendMessageRequest``). ``null``
-     *     clears it → schedule computation falls back to ``PERSONA_DEFAULT_TIMEZONE``.
-     *     Nothing is required — an empty PATCH is a valid no-op read.
-     */
-    UpdateProfileRequest: {
-      /** First Name */
-      first_name?: string | null;
-      /** Last Name */
-      last_name?: string | null;
-      /** Timezone */
-      timezone?: string | null;
-      /** Quiet Hours Start */
-      quiet_hours_start?: number | null;
-      /** Quiet Hours End */
-      quiet_hours_end?: number | null;
-    };
-    /**
-     * UsageEntry
-     * @description One usage-log row (per-turn telemetry, paginated).
-     */
-    UsageEntry: {
-      /** Persona Id */
-      persona_id?: string | null;
-      /** Tier Used */
-      tier_used: string;
-      /** Model Name */
-      model_name: string;
-      /** Prompt Tokens */
-      prompt_tokens: number;
-      /** Completion Tokens */
-      completion_tokens: number;
-      /** Cost Cents */
-      cost_cents: number;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-    };
-    /**
-     * UserProfileResponse
-     * @description The caller's own profile — identity anchor + optional name (Spec K6).
-     *
-     *     ``first_name`` / ``last_name`` are optional (``None`` when unset — a nameless
-     *     account is fully valid). ``email`` may be ``None`` when the token carried none
-     *     (the provisioning fallback stores a noreply address, but the surface stays
-     *     nullable so the contract never implies a real address). Our DB is the source of
-     *     truth; Clerk stays auth-only.
-     */
-    UserProfileResponse: {
-      /** Id */
-      id: string;
-      /** Email */
-      email?: string | null;
-      /** First Name */
-      first_name?: string | null;
-      /** Last Name */
-      last_name?: string | null;
-      /** Timezone */
-      timezone?: string | null;
-      /** Quiet Hours Start */
-      quiet_hours_start?: number | null;
-      /** Quiet Hours End */
-      quiet_hours_end?: number | null;
-      /**
-       * Created At
-       * Format: date-time
-       */
-      created_at: string;
-    };
-    /** ValidationError */
-    ValidationError: {
-      /** Location */
-      loc: (string | number)[];
-      /** Message */
-      msg: string;
-      /** Error Type */
-      type: string;
-      /** Input */
-      input?: unknown;
-      /** Context */
-      ctx?: Record<string, never>;
-    };
-  };
-  responses: never;
-  parameters: never;
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
+    schemas: {
+        /**
+         * ActiveTurnResponse
+         * @description The in-progress assistant turn for a conversation (Spec P1 reattach surface).
+         *
+         *     Returned by ``GET /conversations/{id}/active-turn`` so the web client detects
+         *     a live turn on return and seeds the partial — the accumulated ``content`` plus
+         *     the tool/text interleave in ``stream_events`` (the persisted checkpoint shape)
+         *     — before resubscribing to the live tail at ``…/active-turn/events``. A 404
+         *     means there is no active turn (all messages are terminal). ``stream_events``
+         *     is the DB checkpoint shape, NOT the core ``ConversationMessage`` model (the
+         *     byte-for-byte dump corpus is untouched).
+         */
+        ActiveTurnResponse: {
+            /** Message Id */
+            message_id: string;
+            /** Streaming Status */
+            streaming_status: string;
+            /** Content */
+            content: string;
+            /** Stream Events */
+            stream_events?: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
+         * AdoptCatalogAppRequest
+         * @description Self-adopt a catalog app for a persona (Spec N4, the B2-③ setup-form target).
+         *
+         *     The connection ``url`` and ``auth_method`` are derived from the catalog entry
+         *     server-side (N4-D-10 — the catalog is the trust anchor for *where* it connects); the
+         *     caller supplies ONLY ``credential`` (when the app declares a secret). ``credential`` is
+         *     ``repr=False`` (redacted in logs), encrypted at rest via the store, and NEVER returned.
+         */
+        AdoptCatalogAppRequest: {
+            /** Catalog Name */
+            catalog_name: string;
+            /** Credential */
+            credential?: string | null;
+        };
+        /**
+         * ArtifactItem
+         * @description A single workspace artifact in the F5 list view.
+         *
+         *     The ``ref`` is the workspace-relative path the existing
+         *     ``GET /v1/personas/{id}/uploads/{ref}`` route already knows how to
+         *     serve — F5 reuses that route for downloads + inline rendering.
+         */
+        ArtifactItem: {
+            /** Ref */
+            ref: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Media Type */
+            media_type: string;
+            metadata?: components["schemas"]["ArtifactMetadataView"] | null;
+        };
+        /**
+         * ArtifactListResponse
+         * @description Paginated artifact-list response for D-F5-1.
+         *
+         *     ``total`` is the post-filter count; ``items`` is the window of size
+         *     ``limit`` starting at ``offset``. The client computes ``hasMore`` from
+         *     ``offset + items.length < total``.
+         */
+        ArtifactListResponse: {
+            /** Total */
+            total: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Items */
+            items: components["schemas"]["ArtifactItem"][];
+        };
+        /**
+         * ArtifactMetadataView
+         * @description Sidecar metadata surfaced through the artifact list endpoint.
+         *
+         *     Mirrors ``services.artifact_metadata.WorkspaceArtifactMetadata`` at the
+         *     API surface. Kept as a distinct response model (rather than re-exporting
+         *     the service shape) so the OpenAPI schema is self-contained and the
+         *     web client gets stable types.
+         */
+        ArtifactMetadataView: {
+            /** Source */
+            source: string;
+            /** Ai Generated */
+            ai_generated?: boolean | null;
+            /** Type */
+            type: string;
+            /** Producing Spec */
+            producing_spec: string;
+            /** Conversation Id */
+            conversation_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Original Name */
+            original_name: string | null;
+        };
+        /**
+         * AuthorPersonaRequest
+         * @description LLM-assisted authoring from a natural-language description (§5.1, §6.3).
+         */
+        AuthorPersonaRequest: {
+            /** Description */
+            description: string;
+        };
+        /**
+         * AuthoringDraft
+         * @description The draft envelope returned by ``/author`` and ``/author/refine`` (D-10-2).
+         *
+         *     A draft is NOT a persona row — the user reviews/refines it, then saves via
+         *     ``POST /v1/personas`` (which creates the row). ``errors`` is populated only
+         *     when validation retries are exhausted (best-effort YAML returned for the form
+         *     to fix, §3.3); ``None`` on success.
+         */
+        AuthoringDraft: {
+            /** Yaml */
+            yaml: string;
+            /** Questions */
+            questions?: components["schemas"]["ClarifyingQuestion"][];
+            /** Prompt Version */
+            prompt_version: string;
+            /** Errors */
+            errors?: string[] | null;
+        };
+        /** Body_create_upload_v1_personas__persona_id__uploads_post */
+        Body_create_upload_v1_personas__persona_id__uploads_post: {
+            /** File */
+            file: string;
+            /** Conversation Id */
+            conversation_id?: string | null;
+        };
+        /**
+         * CallSummary
+         * @description A finished (or in-progress) voice call in the Calls history (Spec V9, V9-D-5).
+         *
+         *     The durable call envelope read from the ``calls`` table (V9-D-3: the
+         *     call-record is the Calls-membership key, NOT ``origin``). ``conversation_id``
+         *     wires each call to its saved transcript — the spoken turns now persist as
+         *     ``messages`` (V9-D-1/D-2), so ``GET /v1/conversations/{conversation_id}``
+         *     renders them under the same thread UI as a text chat.
+         *
+         *     Attributes:
+         *         call_id: The call-record id.
+         *         conversation_id: The conversation this call ran on — the transcript link.
+         *         persona_id: The persona on the call (the web resolves the display name /
+         *             avatar, as it does for ``ConversationSummary``).
+         *         started_at: When the call went active (UTC-aware); list order is by this
+         *             field descending.
+         *         ended_at: When the call ended; ``None`` while live / on a crash.
+         *         duration_s: Stored whole-second duration; ``None`` until the call ends.
+         *         end_reason: Why the call ended; ``None`` while live.
+         */
+        CallSummary: {
+            /** Call Id */
+            call_id: string;
+            /** Conversation Id */
+            conversation_id: string;
+            /** Persona Id */
+            persona_id: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Ended At */
+            ended_at?: string | null;
+            /** Duration S */
+            duration_s?: number | null;
+            /** End Reason */
+            end_reason?: ("user_hangup" | "switched" | "error" | "disconnect") | null;
+        };
+        /**
+         * ChannelContext
+         * @description Opaque connector context passed through the chat endpoint (D-08-3).
+         *
+         *     The API stores this on the message row and never interprets it — ``platform``
+         *     is a free-form string, NEVER an enum the API branches on. All connector logic
+         *     lives in the future spec-12 connectors. Null/absent is the web-UI case.
+         */
+        ChannelContext: {
+            /** Platform */
+            platform: string;
+            /** Platform User Id */
+            platform_user_id?: string | null;
+            /** Platform Chat Id */
+            platform_chat_id?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: string;
+            };
+        };
+        /**
+         * ClarifyingQuestion
+         * @description One suggested question the user can answer to improve a draft persona.
+         *
+         *     ``section`` is a free-form hint (expected: identity | self_facts | worldview
+         *     | constraints | tools | skills) — NOT an enum, so a model that names a
+         *     section we don't anticipate doesn't sink the parse.
+         */
+        ClarifyingQuestion: {
+            /** Section */
+            section: string;
+            /** Question */
+            question: string;
+        };
+        /**
+         * ConnectorConnectionOut
+         * @description One active platform connection (Spec C6), owner-scoped + RLS.
+         *
+         *     Returned by ``GET /v1/me/connectors`` — the caller's live bindings only;
+         *     absence of a platform ⇒ not connected. ``platform_identity`` is the bound
+         *     envelope: a phone number / email address (human-recognisable) or an opaque
+         *     platform user id (Telegram/Discord/Slack numeric id) — the web formats it
+         *     per platform. No token or secret is ever exposed here (only the public
+         *     identity + when it linked).
+         */
+        ConnectorConnectionOut: {
+            /** Platform */
+            platform: string;
+            /** Platform Identity */
+            platform_identity: string;
+            /**
+             * Linked At
+             * Format: date-time
+             */
+            linked_at: string;
+        };
+        /**
+         * ConnectorDisconnectResult
+         * @description The outcome of a disconnect (Spec C6, DELETE ``…/connectors/{p}/{id}``).
+         *
+         *     ``severed`` is ``True`` iff an active binding of the caller was revoked;
+         *     ``False`` is the **idempotent no-op** — the binding was already disconnected,
+         *     never existed, or isn't the caller's (RLS hides a foreign binding, so it is a
+         *     no-op, never a ``404`` that would leak whether it exists). Disconnect is
+         *     idempotent by design: a repeat is a clean ``severed=false``.
+         */
+        ConnectorDisconnectResult: {
+            /** Severed */
+            severed: boolean;
+        };
+        /**
+         * ConnectorLinkArtifact
+         * @description A link-initiation artifact (Spec C6, POST ``…/connectors/{platform}/link``).
+         *
+         *     The front-door normalizes the connector service's issue response into ONE shape the
+         *     web renders, regardless of mechanism: exactly one of ``deep_link`` (Telegram),
+         *     ``authorize_url`` (Discord/Slack OAuth), or ``code`` (WhatsApp/SMS/email OTP) is set;
+         *     ``destination`` accompanies ``code`` for the reversed flow ("text/email it to …",
+         *     C6-D-7); ``expires_at`` is the server-authoritative token expiry (C6-D-8) the web's
+         *     countdown + re-issue key off. ``extra="forbid"`` guarantees no token, secret, or stray
+         *     upstream field can ride along — the front-door copies only these known keys.
+         */
+        ConnectorLinkArtifact: {
+            /** Deep Link */
+            deep_link?: string | null;
+            /** Authorize Url */
+            authorize_url?: string | null;
+            /** Code */
+            code?: string | null;
+            /** Destination */
+            destination?: string | null;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+        };
+        /**
+         * ConnectorPlatform
+         * @description The six linkable platforms — a closed set (C6-D-1).
+         *
+         *     Used as the ``link`` path-param type so FastAPI rejects any other value with a 422
+         *     BEFORE it can reach the proxy: the value is interpolated into the upstream URL path,
+         *     so a closed enum forecloses path-injection / SSRF into other connector-service routes.
+         * @enum {string}
+         */
+        ConnectorPlatform: "telegram" | "discord" | "slack" | "whatsapp" | "sms" | "email";
+        /**
+         * ConversationDetail
+         * @description Full conversation history.
+         */
+        ConversationDetail: {
+            /** Id */
+            id: string;
+            /** Persona Id */
+            persona_id: string;
+            /** Title */
+            title: string;
+            /**
+             * Origin
+             * @default chat
+             * @enum {string}
+             */
+            origin: "chat" | "call";
+            /** Messages */
+            messages: components["schemas"]["MessageView"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * ConversationSummary
+         * @description A conversation in a list view.
+         *
+         *     The two ``last_message_*`` fields let the sidebar render a real preview of
+         *     the most recent turn instead of falling back to the title. They are
+         *     populated in a single set-based LIST query (a ``ROW_NUMBER()`` window over
+         *     the RLS-scoped ``messages`` rows — no per-row fan-out) and are ``None`` for
+         *     a conversation that has no messages yet.
+         *
+         *     Attributes:
+         *         id: The conversation id.
+         *         persona_id: The persona this conversation belongs to.
+         *         title: The conversation's display title.
+         *         created_at: Creation timestamp (UTC-aware).
+         *         updated_at: Last-activity timestamp (UTC-aware); list order is by this
+         *             field descending.
+         *         last_message_preview: The most recent message's text, trimmed and
+         *             truncated server-side to :data:`LAST_MESSAGE_PREVIEW_MAX_LEN`
+         *             characters (an ellipsis replaces the tail when it overflows).
+         *             ``None`` when the conversation has no messages.
+         *         last_message_role: Speaker role of the most recent message, using the
+         *             existing message-role vocabulary (``user`` is the human; every
+         *             other role is the persona/assistant side). ``None`` when the
+         *             conversation has no messages. The UI switches on this to attribute
+         *             the preview ("You: …" vs the persona).
+         */
+        ConversationSummary: {
+            /** Id */
+            id: string;
+            /** Persona Id */
+            persona_id: string;
+            /** Title */
+            title: string;
+            /**
+             * Origin
+             * @default chat
+             * @enum {string}
+             */
+            origin: "chat" | "call";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Last Message Preview */
+            last_message_preview?: string | null;
+            /** Last Message Role */
+            last_message_role?: ("user" | "assistant" | "system" | "tool") | null;
+        };
+        /**
+         * CreateConversationRequest
+         * @description Start a new conversation against a persona.
+         *
+         *     ``origin`` is the conversation's immutable birth-marker (Spec V9, V9-D-3):
+         *     ``'chat'`` (the default — every text-path conversation) or ``'call'`` (the
+         *     web sets this when it creates a conversation to host a voice call,
+         *     V9-D-X-marker-writer-web). It is the ONLY seam between chat and voice; the
+         *     closed ``Literal`` keeps the vocabulary shut at the request boundary
+         *     (``extra="forbid"`` means the field must be declared, not silently passed).
+         */
+        CreateConversationRequest: {
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /**
+             * Origin
+             * @default chat
+             * @enum {string}
+             */
+            origin: "chat" | "call";
+        };
+        /**
+         * CreateMCPServerRequest
+         * @description Add a bring-your-own MCP server (spec 30, D-30-3/4).
+         *
+         *     ``url`` is SSRF-validated (https-only, public target) at the route AND on
+         *     every live connect. ``credential`` (a bearer token for ``auth_method =
+         *     "bearer"``) is encrypted at rest (T07) and NEVER returned or logged; it is
+         *     required when ``auth_method`` is not ``"none"``.
+         */
+        CreateMCPServerRequest: {
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            /**
+             * Auth Method
+             * @default none
+             * @enum {string}
+             */
+            auth_method: "none" | "bearer" | "oauth";
+            /** Credential */
+            credential?: string | null;
+            /** Oauth Provider */
+            oauth_provider?: string | null;
+        };
+        /**
+         * CreatePersonaRequest
+         * @description Create a persona from a YAML document (validated against the v1.0 schema).
+         *
+         *     ``avatar_url`` is an optional presentation field (not part of the YAML
+         *     schema) — the persona-list / chat-header visual identity.
+         */
+        CreatePersonaRequest: {
+            /** Yaml */
+            yaml: string;
+            /** Avatar Url */
+            avatar_url?: string | null;
+        };
+        /**
+         * CreditsResponse
+         * @description The user's current credit balance (stub counter).
+         *
+         *     ``low_balance`` is True when the balance is below
+         *     :data:`credits_service.LOW_BALANCE_THRESHOLD` (10 000 by default) — the web
+         *     app uses it to surface the under-limit warning (D-11-12).
+         */
+        CreditsResponse: {
+            /** Balance */
+            balance: number;
+            /**
+             * Low Balance
+             * @default false
+             */
+            low_balance: boolean;
+        };
+        /**
+         * DocumentRef
+         * @description Reference to an attached document — the API-boundary type.
+         *
+         *     Persisted alongside the original file as a ``{doc_ref}.meta.json``
+         *     sidecar in the workspace. Returned by :func:`upload`,
+         *     :func:`list_for_conversation`, and (via JSON) the API GET endpoint
+         *     (T18). Carries the metadata T14/T15/T16 need to render the prompt
+         *     sections + the synopsis.
+         */
+        DocumentRef: {
+            /** Doc Ref */
+            doc_ref: string;
+            /** Filename */
+            filename: string;
+            /** Title */
+            title: string;
+            /** Format */
+            format: string;
+            /** Workspace Path */
+            workspace_path: string;
+            strategy: components["schemas"]["IngestStrategy"];
+            /** Token Count */
+            token_count: number;
+            /** Page Count */
+            page_count?: number | null;
+            /** Sheet Names */
+            sheet_names?: string[] | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /**
+             * Images
+             * @default []
+             */
+            images: components["schemas"]["ImageContent"][];
+        };
+        /**
+         * FireEvent
+         * @description One past fire/miss from the audit trail (the calendar's ran/missed markers).
+         */
+        FireEvent: {
+            /** Schedule Id */
+            schedule_id: string;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * GrantToolRequest
+         * @description Enable a tool on a persona's allow-list via runtime consent (spec 26 T11).
+         *
+         *     Sent when the user accepts a runtime tool-gap offer. ``turn_index`` is the
+         *     conversation turn the offer came from (recorded in the persona_self audit).
+         */
+        GrantToolRequest: {
+            /** Tool Name */
+            tool_name: string;
+            /** Turn Index */
+            turn_index?: number | null;
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * ImageContent
+         * @description An image *reference* block within a multimodal message ``content`` list.
+         *
+         *     Per Spec 13 D-13-X-now option (c), the message store carries only the
+         *     workspace reference — image bytes live exactly once under the persona's
+         *     Spec 03 workspace and are resolved at send time by the backend
+         *     serialisers (Spec 13 T05/T06). This is the structural guard behind
+         *     Dominant Concern #2: the ``messages`` table size grows with reference
+         *     count, not with image bytes. See
+         *     ``docs/specs/phase2/spec_13/decisions.md`` (D-13-X-now) and the T13
+         *     store-by-reference regression test.
+         *
+         *     Attributes:
+         *         type: Discriminator tag — always the literal ``"image"`` so the
+         *             :data:`MessageContent` tagged union can resolve this block by
+         *             its ``type`` field on deserialisation.
+         *         workspace_path: The reference into the persona workspace (Spec 03).
+         *             Resolved to bytes only at backend-send time; the message store
+         *             never holds the bytes themselves.
+         *         media_type: One of the four supported image MIME types per
+         *             **D-13-3**: ``image/png``, ``image/jpeg``, ``image/webp``,
+         *             ``image/gif``. Any other value is rejected at validation time.
+         *         inline_bytes: Optional already-resolved raw image bytes. When a caller
+         *             (e.g. the hosted ``chat_service``, which resolves upload bytes at
+         *             the API boundary) sets this, the backend vision serialisers
+         *             base64-encode it DIRECTLY and skip both the ``workspace_root``
+         *             filesystem read and the ``workspace_root is None`` guard. This is
+         *             the transport for the live image-workspace cascade: the chat tier
+         *             backend is app-scoped/cached and never receives a per-request
+         *             ``workspace_root``, so without inline bytes the image would never
+         *             reach the model. ``None`` keeps the legacy workspace-path resolution
+         *             path (used by the persisted-history replay path). This field is
+         *             NEVER persisted — the API collapses message content to its
+         *             :class:`TextContent` blocks at the store boundary (D-13-X-now
+         *             option c keeps the ``messages`` table bounded by reference count,
+         *             not image bytes), so the store invariant is unaffected.
+         */
+        ImageContent: {
+            /**
+             * Type
+             * @default image
+             * @constant
+             */
+            type: "image";
+            /** Workspace Path */
+            workspace_path: string;
+            /**
+             * Media Type
+             * @enum {string}
+             */
+            media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+        };
+        /**
+         * ImageGenRequest
+         * @description Body of ``POST /v1/personas/:id/imagegen``.
+         *
+         *     The closed Literal surface on ``size`` and ``quality`` ensures invalid
+         *     values land as 422 Pydantic validation errors before any service-
+         *     layer work happens; ``count`` is bounded by D-15-3 (``le=2``).
+         *
+         *     Attributes:
+         *         prompt: The user-supplied text prompt. Required, min length 1.
+         *             The visual_style merge runs at the service layer
+         *             (:func:`persona_api.imagegen.service.generate`) so the prompt
+         *             here is the raw user input — NOT yet merged.
+         *         size: One of the three closed presets per D-15-3. Defaults to
+         *             ``"1024x1024"``. The OpenAI backend rounds non-square presets
+         *             per D-15-X-size-rounding; the audit captures the REQUESTED
+         *             value (this field's literal), not the rounded one.
+         *         count: Number of images to generate. ``Field(ge=1, le=2)`` enforces
+         *             the D-15-3 cap. Defaults to 1.
+         *         quality: One of the two closed presets per D-15-3. Defaults to
+         *             ``"standard"``.
+         */
+        ImageGenRequest: {
+            /** Prompt */
+            prompt: string;
+            /**
+             * Size
+             * @default 1024x1024
+             * @enum {string}
+             */
+            size: "1024x1024" | "1024x1792" | "1792x1024";
+            /**
+             * Count
+             * @default 1
+             */
+            count: number;
+            /**
+             * Quality
+             * @default standard
+             * @enum {string}
+             */
+            quality: "standard" | "high";
+        };
+        /**
+         * ImageRef
+         * @description Image reference carried on a chat message (spec 13, D-13-X-now option c).
+         *
+         *     Refers to a previously-uploaded image in the persona's workspace (Spec 03).
+         *     Image bytes live exactly once in the workspace; the chat body and the
+         *     persisted ``messages`` row carry only ``workspace_path`` + ``media_type``
+         *     so storage scales with reference count, not with image bytes.
+         *
+         *     Attributes:
+         *         workspace_path: Workspace-relative path returned by the uploads route
+         *             (``uploads/<ref>.<ext>``). Resolved against
+         *             ``workspace_root/owner_id/persona_id`` at backend send time.
+         *         media_type: One of the four supported image MIME types per D-13-3:
+         *             ``image/png``, ``image/jpeg``, ``image/webp``, ``image/gif``.
+         *             Any other value is rejected at validation time.
+         */
+        ImageRef: {
+            /** Workspace Path */
+            workspace_path: string;
+            /**
+             * Media Type
+             * @enum {string}
+             */
+            media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+        };
+        /**
+         * IngestStrategy
+         * @description The ingestion paths a document can take.
+         *
+         *     ``VISION_HANDOFF_REQUIRED`` is what :func:`ingest_document` returns when
+         *     the parser sets ``needs_vision_handoff=True`` — the caller (T13's
+         *     :func:`persona_api.services.document_service.upload`) detects this and
+         *     performs the actual rasterisation + ImageContent creation (T21). The
+         *     caller-side outcome ``VISION_HANDOFF`` records the completed handoff
+         *     on the persisted :class:`DocumentRef`.
+         * @enum {string}
+         */
+        IngestStrategy: "whole_inject" | "retrieval" | "vision_handoff_required" | "vision_handoff";
+        /**
+         * MCPCatalogSecret
+         * @description A credential an MCP server requires — DISPLAY-ONLY schema (Spec N1, D-N1-5).
+         *
+         *     Carries **no value field by construction**: the catalog API exposes WHICH secret a
+         *     server needs (so the apps UX can render the setup form), never a secret value. The
+         *     credential isolation property (user → secret store → Gateway, never an LLM turn) is
+         *     upheld at the API boundary, not just internally.
+         */
+        MCPCatalogSecret: {
+            /** Name */
+            name: string;
+            /** Env */
+            env: string;
+            /**
+             * Example
+             * @default
+             */
+            example: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+        };
+        /**
+         * MCPCatalogServer
+         * @description An MCP server in the management catalog (spec 30 T11 + N1).
+         *
+         *     A persona enables a server by adding ``mcp:<name>`` to its ``tools``
+         *     allow-list. ``provider`` is the recommender tag (``mcp:builtin`` /
+         *     ``mcp:optional``); ``required_env`` lists env vars an operator must set.
+         *
+         *     The N1 fields below carry the Docker catalog-mirror display metadata the apps UX
+         *     (N3) renders. They are **additive-with-default** so the existing five-field
+         *     contract is unchanged — a client written against spec 30 sees no break.
+         */
+        MCPCatalogServer: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Provider */
+            provider: string;
+            /** Default Enabled */
+            default_enabled: boolean;
+            /** Required Env */
+            required_env?: string[];
+            /**
+             * Display Name
+             * @default
+             */
+            display_name: string;
+            /**
+             * Icon Url
+             * @default
+             */
+            icon_url: string;
+            /**
+             * Image
+             * @default
+             */
+            image: string;
+            /**
+             * Server Type
+             * @default builtin
+             */
+            server_type: string;
+            /**
+             * Risk
+             * @default low
+             */
+            risk: string;
+            /**
+             * Source Project
+             * @default
+             */
+            source_project: string;
+            /**
+             * Source Commit
+             * @default
+             */
+            source_commit: string;
+            /**
+             * Signed
+             * @default false
+             */
+            signed: boolean;
+            /** Allow Hosts */
+            allow_hosts?: string[];
+            /** Secrets */
+            secrets?: components["schemas"]["MCPCatalogSecret"][];
+        };
+        /**
+         * MCPConnectionStatus
+         * @description One assigned MCP server's connection status (Spec N6, N6-D-6; R4-C1-21).
+         *
+         *     Makes "assigned" visibly distinct from "working": ``connected`` ⇒ the server's tools
+         *     reach the model; otherwise ``reason`` names why (the T1 vocabulary — ``starting`` /
+         *     ``spawn_failed`` / ``stopped`` / ``fly_outage`` / ``no_key`` / ``unvetted`` /
+         *     ``runtime_capacity`` / ``not_enabled``). The web renders ``reason`` as a friendly badge —
+         *     never the raw enum. No secret is ever included.
+         */
+        MCPConnectionStatus: {
+            /** Server Name */
+            server_name: string;
+            /** Connected */
+            connected: boolean;
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
+         * MCPOAuthAuthorizeRequest
+         * @description Start an OAuth flow for a BYO MCP server (Spec R8, T4).
+         *
+         *     ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
+         *     user to once connected — it is stored SERVER-SIDE against the state (never encoded
+         *     in the OAuth ``state`` value) and is never an external redirect target.
+         */
+        MCPOAuthAuthorizeRequest: {
+            /** Redirect After */
+            redirect_after?: string | null;
+        };
+        /**
+         * MCPOAuthAuthorizeResponse
+         * @description The provider authorize URL to redirect the user to (Spec R8, T4).
+         *
+         *     ``authorize_url`` carries the PKCE ``code_challenge`` + opaque ``state`` — no
+         *     secret. The flow completes at the web callback → ``POST /mcp-servers/oauth/callback``.
+         */
+        MCPOAuthAuthorizeResponse: {
+            /** Authorize Url */
+            authorize_url: string;
+        };
+        /**
+         * MCPOAuthCallbackRequest
+         * @description Complete an OAuth flow (Spec R8, T5): the web callback relays ``state`` + ``code``.
+         *
+         *     Sent by the authenticated web callback page (which received the provider redirect).
+         *     ``state`` is the opaque CSRF token minted at authorize; ``code`` the provider's
+         *     one-time authorization code. Both are consumed server-side and never returned.
+         */
+        MCPOAuthCallbackRequest: {
+            /** State */
+            state: string;
+            /** Code */
+            code: string;
+        };
+        /**
+         * MCPOAuthCallbackResponse
+         * @description Result of completing an OAuth flow (Spec R8, T5).
+         *
+         *     ``server`` is the now-connected server (``has_credential`` true). ``redirect_after``
+         *     is the server-side-stored app path to return the user to (or ``None``).
+         */
+        MCPOAuthCallbackResponse: {
+            server: components["schemas"]["MCPServerDetail"];
+            /** Redirect After */
+            redirect_after?: string | null;
+        };
+        /**
+         * MCPServerDetail
+         * @description A bring-your-own MCP server as returned to its owner (spec 30, D-30-3).
+         *
+         *     The credential is NEVER included — only ``has_credential`` (whether one is
+         *     stored). ``discovered_tools`` is the cached eager-discovery result (D-30-5),
+         *     ``None`` until a successful test-connection.
+         */
+        MCPServerDetail: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            /** Auth Method */
+            auth_method: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Has Credential */
+            has_credential: boolean;
+            /** Discovered Tools */
+            discovered_tools?: string[] | null;
+            /** Catalog Source */
+            catalog_source?: string | null;
+            /** Oauth Provider */
+            oauth_provider?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * MCPServerTestResult
+         * @description Outcome of a BYO-MCP test-connection (spec 30, D-30-5).
+         *
+         *     ``ok`` true → ``tools`` lists the discovered tool names (cached on the row).
+         *     ``ok`` false → ``error`` is a short, non-sensitive reason category.
+         */
+        MCPServerTestResult: {
+            /** Ok */
+            ok: boolean;
+            /** Tools */
+            tools?: string[];
+            /** Error */
+            error?: string | null;
+        };
+        /**
+         * MemoryCorrectionRequest
+         * @description Correct a Memory node's content (Spec K5, K5-D-7 / K5-D-5).
+         *
+         *     The user's edit to what a node says — the highest-quality write the graph gets.
+         *     Content-only (per K5-D-7): it flows through K0's update path (re-embed, re-index,
+         *     semantic links re-evaluated) and records provenance as ``user``-edited.
+         */
+        MemoryCorrectionRequest: {
+            /** Content */
+            content: string;
+        };
+        /**
+         * MemoryEvolutionEntry
+         * @description One step in how a memory grew — a provenance contribution (oldest first).
+         */
+        MemoryEvolutionEntry: {
+            /** Source */
+            source: string;
+            /**
+             * Written At
+             * Format: date-time
+             */
+            written_at: string;
+            /** Reason */
+            reason?: string | null;
+            /** Superseded Content */
+            superseded_content?: string | null;
+        };
+        /**
+         * MemoryLinkEdge
+         * @description A typed edge for the canvas — one of the four LinkType relationships.
+         */
+        MemoryLinkEdge: {
+            /** Src Node Id */
+            src_node_id: string;
+            /** Dst Node Id */
+            dst_node_id: string;
+            /** Link Type */
+            link_type: string;
+            /** Weight */
+            weight?: number | null;
+        };
+        /**
+         * MemoryLinkView
+         * @description A traversable typed link in the detail panel — the edge plus the neighbour.
+         */
+        MemoryLinkView: {
+            /** Link Type */
+            link_type: string;
+            /** Weight */
+            weight?: number | null;
+            /**
+             * Direction
+             * @enum {string}
+             */
+            direction: "out" | "in";
+            neighbor: components["schemas"]["MemoryNodeSummary"];
+        };
+        /**
+         * MemoryNodeDetail
+         * @description A node's full detail: content, provenance-as-story, evolution, typed links.
+         */
+        MemoryNodeDetail: {
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Content */
+            content: string;
+            /** Wellbeing Category */
+            wellbeing_category?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            origin: components["schemas"]["MemoryProvenanceView"];
+            /** Evolution */
+            evolution: components["schemas"]["MemoryEvolutionEntry"][];
+            /** Links */
+            links: components["schemas"]["MemoryLinkView"][];
+        };
+        /**
+         * MemoryNodeSummary
+         * @description A node as drawn on the canvas — no content/provenance (that is the detail).
+         *
+         *     ``degree`` is the node's connectedness within the returned window (0 when not
+         *     computed for this view) — the "size by connectedness, lightly" signal (K5-D-3).
+         */
+        MemoryNodeSummary: {
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Wellbeing Category */
+            wellbeing_category?: string | null;
+            /**
+             * Degree
+             * @default 0
+             */
+            degree: number;
+        };
+        /**
+         * MemoryProvenanceView
+         * @description Where a memory came from — the structured basis the UI renders as story.
+         */
+        MemoryProvenanceView: {
+            /** Source */
+            source: string;
+            /** Persona Id */
+            persona_id?: string | null;
+            /** Persona Name */
+            persona_name?: string | null;
+            /** Interaction Id */
+            interaction_id?: string | null;
+            /** Conversation Id */
+            conversation_id?: string | null;
+            /**
+             * Written At
+             * Format: date-time
+             */
+            written_at: string;
+            /** Reason */
+            reason?: string | null;
+            /** Grounding */
+            grounding?: string | null;
+        };
+        /**
+         * MemorySearchResponse
+         * @description The matches for a Memory search query, best-first (criterion 5).
+         */
+        MemorySearchResponse: {
+            /** Query */
+            query: string;
+            /** Results */
+            results: components["schemas"]["MemorySearchResult"][];
+        };
+        /**
+         * MemorySearchResult
+         * @description One search hit — exact-term and paraphrase ranks both visible (K1 hybrid).
+         */
+        MemorySearchResult: {
+            /** Node Id */
+            node_id: string;
+            /** Label */
+            label: string;
+            /** Kind */
+            kind: string;
+            /** Score */
+            score: number;
+            /** Dense Rank */
+            dense_rank?: number | null;
+            /** Sparse Rank */
+            sparse_rank?: number | null;
+        };
+        /**
+         * MemoryWindowResponse
+         * @description A windowed slice of the graph — the seed (no focus) or a focus neighbourhood.
+         *
+         *     Never the whole graph (K5-D-2): ``total_nodes`` is the owner's full tally for the
+         *     header; ``nodes``/``links`` are only the loaded window.
+         *
+         *     ``available`` distinguishes *no graph store* (this deployment has no usable graph —
+         *     e.g. community-on-SQLite, the K0 graph being Postgres-only) from *an empty graph*
+         *     (a real but as-yet-unpopulated map). The UI must not show the "no memories yet"
+         *     invite when the truth is "Memory isn't available here" — so the nav is gated and
+         *     the page shows a distinct unavailable state when this is ``False`` (Spec K5).
+         */
+        MemoryWindowResponse: {
+            /**
+             * Available
+             * @default true
+             */
+            available: boolean;
+            /** Focus Id */
+            focus_id?: string | null;
+            /** Is Seed */
+            is_seed: boolean;
+            /** Total Nodes */
+            total_nodes: number;
+            /** Nodes */
+            nodes: components["schemas"]["MemoryNodeSummary"][];
+            /** Links */
+            links: components["schemas"]["MemoryLinkEdge"][];
+        };
+        /**
+         * MessageView
+         * @description A single message in a conversation history.
+         */
+        MessageView: {
+            /** Id */
+            id: string;
+            /** Role */
+            role: string;
+            /** Content */
+            content: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Channel */
+            channel?: {
+                [key: string]: unknown;
+            } | null;
+            /** Tier Used */
+            tier_used?: string | null;
+            /** Events */
+            events?: {
+                [key: string]: unknown;
+            }[] | null;
+        };
+        /**
+         * NotificationMarkReadResult
+         * @description How many feed rows a mark-read touched (0 = nothing unread / not owned).
+         */
+        NotificationMarkReadResult: {
+            /** Updated */
+            updated: number;
+        };
+        /**
+         * NotificationOut
+         * @description One durable bell notification (Spec P6 feed), owner-scoped + RLS.
+         *
+         *     Copy is locale-neutral (P6-D-5): the web resolves ``message_key`` + ``params``
+         *     via next-intl at render. ``kind`` + ``ref_id`` drive the deep-link
+         *     (``run_terminal`` → ``/runs/{ref_id}``, ``persona_ready`` → ``/personas/{ref_id}``).
+         */
+        NotificationOut: {
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Ref Id */
+            ref_id?: string | null;
+            /** Level */
+            level: string;
+            /** Message Key */
+            message_key: string;
+            /**
+             * Params
+             * @default {}
+             */
+            params: {
+                [key: string]: string;
+            };
+            /** Read */
+            read: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * Occurrence
+         * @description One computed future fire (tz-aware UTC instant) + its schedule/task context.
+         */
+        Occurrence: {
+            /** Schedule Id */
+            schedule_id: string;
+            /** Task Id */
+            task_id: string | null;
+            /** Persona Id */
+            persona_id: string | null;
+            /**
+             * Fire At
+             * Format: date-time
+             */
+            fire_at: string;
+            /** Timezone */
+            timezone: string;
+            /** Human Terms */
+            human_terms: string;
+        };
+        /**
+         * OccurrencesResult
+         * @description The windowed occurrences + fire history + the honest truncation marker (A8-D-11).
+         */
+        OccurrencesResult: {
+            /** Occurrences */
+            occurrences: components["schemas"]["Occurrence"][];
+            /** History */
+            history: components["schemas"]["FireEvent"][];
+            /**
+             * Window From
+             * Format: date-time
+             */
+            window_from: string;
+            /**
+             * Window To
+             * Format: date-time
+             */
+            window_to: string;
+            /** Truncated */
+            truncated: boolean;
+        };
+        /**
+         * PersonaCapabilities
+         * @description Deployment-derived capability flags surfaced with the persona detail.
+         *
+         *     Hydrated from the runtime :class:`persona_runtime.tier.TierRegistry` so the
+         *     UI can answer "does this persona support image attachments?" BEFORE the
+         *     user attempts to send (Spec 13 fail-loud made visible — Spec F3 §10 #7;
+         *     D-F3-X-no-vision-surface-shape). At v0.1 the answer is deployment-wide:
+         *     every persona under a given deployment shares the same registry, so
+         *     ``vision`` is identical across personas — see D-F3-X-deployment-vs-persona-
+         *     capability-framing. The field's shape survives the v0.2 inflection where
+         *     per-persona tier pins make the answer genuinely per-persona; only the
+         *     hydration source changes (from registry to per-persona lookup).
+         *
+         *     Attributes:
+         *         vision: ``True`` iff at least one configured tier resolves to a
+         *             backend whose ``supports_vision`` is ``True``. Read via the
+         *             public :meth:`TierRegistry.supports_vision_for` method
+         *             (D-F3-X-tier-registry-public-contract).
+         *         configured_tiers: Tier names registered on the active deployment
+         *             in insertion order (``("small", "mid", "frontier")`` for the
+         *             typical three-tier deployment). The UI may surface these in a
+         *             disabled-attach tooltip to explain *which* models the deployment
+         *             has configured.
+         */
+        PersonaCapabilities: {
+            /** Vision */
+            vision: boolean;
+            /** Configured Tiers */
+            configured_tiers: string[];
+        };
+        /**
+         * PersonaDetail
+         * @description A persona's full detail (YAML + metadata).
+         *
+         *     The optional :attr:`capabilities` field (D-F3-X-capability-endpoint) is
+         *     additive on top of the Spec 08 / Spec 09 surface: tests + composition
+         *     roots that do not wire a :class:`TierRegistry` (e.g. unit fixtures
+         *     without the runtime) omit the field and the API returns ``None`` so the
+         *     persona-detail surface stays usable without runtime composition.
+         */
+        PersonaDetail: {
+            /** Id */
+            id: string;
+            /** Yaml */
+            yaml: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Avatar Url */
+            avatar_url?: string | null;
+            /** Avatar Source */
+            avatar_source?: string | null;
+            /** Avatar Ai Generated */
+            avatar_ai_generated?: boolean | null;
+            capabilities?: components["schemas"]["PersonaCapabilities"] | null;
+            /** Consent To Auto Dispatch */
+            consent_to_auto_dispatch?: boolean | null;
+            /** Consent Updated At */
+            consent_updated_at?: string | null;
+            /** Unavailable Mcp Servers */
+            unavailable_mcp_servers?: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Conversation Count
+             * @default 0
+             */
+            conversation_count: number;
+        };
+        /**
+         * PersonaSpecialitySummary
+         * @description A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
+         *
+         *     The persona-scoped surface adds the server-computed ``consent_state`` — the one
+         *     security-authoritative bit the client cannot derive (it needs the consent store +
+         *     the current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the
+         *     current hash), ``stale`` (consented at an old body hash → re-gate, S1-D-5), or
+         *     ``none`` (never/revoked → default-deny). Enablement (the ``skills:`` declaration)
+         *     and ``unavailable`` stay client-derived from the edited persona draft.
+         */
+        PersonaSpecialitySummary: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** When To Use */
+            when_to_use?: string | null;
+            /** Trust */
+            trust: string;
+            /** Requires Consent */
+            requires_consent: boolean;
+            /** Content Hash */
+            content_hash?: string | null;
+            /** Source */
+            source?: string | null;
+            /** Source Uri */
+            source_uri?: string | null;
+            /** Source Ref */
+            source_ref?: string | null;
+            /** Consent State */
+            consent_state: string;
+        };
+        /**
+         * PersonaSummary
+         * @description A persona in a list view (no full YAML).
+         *
+         *     Spec 35: the library card surfaces a capability + identity glance. The
+         *     counts below are parsed from the SAME stored YAML the list query already
+         *     loads (so they cost nothing extra), and ``conversation_count`` is a single
+         *     GROUP-BY over the RLS-scoped conversations — not an N+1.
+         */
+        PersonaSummary: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Role */
+            role: string;
+            /** Avatar Url */
+            avatar_url?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Language
+             * @default en
+             */
+            language: string;
+            /**
+             * Tools Count
+             * @default 0
+             */
+            tools_count: number;
+            /**
+             * Skills Count
+             * @default 0
+             */
+            skills_count: number;
+            /**
+             * Constraints Count
+             * @default 0
+             */
+            constraints_count: number;
+            /**
+             * Conversation Count
+             * @default 0
+             */
+            conversation_count: number;
+        };
+        /**
+         * PostMessageRequest
+         * @description Send a user message; the response streams over SSE (§5.2).
+         *
+         *     ``channel`` is the optional connector passthrough (D-08-3) — null for the
+         *     web UI. The runtime ignores it in v0.1; the API just stores it on the
+         *     message row and echoes ``format_hints`` on the ``done`` event.
+         *
+         *     ``images`` is the optional spec-13 multimodal extension (D-13-X-now option
+         *     c, D-13-5): up to 4 :class:`ImageRef` per message. ``None`` (the default)
+         *     keeps the text-only path byte-for-byte unchanged. An empty list is
+         *     equivalent to ``None`` semantically but rejected as a validation error so
+         *     callers don't accidentally send ``images=[]`` and skip the cap check; pass
+         *     ``None`` or omit the field.
+         *
+         *     The cap is enforced via :class:`Field`'s built-in ``min_length`` /
+         *     ``max_length`` (D-13-5) so the failure surfaces as a structured
+         *     ``too_long`` / ``too_short`` Pydantic v2 error — JSON-serialisable through
+         *     the API's ``_request_422`` handler in :mod:`persona_api.errors` (a custom
+         *     ``field_validator`` would attach a raw :class:`ValueError` to ``ctx`` and
+         *     break the response body's ``json.dumps``).
+         */
+        PostMessageRequest: {
+            /** Content */
+            content: string;
+            channel?: components["schemas"]["ChannelContext"] | null;
+            /** Images */
+            images?: components["schemas"]["ImageRef"][] | null;
+        };
+        /**
+         * RecurrenceKind
+         * @description The picker's top-level recurrence categories (the humane vocabulary, A8-D-1).
+         * @enum {string}
+         */
+        RecurrenceKind: "daily" | "weekly" | "monthly_day" | "monthly_weekday" | "hourly" | "yearly";
+        /**
+         * RecurrencePattern
+         * @description The RRULE-free picker-state for a recurring cadence (A8-D-1).
+         *
+         *     A structured, UI-bindable view of the v1 vocabulary — the calendar's recurrence
+         *     builder reads/writes THIS, never an RRULE string. Round-trips losslessly with
+         *     :class:`~persona.schedules.RecurrenceRule` via :func:`pattern_to_rule` /
+         *     :func:`rule_to_pattern` for the supported set.
+         *
+         *     Attributes:
+         *         kind: The recurrence category.
+         *         interval: Stride — days (DAILY), weeks (WEEKLY), months (MONTHLY_*), hours
+         *             (HOURLY, must divide 24 for a clean wall-clock cadence); 1 for YEARLY.
+         *         weekdays: WEEKLY — the selected weekdays (BYDAY tokens ``MO``..``SU``, canonical
+         *             week order, no ordinal). The 5-weekday preset renders "every weekday".
+         *         month_day: MONTHLY_DAY — the day of month (1..31, or -1 for the last day).
+         *         weekday: MONTHLY_WEEKDAY — the weekday token (``MO``..``SU``).
+         *         ordinal: MONTHLY_WEEKDAY — which occurrence (1..4, or -1 for the last).
+         *         month: YEARLY — the month (1..12).
+         *         day_of_month: YEARLY — the day of month (1..31).
+         *         hour: Local hour-of-day (0..23). Required for every kind except HOURLY (whose
+         *             marks come from ``interval``); ``None`` only for HOURLY.
+         *         minute: Local minute-of-hour (0..59).
+         *         count: Bound — total occurrences (XOR ``until``).
+         *         until: Bound — last instant, tz-aware UTC (XOR ``count``).
+         */
+        RecurrencePattern: {
+            kind: components["schemas"]["RecurrenceKind"];
+            /**
+             * Interval
+             * @default 1
+             */
+            interval: number;
+            /**
+             * Weekdays
+             * @default []
+             */
+            weekdays: string[];
+            /** Month Day */
+            month_day?: number | null;
+            /** Weekday */
+            weekday?: string | null;
+            /** Ordinal */
+            ordinal?: number | null;
+            /** Month */
+            month?: number | null;
+            /** Day Of Month */
+            day_of_month?: number | null;
+            /** Hour */
+            hour?: number | null;
+            /**
+             * Minute
+             * @default 0
+             */
+            minute: number;
+            /** Count */
+            count?: number | null;
+            /** Until */
+            until?: string | null;
+        };
+        /**
+         * RefinePersonaRequest
+         * @description Refine a draft persona by answering a clarifying question (spec 10, §4 / D-10-2).
+         *
+         *     Stateless: ``round`` is the count of refinements already applied (the UI owns
+         *     the counter); the server rejects ``round > 3`` as the backstop on the
+         *     3-round cap (D-10-5).
+         */
+        RefinePersonaRequest: {
+            /** Current Yaml */
+            current_yaml: string;
+            /** Question */
+            question: string;
+            /** Answer */
+            answer: string;
+            /**
+             * Round
+             * @default 0
+             */
+            round: number;
+        };
+        /**
+         * ReschedulePreview
+         * @description The engine's preview of a proposed calendar reschedule (no write).
+         */
+        ReschedulePreview: {
+            /** Human Terms */
+            human_terms: string;
+            /** Timezone */
+            timezone: string;
+            /** Next Fire */
+            next_fire: string | null;
+            /** Quiet Hours Offer */
+            quiet_hours_offer: string | null;
+        };
+        /**
+         * RespondToRunRequest
+         * @description Answer an ask-user question raised by a running agentic loop (§5.3).
+         */
+        RespondToRunRequest: {
+            /** Answer */
+            answer: string;
+        };
+        /**
+         * RunListResponse
+         * @description The caller's runs, newest first (Spec 35 Tasks page index).
+         */
+        RunListResponse: {
+            /** Items */
+            items?: components["schemas"]["RunSummary"][];
+        };
+        /**
+         * RunStatusResponse
+         * @description A run's status + its accumulated steps (JSON-serialised Run/Step).
+         */
+        RunStatusResponse: {
+            /** Id */
+            id: string;
+            /** Persona Id */
+            persona_id: string;
+            /** Task */
+            task: string;
+            /** Status */
+            status: string;
+            /** Steps */
+            steps?: {
+                [key: string]: unknown;
+            }[];
+            /** Output */
+            output?: string | null;
+            /** Error */
+            error?: string | null;
+        };
+        /**
+         * RunSummary
+         * @description A run in the Tasks index — a light projection without the steps JSON.
+         */
+        RunSummary: {
+            /** Id */
+            id: string;
+            /** Persona Id */
+            persona_id: string;
+            /** Task */
+            task: string;
+            /** Status */
+            status: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at?: string | null;
+        };
+        /**
+         * ScheduleCreateRequest
+         * @description A user-initiated schedule create (Spec A10, A10-D-1 — the third verb on A8's door).
+         *
+         *     The A8 reschedule envelope + the create-only fields. **Picker-state in — NO raw RRULE
+         *     from the client** (the A8 bar): exactly one of ``pattern`` / ``one_time_at`` (XOR,
+         *     checked in the route); the SERVER maps pattern → rule. The user is the originator; the
+         *     named persona is the executor who delivers each fire. ``idempotency_key`` is minted by
+         *     the client once per create dialog (A10-D-6): retries/double-clicks converge on one
+         *     task+schedule, while two deliberate submits (two dialog-opens) stay distinct.
+         */
+        ScheduleCreateRequest: {
+            pattern?: components["schemas"]["RecurrencePattern"] | null;
+            /** One Time At */
+            one_time_at?: string | null;
+            /** Timezone */
+            timezone: string;
+            /** Persona Id */
+            persona_id: string;
+            /** Subject */
+            subject: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Notify On Fire
+             * @default true
+             */
+            notify_on_fire: boolean;
+        };
+        /**
+         * ScheduleCreateResult
+         * @description The create confirmation — the ids + the same echo shape the preview showed.
+         *
+         *     ``created`` is ``False`` on an idempotent replay (the task already existed for
+         *     this ``idempotency_key``) — same ids, nothing written twice.
+         */
+        ScheduleCreateResult: {
+            /** Task Id */
+            task_id: string;
+            /** Schedule Id */
+            schedule_id: string;
+            /** Created */
+            created: boolean;
+            /** Human Terms */
+            human_terms: string;
+            /** Timezone */
+            timezone: string;
+            /** Next Fire */
+            next_fire: string | null;
+            /** Quiet Hours Offer */
+            quiet_hours_offer: string | null;
+        };
+        /**
+         * ScheduleRescheduleRequest
+         * @description A calendar-initiated reschedule (Spec A8, T9 — the twin of the chat verb).
+         *
+         *     **Picker-state in — NO raw RRULE from the client** (bar 1): the web sends a structured
+         *     :class:`~persona.schedules.RecurrencePattern` (or a one-time instant) and the SERVER maps it to
+         *     the rule, so there is no client-side recurrence math. Exactly one of ``pattern`` /
+         *     ``one_time_at`` (XOR, checked in the route). Applied through the SAME CAS door as chat.
+         */
+        ScheduleRescheduleRequest: {
+            pattern?: components["schemas"]["RecurrencePattern"] | null;
+            /** One Time At */
+            one_time_at?: string | null;
+            /** Timezone */
+            timezone: string;
+        };
+        /**
+         * SetConsentRequest
+         * @description Set a persona's auto-dispatch consent (spec 21 T09, D-21-7/2).
+         *
+         *     ``granted``: ``True`` = grant (auto-dispatch), ``False`` = decline (stable,
+         *     no re-prompt), ``None`` = revoke back to "ask" (the settings-toggle OFF
+         *     path, which re-arms the prompt on the next autonomous dispatch).
+         */
+        SetConsentRequest: {
+            /** Granted */
+            granted?: boolean | null;
+        };
+        /**
+         * SetSkillConsentRequest
+         * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
+         *
+         *     ``granted``: ``True`` = grant (the skill may inject at its current body hash),
+         *     ``False`` = revoke. That is the ONLY field a client may send — the
+         *     ``content_hash`` consent binds to and the trust ``tier`` are **server-derived**
+         *     from the catalog on every request, never accepted from the client (the
+         *     forge-prevention invariant, S3-D-2). ``extra="forbid"`` (inherited from
+         *     ``_Input``) rejects a client that tries to supply either → 422.
+         */
+        SetSkillConsentRequest: {
+            /** Granted */
+            granted: boolean;
+        };
+        /**
+         * SpecialitySummary
+         * @description A speciality (skill) catalog entry with its trust tier + version handle (Spec S3).
+         *
+         *     The user-facing "Specialities" surface renders skills with their source-assigned
+         *     trust tier (S1-D-3 — never self-declared) and binds consent to ``content_hash``
+         *     (S1-D-5: a synced body change → new hash → prior consent is stale → re-gate).
+         *     ``requires_consent`` is the enablement gate (S1-D-4: ``community``/``third_party``
+         *     need owner consent before injection; ``builtin``/``vetted`` activate freely).
+         */
+        SpecialitySummary: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** When To Use */
+            when_to_use?: string | null;
+            /** Trust */
+            trust: string;
+            /** Requires Consent */
+            requires_consent: boolean;
+            /** Content Hash */
+            content_hash?: string | null;
+            /** Source */
+            source?: string | null;
+            /** Source Uri */
+            source_uri?: string | null;
+            /** Source Ref */
+            source_ref?: string | null;
+        };
+        /**
+         * StartRunRequest
+         * @description Start an agentic run for a task (§5.3).
+         */
+        StartRunRequest: {
+            /** Task */
+            task: string;
+        };
+        /**
+         * ToolRecommendation
+         * @description One recommended capability for a persona (spec 26 T09 / spec 27 T10).
+         *
+         *     Spec 27 realises the D-26-10 unification: the same shape now carries a
+         *     provider tag so built-in tools, skills, and MCP servers rank together. The
+         *     ``provider`` field defaults to ``"builtin"`` so the Spec-26 shape (and its
+         *     callers/tests) stay a forward-compatible strict subset.
+         *
+         *     Attributes:
+         *         tool_name: The capability name — a built-in tool name from
+         *             ``persona.tools.TOOL_CATALOG``, a skill id, or an ``mcp:<server>``
+         *             reference. Hallucinated names are filtered out post-hoc.
+         *         rationale: One-line reason the capability fits this persona.
+         *         confidence: Recommender confidence in [0, 1]; entries below the floor
+         *             are dropped before return.
+         *         provider: Where the capability comes from — ``"builtin"`` (tool),
+         *             ``"skill"``, ``"mcp:builtin"`` (default-enabled MCP server), or
+         *             ``"mcp:optional"`` (opt-in / BYO MCP server). The UI groups by
+         *             provider but ranks across all (spec 27 §2.3 / D-27-13).
+         */
+        ToolRecommendation: {
+            /** Tool Name */
+            tool_name: string;
+            /** Rationale */
+            rationale: string;
+            /** Confidence */
+            confidence: number;
+            /**
+             * Provider
+             * @default builtin
+             */
+            provider: string;
+        };
+        /**
+         * ToolRecommendationResponse
+         * @description The ranked tool-recommendation list returned by ``/personas/recommend-tools``.
+         */
+        ToolRecommendationResponse: {
+            /** Recommendations */
+            recommendations?: components["schemas"]["ToolRecommendation"][];
+            /** Prompt Version */
+            prompt_version: string;
+        };
+        /**
+         * ToolSummary
+         * @description A tool or skill name + description (read-only listing).
+         */
+        ToolSummary: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+        };
+        /**
+         * UpdateMCPServerRequest
+         * @description Patch a BYO MCP server (spec 30). All fields optional; omitted = unchanged.
+         *
+         *     Setting ``credential`` replaces the stored secret (re-encrypted); to clear a
+         *     credential, set ``auth_method = "none"``. ``enabled`` toggles the server
+         *     without deleting it.
+         */
+        UpdateMCPServerRequest: {
+            /** Name */
+            name?: string | null;
+            /** Url */
+            url?: string | null;
+            /** Auth Method */
+            auth_method?: ("none" | "bearer" | "oauth") | null;
+            /** Credential */
+            credential?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+        };
+        /**
+         * UpdatePersonaRequest
+         * @description Replace a persona's YAML (re-validated against the v1.0 schema).
+         */
+        UpdatePersonaRequest: {
+            /** Yaml */
+            yaml: string;
+            /** Avatar Url */
+            avatar_url?: string | null;
+        };
+        /**
+         * UpdateProfileRequest
+         * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
+         *
+         *     All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
+         *     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
+         *     fails fast at the boundary on egregious input; the service then strips control
+         *     characters and treats whitespace-only as unset (names,
+         *     :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
+         *     A8-D-9) is an IANA zone name whose validity is checked in the route handler
+         *     (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
+         *     only a cheap egregious-input guard, not the IANA check (a custom ``field_validator``
+         *     would break the 422 body's ``json.dumps``, cf. ``SendMessageRequest``). ``null``
+         *     clears it → schedule computation falls back to ``PERSONA_DEFAULT_TIMEZONE``.
+         *     Nothing is required — an empty PATCH is a valid no-op read.
+         */
+        UpdateProfileRequest: {
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Timezone */
+            timezone?: string | null;
+            /** Quiet Hours Start */
+            quiet_hours_start?: number | null;
+            /** Quiet Hours End */
+            quiet_hours_end?: number | null;
+        };
+        /**
+         * UsageEntry
+         * @description One usage-log row (per-turn telemetry, paginated).
+         */
+        UsageEntry: {
+            /** Persona Id */
+            persona_id?: string | null;
+            /** Tier Used */
+            tier_used: string;
+            /** Model Name */
+            model_name: string;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+            /** Cost Cents */
+            cost_cents: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * UserProfileResponse
+         * @description The caller's own profile — identity anchor + optional name (Spec K6).
+         *
+         *     ``first_name`` / ``last_name`` are optional (``None`` when unset — a nameless
+         *     account is fully valid). ``email`` may be ``None`` when the token carried none
+         *     (the provisioning fallback stores a noreply address, but the surface stays
+         *     nullable so the contract never implies a real address). Our DB is the source of
+         *     truth; Clerk stays auth-only.
+         */
+        UserProfileResponse: {
+            /** Id */
+            id: string;
+            /** Email */
+            email?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Timezone */
+            timezone?: string | null;
+            /** Quiet Hours Start */
+            quiet_hours_start?: number | null;
+            /** Quiet Hours End */
+            quiet_hours_end?: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
+        };
+    };
+    responses: never;
+    parameters: never;
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-  list_personas_v1_personas_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaSummary"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  create_persona_v1_personas_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["CreatePersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  author_persona_v1_personas_author_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["AuthorPersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["AuthoringDraft"];
-          "text/event-stream": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  refine_persona_v1_personas_author_refine_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["RefinePersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["AuthoringDraft"];
-          "text/event-stream": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  recommend_tools_v1_personas_recommend_tools_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["AuthorPersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ToolRecommendationResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  recommend_capabilities_v1_personas_recommend_capabilities_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["AuthorPersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ToolRecommendationResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  grant_tool_v1_personas__persona_id__tools_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["GrantToolRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_persona_v1_personas__persona_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_persona_v1_personas__persona_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  update_persona_v1_personas__persona_id__patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["UpdatePersonaRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  set_consent_v1_personas__persona_id__consent_patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["SetConsentRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_persona_specialities_v1_personas__persona_id__specialities_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaSpecialitySummary"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-        skill_name: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["SetSkillConsentRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["PersonaSpecialitySummary"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  create_conversation_v1_personas__persona_id__conversations_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["CreateConversationRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConversationSummary"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_conversations_v1_conversations_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConversationSummary"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_conversation_v1_conversations__conversation_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConversationDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_conversation_v1_conversations__conversation_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  post_message_v1_conversations__conversation_id__messages_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["PostMessageRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  read_active_turn_v1_conversations__conversation_id__active_turn_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ActiveTurnResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  stream_active_turn_events_v1_conversations__conversation_id__active_turn_events_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  cancel_active_turn_v1_conversations__conversation_id__active_turn_cancel_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: string;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_calls_v1_calls_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["CallSummary"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  start_run_v1_personas__persona_id__runs_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["StartRunRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["RunStatusResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_runs_v1_runs_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["RunListResponse"];
-        };
-      };
-    };
-  };
-  get_run_v1_runs__run_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        run_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["RunStatusResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  stream_events_v1_runs__run_id__events_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        run_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  respond_v1_runs__run_id__respond_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        run_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["RespondToRunRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  cancel_v1_runs__run_id__cancel_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        run_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: string;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_credits_v1_me_credits_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["CreditsResponse"];
-        };
-      };
-    };
-  };
-  get_usage_v1_me_usage_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["UsageEntry"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_profile_v1_me_profile_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["UserProfileResponse"];
-        };
-      };
-    };
-  };
-  update_profile_v1_me_profile_patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["UpdateProfileRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["UserProfileResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_schedule_occurrences_v1_me_schedule_occurrences_get: {
-    parameters: {
-      query: {
-        from: string;
-        to: string;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["OccurrencesResult"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        schedule_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ScheduleRescheduleRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ReschedulePreview"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        schedule_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ScheduleRescheduleRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ReschedulePreview"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_notifications_v1_me_notifications_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["NotificationOut"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  mark_all_notifications_read_v1_me_notifications_read_all_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["NotificationMarkReadResult"];
-        };
-      };
-    };
-  };
-  mark_notification_read_v1_me_notifications__notification_id__read_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        notification_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["NotificationMarkReadResult"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  healthz_healthz_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-    };
-  };
-  livez_livez_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-    };
-  };
-  list_tools_v1_tools_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ToolSummary"][];
-        };
-      };
-    };
-  };
-  list_skills_v1_skills_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ToolSummary"][];
-        };
-      };
-    };
-  };
-  list_specialities_v1_specialities_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["SpecialitySummary"][];
-        };
-      };
-    };
-  };
-  list_mcp_catalog_v1_mcp_catalog_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPCatalogServer"][];
-        };
-      };
-    };
-  };
-  list_documents_v1_conversations__conversation_id__documents_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["DocumentRef"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_document_v1_conversations__conversation_id__documents__doc_ref__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        conversation_id: string;
-        doc_ref: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  create_upload_v1_personas__persona_id__uploads_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "multipart/form-data": components["schemas"]["Body_create_upload_v1_personas__persona_id__uploads_post"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_upload_v1_personas__persona_id__uploads__ref__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-        ref: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  post_imagegen_v1_personas__persona_id__imagegen_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ImageGenRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_artifacts_v1_personas__persona_id__artifacts_get: {
-    parameters: {
-      query?: {
-        limit?: number;
-        offset?: number;
-        source?: ("upload" | "generated") | null;
-        type?: ("image" | "chart" | "doc" | "data" | "diagram") | null;
-        conversation_id?: string | null;
-        q?: string | null;
-      };
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ArtifactListResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_artifact_v1_personas__persona_id__artifacts__ref__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-        ref: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_mcp_servers_v1_mcp_servers_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"][];
-        };
-      };
-    };
-  };
-  create_mcp_server_v1_mcp_servers_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["CreateMCPServerRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["MCPOAuthAuthorizeRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPOAuthAuthorizeResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  complete_mcp_oauth_v1_mcp_servers_oauth_callback_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["MCPOAuthCallbackRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPOAuthCallbackResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_mcp_server_v1_mcp_servers__server_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_mcp_server_v1_mcp_servers__server_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  update_mcp_server_v1_mcp_servers__server_id__patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["UpdateMCPServerRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  check_mcp_server_connection_v1_mcp_servers__server_id__test_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerTestResult"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_persona_mcp_servers_v1_personas__persona_id__mcp_servers_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  assign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__put: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  unassign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-        server_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  adopt_catalog_app_v1_personas__persona_id__adopted_apps_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        persona_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["AdoptCatalogAppRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MCPServerDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_graph_window_v1_memory_graph_get: {
-    parameters: {
-      query?: {
-        /** @description Centre node id; omit for the first-paint seed window. */
-        focus?: string | null;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MemoryWindowResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  get_node_detail_v1_memory_nodes__node_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        node_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MemoryNodeDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_node_v1_memory_nodes__node_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        node_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  correct_node_v1_memory_nodes__node_id__patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        node_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["MemoryCorrectionRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MemoryNodeDetail"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  search_memory_v1_memory_search_get: {
-    parameters: {
-      query: {
-        /** @description The search query — exact term or paraphrase. */
-        q: string;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MemorySearchResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_connectors_v1_me_connectors_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConnectorConnectionOut"][];
-        };
-      };
-    };
-  };
-  disconnect_connector_v1_me_connectors__platform___platform_identity__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        platform: string;
-        platform_identity: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConnectorDisconnectResult"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  initiate_link_v1_me_connectors__platform__link_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        platform: components["schemas"]["ConnectorPlatform"];
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ConnectorLinkArtifact"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
+    list_personas_v1_personas_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaSummary"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_persona_v1_personas_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    author_persona_v1_personas_author_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorPersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthoringDraft"];
+                    "text/event-stream": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refine_persona_v1_personas_author_refine_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefinePersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthoringDraft"];
+                    "text/event-stream": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommend_tools_v1_personas_recommend_tools_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorPersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRecommendationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommend_capabilities_v1_personas_recommend_capabilities_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorPersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolRecommendationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grant_tool_v1_personas__persona_id__tools_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantToolRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_persona_v1_personas__persona_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_persona_v1_personas__persona_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_persona_v1_personas__persona_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePersonaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_consent_v1_personas__persona_id__consent_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetConsentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_persona_specialities_v1_personas__persona_id__specialities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaSpecialitySummary"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_skill_consent_v1_personas__persona_id__skills__skill_name__consent_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+                skill_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSkillConsentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonaSpecialitySummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_conversation_v1_personas__persona_id__conversations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConversationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_conversations_v1_conversations_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationSummary"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_conversation_v1_conversations__conversation_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_conversation_v1_conversations__conversation_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_message_v1_conversations__conversation_id__messages_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PostMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_active_turn_v1_conversations__conversation_id__active_turn_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveTurnResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_active_turn_events_v1_conversations__conversation_id__active_turn_events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_active_turn_v1_conversations__conversation_id__active_turn_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_calls_v1_calls_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallSummary"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_run_v1_personas__persona_id__runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_runs_v1_runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunListResponse"];
+                };
+            };
+        };
+    };
+    get_run_v1_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_events_v1_runs__run_id__events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    respond_v1_runs__run_id__respond_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RespondToRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_v1_runs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_credits_v1_me_credits_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreditsResponse"];
+                };
+            };
+        };
+    };
+    get_usage_v1_me_usage_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageEntry"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_profile_v1_me_profile_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserProfileResponse"];
+                };
+            };
+        };
+    };
+    update_profile_v1_me_profile_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_schedule_occurrences_v1_me_schedule_occurrences_get: {
+        parameters: {
+            query: {
+                from: string;
+                to: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OccurrencesResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_schedule_create_v1_me_schedule_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleRescheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReschedulePreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_schedule_v1_me_schedule_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleCreateResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleRescheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReschedulePreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleRescheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReschedulePreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notifications_v1_me_notifications_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_all_notifications_read_v1_me_notifications_read_all_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationMarkReadResult"];
+                };
+            };
+        };
+    };
+    mark_notification_read_v1_me_notifications__notification_id__read_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                notification_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationMarkReadResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_events_v1_me_events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    healthz_healthz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    livez_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_tools_v1_tools_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolSummary"][];
+                };
+            };
+        };
+    };
+    list_skills_v1_skills_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolSummary"][];
+                };
+            };
+        };
+    };
+    list_specialities_v1_specialities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpecialitySummary"][];
+                };
+            };
+        };
+    };
+    list_mcp_catalog_v1_mcp_catalog_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPCatalogServer"][];
+                };
+            };
+        };
+    };
+    list_documents_v1_conversations__conversation_id__documents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentRef"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_document_v1_conversations__conversation_id__documents__doc_ref__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+                doc_ref: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_upload_v1_personas__persona_id__uploads_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_create_upload_v1_personas__persona_id__uploads_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_upload_v1_personas__persona_id__uploads__ref__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+                ref: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_imagegen_v1_personas__persona_id__imagegen_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageGenRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_artifacts_v1_personas__persona_id__artifacts_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                source?: ("upload" | "generated") | null;
+                type?: ("image" | "chart" | "doc" | "data" | "diagram") | null;
+                conversation_id?: string | null;
+                q?: string | null;
+            };
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_artifact_v1_personas__persona_id__artifacts__ref__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+                ref: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_mcp_servers_v1_mcp_servers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"][];
+                };
+            };
+        };
+    };
+    create_mcp_server_v1_mcp_servers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateMCPServerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_mcp_oauth_v1_mcp_servers__server_id__oauth_authorize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPOAuthAuthorizeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPOAuthAuthorizeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    complete_mcp_oauth_v1_mcp_servers_oauth_callback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPOAuthCallbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPOAuthCallbackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_mcp_server_v1_mcp_servers__server_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_mcp_server_v1_mcp_servers__server_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_mcp_server_v1_mcp_servers__server_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateMCPServerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_mcp_server_connection_v1_mcp_servers__server_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerTestResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_persona_mcp_servers_v1_personas__persona_id__mcp_servers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_persona_mcp_connections_v1_personas__persona_id__mcp_connections_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPConnectionStatus"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unassign_mcp_server_v1_personas__persona_id__mcp_servers__server_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    adopt_catalog_app_v1_personas__persona_id__adopted_apps_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                persona_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdoptCatalogAppRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServerDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_graph_window_v1_memory_graph_get: {
+        parameters: {
+            query?: {
+                /** @description Centre node id; omit for the first-paint seed window. */
+                focus?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryWindowResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_node_detail_v1_memory_nodes__node_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryNodeDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_node_v1_memory_nodes__node_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    correct_node_v1_memory_nodes__node_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemoryCorrectionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryNodeDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_memory_v1_memory_search_get: {
+        parameters: {
+            query: {
+                /** @description The search query — exact term or paraphrase. */
+                q: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemorySearchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_connectors_v1_me_connectors_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorConnectionOut"][];
+                };
+            };
+        };
+    };
+    disconnect_connector_v1_me_connectors__platform___platform_identity__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                platform: string;
+                platform_identity: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorDisconnectResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    initiate_link_v1_me_connectors__platform__link_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                platform: components["schemas"]["ConnectorPlatform"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorLinkArtifact"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
 }
