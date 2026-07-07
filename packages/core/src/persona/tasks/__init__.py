@@ -64,6 +64,7 @@ from persona.tasks.state import (
     validate_transition,
 )
 from persona.tasks.trigger import (
+    EventFire,
     EventTrigger,
     ResumeTrigger,
     ScheduledFire,
@@ -88,6 +89,7 @@ __all__ = [
     "ContractBounds",
     "CostLedger",
     "Decision",
+    "EventFire",
     "EventTrigger",
     "IntrospectionStatus",
     "StuckReport",

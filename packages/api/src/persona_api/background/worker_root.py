@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from persona.config import PersonaCoreConfig
+from persona.events import EventTriggerSettings
 from persona.graph import ConsolidationPass, PostgresEntityRegistry, build_graph_store
 from persona.graph.config import GraphSettings
 from persona.graph.index import make_graph_index
@@ -89,12 +90,13 @@ from persona_api.tasks.scheduled_fire import register_scheduled_task_fire_handle
 from persona_api.tasks.store import CheckpointStore, TaskStore
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from datetime import datetime
 
     from persona.audit import AuditLogger
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
+    from persona.tasks import ResumeTrigger
     from persona_runtime.legs import LegOutcome
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
@@ -237,6 +239,18 @@ def build_worker_registry(
         register_episodic_consolidation_handler(
             registry, engine=episodic_engine, core_refresher=core_refresher
         )
+    # Event triggers (Spec A7, T6) — env-gated at the composition root
+    # (PERSONA_EVENT_TRIGGERS_ENABLED, default OFF — the A5 criterion-9 posture; OFF ⇒ the leg
+    # handler is byte-identical to pre-A7). When enabled, a leg's completion emits its A2
+    # lifecycle event through the dispatcher, INHERITING the ``EventFire`` causal chain (the
+    # cross-process loop guard, A7-D-4/D-6). The A6-D-8 autonomy-pause reader injects at
+    # merge-back; here it is the frozen default never-paused no-op.
+    on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None
+    if EventTriggerSettings().enabled:
+        from persona_api.events import LifecycleEmitter, build_event_dispatcher
+
+        event_dispatcher = build_event_dispatcher(rls_engine=rls_engine, config=config)
+        on_leg_settled = LifecycleEmitter(dispatcher=event_dispatcher).on_leg_settled
     if runtime_factory is not None:
         _register_task_leg_tenant(
             registry,
@@ -250,6 +264,7 @@ def build_worker_registry(
             audit_logger=build_audit_logger(config, rls_engine),
             live_sessions=live_sessions,
             event_channel=event_channel,
+            on_leg_settled=on_leg_settled,
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -348,6 +363,42 @@ def build_worker_registry(
                 edition=edition,
                 audit_root=Path(config.audit_root),
             )
+        # Door (b) of A7 — the ``event_candidate`` job feeds this SAME pipeline (A7-D-5). Double-
+        # gated: it needs BOTH initiative enabled (there is a pipeline to submit into) AND
+        # event-triggers enabled (a dispatcher enqueues into it). The wellbeing gate (layer a of
+        # criterion 8) lives at the handler seam; the producer is the small-tier layer (b).
+        if EventTriggerSettings().enabled:
+            from persona_api.events import (
+                ApiEventWellbeingCheck,
+                SmallTierEventCandidateProducer,
+                register_event_candidate_handler,
+            )
+            from persona_api.services import audit_service
+
+            def _event_candidate_audit(
+                owner: str, action: str, target: str, metadata: Mapping[str, str] | None = None
+            ) -> None:
+                audit_service.record(
+                    engine=rls_engine,
+                    user_id=owner,
+                    action=action,
+                    target=target,
+                    metadata=dict(metadata) if metadata else None,
+                )
+
+            register_event_candidate_handler(
+                registry,
+                producer=SmallTierEventCandidateProducer(
+                    backend=initiative_backend,
+                    grounding=ApiGroundingSource(
+                        rls_engine, TaskStore(rls_engine), CheckpointStore(rls_engine)
+                    ),
+                    settings=initiative_settings,
+                ),
+                sink=pipeline,
+                wellbeing=ApiEventWellbeingCheck(graph_store),
+                audit=_event_candidate_audit,
+            )
     _log.info(
         "worker registry composed",
         synthesis_tier=synthesis_tier,
@@ -367,8 +418,13 @@ def _register_task_leg_tenant(
     audit_logger: AuditLogger | None = None,
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
+    on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
 ) -> None:
-    """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4)."""
+    """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
+
+    ``on_leg_settled`` (Spec A7, T6) — the A7 lifecycle emitter, wired only when event triggers are
+    enabled; a settled leg emits its A2 lifecycle event through the dispatcher (chain-inheriting).
+    """
     task_store = TaskStore(rls_engine)
     continuation = TaskContinuation(
         task_store=task_store,
@@ -393,6 +449,7 @@ def _register_task_leg_tenant(
         runner_builder=RuntimeFactoryLegRunnerBuilder(runtime_factory),
         continuation=continuation,
         on_milestone=on_milestone,
+        on_leg_settled=on_leg_settled,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).

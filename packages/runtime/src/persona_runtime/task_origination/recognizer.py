@@ -29,9 +29,16 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from persona_runtime.questions import ProactiveQuestion, QuestionOption
 from persona_runtime.task_origination.cues import detect_standing_cue
 from persona_runtime.task_origination.draft import ContractDraft, canonicalize_draft
+from persona_runtime.task_origination.event_cues import detect_event_cue
+from persona_runtime.task_origination.event_recognizer import (
+    EventTriggerVerdict,
+    build_event_clarify_question,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+    from persona_runtime.task_origination.event_recognizer import EventTriggerIntentJudge
 
 __all__ = [
     "RecognitionKind",
@@ -176,19 +183,35 @@ def build_clarify_question(language: str) -> ProactiveQuestion:
 
 
 class StandingIntentRecognizer:
-    """Compose the cue net (step 1) and the model judge (step 2) into one decision (A4-D-2)."""
+    """Compose the cue nets (step 1) and the model judges (step 2) into one decision (A4-D-2).
 
-    def __init__(self, judge: StandingIntentJudge) -> None:
-        """Inject the model-backed judge (the precision layer)."""
+    Two standing impulses share the one recognition seam the loop calls: the A4 clock schedule
+    ("every morning…") and — when ``event_judge`` is wired (A7 enabled) — the A7 event watch ("when
+    an email from X arrives…"). Both resolve to the SAME :class:`RecognitionOutcome` (a STANDING
+    draft flows through the existing echo → confirm → OriginationService door; schedule XOR trigger
+    on the draft, A7-D-3). The event path is checked first — an event condition is more specific
+    than a clock cue — and falls through to the schedule path when the judge says it is not one.
+    """
+
+    def __init__(
+        self, judge: StandingIntentJudge, *, event_judge: EventTriggerIntentJudge | None = None
+    ) -> None:
+        """Inject the schedule judge (the A4 precision layer) + the optional A7 event judge."""
         self._judge = judge
+        self._event_judge = event_judge
 
     async def recognize(self, message: str, *, language: str) -> RecognitionOutcome:
         """Recognise standing intent in ``message`` (cheap-trigger → model-decision).
 
         Returns ``ORDINARY`` with no model call when no cue fires; otherwise consults the
-        judge. A judge failure degrades to ``ASK_ONCE`` (never a silent drop, never an
+        judge(s). A judge failure degrades to ``ASK_ONCE`` (never a silent drop, never an
         unconfirmed task). A ``STANDING`` outcome carries a canonicalised draft.
         """
+        # A7: the event-trigger path (its own cue net + judge). Checked first — an event condition
+        # is more specific than a clock cue; a non-event verdict falls through to the schedule path.
+        event_outcome = await self._recognize_event(message, language)
+        if event_outcome is not None:
+            return event_outcome
         if detect_standing_cue(message) is None:
             return RecognitionOutcome.ordinary()
         try:
@@ -202,3 +225,24 @@ class StandingIntentRecognizer:
         if judgment.verdict is StandingVerdict.NOW_WORK:
             return RecognitionOutcome.ordinary()
         return RecognitionOutcome.ask_once(build_clarify_question(language))
+
+    async def _recognize_event(self, message: str, language: str) -> RecognitionOutcome | None:
+        """The A7 event branch: ``STANDING`` (trigger draft), ``ASK_ONCE``, or ``None`` (defer).
+
+        ``None`` means "not an event trigger" — the caller falls through to the schedule path. A
+        judge failure degrades to ``ASK_ONCE`` (never a silent drop). Inert (returns ``None`` with
+        no model call) when no event judge is wired or no event cue fires (the cheap path).
+        """
+        if self._event_judge is None or detect_event_cue(message) is None:
+            return None
+        try:
+            judgment = await self._event_judge.judge(message, language=language)
+        except Exception:  # noqa: BLE001 — a judge failure degrades to ask-once, never crash or auto-create
+            _logger.warning("event-trigger judge failed; degrading to ask-once")
+            return RecognitionOutcome.ask_once(build_event_clarify_question(language))
+        if judgment.verdict is EventTriggerVerdict.TRIGGER:
+            assert judgment.draft is not None  # guaranteed by EventTriggerJudgment validator
+            return RecognitionOutcome.standing(canonicalize_draft(judgment.draft))
+        if judgment.verdict is EventTriggerVerdict.AMBIGUOUS:
+            return RecognitionOutcome.ask_once(build_event_clarify_question(language))
+        return None  # NOT_TRIGGER — defer to the schedule cue / ordinary chat

@@ -82,7 +82,13 @@ class TaskContinuation:
         self._schedules = schedule_store
 
     def apply(
-        self, owner_id: str, outcome: LegOutcome, *, now: datetime, fired_at: datetime | None = None
+        self,
+        owner_id: str,
+        outcome: LegOutcome,
+        *,
+        now: datetime,
+        fired_at: datetime | None = None,
+        event_fired: bool = False,
     ) -> None:
         """Drive the task's next move from a leg outcome.
 
@@ -90,13 +96,22 @@ class TaskContinuation:
         ``fired_at`` is the scheduled instant that triggered this leg (a :class:`ScheduledFire`'s
         ``fire_time``), used to decide recurrence — "is there a fire strictly AFTER this one?" —
         independent of when the leg executes; defaults to ``now`` for non-scheduled continuations.
+        ``event_fired`` (Spec A7, A7-D-X-event-standing) marks a leg the A7 dispatcher fired via an
+        :class:`~persona.tasks.EventFire`: a COMPLETED such leg returns the task to WAITING(on_event)
+        — a standing "whenever X" watch keeps reacting (the echo said "whenever"; a one-fire death
+        would break echo-honesty). It carries no schedule, so ``_recurs`` is moot.
 
         Raises:
             TaskLegFailedError: On a FAILED leg (so A0 re-delivers — transient).
         """
         task = outcome.task
         if outcome.disposition == LegDisposition.COMPLETED:
-            if self._recurs(owner_id, task, after=fired_at if fired_at is not None else now):
+            if event_fired:
+                # A7 standing watch: the event-fired occurrence is done → back to WAITING(on_event),
+                # ready for the next matching event (the dispatcher's door-a fires the next leg).
+                self._tasks.begin_wait(owner_id, task.id, WaitKind.ON_EVENT, now=now)
+                _log.info("event-triggered occurrence complete → waiting(on_event)", task_id=task.id)
+            elif self._recurs(owner_id, task, after=fired_at if fired_at is not None else now):
                 # One occurrence done, but the schedule has a future fire — return to
                 # WAITING(until_time); the next scheduled fire resumes it (no enqueue here, the
                 # schedule drives the next leg). This is what makes a recurring task RECUR.

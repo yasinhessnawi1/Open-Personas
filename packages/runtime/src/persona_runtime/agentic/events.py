@@ -409,6 +409,7 @@ class RunEvent(BaseModel):
         contract: Mapping[str, Any],
         schedule: Mapping[str, Any],
         draft_hash: str,
+        trigger: Mapping[str, Any] | None = None,
     ) -> RunEvent:
         """A confirmed standing-task contract, ready for the api to create (Spec A4, A4-D-X).
 
@@ -428,6 +429,8 @@ class RunEvent(BaseModel):
             contract: ``Contract.model_dump(mode="json")`` (goal/scope/criteria/bounds/policy).
             schedule: The parsed cadence ``{recurrence|one_time_at, timezone}`` (JSON-safe).
             draft_hash: A stable content hash of the canonical draft (the dedup fallback).
+            trigger: The A7 event-trigger spec ``{event_kind, filter, human_terms}`` (JSON-safe), or
+                ``None``/empty for a time-driven or one-off contract. Schedule XOR trigger (A7-D-3).
         """
         return cls(
             type="task_originated",
@@ -440,6 +443,7 @@ class RunEvent(BaseModel):
                 "assistant_message_id": assistant_message_id,
                 "contract": dict(contract),
                 "schedule": dict(schedule),
+                "trigger": dict(trigger) if trigger else {},
                 "draft_hash": draft_hash,
             },
             timestamp=datetime.now(UTC),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access (field annotation)
 
+from persona.events import TriggerSpec  # noqa: TC002 — Pydantic needs runtime access
 from persona.schedules import RecurrenceRule  # noqa: TC002 — Pydantic needs runtime access
 from persona.tasks import (
     AcceptanceCriterion,
@@ -122,6 +123,9 @@ class ContractDraft(BaseModel):
         acceptance_criteria: The criterion *statements* (ids are assigned at
             :func:`build_contract` time; the draft holds the human strings).
         schedule: The parsed cadence, or ``None`` for an as-yet-unparsed/declined schedule.
+        trigger: The event trigger this contract watches (A7), or ``None``. **Mutually exclusive
+            with ``schedule``** — a contract is time-driven XOR event-driven (A7-D-3, one impulse
+            per contract in v1); the validator enforces it.
         grants: The beyond-default permissions (each its own prominent echo line).
         updates: How the persona will report progress (digest granularity + channel).
     """
@@ -132,8 +136,17 @@ class ContractDraft(BaseModel):
     scope: str = ""
     acceptance_criteria: tuple[str, ...] = ()
     schedule: ParsedSchedule | None = None
+    trigger: TriggerSpec | None = None
     grants: tuple[GrantSpec, ...] = ()
     updates: UpdatePreference = UpdatePreference()
+
+    @model_validator(mode="after")
+    def _one_impulse(self) -> ContractDraft:
+        """Schedule XOR trigger — a contract is time-driven or event-driven, never both (A7-D-3)."""
+        if self.schedule is not None and self.trigger is not None:
+            msg = "a contract has at most one impulse: a schedule OR a trigger, not both (A7-D-3)"
+            raise ValueError(msg)
+        return self
 
 
 def build_contract(draft: ContractDraft) -> Contract:

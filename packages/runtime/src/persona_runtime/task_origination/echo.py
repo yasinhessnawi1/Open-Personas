@@ -129,6 +129,7 @@ class Clause(StrEnum):
     GOAL = "goal"
     SCOPE = "scope"
     SCHEDULE = "schedule"
+    TRIGGER = "trigger"
     BOUNDS = "bounds"
     UPDATES = "updates"
 
@@ -146,7 +147,10 @@ def render_echo(draft: ContractDraft, mode: EchoMode = EchoMode.CHAT) -> str:
     lines = [render_clause(draft, Clause.GOAL)]
     if draft.scope:
         lines.append(render_clause(draft, Clause.SCOPE))
-    lines.append(render_clause(draft, Clause.SCHEDULE))
+    # The single "When:" line is time-driven XOR event-driven (A7-D-3): render the trigger clause
+    # when the contract watches an event, else the schedule clause.
+    when_clause = Clause.TRIGGER if draft.trigger is not None else Clause.SCHEDULE
+    lines.append(render_clause(draft, when_clause))
     lines.append(render_clause(draft, Clause.BOUNDS))
     lines.append(render_clause(draft, Clause.UPDATES))
     return "\n".join(lines)
@@ -195,6 +199,13 @@ def render_clause(draft: ContractDraft, clause: Clause, mode: EchoMode = EchoMod
         if sched.recurrence is None:  # a one-time task — offer the (now-honest) recurring upgrade
             return f"When: {when}. {_RECURRENCE_INVITE}"
         return f"When: {when}"
+    if clause is Clause.TRIGGER:
+        # The event "When:" (A7): render the concrete filter the user named (not the mechanism) —
+        # "whenever an email from landlord@… arrives" (A7-R-3, comprehension over cleverness).
+        trig = draft.trigger
+        if trig is None:  # pragma: no cover — render_echo only routes here when a trigger is set
+            return f"When: {_NO_SCHEDULE_WHEN}"
+        return f"When: whenever {trig.human_terms}"
     if clause is Clause.BOUNDS:
         return _render_bounds(draft)
     if clause is Clause.UPDATES:

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from persona.tasks import (
+        EventFire,
         EventTrigger,
         LegBoxLimit,
         RecentLegSummary,
@@ -267,7 +268,7 @@ class LegExecutor:
         self,
         *,
         task: Task,
-        trigger: ScheduledFire | UserReply | EventTrigger,
+        trigger: ScheduledFire | UserReply | EventTrigger | EventFire,
         prior_checkpoint: TaskCheckpoint | None = None,
         recent_legs: Sequence[RecentLegSummary] = (),
         retrieval: Sequence[str] = (),
@@ -352,7 +353,7 @@ class LegExecutor:
     @staticmethod
     def _render(
         task: Task,
-        trigger: ScheduledFire | UserReply | EventTrigger,
+        trigger: ScheduledFire | UserReply | EventTrigger | EventFire,
         prior: TaskCheckpoint | None,
         recent_legs: Sequence[RecentLegSummary],
         retrieval: Sequence[str],

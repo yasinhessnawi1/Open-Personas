@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
-from persona.tasks.trigger import EventTrigger, ScheduledFire, UserReply
+from persona.tasks.trigger import EventFire, EventTrigger, ScheduledFire, UserReply
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -112,7 +112,7 @@ def _render_retrieval(retrieval: Sequence[str]) -> str:
     return "\n".join(f"- {snippet}" for snippet in retrieval)
 
 
-def _render_trigger(trigger: ScheduledFire | UserReply | EventTrigger) -> str:
+def _render_trigger(trigger: ScheduledFire | UserReply | EventTrigger | EventFire) -> str:
     if isinstance(trigger, ScheduledFire):
         return (
             f"TRIGGER: scheduled fire (schedule {trigger.schedule_id}) "
@@ -120,13 +120,15 @@ def _render_trigger(trigger: ScheduledFire | UserReply | EventTrigger) -> str:
         )
     if isinstance(trigger, UserReply):
         return f"TRIGGER: the user replied: {trigger.reply}"
+    if isinstance(trigger, EventFire):  # A7's on-event fire — the legible "ran because" (A7-D-6)
+        return f"TRIGGER: event ({trigger.event_kind}) — {trigger.human}"
     return f"TRIGGER: event from {trigger.source}: {trigger.payload}"
 
 
 def reconstruct_context(
     *,
     contract: Contract,
-    trigger: ScheduledFire | UserReply | EventTrigger,
+    trigger: ScheduledFire | UserReply | EventTrigger | EventFire,
     checkpoint: TaskCheckpoint | None = None,
     recent_legs: Sequence[RecentLegSummary] = (),
     retrieval: Sequence[str] = (),

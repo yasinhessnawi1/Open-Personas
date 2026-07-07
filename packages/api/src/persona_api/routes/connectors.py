@@ -10,7 +10,7 @@ existing capability.
 
 from __future__ import annotations
 
-from datetime import datetime  # noqa: TC003 — used in cast() at runtime
+from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
 from enum import StrEnum
 from typing import cast
 
@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Request
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import ConnectorServiceUnavailableError
+from persona_api.events import on_connector_unlinked
 from persona_api.schemas import (
     ConnectorConnectionOut,
     ConnectorDisconnectResult,
@@ -78,7 +79,7 @@ async def disconnect_connector(
     platform: str,
     platform_identity: str,
     request: Request,
-    user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — RLS via contextvar
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> ConnectorDisconnectResult:
     """Sever the caller's binding for ``(platform, platform_identity)`` (Spec C6).
 
@@ -94,6 +95,17 @@ async def disconnect_connector(
         platform=platform,
         platform_identity=platform_identity,
     )
+    if severed > 0:
+        # A7 unlink hygiene (criterion 7): the platform stops reaching the caller, so its event
+        # triggers go dormant (fire any "when {platform} unlinks" trigger once, then disable). No-op
+        # unless PERSONA_EVENT_TRIGGERS_ENABLED. Owner = the authenticated caller (RLS-scoped).
+        on_connector_unlinked(
+            rls_engine=request.app.state.rls_engine,
+            config=request.app.state.config,
+            owner_id=user.id,
+            platform=platform,
+            now=datetime.now(UTC),
+        )
     return ConnectorDisconnectResult(severed=severed > 0)
 
 

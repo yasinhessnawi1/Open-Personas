@@ -43,6 +43,13 @@ def _schedule_payload(draft: ContractDraft) -> dict[str, Any]:
     return draft.schedule.model_dump(mode="json")
 
 
+def _trigger_payload(draft: ContractDraft) -> dict[str, Any]:
+    """The JSON-safe trigger spec (empty when the draft has no trigger — A7). Schedule XOR this."""
+    if draft.trigger is None:
+        return {}
+    return draft.trigger.model_dump(mode="json")
+
+
 def build_task_originated_event(
     *,
     draft: ContractDraft,
@@ -68,5 +75,6 @@ def build_task_originated_event(
         assistant_message_id=assistant_message_id,
         contract=contract.model_dump(mode="json"),
         schedule=_schedule_payload(canonical),
+        trigger=_trigger_payload(canonical),
         draft_hash=draft_content_hash(canonical),
     )

@@ -1290,20 +1290,32 @@ class RuntimeFactory:
                 error=type(exc).__name__,
             )
             return None, None, None, None
+        # A7 (T8): the event-trigger judge shares the recognition-tier backend and is wired ONLY
+        # when event triggers are enabled (the feature-gate posture). OFF ⇒ the recogniser is
+        # byte-identical to the A4-only path (the event branch is inert). A recognised event watch
+        # flows through the SAME echo → confirm → OriginationService door as a schedule.
+        from persona.events import EventTriggerSettings
         from persona_runtime.task_origination import (
             ModelAmendmentInterpreter,
+            ModelEventTriggerIntentJudge,
             ModelRescheduleInterpreter,
             ModelStandingIntentJudge,
             ModelSteeringInterpreter,
             StandingIntentRecognizer,
         )
 
+        event_judge = (
+            ModelEventTriggerIntentJudge(backend=backend)
+            if EventTriggerSettings().enabled
+            else None
+        )
         recognizer = StandingIntentRecognizer(
             ModelStandingIntentJudge(
                 backend=backend,
                 default_timezone=self._core_config.default_timezone,
                 timezone_provider=self._build_user_timezone_provider(),
-            )
+            ),
+            event_judge=event_judge,
         )
         return (
             recognizer,

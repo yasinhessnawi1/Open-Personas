@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
-from persona.tasks import LegBox, ResumeTrigger, ScheduledFire, TaskState, is_terminal
+from persona.tasks import EventFire, LegBox, ResumeTrigger, ScheduledFire, TaskState, is_terminal
 from persona_runtime.legs import BasicCheckpointWriter, LegExecutor
 
 if TYPE_CHECKING:
@@ -124,6 +124,8 @@ class TaskLegHandler:
         box: LegBox | None = None,
         runnable_guard: RunnableGuard | None = None,
         on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
+        on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]]
+        | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -137,6 +139,10 @@ class TaskLegHandler:
         # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
         # continuation applies. Optional + best-effort; a plain A2 worker wires none.
         self._on_milestone = on_milestone
+        # Spec A7 (T4): the lifecycle-emission hook — receives the settled outcome AND the leg's
+        # originating trigger, so an event-fired leg can emit a lifecycle event that INHERITS the
+        # ``EventFire`` causal chain (the cross-process loop guard). Optional + best-effort.
+        self._on_leg_settled = on_leg_settled
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -196,7 +202,14 @@ class TaskLegHandler:
         if self._continuation is not None:
             trigger = payload.trigger
             fired_at = trigger.fire_time if isinstance(trigger, ScheduledFire) else None
-            self._continuation.apply(owner, outcome, now=now, fired_at=fired_at)
+            # A7 standing watch: an EventFire-fired leg that completes returns to WAITING(on_event).
+            self._continuation.apply(
+                owner,
+                outcome,
+                now=now,
+                fired_at=fired_at,
+                event_fired=isinstance(trigger, EventFire),
+            )
         # Spec A4 (T10): after the state settles, publish a granularity-gated digest update. The
         # post-leg task carries the settled state; the hook decides milestone/completion + gating.
         # Best-effort — a delivery hiccup must never fail or re-deliver the (already-done) leg.
@@ -206,6 +219,16 @@ class TaskLegHandler:
             except Exception as exc:  # noqa: BLE001 — the update is additive; never fail the leg
                 _log.warning(
                     "task milestone update failed task_id={tid}: {err}", tid=task.id, err=str(exc)
+                )
+        # Spec A7 (T4): emit the lifecycle event this settled leg produced, carrying the leg's
+        # trigger so an event-fired leg's output inherits its causal chain. Best-effort + isolated
+        # from the milestone hook (one failing must not skip the other, nor fail the done leg).
+        if self._on_leg_settled is not None:
+            try:
+                await self._on_leg_settled(outcome, payload.trigger, now)
+            except Exception as exc:  # noqa: BLE001 — additive; never fail the leg
+                _log.warning(
+                    "task lifecycle emit failed task_id={tid}: {err}", tid=task.id, err=str(exc)
                 )
 
 
@@ -220,6 +243,7 @@ def register_task_leg_handler(
     box: LegBox | None = None,
     runnable_guard: RunnableGuard | None = None,
     on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
+    on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -235,6 +259,7 @@ def register_task_leg_handler(
                 box=box,
                 runnable_guard=runnable_guard,
                 on_milestone=on_milestone,
+                on_leg_settled=on_leg_settled,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

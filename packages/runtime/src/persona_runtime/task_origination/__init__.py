@@ -60,6 +60,17 @@ from persona_runtime.task_origination.emission import (
     build_task_originated_event,
     draft_content_hash,
 )
+from persona_runtime.task_origination.event_cues import EventCueSignal, detect_event_cue
+from persona_runtime.task_origination.event_judge import (
+    EVENT_JUDGE_PROMPT_VERSION,
+    ModelEventTriggerIntentJudge,
+)
+from persona_runtime.task_origination.event_recognizer import (
+    EventTriggerIntentJudge,
+    EventTriggerJudgment,
+    EventTriggerVerdict,
+    build_event_clarify_question,
+)
 from persona_runtime.task_origination.judge import (
     JUDGE_PROMPT_VERSION,
     ModelStandingIntentJudge,
@@ -108,12 +119,18 @@ __all__ = [
     "ECHO_PROMPT_VERSION",
     "ECHO_PROMPT_VOICE",
     "ECHO_PROMPT_VOICE_VERSION",
+    "EVENT_JUDGE_PROMPT_VERSION",
     "JUDGE_PROMPT_VERSION",
     "RESCHEDULE_PROMPT_VERSION",
     "STEERING_PROMPT_VERSION",
     "AmendmentInterpreter",
     "Clause",
+    "EventCueSignal",
+    "EventTriggerIntentJudge",
+    "EventTriggerJudgment",
+    "EventTriggerVerdict",
     "ModelAmendmentInterpreter",
+    "ModelEventTriggerIntentJudge",
     "ModelRescheduleInterpreter",
     "ModelStandingIntentJudge",
     "ModelSteeringInterpreter",
@@ -144,11 +161,13 @@ __all__ = [
     "amend_updates",
     "build_clarify_question",
     "build_contract",
+    "build_event_clarify_question",
     "build_task_originated_event",
     "canonicalize_draft",
     "changed_clauses",
     "classify_amendment_materiality",
     "clear_grant",
+    "detect_event_cue",
     "detect_standing_cue",
     "detect_steering_cue",
     "draft_content_hash",

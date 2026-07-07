@@ -59,6 +59,8 @@ def changed_clauses(before: ContractDraft, after: ContractDraft) -> tuple[Clause
         clauses.append(Clause.SCOPE)
     if before.schedule != after.schedule:
         clauses.append(Clause.SCHEDULE)
+    if before.trigger != after.trigger:
+        clauses.append(Clause.TRIGGER)
     if before.grants != after.grants:
         clauses.append(Clause.BOUNDS)
     if before.updates != after.updates:
@@ -128,6 +130,10 @@ def _amendment_payloads(
             _set("note", _schedule_terms(before), _schedule_terms(after))  # phrasing → tuning
         else:
             _set("schedule_cadence", _schedule_terms(before), _schedule_terms(after))  # material
+    if before.trigger != after.trigger:
+        # A7: changing WHAT you watch (sender/platform/keyword/task) is material — re-confirm, never
+        # a silent phrasing tweak (A4-D-4 reuse; the trigger is the event-"when", a material key).
+        _set("schedule_cadence", _trigger_terms(before), _trigger_terms(after))
     if before.scope != after.scope:
         _set("description", before.scope, after.scope)  # phrasing → tuning
     if before.updates != after.updates:
@@ -137,6 +143,10 @@ def _amendment_payloads(
 
 def _schedule_terms(draft: ContractDraft) -> str:
     return draft.schedule.human_terms if draft.schedule is not None else ""
+
+
+def _trigger_terms(draft: ContractDraft) -> str:
+    return draft.trigger.human_terms if draft.trigger is not None else ""
 
 
 def _updates_terms(draft: ContractDraft) -> str:

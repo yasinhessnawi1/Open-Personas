@@ -11,6 +11,49 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Event triggers — the persona's third impulse: react to typed events (Spec A7)
+
+> "When an email from my landlord arrives, summarise it." A7 adds reaction to
+> typed *platform events* (not only A1's clocks and A5's scans) **without a new
+> actor**: an event trigger's only two consequences are **fire a confirmed
+> contract task's leg** (A4's machinery, the trigger replacing the clock in the
+> A1→A2 bridge) or **enqueue an A5 initiative candidate** — every A7 outcome
+> already passes an existing consent/safety gate. Feature-gated OFF; inert until
+> `PERSONA_EVENT_TRIGGERS_ENABLED=true`.
+
+#### Added
+- **`persona.events`** (`persona-core`) — the closed six-member `EventKind`
+  catalogue (`connector.message_received`, `task.leg_completed/failed`,
+  `task.milestone`, `connector.linked/unlinked`) with frozen typed envelopes, the
+  per-kind `TriggerFilter` union (case-insensitive `contains`, no regex — A7-D-2),
+  the two-member `TriggerAction` union, `TriggerSpec`, and `EventTriggerSettings`
+  (`PERSONA_EVENT_TRIGGERS_*`).
+- **`EventFire`** — a distinct `ResumeTrigger` variant carrying the causal chain
+  that rides the queued leg across the connector→worker boundary (the
+  cross-process loop guard, A7-D-6).
+- **The trigger registry** (`event_triggers` table, migration `039`, split-home
+  RLS) + the **dispatcher** (`persona_api.events`): match at the event birth
+  point, act through the shared `JobQueue` via **exactly two doors** — a
+  structural test proves no third path. Loop prevention (causal-chain refusal +
+  depth cap), storm safety (cooldown coalesce-to-one + R7 pre-check, drop-with-
+  audit + a P6 bell), and the A6-D-8 autonomy-pause seam gate every fire.
+- **Door b** — the `event_candidate` job turns an event into an A5 candidate
+  through the unchanged pipeline; a deterministic wellbeing subject-exclusion at
+  the handler seam keeps gated-category content from ever becoming an unprompted
+  initiative subject (criterion 8, K4 composition).
+- **Create-via-chat** — an NL event-trigger recognizer (cue-gated small-tier
+  judge, conservative: never guesses a watched sender) drafts a `TriggerSpec` that
+  flows through the **existing** A4 echo → confirm → `OriginationService` door
+  (the only creation path); the echo renders the concrete `When: whenever …`.
+- **The A6 provenance contract** (`persona_api.events.provenance`) — the frozen,
+  importable audit-action + `EventFire`-identity vocabulary A6 renders "ran
+  because: {human}" from, guarded by a shape test against drift.
+- Live wiring: the connector inbound path + worker lifecycle emit through the real
+  dispatcher; unlinking a platform disables its triggers with a user notice.
+- `PERSONA_EVENT_TRIGGERS_ENABLED` (default `false`) + `COOLDOWN_SECONDS` (300),
+  `MAX_CHAIN_DEPTH` (3), `PER_OWNER_MAX_FIRES_PER_HOUR` (60), `FIRE_COST_ESTIMATE`
+  (1).
+
 ### Real-time delivery — a background delivery surfaces live, no reload (Spec A11)
 
 > When a persona acts while you're away, you shouldn't have to reload to find out.

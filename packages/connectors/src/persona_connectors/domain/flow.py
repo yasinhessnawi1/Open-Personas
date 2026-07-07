@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from persona.logging import get_logger
 from persona.schema.origination import PersonaIdentityTag
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,6 +69,8 @@ __all__ = [
     "SharedInboundFlow",
     "TurnRequest",
 ]
+
+_log = get_logger("connectors.flow")
 
 
 class TurnRequest(BaseModel):
@@ -162,12 +165,17 @@ class SharedInboundFlow:
         list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
         run_turn: Callable[[TurnRequest], Awaitable[str]],
         commands: FlowCommands | None = None,
+        emit_message_received: Callable[..., None] | None = None,
     ) -> None:
         self._resolver = resolver
         self._store = conversation_store
         self._list_persona_names = list_persona_names
         self._run_turn = run_turn
         self._commands = commands if commands is not None else FlowCommands()
+        # Spec A7 (T6): the connector.message_received emit callback (default None → byte-identical
+        # today). Injected by the composition root closing over a real dispatcher; this api-free
+        # module only knows primitives. Best-effort — never fails the delivered turn.
+        self._emit_message_received = emit_message_received
 
     async def handle_text(
         self,
@@ -272,3 +280,22 @@ class SharedInboundFlow:
         await transport.send_persona(
             NormalisedOutbound(persona=tag, text=reply, conversation_key=chat)
         )
+        # Spec A7 (T6): a delivered turn is a connector.message_received event — emit it (best-
+        # effort; the reply already went out, so a hiccup must never surface). Only a DELIVERED turn
+        # emits (the early-return branches above are not "a message reached the persona").
+        if self._emit_message_received is not None:
+            try:
+                self._emit_message_received(
+                    owner_id=owner_id,
+                    persona_id=decision.persona_id,
+                    conversation_id=foreground.conversation_id,
+                    platform=platform,
+                    sender_id=inbound.sender_id,
+                    thread_id=inbound.thread_id,
+                    subject=inbound.raw.get("subject"),
+                    body=inbound.text,
+                    message_id=inbound.message_id,
+                    occurred_at=inbound.received_at,
+                )
+            except Exception:  # noqa: BLE001 — emission is additive; never fail the delivered turn
+                _log.warning("connector.message_received emit failed", platform=platform)

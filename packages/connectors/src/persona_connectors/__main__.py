@@ -27,11 +27,17 @@ from typing import TYPE_CHECKING
 import httpx
 import uvicorn
 from persona.auth.jwt_verifier import make_jwt_verifier
+from persona.events import EventTriggerSettings
 from persona.logging import get_logger
 from persona.stores.chroma import ChromaBackend
 from persona.stores.postgres import PostgresBackend
 from persona_api.config import APIConfig, Edition
 from persona_api.editions.factory import build_credits_policy
+from persona_api.events import (
+    build_event_dispatcher,
+    make_connector_linked_emit,
+    make_message_received_emit,
+)
 from persona_api.services import persona_service
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
@@ -343,6 +349,7 @@ async def _setup_whatsapp(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+    emit_message_received: Callable[..., None] | None = None,
 ) -> tuple[MessageDeliverer, FastAPI]:
     """Assemble the WhatsApp adapter → (deliverer, the Twilio webhook/status/issue app)."""
     connector = whatsapp_adapter.WhatsAppConnector(
@@ -361,6 +368,7 @@ async def _setup_whatsapp(
         conversation_store=conversation_store,
         list_persona_names=list_persona_names,
         run_turn=run_turn,
+        emit_message_received=emit_message_received,
     )
     flow = PhoneInboundFlow(
         platform=whatsapp_adapter.PLATFORM,
@@ -409,6 +417,7 @@ async def _setup_sms(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+    emit_message_received: Callable[..., None] | None = None,
 ) -> tuple[MessageDeliverer, FastAPI]:
     """Assemble the SMS adapter → (deliverer, the Twilio webhook/status/issue app)."""
     connector = sms_adapter.SmsConnector(
@@ -427,6 +436,7 @@ async def _setup_sms(
         conversation_store=conversation_store,
         list_persona_names=list_persona_names,
         run_turn=run_turn,
+        emit_message_received=emit_message_received,
     )
     flow = PhoneInboundFlow(
         platform=sms_adapter.PLATFORM,
@@ -467,6 +477,7 @@ async def _setup_email(
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     rls_engine: Engine,
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+    emit_message_received: Callable[..., None] | None = None,
 ) -> tuple[MessageDeliverer, FastAPI]:
     """Assemble the email adapter → (deliverer, the Postmark webhook + issue app, Spec C5)."""
     client = PostmarkClient(
@@ -485,6 +496,7 @@ async def _setup_email(
         conversation_store=conversation_store,
         list_persona_names=list_persona_names,
         run_turn=run_turn,
+        emit_message_received=emit_message_received,
     )
     flow = EmailInboundFlow(connector=connector, linking=email_linking, shared=shared, now=_now)
     ttl = timedelta(minutes=config.email_link_token_ttl_minutes)
@@ -581,7 +593,17 @@ async def _amain() -> None:
         rls_engine=rls_engine, owner_scope=composition.owner_scope
     )
     link_store = PostgresLinkStore(rls_engine=rls_engine, dispatch_engine=dispatch_engine)
-    linking_service = LinkingService(link_store)
+    # A7 (T6/T8): the event-trigger emission seam — built ONCE here (this is the api-coupled
+    # composition layer), gated on PERSONA_EVENT_TRIGGERS_ENABLED. A delivered inbound emits
+    # connector.message_received; a successful link emits connector.linked; both dispatch through
+    # the same real dispatcher. OFF ⇒ the callbacks are None and every flow is byte-identical.
+    emit_message_received = None
+    emit_linked = None
+    if EventTriggerSettings().enabled:
+        _a7_dispatcher = build_event_dispatcher(rls_engine=rls_engine, config=api_config)
+        emit_message_received = make_message_received_emit(_a7_dispatcher)
+        emit_linked = make_connector_linked_emit(_a7_dispatcher)
+    linking_service = LinkingService(link_store, emit_linked=emit_linked)
     resolver = InboundIdentityResolver(linking_service)
     conversation_store = PostgresConversationStateStore(
         rls_engine=rls_engine, dispatch_engine=dispatch_engine
@@ -647,6 +669,7 @@ async def _amain() -> None:
                 list_persona_names=list_persona_names,
                 run_turn=run_turn,
                 owner_scope=composition.owner_scope,
+                emit_message_received=emit_message_received,
             )
             deliverers["whatsapp"] = connector
             http_apps["whatsapp"] = app
@@ -660,6 +683,7 @@ async def _amain() -> None:
                 list_persona_names=list_persona_names,
                 run_turn=run_turn,
                 owner_scope=composition.owner_scope,
+                emit_message_received=emit_message_received,
             )
             deliverers["sms"] = connector
             http_apps["sms"] = app
@@ -678,6 +702,7 @@ async def _amain() -> None:
             run_turn=run_turn,
             rls_engine=rls_engine,
             owner_scope=composition.owner_scope,
+            emit_message_received=emit_message_received,
         )
         deliverers["email"] = connector
         http_apps["email"] = app

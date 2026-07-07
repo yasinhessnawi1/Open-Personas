@@ -124,6 +124,83 @@ async def test_creates_task_and_schedule_with_the_contract() -> None:
     assert created_schedule.payload_template == {"task_id": outcome.task_id}
 
 
+# --- A7: the event-trigger creation door (criterion 1) ---------------------------------
+
+
+class _FakeTriggers:
+    def __init__(self) -> None:
+        self.created: list[Any] = []
+        self.deleted: list[tuple[str, str]] = []
+
+    def create_if_absent(self, record: Any, *, now: datetime) -> Any:  # noqa: ANN401, ARG002
+        self.created.append(record)
+        return record
+
+    def delete(self, owner_id: str, trigger_id: str) -> bool:
+        self.deleted.append((owner_id, trigger_id))
+        return True
+
+
+def _trigger_event_data(*, assistant_message_id: str = "msg-t") -> dict[str, Any]:
+    from persona.events import EventKind, MessageFilter, TriggerSpec
+
+    spec = TriggerSpec(
+        event_kind=EventKind.CONNECTOR_MESSAGE_RECEIVED,
+        filter=MessageFilter(platform="email", sender="landlord@example.com"),
+        human_terms="an email from landlord@example.com arrives",
+    )
+    return {
+        "owner_id": "user-1",
+        "persona_id": "astrid",
+        "persona_name": "Astrid",
+        "conversation_id": "conv-1",
+        "assistant_message_id": assistant_message_id,
+        "contract": Contract(goal="summarise the landlord's email").model_dump(mode="json"),
+        "schedule": {},  # schedule XOR trigger (A7-D-3)
+        "trigger": spec.model_dump(mode="json"),
+        "draft_hash": "ht",
+    }
+
+
+@pytest.mark.asyncio
+async def test_confirmed_trigger_contract_creates_task_and_trigger_row() -> None:
+    tasks, schedules, notifier = _FakeTasks(), _FakeSchedules(), _FakeNotifier()
+    triggers = _FakeTriggers()
+    service = OriginationService(
+        tasks=tasks, schedules=schedules, notifier=notifier, triggers=triggers
+    )
+    outcome = await service.originate(_trigger_event_data())
+
+    assert outcome.status is OriginationStatus.CREATED
+    assert outcome.task is not None
+    # An event-triggered task is born WAITING(on_event) — the dispatcher's door-a fires its leg.
+    assert outcome.task.state is TaskState.WAITING
+    assert outcome.task.wait_kind is WaitKind.ON_EVENT
+    assert outcome.task.schedule_id is None  # no schedule (trigger XOR schedule)
+    assert len(schedules.store) == 0
+    # Criterion 1: the trigger registry row was created HERE (the confirmed-contract door) — exactly
+    # one, pointing door-a at the created task.
+    assert len(triggers.created) == 1
+    record = triggers.created[0]
+    assert record.task_id == outcome.task_id
+    assert record.enabled is True
+    assert record.action.kind == "fire_task_leg"
+    assert record.action.task_id == outcome.task_id
+
+
+@pytest.mark.asyncio
+async def test_triggered_contract_without_a_trigger_store_fails_visibly() -> None:
+    # A confirmed trigger contract with no registry wired must FAIL LOUD (an account), never a
+    # silently-dropped confirmed contract (the failure-visibility invariant extends to A7).
+    tasks, schedules, notifier = _FakeTasks(), _FakeSchedules(), _FakeNotifier()
+    service = OriginationService(
+        tasks=tasks, schedules=schedules, notifier=notifier, triggers=None
+    )
+    outcome = await service.originate(_trigger_event_data())
+    assert outcome.status is OriginationStatus.FAILED
+    assert len(notifier.accounts) == 1  # the un-suppressible failure account
+
+
 @pytest.mark.asyncio
 async def test_spend_cap_lands_on_the_contract_bounds() -> None:
     service, _, _, _ = _service()

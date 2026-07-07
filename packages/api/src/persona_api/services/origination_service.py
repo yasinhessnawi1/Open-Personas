@@ -37,10 +37,13 @@ from persona_api.tasks.scheduled_task_builders import (
     build_backing_schedule,
     build_backing_task,
     derive_task_and_schedule_ids,
+    derive_trigger_id,
 )
 
 if TYPE_CHECKING:
     from persona.schema.origination import PersonaIdentityTag
+
+    from persona_api.events import EventTriggerRecord
 
 __all__ = [
     "FailureNotifier",
@@ -50,6 +53,7 @@ __all__ = [
     "OriginationStatus",
     "ScheduleCreator",
     "TaskCreator",
+    "TriggerCreator",
     "derive_origination_key",
 ]
 
@@ -86,6 +90,20 @@ class ScheduleCreator(Protocol):
 
     def delete(self, owner_id: str, schedule_id: str) -> None:
         """Remove a schedule (the compensating action when the task create fails)."""
+        ...
+
+
+class TriggerCreator(Protocol):
+    """The owner-scoped A7 trigger-registry writer (the real adapter wraps ``EventTriggerStore``)."""  # noqa: E501
+
+    def create_if_absent(
+        self, record: EventTriggerRecord, *, now: datetime
+    ) -> EventTriggerRecord:
+        """Persist the trigger row; reflect the existing row on a PK conflict (idempotent)."""
+        ...
+
+    def delete(self, owner_id: str, trigger_id: str) -> bool:
+        """Remove a trigger (the compensating action when the task/trigger create fails)."""
         ...
 
 
@@ -149,11 +167,18 @@ class OriginationService:
         tasks: TaskCreator,
         schedules: ScheduleCreator,
         notifier: FailureNotifier,
+        triggers: TriggerCreator | None = None,
     ) -> None:
-        """Inject the owner-scoped writers + the failure notifier (DI; composition wires real)."""
+        """Inject the owner-scoped writers + the failure notifier (DI; composition wires real).
+
+        ``triggers`` (Spec A7, T7) is the event-trigger registry writer; ``None`` means the deploy
+        has no event-trigger surface wired, so a ``task_originated`` event that carries a trigger
+        fails visibly (never a silently-dropped confirmed contract).
+        """
         self._tasks = tasks
         self._schedules = schedules
         self._notifier = notifier
+        self._triggers = triggers
 
     async def originate(self, data: Mapping[str, Any]) -> OriginationOutcome:
         """Create the task + schedule for one ``task_originated`` event (A4-D-X).
@@ -179,6 +204,8 @@ class OriginationService:
 
         now = datetime.now(UTC)
         scheduled = bool(data.get("schedule"))
+        triggered = bool(data.get("trigger"))
+        trigger_id = derive_trigger_id(key) if triggered else None
         try:
             if scheduled:
                 schedule = _build_schedule(
@@ -196,13 +223,35 @@ class OriginationService:
                 contract=Contract.model_validate(data["contract"]),
                 conversation_id=conversation_id,
                 schedule_id=schedule_id if scheduled else None,
+                # A7: an event-triggered task is born WAITING(on_event) — the dispatcher's
+                # door-a fires its leg; it carries no schedule.
+                wait_on_event=triggered,
                 now=now,
             )
             self._tasks.create_if_absent(task)
+            if triggered:
+                # A7 (T7): the trigger registry row is created HERE and ONLY here — on the confirmed
+                # contract (criterion 1). No store wired ⇒ fail visibly, never drop.
+                if self._triggers is None:
+                    msg = "task_originated carried a trigger but no trigger registry is wired"
+                    raise OriginationKeyError(msg, context={"task_id": task_id})
+                assert trigger_id is not None  # noqa: S101 — set iff triggered
+                self._triggers.create_if_absent(
+                    _build_trigger_record(
+                        trigger_id=trigger_id,
+                        task_id=task_id,
+                        owner_id=owner_id,
+                        persona_id=str(data["persona_id"]),
+                        payload=data["trigger"],
+                        now=now,
+                    ),
+                    now=now,
+                )
         except Exception as exc:  # noqa: BLE001 — any create failure MUST surface, never silently drop
             await self._on_failure(
                 task_id=task_id,
                 schedule_id=schedule_id if scheduled else None,
+                trigger_id=trigger_id,
                 owner_id=owner_id,
                 persona=_persona_tag(data),
                 conversation_id=conversation_id,
@@ -216,18 +265,26 @@ class OriginationService:
         *,
         task_id: str,
         schedule_id: str | None,
+        trigger_id: str | None,
         owner_id: str,
         persona: PersonaIdentityTag,
         conversation_id: str,
         cause: str,
     ) -> None:
-        """Compensate a partial schedule, then surface an un-suppressible failure account."""
+        """Compensate a partial schedule/trigger, then surface an un-suppressible account."""
         if schedule_id is not None:
             try:
                 self._schedules.delete(owner_id, schedule_id)  # compensate the orphan
             except Exception:  # noqa: BLE001 — best-effort cleanup; the user-visible account is what matters
                 _logger.warning(
                     "origination compensation failed schedule_id={sid}", sid=schedule_id
+                )
+        if trigger_id is not None and self._triggers is not None:
+            try:
+                self._triggers.delete(owner_id, trigger_id)  # compensate a partial trigger row
+            except Exception:  # noqa: BLE001 — best-effort cleanup; the account is what matters
+                _logger.warning(
+                    "origination compensation failed trigger_id={tid}", tid=trigger_id
                 )
         account = account_for_origination_failure(task_id, cause=cause)
         try:
@@ -257,6 +314,7 @@ def _build_task(
     conversation_id: str,
     schedule_id: str | None,
     now: datetime,
+    wait_on_event: bool = False,
 ) -> Task:
     """The A2 task for a confirmed contract — the shared builder (A10-D-8), A4 anchors."""
     return build_backing_task(
@@ -267,6 +325,7 @@ def _build_task(
         conversation_id=conversation_id,
         schedule_id=schedule_id,
         now=now,
+        wait_on_event=wait_on_event,
     )
 
 
@@ -295,4 +354,45 @@ def _build_schedule(
         one_time_at=datetime.fromisoformat(one_time_raw) if isinstance(one_time_raw, str) else None,
         task_id=task_id,
         now=now,
+    )
+
+
+def _build_trigger_record(
+    *,
+    trigger_id: str,
+    task_id: str,
+    owner_id: str,
+    persona_id: str,
+    payload: Mapping[str, Any],
+    now: datetime,
+) -> EventTriggerRecord:
+    """The A7 registry row for a confirmed event-trigger contract — door-a fires this task's leg.
+
+    The ``payload`` is the runtime's ``TriggerSpec`` (``{event_kind, filter, human_terms}``, JSON).
+    ``platform`` is left ``None`` — the store derives it from the filter (the single-write-path
+    invariant). The row is born ENABLED (a confirmed contract is live); the action is fixed to fire
+    the confirmed task's leg. Imports are local to keep the events package out of the service's
+    import-time graph.
+    """
+    from persona.events import EventKind, FireTaskLeg, TriggerFilter
+    from pydantic import TypeAdapter
+
+    from persona_api.events import EventTriggerRecord
+
+    trigger_filter: TriggerFilter = TypeAdapter(TriggerFilter).validate_python(payload["filter"])
+    return EventTriggerRecord(
+        id=trigger_id,
+        owner_id=owner_id,
+        persona_id=persona_id,
+        task_id=task_id,
+        event_kind=EventKind(str(payload["event_kind"])),
+        platform=None,
+        filter=trigger_filter,
+        action=FireTaskLeg(task_id=task_id),
+        enabled=True,
+        disabled_reason=None,
+        last_fired_at=None,
+        pending_coalesced_count=0,
+        created_at=now,
+        updated_at=now,
     )

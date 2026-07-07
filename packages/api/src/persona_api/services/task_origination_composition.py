@@ -12,6 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from persona.events import EventTriggerSettings
+
+from persona_api.events import EventTriggerStore
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services.origination_adapters import (
     OriginatorFailureNotifier,
@@ -74,6 +77,10 @@ def compose_task_origination_services(
         tasks=TaskCreatorAdapter(tasks),
         schedules=ScheduleCreatorAdapter(ScheduleStore(rls_engine)),
         notifier=notifier,
+        # A7 (T7): the event-trigger registry writer — wired only when event triggers are enabled
+        # (a confirmed trigger contract creates its row here; off ⇒ None, and a stray trigger event
+        # fails visibly rather than dropping). EventTriggerStore satisfies the TriggerCreator shape.
+        triggers=EventTriggerStore(rls_engine) if EventTriggerSettings().enabled else None,
     )
     steering = TaskSteeringService(
         tasks=tasks,

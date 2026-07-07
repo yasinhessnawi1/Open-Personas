@@ -1709,9 +1709,10 @@ notifications = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
         # 'schedule_executor_missing' = the A10-D-7 deleted-executor bell (migration 037).
-        # 'schedule_fired' = the opt-in coalesced fire bell (this feature's migration).
+        # 'schedule_fired' = the opt-in coalesced fire bell (migration 039).
+        # 'event_trigger_dropped' = the A7-D-8 storm-drop bell (A7's migration, merged 042).
         "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing', "
-        "'schedule_fired')",
+        "'schedule_fired', 'event_trigger_dropped')",
         name="notifications_kind_check",
     ),
     CheckConstraint(
@@ -1810,4 +1811,43 @@ initiative_notices = Table(
         postgresql_where=text("superseded_at IS NULL"),
         sqlite_where=text("superseded_at IS NULL"),
     ),
+)
+
+# The A7 event-trigger registry (Spec A7, A7-D-5): the per-owner RLS-scoped rules the dispatcher
+# matches at each event birth point (owner+kind+enabled indexed lookup, no model call). RLS
+# ENABLE + FORCE + user_isolation are created ENTIRELY in migration 039 (the 038 split-home
+# template). One trigger = {owner, persona, optional task (door a), kind, filter, action, enabled}
+# plus the cooldown state the storm claim advances atomically (A7-D-4). ``platform`` is
+# denormalised from ``filter`` (the single source of truth) purely so unlink hygiene (criterion 7)
+# is an indexed scoped UPDATE, not a JSON dig — the store's ONE write path keeps them in sync.
+event_triggers = Table(
+    "event_triggers",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # The voicing persona. CASCADE: deleting a persona removes its triggers (no orphan reaction).
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    # Door-a only (FireTaskLeg): the confirmed contract task whose leg fires. NULL for door-b
+    # (EnqueueInitiativeCandidate). CASCADE: deleting the task removes its fire-trigger.
+    Column("task_id", Text, ForeignKey("tasks.id", ondelete="CASCADE")),
+    # The EventKind value (app-gated TEXT, the enum-as-text house style).
+    Column("event_kind", Text, nullable=False),
+    # Denormalised from ``filter`` for message/link kinds (NULL for lifecycle) — the unlink-hygiene
+    # scope column (criterion 7). Source of truth is ``filter``; the store sets both together.
+    Column("platform", Text),
+    Column("filter", _json(), nullable=False),
+    Column("action", _json(), nullable=False),
+    # Lifecycle: pause/resume/disable. FALSE ⇒ never matches (the match lookup filters on it).
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    # 'user_paused' | 'unlinked' | NULL while enabled (audit + the no-silent-re-enable guarantee).
+    Column("disabled_reason", Text),
+    # Cooldown/coalescing state (A7-D-4): the last fire instant + the burst count coalesced since.
+    Column("last_fired_at", DateTime(timezone=True)),
+    Column("pending_coalesced_count", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # THE match lookup (dispatcher hot path, A7-D-5): owner + kind + enabled, indexed.
+    Index("idx_event_triggers_owner_kind_enabled", "owner_id", "event_kind", "enabled"),
+    # The unlink-hygiene scan (criterion 7): disable an owner's triggers on a platform.
+    Index("idx_event_triggers_owner_platform", "owner_id", "platform"),
 )

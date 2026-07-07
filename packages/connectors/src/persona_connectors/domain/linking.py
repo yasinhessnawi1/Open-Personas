@@ -24,6 +24,7 @@ import secrets
 from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from persona_connectors.errors import IdentityNotLinkedError, LinkTokenInvalidError
@@ -31,6 +32,8 @@ from persona_connectors.errors import IdentityNotLinkedError, LinkTokenInvalidEr
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import timedelta
+
+_log = get_logger("connectors.linking")
 
 __all__ = [
     "LinkRecord",
@@ -151,8 +154,16 @@ class LinkingService:
     time is injected (``now``/``ttl``) so the logic is pure + deterministic.
     """
 
-    def __init__(self, store: LinkStore) -> None:
+    def __init__(
+        self,
+        store: LinkStore,
+        emit_linked: Callable[..., None] | None = None,
+    ) -> None:
         self._store = store
+        # A7 (T8): the connector.linked emit callback (default None → byte-identical). Injected by
+        # the composition root closing over a real dispatcher; this api-free module knows only
+        # primitives. Best-effort — a link succeeds even if the event emit hiccups.
+        self._emit_linked = emit_linked
 
     def issue(
         self,
@@ -225,6 +236,12 @@ class LinkingService:
             owner_id=token.owner_id,
             now=now,
         )
+        # A7 (T8): the bind is a connector.linked event — emit it (best-effort; the link succeeded).
+        if self._emit_linked is not None:
+            try:
+                self._emit_linked(owner_id=token.owner_id, platform=platform, occurred_at=now)
+            except Exception:  # noqa: BLE001 — emission is additive; never fail the link
+                _log.warning("connector.linked emit failed", platform=platform)
         return token.owner_id
 
     def resolve_owner(self, *, platform: str, platform_identity: str) -> str:

@@ -37,6 +37,7 @@ __all__ = [
     "build_backing_schedule",
     "build_backing_task",
     "derive_task_and_schedule_ids",
+    "derive_trigger_id",
 ]
 
 
@@ -54,6 +55,11 @@ def derive_task_and_schedule_ids(key: str) -> tuple[str, str]:
     return _derive_id("task", key), _derive_id("sched", key)
 
 
+def derive_trigger_id(key: str) -> str:
+    """The deterministic A7 event-trigger id for one idempotency key (replay-stable, Spec A7)."""
+    return _derive_id("evttrigger", key)
+
+
 def build_backing_task(
     *,
     task_id: str,
@@ -63,15 +69,24 @@ def build_backing_task(
     conversation_id: str | None,
     schedule_id: str | None,
     now: datetime,
+    wait_on_event: bool = False,
 ) -> Task:
     """Construct the A2 task carrying the contract (the matrix rides ``contract``).
 
     A schedule-backed task is born **WAITING(until_time)** — dormant at zero cost, awaiting
     its first scheduled fire, which the leg handler resumes (the existing WAITING→ACTIVE
-    resume). A scheduleless task stays DEFINED (the pre-schedule shape).
-    ``conversation_id`` is ``None`` for a calendar-created task (no originating chat turn).
+    resume). An **event-triggered** task (``wait_on_event``, Spec A7) is born **WAITING(on_event)**
+    — dormant until the A7 dispatcher fires its leg (door-a); it carries no ``schedule_id``. A plain
+    scheduleless task stays DEFINED (the pre-schedule shape). ``conversation_id`` is ``None`` for a
+    calendar-created task (no originating chat turn).
     """
     scheduled = schedule_id is not None
+    if wait_on_event:
+        state, wait_kind = TaskState.WAITING, WaitKind.ON_EVENT
+    elif scheduled:
+        state, wait_kind = TaskState.WAITING, WaitKind.UNTIL_TIME
+    else:
+        state, wait_kind = TaskState.DEFINED, None
     return Task(
         id=task_id,
         owner_id=owner_id,
@@ -79,8 +94,8 @@ def build_backing_task(
         contract=contract,
         conversation_id=conversation_id,
         schedule_id=schedule_id,
-        state=TaskState.WAITING if scheduled else TaskState.DEFINED,
-        wait_kind=WaitKind.UNTIL_TIME if scheduled else None,
+        state=state,
+        wait_kind=wait_kind,
         created_at=now,
         updated_at=now,
     )
