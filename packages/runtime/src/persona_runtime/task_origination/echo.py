@@ -196,6 +196,10 @@ def render_clause(draft: ContractDraft, clause: Clause, mode: EchoMode = EchoMod
         if sched is None:
             return f"When: {_NO_SCHEDULE_WHEN}"
         when = f"{sched.human_terms} · {sched.timezone}"
+        if sched.cadence_note:
+            # The honest degradation rider (R4, BUG A): the asked cadence was
+            # unrepresentable and the parse fell back — say so, never silently.
+            return f"When: {when}. {sched.cadence_note}"
         if sched.recurrence is None:  # a one-time task — offer the (now-honest) recurring upgrade
             return f"When: {when}. {_RECURRENCE_INVITE}"
         return f"When: {when}"
@@ -229,6 +233,9 @@ def _render_clause_voice(draft: ContractDraft, clause: Clause) -> str:
         if sched is None:
             return "It runs once, with no recurring schedule."
         when = f"{sched.human_terms}, {sched.timezone}"
+        if sched.cadence_note:
+            # The honest degradation rider (R4, BUG A) — spoken too, never silent.
+            return f"When: {when}. {sched.cadence_note}"
         if sched.recurrence is None:  # one-time — the now-honest recurring upgrade, spoken plainly
             return f"When: {when}. It runs once — tell me if you'd like it recurring."
         return f"When: {when}."

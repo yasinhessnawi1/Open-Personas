@@ -88,6 +88,10 @@ class ParsedSchedule(BaseModel):
         one_time_at: The single future UTC instant, or ``None`` for a recurring schedule.
         timezone: The IANA timezone the cadence is anchored in (the localization frame).
         human_terms: The cadence echoed in human terms ("every weekday at 07:00 your time").
+        cadence_note: The honest decline rider (R4, BUG A): when the ASKED cadence was
+            unrepresentable and the judge fell back to a run-once, this names what could
+            not be set and the nearest cadences that CAN be — rendered as its own echo
+            line so the fallback is never silent. Empty for a faithfully-parsed cadence.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -96,6 +100,7 @@ class ParsedSchedule(BaseModel):
     one_time_at: datetime | None = None
     timezone: str
     human_terms: str
+    cadence_note: str = ""
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> ParsedSchedule:

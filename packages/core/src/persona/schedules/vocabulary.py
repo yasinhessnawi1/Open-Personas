@@ -361,9 +361,20 @@ def render_human_terms(
 
 def render_recurrence_terms(rule: RecurrenceRule) -> str:
     """Render a recurring rule's cadence in human terms (no raw RRULE, ever)."""
-    # every-N-hours (wall-clock) — name the interval AND the local marks (A8-D-8), so it
-    # can never read as elapsed-time-under-DST.
     if rule.freq is RecurrenceFreq.DAILY and not rule.byday and not rule.bymonthday:
+        # every-N-minutes (wall-clock minute grid — R4, BUG A): the pinned-DAILY form
+        # ("every 15 minutes" → BYHOUR=0..23 × BYMINUTE=0,15,30,45) is rendered as the
+        # cadence it IS, with the daily fire VOLUME stated so confirming it is informed
+        # consent ("— 96 times a day"), never a 96-mark list.
+        minute_step = _even_minute_step(rule.byminute)
+        if minute_step is not None and tuple(rule.byhour) == tuple(range(24)):
+            per_day = 24 * len(rule.byminute)
+            base = (
+                f"every {minute_step} minutes, around the clock — {per_day} times a day, your time"
+            )
+            return _with_bound(base, rule)
+        # every-N-hours (wall-clock) — name the interval AND the local marks (A8-D-8), so it
+        # can never read as elapsed-time-under-DST.
         step = _even_hour_step(rule.byhour)
         if step is not None:
             minute = rule.byminute[0] if rule.byminute else 0
@@ -436,11 +447,15 @@ def _ordinal_word(n: int) -> str:
 
 
 def _time_phrase(rule: RecurrenceRule) -> str:
-    """The time-of-day phrase ('07:00', '07:00 and 19:00'), or '' when unpinned."""
+    """The time-of-day phrase ('07:00', '07:00 and 19:00'), or '' when unpinned.
+
+    A multi-minute grid renders the full hour×minute cross product (the wall-clock marks
+    the rule actually fires at — R4 honesty; dateutil expands BYHOUR×BYMINUTE the same way).
+    """
     if not rule.byhour:
         return ""
-    minute = rule.byminute[0] if rule.byminute else 0
-    return _join([f"{hour:02d}:{minute:02d}" for hour in rule.byhour])
+    minutes = rule.byminute or (0,)
+    return _join([f"{hour:02d}:{minute:02d}" for hour in rule.byhour for minute in minutes])
 
 
 def _with_bound(base: str, rule: RecurrenceRule) -> str:
@@ -452,6 +467,18 @@ def _with_bound(base: str, rule: RecurrenceRule) -> str:
     else:
         return base
     return f"{base} ({bound})"
+
+
+def _even_minute_step(byminute: tuple[int, ...]) -> int | None:
+    """The step of a clean every-N-minutes mark set (``[0, N, 2N, …]`` covering the hour),
+    else None. A single minute (a time-of-day pin) and an irregular set are NOT sub-hourly.
+    """
+    if len(byminute) < 2 or byminute[0] != 0:
+        return None
+    step = byminute[1]
+    if step == 0 or 60 % step != 0:
+        return None
+    return step if tuple(byminute) == tuple(range(0, 60, step)) else None
 
 
 def _even_hour_step(byhour: tuple[int, ...]) -> int | None:

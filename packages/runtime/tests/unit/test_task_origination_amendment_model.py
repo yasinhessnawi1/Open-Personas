@@ -127,3 +127,49 @@ async def test_updates_granularity_change_applies() -> None:
 async def test_amends_true_but_empty_patch_is_a_noop_none() -> None:
     # Claiming to amend while changing nothing representable is not an actionable amendment.
     assert await _amend('{"amends": true}') is None
+
+
+# --- one-time retiming (R4 rail fix, B-3): "once at 9 30" is now expressible -------------
+
+
+@pytest.mark.asyncio
+async def test_one_time_retiming_applies_via_parse_one_time() -> None:
+    """THE transcript amendment: a one-time patch lands as the draft-tz instant."""
+    from zoneinfo import ZoneInfo
+
+    amended = await _amend('{"amends": true, "one_time_at": "2026-07-07T09:30:00"}')
+    assert amended is not None
+    assert amended.schedule is not None
+    assert amended.schedule.recurrence is None
+    assert amended.schedule.one_time_at is not None
+    local = amended.schedule.one_time_at.astimezone(ZoneInfo(_TZ))
+    assert (local.hour, local.minute) == (9, 30)
+    assert "09:30" in amended.schedule.human_terms
+
+
+@pytest.mark.asyncio
+async def test_one_time_bad_iso_is_skipped_not_coerced() -> None:
+    # An unparseable instant must not corrupt the draft; nothing else changed → None.
+    assert await _amend('{"amends": true, "one_time_at": "half past nine"}') is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_is_now_anchored_when_a_schedule_frame_exists() -> None:
+    """A bare-time reply ("once at 9 30") only resolves if the model is told NOW —
+    the interpreter must send the current local time + timezone with the proposal."""
+
+    class _CapturingBackend(_StubBackend):
+        def __init__(self) -> None:
+            super().__init__('{"amends": false}')
+            self.seen: str = ""
+
+        async def chat(self, messages: object, **kwargs: Any) -> ChatResponse:  # noqa: ANN401
+            assert isinstance(messages, list)
+            self.seen = str(messages[-1].content)
+            return await super().chat(messages, **kwargs)
+
+    backend = _CapturingBackend()
+    interp = ModelAmendmentInterpreter(backend=backend)
+    await interp.interpret("once at 9 30", _DRAFT)
+    assert "current local time:" in backend.seen
+    assert _TZ in backend.seen

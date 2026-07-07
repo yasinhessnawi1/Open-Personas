@@ -42,7 +42,7 @@ __all__ = ["JUDGE_PROMPT_VERSION", "ModelStandingIntentJudge"]
 
 _logger = get_logger("runtime.task_origination")
 
-JUDGE_PROMPT_VERSION = "a4-judge-v1"
+JUDGE_PROMPT_VERSION = "a4-judge-v2"
 
 _SYSTEM_PROMPT = """\
 You decide whether a user's message is asking YOU to take on a STANDING task — ongoing or \
@@ -63,9 +63,10 @@ them. When you are unsure, answer "ambiguous" — we will ask the user. NEVER gu
 
 When the task is standing, extract WHEN it should run. Prefer a recurring cadence as an RFC-5545 \
 RRULE ("every weekday at 7am" -> "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=7;BYMINUTE=0"; "every \
-morning at 8" -> "FREQ=DAILY;BYHOUR=8;BYMINUTE=0"). If instead it is a single future moment ("next \
-Monday at 9"), give a one-time ISO-8601 local datetime. Times are in the user's local timezone. If \
-no time is stated, omit both — do NOT invent a cadence.
+morning at 8" -> "FREQ=DAILY;BYHOUR=8;BYMINUTE=0"; "every 15 minutes" -> \
+"FREQ=MINUTELY;INTERVAL=15"; "every 2 hours" -> "FREQ=HOURLY;INTERVAL=2"). If instead it is a \
+single future moment ("next Monday at 9"), give a one-time ISO-8601 local datetime. Times are in \
+the user's local timezone. If no time is stated, omit both — do NOT invent a cadence.
 
 Reply with ONLY a JSON object, no prose:
 {"verdict": "standing"|"now_work"|"ambiguous", "goal": "<short goal in your words>", \
@@ -175,21 +176,36 @@ class ModelStandingIntentJudge:
 
         A recurring RRULE takes precedence; else a stated one-time instant; else a run-once-NOW
         fallback so a standing task with no representable cadence still executes (never inert) and
-        the user can make it recurring by reply. Any parse failure degrades to the same safe
-        run-once fallback — an unrepresentable cadence is declined, never coerced (parse-honesty).
+        the user can make it recurring by reply. An unrepresentable cadence is declined, never
+        coerced (parse-honesty) — and never SILENTLY (R4, BUG A): the run-once fallback carries a
+        ``cadence_note`` naming what could not be set and the nearest cadences that can, so the
+        echo states the degradation and the user confirms it knowingly.
         """
         tz = self._resolve_timezone()
         now = self._now()
         rrule = payload.get("recurrence_rrule")
         one_time = payload.get("one_time_at")
+        note = ""
         try:
             if isinstance(rrule, str) and rrule.strip():
                 return parse_recurrence(rrule.strip(), tz, phrase=rrule.strip())
             if isinstance(one_time, str) and one_time.strip():
                 return parse_one_time(self._to_aware(one_time.strip(), tz), tz, phrase=one_time)
-        except (ScheduleParseError, ValueError):
-            _logger.info("cadence not representable; falling back to run-once")
-        return parse_one_time(now, tz, phrase="run once")
+        except ScheduleParseError as exc:
+            _logger.info("cadence not representable; falling back to run-once (noted honestly)")
+            alternative = exc.context.get("alternative", "a fixed daily or weekly time")
+            note = (
+                "I couldn't set that exact cadence — the closest I can hold is "
+                f"{alternative}. Tell me one and I'll make it recurring."
+            )
+        except ValueError:
+            _logger.info("cadence unparseable; falling back to run-once (noted honestly)")
+            note = (
+                "I couldn't read that cadence exactly — tell me one like 'every 15 minutes' "
+                "or 'every weekday at 8am' and I'll make it recurring."
+            )
+        fallback = parse_one_time(now, tz, phrase="run once")
+        return fallback.model_copy(update={"cadence_note": note}) if note else fallback
 
     @staticmethod
     def _to_aware(iso: str, tz: str) -> datetime:

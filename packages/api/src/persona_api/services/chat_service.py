@@ -40,6 +40,7 @@ from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import ConversationNotFoundError
 from persona_api.services import document_service, image_service
+from persona_api.services.message_metadata import metadata_from_channel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -396,7 +397,14 @@ def _to_message(row: dict[str, object]) -> ConversationMessage:
     # aware_utc: community SQLite returns naive instants (R4-C1-8) — the frozen
     # model rejects them, which 422'd every send in any conversation with history.
     created_at = cast("datetime", aware_utc(cast("datetime", row["created_at"])))
-    return ConversationMessage(role=role, content=str(row["content"]), created_at=created_at)
+    # Rehydrate the runtime metadata the finalize persisted into channel["runtime_metadata"]
+    # (the R4 rail-escape fix): without this, every pending rail (contract_proposal /
+    # cancel_proposal / reschedule_proposal / proactive_question) died at the turn boundary.
+    # Legacy / connector / A9-delegation channel shapes degrade to {} (fail-soft).
+    metadata = metadata_from_channel(row.get("channel"))
+    return ConversationMessage(
+        role=role, content=str(row["content"]), created_at=created_at, metadata=metadata
+    )
 
 
 def _sse(event: str, data: dict[str, object]) -> bytes:

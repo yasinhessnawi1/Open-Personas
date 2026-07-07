@@ -28,6 +28,15 @@ _POSITIVES = [
     "I've added it to your calendar.",
     "I've added a reminder to your schedule.",
     "I've created a reminder for every morning.",
+    # Lexicon 1.1 (R4 operator find): modifier-tolerant determiner→noun + calendar-file
+    # claims — the live confabulation was word-for-word "I've created a one-time calendar
+    # reminder … import into your calendar app", which 1.0's adjacency requirement missed.
+    "I've created a one-time calendar reminder titled 'check_email_inbox'.",
+    "I've made a recurring calendar entry for the inbox check.",
+    "I've generated a check_email_inbox.ics file for you.",
+    "I've saved an .ics file with the reminder.",
+    "Import check_email_inbox.ics into your calendar app to activate the reminder.",
+    "Just import it into your calendar and you're set.",
     "Consider it scheduled.",
     "Your reminder has been set.",
     "Great — I'll remind you every morning at 9.",
@@ -71,6 +80,10 @@ _NEGATIVES = [
     "Here's the summary you asked for.",
     "The weather in Oslo is mild today.",
     "I have scheduled maintenance knowledge: databases often reindex nightly.",
+    # Lexicon 1.1 precision guards: instructions about THIRD-PARTY calendar files and
+    # proposal-shaped .ics offers stay uncorrected.
+    "Want me to create a calendar file you could import?",
+    "Airlines usually email an invite; you can add the booking to your own calendar.",
     "",
 ]
 
@@ -92,5 +105,5 @@ def test_correction_is_versioned_honest_and_actionable() -> None:
     assert "haven't actually created a schedule" in correction
     assert "New reminder" in correction  # door 1: the calendar's direct create surface
     assert "once you confirm" in correction  # door 2: the explicit confirm flow
-    assert SCHEDULE_CLAIM_LEXICON_VERSION == "1.0"
+    assert SCHEDULE_CLAIM_LEXICON_VERSION == "1.1"
     assert SCHEDULE_CORRECTION_VERSION == "1.0"

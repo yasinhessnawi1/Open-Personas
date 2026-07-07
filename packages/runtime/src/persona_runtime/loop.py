@@ -308,6 +308,37 @@ def _pending_contract_draft(conversation: Conversation) -> ContractDraft | None:
     return None
 
 
+#: The ask-once marker on a pending-proposal clarify turn (R4 rail fix). Its presence on the
+#: most recent assistant turn means the ONE clarify has been spent: a second uninterpretable
+#: reply releases the rail to ordinary chat (no trap) instead of clarifying forever.
+_CLARIFY_ASKED_KEY = "contract_clarify_asked"
+
+
+def _pending_clarify_asked(conversation: Conversation) -> bool:
+    """Whether the most recent assistant turn already spent the one pending-proposal clarify."""
+    for message in reversed(conversation.messages):
+        if message.role != "assistant":
+            continue
+        return message.metadata.get(_CLARIFY_ASKED_KEY) == "true"
+    return False
+
+
+def _render_pending_clarify(pending: ContractDraft) -> str:
+    """The deterministic ask-once clarify on a pending proposal (R4 rail fix).
+
+    Spoken INSTEAD of a free model turn when a reply is neither a clean confirm nor an
+    interpretable amendment (interpreter miss/flake): a free turn on a pending proposal is
+    the confabulation door (R4-C1-20 — the model "creates" an .ics it cannot create). The
+    clarify restates the pending terms and names every real exit: confirm, adjust, drop.
+    """
+    return (
+        "Just to be sure I don't set up the wrong thing — here's what I have pending:\n"
+        f"{render_echo(pending)}\n\n"
+        "Say 'yes' to set it up, tell me what to change (for example 'make it 9:30'), "
+        "or say 'never mind' to drop it."
+    )
+
+
 def _build_multimodal_user_message(
     user_message: str, images: list[TurnImage]
 ) -> list[MessageContent]:
@@ -1034,30 +1065,61 @@ class ConversationLoop:
                 # Not a clean confirmation — try to interpret it as an amendment (A4-T9): a
                 # tweak amends the draft, re-echoes the changed clause, and STAYS pending. Only
                 # a clean confirm creates; a confirm-with-a-tweak never silently drops the task.
+                # An interpreter EXCEPTION (small-tier flake) degrades to the clarify below —
+                # never a crashed turn and never a free model turn (R4 rail fix).
+                amended: ContractDraft | None = None
                 if self._amendment_interpreter is not None:
-                    amended = await self._amendment_interpreter.interpret(user_message, pending)
-                    if amended is not None:
-                        amended = canonicalize_draft(amended)
-                        reecho = _render_amendment(pending, amended)
-                        yield _text_chunk(reecho)
-                        now_am = datetime.now(UTC)
-                        conversation.messages.append(
-                            ConversationMessage(
-                                role="user", content=user_message, created_at=now_am
-                            )
+                    try:
+                        amended = await self._amendment_interpreter.interpret(user_message, pending)
+                    except Exception:  # noqa: BLE001 — a flake must degrade to the clarify
+                        _logger.warning(
+                            "amendment interpreter failed; degrading to the pending clarify"
                         )
-                        conversation.messages.append(
-                            ConversationMessage(
-                                role="assistant",
-                                content=reecho,
-                                created_at=now_am,
-                                metadata={"contract_proposal": amended.model_dump_json()},
-                            )
+                if amended is not None:
+                    amended = canonicalize_draft(amended)
+                    reecho = _render_amendment(pending, amended)
+                    yield _text_chunk(reecho)
+                    now_am = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_am)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant",
+                            content=reecho,
+                            created_at=now_am,
+                            metadata={"contract_proposal": amended.model_dump_json()},
                         )
-                        yield _final_chunk(None)
-                        return
-                # Neither a clean confirmation nor an amendment → abandon the proposal and
-                # fall through to ordinary chat.
+                    )
+                    yield _final_chunk(None)
+                    return
+                # Neither a clean confirmation nor an interpretable amendment. On a PENDING
+                # proposal the safe degradation is ask-once clarify (R4 rail fix): a free
+                # model turn here is the confabulation door (R4-C1-20). The clarify re-carries
+                # the proposal + the ask-once marker; a SECOND miss releases to ordinary chat
+                # (the user has moved on — no trap).
+                if not _pending_clarify_asked(conversation):
+                    clarify = _render_pending_clarify(pending)
+                    yield _text_chunk(clarify)
+                    now_cl = datetime.now(UTC)
+                    conversation.messages.append(
+                        ConversationMessage(role="user", content=user_message, created_at=now_cl)
+                    )
+                    conversation.messages.append(
+                        ConversationMessage(
+                            role="assistant",
+                            content=clarify,
+                            created_at=now_cl,
+                            metadata={
+                                "contract_proposal": pending.model_dump_json(),
+                                _CLARIFY_ASKED_KEY: "true",
+                            },
+                        )
+                    )
+                    yield _final_chunk(None)
+                    return
+                # The one clarify is spent → abandon the proposal and fall through to
+                # ordinary chat.
             else:
                 contract = await self._standing_recognizer.recognize(
                     user_message, language=self._persona.identity.language_default

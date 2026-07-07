@@ -162,3 +162,21 @@ def test_one_time_renders_in_local_terms() -> None:
 def test_hourly_interval_must_divide_24() -> None:
     with pytest.raises(ValueError, match="divide 24"):
         RecurrencePattern(kind=RecurrenceKind.HOURLY, interval=5, minute=0)
+
+
+def test_every_n_minutes_reads_as_the_cadence_with_the_daily_volume() -> None:
+    """R4 (BUG A): the pinned-DAILY minute grid ("every 15 minutes") renders as the cadence
+    it is, WITH the daily fire volume — informed consent, never a 96-mark list."""
+    rule = RecurrenceRule(
+        freq=RecurrenceFreq.DAILY, byhour=tuple(range(24)), byminute=(0, 15, 30, 45)
+    )
+    assert render_recurrence_terms(rule) == (
+        "every 15 minutes, around the clock — 96 times a day, your time"
+    )
+
+
+def test_minute_grid_restricted_to_hours_lists_the_real_marks() -> None:
+    # A restricted minute grid (BYHOUR=9 × BYMINUTE=0,30) is NOT around-the-clock — it
+    # renders the true hour×minute cross product (dateutil fires exactly these marks).
+    rule = RecurrenceRule(freq=RecurrenceFreq.DAILY, byhour=(9,), byminute=(0, 30))
+    assert render_recurrence_terms(rule) == "every day at 09:00 and 09:30 your time"
