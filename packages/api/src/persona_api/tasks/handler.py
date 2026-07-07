@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Protocol
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.tasks import EventFire, LegBox, ResumeTrigger, ScheduledFire, TaskState, is_terminal
-from persona_runtime.legs import BasicCheckpointWriter, LegExecutor
+from persona_runtime.legs import BasicCheckpointWriter, LegDisposition, LegExecutor
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -126,6 +126,7 @@ class TaskLegHandler:
         on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
         on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]]
         | None = None,
+        budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -143,6 +144,11 @@ class TaskLegHandler:
         # originating trigger, so an event-fired leg can emit a lifecycle event that INHERITS the
         # ``EventFire`` causal chain (the cross-process loop guard). Optional + best-effort.
         self._on_leg_settled = on_leg_settled
+        # Spec A3 (T10, budget): the leg-boundary budget gate — consulted before enqueueing the
+        # NEXT leg of a CONTINUE outcome. Returns True iff the task was paused at its cap (the
+        # caller must NOT continue); the gate voices the "budget reached; extend?" ask. Optional —
+        # a plain A2 worker wires none, and the pre-A3 no-cap behaviour holds.
+        self._budget_gate = budget_gate
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -200,6 +206,17 @@ class TaskLegHandler:
         # A ScheduledFire's fire_time is the recurrence anchor — "is there a fire after THIS one?" —
         # so a one-time task completes and a recurring one survives regardless of leg-run latency.
         if self._continuation is not None:
+            # A3 budget gate (T10): a CONTINUE outcome is about to enqueue the NEXT leg — first
+            # consult the per-task cap. Over cap ⇒ the gate pauses the task + voices "extend?" and
+            # returns True; we withhold the continuation (no next leg) until the user extends. Only
+            # CONTINUE is gated: COMPLETED/WAITING/FAILED enqueue no follow-on leg to withhold.
+            if (
+                outcome.disposition is LegDisposition.CONTINUE
+                and self._budget_gate is not None
+                and await self._budget_gate(owner, outcome.task, now)
+            ):
+                _log.info("task paused at budget cap; next leg withheld", task_id=task.id)
+                return
             trigger = payload.trigger
             fired_at = trigger.fire_time if isinstance(trigger, ScheduledFire) else None
             # A7 standing watch: an EventFire-fired leg that completes returns to WAITING(on_event).
@@ -244,6 +261,7 @@ def register_task_leg_handler(
     runnable_guard: RunnableGuard | None = None,
     on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
+    budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -260,6 +278,7 @@ def register_task_leg_handler(
                 runnable_guard=runnable_guard,
                 on_milestone=on_milestone,
                 on_leg_settled=on_leg_settled,
+                budget_gate=budget_gate,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

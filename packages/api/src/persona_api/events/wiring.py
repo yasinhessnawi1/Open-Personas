@@ -3,8 +3,9 @@
 :func:`build_event_dispatcher` is the one place the dispatcher's injected seams bind to the real
 platform surfaces: the R7 day-cap (``book_day_spend``, A7-D-8), the ``audit_log`` forensics trail
 (A7-D-9), and the durable P6 storm-drop bell. It is used by the T5 storm proof (the real path) and
-composed into the worker + connector emission wiring at T6. The autonomy-pause seam stays injectable
-— default no-op until A6 wires the real ``owner_autonomy_pause`` reader at merge-back (A6-D-8).
+composed into the worker + connector emission wiring at T6. The autonomy-pause seam is injectable;
+the composition roots (worker, connector-unlink hook, connectors service) bind the real
+``KillSwitchStore.is_owner_autonomy_paused`` reader — wired live at the A6 merge-back (A6-D-8).
 """
 
 from __future__ import annotations

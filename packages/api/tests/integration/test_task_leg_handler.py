@@ -208,6 +208,81 @@ async def test_handler_completes_task_via_continuation(
     assert TaskStore(app_engine).get("user_a", "t1").state == TaskState.COMPLETED
 
 
+class _ContinueRunner:
+    """A leg that hits its step budget → a CONTINUE outcome (another leg would follow)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+        self.calls += 1
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=RunStatus.MAX_STEPS_REACHED,  # not FINAL → CONTINUE
+            steps=[Step(type=StepType.REASONING, content="still working", tokens=100)],
+            output=None,
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+def _leg_job_count(engine: Engine) -> int:
+    with engine.begin() as conn:
+        return int(
+            conn.execute(
+                text("SELECT count(*) FROM jobs WHERE type = 'task_leg' AND owner_id = 'user_a'")
+            ).scalar_one()
+        )
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_withholds_the_next_leg_at_cap(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Spec A3 (T10): a CONTINUE at/over the budget cap withholds the next leg (the gate paused it).
+
+    The gate returning True means the leg-boundary budget check paused the task and voiced the
+    "extend?" ask — so the handler must NOT enqueue the follow-on leg. A gate returning False
+    (within cap) continues normally. This is the wiring the audit found missing.
+    """
+    _seed_active_task(migrated_engine)
+    tasks = TaskStore(app_engine)
+    before = _leg_job_count(migrated_engine)
+
+    paused_handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=CheckpointStore(app_engine),
+        runner_builder=_FakeRunnerBuilder(_ContinueRunner()),  # type: ignore[arg-type]
+        continuation=TaskContinuation(task_store=tasks, queue=JobQueue(app_engine)),
+        budget_gate=lambda _o, _t, _n: _true(),  # over cap → withhold
+    )
+    await paused_handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+    assert _leg_job_count(migrated_engine) == before  # no next leg enqueued — withheld at cap
+
+    within_handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=CheckpointStore(app_engine),
+        runner_builder=_FakeRunnerBuilder(_ContinueRunner()),  # type: ignore[arg-type]
+        continuation=TaskContinuation(task_store=tasks, queue=JobQueue(app_engine)),
+        budget_gate=lambda _o, _t, _n: _false(),  # within cap → continue
+    )
+    await within_handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=0, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+    assert _leg_job_count(migrated_engine) == before + 1  # the next leg WAS enqueued
+
+
+async def _true() -> bool:
+    return True
+
+
+async def _false() -> bool:
+    return False
+
+
 @pytest.mark.asyncio
 async def test_handler_resumes_a_waiting_task_on_pickup(
     migrated_engine: Engine, app_engine: Engine

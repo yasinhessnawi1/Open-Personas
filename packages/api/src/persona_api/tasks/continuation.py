@@ -144,8 +144,10 @@ class TaskContinuation:
             return
         if outcome.disposition == LegDisposition.WAITING_APPROVAL:
             # A3 gate: the leg recorded a durable proposal and ended (no append). Park the task
-            # waiting(on_user) at zero cost — the user's reply resumes it. The C0 persona-voiced
-            # ask is wired in A3's approval orchestrator (T8); this is the state transition.
+            # waiting(on_user) at zero cost — the user resolves it in the Approvals inbox or by
+            # replying in chat (both wired via ApprovalResolutionService). NOTE: the proactive C0
+            # "may I do X?" voice on park (ApprovalResolver.announce) is NOT yet wired — a known
+            # notify-on-park gap; discovery is inbox/chat-driven until it is.
             self.wait_on_user(owner_id, task.id, now=now)
             _log.info(
                 "task waiting(on_user) — approval",

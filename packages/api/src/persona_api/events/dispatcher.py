@@ -8,8 +8,8 @@ filter, and for every match runs a fixed gate chain before routing to **exactly 
 1. **loop guard** (A7-D-4) — refuse a match whose trigger is already in the event's causal chain,
    AND refuse once the chain reaches ``max_chain_depth`` (the distinct-trigger-cycle backstop). Both
    are pre-claim, so a refusal never consumes the cooldown window;
-2. **autonomy pause** — a paused owner's triggers do not fire (the A6-D-8 seam, injected — default
-   no-op until A6 wires the real ``owner_autonomy_pause`` reader at merge-back);
+2. **autonomy pause** — a paused owner's triggers do not fire (the A6-D-8 seam; the composition
+   roots bind the real ``KillSwitchStore.is_owner_autonomy_paused`` reader, wired at A6 merge-back);
 3. **storm claim** — the atomic per-trigger cooldown claim (A7-D-4): a burst coalesces into one
    fire carrying a count; a non-winning arrival is dropped (coalesced), never fired;
 4. **R7 budget** — the denial-of-wallet pre-check before every fire (A7-D-8): over-cap ⇒

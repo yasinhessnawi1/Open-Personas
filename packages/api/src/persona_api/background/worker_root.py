@@ -98,7 +98,7 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
-    from persona.tasks import ResumeTrigger
+    from persona.tasks import ResumeTrigger, Task
     from persona_runtime.legs import LegOutcome
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
@@ -303,8 +303,9 @@ def build_worker_registry(
 
         # The pipeline (T7) — the ONE enforced path from candidate to disposition.
         # T8 fills the delivery seam for ACT (the implicit task through the real
-        # A2/A1 doors; the report is the task machinery's alone); PROPOSE still
-        # returns False (held) until T9 wires the propose-first door.
+        # A2/A1 doors; the report is the task machinery's alone); T9 wires PROPOSE
+        # (the propose-first door) below — a durable A8 reschedule proposal or a
+        # persona-voiced C0 proposal message when a memory backend is present.
         initiative_ledger = InitiativeLedger(rls_engine)
         # The generic-proposal C0 seam (T9): the SAME sender composition A4's
         # digests use — one origination door. Absent memory backend/edition (the
@@ -473,6 +474,16 @@ def _register_task_leg_tenant(
         audit_logger=audit_logger,
         live_sessions=live_sessions,
     )
+    budget_gate = _build_budget_gate(
+        rls_engine=rls_engine,
+        task_store=task_store,
+        memory_backend=memory_backend,
+        edition=edition,
+        audit_root=audit_root,
+        audit_logger=audit_logger,
+        live_sessions=live_sessions,
+        emit_task_updated=_emit_task_updated,
+    )
     register_task_leg_handler(
         registry,
         task_store=task_store,
@@ -482,6 +493,7 @@ def _register_task_leg_tenant(
         on_milestone=on_milestone,
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
+        budget_gate=budget_gate,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
@@ -494,6 +506,78 @@ def _register_task_leg_tenant(
         rls_engine=rls_engine,
         event_channel=event_channel,
     )
+
+
+def _build_budget_gate(
+    *,
+    rls_engine: Engine,
+    task_store: TaskStore,
+    memory_backend: Backend | None,
+    edition: object | None,
+    audit_root: Path,
+    audit_logger: AuditLogger | None,
+    live_sessions: LiveSessionRegistry | None,
+    emit_task_updated: Callable[[str, str, str], None],
+) -> Callable[[str, Task, datetime], Awaitable[bool]]:
+    """The A3 leg-boundary budget gate (T10) — enforce the per-task cap + voice the extend ask.
+
+    Returns an async gate the leg handler consults before enqueueing a CONTINUE's next leg: over
+    cap ⇒ the task is paused (the A2 overlay, so no new legs) and the "budget reached; extend?"
+    account is originated on the task's conversation. When no memory backend is present (community
+    without C0), the pause still holds — only the voiced ask degrades to the persist-only floor
+    (the Tasks surface still shows the budget-paused "extend?" affordance). The pause emits a
+    ``task.updated`` ping through ``emit_task_updated`` (A11) so the surface refetches live.
+    """
+    from persona_api.approvals import account_for_budget_pause
+    from persona_api.approvals.budget import BudgetEnforcer
+    from persona_api.services.origination_adapters import (
+        OriginatorFailureNotifier,
+        resolve_persona_tag,
+    )
+
+    budget = BudgetEnforcer(
+        engine=rls_engine,
+        tasks=task_store,
+        queue=JobQueue(rls_engine),
+        on_state_change=emit_task_updated,
+    )
+    notifier = (
+        OriginatorFailureNotifier(
+            rls_engine=rls_engine,
+            memory_backend=memory_backend,
+            edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
+            audit_root=audit_root,
+            audit_logger=audit_logger,
+            sessions=live_sessions,
+        )
+        if memory_backend is not None and edition is not None
+        else None
+    )
+
+    async def _gate(owner: str, task: Task, now: datetime) -> bool:
+        if not budget.enforce(owner, task, now=now):
+            return False  # within cap — the leg continues
+        # Paused at cap. Voice the "extend?" ask (best-effort; persist-only floor with no backend).
+        if notifier is not None and task.conversation_id is not None:
+            try:
+                persona = resolve_persona_tag(rls_engine, task.persona_id)
+                if persona is not None:
+                    account = account_for_budget_pause(
+                        task.id,
+                        cap_micros=budget.effective_cap(owner, task),
+                        spent_micros=task.ledger.total_micros,
+                    )
+                    await notifier.notify(
+                        account,
+                        persona=persona,
+                        owner_id=owner,
+                        conversation_id=task.conversation_id,
+                    )
+            except Exception:  # noqa: BLE001 — the ask is additive; never fail the paused leg
+                _log.warning("budget extend ask voicing failed", task_id=task.id)
+        return True
+
+    return _gate
 
 
 def _register_delegated_turn_tenant(
