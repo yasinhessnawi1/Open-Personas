@@ -48,7 +48,10 @@ __all__ = [
 ]
 
 #: Bump when the claim lexicon changes (telemetry/probe-suite anchoring).
-SCHEDULE_CLAIM_LEXICON_VERSION = "1.0"
+#: 1.1 (R4 operator find): modifier-tolerant determiner→noun patterns ("I've created a
+#: one-time calendar reminder" slipped 1.0's determiner-noun adjacency requirement) +
+#: calendar-file (.ics) creation claims — the live confabulation's exact shape.
+SCHEDULE_CLAIM_LEXICON_VERSION = "1.1"
 #: Bump when the correction wording changes (Spec 10 prompt-artifact discipline).
 SCHEDULE_CORRECTION_VERSION = "1.0"
 
@@ -73,8 +76,17 @@ _CLAIM_PATTERNS: tuple[str, ...] = (
     r"\bi(?:'ve| have)\s+(?:now\s+)?set\s+(?:that|this|it)\s+up\b",
     r"\bi(?:'ve| have)\s+(?:added|put)\s+(?:that|this|it|one|a\s+reminder)\s+"
     r"(?:to|on|in)\s+your\s+(?:schedule|calendar)\b",
-    r"\bi(?:'ve| have)\s+(?:created|set)\s+(?:a|the|your)\s+"
-    r"(?:reminder|schedule|recurring\s+\w+)\b",
+    # Modifier-tolerant (lexicon 1.1, R4): up to three words may sit between the
+    # determiner and the noun ("created a ONE-TIME CALENDAR reminder") — 1.0's adjacency
+    # requirement let the live .ics confabulation through uncorrected.
+    r"\bi(?:'ve| have)\s+(?:created|set|made|generated)\s+(?:a|an|the|your)\s+"
+    r"(?:[\w-]+\s+){0,3}?(?:reminder|schedule|recurring\s+\w+)\b",
+    # Calendar-file creation claims (lexicon 1.1, R4): the persona "creates" an .ics /
+    # calendar file/event/entry/invite it cannot create — the exact live confabulation.
+    r"\bi(?:'ve| have)\s+(?:created|made|generated|prepared|written|saved)\s+"
+    r"(?:a|an|the|your)\s+(?:[\w-]+\s+){0,3}?"
+    r"(?:[\w.-]*\.ics\b|calendar\s+(?:file|event|entry|invite|reminder))",
+    r"\bimport\s+(?:it|this|that|the\s+file|[\w.-]*\.ics)\s+into\s+your\s+calendar\b",
     r"\bconsider\s+it\s+scheduled\b",
     r"\byour\s+(?:reminder|schedule)\s+has\s+been\s+(?:set|created|added)\b",
     # --- English: recurring-promise claims (a cadence promised as a done deal) ---

@@ -34,6 +34,7 @@ from sqlalchemy import insert, update
 
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
+from persona_api.services.message_metadata import channel_payload_for_metadata
 
 if TYPE_CHECKING:
     from persona.schema.conversation import Conversation
@@ -145,17 +146,29 @@ class MessagesTurnSink:
         row terminal but do NOT touch conversation state (the turn did not finish
         cleanly). No billing here — the deduct rides this path in T2b
         (D-P1-billing-contract).
+
+        A ``complete`` finalize also persists the final assistant message's runtime
+        ``metadata`` (the loop-appended pending-rail state: ``contract_proposal`` /
+        ``cancel_proposal`` / ``reschedule_proposal`` / ``proactive_question``) into the
+        ``channel`` JSON under ``runtime_metadata`` — the A9-aligned message-attached JSON
+        mechanism — so the next turn's conversation reload still sees the pending rail (the
+        R4 rail-escape fix). Metadata-free turns leave ``channel`` NULL, byte-identical.
         """
+        values: dict[str, object] = {
+            "content": content,
+            "streaming_status": status,
+            "stream_events": events,
+            "tier_used": tier,
+        }
+        if status == "complete":
+            final = conversation.messages[-1] if conversation.messages else None
+            if final is not None and final.role == "assistant":
+                channel_payload = channel_payload_for_metadata(final.metadata)
+                if channel_payload is not None:
+                    values["channel"] = channel_payload
         with self._engine.begin() as conn:
             conn.execute(
-                update(messages_t)
-                .where(messages_t.c.id == assistant_message_id)
-                .values(
-                    content=content,
-                    streaming_status=status,
-                    stream_events=events,
-                    tier_used=tier,
-                )
+                update(messages_t).where(messages_t.c.id == assistant_message_id).values(**values)
             )
             if status == "complete":
                 conn.execute(

@@ -171,3 +171,38 @@ async def test_unrepresentable_rrule_declines_to_run_once_not_coerced() -> None:
     assert result.draft.schedule is not None
     assert result.draft.schedule.recurrence is None  # never a coerced/approximate rule
     assert result.draft.schedule.one_time_at is not None
+
+
+# --- R4 (BUG A): sub-daily cadences parse; unrepresentable ones decline HONESTLY ---------
+
+
+@pytest.mark.asyncio
+async def test_every_15_minutes_becomes_a_recurring_schedule_with_the_volume_line() -> None:
+    """The transcript ask now parses: MINUTELY;15 → the pinned-DAILY grid, volume stated."""
+    result = await _judge(
+        '{"verdict": "standing", "goal": "check email inbox", '
+        '"recurrence_rrule": "FREQ=MINUTELY;INTERVAL=15"}'
+    )
+    assert result.draft is not None
+    assert result.draft.schedule is not None
+    assert result.draft.schedule.recurrence is not None
+    assert result.draft.schedule.cadence_note == ""
+    assert "every 15 minutes, around the clock — 96 times a day" in (
+        result.draft.schedule.human_terms
+    )
+
+
+@pytest.mark.asyncio
+async def test_unrepresentable_cadence_fallback_carries_the_honest_note() -> None:
+    """NEVER a silent once-fallback (the R4 transcript): the run-once fallback names what
+    could not be set and the nearest cadences that CAN be held."""
+    result = await _judge(
+        '{"verdict": "standing", "goal": "g", "recurrence_rrule": "FREQ=MINUTELY;INTERVAL=45"}'
+    )
+    assert result.draft is not None
+    assert result.draft.schedule is not None
+    assert result.draft.schedule.recurrence is None  # still the safe run-once
+    assert result.draft.schedule.one_time_at is not None
+    note = result.draft.schedule.cadence_note
+    assert "couldn't set that exact cadence" in note
+    assert "every 5, 10, 15, 20, 30 or 60 minutes" in note

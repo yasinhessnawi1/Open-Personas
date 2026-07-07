@@ -162,3 +162,27 @@ def test_echo_prompt_artifact_is_versioned_and_embeds_structure() -> None:
 def test_grant_decision_default_is_allow() -> None:
     grant = GrantSpec(category=ActionCategory.SPEND, cap_micros=1_000_000)
     assert grant.decision is CategoryDecision.ALLOW
+
+
+def test_render_clause_cadence_note_is_spoken_never_silent() -> None:
+    """R4 (BUG A): a degraded cadence states the decline + the nearest cadences it CAN
+    hold — in the chat echo AND on voice (the honest fallback is never silent)."""
+    from datetime import UTC, datetime
+
+    from persona_runtime.task_origination.echo import EchoMode
+
+    degraded = ParsedSchedule(
+        one_time_at=datetime(2099, 1, 2, 8, 0, tzinfo=UTC),
+        timezone="Europe/Oslo",
+        human_terms="once, on Friday 02 January at 09:00 your time",
+        cadence_note=(
+            "I couldn't set that exact cadence — the closest I can hold is "
+            "every 5, 10, 15, 20, 30 or 60 minutes. Tell me one and I'll make it recurring."
+        ),
+    )
+    draft = ContractDraft(goal="g", schedule=degraded)
+    chat_line = render_clause(draft, Clause.SCHEDULE)
+    assert "couldn't set that exact cadence" in chat_line
+    assert "every 5, 10, 15, 20, 30 or 60 minutes" in chat_line
+    voice_line = render_clause(draft, Clause.SCHEDULE, EchoMode.VOICE)
+    assert "couldn't set that exact cadence" in voice_line

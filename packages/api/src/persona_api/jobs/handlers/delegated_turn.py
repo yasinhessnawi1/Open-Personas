@@ -52,6 +52,7 @@ from sqlalchemy import insert, select, text
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.services import audit_service
+from persona_api.services.message_metadata import metadata_from_channel
 from persona_api.services.origination_service import OriginationService, OriginationStatus
 
 if TYPE_CHECKING:
@@ -257,6 +258,10 @@ class DelegatedTurnHandler:
                 role=str(r["role"]),  # type: ignore[arg-type]
                 content=str(r["content"]),
                 created_at=_aware(r["created_at"]),
+                # The persisted runtime metadata (channel["runtime_metadata"], the R4
+                # rail-escape fix) — so a pending contract proposal echoed on a prior
+                # turn is still visible to this handler's confirm read.
+                metadata=metadata_from_channel(r.get("channel")),
             )
             for r in rows
             if str(r["role"]) in ("user", "assistant", "system")

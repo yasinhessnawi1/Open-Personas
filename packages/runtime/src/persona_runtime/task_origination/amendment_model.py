@@ -35,7 +35,7 @@ from persona_runtime.task_origination.echo import (
     clear_grant,
     set_grant,
 )
-from persona_runtime.task_origination.schedule import parse_recurrence
+from persona_runtime.task_origination.schedule import parse_one_time, parse_recurrence
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -46,7 +46,7 @@ __all__ = ["AMENDMENT_PROMPT_VERSION", "ModelAmendmentInterpreter"]
 
 _logger = get_logger("runtime.task_origination")
 
-AMENDMENT_PROMPT_VERSION = "a4-amendment-v1"
+AMENDMENT_PROMPT_VERSION = "a4-amendment-v2"
 
 _SYSTEM_PROMPT = """\
 The user is replying to a task proposal their assistant just described. Decide whether the reply \
@@ -57,13 +57,19 @@ yes/no with nothing to change).
 Only report the clauses the user actually changed; leave everything else out (unstated clauses \
 are kept as-is). Do NOT restate unchanged clauses.
 
+For a schedule change, use exactly ONE of the two schedule fields: a RECURRING cadence goes in \
+"schedule_rrule" as an RFC-5545 RRULE; a SINGLE moment ("once at 9:30", "just do it tomorrow at \
+8") goes in "one_time_at" as an ISO-8601 local datetime. A bare time with no date ("once at \
+9 30") means the NEXT occurrence of that local time after the current time given below.
+
 Reply with ONLY a JSON object, no prose:
 {"amends": true|false,
  "goal": "<new goal, if changed>",
  "scope": "<new scope, if changed>",
  "spend_cap_kr": <new spending cap in kroner, if changed>,
  "clear_spend": true,            // only if the user removed the spending permission
- "schedule_rrule": "FREQ=...;BYHOUR=..",  // an RFC-5545 RRULE, if the cadence/time changed
+ "schedule_rrule": "FREQ=...;BYHOUR=..",  // an RFC-5545 RRULE, if changed to a recurring cadence
+ "one_time_at": "<ISO-8601 local datetime, if changed to a single moment>",
  "updates_granularity": "every_leg"|"milestones"|"completion_only"|"quiet",
  "updates_channel": "<channel key, if changed>"}
 If the reply is not an amendment at all, reply with {"amends": false}.
@@ -90,6 +96,17 @@ class ModelAmendmentInterpreter:
             f"spend_cap_kr: {self._current_cap_kr(draft)}\n"
             f"updates: {draft.updates.granularity.value} / {draft.updates.channel or 'home'}"
         )
+        if draft.schedule is not None:
+            # The now-anchor (R4 rail fix, B-3): a bare-time one-time amendment ("once at
+            # 9 30") resolves to the NEXT occurrence of that local wall-clock — the model
+            # needs the current local time + schedule to compute it.
+            from zoneinfo import ZoneInfo
+
+            local_now = now.astimezone(ZoneInfo(draft.schedule.timezone))
+            current += (
+                f"\nschedule: {draft.schedule.human_terms}"
+                f"\ncurrent local time: {local_now.isoformat()} ({draft.schedule.timezone})"
+            )
         user = (
             f'Current proposal:\n{current}\n\nUser reply:\n"{reply}"\n\nReply with the JSON object.'
         )
@@ -148,19 +165,39 @@ class ModelAmendmentInterpreter:
 
     def _apply_schedule(self, payload: dict[str, object], draft: ContractDraft) -> ContractDraft:
         rrule = payload.get("schedule_rrule")
-        if not isinstance(rrule, str) or not rrule.strip():
+        one_time = payload.get("one_time_at")
+        rrule_str = rrule.strip() if isinstance(rrule, str) else ""
+        one_time_str = one_time.strip() if isinstance(one_time, str) else ""
+        if not rrule_str and not one_time_str:
             return draft
         if draft.schedule is None:
             # No existing cadence frame (timezone) to anchor the tweak — decline rather than
             # invent a timezone. A first schedule is set earlier in the flow, not by amendment.
             _logger.info("schedule amendment without an existing cadence frame; skipping")
             return draft
+        timezone = draft.schedule.timezone
         try:
-            parsed = parse_recurrence(rrule.strip(), draft.schedule.timezone, phrase=rrule.strip())
-        except ScheduleParseError:
+            if rrule_str:
+                parsed = parse_recurrence(rrule_str, timezone, phrase=rrule_str)
+            else:
+                # The one-time retiming ("once at 9 30" → the next 09:30 local, per the
+                # now-anchored prompt). Parsed through the same parse-honesty boundary; the
+                # re-echo renders the exact instant, so the user always confirms what fires.
+                at = self._to_aware(one_time_str, timezone)
+                parsed = parse_one_time(at, timezone, phrase=one_time_str)
+        except (ScheduleParseError, ValueError):
             _logger.info("amended schedule not representable; skipping the schedule clause")
             return draft
         return amend_schedule(draft, parsed)
+
+    @staticmethod
+    def _to_aware(iso: str, timezone: str) -> datetime:
+        """Parse an ISO datetime; localize a naive value to ``timezone`` (the stated wall-clock)."""
+        from datetime import datetime as _datetime
+        from zoneinfo import ZoneInfo
+
+        parsed = _datetime.fromisoformat(iso)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=ZoneInfo(timezone))
 
     @staticmethod
     def _apply_updates(payload: dict[str, object], draft: ContractDraft) -> ContractDraft:
