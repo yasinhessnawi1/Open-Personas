@@ -11,6 +11,51 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Real-time delivery — a background delivery surfaces live, no reload (Spec A11)
+
+> When a persona acts while you're away, you shouldn't have to reload to find out.
+> A11 adds the persistent user-level push channel so a background delivery appears
+> live — the message in the open chat, the bell instantly — closing R4-C1-23 (the
+> reload-to-see bug). It fills a reserved seam rather than inventing new machinery:
+> the fan-out is the in-process bus both editions already run on.
+
+#### Added
+- **`persona_api.realtime`** — the out-of-turn SSE channel: a closed, versioned,
+  data-only event catalogue (`notification.created` / `message.delivered` /
+  `task.updated`) + `ready`/`resync` control events; the `epoch:seq` transport
+  envelope (the `Last-Event-ID` cursor); the per-user event log + the restart-safe
+  reconnect resolver (in-ring replay vs `resync{epoch_changed|ring_gap}` → the
+  client full-refetches, no silent gap); the in-process `UserEventChannel` bus
+  (per-tab **bounded** queue, `put_nowait` overflow→close, per-user RLS-scoped
+  fan-out) + the `stream_user_events` generator.
+- **`GET /v1/me/events`** — the persistent, RLS-scoped live channel (me-scope from
+  the verified token, never a param; 15s heartbeat under Fly's ~60s SSE reap;
+  `Last-Event-ID` resume; fail-soft 503 when unwired).
+- **Web:** `MeEventsProvider` (one SSE connection, subscribe-once via `useMeEvent`,
+  dedupe-by-id, resume, reconnect, fail-soft to P6's poll) — the bell goes live
+  (`notification.created` → refetch `/v1/me/notifications`, unioned with P6), the
+  open chat appends a background `message.delivered` (refetch + reconcile-by-id, no
+  double-render vs the in-turn stream), the conversation list re-orders.
+
+#### Changed
+- Background originated deliveries now fan out through the channel-backed
+  `LiveSessionRegistry` (the reserved `web_deliverer` seam) instead of
+  `_NoLiveSessions` — a background `message.delivered` reaches an open tab live,
+  emitted AFTER the recorder's durable commit.
+- `run_terminal` (`RunRegistry`) and `schedule_executor_missing`
+  (`ScheduledTaskFireHandler`) now ping the bell live (`notification.created`),
+  published AFTER the durable notification commits (the client refetches).
+
+#### Notes
+- **No migration, no new dependencies.** The resume ring is in-memory (a dropped
+  ring is a refetch, not data loss — durability is P6 + conversation reads); the
+  bus is `asyncio.Queue` + an in-memory registry; the client reuses `consumeSSE`.
+- **Edition-honest (A11-D-1/5):** the in-process bus is the whole fan-out mechanism
+  for both editions as deployed (community SQLite in-process; cloud single Fly
+  Machine). LISTEN/NOTIFY was spiked on Neon (works on the DIRECT endpoint ~38ms,
+  silently dropped on the pooled endpoint) and documented as the drop-in forward
+  path for when cloud goes multi-Machine — not built (nothing is split yet).
+
 ### Voice task origination — one grammar, both channels, via delegation (Spec A9)
 
 > "remind me every morning" spoken in a call now works like typed in chat — but
