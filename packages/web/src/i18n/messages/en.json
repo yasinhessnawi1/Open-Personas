@@ -274,6 +274,32 @@
       "deny": "blocked"
     }
   },
+  "activity": {
+    "area": "Activity",
+    "review": "Review",
+    "tasks": "Tasks",
+    "approvals": "Approvals"
+  },
+  "review": {
+    "title": "Overnight",
+    "subtitle": "What your personas did while you slept — waiting on you first.",
+    "loadFailed": "Couldn't load your review. Try again in a moment.",
+    "spentOvernight": "kr {amount} spent overnight",
+    "quietSpend": "Nothing spent overnight",
+    "emptyTitle": "A quiet night",
+    "emptyBody": "Nothing needed you and nothing went wrong. Your personas will surface anything worth your time here.",
+    "needsYou": "Needs you",
+    "resolve": "Resolve",
+    "reviewInApprovals": "Review in Approvals",
+    "overflow": "+{count} more",
+    "upcoming": "Upcoming",
+    "section": {
+      "waiting": "Waiting on you",
+      "stuck": "Stuck",
+      "done": "Done overnight",
+      "initiatives": "Noticed"
+    }
+  },
   "approvals": {
     "title": "Approvals",
     "subtitle": "Decisions your personas are waiting on — the exact action, before you approve it.",

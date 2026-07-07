@@ -4,10 +4,8 @@ import {
   Activity,
   CalendarClock,
   Home,
-  ListChecks,
   MessagesSquare,
   Phone,
-  ShieldCheck,
   Sparkles,
   Waypoints,
 } from "lucide-react";
@@ -34,13 +32,11 @@ const ITEMS = [
   },
   // Spec V9: the voice-call history surface.
   { href: "/calls", key: "calls", icon: Phone, count: undefined },
-  { href: "/runs", key: "tasks", icon: ListChecks, count: undefined },
-  // Spec A6 (W2): the autonomy Tasks list — the cross-persona state matrix. Interim entry under
-  // the area name "Activity" (A6-D-1); the full Activity re-home (Review landing + Tasks/Approvals
-  // siblings, folding /approvals in) lands with W5.
-  { href: "/tasks", key: "activity", icon: Activity, count: undefined },
-  // Spec A6 (W4): the approvals inbox — pending decisions across tasks, the chat-twin's surface.
-  { href: "/approvals", key: "approvals", icon: ShieldCheck, count: undefined },
+  // Spec A6 (W5, A6-D-1): the Activity area — ONE nav row landing on the morning Review; Tasks +
+  // Approvals are siblings WITHIN the area (the ActivityTabs sub-nav), not top-level rows. This
+  // re-home retires the W2 interim "Activity → /tasks" entry and demotes `/runs` from a top-level
+  // peer to the task-detail "Open run" drill only.
+  { href: "/review", key: "activity", icon: Activity, count: undefined },
   // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."
   { href: "/memory", key: "memory", icon: Waypoints, count: undefined },
   // Spec A8: the schedule/calendar surface (time's view of the personas'

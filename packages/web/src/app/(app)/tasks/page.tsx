@@ -1,5 +1,6 @@
 import { getTranslations } from "next-intl/server";
 
+import { ActivityTabs } from "@/components/activity/activity-tabs";
 import { PageBody, PageHeader } from "@/components/layout";
 import { type PersonaNames, TasksList } from "@/components/tasks/tasks-list";
 import { unwrap } from "@/lib/api";
@@ -24,6 +25,7 @@ export default async function TasksPage() {
   );
   return (
     <PageBody width="narrow">
+      <ActivityTabs />
       <PageHeader title={t("title")} subtitle={t("subtitle")} />
       <TasksList personaNames={personaNames} />
     </PageBody>

@@ -1,5 +1,6 @@
 import { getTranslations } from "next-intl/server";
 
+import { ActivityTabs } from "@/components/activity/activity-tabs";
 import {
   ApprovalsInbox,
   type PersonaNames,
@@ -27,6 +28,7 @@ export default async function ApprovalsPage() {
   );
   return (
     <PageBody width="narrow">
+      <ActivityTabs />
       <PageHeader title={t("title")} subtitle={t("subtitle")} />
       <ApprovalsInbox personaNames={personaNames} />
     </PageBody>
