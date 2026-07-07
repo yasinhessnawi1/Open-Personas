@@ -22,7 +22,7 @@ from persona.errors import MCPServerUnavailableError, MCPUrlNotAllowedError
 from persona.logging import get_logger
 from persona.tools.mcp.client import MCPClient
 from persona.tools.mcp.ssrf import assert_url_allowed
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 
 from persona_api.db.models import persona_mcp_assignments as assignments_t
 from persona_api.db.models import personas as personas_t
@@ -42,7 +42,10 @@ if TYPE_CHECKING:
 __all__ = [
     "assign_to_persona",
     "clear_oauth_tokens",
+    "count_image_servers_for_owner",
+    "create_image_server",
     "create_server",
+    "decrypted_credential_for_server",
     "decrypted_servers_for_persona",
     "delete_server",
     "get_server",
@@ -174,6 +177,70 @@ def create_server(
     if row is None:  # pragma: no cover — RLS WITH CHECK would reject, not return None
         raise MCPServerValidationError("could not create server", context={"reason": "rls_reject"})
     return _to_detail(dict(row))
+
+
+def create_image_server(
+    *,
+    rls_engine: Engine,
+    config: APIConfig,
+    owner_id: str,
+    name: str,
+    image: str,
+    credential: str | None,
+    catalog_source: str,
+) -> dict[str, Any]:
+    """Create an IMAGE-runtime BYO server row (Spec N6, T5b). Returns the redacted detail.
+
+    Unlike :func:`create_server`, this does **NOT** run the SSRF gate: an image server has no
+    remote endpoint — the ``url`` is a non-remote ``image://`` sentinel (never connected to;
+    the per-tenant runtime supplies the real ``/mcp`` URL at connect, N6-D-1). The credential
+    (if any) is encrypted by the SAME Spec-30 cipher and later resolved to the Machine's spawn
+    env (N6-D-2), never a header. ``auth_method`` is ``bearer`` iff a credential is stored — a
+    marker only; the image connect path never builds a header from it. ``catalog_source`` ties
+    the row to its catalog entry (the image-runtime discriminator).
+    """
+    auth_method = "bearer" if credential else "none"
+    encrypted = _encrypt_credential(config, auth_method, credential)
+    with rls_engine.begin() as conn:
+        row = (
+            conn.execute(
+                insert(servers_t)
+                .values(
+                    owner_id=owner_id,
+                    name=name,
+                    url=f"image://{image}",  # non-remote sentinel; never connected to
+                    auth_method=auth_method,
+                    credentials_encrypted=encrypted,
+                    catalog_source=catalog_source,
+                )
+                .returning(*servers_t.c)
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:  # pragma: no cover — RLS WITH CHECK would reject, not return None
+        raise MCPServerValidationError(
+            "could not create image server", context={"reason": "rls_reject"}
+        )
+    return _to_detail(dict(row))
+
+
+def count_image_servers_for_owner(*, rls_engine: Engine, owner_id: str) -> int:
+    """Count the caller's IMAGE-runtime server rows — the assign-time cap input (Spec N6, N6-D-3).
+
+    Image rows carry the ``image://`` url sentinel (:func:`create_image_server`), so counting
+    them bounds the tenant's max concurrent per-tenant Machines (each row → at most one
+    Machine, lazily spawned). Checked at ASSIGN to deny the (N+1)th enable BEFORE the row is
+    created — never a silent spawn-storm at first resolve. RLS-scoped.
+    """
+    with rls_engine.begin() as conn:
+        return int(
+            conn.execute(
+                select(func.count())
+                .select_from(servers_t)
+                .where(servers_t.c.owner_id == owner_id, servers_t.c.url.like("image://%"))
+            ).scalar_one()
+        )
 
 
 def list_servers(*, rls_engine: Engine) -> list[dict[str, Any]]:
@@ -395,6 +462,35 @@ def decrypted_servers_for_persona(
             }
         )
     return out
+
+
+def decrypted_credential_for_server(
+    *, rls_engine: Engine, config: APIConfig, server_name: str
+) -> str | None:
+    """Decrypt the caller's per-user credential for the server named ``server_name`` (Spec N6, T3).
+
+    The read behind :class:`~persona_api.mcp.secret_resolver.FernetGatewaySecretResolver` —
+    the per-tenant MCP runtime's secret-injection source (N6-D-2). RLS-scoped (the request's
+    ``owner_id`` is bound on the engine), so a caller only ever reads *their own* server's
+    secret. Decrypts transiently in memory using the SAME Spec-30 Fernet cipher
+    (``MCP_CREDENTIAL_KEY``) — **no second key** (D-N1-5 / N4-D-1) — and never persists,
+    logs, or returns the ciphertext. Returns ``None`` when there is no such server, no stored
+    credential, or no key configured (fail-closed: an un-injectable secret ⇒ no injection).
+    """
+    with rls_engine.begin() as conn:
+        row = (
+            conn.execute(
+                select(servers_t.c.credentials_encrypted).where(servers_t.c.name == server_name)
+            )
+            .mappings()
+            .first()
+        )
+    if row is None or row["credentials_encrypted"] is None:
+        return None
+    cipher = cipher_from_config(config)
+    if cipher is None:
+        return None
+    return cipher.decrypt(str(row["credentials_encrypted"]))
 
 
 def store_oauth_tokens(

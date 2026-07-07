@@ -96,6 +96,16 @@ class APIConfig(BaseSettings):
     # community (the user runs their own gateway — the local "setup once" win).
     allow_cloud_gateway: bool = Field(default=False, validation_alias="PERSONA_ALLOW_CLOUD_GATEWAY")
 
+    # Spec N6 (N6-D-5): the per-tenant MCP runtime runs a user's chosen image-MCP server
+    # per tenant (a Fly Machine) with their secret injected — third-party code executed
+    # per-tenant. Cloud must NOT do that silently: like the cloud-gateway guard, cloud
+    # refuses to start with the per-tenant runtime configured (a Fly app set) unless the
+    # operator explicitly acknowledges the vetted, per-active-tenant-cost posture here.
+    # Ignored in community (which keeps N1's local gateway — no per-tenant Fly runtime).
+    allow_per_tenant_mcp: bool = Field(
+        default=False, validation_alias="PERSONA_ALLOW_PER_TENANT_MCP"
+    )
+
     # Spec C6 (C6-D-0): the base URL of the separate connector service (C1-D-1) that the
     # web front-door proxies link-initiation to (``POST /v1/me/connectors/{platform}/link``
     # → ``{url}/v1/connectors/{platform}/link``, forwarding the caller's bearer). Empty ⇒
@@ -355,6 +365,14 @@ class APIConfig(BaseSettings):
     # adoption (mcp_search → adopt); never the existing built-in/Spec-27/N3 grant path.
     mcp_adopt_vetted: str = Field(default="", validation_alias="PERSONA_MCP_ADOPT_VETTED")
 
+    # Spec N6 (N6-D-4): the operator allow-list of catalog images permitted to RUN
+    # per-tenant (distinct from ``mcp_adopt_vetted``, which governs *remote* adoption).
+    # Comma-list of catalog entry names. Cloud honors it as an allowlist on top of the
+    # Docker-official ``mcp/`` namespace + provenance basis; the **empty default is
+    # deny-all (fail-closed)** — nothing runs per-tenant until the operator vets it.
+    # NOT signature-based (the mirror carries no image signatures, N6-R-1).
+    mcp_run_vetted: str = Field(default="", validation_alias="PERSONA_MCP_RUN_VETTED")
+
     # Spec R8 — per-user MCP OAuth 2.1 (R8-D-1/6/7). Open Persona is the OAuth *client*.
     #
     # The fixed, pre-registered HTTPS callback base — the OAuth redirect_uri is
@@ -529,3 +547,8 @@ class APIConfig(BaseSettings):
     def mcp_adopt_vetted_list(self) -> list[str]:
         """The cloud operator-vetted catalog names a persona may self-adopt (N4-D-6)."""
         return [n.strip() for n in self.mcp_adopt_vetted.split(",") if n.strip()]
+
+    @property
+    def mcp_run_vetted_list(self) -> list[str]:
+        """The cloud operator-vetted catalog names permitted to RUN per-tenant (N6-D-4)."""
+        return [n.strip() for n in self.mcp_run_vetted.split(",") if n.strip()]

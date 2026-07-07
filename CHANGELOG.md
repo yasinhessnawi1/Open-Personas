@@ -11,6 +11,56 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Per-tenant MCP — bring-your-own credentialed image servers, isolated (Spec N6)
+
+> The deferred half of N1: a user's chosen IMAGE-runtime MCP server (a Docker image
+> with no remote URL — e.g. `mcp/google-flights`, ~77% of the catalog) now runs
+> **scoped to that user**, with **their** secret injected, **isolated** — resolving the
+> D-N1-5 blocker (a shared gateway couldn't vary a per-user secret). Closes R4-C1-21:
+> a persona assigned `mcp:google-flights` used to silently get no tools; now the image
+> runs per-tenant and its tools reach the model, and an assigned-but-not-connected
+> server shows a friendly badge instead of failing silently.
+
+#### Added
+- **`persona_api.mcp.runtime`** — the runtime-agnostic vocabulary: `MCPRuntimeState`,
+  `NotConnectedReason`, `MCPServerConnection` (the `connected`/`not_connected(reason)`
+  signal), `MCPRuntimeInstance`, and the `PerTenantMCPRuntime` Protocol.
+- **`persona_api.mcp.fly` + `.fly_runtime`** — the ratified substrate (N6-D-1): a Fly
+  Machine per (tenant, server) via the Machines REST API (`httpx`, no Fly SDK). `ensure`
+  reconciles-by-deterministic-name and **adopts** an orphaned Machine across the
+  spawn crash-window (zero double-spawn); a background reaper stops idle Machines
+  cross-tenant.
+- **`persona_api.mcp.secret_resolver`** — the live `GatewaySecretResolver` (the N1 seam,
+  implemented at the api layer): a tenant's Fernet secret (reusing Spec-30's store +
+  key, no second key) is injected as the Machine's **spawn env** — never a prompt, tool
+  spec, tool result, log, or error body.
+- **`persona_api.mcp.run_policy`** — the runnable-image allow-list (N6-D-4): Docker-
+  official `mcp/` namespace + provenance + operator allow-list (`PERSONA_MCP_RUN_VETTED`,
+  empty = deny-all), checked at BOTH assign and spawn (TOCTOU fail-closed). NOT
+  signature-based.
+- **Migration `mcp_runtime_instances`** — RLS-scoped per-tenant instance records
+  (idempotency key `(owner_id, server_id)`; the reaper reads them under the bypass engine,
+  ensure/signal under `persona_app`). *(Placeholder revision; renumbered at merge-back.)*
+- **`GET /v1/personas/{id}/mcp-connections`** — the not-connected signal (R4-C1-21): each
+  assigned server's `connected`/`not_connected(reason)`, RLS-scoped, secretless. The web
+  renders it as a friendly badge (never a raw enum).
+- Image-app adoption (`adopt_catalog_app` image branch): vetting re-check + the per-tenant
+  cap (the (N+1)th enable denied with `MCPRuntimeCapacityError`, enforced at assign).
+- Env: `PERSONA_MCP_RUNTIME_FLY_APP` / `FLY_API_TOKEN` / `_FLY_PORT` / `_IDLE_TIMEOUT_S` /
+  `_REAP_INTERVAL_S` / `_MAX_PER_TENANT`, `PERSONA_ALLOW_PER_TENANT_MCP`,
+  `PERSONA_MCP_RUN_VETTED`.
+
+#### Security
+- **Edition-honest (N6-D-5):** community keeps N1's local gateway, byte-unchanged; cloud
+  runs the per-tenant runtime only behind `PERSONA_EDITION=cloud` + the explicit
+  `PERSONA_ALLOW_PER_TENANT_MCP=1` ack (startup refuses otherwise) — no arbitrary
+  third-party-container execution without the operator asserting the vetted, per-active-
+  tenant-cost posture.
+- **Isolation is structural:** two tenants enabling one server name get two Firecracker
+  Machines, each with only its own secret; the credential flows user → Fernet store →
+  spawn env → process, never the model boundary (proven adversarially, incl. a hostile
+  error body echoing the secret).
+
 ### Routing — deliberate surface→tier policy; the tuning surface retired (Spec P9)
 
 > The router stops guessing: a turn's model tier is a function of its SURFACE,

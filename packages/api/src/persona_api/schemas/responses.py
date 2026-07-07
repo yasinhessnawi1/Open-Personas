@@ -721,6 +721,21 @@ class MCPServerDetail(_Output):
     updated_at: datetime
 
 
+class MCPConnectionStatus(_Output):
+    """One assigned MCP server's connection status (Spec N6, N6-D-6; R4-C1-21).
+
+    Makes "assigned" visibly distinct from "working": ``connected`` ⇒ the server's tools
+    reach the model; otherwise ``reason`` names why (the T1 vocabulary — ``starting`` /
+    ``spawn_failed`` / ``stopped`` / ``fly_outage`` / ``no_key`` / ``unvetted`` /
+    ``runtime_capacity`` / ``not_enabled``). The web renders ``reason`` as a friendly badge —
+    never the raw enum. No secret is ever included.
+    """
+
+    server_name: str
+    connected: bool
+    reason: str | None = None
+
+
 class MCPOAuthAuthorizeResponse(_Output):
     """The provider authorize URL to redirect the user to (Spec R8, T4).
 

@@ -928,6 +928,59 @@ persona_mcp_assignments = Table(
     Index("idx_persona_mcp_assignments_server", "server_id"),
 )
 
+# Spec N6 (N6-D-7) — per-tenant MCP runtime instances. One row per (owner, server)
+# image-runtime instance the per-tenant Fly runtime spawns (N6-D-1). Durable so the
+# runtime's ``ensure``/reap is idempotent across API restarts and the not-connected
+# signal (N6-D-6) can read state. **Never holds a secret** — the injected credential
+# lives only in the Machine's env (N6-D-2); this row records where it runs + its state.
+#
+# Its RLS lives ENTIRELY in migration ``NNN_mcp_runtime_instances`` (mirroring 009/011/027
+# — so ``001``'s downgrade never ALTERs a later table) and is therefore NOT in
+# ``db.rls._POLICIES``. The Fly Machine NAME is DERIVED from (owner_id, server_id) at
+# runtime — a pure function, so it is NOT stored (N6-D-7a ruling); reconciliation
+# recomputes it and queries Fly. Only ``fly_machine_id`` (the Fly-assigned, non-derivable
+# id) is persisted, for start/stop/destroy without a name→id lookup.
+mcp_runtime_instances = Table(
+    "mcp_runtime_instances",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "server_id",
+        Text,
+        ForeignKey("user_mcp_servers.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # The Fly-assigned Machine id (non-derivable) once created; NULL while a row is
+    # reserved (pending) but the Machine is not yet created (the crash-window, N6-D-7a).
+    Column("fly_machine_id", Text),
+    # The Fly app the Machine lives in (operator config); recorded for reap targeting.
+    Column("fly_app", Text),
+    # The per-tenant streamable-HTTP /mcp URL the N4 client connects to (acceptance #4);
+    # NULL until running.
+    Column("endpoint_url", Text),
+    # Lifecycle (drives the N6-D-6 signal). CHECK-guarded fail-fast enum.
+    Column("state", Text, nullable=False, server_default=text("'pending'")),
+    # The not_connected(reason) detail when state is not running (N6-D-6). NULL when running.
+    Column("state_reason", Text),
+    # The vetted image ref actually run (N6-D-4 audit + reap).
+    Column("image", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # Touched on each tool-resolve; the idle-reaper TTL reads this (N6-D-3).
+    Column("last_used_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # THE idempotency key (N6-D-7a condition 1): one instance row per (tenant, server) so
+    # a concurrent double-resolve / post-restart re-ensure can never make a second row.
+    UniqueConstraint("owner_id", "server_id", name="uq_mcp_runtime_instances_owner_server"),
+    CheckConstraint(
+        "state IN ('pending', 'starting', 'running', 'stopped', 'failed')",
+        name="mcp_runtime_instances_state_check",
+    ),
+    # RLS predicate + the per-tenant cap count (N6-D-3 assign-time guard).
+    Index("idx_mcp_runtime_instances_owner", "owner_id"),
+    # The reaper's hot query: WHERE state='running' AND last_used_at < deadline.
+    Index("idx_mcp_runtime_instances_reap", "state", "last_used_at"),
+)
+
 # ---------------------------------------------------------------------------
 # Spec S3 — per-persona speciality (skill) consent (S1-D-6 / S3-D-1).
 #

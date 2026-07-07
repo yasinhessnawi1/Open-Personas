@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
     from persona.tasks.reader import TaskStateReader
-    from persona.tools.mcp.catalog import MCPCatalog
+    from persona.tools.mcp.catalog import MCPCatalog, MCPServerCatalogEntry
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
     from persona_api.config import APIConfig
     from persona_api.editions import CreditsPolicy
+    from persona_api.mcp.runtime import PerTenantMCPRuntime
     from persona_api.sandbox.pool import SandboxPool
     from persona_api.storage import FileStorage
 
@@ -134,6 +135,7 @@ class RuntimeFactory:
         memory_backend: Backend | None = None,
         docgen_full_fidelity: bool = False,
         crisis_encoder: CrisisScorer | None = None,
+        mcp_runtime: PerTenantMCPRuntime | None = None,
     ) -> None:
         """Composition root for per-request loops.
 
@@ -215,6 +217,13 @@ class RuntimeFactory:
         # BYO servers (D-30-6), connects them SSRF-pinned (enforce_ssrf=True),
         # and merges their tools into the toolbox.
         self._api_config = api_config
+        # Spec N6 (N6-D-1): the per-tenant image-MCP runtime (a Fly Machine per
+        # (tenant, server)). ``None`` on the CLI / community / when unconfigured ⇒
+        # image-runtime servers are simply not connected (the not-connected signal,
+        # T6, reports them). When present, an assigned image-runtime server is
+        # resolved THROUGH it to a per-tenant ``/mcp`` URL and connected via the
+        # existing N4 client path UNCHANGED (acceptance #4).
+        self._mcp_runtime = mcp_runtime
         # MCP clients accumulated across requests, closed on shutdown.
         self._mcp_clients: list[MCPClient] = []
         # Spec 27 (D-27-3) — app-scoped lazy supervisor for built-in MCP servers.
@@ -907,13 +916,19 @@ class RuntimeFactory:
         # + auth header from the decrypted credential). Empty when no servers are
         # assigned or no credential key is configured.
         byo_clients = self._build_byo_mcp_clients(persona)
+        # Spec N6 (N6-D-1, R4-C1-21) — the persona's ASSIGNED image-runtime MCP servers,
+        # resolved THROUGH the per-tenant runtime to per-tenant ``/mcp`` URLs. The
+        # returned clients ride the SAME ``extra_mcp_clients`` path as BYO (N6-D-2 — the
+        # only handoff is the URL; the N4 client is unchanged). Empty on the CLI /
+        # community / when the runtime is unconfigured or nothing image-runtime is assigned.
+        image_clients = await self._build_image_runtime_mcp_clients(persona)
         toolbox, mcp_clients = await build_default_toolbox(
             self._core_config,
             persona,
             extra_tools=extra or None,  # type: ignore[arg-type]
             workspace_persister=workspace_persister,
             extra_mcp_servers=builtin_mcp_servers or None,
-            extra_mcp_clients=byo_clients or None,
+            extra_mcp_clients=(byo_clients + image_clients) or None,
             file_sandbox_root=file_sandbox_root,
             mcp_search_catalog=self._mcp_search_catalog(),
         )
@@ -1028,8 +1043,16 @@ class RuntimeFactory:
             config=self._api_config,
             persona_id=persona.persona_id,
         )
+        # Spec N6: an assigned IMAGE-runtime server (its catalog entry is
+        # ``server_type == "server"``) is NOT a remote endpoint — it has no reachable
+        # ``url`` and is connected via the per-tenant runtime instead
+        # (``_build_image_runtime_mcp_clients``). Skip it here so the BYO path never tries
+        # to SSRF-connect its placeholder URL (and never double-handles it).
+        image_names = set(self._image_runtime_entries())
         clients: list[MCPClient] = []
         for s in servers:
+            if str(s["name"]) in image_names:
+                continue  # image-runtime → the N6 runtime path handles it
             # Spec R8: ``oauth`` injects like ``bearer`` — the (refreshed) per-user
             # access token is the decrypted credential. A skipped/un-authorized oauth
             # server never reaches here (decrypted_servers_for_persona fails it closed).
@@ -1053,6 +1076,75 @@ class RuntimeFactory:
                     else None,
                 )
             )
+        return clients
+
+    def _image_runtime_entries(self) -> dict[str, MCPServerCatalogEntry]:
+        """The catalog entries that are image-runtime servers (``server_type == "server"``).
+
+        Keyed by name — the discriminator for "connect via the per-tenant runtime, not as a
+        remote endpoint". Built from the merged catalog (in-memory; the mirror snapshot).
+        """
+        from persona_api.services import catalog_service
+
+        return {
+            e.name: e for e in catalog_service.merged_mcp_catalog() if e.server_type == "server"
+        }
+
+    async def _build_image_runtime_mcp_clients(self, persona: Persona) -> list[MCPClient]:
+        """Resolve the persona's assigned image-runtime servers → per-tenant ``/mcp`` clients (N6).
+
+        For each assigned server whose catalog entry is an image-runtime server, resolve the
+        tenant's secret (:class:`FernetGatewaySecretResolver` → spawn env, N6-D-2) and
+        ``ensure`` its per-tenant Fly Machine (N6-D-1); a ``running`` instance yields a real
+        ``/mcp`` URL that the EXISTING N4 :class:`MCPClient` connects to unchanged
+        (acceptance #4 — the R4-C1-21 close). A not-running instance simply contributes no
+        client (the not-connected signal, T6, reports it). Returns ``[]`` on the CLI /
+        community / when the runtime is unconfigured or no owner is bound.
+        """
+        if self._mcp_runtime is None or self._api_config is None or persona.persona_id is None:
+            return []
+        from persona_api.sandbox import get_sandbox_request_context
+
+        ctx = get_sandbox_request_context()
+        if ctx is None:
+            return []  # no owner bound → fail closed (never guess the tenant)
+        entries = self._image_runtime_entries()
+        if not entries:
+            return []
+        from persona.tools.mcp.client import MCPClient
+
+        from persona_api.mcp import store as mcp_store
+        from persona_api.mcp.secret_resolver import FernetGatewaySecretResolver, build_spawn_env
+
+        resolver = FernetGatewaySecretResolver(rls_engine=self._engine, config=self._api_config)
+        assigned = mcp_store.list_servers_for_persona(
+            rls_engine=self._engine, persona_id=persona.persona_id
+        )
+        clients: list[MCPClient] = []
+        for s in assigned:
+            if not s.get("enabled"):
+                continue
+            entry = entries.get(str(s["name"]))
+            if entry is None:
+                continue  # remote / manual BYO — handled by _build_byo_mcp_clients
+            secret_env = build_spawn_env(resolver, owner_id=ctx.owner_id, entry=entry)
+            inst = await self._mcp_runtime.ensure(
+                owner_id=ctx.owner_id,
+                server_id=str(s["id"]),
+                image=entry.image,
+                secret_env=secret_env,
+            )
+            if inst.state == "running" and inst.endpoint_url:
+                clients.append(
+                    MCPClient(
+                        server_name=str(s["name"]),
+                        server_url=inst.endpoint_url,
+                        persona_id=persona.persona_id,
+                        # The endpoint is an internal Fly 6PN DNS URL (operator-trust,
+                        # not user-supplied) → not SSRF-pinned, like the N1 gateway (D-N1-2).
+                        enforce_ssrf=False,
+                    )
+                )
         return clients
 
     def _make_oauth_reauth(
