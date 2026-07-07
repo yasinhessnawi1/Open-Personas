@@ -69,17 +69,21 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
+    from persona.graph.fusion import HybridResult
     from persona.graph.protocol import GraphStore
     from persona.imagegen import ImageBackend
     from persona.sandbox.result import SandboxFile
     from persona.schedules import QuietHours
+    from persona.schema.chunks import PersonaChunk
     from persona.stores.backend import Backend
+    from persona.stores.core_memory import CoreMemoryStore
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
     from persona.tasks.reader import TaskStateReader
     from persona.tools.mcp.catalog import MCPCatalog
     from persona.tools.mcp.client import MCPClient
     from persona_runtime.crisis_encoder import CrisisScorer
+    from persona_runtime.graph_selection import GatingContext
     from persona_runtime.logging import TurnLogWriter
     from persona_runtime.prompt import GraphContext
     from persona_runtime.task_origination import (
@@ -89,6 +93,7 @@ if TYPE_CHECKING:
         SteeringInterpreter,
     )
     from persona_runtime.tier import TierRegistry
+    from persona_runtime.unified_recall import UnifiedProjection
     from sqlalchemy import Engine
 
     from persona_api.config import APIConfig
@@ -314,38 +319,22 @@ class RuntimeFactory:
         """
         return self._graph_store
 
-    def _build_graph_retrieval(self) -> Callable[[str], GraphContext] | None:
-        """The owner-scoped graph-knowledge retrieval for the chat loop (K3).
+    def _build_graph_allowlist_provider(
+        self, store: GraphStore
+    ) -> Callable[[GatingContext], set[str] | None]:
+        """The K4 allowlist provider over a graph store (K4-D-2) — shared by K3 + K9 paths.
 
-        Reuses the K2 graph store + the ``current_user_id`` owner provider (the
-        same one ``record_user_fact`` writes through), so reads and writes share
-        one owner scope. Graph reads are on whenever the store is composed — the
-        shared-graph thesis, mirroring writes; ``None`` (no store) ⇒ the loop runs
-        zero-graph (additive, byte-identical). The owner is resolved per turn at
-        dispatch, so a non-request call fails closed.
+        The gate-eligible flagged nodes the provider gates over: the owner's wellbeing-tagged
+        nodes narrowed to the gate-eligible categories, each with its recency band. Most owners
+        have none → the provider returns ``None`` (no subtraction) → the hot path stays free.
+        Single-sourced so the chat graph path (K3) and the unified recall (K9) never fork the gate.
         """
-        if self._graph_store is None:
-            return None
         from datetime import UTC, datetime
 
-        from persona.graph.config import GraphSettings
-        from persona.graph.retrieval import HybridRetriever
         from persona.wellbeing_policy import is_gate_eligible, parse_category
-        from persona_runtime.graph_selection import make_graph_retrieval, recency_bucket
-        from persona_runtime.graph_window import get_recent_window
-        from persona_runtime.prompt import GraphContext
+        from persona_runtime.graph_selection import recency_bucket
         from persona_runtime.wellbeing import FlaggedNode, make_allowlist_provider, recency_band
 
-        from persona_api.middleware.rls_context import current_user_id
-
-        settings = GraphSettings()
-        retriever = HybridRetriever(store=self._graph_store, settings=settings)
-        store = self._graph_store
-
-        # K4 (K4-D-2): the gate-eligible flagged nodes the allowlist provider gates over —
-        # the owner's wellbeing-tagged nodes narrowed to the gate-eligible categories, each
-        # with its recency band (computed from provenance). Most owners have none → the
-        # provider returns None (no subtraction) → the hot path stays free.
         def flagged(owner_id: str) -> list[FlaggedNode]:
             now = datetime.now(UTC)
             out: list[FlaggedNode] = []
@@ -363,10 +352,34 @@ class RuntimeFactory:
                 )
             return out
 
-        allowlist_provider = make_allowlist_provider(
+        return make_allowlist_provider(
             flagged_nodes=flagged,
             owner_node_ids=lambda owner_id: set(store.node_ids_for_owner(owner_id)),
         )
+
+    def _build_graph_retrieval(self) -> Callable[[str], GraphContext] | None:
+        """The owner-scoped graph-knowledge retrieval for the chat loop (K3).
+
+        Reuses the K2 graph store + the ``current_user_id`` owner provider (the
+        same one ``record_user_fact`` writes through), so reads and writes share
+        one owner scope. Graph reads are on whenever the store is composed — the
+        shared-graph thesis, mirroring writes; ``None`` (no store) ⇒ the loop runs
+        zero-graph (additive, byte-identical). The owner is resolved per turn at
+        dispatch, so a non-request call fails closed.
+        """
+        if self._graph_store is None:
+            return None
+        from persona.graph.config import GraphSettings
+        from persona.graph.retrieval import HybridRetriever
+        from persona_runtime.graph_selection import make_graph_retrieval
+        from persona_runtime.graph_window import get_recent_window
+        from persona_runtime.prompt import GraphContext
+
+        from persona_api.middleware.rls_context import current_user_id
+
+        settings = GraphSettings()
+        retriever = HybridRetriever(store=self._graph_store, settings=settings)
+        allowlist_provider = self._build_graph_allowlist_provider(self._graph_store)
         # The recent-window source: the per-turn ContextVar every conversational loop sets
         # before retrieval (K4-D-X-gating-signal-seam) — so the gate reads the conversation,
         # not the bare query (no uncanny re-closing). Unset ⇒ empty ⇒ query-only (fail-safe).
@@ -394,6 +407,109 @@ class RuntimeFactory:
                 return GraphContext()
 
         return safe_retrieval
+
+    def _memory_backend_for(self) -> Backend:
+        """The edition's memory backend (Postgres cloud / Chroma community) — shared builder."""
+        return self._memory_backend or PostgresBackend(engine=self._engine, embedder=self._embedder)
+
+    def _build_core_store(self) -> CoreMemoryStore:
+        """The K9 core-memory store over the edition backend (K9-D-10)."""
+        from persona.stores.core_memory import CoreMemoryStore
+
+        return CoreMemoryStore(
+            backend=self._memory_backend_for(), audit_logger=self._resolve_audit_logger()
+        )
+
+    def _build_core_block_provider(self, persona_id: str) -> Callable[[], str | None] | None:
+        """The turn-path READER of the always-in-context core block (K9-D-10; acceptance-7).
+
+        Reads the persona's current block (background-refreshed elsewhere — never built here).
+        Gated by ``core_enabled``; fail-soft (any store error ⇒ no block, byte-identical).
+        """
+        from persona.recall.config import RecallSettings
+        from persona.recall.core_memory import read_core_block
+
+        if not RecallSettings().core_enabled:
+            return None
+        store = self._build_core_store()
+
+        def provider() -> str | None:
+            try:
+                block = read_core_block(store, persona_id)
+            except Exception:  # noqa: BLE001 — a nicety; never break a turn
+                _logger.warning("core-block read failed; omitted", exc_info=True)
+                return None
+            return block.text if block is not None else None
+
+        return provider
+
+    def _build_unified_recall(self, persona_id: str) -> Callable[[str], UnifiedProjection] | None:
+        """The K9 unified recall for the chat/voice loop (K9-D-1/D-11), env-gated OFF by default.
+
+        Fuses the K8 pyramid AND the K7 graph into one reranked+gated path, projected into the
+        existing ``episodic`` / ``graph`` seam. Returns ``None`` (today's two-path recall) unless
+        ``unified_enabled`` is flipped. The reranker is the fail-soft shell with **no P7 scorer**
+        (fused order, the D-12 stub-safe path) until P7 lands; K4 gating is the SAME allowlist the
+        graph path uses (single-sourced). Owner is resolved per turn (fail-closed graph scope).
+        """
+        from persona.graph.config import GraphSettings
+        from persona.graph.retrieval import HybridRetriever
+        from persona.recall.config import RecallSettings
+        from persona.recall.rerank import build_reranker
+        from persona.stores.lifecycle import EpisodicSettings
+        from persona_runtime.graph_window import get_recent_window
+        from persona_runtime.recall_adapters import GraphNeighbourProvider, PyramidEpisodeProvider
+        from persona_runtime.unified_recall import make_unified_recall
+
+        from persona_api.middleware.rls_context import current_user_id
+
+        settings = RecallSettings()
+        if not settings.unified_enabled:
+            return None
+
+        backend = self._memory_backend_for()
+        episodic = EpisodicStore(backend=backend, audit_logger=self._resolve_audit_logger())
+
+        def episodic_query(q: str, k: int) -> list[PersonaChunk]:
+            return episodic.query(persona_id, q, k)
+
+        def gist_query(q: str, k: int) -> list[PersonaChunk]:
+            return episodic.pyramid.query(persona_id, q, k)
+
+        graph_retrieve: Callable[[str], list[HybridResult]] | None = None
+        neighbour_provider: GraphNeighbourProvider | None = None
+        allowlist_provider: Callable[[GatingContext], set[str] | None] | None = None
+        if self._graph_store is not None:
+            retriever = HybridRetriever(store=self._graph_store, settings=GraphSettings())
+            allowlist_provider = self._build_graph_allowlist_provider(self._graph_store)
+            neighbour_provider = GraphNeighbourProvider(self._graph_store, current_user_id.get)
+
+            def graph_retrieve(q: str) -> list[HybridResult]:
+                owner = current_user_id.get()
+                return retriever.retrieve(owner, q) if owner else []
+
+        # P7 scorer absent ⇒ fused-order fail-soft shell (D-12 stub-safe); chat sync deadline.
+        reranker = build_reranker(
+            scorer=None,
+            settings=settings,
+            timeout_s=settings.rerank_timeout_ms_chat / 1000.0,
+        )
+        return make_unified_recall(
+            reranker=reranker,
+            settings=settings,
+            episodic_settings=EpisodicSettings(),
+            persona_id=persona_id,
+            owner_provider=current_user_id.get,
+            episodic_query=episodic_query,
+            resolve_display=lambda chunks: episodic.resolve_display(persona_id, list(chunks)),
+            gist_query=gist_query,
+            graph_retrieve=graph_retrieve,
+            episode_provider=PyramidEpisodeProvider(episodic.pyramid, persona_id),
+            neighbour_provider=neighbour_provider,
+            allowlist_provider=allowlist_provider,
+            recent_window_provider=get_recent_window,
+            rerank_top_k=settings.rerank_top_k_chat,
+        )
 
     def _build_user_name_provider(self) -> Callable[[], str | None]:
         """The per-turn display-name resolver for the chat loop (Spec K6, K6-D-6).
@@ -1284,6 +1400,13 @@ class RuntimeFactory:
             reschedule_interpreter=reschedule_interpreter,
             timezone_provider=self._build_user_timezone_provider(),
             quiet_hours_provider=self._build_user_quiet_hours_provider(),
+            # K9 (K9-D-1/D-10/D-11): the unified recall (fuse-don't-route over pyramid + graph,
+            # reranked+gated) and the always-in-context core-memory block reader. The unified path
+            # is env-gated OFF (``unified_enabled``) → today's two-path recall until flipped; the
+            # core-block reader is turn-path READ-ONLY (background refresh rides the K8 engine job).
+            # Both fail-soft — a recall/block hiccup degrades to memoryless, never fails a turn.
+            unified_recall=self._build_unified_recall(persona_id),
+            core_block_provider=self._build_core_block_provider(persona_id),
         )
         # Replace the loop's default-empty deferred_input_files with the
         # SHARED holder (same identity), so the use_skill intercept's

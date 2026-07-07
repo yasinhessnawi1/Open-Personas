@@ -506,6 +506,11 @@ _K3_USAGE_GUIDANCE = (
 #: framing of D-K3-1, distinct from who-the-persona-is.
 _K3_GRAPH_HEADER = "What you already know about this person:"
 
+#: Header for the K9 core-memory block (K9-D-10) — the persistent user+persona
+#: summary that carries cross-year coherence, framed as the standing backdrop the
+#: persona holds about this person (distinct from per-turn recall below it).
+_CORE_MEMORY_HEADER = "What you carry about this person across your time together:"
+
 #: GraphRecency → the coarse framing phrase in each item's bracket. T4 owns the
 #: phrasing; D-K3-4 owns the buckets.
 _RECENCY_PHRASE: dict[GraphRecency, str] = {
@@ -544,6 +549,11 @@ class RetrievedContext(BaseModel):
     worldview: list[PersonaChunk] = Field(default_factory=list)
     episodic: list[PersonaChunk] = Field(default_factory=list)
     graph: GraphContext = Field(default_factory=GraphContext)
+    # Spec K9 (K9-D-10): the always-in-context core-memory block — a compact
+    # user+persona summary, background-refreshed (never the turn path) and read
+    # here for injection. ``None``/empty ⇒ nothing rendered ⇒ byte-identical
+    # prompt (K9-D-11); additive + defaulted, so pre-K9 constructors are untouched.
+    core_block: str | None = None
     # Spec K8 (K8-D-5/11): the FOUND raw episodic ids, recorded before band
     # display resolution replaces demoted hits with gist-rendered entries.
     # Reinforcement targets these (a demoted hit must reinforce so important
@@ -823,6 +833,13 @@ class PromptBuilder:
                 suffix = f" ({tag})" if tag else ""
                 lines.append(f"- {c.text}{suffix}")
             parts.append("\n".join(lines))
+
+        # 4b0. Core-memory block — the persistent user+persona summary (K9, T7;
+        # K9-D-10). Always in context for cross-year coherence: the standing
+        # backdrop above per-turn recall, background-refreshed (never the turn
+        # path). Empty/None ⇒ nothing rendered ⇒ byte-identical prompt (K9-D-11).
+        if context.core_block:
+            parts.append(f"{_CORE_MEMORY_HEADER}\n{context.core_block}")
 
         # 4c. Graph knowledge — the user-scoped shared brain (K3, D-K3-1). In the
         # supplementary region (below the identity/constraints floor, a peer of

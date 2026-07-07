@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from persona_runtime.prompt import GraphContext, GraphRecency, PromptBuilder
     from persona_runtime.routing import FirstTokenLatencyTracker, IntelligentRouter, Router
     from persona_runtime.tier import TierRegistry
+    from persona_runtime.unified_recall import UnifiedProjection
 
     from persona_voice.agent.language import CallLanguagePlan
 
@@ -130,6 +131,17 @@ class VoiceTurnContext:
     lexical-only (V11). The reply producer runs the composed classify OFF the event loop
     (``asyncio.to_thread``) so the CPU-bound score never starves the voice loop; fail-soft→
     R0 (encoder error / not-yet-warm / timeout ⇒ lexical) lives in ``classify_user_message``."""
+    unified_recall: Callable[[str], UnifiedProjection] | None = None
+    """The K9 unified recall (K9-D-1/D-11), env-gated OFF by default. When wired (via
+    ``build_voice_unified_recall``), it REPLACES the separate episodic + graph legs with one
+    fused+reranked+gated path, projected into ``episodic`` + ``graph`` — run inside the reply
+    producer's ``asyncio.to_thread`` so the reranker never touches the voice loop (a stall
+    degrades to fused; K9-D-3/D-4). ``None`` (default) ⇒ today's two-path voice recall,
+    byte-identical; ``graph_retrieval`` stays the V13 graph shell then."""
+    core_block_provider: Callable[[], str | None] | None = None
+    """The K9 core-memory block reader (K9-D-10). ``None`` ⇒ no block, byte-identical. The
+    block is background-refreshed on the K8 engine cadence (never the turn path); the voice turn
+    only READS it for injection, inside the same off-loop retrieval (acceptance-7)."""
 
     def __post_init__(self) -> None:
         missing = [kind for kind in REQUIRED_STORE_KINDS if kind not in self.stores]

@@ -551,9 +551,12 @@ memory_chunks = Table(
     # migration of record for existing deployments; this canonical declaration
     # is the source of truth for fresh DBs via ``001_initial`` create_all.
     # Spec K8: ``'episodic_gist'`` is the sixth (gists-as-chunks, K8-D-2);
-    # its migration of record is 0NN_episodic_pyramid.
+    # its migration of record is 0NN_episodic_pyramid. Spec K9: ``'core_memory'``
+    # is the seventh (the always-in-context block, K9-D-10; migration
+    # 0NN_core_memory_kind) — excluded from recall by construction.
     CheckConstraint(
-        "kind IN ('identity', 'self_facts', 'worldview', 'episodic', 'document', 'episodic_gist')",
+        "kind IN ('identity', 'self_facts', 'worldview', 'episodic', 'document', "
+        "'episodic_gist', 'core_memory')",
         name="memory_chunks_kind_check",
     ),
     CheckConstraint(

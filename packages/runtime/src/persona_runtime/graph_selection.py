@@ -50,6 +50,7 @@ __all__ = [
     "GatingContext",
     "GraphRetriever",
     "make_graph_retrieval",
+    "project_node",
     "recency_bucket",
     "select_graph_knowledge",
 ]
@@ -170,10 +171,15 @@ def _passes_gate(result: HybridResult, settings: GraphSettings) -> bool:
     return result.sparse_rank is not None and result.sparse_rank <= settings.inject_sparse_rank_cap
 
 
-def _project(result: HybridResult, now: datetime) -> GraphKnowledgeItem:
-    node = result.node
+def project_node(node: ConceptNode, *, relevance: float | None, now: datetime) -> GraphKnowledgeItem:
+    """Project a graph node into the injectable item (K3-D-4) — the single-sourced projection.
+
+    Used by K3's per-turn selection (:func:`_project`) AND K9's unified-recall projection
+    (persona_runtime.unified_recall), so the two never fork the node→item mapping. ``relevance``
+    is the reading that admitted the node (the reranked score on the K9 path, the dense cosine
+    on the K3 path); ``now`` is the turn clock for the recency bucket (pure — no clock read).
+    """
     persona, interaction = _source(node)
-    relevance = None if node.distance is None else 1.0 - node.distance
     return GraphKnowledgeItem(
         concept_name=node.concept_name,
         content=node.content,
@@ -183,6 +189,12 @@ def _project(result: HybridResult, now: datetime) -> GraphKnowledgeItem:
         wellbeing_category=node.wellbeing_category,
         relevance=relevance,
     )
+
+
+def _project(result: HybridResult, now: datetime) -> GraphKnowledgeItem:
+    node = result.node
+    relevance = None if node.distance is None else 1.0 - node.distance
+    return project_node(node, relevance=relevance, now=now)
 
 
 def select_graph_knowledge(

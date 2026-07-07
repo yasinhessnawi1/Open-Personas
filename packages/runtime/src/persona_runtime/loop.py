@@ -146,6 +146,7 @@ if TYPE_CHECKING:
         SteeringInterpreter,
     )
     from persona_runtime.tier import TierRegistry
+    from persona_runtime.unified_recall import UnifiedProjection
 
 __all__ = ["ConversationLoop"]
 
@@ -443,6 +444,8 @@ class ConversationLoop:
         reschedule_interpreter: RescheduleInterpreter | None = None,
         timezone_provider: Callable[[], str] | None = None,
         quiet_hours_provider: Callable[[], QuietHours | None] | None = None,
+        unified_recall: Callable[[str], UnifiedProjection] | None = None,
+        core_block_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
@@ -488,6 +491,12 @@ class ConversationLoop:
         # the additive zero-graph path — every existing caller is byte-identical
         # until the composition root wires a retriever (RuntimeFactory).
         self._graph_retrieval = graph_retrieval
+        # K9 (K9-D-1/D-10/D-11): the unified recall (fuse-don't-route over pyramid + graph,
+        # reranked+gated) and the always-in-context core-memory block reader. Both ``None``
+        # by default ⇒ today's two-path recall + no block, byte-identical (K9-D-X-backcompat);
+        # the RuntimeFactory wires them (env-gated) once composed.
+        self._unified_recall = unified_recall
+        self._core_block_provider = core_block_provider
         # K4 (K4-D-3 / K4-D-X-surfacing-recency-seam): the per-category care text that
         # rides K3's surfacing slot for any injected wellbeing-tagged node. ``None`` (the
         # default) is the reserved no-op — the prompt renders no care text, byte-identical.
@@ -1754,6 +1763,8 @@ class ConversationLoop:
             history_turns=history_turns,
             on_recall=on_recall,
             graph_retrieval=self._graph_retrieval,
+            core_block_provider=self._core_block_provider,
+            unified_recall=self._unified_recall,
         )
 
     async def _manage_history(

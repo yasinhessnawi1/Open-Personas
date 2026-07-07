@@ -57,9 +57,51 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from persona.graph.protocol import GraphStore
+    from persona.stores.episodic import EpisodicStore
+    from persona_runtime.graph_selection import GatingContext
     from persona_runtime.prompt import GraphContext, GraphRecency
+    from persona_runtime.unified_recall import UnifiedProjection
 
-__all__ = ["VoiceGraphComposition", "build_voice_graph_retrieval"]
+__all__ = [
+    "VoiceGraphComposition",
+    "VoiceUnifiedComposition",
+    "build_voice_graph_retrieval",
+    "build_voice_unified_recall",
+]
+
+
+def _voice_allowlist_provider(
+    store: GraphStore,
+) -> Callable[[GatingContext], set[str] | None]:
+    """The K4 allowlist provider for a voice caller (K4-D-2) — identical to chat's gate.
+
+    Mirrors ``RuntimeFactory._build_graph_allowlist_provider`` exactly (the gate is never a
+    voice-local variant, V13-D-5): the owner's wellbeing-tagged nodes narrowed to the
+    gate-eligible categories, each recency-banded; most callers have none ⇒ ``None`` ⇒ no
+    subtraction. Shared by the voice graph path (V13) and the voice unified recall (K9).
+    """
+
+    def flagged(owner: str) -> list[FlaggedNode]:
+        now = datetime.now(UTC)
+        out: list[FlaggedNode] = []
+        for node in store.flagged_nodes(owner):
+            category = parse_category(node.wellbeing_category)
+            if category is None or not is_gate_eligible(category):
+                continue
+            out.append(
+                FlaggedNode(
+                    node_id=node.id,
+                    category=category,
+                    recency=recency_band(recency_bucket(node, now)),
+                    text=f"{node.concept_name} {node.content}",
+                )
+            )
+        return out
+
+    return make_allowlist_provider(
+        flagged_nodes=flagged,
+        owner_node_ids=lambda owner: set(store.node_ids_for_owner(owner)),
+    )
 
 
 @dataclass(frozen=True)
@@ -148,3 +190,71 @@ def build_voice_graph_retrieval(
         recent_window_provider=get_recent_window,
     )
     return VoiceGraphComposition(retrieval=retrieval, surfacing_guidance=surfacing_guidance)
+
+
+@dataclass(frozen=True)
+class VoiceUnifiedComposition:
+    """The K9 unified-recall callables for a voice turn (K9, T9).
+
+    Attributes:
+        retrieval: The per-turn ``query -> UnifiedProjection`` (fuse-don't-route over the
+            pyramid + graph, reranked+gated). Handed to ``retrieve_context`` via
+            ``VoiceTurnContext.unified_recall``; it runs inside the reply producer's
+            ``asyncio.to_thread`` (the reranker OFF the event loop — a stall degrades to the
+            fused order, never stalls the spoken turn; K9-D-3/D-4).
+        surfacing_guidance: The K4 per-category spoken-care text provider (the K3 slot).
+    """
+
+    retrieval: Callable[[str], UnifiedProjection]
+    surfacing_guidance: Callable[[str, GraphRecency], str | None]
+
+
+def build_voice_unified_recall(
+    graph_store: GraphStore,
+    episodic_store: EpisodicStore,
+    *,
+    owner_id: str,
+    persona_id: str,
+) -> VoiceUnifiedComposition:
+    """Compose the K9 unified recall for a voice turn (K9, T9) — NO voice fork.
+
+    Reuses ``make_unified_recall`` + the shared adapters exactly as chat does (K9-D-11), with
+    the voice adaptations that are NOT gate variants: the fixed caller owner scope (V13-D-1),
+    the voice profile (traversal-off graph settings + a tighter node budget, V13-D-3), and a
+    voice reranker bounded by the measured voice deadline (K9-D-4 — a rerank stall degrades to
+    fused). The K4 gate is IDENTICAL to chat's (``_voice_allowlist_provider`` + the recent-window
+    lift + surfacing) — the standing voice-safety identity (V13-D-5). No P7 scorer yet ⇒ the
+    fail-soft shell yields the fused order (D-12 stub-safe). Runs OFF the loop inside the reply
+    producer's ``to_thread``.
+    """
+    from persona.recall.config import RecallSettings
+    from persona.recall.rerank import build_reranker
+    from persona.stores.lifecycle import EpisodicSettings
+    from persona_runtime.recall_adapters import GraphNeighbourProvider, PyramidEpisodeProvider
+    from persona_runtime.unified_recall import make_unified_recall
+
+    graph_settings: GraphSettings = voice_graph_settings(GraphSettings())
+    retriever = HybridRetriever(store=graph_store, settings=graph_settings)
+    # Voice profile: fewer, surer nodes (V13-D-3 VOICE_NODE_BUDGET); the voice-deadline reranker
+    # (stub ⇒ fused now; a P7 tiny encoder later, bounded so a stall degrades to fused).
+    settings = RecallSettings(result_budget=VOICE_NODE_BUDGET)
+    reranker = build_reranker(
+        scorer=None, settings=settings, timeout_s=settings.rerank_timeout_ms_voice / 1000.0
+    )
+    retrieval = make_unified_recall(
+        reranker=reranker,
+        settings=settings,
+        episodic_settings=EpisodicSettings(),
+        persona_id=persona_id,
+        owner_provider=lambda: owner_id,
+        episodic_query=lambda q, k: episodic_store.query(persona_id, q, k),
+        resolve_display=lambda chunks: episodic_store.resolve_display(persona_id, list(chunks)),
+        gist_query=lambda q, k: episodic_store.pyramid.query(persona_id, q, k),
+        graph_retrieve=lambda q: retriever.retrieve(owner_id, q),
+        episode_provider=PyramidEpisodeProvider(episodic_store.pyramid, persona_id),
+        neighbour_provider=GraphNeighbourProvider(graph_store, lambda: owner_id),
+        allowlist_provider=_voice_allowlist_provider(graph_store),
+        recent_window_provider=get_recent_window,
+        rerank_top_k=settings.rerank_top_k_voice,
+    )
+    return VoiceUnifiedComposition(retrieval=retrieval, surfacing_guidance=surfacing_guidance)

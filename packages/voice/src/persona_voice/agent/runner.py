@@ -36,7 +36,7 @@ import contextlib
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from persona.audit import JSONLAuditLogger
 from persona.config import PersonaCoreConfig
@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.prompt import GraphContext, GraphRecency
     from persona_runtime.tier import TierRegistry
+    from persona_runtime.unified_recall import UnifiedProjection
     from sqlalchemy import Engine
 
     from persona_voice.config import VoiceConfig
@@ -421,19 +422,38 @@ async def build_agent_session(
     # (``graph_voice`` overlap-or-skip); this only wires it.
     graph_retrieval: Callable[[str], GraphContext] | None = None
     graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None
+    unified_recall: Callable[[str], UnifiedProjection] | None = None
+    core_block_provider: Callable[[], str | None] | None = None
     if config.graph_memory_enabled:
         from persona.graph import build_graph_store
-
-        from persona_voice.model.graph import build_voice_graph_retrieval
+        from persona.recall.config import RecallSettings
 
         graph_store = build_graph_store(
             engine=rls_engine,
             embedder=embedder,
             audit_logger=JSONLAuditLogger(audit_root),
         )
-        composition = build_voice_graph_retrieval(graph_store, owner_id=user_id)
-        graph_retrieval = composition.retrieval
-        graph_surfacing_guidance = composition.surfacing_guidance
+        if RecallSettings().unified_enabled:
+            # K9 (T9): the unified recall REPLACES the separate graph shell (fuse-don't-route,
+            # K9-D-1). Same K4 gate + surfacing (never a voice fork, V13-D-5); env-gated OFF
+            # until the T10 operator flip. ``graph_retrieval`` stays ``None`` (the separate
+            # graph_task never runs — the unified path carries the graph into ``context.graph``).
+            from persona_voice.model.graph import build_voice_unified_recall
+
+            composition = build_voice_unified_recall(
+                graph_store,
+                cast("EpisodicStore", stores["episodic"]),
+                owner_id=user_id,
+                persona_id=persona_id,
+            )
+            unified_recall = composition.retrieval
+            graph_surfacing_guidance = composition.surfacing_guidance
+        else:
+            from persona_voice.model.graph import build_voice_graph_retrieval
+
+            graph_composition = build_voice_graph_retrieval(graph_store, owner_id=user_id)
+            graph_retrieval = graph_composition.retrieval
+            graph_surfacing_guidance = graph_composition.surfacing_guidance
 
     # --- per-call language plan (Spec 32 B2) ---
     # Resolve the persona's declared language ONCE into the STT route (B3), the
@@ -479,6 +499,8 @@ async def build_agent_session(
         user_name=user_name,
         graph_retrieval=graph_retrieval,
         graph_surfacing_guidance=graph_surfacing_guidance,
+        unified_recall=unified_recall,
+        core_block_provider=core_block_provider,
     )
     recorder = VoiceTurnRecorder(
         ctx,

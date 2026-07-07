@@ -83,6 +83,13 @@ class VoicePromptAssembler:
             top_k=top_k,
             identity=self._identity(),
             history_turns=history_turns,
+            # K9 (T9): when composed, the unified recall REPLACES the separate episodic + graph
+            # legs with one fused+reranked+gated path (K9-D-1/D-11) — run here, inside the reply
+            # producer's ``to_thread``, so the reranker stays OFF the voice loop. ``None`` ⇒
+            # today's two-path voice recall (the V13 graph shell runs separately). The core block
+            # is READ here (never built — acceptance-7). Both default ``None`` ⇒ byte-identical.
+            unified_recall=self._ctx.unified_recall,
+            core_block_provider=self._ctx.core_block_provider,
         )
         # Spec K8 (K8-D-5): reinforce the recalled episodic chunks. This method
         # runs inside the reply producer's ``asyncio.to_thread`` worker, so the
