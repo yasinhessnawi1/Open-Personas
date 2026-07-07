@@ -354,6 +354,12 @@ def _build_schedule(
         one_time_at=datetime.fromisoformat(one_time_raw) if isinstance(one_time_raw, str) else None,
         task_id=task_id,
         now=now,
+        # A chat/voice-originated schedule reaches here ONLY from a user-CONFIRMED contract
+        # (criterion 1) — the user explicitly asked to be reminded, exactly like the HTTP
+        # reminder dialog (which defaults notify_on_fire=True). Key the bell on "did the user
+        # ask", not "which door": a fire writes the coalesced schedule_fired bell (one
+        # re-alerting entry per schedule — never 96 rows). Operator-pass find, 2026-07-07.
+        notify_on_fire=True,
     )
 
 

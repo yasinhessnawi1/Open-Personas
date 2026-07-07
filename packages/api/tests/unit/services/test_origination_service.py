@@ -319,3 +319,26 @@ async def test_task_failure_compensates_the_orphan_schedule() -> None:
     # The schedule was created first (FK), then the task failed → the orphan is compensated away.
     assert schedules.deleted  # delete was attempted
     assert schedules.store == {}  # no orphan schedule left firing for a non-existent task
+
+
+def test_origination_built_schedule_opts_into_the_fire_bell() -> None:
+    # Operator-pass find (2026-07-07): a chat/voice-CONFIRMED schedule reaches the
+    # origination door only from an explicit user request, so it must ring the bell on
+    # fire — exactly like the HTTP reminder dialog (notify_on_fire default True). Before
+    # the fix, _build_schedule left it at the column default False → chat reminders were
+    # silent. Pure-function assertion (no stores/DB).
+    from datetime import UTC, datetime
+
+    from persona_api.services.origination_service import _build_schedule
+
+    sched = _build_schedule(
+        schedule_id="sch_1",
+        owner_id="owner_1",
+        payload={
+            "timezone": "Europe/Oslo",
+            "recurrence": {"freq": "DAILY", "byhour": [9], "byminute": [0]},
+        },
+        task_id="task_1",
+        now=datetime(2026, 7, 7, 12, 0, tzinfo=UTC),
+    )
+    assert sched.notify_on_fire is True
