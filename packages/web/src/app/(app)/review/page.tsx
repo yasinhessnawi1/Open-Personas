@@ -1,8 +1,12 @@
 import { getTranslations } from "next-intl/server";
 
 import { ActivityTabs } from "@/components/activity/activity-tabs";
+import { AutonomyControls } from "@/components/activity/autonomy-controls";
 import { Review } from "@/components/activity/review";
 import { PageBody, PageHeader } from "@/components/layout";
+import { Separator } from "@/components/ui/separator";
+import { unwrap } from "@/lib/api";
+import { serverApi } from "@/lib/api/server";
 
 /**
  * Spec A6 (W5) — the morning Review: "what did my personas do while I slept?" (criterion 11).
@@ -16,11 +20,16 @@ import { PageBody, PageHeader } from "@/components/layout";
  */
 export default async function ReviewPage() {
   const t = await getTranslations("review");
+  const api = await serverApi();
+  const personas = await unwrap(await api.GET("/v1/personas")).catch(() => []);
+  const personaList = personas.map((p) => ({ id: p.id, name: p.name }));
   return (
     <PageBody width="narrow">
       <ActivityTabs />
       <PageHeader title={t("title")} subtitle={t("subtitle")} />
       <Review />
+      <Separator className="my-8" />
+      <AutonomyControls personas={personaList} />
     </PageBody>
   );
 }

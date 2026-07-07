@@ -300,6 +300,21 @@
       "initiatives": "Noticed"
     }
   },
+  "autonomyControls": {
+    "title": "Autonomy controls",
+    "subtitle": "Pause or resume what your personas do on their own.",
+    "ownerLabel": "Autonomy",
+    "statusActive": "Active",
+    "statusPaused": "Paused",
+    "ownerHint": "Pausing stops your personas' running tasks at their next step — anything mid-step finishes first.",
+    "pause": "Pause",
+    "resume": "Resume",
+    "byPersona": "Manage each persona",
+    "suspend": "Suspend",
+    "resumePersona": "Resume",
+    "suspended": "Suspended",
+    "failed": "That didn't go through. Try again in a moment."
+  },
   "approvals": {
     "title": "Approvals",
     "subtitle": "Decisions your personas are waiting on — the exact action, before you approve it.",
