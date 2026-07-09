@@ -7,23 +7,21 @@ test.describe("app shell", () => {
   }) => {
     await page.goto("/personas");
 
-    const personasLink = page.getByRole("link", {
-      name: "Personas",
-      exact: true,
-    });
-    const conversationsLink = page.getByRole("link", {
-      name: "Conversations",
-      exact: true,
-    });
+    // Nav rows may carry live count badges (R9-010), so match on the leading
+    // label rather than an exact accessible name.
+    const personasLink = page.getByRole("link", { name: /^Personas/ }).first();
+    // R9-009: the Conversations nav row folded into the MESSAGES section —
+    // its "All chats (N)" header link is the way to /conversations now.
+    const allChatsLink = page.getByRole("link", { name: /^All chats/ });
     const settingsLink = page.getByRole("link", {
       name: "Settings",
       exact: true,
     });
     await expect(personasLink).toBeVisible();
-    await expect(conversationsLink).toBeVisible();
+    await expect(allChatsLink).toBeVisible();
     await expect(settingsLink).toBeVisible();
 
-    await conversationsLink.click();
+    await allChatsLink.click();
     await expect(page).toHaveURL(/\/conversations$/);
 
     // Theme toggle → Dark applies the `dark` class on <html>.

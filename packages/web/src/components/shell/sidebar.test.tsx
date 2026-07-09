@@ -47,6 +47,7 @@ const messages = {
       personas: "Personas",
       messages: "Messages",
       messagesEmpty: "No conversations yet",
+      allChats: "{count, plural, =0 {All chats} other {All chats (#)}}",
       untitled: "Untitled conversation",
       unknownPersona: "Unknown persona",
     },
@@ -161,6 +162,37 @@ describe("Sidebar layout contract", () => {
     expect(rowText("Schedule")).toContain("3");
     // Zero-hidden: the Memory row renders, its zero count does not.
     expect(rowText("Memory")).toBe("Memory");
+  });
+
+  it("folds Conversations into MESSAGES: no nav row, an All chats (N) link (R9-009)", () => {
+    const withCounts: SidebarData = {
+      ...data,
+      counts: { ...data.counts, conversations: 34 },
+    };
+    wrap(<Sidebar data={withCounts} />);
+    // The primary nav no longer carries a /conversations row…
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(
+      Array.from(nav.querySelectorAll("a")).some(
+        (a) => a.getAttribute("href") === "/conversations",
+      ),
+    ).toBe(false);
+    // …the MESSAGES section header carries the affordance instead, with the
+    // same honest total the removed row's badge showed.
+    const allChats = screen.getByRole("link", { name: "All chats (34)" });
+    expect(allChats.getAttribute("href")).toBe("/conversations");
+  });
+
+  it("keeps /conversations reachable in the collapsed icon rail (R9-009)", () => {
+    localStorage.setItem("persona:sidebar-collapsed", "true");
+    try {
+      wrap(<Sidebar data={data} />);
+      // Zero conversations → the plural label collapses to "All chats".
+      const allChats = screen.getByRole("link", { name: "All chats" });
+      expect(allChats.getAttribute("href")).toBe("/conversations");
+    } finally {
+      localStorage.removeItem("persona:sidebar-collapsed");
+    }
   });
 
   it("pins the account footer (non-shrinking) so it stays present with a long list", () => {

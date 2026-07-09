@@ -4,7 +4,6 @@ import {
   Activity,
   CalendarClock,
   Home,
-  MessagesSquare,
   Phone,
   Sparkles,
   Waypoints,
@@ -24,12 +23,10 @@ import { cn } from "@/lib/utils";
 const ITEMS = [
   { href: "/", key: "home", icon: Home, count: undefined },
   { href: "/personas", key: "personas", icon: Sparkles, count: "personas" },
-  {
-    href: "/conversations",
-    key: "conversations",
-    icon: MessagesSquare,
-    count: "conversations",
-  },
+  // R9-009: the Conversations row is FOLDED into the MESSAGES section — its
+  // "All chats (N)" affordance links to /conversations (the route + page stay;
+  // only this nav row went). The command palette's "Go to conversations" entry
+  // deliberately remains — that's search, not nav.
   // Spec V9: the voice-call history surface. R9-010: badge = total call records.
   { href: "/calls", key: "calls", icon: Phone, count: "calls" },
   // Spec A6 (W5, A6-D-1): the Activity area — ONE nav row landing on the morning Review; Tasks +
@@ -61,7 +58,6 @@ const ITEMS = [
  */
 export interface NavCounts {
   readonly personas?: number;
-  readonly conversations?: number;
   readonly calls?: number;
   /** Non-terminal (in-progress / waiting) tasks — the active working set. */
   readonly activity?: number;

@@ -89,6 +89,7 @@
       "personas": "Personas",
       "messages": "Messages",
       "messagesEmpty": "No conversations yet",
+      "allChats": "{count, plural, =0 {All chats} other {All chats (#)}}",
       "calls": "Calls",
       "callsEmpty": "No calls yet",
       "callOngoing": "Call",

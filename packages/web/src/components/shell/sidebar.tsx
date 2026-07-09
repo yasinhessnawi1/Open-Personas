@@ -44,7 +44,7 @@ import { CommandTrigger } from "./command-palette";
 import { Nav } from "./nav";
 import { NotificationBell } from "./notification-bell";
 import type { SidebarData } from "./sidebar-data";
-import { MessagesList, PersonasRail } from "./sidebar-sections";
+import { AllChatsLink, MessagesList, PersonasRail } from "./sidebar-sections";
 
 /** Width bounds + the default (px). Collapsed snaps to the icon rail. */
 const MIN_WIDTH = 224;
@@ -65,17 +65,21 @@ function clampWidth(value: number): number {
  * A sidebar section: an optional heading + a body. The reusable unit of the
  * section model. `grow` makes the section the flexible, scrolling region
  * (only the MESSAGES section uses it). `collapsed` hides the textual heading
- * in icon-rail mode.
+ * in icon-rail mode. `action` is an optional affordance rendered on the
+ * heading row's trailing edge (hidden with the heading when collapsed) —
+ * R9-009's "All chats (N)" uses it.
  */
 function SidebarSection({
   heading,
   collapsed,
   grow,
+  action,
   children,
 }: {
   heading?: string;
   collapsed: boolean;
   grow?: boolean;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -84,7 +88,10 @@ function SidebarSection({
       data-slot="sidebar-section"
     >
       {heading && !collapsed ? (
-        <h2 className="px-2 type-caption text-muted-foreground">{heading}</h2>
+        <div className="flex items-baseline justify-between gap-2 px-2">
+          <h2 className="type-caption text-muted-foreground">{heading}</h2>
+          {action}
+        </div>
       ) : null}
       {grow ? (
         <ScrollArea className="-mx-1 min-h-0 flex-1">
@@ -226,7 +233,6 @@ export function Sidebar({ data }: { data: SidebarData }) {
             collapsed={collapsed}
             counts={{
               personas: data.counts.personas,
-              conversations: data.counts.conversations,
               calls: data.counts.calls,
               activity: data.counts.activeTasks,
               memory: data.counts.memoryNodes,
@@ -244,12 +250,19 @@ export function Sidebar({ data }: { data: SidebarData }) {
 
           {/* (5) MESSAGES — the flexible, growing, scrolling region.
               (R4 T2: the CALLS recent-list preview was removed from the sidebar
-              — the Calls *nav item* stays and the full history lives at /calls.) */}
+              — the Calls *nav item* stays and the full history lives at /calls.)
+              R9-009: the Conversations nav row folded in here — "All chats (N)"
+              is the section's link to /conversations (header link when expanded;
+              an icon link above the list in rail mode). */}
           <SidebarSection
             heading={t("sidebar.messages")}
             collapsed={collapsed}
             grow
+            action={<AllChatsLink count={data.counts.conversations} />}
           >
+            {collapsed ? (
+              <AllChatsLink count={data.counts.conversations} collapsed />
+            ) : null}
             <MessagesList
               conversations={data.conversations}
               collapsed={collapsed}

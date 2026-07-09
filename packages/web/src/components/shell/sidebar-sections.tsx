@@ -11,7 +11,7 @@
  * collapse animation.
  */
 
-import { Phone } from "lucide-react";
+import { MessagesSquare, Phone } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useFormatter, useTranslations } from "next-intl";
@@ -76,6 +76,63 @@ export function PersonasRail({
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * "All chats (N)" — the MESSAGES section's link to the full /conversations
+ * page (R9-009: the Conversations nav row folded into this section; the route
+ * and page are unchanged). N is the honest owner total from /v1/me/nav-counts
+ * (the same figure the removed nav row's badge showed); at 0 the count is
+ * hidden (the badge zero-hidden convention).
+ *
+ * Expanded: a caption link in the section-header row. Collapsed (icon rail):
+ * the section heading is hidden, so this renders as a tooltip-labelled icon
+ * link above the avatar list — /conversations stays reachable in rail mode.
+ */
+export function AllChatsLink({
+  count,
+  collapsed = false,
+  onNavigate,
+}: {
+  count: number;
+  collapsed?: boolean;
+  onNavigate?: () => void;
+}) {
+  const t = useTranslations("nav.sidebar");
+  const label = t("allChats", { count });
+
+  if (collapsed) {
+    return (
+      <div className="flex justify-center pb-1">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Link
+                href="/conversations"
+                onClick={onNavigate}
+                aria-label={label}
+                className="grid size-9 place-items-center rounded-md text-muted-foreground outline-none transition-colors duration-[var(--motion-duration-fast)] hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+              />
+            }
+          >
+            <MessagesSquare className="size-4" />
+          </TooltipTrigger>
+          <TooltipContent side="right">{label}</TooltipContent>
+        </Tooltip>
+      </div>
+    );
+  }
+
+  return (
+    <Link
+      href="/conversations"
+      onClick={onNavigate}
+      data-slot="sidebar-all-chats"
+      className="rounded-sm type-caption normal-case tracking-normal text-muted-foreground tabular-nums outline-none transition-colors duration-[var(--motion-duration-fast)] hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+    >
+      {label}
+    </Link>
   );
 }
 

@@ -11,7 +11,7 @@ import { AccountMenu } from "./account-menu";
 import { CommandTrigger } from "./command-palette";
 import { Nav } from "./nav";
 import type { SidebarData } from "./sidebar-data";
-import { MessagesList, PersonasRail } from "./sidebar-sections";
+import { AllChatsLink, MessagesList, PersonasRail } from "./sidebar-sections";
 
 /**
  * Shared inner content for the MOBILE sheet. Mirrors the desktop section model
@@ -47,7 +47,6 @@ export function SidebarBody({
           onNavigate={onNavigate}
           counts={{
             personas: data.counts.personas,
-            conversations: data.counts.conversations,
             calls: data.counts.calls,
             activity: data.counts.activeTasks,
             memory: data.counts.memoryNodes,
@@ -70,9 +69,17 @@ export function SidebarBody({
         </section>
 
         <section className="flex min-h-0 flex-1 flex-col gap-1.5">
-          <h2 className="px-2 type-caption text-muted-foreground">
-            {t("sidebar.messages")}
-          </h2>
+          {/* R9-009: the Conversations nav row folded into MESSAGES — the
+              header carries the "All chats (N)" link to /conversations. */}
+          <div className="flex items-baseline justify-between gap-2 px-2">
+            <h2 className="type-caption text-muted-foreground">
+              {t("sidebar.messages")}
+            </h2>
+            <AllChatsLink
+              count={data.counts.conversations}
+              onNavigate={onNavigate}
+            />
+          </div>
           <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">
             <MessagesList
               conversations={data.conversations}
