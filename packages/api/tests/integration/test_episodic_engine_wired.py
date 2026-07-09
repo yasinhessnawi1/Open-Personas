@@ -188,20 +188,27 @@ def _fire_and_verify(
             ),
             {"p": persona},
         ).all()
-        episodes = conn.execute(
+        # R4-C1-15: episode nodes are named from the gist's opening sentence
+        # (no longer the ``episode <timestamp>`` label), so select the node by
+        # the engine's provenance reason — the stable merge contract.
+        episode_rows = conn.execute(
             text(
-                "SELECT count(*) FROM graph_nodes "
-                "WHERE owner_id = :o AND concept_name LIKE 'episode %'"
+                "SELECT concept_name FROM graph_nodes "
+                "WHERE owner_id = :o AND provenance @> "
+                """'[{"reason": "sleep-time episodic consolidation"}]'"""
             ),
             {"o": owner},
-        ).scalar_one()
+        ).all()
         raw = conn.execute(
             text("SELECT id, text FROM memory_chunks WHERE persona_id = :p AND kind = 'episodic'"),
             {"p": persona},
         ).all()
     assert len(gists) == 1  # the closed session got its gist THROUGH the fire
     assert set(gists[0].member_ids) == set(raw_ids)
-    assert episodes == 1  # and its concept node landed via the real merge
+    assert len(episode_rows) == 1  # and its concept node landed via the real merge
+    # R4-C1-15 naming: the node reads as a real memory (the gist's opening
+    # sentence from the deterministic fake), never the timestamp fallback.
+    assert episode_rows[0].concept_name.startswith("They discussed moving to Oslo")
     assert {r.id for r in raw} == set(raw_ids)  # raw layer untouched
 
 
