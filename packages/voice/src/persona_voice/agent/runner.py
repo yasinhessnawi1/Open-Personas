@@ -130,10 +130,24 @@ _BGE_MODEL = "BAAI/bge-small-en-v1.5"
 # The synthetic turn-0 prompt (Spec 32 A3). It rides the normal producer path as
 # the opening "user" message; the persona's reply is the greeting, generated in
 # the declared language (B5). The persona answers the phone — no user input.
+#
+# R9-002: the nudge is memory-aware. The K9 core-memory block (read ONCE at
+# session setup — ``_load_core_block``) rides the assembled prompt, so the model
+# MAY open with genuine continuity — but only through the guarded branch below:
+# the model decides from what it sees in context; the code only decides what
+# reaches the context. No history in context ⇒ the plain-hello branch (today's
+# behaviour). The instruction-level sensitive-topic guard is defence in depth on
+# top of the K4-composed upstream content: an UNPROMPTED first utterance must
+# never raise a heavy topic.
 _GREETING_NUDGE = (
-    "(The voice call has just connected. Greet the person warmly in one short "
-    "sentence to open the conversation, in character. Do not wait for them to "
-    "speak first.)"
+    "(The voice call has just connected. Greet the person warmly in one or two "
+    "short sentences to open the conversation, in character, and do not wait for "
+    "them to speak first. If your context includes shared history with this "
+    "person, greet them as a returning acquaintance and you may touch on at most "
+    "one recent, light, neutral open thread from it. Never raise sensitive "
+    "topics - health, crisis, relationships, finances, or legal matters - "
+    "unprompted; when in doubt, keep it to a plain warm hello. If you have no "
+    "shared history in your context, simply give one short warm hello.)"
 )
 
 
@@ -203,6 +217,40 @@ def _load_user_name(engine: Engine, user_id: str) -> str | None:
         return None
     parts = [p for p in (row["first_name"], row["last_name"]) if p]
     return " ".join(parts) or None
+
+
+def _load_core_block(
+    engine: Engine, embedder: Embedder, persona_id: str, audit_root: Path
+) -> str | None:
+    """Read the persona's K9 core-memory block ONCE at session setup (R9-002).
+
+    The greeting head start: the compact user+persona summary (K9-D-10, background-
+    refreshed — never built here) is read at session setup, alongside
+    :func:`_load_persona` / :func:`_load_user_name` — the established off-turn-loop
+    pattern, so NO fetch ever runs on the connect→first-word path (the provider
+    replays this one read for the whole call). One cheap RLS-scoped SELECT
+    (``CoreMemoryStore.current`` — no model call, no embedding); gated by the SAME
+    ``RecallSettings.core_enabled`` the chat path's provider uses (parity, never a
+    voice fork). Fail-soft: gate off, no block, or any error ⇒ ``None`` ⇒ no head
+    start ⇒ the plain-hello branch — the head start is a nicety and must never
+    break a call.
+    """
+    from persona.recall.config import RecallSettings
+    from persona.recall.core_memory import read_core_block
+    from persona.stores.core_memory import CoreMemoryStore
+
+    try:
+        if not RecallSettings().core_enabled:
+            return None
+        store = CoreMemoryStore(
+            backend=PostgresBackend(engine=engine, embedder=embedder),
+            audit_logger=JSONLAuditLogger(audit_root),
+        )
+        block = read_core_block(store, persona_id)
+    except Exception:  # noqa: BLE001 — the head start is a nicety; never break a call
+        _logger.warning("voice core-block read failed (non-fatal)", exc_info=True)
+        return None
+    return block.text if block is not None else None
 
 
 def _build_stores(engine: Engine, embedder: Embedder, audit_root: Path) -> dict[str, MemoryStore]:
@@ -477,6 +525,18 @@ async def build_agent_session(
     # chat — one persona, one user, coherent across channels. ``None`` ⇒ nameless ⇒
     # byte-identical voice prompt.
     user_name = _load_user_name(rls_engine, user_id)
+    # R9-002: the greeting head start — read the K9 core-memory block ONCE here at
+    # session setup (the ``_load_user_name`` pattern: off the per-utterance path,
+    # fail-soft). The session-constant text is served through the EXISTING
+    # ``core_block_provider`` prompt seam on every turn (chat parity, K9-D-10/11),
+    # so turn 0's greeting sees the shared history with ZERO added connect→
+    # first-word latency: the provider is a closure over this pre-fetched value —
+    # no fetch ever runs on the turn path. ``None`` (gate off / no block / error)
+    # ⇒ provider stays ``None`` ⇒ byte-identical prompt ⇒ the plain-hello branch.
+    core_block_text = _load_core_block(rls_engine, embedder, persona_id, audit_root)
+    core_block_provider: Callable[[], str | None] | None = (
+        (lambda: core_block_text) if core_block_text is not None else None
+    )
 
     # --- V13 (V13-D-1/D-5/D-6): the K4-gated graph-memory read shell ---
     # Compose the owner-scoped graph store + the K4-gated retrieval (allowlist
@@ -490,7 +550,6 @@ async def build_agent_session(
     graph_retrieval: Callable[[str], GraphContext] | None = None
     graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None
     unified_recall: Callable[[str], UnifiedProjection] | None = None
-    core_block_provider: Callable[[], str | None] | None = None
     if config.graph_memory_enabled:
         from persona.graph import build_graph_store
         from persona.recall.config import RecallSettings
