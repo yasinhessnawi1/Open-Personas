@@ -556,6 +556,7 @@ class PostgresGraphStore:
         on-the-fly via :meth:`neighbors`, not here). RLS-scoped; a read (CQS).
         """
         return self._backend.edges_among(owner_id, node_ids)
+
     def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
         """The A5 noticing pool — salience+recency ordered, subject-safe at the read.
 

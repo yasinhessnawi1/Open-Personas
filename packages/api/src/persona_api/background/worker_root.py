@@ -375,7 +375,7 @@ def build_worker_registry(
         # the voice-side ``delegation_enabled``); the create rides the unchanged origination svc.
         # Needs a memory backend for the origination failure notifier (as the task-leg digest does);
         # a backend-less worker path simply does not register it (no delegation without a backend).
-        if memory_backend is not None:
+        if memory_backend is not None and runtime_factory is not None:
             _register_delegated_turn_tenant(
                 registry,
                 rls_engine=rls_engine,

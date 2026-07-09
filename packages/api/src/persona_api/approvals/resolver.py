@@ -79,6 +79,7 @@ class InboxDecision(StrEnum):
     DENY = "deny"
     MODIFY = "modify"
 
+
 _log = get_logger("api.approvals.resolver")
 
 

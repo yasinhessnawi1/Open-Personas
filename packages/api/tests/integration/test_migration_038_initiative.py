@@ -31,7 +31,8 @@ pytestmark = pytest.mark.integration
 
 _API_DIR = Path(__file__).resolve().parents[2]  # packages/api
 _ALEMBIC_INI = _API_DIR / "alembic.ini"
-_PRED = "037_notifications_schedule_kind"  # 038 (was 036) placeholder predecessor (renumbered at merge-back)
+# 038 (was 036) placeholder predecessor (renumbered at merge-back)
+_PRED = "037_notifications_schedule_kind"
 _TABLES = ("initiative_declines", "initiative_notices")
 
 

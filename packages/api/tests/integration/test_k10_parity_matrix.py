@@ -208,9 +208,7 @@ def test_managed_synthesis_runs_and_writes_graph(
     """K2 synthesis: real worker claim → extract → graph node (the pass RAN + output)."""
     owner, persona, convo = "pm_synth_owner", "pm_synth_persona", "pm_synth_convo"
     with seed_engine.begin() as conn:
-        conn.execute(
-            text("INSERT INTO users (id, email) VALUES (:o, 's@ex.com')"), {"o": owner}
-        )
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 's@ex.com')"), {"o": owner})
         conn.execute(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'name: s')"),
             {"p": persona, "o": owner},

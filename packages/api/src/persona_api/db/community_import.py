@@ -36,7 +36,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from sqlalchemy import Table, create_engine, inspect as sa_inspect, select, text
+from sqlalchemy import Table, create_engine, select, text
+from sqlalchemy import inspect as sa_inspect
 
 from persona_api.db.community import build_community_metadata, make_community_engine
 from persona_api.db.models import metadata as _canonical_metadata
@@ -162,7 +163,7 @@ class CommunityImporter:
         if not inspector.has_table(community_table.name):
             return []
         source_cols = {c["name"] for c in inspector.get_columns(community_table.name)}
-        cols = [community_table.c[n] for n in community_table.columns.keys() if n in source_cols]
+        cols = [c for c in community_table.columns if c.name in source_cols]
         if not cols:
             return []
         with source.connect() as conn:

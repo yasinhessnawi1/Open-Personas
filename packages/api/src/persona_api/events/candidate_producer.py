@@ -153,9 +153,7 @@ class SmallTierEventCandidateProducer:
             return self._grounding.task_content(owner_id, ref)
         return None
 
-    def _messages(
-        self, payload: EventCandidatePayload, content: str
-    ) -> list[ConversationMessage]:
+    def _messages(self, payload: EventCandidatePayload, content: str) -> list[ConversationMessage]:
         now = datetime.now(UTC)
         body = (
             f"An event fired a standing watch: {payload.human}.\n\n"

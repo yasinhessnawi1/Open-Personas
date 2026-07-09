@@ -68,8 +68,10 @@ def test_no_cue_utterances_trip_no_cue_and_stay_cheap() -> None:
 
     p50 = _percentile(samples_ms, 50.0)
     p95 = _percentile(samples_ms, 95.0)
-    print(f"\n[A9 criterion-2] no-cue gate overhead: p50={p50:.4f}ms p95={p95:.4f}ms "
-          f"(budget 800ms P50 / 1500ms P95)")
+    print(
+        f"\n[A9 criterion-2] no-cue gate overhead: p50={p50:.4f}ms p95={p95:.4f}ms "
+        f"(budget 800ms P50 / 1500ms P95)"
+    )
     assert p95 < _MAX_P95_MS  # negligible vs the voice budget — the no-intent turn is unchanged
 
 

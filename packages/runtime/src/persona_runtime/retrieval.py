@@ -277,7 +277,9 @@ def retrieve_context(
         episodic_displayed, episodic_found_ids = _recall_episodic(
             stores["episodic"], persona_id, user_message, k, recency=dynamic
         )
-        graph_context = graph_retrieval(user_message) if graph_retrieval is not None else GraphContext()
+        graph_context = (
+            graph_retrieval(user_message) if graph_retrieval is not None else GraphContext()
+        )
 
     context = RetrievedContext(
         identity=resolved_identity,

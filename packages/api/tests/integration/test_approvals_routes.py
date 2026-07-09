@@ -117,9 +117,7 @@ def test_decision_is_422_on_modify_without_edits(
     assert resp.status_code == 422
 
 
-def test_get_cross_owner_approval_is_404_rls(
-    migrated_engine: Engine, app_engine: Engine
-) -> None:
+def test_get_cross_owner_approval_is_404_rls(migrated_engine: Engine, app_engine: Engine) -> None:
     _seed_proposal_for(migrated_engine, app_engine, "owner_b")
     client = _client(app_engine, with_resolver=True)
     # owner_a asks for owner_b's proposal → RLS hides it → a clean 404 (never a cross-tenant read).

@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from persona.errors import DailySpendCapExceededError
 from persona_api.errors import register_exception_handlers
 
-_RESET = int(time.time()) + 3600  # an hour out
+_RESET_HORIZON_S = 3600  # the cap resets an hour out
 
 
 @pytest.fixture
@@ -29,13 +29,16 @@ def client() -> TestClient:
 
     @app.get("/_test/daily_cap")
     async def _raise_daily_cap() -> None:
+        # Compute the reset AT REQUEST TIME (not module import) so ``Retry-After`` = seconds-to-
+        # reset is deterministic regardless of how long the suite takes to reach this test — a
+        # module-level constant made the countdown shrink with suite duration (a load-flake).
         raise DailySpendCapExceededError(
             "Daily spend cap reached — this resets at UTC midnight.",
             context={
                 "cap": "10000",
                 "spent": "9950",
                 "requested_cost": "100",
-                "reset_epoch": str(_RESET),
+                "reset_epoch": str(int(time.time()) + _RESET_HORIZON_S),
             },
         )
 
@@ -49,8 +52,9 @@ def test_daily_cap_maps_to_429(client: TestClient) -> None:
 def test_daily_cap_retry_after_counts_down_to_reset(client: TestClient) -> None:
     resp = client.get("/_test/daily_cap")
     retry_after = int(resp.headers["Retry-After"])
-    # Seconds-to-reset (± a second of test wall-clock), positive, never past the reset.
-    assert 3500 <= retry_after <= 3600
+    # Seconds-to-reset: the reset is minted at request time an hour out, so the countdown is the
+    # full horizon minus only the request round-trip (sub-second) — deterministic under load.
+    assert 3595 <= retry_after <= _RESET_HORIZON_S
 
 
 def test_daily_cap_body_carries_cap_spent_reset(client: TestClient) -> None:
@@ -58,7 +62,9 @@ def test_daily_cap_body_carries_cap_spent_reset(client: TestClient) -> None:
     assert body["error"] == "daily_spend_cap_exceeded"
     assert body["context"]["cap"] == "10000"
     assert body["context"]["spent"] == "9950"
-    assert body["context"]["reset_epoch"] == str(_RESET)
+    # The reset epoch is ~an hour out from the request (minted at request time, not import).
+    reset_in = int(body["context"]["reset_epoch"]) - int(time.time())
+    assert 3595 <= reset_in <= _RESET_HORIZON_S
     assert body["detail"]
 
 

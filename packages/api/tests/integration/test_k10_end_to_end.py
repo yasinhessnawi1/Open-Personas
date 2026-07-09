@@ -295,7 +295,10 @@ def _build_legacy_store(root: Path, embedder: HashEmbedder384) -> tuple[Path, Pa
                 text="Imported persona identity",
                 created_at=now,
                 provenance=ChunkProvenance(
-                    source=WriteSource.SYSTEM, logical_id=cid, version=1, written_at=now,
+                    source=WriteSource.SYSTEM,
+                    logical_id=cid,
+                    version=1,
+                    written_at=now,
                     written_by="test",
                 ),
             )

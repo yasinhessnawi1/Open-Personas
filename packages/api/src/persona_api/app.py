@@ -570,7 +570,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         and rls_engine is not None
     ):
         import httpx
-
         from persona.tools.mcp.catalog import MCPCatalog
 
         from persona_api.mcp import run_policy
@@ -765,6 +764,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         and _worker_tier_registry is not None
     ):
         from persona.backends.errors import AuthenticationError
+
         from persona_api.background.worker_root import start_in_process_worker
 
         try:

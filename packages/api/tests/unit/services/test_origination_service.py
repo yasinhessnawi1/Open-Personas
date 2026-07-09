@@ -121,7 +121,13 @@ async def test_creates_task_and_schedule_with_the_contract() -> None:
     assert len(schedules.store) == 1
     created_schedule = next(iter(schedules.store.values()))
     assert created_schedule.target_job_type == "task_scheduled_fire"
-    assert created_schedule.payload_template == {"task_id": outcome.task_id}
+    # The fire payload carries the task anchor + the bell opt-in (notify_on_fire) and the fire's
+    # subject (the reminder text the coalesced bell renders) — the schedule-fix rail.
+    assert created_schedule.payload_template == {
+        "task_id": outcome.task_id,
+        "notify_on_fire": True,
+        "subject": "track the fares every morning",
+    }
 
 
 # --- A7: the event-trigger creation door (criterion 1) ---------------------------------
@@ -193,9 +199,7 @@ async def test_triggered_contract_without_a_trigger_store_fails_visibly() -> Non
     # A confirmed trigger contract with no registry wired must FAIL LOUD (an account), never a
     # silently-dropped confirmed contract (the failure-visibility invariant extends to A7).
     tasks, schedules, notifier = _FakeTasks(), _FakeSchedules(), _FakeNotifier()
-    service = OriginationService(
-        tasks=tasks, schedules=schedules, notifier=notifier, triggers=None
-    )
+    service = OriginationService(tasks=tasks, schedules=schedules, notifier=notifier, triggers=None)
     outcome = await service.originate(_trigger_event_data())
     assert outcome.status is OriginationStatus.FAILED
     assert len(notifier.accounts) == 1  # the un-suppressible failure account

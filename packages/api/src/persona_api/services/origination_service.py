@@ -96,9 +96,7 @@ class ScheduleCreator(Protocol):
 class TriggerCreator(Protocol):
     """The owner-scoped A7 trigger-registry writer (the real adapter wraps ``EventTriggerStore``)."""  # noqa: E501
 
-    def create_if_absent(
-        self, record: EventTriggerRecord, *, now: datetime
-    ) -> EventTriggerRecord:
+    def create_if_absent(self, record: EventTriggerRecord, *, now: datetime) -> EventTriggerRecord:
         """Persist the trigger row; reflect the existing row on a PK conflict (idempotent)."""
         ...
 
@@ -290,9 +288,7 @@ class OriginationService:
             try:
                 self._triggers.delete(owner_id, trigger_id)  # compensate a partial trigger row
             except Exception:  # noqa: BLE001 — best-effort cleanup; the account is what matters
-                _logger.warning(
-                    "origination compensation failed trigger_id={tid}", tid=trigger_id
-                )
+                _logger.warning("origination compensation failed trigger_id={tid}", tid=trigger_id)
         account = account_for_origination_failure(task_id, cause=cause)
         try:
             await self._notifier.notify(

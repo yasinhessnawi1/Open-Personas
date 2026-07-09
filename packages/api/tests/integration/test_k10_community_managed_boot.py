@@ -77,9 +77,7 @@ def test_embedded_manager_provisions_migrates_seeds_stops_and_restarts(
         engine = create_engine(url)
         with engine.connect() as conn:
             n_tables = conn.execute(
-                text(
-                    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"
-                )
+                text("SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
             ).scalar()
             head = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
             vector_ext = conn.execute(

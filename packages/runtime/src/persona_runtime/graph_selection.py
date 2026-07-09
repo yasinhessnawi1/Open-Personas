@@ -171,7 +171,9 @@ def _passes_gate(result: HybridResult, settings: GraphSettings) -> bool:
     return result.sparse_rank is not None and result.sparse_rank <= settings.inject_sparse_rank_cap
 
 
-def project_node(node: ConceptNode, *, relevance: float | None, now: datetime) -> GraphKnowledgeItem:
+def project_node(
+    node: ConceptNode, *, relevance: float | None, now: datetime
+) -> GraphKnowledgeItem:
     """Project a graph node into the injectable item (K3-D-4) — the single-sourced projection.
 
     Used by K3's per-turn selection (:func:`_project`) AND K9's unified-recall projection

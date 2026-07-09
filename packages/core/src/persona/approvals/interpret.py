@@ -278,9 +278,7 @@ def is_decision_cue(reply: str) -> bool:
     an inbox action).
     """
     content = [token for token in _tokenise(reply) if token not in _FILLER]
-    return any(
-        token in _AFFIRM or token in _DENY or token in _MODIFY_MARKERS for token in content
-    )
+    return any(token in _AFFIRM or token in _DENY or token in _MODIFY_MARKERS for token in content)
 
 
 class LexiconReplyInterpreter:

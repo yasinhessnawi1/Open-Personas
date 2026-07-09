@@ -225,12 +225,22 @@ def test_mcp_catalog_requires_auth(client: TestClient) -> None:
     assert client.get("/v1/mcp-catalog").status_code == 401
 
 
-def test_merged_catalog_no_mirror_is_exactly_the_builtins() -> None:
-    """No mirror snapshot → load_mirror_catalog falls back to builtin → just the 6."""
+def test_merged_catalog_no_override_is_builtin_floor_plus_bundled_mirror() -> None:
+    """N2-D-1: with no operator override, the catalog is the builtin floor merged over the
+
+    BUNDLED mirror snapshot (``mirror.json``) — no longer just the six builtins, since a bundled
+    snapshot now ships. The builtin floor always survives (builtin-wins on collision). Derived
+    from the sources (not hardcoded) so it tracks the bundled catalog as it grows; the pure
+    builtin-fallback path is unit-covered in ``test_mcp_mirror.py``.
+    """
+    from persona.tools.mcp.catalog import BUILTIN_MCP_CATALOG
+    from persona.tools.mcp.mirror import load_mirror_catalog
     from persona_api.services import catalog_service
 
     names = {e.name for e in catalog_service.merged_mcp_catalog()}
-    assert names == _BUILTINS
+    expected = set(BUILTIN_MCP_CATALOG.servers) | set(load_mirror_catalog(override=None).servers)
+    assert names == expected
+    assert names >= _BUILTINS  # the always-present core floor survives the merge
 
 
 def test_merged_catalog_builtin_floor_with_builtin_wins_on_collision(

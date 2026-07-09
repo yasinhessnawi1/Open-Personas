@@ -429,7 +429,10 @@ def test_delegated_spoken_steering_is_applied_through_the_worker(
     )
     # First create a task (the origination delegation), so there is a live task to steer.
     enqueue_delegated_turn(
-        migrated_engine, owner_id=_OWNER, conversation_id=_CONVO, verbatim_ask=_ASK,
+        migrated_engine,
+        owner_id=_OWNER,
+        conversation_id=_CONVO,
+        verbatim_ask=_ASK,
         persona_id=_PERSONA,
     )
     assert asyncio.run(worker.run_once()) == 1
@@ -442,8 +445,11 @@ def test_delegated_spoken_steering_is_applied_through_the_worker(
 
     # Now a spoken steering ask — delegated verbatim, applied by the real worker.
     enqueue_delegated_turn(
-        migrated_engine, owner_id=_OWNER, conversation_id=_CONVO,
-        verbatim_ask="pause the fare tracker", persona_id=_PERSONA,
+        migrated_engine,
+        owner_id=_OWNER,
+        conversation_id=_CONVO,
+        verbatim_ask="pause the fare tracker",
+        persona_id=_PERSONA,
     )
     assert asyncio.run(worker.run_once()) == 1
 

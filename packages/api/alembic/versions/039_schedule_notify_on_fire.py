@@ -37,9 +37,7 @@ branch_labels = None
 depends_on = None
 
 _OLD_KINDS = "('run_terminal', 'persona_ready', 'schedule_executor_missing')"
-_NEW_KINDS = (
-    "('run_terminal', 'persona_ready', 'schedule_executor_missing', 'schedule_fired')"
-)
+_NEW_KINDS = "('run_terminal', 'persona_ready', 'schedule_executor_missing', 'schedule_fired')"
 
 
 def upgrade() -> None:

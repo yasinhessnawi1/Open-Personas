@@ -60,6 +60,7 @@ class _EmbeddedServer(Protocol):
     def ensure_postgres_running(self) -> None: ...
     def get_pid(self) -> int | None: ...
 
+
 __all__ = [
     "EMBEDDED_PG_MAJOR",
     "CommunityDbManager",

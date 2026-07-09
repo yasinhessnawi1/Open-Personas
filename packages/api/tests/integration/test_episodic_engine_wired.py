@@ -196,10 +196,7 @@ def _fire_and_verify(
             {"o": owner},
         ).scalar_one()
         raw = conn.execute(
-            text(
-                "SELECT id, text FROM memory_chunks "
-                "WHERE persona_id = :p AND kind = 'episodic'"
-            ),
+            text("SELECT id, text FROM memory_chunks WHERE persona_id = :p AND kind = 'episodic'"),
             {"p": persona},
         ).all()
     assert len(gists) == 1  # the closed session got its gist THROUGH the fire

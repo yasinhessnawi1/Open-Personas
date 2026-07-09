@@ -52,9 +52,7 @@ class _AbortError(RuntimeError):
 # ---- legacy source builder -------------------------------------------------
 
 
-def _build_legacy_store(
-    root: Path, embedder: HashEmbedder384
-) -> tuple[Path, Path, dict[str, int]]:
+def _build_legacy_store(root: Path, embedder: HashEmbedder384) -> tuple[Path, Path, dict[str, int]]:
     """A realistic legacy community install: SQLite relational + Chroma vectors."""
     from persona.stores.chroma import ChromaBackend
 
@@ -112,8 +110,10 @@ def _build_legacy_store(
     chroma.upsert(
         persona_id=persona_id,
         store_kind="identity",
-        chunks=[_chunk(persona_id, "identity", "Astrid is a tenancy-law expert"),
-                _chunk(persona_id, "identity", "Astrid works in Oslo")],
+        chunks=[
+            _chunk(persona_id, "identity", "Astrid is a tenancy-law expert"),
+            _chunk(persona_id, "identity", "Astrid works in Oslo"),
+        ],
     )
     chroma.upsert(
         persona_id=persona_id,

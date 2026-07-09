@@ -28,6 +28,10 @@ from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimite
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+# Cloud-edition RLS routes: the app build requires APP_DATABASE_URL (the non-superuser DSN) —
+# a DB-backed integration test. Marked so it runs in the integration job, not the DB-less default.
+pytestmark = pytest.mark.integration
+
 NOW = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
 
 

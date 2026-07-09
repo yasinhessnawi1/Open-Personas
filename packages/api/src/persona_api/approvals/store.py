@@ -131,9 +131,7 @@ class ApprovalStore:
             row = (
                 conn.execute(
                     select(proposals_t)
-                    .select_from(
-                        proposals_t.join(tasks_t, proposals_t.c.task_id == tasks_t.c.id)
-                    )
+                    .select_from(proposals_t.join(tasks_t, proposals_t.c.task_id == tasks_t.c.id))
                     .where(
                         tasks_t.c.conversation_id == conversation_id,
                         proposals_t.c.status == ProposalStatus.PENDING.value,

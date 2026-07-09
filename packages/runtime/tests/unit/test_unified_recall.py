@@ -8,8 +8,8 @@ end-to-end on the composition (a stub reranker yields fused order, no hard P7 de
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from persona.graph.fusion import HybridResult
 from persona.graph.models import ConceptNode, NodeKind, NodeProvenance
@@ -18,6 +18,9 @@ from persona.recall.rerank import IdentityReranker
 from persona.schema.chunks import PersonaChunk, WriteSource
 from persona.stores.lifecycle import EpisodicSettings
 from persona_runtime.unified_recall import UnifiedProjection, make_unified_recall
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 

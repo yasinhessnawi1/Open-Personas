@@ -146,8 +146,10 @@ def test_get_pending_for_conversation(migrated_engine: Engine, app_engine: Engin
             {"p": "persona_a"},
         )
         conn.execute(
-            text("UPDATE tasks SET conversation_id='c1', state='waiting', wait_kind='on_user' "
-                 "WHERE id='t1'")
+            text(
+                "UPDATE tasks SET conversation_id='c1', state='waiting', wait_kind='on_user' "
+                "WHERE id='t1'"
+            )
         )
     store = ApprovalStore(app_engine)
     assert store.get_pending_for_conversation("user_a", "c1") is None  # nothing pending yet

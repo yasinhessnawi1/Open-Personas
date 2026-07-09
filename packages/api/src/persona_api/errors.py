@@ -522,9 +522,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(MCPRuntimeCapacityError)
-    async def _mcp_runtime_capacity_409(
-        _: Request, exc: MCPRuntimeCapacityError
-    ) -> JSONResponse:
+    async def _mcp_runtime_capacity_409(_: Request, exc: MCPRuntimeCapacityError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content=_body(

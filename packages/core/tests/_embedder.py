@@ -36,8 +36,7 @@ class HashEmbedder:
             # finite). Deterministic finite fallback per lane; unchanged for
             # every text that already decoded finite.
             floats = [
-                x if math.isfinite(x) else (digest[i * 4] + 1) / 255.0
-                for i, x in enumerate(floats)
+                x if math.isfinite(x) else (digest[i * 4] + 1) / 255.0 for i, x in enumerate(floats)
             ]
             full = (floats * 4)[: self.dimension]
             norm = math.sqrt(sum(x * x for x in full)) or 1.0

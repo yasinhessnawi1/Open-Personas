@@ -40,14 +40,17 @@ def test_conversation_trigger_enqueues_a_conversation_synthesis() -> None:
     enqueue_conversation_synthesis(
         q, owner_id="u1", conversation_id="conv-1", persona_id="p1", message_count=4
     )
-    assert len(q.enqueued) == 1
-    job = q.enqueued[0]
-    assert job["type"] == "synthesis"
+    # A conversation boundary enqueues the K2 synthesis job AND (K8) the episodic-consolidation
+    # job — two durable A0 producers off the same interaction boundary. Select by type so the
+    # assertion is order-independent.
+    assert len(q.enqueued) == 2
+    job = next(j for j in q.enqueued if j["type"] == "synthesis")
     assert job["owner_id"] == "u1"
     assert job["payload"]["interaction_kind"] == "conversation"
     assert job["payload"]["interaction_id"] == "conv-1"
     assert job["payload"]["high_water_mark"] == 4
     assert job["idempotency_key"] == "synthesis:conversation:conv-1:4"
+    assert any(j["type"] == "episodic_consolidation" for j in q.enqueued)
 
 
 def test_run_trigger_enqueues_an_agentic_run_synthesis() -> None:

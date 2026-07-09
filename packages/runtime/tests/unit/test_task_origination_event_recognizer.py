@@ -246,6 +246,4 @@ def test_event_judgment_validator_enforces_draft_iff_trigger() -> None:
     with pytest.raises(ValueError, match="must carry a draft"):
         EventTriggerJudgment(verdict=EventTriggerVerdict.TRIGGER)
     with pytest.raises(ValueError, match="only a TRIGGER judgment"):
-        EventTriggerJudgment(
-            verdict=EventTriggerVerdict.NOT_TRIGGER, draft=ContractDraft(goal="g")
-        )
+        EventTriggerJudgment(verdict=EventTriggerVerdict.NOT_TRIGGER, draft=ContractDraft(goal="g"))
