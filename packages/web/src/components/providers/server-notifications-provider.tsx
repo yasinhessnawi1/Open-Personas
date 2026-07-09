@@ -165,7 +165,7 @@ export function ServerNotificationsProvider({
     } catch {
       persona = row.params.persona ?? "";
     }
-    const params = { ...row.params, persona };
+    const params: Record<string, string> = { ...row.params, persona };
     try {
       // Unknown key (a stale/foreign writer's row): silent persona-scoped generic —
       // a persisted row never changes, so logging it forever is noise, not signal.

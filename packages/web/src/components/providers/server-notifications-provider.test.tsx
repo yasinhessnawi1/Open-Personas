@@ -229,10 +229,10 @@ describe("ServerNotificationsProvider", () => {
   // console-clean contract, not just the rendered fallback.
   describe("malformed-row resilience (R9-003)", () => {
     /** No i18n error may reach the console (the R9-003 reopen contract). */
-    const expectNoIntlErrors = (spy: ReturnType<typeof vi.spyOn>) => {
-      const intlCalls = spy.mock.calls.filter((args) =>
+    const expectNoIntlErrors = (spy: { mock: { calls: unknown[][] } }) => {
+      const intlCalls = spy.mock.calls.filter((args: unknown[]) =>
         args.some(
-          (a) =>
+          (a: unknown) =>
             String(a).includes("FORMATTING_ERROR") ||
             String(a).includes("MISSING_MESSAGE") ||
             String(a).includes("IntlError"),
