@@ -38,7 +38,10 @@ const messages = {
       failed: "Task failed · {persona}",
     },
     persona: { ready: "{persona} is ready" },
-    schedule: { fired: "{persona} ran your reminder: {subject}" },
+    schedule: {
+      fired: "{persona} ran your reminder: {subject}",
+      firedNoSubject: "{persona} ran your reminder.",
+    },
   },
 };
 
@@ -218,14 +221,27 @@ describe("ServerNotificationsProvider", () => {
     );
   });
 
-  // R9-003: title resolution must NEVER crash the shell over one malformed row.
-  // next-intl surfaces a missing interpolation param as a FORMATTING_ERROR
-  // (IntlError via onError + key-echo fallback with the default config, or a
-  // throw with a rethrowing onError) — either way the row must render the
-  // persona-scoped generic title, never break the provider render.
+  // R9-003 (+reopen): title resolution must NEVER crash the shell over one malformed
+  // row — and must never SPAM the console either. next-intl's default onError
+  // console.errors internally even when it recovers, and a persisted malformed row
+  // re-logs on every poll; so resolveTitle pre-validates (t.has + t.raw arg scan)
+  // and never enters next-intl's error path at all. These tests assert the
+  // console-clean contract, not just the rendered fallback.
   describe("malformed-row resilience (R9-003)", () => {
-    it("renders the generic title for a schedule_fired row missing `subject` (no throw)", async () => {
-      // next-intl's default onError logs the IntlError — silence the expected noise.
+    /** No i18n error may reach the console (the R9-003 reopen contract). */
+    const expectNoIntlErrors = (spy: ReturnType<typeof vi.spyOn>) => {
+      const intlCalls = spy.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            String(a).includes("FORMATTING_ERROR") ||
+            String(a).includes("MISSING_MESSAGE") ||
+            String(a).includes("IntlError"),
+        ),
+      );
+      expect(intlCalls).toEqual([]);
+    };
+
+    it("renders the no-subject reminder title for a schedule_fired row missing `subject` — console-clean", async () => {
       const consoleError = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
@@ -244,9 +260,10 @@ describe("ServerNotificationsProvider", () => {
           "2",
         ),
       );
+      // The known legacy case gets its honest specific title (not the vague generic).
       expect(screen.getByTestId("entry-s1")).toHaveAttribute(
         "data-title",
-        "Ada has an update",
+        "Ada ran your reminder.",
       );
       expect(screen.getByTestId("entry-s1")).toHaveAttribute(
         "data-href",
@@ -256,6 +273,7 @@ describe("ServerNotificationsProvider", () => {
         "data-title",
         "Ada is ready",
       );
+      expectNoIntlErrors(consoleError);
       consoleError.mockRestore();
     });
 
@@ -279,7 +297,7 @@ describe("ServerNotificationsProvider", () => {
       );
     });
 
-    it("falls back to the generic title for an unknown message_key", async () => {
+    it("falls back to the generic title for an unknown message_key — console-clean", async () => {
       const consoleError = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
@@ -299,6 +317,15 @@ describe("ServerNotificationsProvider", () => {
         "data-title",
         "Ada has an update",
       );
+      const intlCalls = consoleError.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            String(a).includes("FORMATTING_ERROR") ||
+            String(a).includes("MISSING_MESSAGE") ||
+            String(a).includes("IntlError"),
+        ),
+      );
+      expect(intlCalls).toEqual([]);
       consoleError.mockRestore();
     });
   });

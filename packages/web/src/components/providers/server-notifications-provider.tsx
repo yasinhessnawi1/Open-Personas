@@ -151,11 +151,13 @@ export function ServerNotificationsProvider({
 
   const resolveTitle = useCallback((row: ServerNotificationRow): string => {
     // The feed renders persisted rows from many writers — a single malformed row
-    // (unknown key, missing interpolation param) must NEVER crash the shell.
-    // next-intl has two failure modes: it can THROW an IntlError (FORMATTING_ERROR
-    // when a param like `subject` is absent — e.g. a schedule_fired row persisted
-    // before subject-threading, R9-003) or RETURN the raw dotted key (missing-key
-    // mode). Handle both: try/catch for the throw, string-compare for the key echo.
+    // (unknown key, missing interpolation param) must NEVER crash the shell, and
+    // (R9-003 reopen) must never SPAM the console either: next-intl's default
+    // onError console.errors internally even when it recovers, and a persisted
+    // malformed row re-logs on every poll. So we never enter next-intl's error
+    // path at all: pre-validate the key (t.has) and the interpolation params
+    // (t.raw + ICU-arg scan) BEFORE translating; fall back silently. The
+    // try/catch stays as the crash floor for rethrowing i18n configs.
     let persona: string;
     try {
       persona =
@@ -163,15 +165,37 @@ export function ServerNotificationsProvider({
     } catch {
       persona = row.params.persona ?? "";
     }
+    const params = { ...row.params, persona };
     try {
-      const title = tRef.current(row.message_key, { ...row.params, persona });
-      // Never surface a raw dotted key in the bell — persona-scoped generic instead.
+      // Unknown key (a stale/foreign writer's row): silent persona-scoped generic —
+      // a persisted row never changes, so logging it forever is noise, not signal.
+      if (!tRef.current.has(row.message_key)) {
+        return tRef.current("notifications.genericUpdate", { persona });
+      }
+      // Missing interpolation params (e.g. a schedule_fired row persisted before
+      // subject-threading): scan the raw ICU message for its {args} and verify.
+      const raw = tRef.current.raw(row.message_key);
+      const required =
+        typeof raw === "string"
+          ? [...raw.matchAll(/\{(\w+)[,}]/g)].map((m) => m[1])
+          : [];
+      if (required.some((name) => params[name] == null)) {
+        // The known legacy case gets its honest specific title; the rest, the generic.
+        if (row.message_key === "notifications.schedule.fired") {
+          return tRef.current("notifications.schedule.firedNoSubject", {
+            persona,
+          });
+        }
+        return tRef.current("notifications.genericUpdate", { persona });
+      }
+      const title = tRef.current(row.message_key, params);
+      // Belt-and-braces: never surface a raw dotted key in the bell.
       if (title === row.message_key || title.startsWith("notifications.")) {
         return tRef.current("notifications.genericUpdate", { persona });
       }
       return title;
     } catch {
-      // Malformed row (or genericUpdate itself failed below) — last-resort chain.
+      // Crash floor (rethrowing i18n configs / anything unforeseen) — last resort.
       try {
         return tRef.current("notifications.genericUpdate", { persona });
       } catch {
