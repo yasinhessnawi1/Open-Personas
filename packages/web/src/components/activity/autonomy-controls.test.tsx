@@ -81,7 +81,9 @@ describe("AutonomyControls", () => {
     ).toBeInTheDocument();
     // The three origination sources it now genuinely gates are named (no vague overclaim).
     expect(
-      screen.getByText(/new initiatives, scheduled reminders, and event reactions/i),
+      screen.getByText(
+        /new initiatives, scheduled reminders, and event reactions/i,
+      ),
     ).toBeInTheDocument();
   });
 
