@@ -6,9 +6,15 @@ collaborators — Spec 22's
 :class:`~persona.backends.openrouter_catalog.OpenRouterCatalogClient` and Spec 23's
 :class:`~persona.backends.metadata.openrouter_resolver.OpenRouterModelMetadataResolver`
 — no new network client, no second cache layer: the catalog client already caches
-its one HTTP fetch in-process (D-22-5), and :func:`_default_client` caches the
-CLIENT ITSELF at module scope so every request reuses that same in-process cache
-(construction is cheap / no network, D-22-11).
+its one HTTP fetch in-process (D-22-5), and :func:`_default_client` /
+:func:`_default_resolver` cache the CLIENT and the RESOLVER at module scope so
+every request reuses the same in-process cache for BOTH the HTTP fetch AND the
+resolver's own catalog-index build
+(:meth:`OpenRouterModelMetadataResolver._ensure_index`, construction is cheap /
+no network, D-22-11). A prior version of this module only cached the client —
+the resolver (and its ~350-entry index walk) was rebuilt from scratch on every
+single ``GET /v1/models`` call; that was a real per-request cost, not just a
+docstring inaccuracy (M1-T5 review fix).
 
 Two lists, one shared validity filter (spec_M1_design.md §4):
 
@@ -20,16 +26,27 @@ Two lists, one shared validity filter (spec_M1_design.md §4):
 "Valid" = chat-capable (``"text"`` in the entry's ``architecture.output_modalities``
 — excludes a hypothetical embedding-/audio-only-output entry; every entry in the
 live catalog passes this today, so it is a defensive no-op filter, not a live
-exclusion) AND :meth:`OpenRouterModelMetadataResolver.resolve` returns metadata for
-the id. The resolver's own ``_ensure_index`` already drops entries with invalid
-pricing — the R9-018 ``-1`` sentinel class OpenRouter uses for its own meta-router
-aliases (``openrouter/auto`` etc.) — and logs ONE summary WARNing per catalog
-fetch for the whole skipped set; this module does NOT re-log per entry when
-:meth:`resolve` returns ``None`` — that would be exactly the log spam R9-018 fixed.
-There is no separate "deprecated" boolean on :class:`OpenRouterModelEntry` (the
-live catalog does not expose one to this codebase's ``extra=\"ignore\"`` model) —
-the invalid-pricing check IS the only "unusable / deprecated-class" signal
-available, so it does double duty as both filters named in the task brief.
+exclusion) AND NOT announced-EOL (see below) AND
+:meth:`OpenRouterModelMetadataResolver.resolve` returns metadata for the id. The
+resolver's own ``_ensure_index`` already drops entries with invalid pricing — the
+R9-018 ``-1`` sentinel class OpenRouter uses for its own meta-router aliases
+(``openrouter/auto`` etc.) — and logs ONE summary WARNing per catalog fetch for
+the whole skipped set; this module does NOT re-log per entry when
+:meth:`resolve` returns ``None`` — that would be exactly the log spam R9-018
+fixed.
+
+Announced-EOL (M1-T5 review fix): :class:`OpenRouterModelEntry` DOES carry a
+deprecation signal — ``expiration_date`` (an ISO date string; live-verified
+2026-07-09 as set on 5/346 catalog entries, e.g. ``arcee-ai/trinity-mini``
+expiring 2026-07-10 — docs/specs/phase2/spec_22/research.md). A prior version of
+this docstring claimed "no deprecation signal exists" and relied on the
+invalid-pricing check alone to double as the deprecation filter; that claim was
+factually wrong — ``expiration_date`` was simply never modeled on
+:class:`OpenRouterModelEntry` until this fix. Any entry with ``expiration_date``
+set to ANY value is now excluded from BOTH ``recommended`` and ``all`` —
+presence alone is the signal, with no date parsing or comparison: the picker
+persists a choice on a persona, so offering an announced-end-of-life model is a
+footgun the moment it's chosen, regardless of how far out the date is.
 
 Fail-open (D-22-1 precedent): no ``PERSONA_OPENROUTER_API_KEY`` configured, or a
 catalog fetch failure, both yield ``stale=True`` + empty ``models`` — never an
@@ -182,9 +199,36 @@ def _default_client() -> OpenRouterCatalogClient | None:
     return OpenRouterCatalogClient(api_key, base_url=base_url)
 
 
+@lru_cache(maxsize=1)
+def _default_resolver() -> OpenRouterModelMetadataResolver | None:
+    """The module-scoped metadata resolver, paired 1:1 with :func:`_default_client`.
+
+    ``None`` exactly when :func:`_default_client` is ``None`` (no
+    ``PERSONA_OPENROUTER_API_KEY`` configured). Cached the same way as
+    :func:`_default_client` (``lru_cache(maxsize=1)``, same first-call-wins
+    guard) so the resolver — and its own catalog-index build,
+    :meth:`OpenRouterModelMetadataResolver._ensure_index` — is constructed ONCE
+    per process and reused by every ``GET /v1/models`` request, not rebuilt
+    (and its ~350 entries re-walked) on every single call (M1-T5 review fix).
+    """
+    client = _default_client()
+    if client is None:
+        return None
+    return OpenRouterModelMetadataResolver(client)
+
+
 def _is_chat_capable(entry: OpenRouterModelEntry) -> bool:
     """Whether the catalog entry can serve chat completions (produces text output)."""
     return "text" in entry.architecture.output_modalities
+
+
+def _is_announced_eol(entry: OpenRouterModelEntry) -> bool:
+    """Whether the catalog entry is announced-EOL (``expiration_date`` set to ANY value).
+
+    Presence-only check — no date parsing/comparison (see the module
+    docstring's "Announced-EOL" section for the rationale).
+    """
+    return entry.expiration_date is not None
 
 
 def _to_catalog_entry(
@@ -245,12 +289,25 @@ def list_models(
         )
         return ModelCatalogResult(models=(), source="openrouter", stale=True)
 
-    resolver = OpenRouterModelMetadataResolver(catalog_client)
+    # Reuse the cached module-scoped resolver when serving the default client;
+    # an injected override (tests) gets its own resolver so a fake's fixtures
+    # never leak through the process-lifetime singleton (M1-T5 review fix —
+    # see _default_resolver's docstring for why this is cached at all).
+    resolver = (
+        OpenRouterModelMetadataResolver(client) if client is not None else _default_resolver()
+    )
+    if resolver is None:
+        # Unreachable in practice: `client is None` here means `catalog_client`
+        # above was `_default_client()`, which already proved non-None (the
+        # fail-open return fired otherwise) — so `_default_resolver()` cannot
+        # be None either. Kept explicit so mypy sees a non-Optional resolver.
+        resolver = OpenRouterModelMetadataResolver(catalog_client)
     curated_ids = frozenset(CURATED_MODEL_IDS)
 
     # Pre-select the candidate entries per scope; the validity filter below
-    # (chat-capable + resolvable pricing) is then applied identically to both,
-    # so "recommended" and "all" can never disagree on what counts as valid.
+    # (chat-capable + not announced-EOL + resolvable pricing) is then applied
+    # identically to both, so "recommended" and "all" can never disagree on
+    # what counts as valid.
     candidates: tuple[OpenRouterModelEntry, ...]
     if scope == "recommended":
         by_id = {entry.id: entry for entry in entries}
@@ -260,6 +317,12 @@ def list_models(
 
     models: list[ModelCatalogEntry] = []
     for entry in candidates:
+        if _is_announced_eol(entry):
+            # expiration_date set to ANY value — excluded from BOTH scopes,
+            # even if curated (see the module docstring's "Announced-EOL"
+            # section). No per-entry log: this is expected, routine catalog
+            # churn, not an error.
+            continue
         if not _is_chat_capable(entry):
             continue
         metadata = resolver.resolve(entry.id)

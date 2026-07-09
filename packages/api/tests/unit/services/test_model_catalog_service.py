@@ -9,8 +9,10 @@ never runs in CI).
 
 Covers: recommended = curated ∩ valid in curated order; all = every valid entry
 (curated-flagged); the R9-018 ``-1`` sentinel pricing exclusion; the chat-capable
-(text-output) gate; the price-per-1M conversion pinned against a hand-computed
-value; and the fail-open paths (no client configured, fetch raises).
+(text-output) gate; the announced-EOL (``expiration_date`` presence) exclusion
+from both scopes regardless of curation (M1-T5 review fix); the price-per-1M
+conversion pinned against a hand-computed value; and the fail-open paths (no
+client configured, fetch raises).
 """
 
 from __future__ import annotations
@@ -36,12 +38,14 @@ def _entry(
     context_length: int | None = 128_000,
     tools: bool = True,
     text_output: bool = True,
+    expiration_date: str | None = None,
 ) -> OpenRouterModelEntry:
     """Build a catalog entry directly (no JSON round-trip needed for a fake)."""
     return OpenRouterModelEntry(
         id=model_id,
         name=name,
         context_length=context_length,
+        expiration_date=expiration_date,
         pricing=OpenRouterPricing(prompt=prompt, completion=completion),
         architecture=OpenRouterArchitecture(
             output_modalities=("text",) if text_output else ("embedding",)
@@ -133,6 +137,38 @@ def test_non_chat_capable_entry_is_excluded_even_if_curated_and_valid() -> None:
     assert result.stale is False  # a successful fetch that filtered everything is NOT stale
 
 
+def test_announced_eol_entry_is_excluded_from_all_scopes_even_when_curated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``expiration_date`` set to ANY value excludes an entry from BOTH scopes.
+
+    ORCHESTRATOR RULING (M1-T5 review fix): presence of ``expiration_date`` is
+    the announced-EOL signal, full stop — no date parsing/comparison, and
+    curation does NOT override it. The entry here is otherwise perfectly
+    valid (chat-capable, resolvable pricing) and curated (via monkeypatched
+    ``CURATED_MODEL_IDS``), isolating the EOL filter as the sole reason it's
+    excluded from both ``recommended`` and ``all``.
+    """
+    eol_id = "some-provider/eol-model"
+    monkeypatch.setattr(svc, "CURATED_MODEL_IDS", (eol_id,))
+    eol_entry = _entry(
+        eol_id,
+        prompt="0.000003",
+        completion="0.000015",
+        expiration_date="2026-07-10",
+    )
+
+    all_result = svc.list_models(scope="all", client=_FakeCatalogClient((eol_entry,)))
+    assert all_result.models == ()
+    assert all_result.stale is False  # filtered, not a fetch failure
+
+    recommended_result = svc.list_models(
+        scope="recommended", client=_FakeCatalogClient((eol_entry,))
+    )
+    assert recommended_result.models == ()
+    assert recommended_result.stale is False
+
+
 def test_label_falls_back_to_id_when_catalog_name_is_blank() -> None:
     entry = _entry("some-provider/small-model", prompt="0.0000005", completion="0.000001", name="")
     result = svc.list_models(scope="all", client=_FakeCatalogClient((entry,)))
@@ -184,12 +220,14 @@ def test_no_client_configured_is_stale_empty_not_raised(monkeypatch: pytest.Monk
     """No PERSONA_OPENROUTER_API_KEY -> the module-scoped client is None -> fail-open."""
     monkeypatch.delenv(svc._API_KEY_ENV, raising=False)  # noqa: SLF001 — env-driven singleton
     svc._default_client.cache_clear()  # noqa: SLF001 — force env re-read
+    svc._default_resolver.cache_clear()  # noqa: SLF001 — paired cache, same reset (M1-T5)
     try:
         result = svc.list_models(scope="recommended")
         assert result.stale is True
         assert result.models == ()
     finally:
         svc._default_client.cache_clear()  # noqa: SLF001 — don't leak into other tests
+        svc._default_resolver.cache_clear()  # noqa: SLF001 — don't leak into other tests
 
 
 def test_curated_model_ids_are_unique_and_nonempty() -> None:

@@ -113,6 +113,13 @@ class OpenRouterModelEntry(BaseModel):
     ``"image" in architecture.input_modalities`` (the array, never the
     derived modality string). ``is_free`` follows D-22-14 — the ``:free``
     suffix is authoritative, NOT zero pricing.
+
+    ``expiration_date`` IS this catalog's deprecation signal (an ISO date
+    string; set on ~5/346 live entries, verified 2026-07-09 — see
+    docs/specs/phase2/spec_22/research.md). It is kept as the raw string
+    (no date parsing) because this module is a pure catalog parser, not a
+    policy layer — consumers that need an "announced-EOL" filter (M1-T5)
+    key off *presence* (``is not None``), not the parsed value.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
@@ -121,6 +128,7 @@ class OpenRouterModelEntry(BaseModel):
     canonical_slug: str | None = None
     name: str = ""
     context_length: int | None = None
+    expiration_date: str | None = None
     pricing: OpenRouterPricing = Field(default_factory=OpenRouterPricing)
     architecture: OpenRouterArchitecture = Field(default_factory=OpenRouterArchitecture)
     supported_parameters: tuple[str, ...] = ()

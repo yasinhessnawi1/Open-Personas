@@ -39,8 +39,9 @@ def _model_item(
     tools: bool = False,
     vision: bool = False,
     prompt: str = "0.000003",
+    expiration_date: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    item: dict[str, Any] = {
         "id": model_id,
         "canonical_slug": model_id.split(":")[0],
         "name": model_id,
@@ -54,6 +55,9 @@ def _model_item(
         "supported_parameters": (["tools", "tool_choice"] if tools else ["temperature"]),
         "extra_future_field": "ignored",  # exercises extra="ignore" (D-22-12)
     }
+    if expiration_date is not None:
+        item["expiration_date"] = expiration_date
+    return item
 
 
 def _client(
@@ -98,6 +102,31 @@ class TestListModels:
         assert models[1].is_free is True
         assert models[1].supports_vision is False
         client.close()
+
+    def test_parses_expiration_date_when_present(self) -> None:
+        """``expiration_date`` (the M1-T5 announced-EOL signal) round-trips as-is."""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        _model_item("arcee-ai/trinity-mini", expiration_date="2026-07-10"),
+                    ]
+                },
+            )
+
+        models = _client(handler).list_models()
+        assert models[0].expiration_date == "2026-07-10"
+
+    def test_expiration_date_defaults_to_none_when_absent(self) -> None:
+        """Entries without ``expiration_date`` in the payload parse to ``None`` (not live-EOL)."""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": [_model_item("openai/gpt-4o")]})
+
+        models = _client(handler).list_models()
+        assert models[0].expiration_date is None
 
     def test_caches_until_force_refresh(self) -> None:
         calls: list[int] = []

@@ -8,8 +8,9 @@ RLS-scoped, no seeding needed); the DB is required only because
 ``users`` row on the real admin engine (same as every other authenticated route).
 
 No network: ``PERSONA_OPENROUTER_API_KEY`` is force-cleared and the module-scoped
-catalog-client cache is reset around every test — regardless of what the ambient
-shell / ``.env`` happens to have configured — so this suite deterministically
+catalog-client and metadata-resolver caches are reset around every test —
+regardless of what the ambient shell / ``.env`` happens to have configured — so
+this suite deterministically
 exercises the "no client configured" fail-open path and never makes a real
 OpenRouter call (the plan's Global Constraint: "OpenRouterCatalogClient is never
 allowed to fetch in CI"). The populated / priced happy path is unit-tested with a
@@ -51,8 +52,10 @@ def _no_real_openrouter_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     """
     monkeypatch.delenv("PERSONA_OPENROUTER_API_KEY", raising=False)
     model_catalog_service._default_client.cache_clear()  # noqa: SLF001 — force env re-read
+    model_catalog_service._default_resolver.cache_clear()  # noqa: SLF001 — paired cache (M1-T5)
     yield
     model_catalog_service._default_client.cache_clear()  # noqa: SLF001 — don't leak into other tests
+    model_catalog_service._default_resolver.cache_clear()  # noqa: SLF001 — don't leak into other tests
 
 
 @pytest.fixture
