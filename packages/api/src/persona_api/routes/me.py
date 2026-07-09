@@ -20,6 +20,7 @@ from persona_api.realtime.stream import stream_user_events
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schemas import (
     CreditsResponse,
+    NavCountsResponse,
     NotificationMarkReadResult,
     NotificationOut,
     UpdateProfileRequest,
@@ -30,6 +31,7 @@ from persona_api.schemas.requests import ScheduleCreateRequest, ScheduleReschedu
 from persona_api.services import (
     calendar_reschedule_service,
     credits_service,
+    nav_counts_service,
     notifications_service,
     occurrences_service,
     schedule_create_service,
@@ -84,6 +86,34 @@ async def get_usage(
         )
         for r in rows
     ]
+
+
+@router.get("/nav-counts", response_model=NavCountsResponse)
+async def get_nav_counts(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> NavCountsResponse:
+    """The caller's sidebar nav-badge counts in one round-trip (R9-010).
+
+    Six owner-scoped, index-friendly ``COUNT``s (personas / chat conversations /
+    calls / non-terminal tasks / schedule rows / canonical graph nodes) — see
+    :mod:`persona_api.services.nav_counts_service` for the pinned semantics.
+    RLS-scoped like the sibling ``/v1/me`` routes; ``memory_nodes`` is ``0``
+    when no graph store is wired (the Memory nav row is hidden then anyway).
+    """
+    counts = nav_counts_service.get_nav_counts(
+        request.app.state.rls_engine,
+        owner_id=user.id,
+        include_memory=getattr(request.app.state, "graph_store", None) is not None,
+    )
+    return NavCountsResponse(
+        personas=counts["personas"],
+        conversations=counts["conversations"],
+        calls=counts["calls"],
+        memory_nodes=counts["memory_nodes"],
+        active_tasks=counts["active_tasks"],
+        schedules=counts["schedules"],
+    )
 
 
 @router.get("/profile", response_model=UserProfileResponse)

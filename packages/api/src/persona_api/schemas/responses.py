@@ -47,6 +47,7 @@ __all__ = [
     "MemorySearchResult",
     "MemoryWindowResponse",
     "MessageView",
+    "NavCountsResponse",
     "PersonaCapabilities",
     "PersonaDetail",
     "PersonaSummary",
@@ -527,6 +528,36 @@ class UserProfileResponse(_Output):
     quiet_hours_start: int | None = None
     quiet_hours_end: int | None = None
     created_at: datetime
+
+
+class NavCountsResponse(_Output):
+    """The owner-scoped totals behind the sidebar nav badges (R9-010).
+
+    One cheap round-trip for every nav-row count — each field is an
+    index-friendly ``COUNT`` over the caller's own rows (RLS-scoped like the
+    sibling ``/v1/me`` routes):
+
+    - ``personas`` / ``conversations``: honest TOTALS (the sidebar previously
+      derived these from its truncated preview lists). ``conversations``
+      counts chat-born threads only (``origin != 'call'`` — call transcripts
+      belong to the Calls surface).
+    - ``calls``: all call records.
+    - ``memory_nodes``: canonical knowledge-graph nodes (``merged_into IS
+      NULL``, matching what the Memory surface shows); ``0`` when no graph
+      store is wired (the Memory nav row is hidden then anyway).
+    - ``active_tasks``: the active working set — non-terminal states only
+      (from :data:`persona.tasks.state.TERMINAL_STATES`'s complement), never
+      completed/failed/cancelled history.
+    - ``schedules``: schedule ROWS — a recurring schedule counts once, never
+      its occurrences/fires.
+    """
+
+    personas: int
+    conversations: int
+    calls: int
+    memory_nodes: int
+    active_tasks: int
+    schedules: int
 
 
 class NotificationOut(_Output):
