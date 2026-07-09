@@ -52,7 +52,7 @@ from persona.imagegen.errors import (
     ImageGenUnavailableError,
     ImageProviderError,
 )
-from persona.logging import get_logger
+from persona.logging import get_logger, redact_secrets
 
 if TYPE_CHECKING:
     from persona.imagegen.protocol import ImageBackend
@@ -116,6 +116,11 @@ class AttemptRecord:
         last_error_reason: ``exc.context.get("reason", "")`` — the
             Spec 15 ``ImageProviderError`` discriminator the classifier
             branched on (empty for non-:class:`PersonaError` failures).
+        last_error_message: ``redact_secrets(str(exc))`` — the provider's
+            own phrasing of *why* the backend failed (R9-015), so the
+            dead-letter ``last_error`` distinguishes a bad model id from an
+            auth failure from a rate-limit. Credential-scrubbed at the
+            record boundary; never carries a raw key.
         retried_same_model: Whether a same-model retry was attempted
             before fallback (D-20-10 N=1 instrumentation).
     """
@@ -124,6 +129,7 @@ class AttemptRecord:
     model: str
     last_error_class: str
     last_error_reason: str
+    last_error_message: str
     retried_same_model: bool
 
 
@@ -315,8 +321,14 @@ class MultiModelImageBackend:
             outcome = await self._try_backend(backend, prompt, options, attempts)
             if outcome is not None:
                 return outcome
-        # Every backend exhausted — raise structured aggregate.
+        # Every backend exhausted — raise structured aggregate. Per R9-015
+        # the aggregate MUST carry the per-backend causes (class + redacted
+        # message) so the dead-letter ``last_error`` is diagnosable — an
+        # empty "everything failed" is what left the owner blind. The
+        # ``attempts`` list (asdict) now includes ``last_error_message``;
+        # ``final_error_class`` / ``final_error`` hoist the terminal cause.
         final_class = attempts[-1].last_error_class if attempts else ""
+        final_error = attempts[-1].last_error_message if attempts else ""
         raise AllModelsFailedError(
             "every backend in MultiModelImageBackend exhausted",
             context={
@@ -324,6 +336,7 @@ class MultiModelImageBackend:
                 "attempt_count": str(len(attempts)),
                 "attempts": str([asdict(a) for a in attempts]),
                 "final_error_class": final_class,
+                "final_error": final_error,
             },
         )
 
@@ -456,7 +469,13 @@ class MultiModelImageBackend:
         exc: Exception,
         action: str,
     ) -> None:
-        """Emit a structured WARNING when a backend is skipped per D-20-12 shape."""
+        """Emit a structured WARNING when a backend is skipped per D-20-12 shape.
+
+        Carries the redacted provider error MESSAGE (R9-015) so a bad model
+        id / auth failure / endpoint error / rate-limit are distinguishable in
+        the log — ``error_class`` + ``reason`` alone rendered them identical.
+        The message is credential-scrubbed via :func:`redact_secrets`.
+        """
         context = exc.context if isinstance(exc, PersonaError) else {}
         _LOG.warning(
             "multi_model_image fallback",
@@ -464,6 +483,7 @@ class MultiModelImageBackend:
             model=backend.model_name,
             error_class=type(exc).__name__,
             reason=context.get("reason", ""),
+            error=redact_secrets(str(exc)),
             action=action,
             tier=self._tier_name or "imagegen",
         )
@@ -485,6 +505,10 @@ class MultiModelImageBackend:
                 model=backend.model_name,
                 last_error_class=type(exc).__name__,
                 last_error_reason=reason,
+                # R9-015: capture the redacted provider message so the
+                # aggregated AllModelsFailedError (→ dead-letter last_error)
+                # carries *why* each backend failed, not just its class.
+                last_error_message=redact_secrets(str(exc)),
                 retried_same_model=retried,
             )
         )

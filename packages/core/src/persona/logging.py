@@ -14,9 +14,10 @@ Per D-01-7 in ``docs/specs/spec_01/decisions.md``.
 from __future__ import annotations
 
 import contextlib
+import re
 import sys
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from loguru import logger as _root_logger
 
@@ -25,7 +26,69 @@ from persona.config import PersonaCoreConfig
 if TYPE_CHECKING:
     from loguru import Logger
 
-__all__ = ["get_logger", "reset_for_testing"]
+__all__ = ["get_logger", "redact_secrets", "reset_for_testing"]
+
+# Marker substituted for anything that looks like a credential in a free-form
+# string headed for a log. Deliberately ASCII-plain so it round-trips through
+# any sink encoding.
+_SECRET_MARKER: Final[str] = "<redacted>"
+
+# Default cap for a redacted error message: long enough to keep the operator
+# signal (the provider's own phrasing of *what* failed), short enough that a
+# multi-KB HTML error body or a stack-embedded token dump cannot flood the log.
+_ERROR_MESSAGE_MAX_CHARS: Final[int] = 300
+
+# Patterns that scrub anything resembling a secret out of a provider error
+# string BEFORE it reaches a sink. Order matters: the labelled forms
+# (``Bearer …`` / ``api_key=…``) run first so their value is masked whole;
+# the long-opaque-run catch-all mops up bare keys/hashes/base64 the labelled
+# passes missed. Over-redaction here is acceptable — a masked hash still lets
+# the operator see the surrounding "invalid model id" / "quota exceeded" text.
+_SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    # ``Bearer <token>`` (case-insensitive), token = non-space run.
+    re.compile(r"(?i)\bbearer\s+[^\s\"']+"),
+    # ``sk-…`` / ``sk-or-v1-…`` style keys (OpenAI-compat + OpenRouter).
+    re.compile(r"\bsk-[A-Za-z0-9._-]{6,}"),
+    # ``api_key=…`` / ``api-key: …`` / ``token=…`` / ``secret=…`` /
+    # ``password=…`` / ``authorization: …`` — label + delimiter + value.
+    re.compile(
+        r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password|authorization)"
+        r"\s*[=:]\s*[^\s\"',&]+"
+    ),
+    # Bare long opaque runs (>=40 chars of key/hash/base64 alphabet).
+    re.compile(r"\b[A-Za-z0-9._~+/=-]{40,}\b"),
+)
+
+
+def redact_secrets(text: str, *, max_chars: int = _ERROR_MESSAGE_MAX_CHARS) -> str:
+    """Scrub credential-looking substrings out of ``text`` and cap its length.
+
+    Defence-in-depth for logging free-form provider error strings (``str(exc)``):
+    an upstream SDK can echo the request ``Authorization`` header, a bad
+    ``sk-…`` key, or a signed URL into its exception message. This masks the
+    known credential shapes (Bearer tokens, ``sk-…`` keys, ``api_key=…`` and
+    friends, and long opaque hex/base64 runs) with :data:`_SECRET_MARKER`, then
+    truncates to ``max_chars`` (appending an ``…`` ellipsis) so an oversized
+    error body cannot flood the sink.
+
+    This is a heuristic, not a guarantee — it errs toward over-redaction. Use it
+    at the log boundary, never to sanitise data for storage or return.
+
+    Args:
+        text: The raw string (typically ``str(exc)``) about to be logged.
+        max_chars: Cap on the returned length; defaults to
+            :data:`_ERROR_MESSAGE_MAX_CHARS`.
+
+    Returns:
+        The redacted, length-capped string.
+    """
+    scrubbed = text
+    for pattern in _SECRET_PATTERNS:
+        scrubbed = pattern.sub(_SECRET_MARKER, scrubbed)
+    if len(scrubbed) > max_chars:
+        scrubbed = scrubbed[:max_chars] + "…"
+    return scrubbed
+
 
 # Idempotency guards. These two variables together implement the
 # "configure sinks exactly once per process" property required by D-01-7.

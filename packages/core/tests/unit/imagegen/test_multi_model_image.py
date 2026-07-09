@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.errors import AuthenticationError, PersonaError
 from persona.imagegen.errors import (
     ContentRejectedError,
@@ -30,7 +31,7 @@ from persona.imagegen.result import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 
 # ---------------------------------------------------------------------
@@ -606,10 +607,106 @@ class TestAttemptRecord:
             model="m",
             last_error_class="ImageProviderError",
             last_error_reason="rate_limit",
+            last_error_message="rate limited",
             retried_same_model=True,
         )
         with pytest.raises((AttributeError, TypeError)):
             record.provider = "other"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------
+# R9-015 — provider error surfacing on fallback + exhaustion
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def log_records() -> Iterator[list[dict[str, Any]]]:
+    """Loguru sink capturing full records (message + structured ``extra``)."""
+    records: list[dict[str, Any]] = []
+    sink_id = _loguru_logger.add(lambda m: records.append(dict(m.record)), level="DEBUG")
+    try:
+        yield records
+    finally:
+        _loguru_logger.remove(sink_id)
+
+
+def _auth_with_secret() -> AuthenticationError:
+    """An auth error whose message leaks a bearer token + sk- key (worst case)."""
+    return AuthenticationError(
+        "401 Unauthorized: Authorization: Bearer "
+        "sk-or-v1-abcdef0123456789abcdef0123456789 rejected",
+        context={"provider": "openrouter"},
+    )
+
+
+class TestProviderErrorSurfacing:
+    @pytest.mark.asyncio
+    async def test_log_fallback_emits_redacted_error_message(
+        self, log_records: list[dict[str, Any]]
+    ) -> None:
+        # A backend fails with a distinctive message → the fallback WARNING
+        # carries an ``error=`` field so a bad model id is distinguishable
+        # from an auth failure (the whole R9-015 point).
+        primary = _ScriptedBackend(
+            provider="nvidia",
+            model="flux",
+            script=[_model_not_found()],
+        )
+        secondary = _ScriptedBackend(
+            provider="fal", model="flux-pro", script=[_make_result(provider="fal")]
+        )
+        wrapper = MultiModelImageBackend([primary, secondary], tier_name="imagegen")
+
+        await wrapper.generate("a cat")
+
+        fallback = next(r for r in log_records if r["message"] == "multi_model_image fallback")
+        # PersonaError.str() appends its context; the provider phrasing is present.
+        assert "no such model" in fallback["extra"]["error"]
+        assert fallback["extra"]["error_class"] == "ImageProviderError"
+
+    @pytest.mark.asyncio
+    async def test_log_fallback_scrubs_secret_from_message(
+        self, log_records: list[dict[str, Any]]
+    ) -> None:
+        # A provider error echoing a Bearer token + sk- key must be scrubbed
+        # before it reaches the sink.
+        primary = _ScriptedBackend(provider="openrouter", model="x", script=[_auth_with_secret()])
+        secondary = _ScriptedBackend(
+            provider="fal", model="flux-pro", script=[_make_result(provider="fal")]
+        )
+        wrapper = MultiModelImageBackend([primary, secondary])
+
+        await wrapper.generate("a cat")
+
+        fallback = next(r for r in log_records if r["message"] == "multi_model_image fallback")
+        logged = fallback["extra"]["error"]
+        assert "sk-or-v1-abcdef0123456789abcdef0123456789" not in logged
+        assert "Bearer sk-or-v1" not in logged
+        assert "<redacted>" in logged
+        # The non-secret signal ("401 Unauthorized") is preserved.
+        assert "401 Unauthorized" in logged
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_error_carries_per_backend_causes(self) -> None:
+        # When every backend fails, the aggregated AllModelsFailedError must
+        # carry each backend's redacted message so the dead-letter last_error
+        # is diagnosable — not just "everything failed".
+        primary = _ScriptedBackend(provider="nvidia", model="flux", script=[_credits_expired()])
+        secondary = _ScriptedBackend(provider="openrouter", model="x", script=[_auth_with_secret()])
+        wrapper = MultiModelImageBackend([primary, secondary])
+
+        with pytest.raises(AllModelsFailedError) as excinfo:
+            await wrapper.generate("a cat")
+        ctx = excinfo.value.context
+        attempts_str = ctx["attempts"]
+        # Per-backend messages present (redacted) in the attempts dump.
+        assert "402 paid trial expired" in attempts_str
+        assert "401 Unauthorized" in attempts_str
+        # The final (terminal) cause is hoisted for the dead-letter.
+        assert "401 Unauthorized" in ctx["final_error"]
+        # And the secret never leaks into the aggregated error.
+        assert "sk-or-v1-abcdef0123456789abcdef0123456789" not in attempts_str
+        assert "sk-or-v1-abcdef0123456789abcdef0123456789" not in ctx["final_error"]
 
 
 # ---------------------------------------------------------------------
