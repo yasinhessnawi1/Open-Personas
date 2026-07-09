@@ -88,6 +88,7 @@ from persona_api.routes import (
     mcp_servers,
     me,
     memory,
+    models,
     personas,
     runs,
     tasks,
@@ -981,3 +982,4 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(approvals.router)  # spec A6: the approvals inbox (dual-resolution twin)
     app.include_router(autonomy.router)  # spec A6: the morning review (the shared digest)
     app.include_router(tasks.router)  # spec A6: the tasks read surface (list / detail / audit)
+    app.include_router(models.router)  # spec M1: model catalog — curated shortlist + browse-all
