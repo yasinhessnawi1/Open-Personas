@@ -99,6 +99,8 @@ class TestFullRoutingFromYaml:
         assert p.routing.intelligent.weights.cost == 0.6
         assert p.routing.intelligent.weights.quality == 0.50  # default preserved
         assert p.routing.budget.max_cents_per_turn == 3.0
+        # Additive invariant: pre-M1 document (no preferred_model field) parses cleanly.
+        assert p.routing.preferred_model is None
 
 
 class TestPreferredModel:

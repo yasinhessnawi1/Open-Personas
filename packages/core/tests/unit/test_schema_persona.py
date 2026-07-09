@@ -42,6 +42,8 @@ def test_valid_fixture_loads(fixture: Path) -> None:
     persona = Persona.from_yaml(fixture)
     assert isinstance(persona, Persona)
     assert persona.identity.name
+    # Additive invariant: all pre-M1 fixtures have preferred_model defaulted to None.
+    assert persona.routing.preferred_model is None
 
 
 @pytest.mark.parametrize("fixture", INVALID_FIXTURES, ids=lambda p: p.name)
