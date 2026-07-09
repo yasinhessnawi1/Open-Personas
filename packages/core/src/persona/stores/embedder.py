@@ -51,6 +51,18 @@ class Embedder(Protocol):
         ...
 
 
+#: The ONE process-wide torch-model construction lock. The failure it guards against is
+#: PROCESS-GLOBAL: two concurrent ``SentenceTransformer``/``CrossEncoder`` constructions —
+#: even of different models from different instances (a background warm-up thread + the
+#: main thread, or two app builds in one pytest process) — corrupt torch's meta-device
+#: init, after which EVERY subsequent model load in the process raises "Cannot copy out
+#: of meta tensor" (the measured cascade). A per-instance lock cannot prevent that, so
+#: every lazy torch-model construction in the process must serialise on THIS lock
+#: (the K9 cross-encoder scorer imports it too). Construction is rare (once per model),
+#: so the serialisation costs nothing steady-state.
+TORCH_MODEL_CONSTRUCTION_LOCK = threading.Lock()
+
+
 class SentenceTransformerEmbedder:
     """``sentence-transformers``-backed embedder with lazy model load.
 
@@ -73,12 +85,11 @@ class SentenceTransformerEmbedder:
         self._device = device
         self._model: object | None = None
         self._dimension: int | None = None
-        # The embedder is app-shared and now accessed from a background warm-up
-        # thread (Spec 32 A1) concurrently with the agent loop. Serialise the
-        # lazy load so two threads never construct the SentenceTransformer at
-        # once — concurrent construction corrupts torch's meta-device init and
-        # raises "Cannot copy out of meta tensor" (notably on MPS).
-        self._load_lock = threading.Lock()
+        # Lazy loads serialise on the PROCESS-GLOBAL construction lock (not per-instance):
+        # concurrent construction corrupts torch's meta-device init process-wide — two
+        # DIFFERENT instances loading at once (a warm-up thread + the main thread) trip it
+        # just as surely as two threads on one instance. See TORCH_MODEL_CONSTRUCTION_LOCK.
+        self._load_lock = TORCH_MODEL_CONSTRUCTION_LOCK
 
     @property
     def dimension(self) -> int:

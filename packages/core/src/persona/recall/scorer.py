@@ -88,10 +88,13 @@ class CrossEncoderScorer:
         self._model: object | None = None
         # The scorer is process-shared (``shared_scorer``) and first-scored from
         # reranker worker threads (chat DeadlineReranker / voice to_thread), possibly
-        # concurrently across turns. Double-checked locking serialises the one-time
-        # construction — concurrent construction corrupts torch's meta-device init
-        # (the embedder's measured failure mode).
-        self._load_lock = threading.Lock()
+        # concurrently across turns. The one-time construction serialises on the
+        # PROCESS-GLOBAL torch construction lock (shared with every embedder): the
+        # meta-device corruption is process-wide, so a scorer constructing while an
+        # embedder constructs trips it just the same (the embedder's measured failure).
+        from persona.stores.embedder import TORCH_MODEL_CONSTRUCTION_LOCK
+
+        self._load_lock = TORCH_MODEL_CONSTRUCTION_LOCK
 
     def _load(self) -> object:
         if self._model is not None:

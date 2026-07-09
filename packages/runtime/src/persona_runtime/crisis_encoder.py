@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from functools import lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -164,7 +165,14 @@ class CrisisEncoder:
 
     def _resolve_embedder(self) -> Embedder:
         if self._embedder is None:
-            self._embedder = SentenceTransformerEmbedder(model_name=self.model_name, normalize=True)
+            # Pinned to CPU, the codebase-wide convention (the bge default_embedder + the K9
+            # cross-encoder do the same): ``device="auto"`` selects Apple MPS on a Mac, where
+            # this lazy/threaded load (warmup runs via asyncio.to_thread) intermittently raises
+            # "Cannot copy out of meta tensor". MiniLM-L12 encodes fast on CPU (R6's measured
+            # ~85-90 ms onset already assumed it), so CPU is both robust and fast enough.
+            self._embedder = SentenceTransformerEmbedder(
+                model_name=self.model_name, normalize=True, device="cpu"
+            )
         return self._embedder
 
     def _fit(self) -> _LogRegHead:
@@ -240,12 +248,17 @@ class CrisisEncoder:
         return [0.0 if not t else float(row[1]) for t, row in zip(normalised, probas, strict=True)]
 
 
+@lru_cache(maxsize=1)
 def build_crisis_encoder() -> CrisisEncoder:
     """The app-scoped crisis encoder for a composition root (RuntimeFactory / voice runner).
 
     Lazy — the ~470 MB model + head fit are paid at :meth:`CrisisEncoder.warmup` (boot,
     off-loop) or, failing that, on the first :meth:`CrisisEncoder.score`. One instance per
-    process, injected into every path so there is ONE classifier (R6-D-3).
+    process (``lru_cache`` — enforced, not aspirational), injected into every path so there
+    is ONE classifier (R6-D-3). Without the cache, every app build loads its own ~470 MB
+    model — N test-suite app builds in one pytest process accumulated N loads and corrupted
+    torch's meta-device init (the "Cannot copy out of meta tensor" cascade). Tests that need
+    an isolated instance construct :class:`CrisisEncoder` directly.
     """
     return CrisisEncoder()
 
