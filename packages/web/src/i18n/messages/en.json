@@ -175,7 +175,12 @@
     "loadOlder": "Load older",
     "loading": "Loading…",
     "endOfList": "End of conversations.",
-    "shownOf": "Showing {shown} of {total}"
+    "shownOf": "Showing {shown} of {total}",
+    "newMessage": "New message"
+  },
+  "personaPicker": {
+    "choosePersona": "Choose a persona",
+    "empty": "No personas yet. Create one to start a chat."
   },
   "calls": {
     "title": "Calls",

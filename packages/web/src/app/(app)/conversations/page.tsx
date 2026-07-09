@@ -5,6 +5,7 @@ import {
   ConversationList,
   type ConversationListPersona,
 } from "@/components/conversations/conversation-list";
+import { NewConversationButton } from "@/components/conversations/new-conversation-button";
 import { PageBody, PageHeader, Stack } from "@/components/layout";
 import { EmptyState } from "@/components/patterns/empty-state";
 import { unwrap } from "@/lib/api";
@@ -40,9 +41,21 @@ export default async function ConversationsPage() {
     ]),
   );
 
+  const personaList = Array.from(personaMap.values());
+
   return (
     <PageBody>
-      <PageHeader title={t("title")} subtitle={t("subtitle")} />
+      <PageHeader
+        title={t("title")}
+        subtitle={t("subtitle")}
+        // R9-014 (b): "New message" → reusable persona picker → new chat.
+        // Only offered when the owner actually has a persona to message.
+        actions={
+          personaList.length > 0 ? (
+            <NewConversationButton personas={personaList} />
+          ) : undefined
+        }
+      />
       {conversations.length === 0 ? (
         <EmptyState
           icon={<MessageSquare className="size-8" aria-hidden="true" />}
@@ -51,7 +64,7 @@ export default async function ConversationsPage() {
         />
       ) : (
         <Stack gap={2}>
-          <ConversationFilterStrip personas={Array.from(personaMap.values())} />
+          <ConversationFilterStrip personas={personaList} />
           <ConversationList
             conversations={conversations}
             personaById={Object.fromEntries(personaMap)}
