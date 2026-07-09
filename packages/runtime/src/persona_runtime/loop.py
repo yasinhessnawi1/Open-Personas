@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from persona.audit import AuditAction
 from persona.autonomy import policy_for, resolve_autonomy
+from persona.backends.multi_model import MultiModelChatBackend
 from persona.backends.types import reasoning_as_text
 from persona.errors import SkillCompositionDepthError, SkillCycleError
 from persona.logging import get_logger
@@ -89,6 +90,7 @@ from persona_runtime.routing import (
     HeuristicRouter,
     RoutingContext,
     RoutingDecision,
+    canonical_model_id,
     classifiers,
     reorder_primary,
     tier_for,
@@ -478,6 +480,7 @@ class ConversationLoop:
         latency_tracker: FirstTokenLatencyTracker | None = None,
         question_author: QuestionAuthor | None = None,
         intelligent_router: IntelligentRouter | None = None,
+        preferred_backend_provider: Callable[[str], ChatBackend | None] | None = None,
         day_spent_cents_provider: Callable[[], float] | None = None,
         graph_retrieval: Callable[[str], GraphContext] | None = None,
         nonce_source: Callable[[], str] | None = None,
@@ -617,6 +620,16 @@ class ConversationLoop:
         # feeds the soft per-session budget ramp.
         self._intelligent_router = intelligent_router
         self._session_spent_cents: float = 0.0
+        # Spec M1 (M1-T3): the persona's chosen model preempts the Spec 23 scorer.
+        # ``None`` (the default) is the pre-M1 path — every existing caller stays
+        # byte-identical (the hook short-circuits before touching routing). The
+        # composition root (T4) injects T2's cached OpenRouter passthrough builder;
+        # a ``None`` return from it ⇒ fail-open to the tier default. The two log-once
+        # guards keep the gate-skip and the provider-None fail-open to one DEBUG line
+        # per loop instance (never per turn).
+        self._preferred_backend_provider = preferred_backend_provider
+        self._preferred_gate_logged = False
+        self._preferred_provider_none_logged = False
         # Spec R7 (R7-D-1 discharge of D-23-X): per-day enforcement is no longer
         # deferred — the DURABLE cross-session per-day number is ``turn_logs``
         # (recorded actual ``cost_cents``), read via an injected provider closure
@@ -1240,6 +1253,13 @@ class ConversationLoop:
         # the choice equals the current primary — backward-compat (criterion 11).
         if self._intelligent_router is not None and self._persona.routing.intelligent.enabled:
             backend = reorder_primary(backend, decision.model)
+        # Spec M1 (M1-T3): the persona's preferred model fronts the tier backend. When the
+        # decision carries the preferred provenance, promote it to primary within the tier
+        # (if it is one of the tier's subs) or compose the injected passthrough AHEAD of the
+        # tier chain — the chain IS the error fallback. Independent of intelligent routing;
+        # a provider miss / already-primary id ⇒ the tier backend is unchanged (fail-open).
+        if decision.model_fallback_reason == "preferred_model":
+            backend = self._front_preferred_backend(backend, decision.model)
         max_tokens = _backend_max_tokens(backend)
 
         # Mutable per-turn state for the generation sub-loop. ``tool_messages``
@@ -1986,22 +2006,21 @@ class ConversationLoop:
                 rationale=f"persona_override → {override}",
                 candidates_considered=(override,),
             )
-            # Spec 23 T11: a tier override pins the TIER; intelligent routing may
-            # still pick the best MODEL within it (orthogonal). Off-path is a
-            # no-op (criterion 11) — the override context is built only when active.
-            if self._model_selection_active():
+            # Spec 23 T11 + Spec M1 T3: a tier override pins the TIER; the persona's
+            # preferred model (M1) or the intelligent scorer (23) may still pick the
+            # MODEL within it (orthogonal). Off-path (no provider + selection off) is a
+            # no-op (criterion 11) — the context is built only when one could consume it.
+            if self._preferred_backend_provider is not None or self._model_selection_active():
                 ctx = self._build_routing_context(user_message, conversation, turn_has_image)
-                decision = self._enrich_with_model_selection(decision, ctx)
+                decision = self._finalize_routing(decision, ctx)
             return decision
 
         routing_context = self._build_routing_context(user_message, conversation, turn_has_image)
         decision = self._router.route(routing_context)
-        # Spec 23 T11 (D-23-X-seam-shape): enrich the rule-based tier decision
-        # with the metadata-driven model choice. No-op when the feature is off —
-        # the decision is byte-identical to v0.1 (criterion 11).
-        if self._model_selection_active():
-            decision = self._enrich_with_model_selection(decision, routing_context)
-        return decision
+        # Spec 23 T11 + Spec M1 T3 (D-23-X-seam-shape): overlay the model choice on the
+        # rule-based tier decision — the persona's preferred model PREEMPTS the scorer.
+        # No-op when both are off ⇒ byte-identical to v0.1 (criterion 11).
+        return self._finalize_routing(decision, routing_context)
 
     def _build_routing_context(
         self, user_message: str, conversation: Conversation, turn_has_image: bool
@@ -2094,6 +2113,92 @@ class ConversationLoop:
                 "model_fallback_reason": sel.fallback_reason,
             }
         )
+
+    def _finalize_routing(
+        self, decision: RoutingDecision, context: RoutingContext
+    ) -> RoutingDecision:
+        """Overlay the persona's model choice onto the tier decision (Spec M1 T3 + Spec 23).
+
+        The persona's ``preferred_model`` (capability-gated) PREEMPTS the intelligent
+        scorer: when it applies, ``decision.model`` becomes the chosen id with
+        ``model_fallback_reason="preferred_model"`` provenance and the scorer is skipped
+        entirely. Otherwise the Spec 23 model-within-tier selection runs (or nothing, when
+        that feature is off) — byte-identical to the pre-M1 path (criterion 11).
+        """
+        preferred = self._preferred_model_for_turn(context)
+        if preferred is not None:
+            return decision.model_copy(
+                update={"model": preferred, "model_fallback_reason": "preferred_model"}
+            )
+        if self._model_selection_active():
+            return self._enrich_with_model_selection(decision, context)
+        return decision
+
+    def _preferred_model_for_turn(self, context: RoutingContext) -> str | None:
+        """The persona's chosen model for THIS turn, or ``None`` to route as today (M1-T3).
+
+        Returns ``routing.preferred_model`` (whitespace-stripped — T1 does not normalise it
+        at the schema) unless: (a) it is unset, (b) no ``preferred_backend_provider`` is
+        wired (the pre-M1 / community path), or (c) the CAPABILITY GATE fails — a
+        tools-requiring turn (``context.requires_strong_tools``) whose chosen model's
+        metadata reports ``tools_supported is False``. Metadata / router ``None`` ⇒ ALLOW
+        (fail-open; the runtime tier-chain fallback still protects). The gate-skip logs at
+        most once per loop instance at DEBUG.
+        """
+        raw = self._persona.routing.preferred_model
+        if raw is None or self._preferred_backend_provider is None:
+            return None
+        preferred = raw.strip()
+        if not preferred:
+            return None
+        if context.requires_strong_tools and self._intelligent_router is not None:
+            metadata = self._intelligent_router.metadata_for(preferred)
+            if metadata is not None and metadata.tools_supported is False:
+                if not self._preferred_gate_logged:
+                    _logger.debug(
+                        "preferred model {m} lacks tool support for a tools-requiring turn; "
+                        "routing via the tier default",
+                        m=preferred,
+                    )
+                    self._preferred_gate_logged = True
+                return None
+        return preferred
+
+    def _front_preferred_backend(self, backend: ChatBackend, preferred_id: str) -> ChatBackend:
+        """Front the persona's preferred model on the tier ``backend`` (Spec M1 T3).
+
+        If ``preferred_id`` is already one of the tier backend's sub-backends, promote it to
+        primary (:func:`reorder_primary`) — the tier chain stays intact as the error
+        fallback. Otherwise ask the injected provider for a passthrough backend and compose
+        ``[passthrough, *subs]`` so a passthrough error falls through to the tier chain
+        (D-20-9). A ``None`` provider result (misconfigured id / no key) leaves the tier
+        backend unchanged (fail-open; logged at most once per loop instance at DEBUG).
+        """
+        if isinstance(backend, MultiModelChatBackend):
+            subs: list[ChatBackend] = list(backend.backends)
+            tier_name = backend.tier_name
+        else:
+            subs = [backend]
+            tier_name = getattr(backend, "tier_name", None)
+        # Already a sub of this tier → promote to primary; the chain is the fallback.
+        if any(
+            canonical_model_id(sub.provider_name, sub.model_name) == preferred_id for sub in subs
+        ):
+            return reorder_primary(backend, preferred_id)
+        provider = self._preferred_backend_provider
+        if provider is None:  # defensive — the gate ensures a provider, but stay fail-open
+            return backend
+        passthrough = provider(preferred_id)
+        if passthrough is None:
+            if not self._preferred_provider_none_logged:
+                _logger.debug(
+                    "preferred model {m} has no passthrough backend (provider returned None); "
+                    "using the tier default",
+                    m=preferred_id,
+                )
+                self._preferred_provider_none_logged = True
+            return backend
+        return MultiModelChatBackend([passthrough, *subs], tier_name=tier_name)
 
     async def _stream_round(
         self,

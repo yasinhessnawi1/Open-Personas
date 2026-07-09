@@ -200,6 +200,18 @@ class IntelligentRouter:
             fallback_reason=None,
         )
 
+    def metadata_for(self, canonical_id: str) -> ModelMetadata | None:
+        """Resolve metadata for ONE id via the same chain ``select_model`` uses (Spec M1 gate).
+
+        The M1 preferred-model capability gate calls this to read ``tools_supported`` for
+        the persona's chosen model. Best-effort by contract: any resolver failure ⇒ ``None``
+        ⇒ the gate fails OPEN (the runtime tier-chain fallback still protects the turn).
+        """
+        try:
+            return self._resolver.resolve(canonical_id)
+        except Exception:  # noqa: BLE001 — gate is best-effort; None ⇒ fail-open
+            return None
+
     # ------------------------------------------------------------------ #
 
     def _resolve_candidates(
