@@ -1,20 +1,25 @@
-"""Sandbox error-UX tests: every violation message carries a valid-path hint.
+"""Sandbox error-UX tests: every violation carries a reason-keyed correction.
 
-T10 / D-25-5 / spec §2.5 (acceptance criteria 4 + 8). The original
-``SandboxViolationError`` messages stated only what was WRONG; a model that
-hit one had no way to construct a path that WOULD work and often gave up.
-Each of the 7 raise sites (null_byte, too_long, mixed_separators, empty,
-absolute, root_reference, escape) must now append a consistent relative-path
-example so the model can recover.
+R9-007 (refining T10 / D-25-5 / spec §2.5, acceptance criteria 4 + 8). The
+original ``SandboxViolationError`` messages stated only what was WRONG; a model
+that hit one had no way to construct a path that WOULD work and often retried
+the same escaping shape — burning steps and model spend. A first pass added a
+single generic "use out/report.md" hint to every reason, but that same hint
+fired for cases it did not fit (e.g. it never told the model to swap backslashes
+for forward slashes, or to name a file rather than the directory). Each of the
+7 path-validation raise sites (null_byte, too_long, mixed_separators, empty,
+absolute, root_reference, escape) now appends an ACTIONABLE, imperative
+correction keyed to *why* the path was rejected, so the model can recover.
 
-These tests assert two things per reason:
-1. the human-readable message contains a relative-path example, and
-2. the message names the reason discriminator,
+These tests assert per reason:
+1. the message carries the reason-specific corrective phrase(s), and
+2. the message names the reason discriminator (``[reason=X]``),
 while the structured ``context`` dict (reason + preview) is left intact.
 
-The final test exercises the pass-through: a ``file_write`` call with an
-absolute path returns a ToolResult whose ``content`` includes the hint, so the
-model actually sees it.
+The final tests exercise the pass-through: a ``file_write`` / ``file_read``
+call with a bad path returns a ToolResult whose ``content`` includes the keyed
+correction, and a "followable correction" test proves the hint leads somewhere
+valid — absolute path (error + hint) then a relative in-sandbox path (success).
 """
 
 # ruff: noqa: ANN401, ARG001, ARG002, ERA001
@@ -25,6 +30,7 @@ from typing import TYPE_CHECKING
 import pytest
 from persona.errors import SandboxViolationError
 from persona.tools._sandbox import resolve_sandbox_path
+from persona.tools.builtin.file_read import make_file_read_tool
 from persona.tools.builtin.file_write import make_file_write_tool
 
 if TYPE_CHECKING:
@@ -42,38 +48,31 @@ _REASON_CASES: list[tuple[str, str]] = [
     ("../escape.txt", "escape"),
 ]
 
-# Human-readable summary the resolver pairs with each reason (the "what was
-# wrong" half of the message, before the shared hint).
-_SUMMARY_BY_REASON: dict[str, str] = {
-    "null_byte": "null byte in path",
-    "too_long": "path too long",
-    "mixed_separators": "windows-style separator on POSIX",
-    "empty": "empty path",
-    "absolute": "absolute path not allowed",
-    "root_reference": "path resolves to sandbox root directory",
-    "escape": "path escapes sandbox",
+# Reason -> substrings that MUST appear in the corrective message. These are the
+# actionable phrases the model needs to recover from THAT specific failure.
+_EXPECTED_PHRASES: dict[str, list[str]] = {
+    "null_byte": ["Remove control", "out/report.md"],
+    "too_long": ["Shorten the path", "4096"],
+    "mixed_separators": ["forward slashes", "backslashes"],
+    "empty": ["non-empty relative filename", "out/report.md"],
+    "absolute": ["RELATIVE", "out/report.md", "absolute path"],
+    "root_reference": ["Provide a filename", "not the directory itself"],
+    "escape": ["RELATIVE", "out/report.md", ".."],
 }
 
 
-def _summary_for(reason: str) -> str:
-    return _SUMMARY_BY_REASON[reason]
-
-
-class TestPathHintInMessage:
-    """Every raise site enriches its message with a recoverable path example."""
+class TestReasonKeyedCorrection:
+    """Every raise site enriches its message with a reason-specific correction."""
 
     @pytest.mark.parametrize(("bad", "reason"), _REASON_CASES)
-    def test_message_contains_relative_path_example(
+    def test_message_contains_actionable_correction(
         self, tmp_path: Path, bad: str, reason: str
     ) -> None:
         with pytest.raises(SandboxViolationError) as exc_info:
             resolve_sandbox_path(tmp_path, bad)
         msg = str(exc_info.value)
-        # The relative-path example the model can copy to recover.
-        assert "out/report.md" in msg
-        assert "relative path" in msg
-        # The hint points the model at the sandbox-root resolution form.
-        assert "sandbox root" in msg
+        for phrase in _EXPECTED_PHRASES[reason]:
+            assert phrase in msg, f"reason={reason} missing corrective phrase {phrase!r} in {msg!r}"
 
     @pytest.mark.parametrize(("bad", "reason"), _REASON_CASES)
     def test_message_names_the_reason(self, tmp_path: Path, bad: str, reason: str) -> None:
@@ -87,37 +86,82 @@ class TestPathHintInMessage:
         # structured context (reason + preview-style fields) is unchanged.
         with pytest.raises(SandboxViolationError) as exc_info:
             resolve_sandbox_path(tmp_path, bad)
-        ctx = exc_info.value.context
-        assert ctx.get("reason") == reason
+        assert exc_info.value.context.get("reason") == reason
 
-    def test_hint_is_consistent_across_all_reasons(self, tmp_path: Path) -> None:
-        # The valid-path example must be identical for every reason so the
-        # model's recovery action does not depend on which check fired. We read
-        # ``args[0]`` (the raw message passed to the exception) rather than
-        # ``str(exc)`` — PersonaError appends the structured context to ``str``,
-        # which legitimately varies per reason.
-        shared_hint = (
-            "use a relative path like 'out/report.md' "
-            "(resolves to <root>/out/report.md under the sandbox root)"
-        )
+    def test_corrections_are_distinct_per_reason(self, tmp_path: Path) -> None:
+        # The whole point of R9-007: the guidance is keyed to the reason, so
+        # different failures yield different corrective text (not one generic
+        # hint). We read ``args[0]`` (the raw message) and strip the shared
+        # ``<summary> [reason=X]; `` prefix to compare only the correction half.
+        corrections: dict[str, str] = {}
         for bad, reason in _REASON_CASES:
             with pytest.raises(SandboxViolationError) as exc_info:
                 resolve_sandbox_path(tmp_path, bad)
-            raw_message = exc_info.value.args[0]
-            assert raw_message == f"{_summary_for(reason)} [reason={reason}]; {shared_hint}"
+            raw = exc_info.value.args[0]
+            corrections[reason] = raw.split("]; ", 1)[1]
+        # At minimum, the reasons with materially different fixes must differ.
+        assert corrections["mixed_separators"] != corrections["absolute"]
+        assert corrections["root_reference"] != corrections["absolute"]
+        assert corrections["too_long"] != corrections["escape"]
+        # And the distinct corrective phrasings really are distinct values.
+        assert len(set(corrections.values())) >= 5
 
 
-class TestFileWriteSurfacesHint:
+class TestToolsSurfaceCorrection:
     """The enriched message reaches the model via the ToolResult content."""
 
     @pytest.mark.asyncio
-    async def test_absolute_path_error_includes_hint(self, tmp_path: Path) -> None:
+    async def test_file_write_absolute_path_error_includes_correction(self, tmp_path: Path) -> None:
         tool_inst = make_file_write_tool(sandbox_root=tmp_path)
         result = await tool_inst.execute(
             path="/workspace/out/startup_launch_funnel.md", content="x"
         )
         assert result.is_error is True
-        # The model sees the hint embedded in the tool result content.
         assert "out/report.md" in result.content
-        assert "relative path" in result.content
+        assert "RELATIVE" in result.content
         assert "[reason=absolute]" in result.content
+
+    @pytest.mark.asyncio
+    async def test_file_read_mixed_separators_error_includes_correction(
+        self, tmp_path: Path
+    ) -> None:
+        tool_inst = make_file_read_tool(sandbox_root=tmp_path)
+        result = await tool_inst.execute(path="a\\b\\c")
+        assert result.is_error is True
+        # file_read shares the resolver, so it gets the same reason-keyed hint.
+        assert "forward slashes" in result.content
+        assert "[reason=mixed_separators]" in result.content
+
+
+class TestFollowableCorrection:
+    """Following the correction leads to a valid path (the hint goes somewhere)."""
+
+    @pytest.mark.asyncio
+    async def test_absolute_then_relative_in_sandbox_succeeds(self, tmp_path: Path) -> None:
+        tool_inst = make_file_write_tool(sandbox_root=tmp_path)
+
+        # 1. The model tries an absolute path — rejected, but told the fix.
+        rejected = await tool_inst.execute(path="/etc/report.md", content="hello")
+        assert rejected.is_error is True
+        assert "out/report.md" in rejected.content
+        assert "[reason=absolute]" in rejected.content
+
+        # 2. It follows the correction verbatim — a relative in-sandbox path.
+        accepted = await tool_inst.execute(path="out/report.md", content="hello")
+        assert accepted.is_error is False
+        # The corrected path actually landed inside the sandbox root.
+        assert (tmp_path / "out" / "report.md").read_text() == "hello"
+
+    @pytest.mark.asyncio
+    async def test_root_reference_then_named_file_succeeds(self, tmp_path: Path) -> None:
+        tool_inst = make_file_write_tool(sandbox_root=tmp_path)
+
+        rejected = await tool_inst.execute(path=".", content="data")
+        assert rejected.is_error is True
+        assert "Provide a filename" in rejected.content
+        assert "[reason=root_reference]" in rejected.content
+
+        # Following it: name a file instead of the directory.
+        accepted = await tool_inst.execute(path="notes.md", content="data")
+        assert accepted.is_error is False
+        assert (tmp_path / "notes.md").read_text() == "data"

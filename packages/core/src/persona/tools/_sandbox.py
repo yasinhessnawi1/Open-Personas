@@ -165,18 +165,72 @@ def resolve_request_sandbox_root(source: SandboxRootProvider) -> Path:
     return source
 
 
-# Consistent recovery hint appended to every SandboxViolationError message
-# (T10 / D-25-5 / spec §2.5). The model that triggered the violation reads the
-# ToolResult text and needs a concrete, valid path form to retry with — not
-# just a statement of what was wrong. Every reason ends with the SAME relative
-# path example so the recovery action is unambiguous regardless of which check
-# fired. ``<root>`` stands for the sandbox root, whose absolute value the model
-# neither knows nor needs (it is per-persona); the example shows the *form* of
-# a relative path that resolves inside it.
-_VALID_PATH_HINT = (
-    "use a relative path like 'out/report.md' "
-    "(resolves to <root>/out/report.md under the sandbox root)"
-)
+# Per-reason recovery guidance appended to every SandboxViolationError message
+# (R9-007, refining T10 / D-25-5 / spec §2.5). The model that triggered the
+# violation reads the ToolResult text and, without an ACTIONABLE fix keyed to
+# *why* the path was rejected, tends to retry the same escaping shape — burning
+# steps and model spend (owner saw dozens of ``file_write sandbox violation``
+# warnings in one run). A single generic "use out/report.md" hint fired for
+# every reason and did not tell the model, e.g., to swap backslashes for
+# forward slashes or to name a file instead of the directory. Each entry below
+# is a terse, imperative, model-facing correction that names the concrete valid
+# path form for THAT failure. The reason discriminator is emitted separately by
+# :func:`_violation_message` (``[reason=<reason>]``) and left in ``context`` so
+# audits/tests that key on the reason keep working. This is the ONE place the
+# hint text lives — both ``file_read`` and ``file_write`` surface it via
+# ``str(exc)``, so there is no per-tool copy to drift.
+_CORRECTION_BY_REASON: dict[str, str] = {
+    "absolute": (
+        "Paths must be RELATIVE to the working directory and stay inside it — "
+        "e.g. 'out/report.md'. Do not use an absolute path (a leading '/') or '..'."
+    ),
+    "escape": (
+        "Paths must be RELATIVE to the working directory and stay inside it — "
+        "e.g. 'out/report.md'. Do not use '..' or any path that climbs out of "
+        "the working directory."
+    ),
+    "root_reference": (
+        "Provide a filename inside the working directory, e.g. 'notes.md', not "
+        "the directory itself."
+    ),
+    "mixed_separators": (
+        "Use forward slashes '/' to separate path segments, e.g. 'out/report.md'; "
+        "backslashes are not allowed."
+    ),
+    "too_long": (
+        "Shorten the path to at most 4096 characters; use a short relative path "
+        "like 'out/report.md'."
+    ),
+    "null_byte": (
+        "Remove control/NUL characters from the path; use a plain relative path "
+        "like 'out/report.md'."
+    ),
+    "empty": ("Provide a non-empty relative filename, e.g. 'out/report.md'."),
+    "no_scope": (
+        "No workspace is bound for this request, so file access is unavailable "
+        "right now — changing the path will not help; do not retry."
+    ),
+}
+
+# Fallback for any reason not explicitly mapped, keeping the resolver total and
+# never leaving the model with a bare "no". Points at the same relative form.
+_DEFAULT_CORRECTION = "Use a relative path inside the working directory, e.g. 'out/report.md'."
+
+
+def _correction_for(reason: str) -> str:
+    """Return terse, model-facing recovery guidance keyed to a violation reason.
+
+    Args:
+        reason: The machine discriminator set in ``context["reason"]`` (one of
+            the keys of :data:`_CORRECTION_BY_REASON`).
+
+    Returns:
+        An imperative one-liner telling the model the concrete valid path form
+        for that specific failure, so it can recover instead of retrying the
+        same rejected shape. Unmapped reasons fall back to
+        :data:`_DEFAULT_CORRECTION`.
+    """
+    return _CORRECTION_BY_REASON.get(reason, _DEFAULT_CORRECTION)
 
 
 def _violation_message(summary: str, reason: str) -> str:
@@ -190,11 +244,12 @@ def _violation_message(summary: str, reason: str) -> str:
             structured context.
 
     Returns:
-        ``"<summary> [reason=<reason>]; <valid-path hint>"`` — a string that
-        tells the model both what failed and a concrete relative path form
-        that would succeed, enabling a recovery retry instead of giving up.
+        ``"<summary> [reason=<reason>]; <reason-keyed correction>"`` — a string
+        that tells the model both what failed and, keyed to *why*, a concrete
+        path form that would succeed, enabling a recovery retry instead of a
+        repeated escaping attempt.
     """
-    return f"{summary} [reason={reason}]; {_VALID_PATH_HINT}"
+    return f"{summary} [reason={reason}]; {_correction_for(reason)}"
 
 
 def resolve_sandbox_path(root: Path, requested: str) -> Path:
