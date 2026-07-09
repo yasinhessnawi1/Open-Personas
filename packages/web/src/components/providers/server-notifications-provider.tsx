@@ -150,16 +150,34 @@ export function ServerNotificationsProvider({
   );
 
   const resolveTitle = useCallback((row: ServerNotificationRow): string => {
-    const persona =
-      row.params.persona ?? tRef.current("notifications.personaFallback");
-    const title = tRef.current(row.message_key, { ...row.params, persona });
-    // Guard: next-intl returns the raw message key when the key is missing OR an
-    // interpolation param is absent (e.g. a schedule_fired notification with no subject).
-    // Never surface a raw dotted key in the bell — fall back to a persona-scoped generic.
-    if (title === row.message_key || title.startsWith("notifications.")) {
-      return tRef.current("notifications.genericUpdate", { persona });
+    // The feed renders persisted rows from many writers — a single malformed row
+    // (unknown key, missing interpolation param) must NEVER crash the shell.
+    // next-intl has two failure modes: it can THROW an IntlError (FORMATTING_ERROR
+    // when a param like `subject` is absent — e.g. a schedule_fired row persisted
+    // before subject-threading, R9-003) or RETURN the raw dotted key (missing-key
+    // mode). Handle both: try/catch for the throw, string-compare for the key echo.
+    let persona: string;
+    try {
+      persona =
+        row.params.persona ?? tRef.current("notifications.personaFallback");
+    } catch {
+      persona = row.params.persona ?? "";
     }
-    return title;
+    try {
+      const title = tRef.current(row.message_key, { ...row.params, persona });
+      // Never surface a raw dotted key in the bell — persona-scoped generic instead.
+      if (title === row.message_key || title.startsWith("notifications.")) {
+        return tRef.current("notifications.genericUpdate", { persona });
+      }
+      return title;
+    } catch {
+      // Malformed row (or genericUpdate itself failed below) — last-resort chain.
+      try {
+        return tRef.current("notifications.genericUpdate", { persona });
+      } catch {
+        return persona; // plain-string floor: resolveTitle can never throw.
+      }
+    }
   }, []);
 
   const refresh = useCallback(async () => {

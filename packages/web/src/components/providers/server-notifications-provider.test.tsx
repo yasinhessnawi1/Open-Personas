@@ -32,11 +32,13 @@ import {
 const messages = {
   notifications: {
     personaFallback: "your persona",
+    genericUpdate: "{persona} has an update",
     run: {
       completed: "Task finished · {persona}",
       failed: "Task failed · {persona}",
     },
     persona: { ready: "{persona} is ready" },
+    schedule: { fired: "{persona} ran your reminder: {subject}" },
   },
 };
 
@@ -214,5 +216,90 @@ describe("ServerNotificationsProvider", () => {
       expect.stringContaining("/v1/me/notifications/read-all"),
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  // R9-003: title resolution must NEVER crash the shell over one malformed row.
+  // next-intl surfaces a missing interpolation param as a FORMATTING_ERROR
+  // (IntlError via onError + key-echo fallback with the default config, or a
+  // throw with a rethrowing onError) — either way the row must render the
+  // persona-scoped generic title, never break the provider render.
+  describe("malformed-row resilience (R9-003)", () => {
+    it("renders the generic title for a schedule_fired row missing `subject` (no throw)", async () => {
+      // next-intl's default onError logs the IntlError — silence the expected noise.
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      currentRows = [
+        row("s1", "schedule_fired", "sched-1", {
+          message_key: "notifications.schedule.fired",
+          params: { persona: "Ada" }, // pre-subject-threading row: no `subject`
+        }),
+        row("n2", "persona_ready", "p9"),
+      ];
+      renderProvider();
+      // The provider render survives the malformed row AND the sibling row still lands.
+      await waitFor(() =>
+        expect(screen.getByTestId("summary")).toHaveAttribute(
+          "data-count",
+          "2",
+        ),
+      );
+      expect(screen.getByTestId("entry-s1")).toHaveAttribute(
+        "data-title",
+        "Ada has an update",
+      );
+      expect(screen.getByTestId("entry-s1")).toHaveAttribute(
+        "data-href",
+        "/schedule",
+      );
+      expect(screen.getByTestId("entry-n2")).toHaveAttribute(
+        "data-title",
+        "Ada is ready",
+      );
+      consoleError.mockRestore();
+    });
+
+    it("renders the real reminder title when `subject` is present", async () => {
+      currentRows = [
+        row("s2", "schedule_fired", "sched-2", {
+          message_key: "notifications.schedule.fired",
+          params: { persona: "Ada", subject: "water the plants" },
+        }),
+      ];
+      renderProvider();
+      await waitFor(() =>
+        expect(screen.getByTestId("summary")).toHaveAttribute(
+          "data-count",
+          "1",
+        ),
+      );
+      expect(screen.getByTestId("entry-s2")).toHaveAttribute(
+        "data-title",
+        "Ada ran your reminder: water the plants",
+      );
+    });
+
+    it("falls back to the generic title for an unknown message_key", async () => {
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      currentRows = [
+        row("u1", "run_terminal", "abc", {
+          message_key: "notifications.some.unknown.key",
+        }),
+      ];
+      renderProvider();
+      await waitFor(() =>
+        expect(screen.getByTestId("summary")).toHaveAttribute(
+          "data-count",
+          "1",
+        ),
+      );
+      expect(screen.getByTestId("entry-u1")).toHaveAttribute(
+        "data-title",
+        "Ada has an update",
+      );
+      consoleError.mockRestore();
+    });
   });
 });
