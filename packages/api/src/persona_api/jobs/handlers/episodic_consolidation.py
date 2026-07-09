@@ -98,11 +98,9 @@ class EpisodicConsolidationHandler:
             try:
                 await self._core_refresher(context.owner_id, payload.persona_id)
             except Exception:  # noqa: BLE001 — a core-block refresh must never fail the job
-                _logger.warning(
-                    "core-block refresh failed; prior block stays",
-                    owner_id=context.owner_id,
-                    persona_id=payload.persona_id,
-                    exc_info=True,
+                _logger.opt(exception=True).warning(
+                    "core-block refresh failed; prior block stays "
+                    f"(owner={context.owner_id} persona={payload.persona_id})",
                 )
         _logger.info(
             "episodic_consolidation ran",

@@ -413,8 +413,8 @@ class RuntimeFactory:
             try:
                 return inner(query)
             except Exception:  # noqa: BLE001 — memoryless beats turn-fatal
-                _logger.warning(
-                    "graph retrieval failed; turn degrades to zero-graph", exc_info=True
+                _logger.opt(exception=True).warning(
+                    "graph retrieval failed; turn degrades to zero-graph"
                 )
                 return GraphContext()
 
@@ -449,7 +449,7 @@ class RuntimeFactory:
             try:
                 block = read_core_block(store, persona_id)
             except Exception:  # noqa: BLE001 — a nicety; never break a turn
-                _logger.warning("core-block read failed; omitted", exc_info=True)
+                _logger.opt(exception=True).warning("core-block read failed; omitted")
                 return None
             return block.text if block is not None else None
 
@@ -551,7 +551,7 @@ class RuntimeFactory:
             try:
                 profile = user_service.get_user_profile(engine, user_id=owner_id)
             except Exception:  # noqa: BLE001 — the name is a nicety; never fail a turn
-                _logger.warning("user-name resolution failed (non-fatal)", exc_info=True)
+                _logger.opt(exception=True).warning("user-name resolution failed (non-fatal)")
                 return None
             if profile is None:
                 return None
@@ -587,7 +587,7 @@ class RuntimeFactory:
             try:
                 store.get_or_create_self_node(owner_id, display_name=display_name)
             except Exception:  # noqa: BLE001 — foundation upkeep; never fail a turn
-                _logger.warning("self-node sync failed (non-fatal)", exc_info=True)
+                _logger.opt(exception=True).warning("self-node sync failed (non-fatal)")
 
         return sync
 

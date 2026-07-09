@@ -157,8 +157,8 @@ def make_unified_recall(
         except Exception:  # noqa: BLE001
             from persona.logging import get_logger
 
-            get_logger(_LOG).warning(
-                "unified recall failed; turn degrades to memoryless", exc_info=True
+            get_logger(_LOG).opt(exception=True).warning(
+                "unified recall failed; turn degrades to memoryless"
             )
             return UnifiedProjection()
 

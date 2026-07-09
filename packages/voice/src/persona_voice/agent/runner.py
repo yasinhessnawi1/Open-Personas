@@ -211,7 +211,7 @@ def _load_user_name(engine: Engine, user_id: str) -> str | None:
                 .first()
             )
     except Exception:  # noqa: BLE001 — the name is a nicety; never break a call
-        _logger.warning("voice user-name resolution failed (non-fatal)", exc_info=True)
+        _logger.opt(exception=True).warning("voice user-name resolution failed (non-fatal)")
         return None
     if row is None:
         return None
@@ -248,7 +248,7 @@ def _load_core_block(
         )
         block = read_core_block(store, persona_id)
     except Exception:  # noqa: BLE001 — the head start is a nicety; never break a call
-        _logger.warning("voice core-block read failed (non-fatal)", exc_info=True)
+        _logger.opt(exception=True).warning("voice core-block read failed (non-fatal)")
         return None
     return block.text if block is not None else None
 

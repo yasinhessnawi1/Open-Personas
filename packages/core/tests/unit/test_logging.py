@@ -169,3 +169,25 @@ def test_get_logger_uses_default_config_when_none_provided(
     output = _capture_stderr(capsys)
     assert "defaulted" in output
     assert "schema" in output
+
+
+def test_no_exc_info_true_in_log_calls_repo_wide() -> None:
+    """Guard (R9-016): ``exc_info=True`` is a stdlib-logging kwarg that our loguru
+    loggers SILENTLY IGNORE — no traceback is emitted. Eight fail-soft warnings had it
+    and dropped their tracebacks for months. The correct idiom is
+    ``logger.opt(exception=True).warning(...)``. This scan fails if the anti-pattern
+    reappears anywhere in shipped source.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[4]
+    offenders: list[str] = []
+    for src in repo_root.glob("packages/*/src/**/*.py"):
+        for i, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+            if "exc_info=True" in line:
+                offenders.append(f"{src.relative_to(repo_root)}:{i}")
+    assert not offenders, (
+        "exc_info=True is a no-op on loguru loggers (drops the traceback). "
+        "Use `logger.opt(exception=True).warning(...)` instead. Offenders:\n"
+        + "\n".join(offenders)
+    )
