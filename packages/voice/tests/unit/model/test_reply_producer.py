@@ -619,6 +619,49 @@ class TestUnifiedMemoryWiring:
         written = ctx.stores["episodic"].get_all("astrid", include_superseded=True)
         assert any("remember my cat Milo" in c.text and "Noted." in c.text for c in written)
 
+    @pytest.mark.asyncio
+    async def test_greeting_turn_persists_the_greeting_but_never_the_nudge(self) -> None:
+        """R9-001 — driven through the REAL producer path with the runner's REAL
+        greeting-turn construction (``_greeting_transcript``, the exact object
+        ``begin_greeting`` feeds ``invoke_model_for_turn``): the synthetic flag
+        rides producer → recorder → persistence, so the committed turn persists
+        exactly ONE transcript row (the assistant greeting) and the nudge text
+        never reaches the durable transcript or episodic memory."""
+        from persona_voice.agent.runner import _GREETING_NUDGE, _greeting_transcript
+
+        class _RecordingTranscriptWriter:
+            def __init__(self) -> None:
+                self.turns: list[dict[str, Any]] = []
+
+            def record_turn(
+                self, *, user_text: str | None, heard_text: str, truncated: bool, now: datetime
+            ) -> None:
+                self.turns.append({"user_text": user_text, "heard_text": heard_text})
+
+        backend = _ScriptedBackend([StreamChunk(delta="Hei! So glad you called."), _final()])
+        ctx = _context(backend)
+        writer = _RecordingTranscriptWriter()
+        recorder = VoiceTurnRecorder(ctx, transcript_writer=writer)  # type: ignore[arg-type]
+        producer = VoiceModelReplyProducer(ctx, turn_recorder=recorder)
+
+        # Turn 0 exactly as production runs it: the runner's greeting transcript
+        # through the producer, then V4's commit hook with the heard greeting.
+        greeting = _greeting_transcript()
+        stream = await producer(greeting)
+        spoken = "".join([tok async for tok in stream])
+        await recorder.on_reply_committed(
+            BargedReply(heard_text=spoken, truncated=False, token_count=5)
+        )
+
+        # The persona's greeting reply persists (cross-device transcript +
+        # memory continuity) — as the ONLY row of the turn: no user row.
+        assert writer.turns == [{"user_text": None, "heard_text": "Hei! So glad you called."}]
+        # The nudge never reaches any durable surface.
+        written = ctx.stores["episodic"].get_all("astrid", include_superseded=True)
+        assert written
+        assert all(_GREETING_NUDGE not in c.text for c in written)
+        assert any("Hei! So glad you called." in c.text for c in written)
+
 
 @tool(name="generate_image", description="Generate an image (succeeds).")
 async def _generate_image_ok(prompt: str) -> ToolResult:

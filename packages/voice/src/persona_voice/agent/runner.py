@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_voice.config import VoiceConfig
-    from persona_voice.loop.streaming import StreamingLoop
+    from persona_voice.loop.streaming import StreamingLoop, Transcript
     from persona_voice.turn_taking.heard_words import TurnTranscriptListener
 
 __all__ = [
@@ -135,6 +135,20 @@ _GREETING_NUDGE = (
     "sentence to open the conversation, in character. Do not wait for them to "
     "speak first.)"
 )
+
+
+def _greeting_transcript() -> Transcript:
+    """The synthetic turn-0 transcript the greeting kickoff feeds the producer.
+
+    Marked ``synthetic=True`` (R9-001): the nudge is an internal instruction, not
+    the caller's speech, so the persistence boundary (``VoiceTurnRecorder``) keeps
+    it out of the user-facing transcript — only the persona's greeting reply
+    persists. The flag is structural (carried on the Transcript itself), so the
+    nudge wording can change freely without regressing the suppression.
+    """
+    from persona_voice.loop.streaming import Transcript  # deferred, like the session build
+
+    return Transcript(is_final=True, text=_GREETING_NUDGE, confidence=1.0, synthetic=True)
 
 
 def _load_persona(engine: Engine, persona_id: str) -> Persona:
@@ -773,7 +787,7 @@ async def build_agent_session(
     async def _greet() -> None:
         """Run turn 0 — gate on the warm-up, then have the persona greet first."""
         await orchestrator.begin_greeting(
-            Transcript(is_final=True, text=_GREETING_NUDGE, confidence=1.0),
+            _greeting_transcript(),
             warmup=embedder_warmup,
             warmup_timeout_s=config.greet_warmup_timeout_s,
             greet_timeout_s=config.greet_timeout_s,

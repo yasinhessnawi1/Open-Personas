@@ -226,7 +226,9 @@ class VoiceModelReplyProducer:
         )
         if safety_verdict.action is InterceptAction.HARD and safety_verdict.completion is not None:
             if self._turn_recorder is not None:
-                self._turn_recorder.note_user_message(user_message)
+                self._turn_recorder.note_user_message(
+                    user_message, synthetic=final_transcript.synthetic
+                )
             yield safety_verdict.completion.voice_text
             return
 
@@ -252,7 +254,9 @@ class VoiceModelReplyProducer:
                 decision = None
             if decision is not None and decision.owns_turn:
                 if self._turn_recorder is not None:
-                    self._turn_recorder.note_user_message(user_message)
+                    self._turn_recorder.note_user_message(
+                        user_message, synthetic=final_transcript.synthetic
+                    )
                 if decision.verbatim_ask is not None and self._delegation_listener is not None:
                     # Delegate the VERBATIM ask (never the mid-model draft) for the frontier to
                     # re-parse + execute. Set on an origination CONFIRM (the spoken echo + "yes" was
@@ -287,9 +291,13 @@ class VoiceModelReplyProducer:
             else None
         )
         # Note this turn's user transcript for the unified-memory write that the
-        # recorder performs on commit (T8 correlation key — D-V5-X).
+        # recorder performs on commit (T8 correlation key — D-V5-X). ``synthetic``
+        # rides along (R9-001): an internally-originated prompt (greeting nudge /
+        # narration) must not persist as user speech at the commit boundary.
         if self._turn_recorder is not None:
-            self._turn_recorder.note_user_message(user_message)
+            self._turn_recorder.note_user_message(
+                user_message, synthetic=final_transcript.synthetic
+            )
 
         routing_context = self._routing_context(user_message)
         tier = self._choose_tier(routing_context)

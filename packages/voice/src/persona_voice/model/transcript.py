@@ -64,7 +64,7 @@ class VoiceTranscriptWriter:
         self._conversation_id = conversation_id
 
     def record_turn(
-        self, *, user_text: str, heard_text: str, truncated: bool, now: datetime
+        self, *, user_text: str | None, heard_text: str, truncated: bool, now: datetime
     ) -> None:
         """Persist one committed turn as a user + an assistant ``messages`` row.
 
@@ -76,19 +76,28 @@ class VoiceTranscriptWriter:
         finalized/legacy row — never ``'running'``, so the one-active-turn unique
         index is untouched) and ``originated`` defaults ``false`` (a solicited
         turn). Best-effort — MUST NOT raise.
+
+        ``user_text=None`` (R9-001) persists the ASSISTANT row only — a synthetic
+        turn (the turn-0 greeting nudge / a coalesced narration prompt) has no
+        real user speech, so no user row is written and the internal instruction
+        never renders as a user bubble. An assistant-only row is an established
+        ``messages`` shape (originated/proactive chat turns), so no consumer
+        assumes strict user/assistant pairing; the ``+1µs`` offset is kept
+        unconditionally so ordering stays deterministic either way.
         """
         try:
             with self._engine.begin() as conn:
-                conn.execute(
-                    insert(_messages).values(
-                        id=f"msg_{uuid.uuid4().hex}",
-                        conversation_id=self._conversation_id,
-                        role="user",
-                        content=user_text,
-                        created_at=now,
-                        channel=dict(_VOICE_CHANNEL),
+                if user_text is not None:
+                    conn.execute(
+                        insert(_messages).values(
+                            id=f"msg_{uuid.uuid4().hex}",
+                            conversation_id=self._conversation_id,
+                            role="user",
+                            content=user_text,
+                            created_at=now,
+                            channel=dict(_VOICE_CHANNEL),
+                        )
                     )
-                )
                 conn.execute(
                     insert(_messages).values(
                         id=f"msg_{uuid.uuid4().hex}",

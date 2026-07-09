@@ -132,6 +132,69 @@ class TestUnifiedWrite:
         assert ctx.conversation.messages == []
 
 
+class _RecordingTranscriptWriter:
+    """Transcript-writer double — records the exact ``record_turn`` kwargs."""
+
+    def __init__(self) -> None:
+        self.turns: list[dict[str, Any]] = []
+
+    def record_turn(
+        self, *, user_text: str | None, heard_text: str, truncated: bool, now: datetime
+    ) -> None:
+        self.turns.append(
+            {"user_text": user_text, "heard_text": heard_text, "truncated": truncated}
+        )
+
+
+class TestSyntheticTurnSuppression:
+    """R9-001 — a synthetic turn (the greeting nudge / a narration prompt)
+    persists its ASSISTANT half only, at the persistence boundary."""
+
+    @pytest.mark.asyncio
+    async def test_synthetic_turn_persists_assistant_only(self) -> None:
+        ctx, episodic = _context()
+        writer = _RecordingTranscriptWriter()
+        recorder = VoiceTurnRecorder(ctx, transcript_writer=writer)  # type: ignore[arg-type]
+        nudge = "(The voice call has just connected. Greet the person.)"
+        recorder.note_user_message(nudge, synthetic=True)
+
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="Hei! So glad you called.", truncated=False, token_count=5)
+        )
+
+        # Durable transcript: assistant row only — the nudge never becomes a user bubble.
+        assert writer.turns == [
+            {"user_text": None, "heard_text": "Hei! So glad you called.", "truncated": False}
+        ]
+        # Episodic memory: the greeting is remembered, the nudge is not minted as
+        # something the user said.
+        assert len(episodic.chunks) == 1
+        assert episodic.chunks[0].text == "ASSISTANT: Hei! So glad you called."
+        assert nudge not in episodic.chunks[0].text
+        # In-memory live history keeps both halves (prompt context only, never
+        # rendered) — the model still sees why it spoke unprompted.
+        assert [m.role for m in ctx.conversation.messages] == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_synthetic_flag_resets_so_the_next_turn_persists_the_pair(self) -> None:
+        ctx, episodic = _context()
+        writer = _RecordingTranscriptWriter()
+        recorder = VoiceTurnRecorder(ctx, transcript_writer=writer)  # type: ignore[arg-type]
+
+        recorder.note_user_message("(greet them)", synthetic=True)
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="Hello!", truncated=False, token_count=1)
+        )
+        # The next REAL turn is unaffected: user half persists again.
+        recorder.note_user_message("what are my rights?")
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="Strong ones.", truncated=False, token_count=2)
+        )
+
+        assert writer.turns[1]["user_text"] == "what are my rights?"
+        assert "USER: what are my rights?" in episodic.chunks[1].text
+
+
 class TestEpisodicWriteFailSoft:
     @pytest.mark.asyncio
     async def test_write_failure_does_not_raise_and_history_still_appends(self) -> None:

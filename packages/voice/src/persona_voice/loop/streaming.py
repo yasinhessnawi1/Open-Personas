@@ -107,6 +107,14 @@ class Transcript(BaseModel):
     text: str
     confidence: float = Field(ge=0.0, le=1.0)
     eou_at: datetime | None = None
+    #: ``True`` when this "utterance" is an internally-originated prompt riding
+    #: the producer path — the turn-0 greeting nudge (Spec 32 A3) or a coalesced
+    #: narration prompt — never speech from the caller. The persistence boundary
+    #: reads this to keep internal prompts out of the user-facing transcript
+    #: (R9-001): the turn's assistant reply still persists; no user row does.
+    #: Structural by design, so the prompt wording is free to change without
+    #: regressing (no text-matching anywhere).
+    synthetic: bool = False
 
 
 class AudioChunk(BaseModel):

@@ -420,9 +420,15 @@ class ConversationalOrchestrator:
 
     @staticmethod
     def _coalesce_narrations(narrations: list[Transcript]) -> Transcript:
-        """Fold pending narrations into one prompt → one spoken utterance."""
+        """Fold pending narrations into one prompt → one spoken utterance.
+
+        ``synthetic=True`` (R9-001): a narration prompt is an internal
+        instruction, not the caller's speech — the same class as the turn-0
+        greeting nudge — so the persistence boundary persists only the spoken
+        narration (the assistant row), never the instruction as a user row.
+        """
         text = " ".join(n.text for n in narrations if n.text)
-        return Transcript(is_final=True, text=text, confidence=1.0)
+        return Transcript(is_final=True, text=text, confidence=1.0, synthetic=True)
 
     # ----- greet-on-connect (turn 0; Spec 32 A3) -----------------------
 
