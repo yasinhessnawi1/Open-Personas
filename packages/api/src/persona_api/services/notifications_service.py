@@ -18,7 +18,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import notifications as notifications_t
-from persona_api.realtime.events import NotificationCreatedEvent, TaskUpdatedEvent
+from persona_api.realtime.events import (
+    NotificationCreatedEvent,
+    SidebarChangedEvent,
+    TaskUpdatedEvent,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
@@ -190,3 +194,23 @@ def publish_task_updated(
     if channel is None:
         return
     channel.publish(owner_id, TaskUpdatedEvent(task_id=task_id, state=state))
+
+
+def publish_sidebar_changed(
+    channel: UserEventChannel | None,
+    *,
+    owner_id: str,
+    reason: str,
+) -> None:
+    """Ping the owner's OTHER open tabs/devices that their sidebar-shaping data moved (R9-012).
+
+    Emitted post-commit at the mutation routes (persona create/delete, conversation
+    create/delete, schedule create) — a data-only ping; the client soft-refreshes and the
+    server re-resolves the sidebar from the durable stores (surface-lags-truth, A11-D-2).
+    ``reason`` is observability only. Best-effort like the sibling publishers: no channel /
+    no open tab → a no-op (the sidebar catches up on the next focus/navigation); a publish
+    never fails the authoritative write.
+    """
+    if channel is None:
+        return
+    channel.publish(owner_id, SidebarChangedEvent(reason=reason))

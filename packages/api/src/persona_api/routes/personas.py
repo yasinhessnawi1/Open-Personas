@@ -48,6 +48,7 @@ from persona_api.services import (
     authoring_service,
     catalog_service,
     consent_service,
+    notifications_service,
     persona_service,
     skill_consent_service,
     tool_consent_service,
@@ -389,6 +390,13 @@ async def create_persona(
         user_id=user.id,
         action="persona.create",
         target=persona_id,
+    )
+    # R9-012: post-commit sidebar liveness ping — the owner's OTHER tabs/devices
+    # soft-refresh their sidebar (data-only; best-effort, never fails the create).
+    notifications_service.publish_sidebar_changed(
+        getattr(request.app.state, "event_channel", None),
+        owner_id=user.id,
+        reason="persona.created",
     )
     # Defer voice auto-pick + avatar generation OFF the create critical path.
     # Voice always runs in-process (BackgroundTasks). Avatar generation routes to
@@ -949,4 +957,10 @@ async def delete_persona(
         user_id=user.id,
         action="persona.delete",
         target=persona_id,
+    )
+    # R9-012: post-commit sidebar liveness ping (see create_persona).
+    notifications_service.publish_sidebar_changed(
+        getattr(request.app.state, "event_channel", None),
+        owner_id=user.id,
+        reason="persona.deleted",
     )

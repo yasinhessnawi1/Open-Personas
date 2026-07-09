@@ -15,6 +15,7 @@ from persona_api.realtime.events import (
     NotificationCreatedEvent,
     ReadyControl,
     ResyncControl,
+    SidebarChangedEvent,
     TaskUpdatedEvent,
 )
 from pydantic import ValidationError
@@ -90,6 +91,18 @@ def test_task_updated_shape() -> None:
     }
 
 
+def test_sidebar_changed_shape() -> None:
+    # R9-012: the generic data-only sidebar ping — `reason` is observability
+    # only (the client refetches; it never branches on the payload).
+    e = SidebarChangedEvent(reason="persona.created")
+    assert e.type == "sidebar.changed"
+    assert e.model_dump(mode="json") == {
+        "v": 1,
+        "type": "sidebar.changed",
+        "reason": "persona.created",
+    }
+
+
 def test_events_are_frozen() -> None:
     e = NotificationCreatedEvent(notification_id="n1", kind="k")
     with pytest.raises(ValidationError):
@@ -140,11 +153,12 @@ def test_resync_control_shape_and_reason_enum() -> None:
         ResyncControl(epoch="abc", latest_seq=1, reason="not_a_reason")  # type: ignore[arg-type]
 
 
-def test_channel_event_union_covers_exactly_the_three_data_types() -> None:
+def test_channel_event_union_covers_exactly_the_four_data_types() -> None:
     # The union is the closed catalogue; control events are deliberately NOT in it.
     members = set(ChannelEvent.__args__)  # type: ignore[attr-defined]
     assert members == {
         NotificationCreatedEvent,
         MessageDeliveredEvent,
         TaskUpdatedEvent,
+        SidebarChangedEvent,
     }

@@ -280,7 +280,7 @@ async def create_schedule(
 
     engine = request.app.state.rls_engine
     try:
-        return schedule_create_service.create_user_schedule(
+        result = schedule_create_service.create_user_schedule(
             engine,
             ScheduleStore(engine),
             TaskStore(engine),
@@ -294,6 +294,14 @@ async def create_schedule(
             now=datetime.now(UTC),
             notify_on_fire=body.notify_on_fire,
         )
+        # R9-012: post-commit sidebar liveness ping — the Schedule badge on the
+        # owner's OTHER tabs/devices catches up (data-only; best-effort).
+        notifications_service.publish_sidebar_changed(
+            getattr(request.app.state, "event_channel", None),
+            owner_id=user.id,
+            reason="schedule.created",
+        )
+        return result
     except PersonaNotFoundError as exc:
         raise HTTPException(status_code=404, detail="executor persona not found") from exc
     except ScheduleNeverFiresError as exc:

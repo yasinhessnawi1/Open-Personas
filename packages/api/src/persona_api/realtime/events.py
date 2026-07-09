@@ -27,6 +27,7 @@ __all__ = [
     "NotificationCreatedEvent",
     "ReadyControl",
     "ResyncControl",
+    "SidebarChangedEvent",
     "TaskUpdatedEvent",
 ]
 
@@ -87,8 +88,26 @@ class TaskUpdatedEvent(_Event):
     state: str
 
 
+class SidebarChangedEvent(_Event):
+    """The owner's sidebar-shaping data changed on ANOTHER device/tab (R9-012).
+
+    A generic, data-only liveness ping emitted post-commit at the mutation
+    routes that move the sidebar's lists/badges (persona create/delete,
+    conversation create/delete, schedule create). The client's only reaction is
+    a soft ``router.refresh()`` — the server re-resolves the sidebar from the
+    durable stores (A11-D-2 refetch-on-ping; the payload is never trusted as
+    state). ``reason`` names the originating mutation for observability only;
+    the client must not branch on it.
+    """
+
+    type: Literal["sidebar.changed"] = "sidebar.changed"
+    reason: str
+
+
 #: The closed v1 data catalogue. Control events are deliberately excluded.
-ChannelEvent = NotificationCreatedEvent | MessageDeliveredEvent | TaskUpdatedEvent
+ChannelEvent = (
+    NotificationCreatedEvent | MessageDeliveredEvent | TaskUpdatedEvent | SidebarChangedEvent
+)
 
 
 class ReadyControl(_Event):

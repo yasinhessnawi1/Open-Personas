@@ -28,7 +28,12 @@ from persona_api.schemas import (
     MessageView,
     PostMessageRequest,
 )
-from persona_api.services import audit_service, chat_service, document_service
+from persona_api.services import (
+    audit_service,
+    chat_service,
+    document_service,
+    notifications_service,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -64,6 +69,13 @@ async def create_conversation(
         user_id=user.id,
         action="conversation.create",
         target=conv_id,
+    )
+    # R9-012: post-commit sidebar liveness ping — the owner's OTHER tabs/devices
+    # soft-refresh their sidebar (data-only; best-effort, never fails the create).
+    notifications_service.publish_sidebar_changed(
+        getattr(request.app.state, "event_channel", None),
+        owner_id=user.id,
+        reason="conversation.created",
     )
     row = chat_service.get_conversation(
         rls_engine=request.app.state.rls_engine, conversation_id=conv_id
@@ -180,6 +192,12 @@ async def delete_conversation(
         user_id=user.id,
         action="conversation.delete",
         target=conversation_id,
+    )
+    # R9-012: post-commit sidebar liveness ping (see create_conversation).
+    notifications_service.publish_sidebar_changed(
+        getattr(request.app.state, "event_channel", None),
+        owner_id=user.id,
+        reason="conversation.deleted",
     )
 
 
