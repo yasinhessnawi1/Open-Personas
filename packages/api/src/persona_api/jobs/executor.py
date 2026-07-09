@@ -26,7 +26,11 @@ terminates the job as ``failed`` (non-retryable). Any other exception is transie
 cause. A worker that *crashes* mid-job (no exception fires) is the lease-expiry
 reclaim path; the crash-loop cap dead-letters a job re-claimed past its attempts
 so neither failure mode storms (criterion 5). A drain cancellation re-raises and
-leaves the job for reclaim (T5).
+leaves the job for reclaim (T5). A **pre-dispatch poison** — a job type this
+process has no handler for, or a durable payload that fails its model's
+validation — can never succeed by retrying, so it dead-letters immediately
+(R9-013; the pre-fix escape crashed the asyncio task unretrieved and
+lease-cycled forever).
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import PermanentJobError
+from persona.errors import PermanentJobError, UnknownJobTypeError
 from persona.jobs import JobState
 from persona.logging import get_logger
 
@@ -104,7 +108,15 @@ class JobExecutor:
             _log.warning("job not runnable; lease lost", job_id=record.id, type=record.type)
             return JobState.FAILED
 
-        spec = self._registry.get(record.type)
+        # Pre-dispatch poison guard (R9-013): a job whose TYPE this process cannot
+        # resolve can never succeed here — retrying re-crashes, the lease lapses,
+        # reclaim re-claims, forever (the "Task exception was never retrieved"
+        # poison loop). Fail it DECISIVELY: dead-letter with the honest cause,
+        # release the claim, and let nothing escape the task.
+        try:
+            spec = self._registry.get(record.type)
+        except UnknownJobTypeError as exc:
+            return self._dead_letter_poisoned(record, exc, reason="unknown job type")
 
         # Crash-loop cap: a job re-claimed (via lease-expiry reclaim) more times than
         # the policy allows dead-letters WITHOUT running again. Deterministic
@@ -118,7 +130,13 @@ class JobExecutor:
             _log.warning("job dead-lettered: crash-loop cap", job_id=record.id, type=record.type)
             return JobState.DEAD
 
-        payload = self._registry.parse_payload(record.type, record.payload)
+        # Same poison class (R9-013): the payload is durable, so a payload that
+        # fails its registered model's validation fails it on EVERY delivery —
+        # deterministic, never retryable in this or any process. Dead-letter.
+        try:
+            payload = self._registry.parse_payload(record.type, record.payload)
+        except Exception as exc:  # noqa: BLE001 — pure validation over stored JSONB; deterministic
+            return self._dead_letter_poisoned(record, exc, reason="payload parse failed")
         context = WorkerJobContext(
             owner_id=record.owner_id,
             rls_engine=self._rls_engine,
@@ -155,6 +173,27 @@ class JobExecutor:
             return JobState.SUCCEEDED
         _log.warning("job finished but completion lost the lease", job_id=record.id)
         return JobState.FAILED
+
+    def _dead_letter_poisoned(self, record: JobRecord, exc: Exception, *, reason: str) -> JobState:
+        """Dead-letter a pre-dispatch poison job — terminal ``dead``, no retry cycles.
+
+        The failure fired before the handler could even be resolved (unknown job
+        type in this process, undecodable durable payload), so a retry can never
+        succeed: the pre-fix behaviour let the exception escape the asyncio task
+        ("Task exception was never retrieved"), the claimed job's lease lapsed,
+        and reclaim re-crashed it every cycle (R9-013). The job is RUNNING under
+        our lease here (``mark_running`` already succeeded), so ``mark_dead``
+        releases the claim in the same established transition the retry-exhaustion
+        and crash-loop-cap paths use.
+        """
+        self._queue.mark_dead(job_id=record.id, worker_id=self._worker_id, error=str(exc))
+        _log.warning(
+            "job dead-lettered: pre-dispatch poison",
+            job_id=record.id,
+            type=record.type,
+            reason=reason,
+        )
+        return JobState.DEAD
 
     def _fail_retryable(
         self, record: JobRecord, spec: JobTypeSpec[Any], exc: Exception

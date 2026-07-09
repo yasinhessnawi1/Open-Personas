@@ -271,13 +271,34 @@ class Worker:
             for record in records:
                 task: asyncio.Task[object] = asyncio.create_task(self._executor.execute(record))
                 self._in_flight.add(task)
-                task.add_done_callback(self._in_flight.discard)
+                task.add_done_callback(self._settle_job_task)
             if not records:
                 # Nothing due (or no free slots) — wait a jittered interval, but
                 # wake immediately if a drain is requested mid-sleep.
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._draining.wait(), timeout=self._next_poll_delay())
         await self._drain()
+
+    def _settle_job_task(self, task: asyncio.Task[object]) -> None:
+        """Discard a settled job task, RETRIEVING any escaped exception (R9-013).
+
+        ``JobExecutor.execute`` classifies and records every failure it can; if
+        an exception still escapes it, retrieving it here logs an honest ERROR
+        instead of asyncio's deferred "Task exception was never retrieved" crash
+        report — and the job is left for lease-expiry reclaim, exactly as a hard
+        crash would be. (Drain-time ``CancelledError`` is the expected settle.)
+        """
+        self._in_flight.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _log.error(
+                "job task crashed outside the executor's failure paths; "
+                "left for lease-expiry reclaim",
+                worker_id=self._worker_id,
+                error=str(exc),
+            )
 
     async def _drain(self) -> None:
         """Await in-flight jobs within the drain bound; cancel the rest.
