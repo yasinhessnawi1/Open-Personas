@@ -244,6 +244,20 @@ class RoutingConfig(BaseModel):
     tier_for_tools: Literal["frontier", "mid", "small", "auto"] = "small"
     intelligent: IntelligentRoutingConfig = Field(default_factory=IntelligentRoutingConfig)
     budget: RoutingBudgetConfig = Field(default_factory=RoutingBudgetConfig)
+    #: Spec M1 — the user's chosen OpenRouter model id for THIS persona ("one model +
+    #: auto-tier fallback"). ``None`` (the default, and the pre-M1 shape) ⇒ the tier
+    #: system routes exactly as before; set ⇒ the loop prefers it when capable and
+    #: falls back to the tier chain on error (additive-optional, the D-23-9 precedent —
+    #: NO schema_version bump).
+    preferred_model: str | None = Field(default=None, min_length=1)
+
+    @field_validator("preferred_model")
+    @classmethod
+    def _preferred_model_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            msg = "preferred_model must be a non-empty model id or None"
+            raise ValueError(msg)
+        return v
 
 
 class EmbeddingConfig(BaseModel):

@@ -99,3 +99,20 @@ class TestFullRoutingFromYaml:
         assert p.routing.intelligent.weights.cost == 0.6
         assert p.routing.intelligent.weights.quality == 0.50  # default preserved
         assert p.routing.budget.max_cents_per_turn == 3.0
+
+
+class TestPreferredModel:
+    def test_routing_preferred_model_defaults_none_and_old_yaml_loads(self) -> None:
+        # Additive invariant: a pre-M1 routing block loads byte-identically.
+        cfg = RoutingConfig()
+        assert cfg.preferred_model is None
+
+    def test_routing_preferred_model_accepts_canonical_id(self) -> None:
+        cfg = RoutingConfig(preferred_model="anthropic/claude-sonnet-4.6")
+        assert cfg.preferred_model == "anthropic/claude-sonnet-4.6"
+
+    def test_routing_preferred_model_rejects_blank_and_whitespace(self) -> None:
+        with pytest.raises(ValidationError):
+            RoutingConfig(preferred_model="")
+        with pytest.raises(ValidationError):
+            RoutingConfig(preferred_model="   ")
