@@ -1,9 +1,11 @@
 """RuntimeFactory wires ``render_diagram`` when a workspace persister exists.
 
 Spec 28 B3. ``render_diagram`` is runtime-wired (needs the WorkspacePersister to
-store the diagram source for client-side SVG rendering). It is composed in
-``_build_toolbox`` only when ``workspace_root`` is set; the persona allow-list is
-the final advertisement gate.
+store the diagram source for client-side SVG rendering). Since R5-D-4 the
+persister writes through the ``FileStorage`` seam: it is composed in
+``_build_toolbox`` only when a ``file_storage`` backend is injected (the app
+composition root builds one from ``workspace_root`` via ``build_file_storage``);
+the persona allow-list is the final advertisement gate.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 from persona.schema.persona import Persona, PersonaIdentity
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_api.storage import LocalFileStorage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,12 +34,16 @@ def _make_persona(*, tools: list[str]) -> Persona:
 
 
 def _make_factory(*, audit_root: Path, workspace_root: Path | None) -> RuntimeFactory:
+    # Mirror the app composition root (R5-D-4): a configured workspace_root
+    # comes with a FileStorage backend (``build_file_storage`` → local default);
+    # no workspace ⇒ no storage ⇒ no persister.
     return RuntimeFactory(
         rls_engine=None,  # type: ignore[arg-type]
         embedder=None,  # type: ignore[arg-type]
         tier_registry=None,  # type: ignore[arg-type]
         turn_log_writer=None,  # type: ignore[arg-type]
         audit_root=audit_root,
+        file_storage=LocalFileStorage(workspace_root) if workspace_root is not None else None,
         sandbox_pool=None,
         workspace_root=workspace_root,
         image_backend=None,
