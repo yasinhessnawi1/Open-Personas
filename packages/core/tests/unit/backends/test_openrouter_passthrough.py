@@ -47,3 +47,20 @@ def test_passthrough_construction_failure_is_none_not_raise(
     # A blank id (whitespace-only after strip) is rejected before construction
     # is even attempted → None, logged; never raises.
     assert build_openrouter_passthrough(" ") is None
+
+
+def test_passthrough_factory_exception_is_none_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The construction try/except itself: a factory raise → None (fail-open), never propagates."""
+    monkeypatch.setenv(OPENROUTER_KEY_ENV, "test-key-not-real")
+
+    def _boom(config):  # noqa: ANN001, ANN202, ARG001 — signature mirrors load_backend
+        msg = "provider exploded at construction"
+        raise RuntimeError(msg)
+
+    import persona.backends._factory
+
+    monkeypatch.setattr(persona.backends._factory, "load_backend", _boom, raising=True)
+    build_openrouter_passthrough.cache_clear()
+    assert build_openrouter_passthrough("z-ai/glm-4.6") is None
