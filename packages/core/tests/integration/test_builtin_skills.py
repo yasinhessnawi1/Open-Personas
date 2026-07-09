@@ -23,6 +23,7 @@ branches end-to-end with real files). Regression guard on token counts:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -217,11 +218,20 @@ class TestInjectorEndToEnd:
         self,
         document_generation_spec,  # noqa: ANN001
     ) -> None:
+        # P5 (D-24-5): the RAW body carries BOTH fidelity variants inline and
+        # is never injected as-is — the composition root resolves the fence at
+        # the single scan point BEFORE injection. What production injects is a
+        # RESOLVED variant, and each variant is under the declared budget →
+        # verbatim pass-through for both.
+        from persona.skills.document_generation import apply_docgen_fidelity
+
         injector = SkillInjector()
-        out = await injector.inject(document_generation_spec)
-        # Under budget → verbatim.
-        assert out == document_generation_spec.content
-        assert MARKER not in out
+        for full in (True, False):
+            resolved = apply_docgen_fidelity(document_generation_spec, full_fidelity=full)
+            out = await injector.inject(resolved)
+            # Under budget → verbatim.
+            assert out == resolved.content
+            assert MARKER not in out
 
     @pytest.mark.asyncio
     async def test_web_research_truncated_without_summariser(
@@ -437,19 +447,48 @@ class TestUnifiedDocumentGenerationSkill:
         self,
         document_generation_spec,  # noqa: ANN001
     ) -> None:
-        # reportlab + python-pptx are ABSENT from the default sandbox template
-        # and unobtainable offline. The SKILL.md must route pdf to matplotlib
-        # (PdfPages, pre-installed) and degrade pptx honestly — never name the
-        # absent libraries as the route to take.
+        # reportlab + python-pptx are ABSENT from the DEFAULT sandbox template
+        # and unobtainable offline (P5 added a custom template that bakes them
+        # in, hence the fidelity fence). The SKILL.md must route pdf to
+        # matplotlib (PdfPages, pre-installed) as the always-available floor,
+        # and the degrade variant must flag python-pptx as unavailable and
+        # offer a working alternative — never name an absent library as the
+        # route to take, never instruct an install.
+        from persona.skills.document_generation import apply_docgen_fidelity
+
         body = document_generation_spec.content
         assert "PdfPages" in body, (
-            "SKILL.md must teach matplotlib's PdfPages for offline PDF "
-            "(reportlab is absent from the sandbox and cannot be installed)."
+            "SKILL.md must teach matplotlib's PdfPages as the offline PDF "
+            "floor (reportlab is absent from the default sandbox template)."
         )
-        # pptx must be flagged as unavailable / degraded, not produced via
-        # an absent library import.
-        assert "python-pptx" in body, "SKILL.md must name python-pptx in the pptx degrade guidance."
-        assert "NOT installed" in body, (
-            "SKILL.md must state python-pptx is NOT installed and degrade the "
-            "pptx format honestly (offer docx/md instead)."
+        assert "python-pptx" in body, "SKILL.md must name python-pptx in the pptx guidance."
+
+        # Degrade variant (default template): pptx must be flagged as
+        # unavailable/uninstallable and degraded honestly to docx/md.
+        degraded = apply_docgen_fidelity(document_generation_spec, full_fidelity=False).content
+        assert re.search(r"python-pptx.*\bNOT\b.*(available|installed)", degraded, re.DOTALL), (
+            "Degrade-variant SKILL.md must state python-pptx is NOT "
+            "available/installed on the default template."
+        )
+        assert "cannot be installed" in degraded, (
+            "Degrade-variant SKILL.md must state python-pptx cannot be "
+            "installed offline (egress is off, D-12-4)."
+        )
+        assert "docx" in degraded, (
+            "Degrade-variant SKILL.md must offer a slide-structured docx "
+            "alternative instead of pptx."
+        )
+        assert "`md`" in degraded, (
+            "Degrade-variant SKILL.md must offer an md outline alternative instead of pptx."
+        )
+
+        # Full variant (custom doc-gen template): real .pptx, but keep the
+        # try-import guard so a misconfigured template degrades, not installs.
+        full = apply_docgen_fidelity(document_generation_spec, full_fidelity=True).content
+        assert "from pptx import" in full, (
+            "Full-variant SKILL.md must produce real .pptx via python-pptx."
+        )
+        assert "ModuleNotFoundError" in full, (
+            "Full-variant SKILL.md must keep the try-import guard around "
+            "python-pptx (degrade on a misconfigured template, never install)."
         )
