@@ -115,4 +115,28 @@ describe("createChannelRouter", () => {
     r.handle({ event: "something.new", id: "e1:1", data: "{}" });
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  it("routes sidebar.changed as a data event, deduped by id (R9-012)", () => {
+    const dispatch = vi.fn();
+    const r = createChannelRouter(dispatch);
+    r.handle(ready("e1", 0));
+    const frame: RawSSEEvent = {
+      event: "sidebar.changed",
+      id: "e1:1",
+      data: JSON.stringify({
+        v: 1,
+        type: "sidebar.changed",
+        reason: "persona.created",
+      }),
+    };
+    r.handle(frame);
+    expect(dispatch).toHaveBeenCalledWith(
+      "sidebar.changed",
+      expect.objectContaining({ reason: "persona.created" }),
+    );
+    // A reconnect replay of the same frame never fires twice (A11-D-4).
+    r.handle(frame);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(r.lastEventId()).toBe("e1:1");
+  });
 });

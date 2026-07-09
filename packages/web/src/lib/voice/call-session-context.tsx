@@ -47,6 +47,7 @@ import {
   useState,
 } from "react";
 import { useAuth } from "@/auth";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import {
   clearPersistedCall,
   isResumable,
@@ -160,6 +161,7 @@ export function CallSessionProvider({
   children: ReactNode;
 }): React.JSX.Element {
   const { getToken } = useAuth();
+  const refreshSidebar = useSidebarRefresh();
   const token = useCallback(
     () => getToken(TEMPLATE ? { template: TEMPLATE } : undefined),
     [getToken],
@@ -392,7 +394,11 @@ export function CallSessionProvider({
     setTarget(null);
     setStartedAt(null);
     clearPersistedCall();
-  }, [endInner, flushRecap]);
+    // R9-012: the shared sidebar-refresh seam — the ended call moves the Calls
+    // badge + the /calls history (soft refresh; client state preserved). `end`
+    // is the single teardown seam, so the switch flow is covered too.
+    refreshSidebar();
+  }, [endInner, flushRecap, refreshSidebar]);
 
   const resumeCall = useCallback(() => {
     if (resumable === null) return;

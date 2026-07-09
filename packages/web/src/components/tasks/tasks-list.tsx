@@ -14,6 +14,7 @@ import {
   fetchTasks,
   type TaskSummary,
 } from "@/lib/api/tasks-client";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { useTaskSignal } from "@/lib/task-signal";
 
 import { TaskRow } from "./task-row";
@@ -44,6 +45,7 @@ export function ordered(tasks: TaskSummary[]): TaskSummary[] {
 export function TasksList({ personaNames }: { personaNames: PersonaNames }) {
   const t = useTranslations("taskList");
   const { getToken } = useAuth();
+  const refreshSidebar = useSidebarRefresh();
   const toast = useToast();
   const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -77,13 +79,16 @@ export function TasksList({ personaNames }: { personaNames: PersonaNames }) {
               : task,
           ),
         );
+        // R9-012: the shared sidebar-refresh seam — the Activity badge counts
+        // non-terminal tasks; a cancel moves it (soft refresh, list state kept).
+        refreshSidebar();
       } catch {
         toast.error(t("cancelFailed"));
       } finally {
         setBusy((b) => ({ ...b, [taskId]: false }));
       }
     },
-    [getToken, toast, t],
+    [getToken, toast, t, refreshSidebar],
   );
 
   if (tasks === null) {

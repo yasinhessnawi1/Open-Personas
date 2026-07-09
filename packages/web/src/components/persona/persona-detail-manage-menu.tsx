@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useApi } from "@/lib/api/use-api";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { renameInIdentity } from "@/lib/persona";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +45,7 @@ export function PersonaDetailManageMenu({
   const confirm = useConfirm();
   const { notify } = useNotify();
   const router = useRouter();
+  const refreshSidebar = useSidebarRefresh();
   const api = useApi();
   const [busy, setBusy] = useState(false);
 
@@ -74,7 +76,8 @@ export function PersonaDetailManageMenu({
         title: tn("duplicated", { name: personaName }),
       });
       router.push("/personas");
-      router.refresh();
+      // R9-012: the shared sidebar-refresh seam — rail + badges re-resolve.
+      refreshSidebar();
     } finally {
       setBusy(false);
     }
@@ -96,7 +99,7 @@ export function PersonaDetailManageMenu({
       });
       notify({ level: "success", title: tn("deleted", { name: personaName }) });
       router.push("/personas");
-      router.refresh();
+      refreshSidebar(); // R9-012: shared sidebar-refresh seam
     } finally {
       setBusy(false);
     }

@@ -2,7 +2,7 @@
 
 import { ChevronRight, MoreVertical, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useFormatter, useTranslations } from "next-intl";
 import { useMemo, useState } from "react";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useApi } from "@/lib/api/use-api";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { cn } from "@/lib/utils";
 
 export interface ConversationListPersona {
@@ -56,8 +57,8 @@ export function ConversationList({
   // so the rendered date matches (a bare `toLocaleDateString()` used the runtime
   // default locale, which differs SSR↔browser → hydration mismatch).
   const format = useFormatter();
-  const router = useRouter();
   const api = useApi();
+  const refreshSidebar = useSidebarRefresh();
   const search = useSearchParams();
   const personaFilter = search.get("persona_id");
   const qFilter = (search.get("q") ?? "").trim().toLowerCase();
@@ -89,7 +90,9 @@ export function ConversationList({
         params: { path: { conversation_id: id } },
       });
       notify({ level: "success", title: tn("deleted", { name: label }) });
-      router.refresh();
+      // R9-012: the shared sidebar-refresh seam — the page list AND the
+      // sidebar MESSAGES/badges re-resolve in one soft refresh.
+      refreshSidebar();
     } finally {
       setDeletingId(null);
     }

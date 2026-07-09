@@ -80,6 +80,11 @@ vi.mock("livekit-client", () => ({
   createAudioAnalyser: () => ({ calculateVolume: () => 0, cleanup: vi.fn() }),
 }));
 
+// R9-012: the provider refreshes the sidebar at call end via useSidebarRefresh.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
 vi.mock("@/auth", () => ({
   useAuth: () => ({ getToken: async () => "jwt" }),
 }));

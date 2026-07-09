@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ActiveCallIndicator } from "@/components/voice/active-call-indicator";
 import { useApi } from "@/lib/api/use-api";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { renameInIdentity } from "@/lib/persona";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { cn } from "@/lib/utils";
@@ -73,6 +74,7 @@ export function PersonaLibraryCard({ persona }: PersonaLibraryCardProps) {
   const confirm = useConfirm();
   const { notify } = useNotify();
   const router = useRouter();
+  const refreshSidebar = useSidebarRefresh();
   const api = useApi();
   const { requestCall } = useCallSession();
   const [busy, setBusy] = useState(false);
@@ -141,7 +143,9 @@ export function PersonaLibraryCard({ persona }: PersonaLibraryCardProps) {
         level: "success",
         title: tn("duplicated", { name: persona.name }),
       });
-      router.refresh();
+      // R9-012: the shared sidebar-refresh seam — the PERSONAS rail + badges
+      // re-resolve server-side (soft refresh; client state preserved).
+      refreshSidebar();
     } finally {
       setBusy(false);
     }
@@ -165,7 +169,7 @@ export function PersonaLibraryCard({ persona }: PersonaLibraryCardProps) {
         level: "success",
         title: tn("deleted", { name: persona.name }),
       });
-      router.refresh();
+      refreshSidebar(); // R9-012: shared sidebar-refresh seam
     } finally {
       setBusy(false);
     }

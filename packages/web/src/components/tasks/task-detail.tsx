@@ -21,6 +21,7 @@ import {
   resumeTask,
   type TaskDetail as TaskDetailData,
 } from "@/lib/api/tasks-client";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { useTaskSignal } from "@/lib/task-signal";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,7 @@ export function TaskDetail({
 }) {
   const t = useTranslations("taskDetail");
   const { getToken } = useAuth();
+  const refreshSidebar = useSidebarRefresh();
   const toast = useToast();
   const [detail, setDetail] = useState<TaskDetailData | null | "error">(null);
   const [busy, setBusy] = useState(false);
@@ -96,13 +98,16 @@ export function TaskDetail({
         // else a plain confirm for a real change.
         setReflection(result.note || t(`reflect.${verb}`));
         await refetch();
+        // R9-012: a cancel moves the Activity badge (non-terminal count) — the
+        // shared sidebar-refresh seam re-resolves it (soft refresh).
+        if (verb === "cancel") refreshSidebar();
       } catch {
         toast.error(t("commandFailed"));
       } finally {
         setBusy(false);
       }
     },
-    [getToken, taskId, refetch, toast, t],
+    [getToken, taskId, refetch, toast, t, refreshSidebar],
   );
 
   const doExtend = useCallback(async () => {

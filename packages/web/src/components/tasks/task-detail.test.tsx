@@ -31,6 +31,11 @@ const auth = vi.hoisted(() => ({
   getToken: () => Promise.resolve("test-token"),
 }));
 
+// R9-012: a cancel refreshes the sidebar via useSidebarRefresh.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
 vi.mock("@/auth", () => ({
   useAuth: () => ({ getToken: auth.getToken }),
 }));

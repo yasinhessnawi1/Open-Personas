@@ -15,12 +15,16 @@ export type MeEventType =
   | "notification.created"
   | "message.delivered"
   | "task.updated"
+  | "sidebar.changed"
   | "resync";
 
 const DATA_EVENTS: ReadonlySet<string> = new Set([
   "notification.created",
   "message.delivered",
   "task.updated",
+  // R9-012: the generic cross-device sidebar ping (persona/conversation
+  // create+delete, schedule create) — consumers soft-refresh, never trust payload.
+  "sidebar.changed",
 ]);
 
 export type MeDispatch = (

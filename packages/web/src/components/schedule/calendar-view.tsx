@@ -12,7 +12,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-
 import { useAuth } from "@/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -22,6 +21,7 @@ import {
   previewReschedule,
   type ReschedulePreview,
 } from "@/lib/api/schedule-client";
+import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import {
   type FireStatus,
@@ -61,6 +61,7 @@ export function CalendarView({
   defaultTimezone,
 }: CalendarViewProps) {
   const { getToken } = useAuth();
+  const refreshSidebar = useSidebarRefresh();
   const [data, setData] = useState<OccurrencesResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Occurrence | null>(null);
@@ -169,6 +170,9 @@ export function CalendarView({
           onCreated={async () => {
             setCreating(false);
             await load(); // the new occurrence appears immediately — same engine read
+            // R9-012: the shared sidebar-refresh seam — the Schedule badge
+            // re-resolves server-side (soft refresh; calendar state preserved).
+            refreshSidebar();
           }}
         />
       )}
