@@ -24,6 +24,7 @@ from persona.backends.metadata import (
     StaticModelMetadataResolver,
 )
 from persona.backends.openrouter_catalog import OpenRouterCatalogClient
+from persona.backends.openrouter_passthrough import build_openrouter_passthrough
 from persona.config import PersonaCoreConfig
 from persona.errors import PersonaNotFoundError
 from persona.history import ConversationHistoryManager
@@ -1515,6 +1516,13 @@ class RuntimeFactory:
             # byte-identically (criterion 11).
             latency_tracker=self._latency_tracker,
             intelligent_router=self._intelligent_router,
+            # Spec M1 (M1-T4): the per-persona ``preferred_model`` choice (T1,
+            # additive-optional) resolves through the OpenRouter passthrough (T2) — any
+            # catalog id, no tier pre-registration needed. Fail-open: an unset key or a
+            # bad choice returns None from the provider and the loop's override
+            # short-circuit (T3) falls back to the tier default, so this is
+            # byte-identical for personas that never set ``preferred_model``.
+            preferred_backend_provider=build_openrouter_passthrough,
             # Spec R7 (R7-D-1 discharge of D-23-X): the soft per-day cost-bias ramp's
             # real cross-session spend source (today's recorded turn_logs cost for
             # this owner+persona). Fail-soft to 0.0; replaces the old construction-
