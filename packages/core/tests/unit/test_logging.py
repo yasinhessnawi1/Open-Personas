@@ -191,3 +191,28 @@ def test_no_exc_info_true_in_log_calls_repo_wide() -> None:
         "Use `logger.opt(exception=True).warning(...)` instead. Offenders:\n"
         + "\n".join(offenders)
     )
+
+
+def test_pretty_format_renders_structured_kwargs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Guard (R9-019): the dev/pretty sink must render structured log kwargs as a
+    ``key=value`` suffix — before the fix loguru dropped every field the format string
+    did not name, so dev logs lost all context (the imagegen provider error, etc.).
+    """
+    log = plog.get_logger("imagegen", config=PersonaCoreConfig(log_format="pretty"))
+    log.warning("provider fell back", provider="cloudflare", error="401 bad {token}")
+    out = _capture_stderr(capsys)
+    assert "provider fell back" in out
+    assert "provider=cloudflare" in out
+    assert "error=401 bad {token}" in out  # braces are literal, not re-templated
+
+
+def test_pretty_format_no_context_suffix_when_no_extra_kwargs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A plain message (no structured kwargs) shows no trailing ``| `` context noise."""
+    log = plog.get_logger("cli", config=PersonaCoreConfig(log_format="pretty"))
+    log.info("just a message")
+    out = _capture_stderr(capsys).rstrip()
+    assert out.endswith("just a message")

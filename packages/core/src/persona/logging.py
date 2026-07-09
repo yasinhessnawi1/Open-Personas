@@ -24,7 +24,7 @@ from loguru import logger as _root_logger
 from persona.config import PersonaCoreConfig
 
 if TYPE_CHECKING:
-    from loguru import Logger
+    from loguru import Logger, Record
 
 __all__ = ["get_logger", "redact_secrets", "reset_for_testing"]
 
@@ -100,13 +100,38 @@ _lock: threading.Lock = threading.Lock()
 # remove only what we added without touching downstream sinks.
 _sink_ids: list[int] = []
 
-# Pretty format mirrors the loguru default but adds the bound ``component``.
+# Pretty format mirrors the loguru default but adds the bound ``component`` and the
+# rendered structured context (``{extra[_ctx]}``, set by :func:`_attach_ctx`). Without
+# ``_ctx``, loguru's pretty sink templates ONLY ``{message}`` + ``{component}`` and every
+# other structured field passed as a log kwarg is INVISIBLE in dev (R9-019) — the JSON
+# sink serialises them, but developers reading the console saw bare messages. ``_ctx`` is
+# substituted LITERALLY (like ``{message}``), so arbitrary values — braces, ``<tags>`` —
+# are safe: loguru parses color markup in the format string BEFORE substituting fields.
 _PRETTY_FORMAT: str = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
     "<level>{level: <8}</level> | "
     "<cyan>{extra[component]}</cyan> | "
-    "<level>{message}</level>"
+    "<level>{message}</level>{extra[_ctx]}"
 )
+
+# Extra keys that are structural (rendered elsewhere or internal), never part of the
+# human-facing context suffix.
+_CTX_SKIP: frozenset[str] = frozenset({"component", "_ctx"})
+
+
+def _attach_ctx(record: Record) -> None:
+    """Loguru patcher (R9-019): render the record's structured fields into ``extra[_ctx]``.
+
+    A log call like ``logger.warning("x fell back", provider=p, error=e)`` binds
+    ``provider``/``error`` into ``record["extra"]`` — but loguru's pretty format only shows
+    fields the template names, so they vanished in dev. This computes a ``key=value``
+    suffix from every non-structural extra so the pretty sink can append it; the field is
+    ALWAYS set (empty string when there is no context) so ``{extra[_ctx]}`` never KeyErrors.
+    Applied globally via ``configure(patcher=...)``, so even records from a raw logger get it.
+    """
+    extra = record["extra"]
+    fields = {k: v for k, v in extra.items() if k not in _CTX_SKIP}
+    extra["_ctx"] = " | " + " ".join(f"{k}={v}" for k, v in fields.items()) if fields else ""
 
 
 def _configure_sinks(config: PersonaCoreConfig) -> None:
@@ -115,6 +140,9 @@ def _configure_sinks(config: PersonaCoreConfig) -> None:
     Caller MUST hold ``_lock``. Does not check the idempotency flag — that is
     the caller's responsibility (see :func:`get_logger`).
     """
+    # R9-019: render structured log kwargs into ``extra[_ctx]`` for EVERY record (global
+    # patcher, so a raw ``loguru.logger`` call also gets it — keeps ``{extra[_ctx]}`` safe).
+    _root_logger.configure(patcher=_attach_ctx)
     if config.log_format == "json":
         sink_id = _root_logger.add(
             sys.stderr,
