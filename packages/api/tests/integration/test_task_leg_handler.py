@@ -352,3 +352,159 @@ async def test_handler_resumes_a_waiting_task_on_pickup(
     )
     assert runner.calls == 1  # the leg ran (the task was resumed, not skipped)
     assert tasks.get("user_a", "t1").state == TaskState.COMPLETED  # then the leg completed it
+
+
+# --- R9-005: an over-budget checkpoint after a FINISHED run never burns retries ------------------
+
+
+class _WordyRunner:
+    """A counting runner whose single finished output overflows a tiny checkpoint budget."""
+
+    def __init__(self, output: str, *, status: RunStatus = RunStatus.COMPLETED) -> None:
+        self.calls = 0
+        self._output = output
+        self._status = status
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+        self.calls += 1
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=self._status,
+            steps=[Step(type=StepType.FINAL, content="done", tokens=100)],
+            output=self._output,
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_over_budget_checkpoint_parks_task_and_never_retries(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-005 reproduce: the run FINISHES, the checkpoint write overflows the budget — the job
+    must SUCCEED (one execution, no retry, no dead-letter) while the task parks honestly
+    ``waiting(on_user)`` with the real cause, voiced via ``on_task_stuck``.
+
+    Drives the REAL trigger chain: a queued ``task_leg`` job through the real ``JobExecutor``
+    (the retry-classification layer) into the real handler + ``CompactingCheckpointWriter`` +
+    ``CheckpointStore`` budget gate — no hand-raised errors, no forced verdicts. Before the
+    fix, the store's ``CheckpointTooLargeError`` propagated as transient: 3 full leg re-runs
+    (3× model spend), then dead-letter.
+    """
+    from persona.jobs import JobRegistry, JobState
+    from persona_api.jobs.executor import JobExecutor
+    from persona_api.tasks import register_task_leg_handler, task_leg_idempotency_key
+    from persona_runtime.legs import CompactingCheckpointWriter
+
+    _seed_active_task(migrated_engine)
+    tasks = TaskStore(app_engine)
+    budget = 24  # tiny: the single finished output alone exceeds it (compaction can't shrink one)
+    runner = _WordyRunner("the finished run concluded a very long deliverable indeed " * 20)
+    stuck: list[tuple[str, object]] = []
+
+    async def _voice_spy(owner_id: str, report) -> None:
+        stuck.append((owner_id, report))
+
+    registry = JobRegistry()
+    register_task_leg_handler(
+        registry,
+        task_store=tasks,
+        checkpoint_store=CheckpointStore(app_engine, token_budget=budget),
+        runner_builder=_FakeRunnerBuilder(runner),  # type: ignore[arg-type]
+        continuation=TaskContinuation(
+            task_store=tasks,
+            queue=JobQueue(app_engine),
+            checkpoint_store=CheckpointStore(app_engine, token_budget=budget),
+        ),
+        writer=CompactingCheckpointWriter(token_budget=budget),
+        on_task_stuck=_voice_spy,
+    )
+    payload = TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER)
+    queue = JobQueue(migrated_engine)
+    rec = queue.enqueue(
+        type="task_leg",
+        owner_id="user_a",
+        payload=payload.model_dump(mode="json"),
+        idempotency_key=task_leg_idempotency_key(payload),
+    )
+    assert rec is not None
+    executor = JobExecutor(queue=queue, registry=registry, rls_engine=app_engine, worker_id="w1")
+    claimed = queue.claim(worker_id="w1", lease_seconds=30, limit=1)
+    assert claimed, "expected the enqueued leg job to be claimable"
+
+    outcome = await executor.execute(claimed[0])
+
+    # The job SUCCEEDED — the deterministic write failure was NOT classified transient.
+    assert outcome is JobState.SUCCEEDED
+    with migrated_engine.begin() as conn:
+        state = conn.execute(
+            text("SELECT state FROM jobs WHERE id = :i"), {"i": rec.id}
+        ).scalar_one()
+    assert state == "succeeded"  # not 'queued' (retry), not 'dead' (dead-letter)
+    assert runner.calls == 1  # exactly ONE leg execution — no model re-spend
+    assert queue.claim(worker_id="w1", lease_seconds=30, limit=5) == []  # nothing re-queued
+
+    # The task parked honestly: waiting(on_user), nothing half-written, the real cause voiced.
+    task = tasks.get("user_a", "t1")
+    assert task.state == TaskState.WAITING
+    assert task.head_checkpoint_seq is None  # the oversized checkpoint never landed
+    assert CheckpointStore(app_engine).get_latest("user_a", "t1") is None
+    assert len(stuck) == 1
+    owner_voiced, report = stuck[0]
+    assert owner_voiced == "user_a"
+    assert "token budget" in report.cause  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_compaction_keeps_the_task_progressing(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-005 layer 2: with the distiller wired (the new default path), a many-leg task whose
+    accumulation would overflow COMPACTS instead — every checkpoint lands, the head advances,
+    and the task keeps going (the completed work is preserved, never discarded)."""
+    from persona.tasks import checkpoint_token_count
+    from persona_runtime.legs import CompactingCheckpointWriter
+
+    _seed_active_task(migrated_engine)
+    tasks = TaskStore(app_engine)
+    budget = 200
+    runner = _WordyRunner(
+        "this leg established a fairly wordy conclusion about the ongoing work " * 3,
+        status=RunStatus.MAX_STEPS_REACHED,  # not FINAL → CONTINUE (a long multi-leg task)
+    )
+    handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=CheckpointStore(app_engine, token_budget=budget),
+        runner_builder=_FakeRunnerBuilder(runner),  # type: ignore[arg-type]
+        writer=CompactingCheckpointWriter(token_budget=budget),
+    )
+    ctx = _FakeContext("user_a")
+    for seq in range(12):
+        predecessor = None if seq == 0 else seq - 1
+        await handler.handle(
+            TaskLegPayload(task_id="t1", predecessor_seq=predecessor, trigger=_TRIGGER), ctx
+        )
+
+    task = tasks.get("user_a", "t1")
+    assert task.state == TaskState.ACTIVE  # never parked — the budget never tripped
+    assert task.head_checkpoint_seq == 11  # every leg's work landed
+    latest = CheckpointStore(app_engine).get_latest("user_a", "t1")
+    assert latest is not None
+    assert checkpoint_token_count(latest) <= budget
+    # Older findings were folded into the explicit marker, not lost (restorable via run records).
+    assert any("earlier findings compacted" in c for c in latest.progress_conclusions)
+
+
+def test_default_writer_is_the_compacting_distiller() -> None:
+    """R9-005 wiring guard: a handler built without an explicit writer gets the T12 distiller,
+    never the unbounded ``BasicCheckpointWriter`` stand-in that caused the production
+    dead-letter."""
+    from persona_runtime.legs import CompactingCheckpointWriter
+
+    handler = TaskLegHandler(
+        task_store=None,  # type: ignore[arg-type]  # wiring-only check; never handles a job
+        checkpoint_store=None,  # type: ignore[arg-type]
+        runner_builder=None,  # type: ignore[arg-type]
+    )
+    assert isinstance(handler._writer, CompactingCheckpointWriter)  # noqa: SLF001

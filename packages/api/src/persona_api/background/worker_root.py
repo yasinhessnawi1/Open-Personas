@@ -44,6 +44,7 @@ from persona.stores.pyramid import EpisodicPyramid
 from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
+from persona_runtime.legs import CompactingCheckpointWriter
 
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger
@@ -98,7 +99,7 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
-    from persona.tasks import ResumeTrigger, Task
+    from persona.tasks import ResumeTrigger, StuckReport, Task
     from persona_runtime.legs import LegOutcome
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
@@ -493,17 +494,32 @@ def _register_task_leg_tenant(
         audit_root=audit_root,
         audit_logger=audit_logger,
     )
+    on_task_stuck = _build_task_stuck_hook(
+        rls_engine=rls_engine,
+        task_store=task_store,
+        memory_backend=memory_backend,
+        edition=edition,
+        audit_root=audit_root,
+        audit_logger=audit_logger,
+        live_sessions=live_sessions,
+    )
     register_task_leg_handler(
         registry,
         task_store=task_store,
         checkpoint_store=CheckpointStore(rls_engine),
         runner_builder=RuntimeFactoryLegRunnerBuilder(runtime_factory),
         continuation=continuation,
+        # R9-005 (Spec A2, T12): the live path runs the reflect-and-compact distiller, NEVER the
+        # BasicCheckpointWriter stand-in — the stand-in accumulates unboundedly and, after a
+        # SUCCESSFUL run, deterministically trips the store's budget gate (3× model re-spend,
+        # then dead-letter). Explicit here (belt) on top of the handler's default (suspenders).
+        writer=CompactingCheckpointWriter(),
         on_milestone=on_milestone,
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
         budget_gate=budget_gate,
         on_approval_parked=on_approval_parked,
+        on_task_stuck=on_task_stuck,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).
@@ -633,6 +649,63 @@ def _build_approval_announce_hook(
         await notifier.ask(proposal)
 
     return _announce
+
+
+def _build_task_stuck_hook(
+    *,
+    rls_engine: Engine,
+    task_store: TaskStore,
+    memory_backend: Backend | None,
+    edition: object | None,
+    audit_root: Path,
+    audit_logger: AuditLogger | None,
+    live_sessions: LiveSessionRegistry | None,
+) -> Callable[[str, StuckReport], Awaitable[None]] | None:
+    """The R9-005 honesty voice — a task parked on an over-budget checkpoint says so (C0).
+
+    Returns an async ``(owner_id, StuckReport)`` callback the leg handler fires after parking a
+    task whose finished run produced a checkpoint the store's budget gate rejected (the
+    deterministic write failure that must never burn A0 retries). Voices the SAME
+    ``account_for_stuck`` account the dead-leg sweep voices — one stuck-report shape, two
+    entry points. Runs inside the per-job tenant context (``current_user_id`` is set by the
+    executor), so the RLS reads resolve. ``None`` without a memory backend (community /
+    keyless) — the ``waiting(on_user)`` state on the Tasks surface stays the floor.
+    """
+    if memory_backend is None or edition is None:
+        return None
+    from persona_api.approvals.failure import FailureKind, account_for_stuck
+    from persona_api.services.origination_adapters import (
+        OriginatorFailureNotifier,
+        resolve_persona_tag,
+    )
+
+    notifier = OriginatorFailureNotifier(
+        rls_engine=rls_engine,
+        memory_backend=memory_backend,
+        edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
+        audit_root=audit_root,
+        audit_logger=audit_logger,
+        sessions=live_sessions,
+    )
+
+    async def _voice(owner_id: str, report: StuckReport) -> None:
+        # A missing conversation / deleted persona degrades to the persist-only floor (the task
+        # is already parked). Best-effort — the handler wraps + never fails the (done) leg.
+        task = task_store.get(owner_id, report.task_id)
+        if task.conversation_id is None:
+            return
+        persona = resolve_persona_tag(rls_engine, task.persona_id)
+        if persona is None:
+            return
+        account = account_for_stuck(report, kind=FailureKind.TASK_STUCK)
+        await notifier.notify(
+            account,
+            persona=persona,
+            owner_id=owner_id,
+            conversation_id=task.conversation_id,
+        )
+
+    return _voice
 
 
 def _register_delegated_turn_tenant(

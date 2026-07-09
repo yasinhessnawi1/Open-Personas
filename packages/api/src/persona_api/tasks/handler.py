@@ -19,8 +19,18 @@ in A0's per-job forensics (A0 meters executions), while the *task ledger* accrue
 The disposition-driven task-state transitions (continuation / completion / waiting) are T8/T9;
 this handler runs the leg, writes the checkpoint, and meters. The real ``AgenticLoop`` is built
 per leg by an injected :class:`LegRunnerBuilder` (the composition root — orchestrator-owned at
-deploy, like A0's worker cutover); the :class:`CheckpointWriter` is the ``BasicCheckpointWriter``
-stand-in until the model-backed distiller lands (T11 gates its quality).
+deploy, like A0's worker cutover); the :class:`CheckpointWriter` defaults to the
+``CompactingCheckpointWriter`` distiller (Spec A2, T12 — D-A2-1's reflect-and-compact), so the
+accumulating core stays under the store's budget by construction (R9-005: the
+``BasicCheckpointWriter`` stand-in must never run live — it appends unboundedly and
+deterministically trips ``CheckpointTooLargeError``).
+
+**Over-budget checkpoint = deterministic, never retried (R9-005).** A
+:class:`~persona.errors.CheckpointTooLargeError` from the store gate fires AFTER the agentic run
+finished — re-delivering the job re-runs the whole leg (full model + sandbox spend) into the
+same failure. The handler therefore catches it, parks the task honestly
+(``react_to_dead_leg``'s stuck shape: ``active → waiting(on_user)`` with the real cause, voiced
+via ``on_task_stuck``), and lets the job SUCCEED — one execution, no retry burn, no dead-letter.
 """
 
 from __future__ import annotations
@@ -28,16 +38,25 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from persona.errors import CheckpointTooLargeError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
-from persona.tasks import EventFire, LegBox, ResumeTrigger, ScheduledFire, TaskState, is_terminal
-from persona_runtime.legs import BasicCheckpointWriter, LegDisposition, LegExecutor
+from persona.tasks import (
+    EventFire,
+    LegBox,
+    ResumeTrigger,
+    ScheduledFire,
+    TaskState,
+    WaitKind,
+    is_terminal,
+)
+from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from persona.jobs import JobContext, JobRegistry
-    from persona.tasks import Task
+    from persona.tasks import StuckReport, Task
     from persona_runtime.legs import AgenticRunner, CheckpointWriter, LegOutcome
 
     from persona_api.jobs.queue import JobQueue
@@ -128,12 +147,16 @@ class TaskLegHandler:
         | None = None,
         budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
         on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
+        on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
         self._runner_builder = runner_builder
         self._continuation = continuation
-        self._writer = writer if writer is not None else BasicCheckpointWriter()
+        # R9-005: the production-safe default is the T12 distiller — reflect-and-compact keeps
+        # the accumulating core under the store's budget by construction. The Basic stand-in
+        # grows unboundedly and deterministically trips the budget gate after a successful run.
+        self._writer = writer if writer is not None else CompactingCheckpointWriter()
         self._box = box if box is not None else LegBox()
         # The A3 kill-switch guard (T11): persona-suspend / global-pause prevent the next leg
         # (terminal/budget-paused are checked inline). Optional — a plain A2 worker wires none.
@@ -154,6 +177,11 @@ class TaskLegHandler:
         # approval. Given (owner_id, proposal_id), the wired closure loads the proposal + voices
         # via the approval notifier. Optional + best-effort; None → the inbox/chat is the floor.
         self._on_approval_parked = on_approval_parked
+        # R9-005: the over-budget-checkpoint honesty voice — given (owner_id, StuckReport), the
+        # wired closure voices the persona's "I'm stuck" account on the task's conversation (the
+        # same account the dead-leg sweep voices). Optional + best-effort; None → the Tasks
+        # surface's waiting(on_user) state is the durable floor.
+        self._on_task_stuck = on_task_stuck
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -178,14 +206,25 @@ class TaskLegHandler:
 
         runner = self._runner_builder.build(task.id, task.persona_id, self._box)
         executor = LegExecutor(runner=runner, writer=self._writer, sink=self._checkpoints)
-        outcome = await executor.run_leg(
-            task=task,
-            trigger=payload.trigger,
-            prior_checkpoint=prior,
-            seq=seq,
-            box=self._box,
-            now=now,
-        )
+        try:
+            outcome = await executor.run_leg(
+                task=task,
+                trigger=payload.trigger,
+                prior_checkpoint=prior,
+                seq=seq,
+                box=self._box,
+                now=now,
+            )
+        except CheckpointTooLargeError as exc:
+            # R9-005: the run FINISHED but its checkpoint cannot land within the store's budget
+            # (D-A2-1's post-compaction fail-fast). This is deterministic — re-raising would burn
+            # A0's retries re-running the whole leg (full model spend) into the same write
+            # failure, then dead-letter. Instead: park the task honestly (react_to_dead_leg's
+            # stuck shape — waiting(on_user) with the real cause), voice it, and let the job
+            # SUCCEED. Exactly one execution; the user resumes or cancels. The leg's model spend
+            # is not ledgered (no append landed) — the lesser cost vs. 3× re-spend.
+            await self._park_stuck(owner, task, cause=str(exc), now=now)
+            return
         # A0 metering visibility (per-job spend → audit_log); the task ledger already accrued
         # via the CAS append. On a re-delivery the leg re-runs, so A0 records this execution's
         # spend (forensics) while the ledger no-ops — A0 meters executions, A2 accounts work.
@@ -268,6 +307,31 @@ class TaskLegHandler:
                     "task lifecycle emit failed task_id={tid}: {err}", tid=task.id, err=str(exc)
                 )
 
+    async def _park_stuck(self, owner: str, task: Task, *, cause: str, now: datetime) -> None:
+        """Park the task ``waiting(on_user)`` with an honest cause + voice it (R9-005).
+
+        Mirrors the dead-leg sweep's reaction, but at the source — the job then succeeds, so
+        the deterministic failure never reaches A0's retry/dead-letter machinery. With a
+        continuation wired this IS :meth:`TaskContinuation.react_to_dead_leg` (idempotent
+        active-only guard + StuckReport + A11 signal); the bare-handler fallback still parks
+        (the state change is the floor). The voice hook is best-effort.
+        """
+        _log.warning(
+            "checkpoint over budget after a finished run; parking task (no retry)",
+            task_id=task.id,
+            cause=cause,
+        )
+        if self._continuation is not None:
+            report = self._continuation.react_to_dead_leg(owner, task.id, cause, now=now)
+        else:
+            self._tasks.begin_wait(owner, task.id, WaitKind.ON_USER, now=now)
+            report = None
+        if report is not None and self._on_task_stuck is not None:
+            try:
+                await self._on_task_stuck(owner, report)
+            except Exception as exc:  # noqa: BLE001 — the voice is additive; the park stands
+                _log.warning("stuck voicing failed task_id={tid}: {err}", tid=task.id, err=str(exc))
+
 
 def register_task_leg_handler(
     registry: JobRegistry,
@@ -283,6 +347,7 @@ def register_task_leg_handler(
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
     budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
     on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
+    on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -301,6 +366,7 @@ def register_task_leg_handler(
                 on_leg_settled=on_leg_settled,
                 budget_gate=budget_gate,
                 on_approval_parked=on_approval_parked,
+                on_task_stuck=on_task_stuck,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),
