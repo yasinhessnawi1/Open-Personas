@@ -66,6 +66,14 @@ def load_local_env() -> None:
     #     with the owner creds swapped for the ``persona_app`` RLS role (created by
     #     scripts/dev-bootstrap.sh). Voice keeps the owner DSN (it filters by explicit
     #     owner_id and does not set the RLS GUC — the run-local precedent).
+    # R9-017: silence the HF tokenizers fork-warning spam. When the sandbox
+    # subprocess forks after `tokenizers` has already used parallelism, HF
+    # floods the log with "The current process just got forked, after
+    # parallelism has already been used…". "false" is the forking-server-safe
+    # default (disables tokenizer thread parallelism, avoiding the deadlock the
+    # warning guards against). setdefault so an explicit override still wins.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
     db = os.environ.get("DATABASE_URL")
     if db:
         app_pw = os.environ.get("PERSONA_APP_DB_PASSWORD", "persona_app")
