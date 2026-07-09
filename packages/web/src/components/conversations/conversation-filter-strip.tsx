@@ -75,43 +75,53 @@ export function ConversationFilterStrip({
 
   return (
     <div
-      className="mb-4 flex flex-wrap items-center gap-3"
+      className="flex min-w-0 flex-1 items-center gap-3"
       data-slot="conversation-filter-strip"
     >
-      <div className="flex flex-wrap items-center gap-2">
-        {chips.map((c) => {
-          const active = (c.id ?? null) === activePersona;
-          return (
-            <button
-              key={c.id ?? "__all__"}
-              type="button"
-              onClick={() => setPersona(c.id)}
-              data-state={active ? "active" : "inactive"}
-              className={cn("glass-chip", active && "type-ui")}
-            >
-              {c.label}
-            </button>
-          );
-        })}
+      {/*
+        R9-014 (a): the persona chips live in a BOUNDED horizontal scroll rail
+        (`.chip-rail` — overflow-x-auto, scrollbar hidden, subtle edge fade). It
+        takes the remaining row width (`min-w-0 flex-1`) and scrolls internally,
+        so adding personas can never shrink the search field beside it. A
+        scroll-x rail (over a "+N more" overflow menu) matches the sidebar's
+        existing `.v-rail__scroll` language and keeps every persona one swipe
+        away. URL-param filter behaviour is unchanged: a chip click still sets
+        ?persona_id=.
+      */}
+      <div className="chip-rail min-w-0 flex-1" data-slot="filter-chip-rail">
+        <div className="flex w-max items-center gap-2">
+          {chips.map((c) => {
+            const active = (c.id ?? null) === activePersona;
+            return (
+              <button
+                key={c.id ?? "__all__"}
+                type="button"
+                onClick={() => setPersona(c.id)}
+                data-state={active ? "active" : "inactive"}
+                className={cn("glass-chip shrink-0", active && "type-ui")}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
-      <div className="ml-auto flex min-w-0 max-w-xs flex-1 items-center gap-2">
-        <Search
-          className="size-4 shrink-0 text-muted-foreground"
-          aria-hidden="true"
-        />
+      {/* Stable-width search — `shrink-0` so the chip count never resizes it. */}
+      <div className="flex w-40 shrink-0 items-center gap-1 sm:w-56">
         <Input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder={t("searchPlaceholder")}
           aria-label={t("searchPlaceholder")}
           data-slot="conversation-search"
+          startIcon={<Search aria-hidden="true" />}
         />
         {q ? (
           <button
             type="button"
             onClick={() => setQ("")}
             aria-label={t("delete")}
-            className="rounded p-1 text-muted-foreground hover:text-foreground"
+            className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
           >
             <X className="size-4" />
           </button>

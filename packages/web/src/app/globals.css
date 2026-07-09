@@ -497,6 +497,30 @@
     color: var(--foreground);
   }
 
+  /*
+   * .chip-rail — R9-014 (a): bounded horizontal scroll rail for a chip strip
+   * (e.g. the conversations persona filter). Scrolls the chips internally so a
+   * growing persona count can never shrink a sibling control (the search field).
+   * Scrollbar hidden + a subtle right-edge fade cue that more chips continue
+   * off-screen. Mirrors the sidebar's `.v-rail__scroll` overflow language.
+   */
+  .chip-rail {
+    overflow-x: auto;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* legacy Edge */
+    -webkit-overflow-scrolling: touch;
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 0.5rem,
+      #000 calc(100% - 1.25rem),
+      transparent 100%
+    );
+  }
+  .chip-rail::-webkit-scrollbar {
+    display: none; /* Chrome / Safari */
+  }
+
   .glass-overlay {
     position: fixed;
     inset: 0;

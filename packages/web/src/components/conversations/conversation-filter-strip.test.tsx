@@ -66,3 +66,62 @@ describe("ConversationFilterStrip — no infinite navigation loop", () => {
     expect(replace).toHaveBeenCalledWith("?q=hello", { scroll: false });
   });
 });
+
+const manyPersonas = Array.from({ length: 12 }, (_, i) => ({
+  id: `p${i}`,
+  name: `Persona ${i}`,
+  avatar_url: null,
+}));
+
+function renderStripWith(
+  personas: Array<{ id: string; name: string; avatar_url: string | null }>,
+) {
+  return render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <ConversationFilterStrip personas={personas} />
+    </NextIntlClientProvider>,
+  );
+}
+
+describe("ConversationFilterStrip — R9-014 (a) chip rail / stable search", () => {
+  beforeEach(() => {
+    replace.mockClear();
+    searchString = "";
+  });
+
+  it("puts the chips in a bounded overflow rail so the search stays stable", () => {
+    const { container } = renderStripWith(manyPersonas);
+    // (a): chips live inside the bounded scroll rail (overflow-x), NOT flex-wrap.
+    const rail = container.querySelector('[data-slot="filter-chip-rail"]');
+    expect(rail).not.toBeNull();
+    expect(rail).toHaveClass("chip-rail");
+    // Every persona (+ "All") is still rendered — the rail scrolls, none dropped.
+    expect(rail?.querySelectorAll("button").length).toBe(
+      manyPersonas.length + 1,
+    );
+    // The search field keeps a fixed-width container (shrink-0) beside the rail
+    // — the input sits in its icon-adornment wrapper, whose parent is stable.
+    const stableWrap = screen
+      .getByLabelText("Search")
+      .closest("div")?.parentElement;
+    expect(stableWrap).toHaveClass("shrink-0");
+  });
+
+  it("still sets ?persona_id when a chip is clicked", () => {
+    renderStripWith(manyPersonas);
+    fireEvent.click(screen.getByRole("button", { name: "Persona 3" }));
+    expect(replace).toHaveBeenCalledWith("?persona_id=p3", { scroll: false });
+  });
+
+  it("renders the search magnifier inside the input adornment slot", () => {
+    const { container } = renderStripWith(manyPersonas);
+    const icon = container.querySelector('[data-slot="input-icon"]');
+    expect(icon).not.toBeNull();
+    // The adornment sits in the same relative wrapper as the input (icon-left).
+    const wrapper = icon?.parentElement;
+    // The search input is the icon's sibling inside the same adornment wrapper.
+    expect(wrapper?.querySelector("input")).toBe(
+      screen.getByLabelText("Search"),
+    );
+  });
+});
