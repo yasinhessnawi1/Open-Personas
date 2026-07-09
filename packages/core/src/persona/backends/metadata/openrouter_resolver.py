@@ -104,18 +104,24 @@ class OpenRouterModelMetadataResolver:
             self._index = {}
             return self._index
         index: dict[str, ModelMetadata] = {}
+        skipped = 0
         for entry in entries:
             # The live catalog carries entries our ModelMetadata rejects — e.g.
             # negative *sentinel* pricing ("-1" → variable / not-applicable, which
-            # would violate the cost ``ge=0`` bound). Skip-and-WARN per bad entry
-            # (pydantic ValidationError is a ValueError) rather than crash the
-            # whole resolver — same fail-soft posture as the catalog parser in
-            # OpenRouterCatalogClient.list_models (D-22-1). A skipped entry is a
+            # would violate the cost ``ge=0`` bound). These are genuinely unusable
+            # for cost-based scoring (a model with no fixed price cannot be scored),
+            # so skipping is benign — same fail-soft posture as the catalog parser
+            # in OpenRouterCatalogClient.list_models (D-22-1). A skipped entry is a
             # metadata miss → static fallback → rule-based (criterion 9).
+            #
+            # R9-018: this used to WARN per entry, flooding the log (×N per boot
+            # for the handful of sentinel-priced models). Detail stays at DEBUG;
+            # the operator gets ONE summary WARNING with the count below.
             try:
                 metadata = self._entry_to_metadata(entry)
             except (ValueError, TypeError) as exc:
-                _LOG.warning(
+                skipped += 1
+                _LOG.debug(
                     "skipping openrouter catalog entry with invalid metadata",
                     model_id=entry.id,
                     error=type(exc).__name__,
@@ -124,6 +130,12 @@ class OpenRouterModelMetadataResolver:
             index[entry.id] = metadata
             if entry.canonical_slug and entry.canonical_slug not in index:
                 index[entry.canonical_slug] = metadata
+        if skipped:
+            _LOG.warning(
+                "skipped openrouter catalog entries with incomplete metadata",
+                skipped=skipped,
+                indexed=len(index),
+            )
         self._index = index
         return self._index
 
