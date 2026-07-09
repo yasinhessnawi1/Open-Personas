@@ -2,10 +2,12 @@ import "server-only";
 
 import { serverApi } from "@/lib/api/server";
 import {
+  EMPTY_NAV_COUNTS,
   rankPersonasByRecency,
   resolveCalls,
   resolveConversations,
   type SidebarData,
+  type SidebarNavCounts,
 } from "./sidebar-data";
 
 /** How many recent personas the rail surfaces + how many message / call rows to load. */
@@ -43,26 +45,47 @@ function composeOwnerName(
 export async function fetchSidebarData(): Promise<SidebarData> {
   try {
     const api = await serverApi();
-    const [personasRes, conversationsRes, callsRes, memoryRes, profileRes] =
-      await Promise.all([
-        api.GET("/v1/personas"),
-        api.GET("/v1/conversations", {
-          params: { query: { limit: MESSAGE_ROWS, offset: 0 } },
-        }),
-        api.GET("/v1/calls", {
-          params: { query: { limit: CALL_ROWS, offset: 0 } },
-        }),
-        // Spec K5: a bounded, fail-soft availability probe — gates the Memory nav
-        // row by whether the deployment has a usable knowledge-graph (the window's
-        // `available` flag). Parallel with the rest; any failure degrades to hidden.
-        api.GET("/v1/memory/graph"),
-        // R4 T1 / Spec K6: the owner's display name (given_name + family_name) —
-        // the source of truth for the account-menu identity, in both editions.
-        api.GET("/v1/me/profile"),
-      ]);
+    const [
+      personasRes,
+      conversationsRes,
+      callsRes,
+      memoryRes,
+      profileRes,
+      navCountsRes,
+    ] = await Promise.all([
+      api.GET("/v1/personas"),
+      api.GET("/v1/conversations", {
+        params: { query: { limit: MESSAGE_ROWS, offset: 0 } },
+      }),
+      api.GET("/v1/calls", {
+        params: { query: { limit: CALL_ROWS, offset: 0 } },
+      }),
+      // Spec K5: a bounded, fail-soft availability probe — gates the Memory nav
+      // row by whether the deployment has a usable knowledge-graph (the window's
+      // `available` flag). Parallel with the rest; any failure degrades to hidden.
+      api.GET("/v1/memory/graph"),
+      // R4 T1 / Spec K6: the owner's display name (given_name + family_name) —
+      // the source of truth for the account-menu identity, in both editions.
+      api.GET("/v1/me/profile"),
+      // R9-010: the nav-badge totals — one owner-scoped counts round-trip
+      // (honest totals; the preview lists above are truncated). Fail-soft to
+      // all-zero (no badges) like every other sidebar fetch.
+      api.GET("/v1/me/nav-counts"),
+    ]);
     const personas = personasRes.data ?? [];
     const conversations = conversationsRes.data ?? [];
     const calls = callsRes.data ?? [];
+    const navCounts = navCountsRes.data;
+    const counts: SidebarNavCounts = navCounts
+      ? {
+          personas: navCounts.personas,
+          conversations: navCounts.conversations,
+          calls: navCounts.calls,
+          memoryNodes: navCounts.memory_nodes,
+          activeTasks: navCounts.active_tasks,
+          schedules: navCounts.schedules,
+        }
+      : EMPTY_NAV_COUNTS;
 
     return {
       personas: rankPersonasByRecency(personas, conversations).slice(
@@ -71,6 +94,7 @@ export async function fetchSidebarData(): Promise<SidebarData> {
       ),
       conversations: resolveConversations(conversations, personas),
       calls: resolveCalls(calls, personas),
+      counts,
       ownerName: composeOwnerName(profileRes.data),
       memoryAvailable: memoryRes.data?.available ?? false,
     };
@@ -79,6 +103,7 @@ export async function fetchSidebarData(): Promise<SidebarData> {
       personas: [],
       conversations: [],
       calls: [],
+      counts: EMPTY_NAV_COUNTS,
       ownerName: null,
       memoryAvailable: false,
     };

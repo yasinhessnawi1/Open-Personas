@@ -641,6 +641,32 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/nav-counts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Nav Counts
+     * @description The caller's sidebar nav-badge counts in one round-trip (R9-010).
+     *
+     *     Six owner-scoped, index-friendly ``COUNT``s (personas / chat conversations /
+     *     calls / non-terminal tasks / schedule rows / canonical graph nodes) — see
+     *     :mod:`persona_api.services.nav_counts_service` for the pinned semantics.
+     *     RLS-scoped like the sibling ``/v1/me`` routes; ``memory_nodes`` is ``0``
+     *     when no graph store is wired (the Memory nav row is hidden then anyway).
+     */
+    get: operations["get_nav_counts_v1_me_nav_counts_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/me/profile": {
     parameters: {
       query?: never;
@@ -1596,10 +1622,413 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/approvals": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Approvals
+     * @description Every pending approval across the caller's tasks, oldest-first (RLS-scoped, faithful).
+     */
+    get: operations["list_approvals_v1_approvals_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/approvals/{proposal_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Approval
+     * @description One pending approval, faithfully. 404 when it isn't the caller's / doesn't exist.
+     */
+    get: operations["get_approval_v1_approvals__proposal_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/approvals/{proposal_id}/decision": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Decide Approval
+     * @description Approve / deny / modify a pending approval — the inbox twin of a chat reply (A6-D-3).
+     *
+     *     Goes through the shared :class:`ApprovalResolutionService` (same floor, CAS, durable record). A
+     *     race with the chat path resolves ONCE; the loser gets ``outcome=None`` / ``not_pending`` and the
+     *     durable ``status`` shows what actually won — the surface reflects 'already handled'.
+     */
+    post: operations["decide_approval_v1_approvals__proposal_id__decision_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/review": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Review
+     * @description The caller's morning review — waiting → stuck → done → initiatives + upcoming (A6-D-2).
+     */
+    get: operations["get_review_v1_autonomy_review_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/state": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Autonomy State
+     * @description Is the caller's autonomy paused? The durable presence read, RLS-scoped (B4).
+     */
+    get: operations["get_autonomy_state_v1_autonomy_state_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/pause": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Pause Autonomy
+     * @description Pause ALL of the caller's autonomy (SUSPEND-ALL). Idempotent — re-pausing is a calm no-op.
+     */
+    post: operations["pause_autonomy_v1_autonomy_pause_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/resume": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resume Autonomy
+     * @description Resume the caller's autonomy. Idempotent — resuming when not paused is a calm no-op.
+     */
+    post: operations["resume_autonomy_v1_autonomy_resume_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/personas/{persona_id}/state": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Persona Suspension
+     * @description Is this persona's autonomy suspended? The durable presence read, RLS-scoped (B4).
+     */
+    get: operations["get_persona_suspension_v1_autonomy_personas__persona_id__state_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/personas/{persona_id}/suspend": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Suspend Persona
+     * @description Suspend one persona's autonomy — no new legs for its tasks. Idempotent calm no-op.
+     */
+    post: operations["suspend_persona_v1_autonomy_personas__persona_id__suspend_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/personas/{persona_id}/resume": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resume Persona
+     * @description Resume one persona's autonomy — delete its suspension row. Idempotent calm no-op.
+     */
+    post: operations["resume_persona_v1_autonomy_personas__persona_id__resume_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/personas/{persona_id}/initiative": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Initiative Dial
+     * @description This persona's durable initiative restraint level + the honest platform flag (B4).
+     */
+    get: operations["get_initiative_dial_v1_autonomy_personas__persona_id__initiative_get"];
+    /**
+     * Set Persona Initiative Dial
+     * @description Set this persona's restraint level (the dial). Idempotent — re-setting the same is a no-op.
+     *
+     *     The level persists on the persona row regardless of the platform flag; when initiative is off,
+     *     the note is honest that it won't act until enabled (a true durable write, not a lie).
+     */
+    put: operations["set_persona_initiative_dial_v1_autonomy_personas__persona_id__initiative_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/autonomy/initiatives/{notice_id}/decline": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Decline Initiative
+     * @description Decline a surfaced initiative — user-level, LEDGER-anchored, suppresses it for all personas.
+     *
+     *     Anchored on the durable A5 ledger notice (never conversation metadata — the same anchor-on-
+     *     durable discipline as the resolver). Idempotent: a topic already live-declined is a calm no-op.
+     */
+    post: operations["decline_initiative_v1_autonomy_initiatives__notice_id__decline_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Tasks
+     * @description Standing + recent tasks across the caller's personas — state, spend, paused (the matrix).
+     */
+    get: operations["list_tasks_v1_tasks_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Task
+     * @description The task detail — contract + grants, state, ledger, budget, terminal report, checkpoints.
+     */
+    get: operations["get_task_v1_tasks__task_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/audit": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Task Audit
+     * @description The task's audit trail — budget events, lifecycle, provenance (A3's records, readable).
+     */
+    get: operations["get_task_audit_v1_tasks__task_id__audit_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/pause": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Pause Task
+     * @description Pause a task (no new legs). Idempotent — pausing an already-paused task is a calm no-op.
+     */
+    post: operations["pause_task_v1_tasks__task_id__pause_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/resume": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resume Task
+     * @description Resume a paused task. If the owner's autonomy is paused, reflect it — never silently arm.
+     */
+    post: operations["resume_task_v1_tasks__task_id__resume_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/cancel": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Cancel Task
+     * @description Cancel a task (terminal) — a running step finishes its current work first, stated plainly.
+     */
+    post: operations["cancel_task_v1_tasks__task_id__cancel_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/budget/extend": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Extend Budget
+     * @description Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap.
+     */
+    post: operations["extend_budget_v1_tasks__task_id__budget_extend_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /** AcceptanceCriterionOut */
+    AcceptanceCriterionOut: {
+      /** Id */
+      id: string;
+      /** Statement */
+      statement: string;
+      /** Status */
+      status: string;
+    };
     /**
      * ActiveTurnResponse
      * @description The in-progress assistant turn for a conversation (Spec P1 reattach surface).
@@ -1638,6 +2067,86 @@ export interface components {
       catalog_name: string;
       /** Credential */
       credential?: string | null;
+    };
+    /**
+     * ApprovalDecisionRequest
+     * @description An inbox approval decision (Spec A6, criterion 5) — the structured twin of a chat reply.
+     *
+     *     ``edited_arguments`` is required for (and only meaningful on) a ``modify`` — the inbox's
+     *     modify-inline edit; the resolver's floor decides materiality (a material edit re-confirms). A
+     *     material change presented as instantly-applied would be a lie, so the client reflects the
+     *     resolver's outcome, never assumes. ``note`` is optional free text, recorded as the decision's
+     *     durable verbatim reply.
+     */
+    ApprovalDecisionRequest: {
+      /**
+       * Decision
+       * @enum {string}
+       */
+      decision: "approve" | "deny" | "modify";
+      /** Edited Arguments */
+      edited_arguments?: {
+        [key: string]: components["schemas"]["JsonValue"];
+      } | null;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
+    /**
+     * ApprovalDecisionResult
+     * @description The result of an inbox decision — the outcome + the DURABLE post-state (A6-D-3).
+     *
+     *     ``status`` is read back from the durable A3 record after resolution, so a chat-vs-inbox race is
+     *     honest: the loser gets ``outcome=None`` / ``note="not_pending"`` while ``status`` shows what
+     *     actually won (``approved``/``denied``/…). The surface reflects 'already handled', never errors.
+     */
+    ApprovalDecisionResult: {
+      /** Outcome */
+      outcome: string | null;
+      /** Executed */
+      executed: boolean;
+      /** Note */
+      note: string;
+      /** Status */
+      status: string;
+    };
+    /**
+     * ApprovalOut
+     * @description One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
+     *
+     *     The proposal's exact ``arguments`` + ``description`` are returned VERBATIM — the inbox is a
+     *     safety surface, not a summary (approving a paraphrase would approve a different action). The
+     *     web client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content).
+     */
+    ApprovalOut: {
+      /** Proposal Id */
+      proposal_id: string;
+      /** Task Id */
+      task_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Tool Name */
+      tool_name: string;
+      /** Arguments */
+      arguments: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /** Description */
+      description: string;
+      /** Categories */
+      categories: string[];
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string;
     };
     /**
      * ArtifactItem
@@ -1729,12 +2238,74 @@ export interface components {
       /** Errors */
       errors?: string[] | null;
     };
+    /**
+     * AutonomyStateOut
+     * @description The owner's autonomy-pause state — the durable presence read, reflect never error (B4).
+     *
+     *     ``paused`` is read from the ``owner_autonomy_pause`` row (RLS-scoped). ``changed`` is false on
+     *     an idempotent no-op — pausing an already-paused owner, or resuming one who isn't paused.
+     */
+    AutonomyStateOut: {
+      /** Paused */
+      paused: boolean;
+      /**
+       * Changed
+       * @default false
+       */
+      changed: boolean;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
     /** Body_create_upload_v1_personas__persona_id__uploads_post */
     Body_create_upload_v1_personas__persona_id__uploads_post: {
       /** File */
       file: string;
       /** Conversation Id */
       conversation_id?: string | null;
+    };
+    /**
+     * BudgetExtendRequest
+     * @description Raise a budget-paused task's cap by ``amount_micros`` (Spec A6, B2) — bounded server-side.
+     */
+    BudgetExtendRequest: {
+      /** Amount Micros */
+      amount_micros: number;
+    };
+    /**
+     * BudgetExtendResult
+     * @description The result of a budget extension — bounded, at-most-once, with the old → new cap (B2).
+     */
+    BudgetExtendResult: {
+      /** Task Id */
+      task_id: string;
+      /** Applied */
+      applied: boolean;
+      /** Old Cap Micros */
+      old_cap_micros: number;
+      /** New Cap Micros */
+      new_cap_micros: number;
+      /** State */
+      state: string;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
+    /**
+     * BudgetOut
+     * @description Spend against the effective cap (contract bound + any extensions).
+     */
+    BudgetOut: {
+      /** Cap Micros */
+      cap_micros: number;
+      /** Spent Micros */
+      spent_micros: number;
+      /** State */
+      state: string;
     };
     /**
      * CallSummary
@@ -2054,6 +2625,53 @@ export interface components {
       low_balance: boolean;
     };
     /**
+     * DigestItem
+     * @description One line in a section — persona-voiced where the persona speaks; verbatim-safe as text.
+     */
+    DigestItem: {
+      /** Persona Id */
+      persona_id: string;
+      /** Title */
+      title: string;
+      /**
+       * Detail
+       * @default
+       */
+      detail: string;
+      ref?: components["schemas"]["DigestRef"] | null;
+      /** Ran Because */
+      ran_because?: string | null;
+    };
+    /**
+     * DigestRef
+     * @description The durable referent a Review line deep-links to (A6-D-6; criterion-10 glance→approve).
+     *
+     *     ``kind="approval"`` → the proposal (``/approvals?id=``); ``kind="task"`` → the task
+     *     (``/tasks/{id}``). ``None`` on an item with no actionable target (a noticed initiative, a
+     *     deferred one-liner).
+     */
+    DigestRef: {
+      /** Kind */
+      kind: string;
+      /** Id */
+      id: string;
+    };
+    /**
+     * DigestSection
+     * @description A priority-ordered section, capped for the one-minute read (with an honest overflow).
+     */
+    DigestSection: {
+      /** Kind */
+      kind: string;
+      /** Items */
+      items: components["schemas"]["DigestItem"][];
+      /**
+       * Overflow
+       * @default 0
+       */
+      overflow: number;
+    };
+    /**
      * DocumentRef
      * @description Reference to an attached document — the API-boundary type.
      *
@@ -2103,6 +2721,16 @@ export interface components {
       at: string;
       /** Status */
       status: string;
+    };
+    /**
+     * GrantOut
+     * @description One row of "what you authorised" — a category and its effective decision (grants visible).
+     */
+    GrantOut: {
+      /** Category */
+      category: string;
+      /** Decision */
+      decision: string;
     };
     /**
      * GrantToolRequest
@@ -2261,6 +2889,92 @@ export interface components {
       | "retrieval"
       | "vision_handoff_required"
       | "vision_handoff";
+    /**
+     * InitiativeDeclineOut
+     * @description A declined initiative opportunity — user-level, LEDGER-anchored, reflect never error (B4).
+     *
+     *     Anchored on the durable A5 ledger notice (never conversation metadata). A decline suppresses the
+     *     opportunity for ALL personas until an explicit revival. ``changed`` is false when the topic was
+     *     already live-declined (an idempotent calm no-op).
+     */
+    InitiativeDeclineOut: {
+      /** Notice Id */
+      notice_id: string;
+      /** Opportunity Key */
+      opportunity_key: string;
+      /** Declined */
+      declined: boolean;
+      /**
+       * Changed
+       * @default false
+       */
+      changed: boolean;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
+    /**
+     * InitiativeDialOut
+     * @description A persona's initiative restraint level — the durable dial, honest about the flag (B4).
+     *
+     *     ``dial`` is the durable ``personas.initiative_dial`` (reflected, never assumed). ``changed`` is
+     *     false when the requested level already matched. ``initiative_enabled`` mirrors the platform
+     *     ``PERSONA_INITIATIVE_ENABLED`` flag: the level persists regardless, but when it is false the UX
+     *     must be honest that initiative won't act until it is enabled.
+     */
+    InitiativeDialOut: {
+      /** Persona Id */
+      persona_id: string;
+      /** Dial */
+      dial: string;
+      /**
+       * Changed
+       * @default false
+       */
+      changed: boolean;
+      /**
+       * Initiative Enabled
+       * @default false
+       */
+      initiative_enabled: boolean;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
+    /**
+     * InitiativeDialRequest
+     * @description Set a persona's initiative restraint level (Spec A6, B4 — the dial switch).
+     *
+     *     ``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``
+     *     lets all-safe plans execute. The level persists regardless of the platform initiative flag; the
+     *     route reflects whether initiative is globally enabled so the UX is honest about when it acts.
+     */
+    InitiativeDialRequest: {
+      /**
+       * Dial
+       * @enum {string}
+       */
+      dial: "off" | "propose_only" | "act_within_envelope";
+    };
+    JsonValue: unknown;
+    /**
+     * LedgerOut
+     * @description The cost ledger, per kind + total (µ-dollars).
+     */
+    LedgerOut: {
+      /** Model Micros */
+      model_micros: number;
+      /** Sandbox Micros */
+      sandbox_micros: number;
+      /** External Micros */
+      external_micros: number;
+      /** Total Micros */
+      total_micros: number;
+    };
     /**
      * MCPCatalogSecret
      * @description A credential an MCP server requires — DISPLAY-ONLY schema (Spec N1, D-N1-5).
@@ -2694,6 +3408,69 @@ export interface components {
         | null;
     };
     /**
+     * MorningDigest
+     * @description The render-agnostic morning review — the same content the web surface and C0 both render.
+     */
+    MorningDigest: {
+      /**
+       * Generated At
+       * Format: date-time
+       */
+      generated_at: string;
+      /** Sections */
+      sections: components["schemas"]["DigestSection"][];
+      /** Upcoming */
+      upcoming: components["schemas"]["UpcomingItem"][];
+      /**
+       * Total Spent Micros
+       * @default 0
+       */
+      total_spent_micros: number;
+      /**
+       * Persona Names
+       * @default {}
+       */
+      persona_names: {
+        [key: string]: string;
+      };
+    };
+    /**
+     * NavCountsResponse
+     * @description The owner-scoped totals behind the sidebar nav badges (R9-010).
+     *
+     *     One cheap round-trip for every nav-row count — each field is an
+     *     index-friendly ``COUNT`` over the caller's own rows (RLS-scoped like the
+     *     sibling ``/v1/me`` routes):
+     *
+     *     - ``personas`` / ``conversations``: honest TOTALS (the sidebar previously
+     *       derived these from its truncated preview lists). ``conversations``
+     *       counts chat-born threads only (``origin != 'call'`` — call transcripts
+     *       belong to the Calls surface).
+     *     - ``calls``: all call records.
+     *     - ``memory_nodes``: canonical knowledge-graph nodes (``merged_into IS
+     *       NULL``, matching what the Memory surface shows); ``0`` when no graph
+     *       store is wired (the Memory nav row is hidden then anyway).
+     *     - ``active_tasks``: the active working set — non-terminal states only
+     *       (from :data:`persona.tasks.state.TERMINAL_STATES`'s complement), never
+     *       completed/failed/cancelled history.
+     *     - ``schedules``: schedule ROWS — a recurring schedule counts once, never
+     *       its occurrences/fires.
+     */
+    NavCountsResponse: {
+      /** Personas */
+      personas: number;
+      /** Conversations */
+      conversations: number;
+      /** Calls */
+      calls: number;
+      /** Memory Nodes */
+      memory_nodes: number;
+      /** Active Tasks */
+      active_tasks: number;
+      /** Schedules */
+      schedules: number;
+    };
+    /**
      * NotificationMarkReadResult
      * @description How many feed rows a mark-read touched (0 = nothing unread / not owned).
      */
@@ -2941,6 +3718,30 @@ export interface components {
        * @default 0
        */
       conversation_count: number;
+    };
+    /**
+     * PersonaSuspensionOut
+     * @description A single persona's autonomy-suspension state — presence-based, reflect never error (B4).
+     *
+     *     Rides the existing ``suspended_personas`` mechanism (the same row ``is_runnable`` consults).
+     *     ``suspended`` is the durable presence read (RLS-scoped); ``changed`` is false on an idempotent
+     *     no-op — suspending an already-suspended persona, or resuming one that isn't suspended.
+     */
+    PersonaSuspensionOut: {
+      /** Persona Id */
+      persona_id: string;
+      /** Suspended */
+      suspended: boolean;
+      /**
+       * Changed
+       * @default false
+       */
+      changed: boolean;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
     };
     /**
      * PostMessageRequest
@@ -3271,6 +4072,180 @@ export interface components {
       task: string;
     };
     /**
+     * TaskAuditEntryOut
+     * @description One audit-trail row for a task (budget / lifecycle / trigger provenance), readable.
+     */
+    TaskAuditEntryOut: {
+      /** Action */
+      action: string;
+      /** Target */
+      target: string;
+      /** Metadata */
+      metadata: {
+        [key: string]: components["schemas"]["JsonValue"];
+      };
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /**
+     * TaskCheckpointOut
+     * @description A checkpoint rendered as the human "where it is / what's next" (never raw transcripts).
+     */
+    TaskCheckpointOut: {
+      /** Seq */
+      seq: number;
+      /** Progress Conclusions */
+      progress_conclusions: string[];
+      /** Next Step */
+      next_step: string;
+      /** Open Questions */
+      open_questions: string[];
+      /** Blocked On */
+      blocked_on: string | null;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+    };
+    /**
+     * TaskCommandResult
+     * @description The durable result of a task command (pause/resume/cancel) — reflect, never error (B2).
+     */
+    TaskCommandResult: {
+      /** Task Id */
+      task_id: string;
+      /** Status */
+      status: string;
+      /** Paused */
+      paused: boolean;
+      /** Changed */
+      changed: boolean;
+      /**
+       * Owner Autonomy Paused
+       * @default false
+       */
+      owner_autonomy_paused: boolean;
+      /**
+       * Note
+       * @default
+       */
+      note: string;
+    };
+    /**
+     * TaskDetailOut
+     * @description The task, above the run viewer: contract + grants, state, ledger, budget, report, waits.
+     */
+    TaskDetailOut: {
+      /** Task Id */
+      task_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Goal */
+      goal: string;
+      /** Scope */
+      scope: string;
+      /** Status */
+      status: string;
+      /** Paused */
+      paused: boolean;
+      /** Grants */
+      grants: components["schemas"]["GrantOut"][];
+      /** Acceptance Criteria */
+      acceptance_criteria: components["schemas"]["AcceptanceCriterionOut"][];
+      /** Deadline */
+      deadline: string | null;
+      /** Max Legs */
+      max_legs: number | null;
+      budget: components["schemas"]["BudgetOut"];
+      ledger: components["schemas"]["LedgerOut"];
+      /** Progress */
+      progress: string[];
+      /** Next Step */
+      next_step: string;
+      /** Open Questions */
+      open_questions: string[];
+      /** Wait Reason */
+      wait_reason: string | null;
+      report: components["schemas"]["TaskReportOut"] | null;
+      /** Checkpoints */
+      checkpoints: components["schemas"]["TaskCheckpointOut"][];
+      /** Conversation Id */
+      conversation_id: string | null;
+      /** Schedule Id */
+      schedule_id: string | null;
+      /** Run Ids */
+      run_ids: string[];
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+    };
+    /**
+     * TaskReportOut
+     * @description The terminal outcome — a distinct projection so a failure never renders as a success.
+     */
+    TaskReportOut: {
+      /** Kind */
+      kind: string;
+      /**
+       * Cause
+       * @default
+       */
+      cause: string;
+      /**
+       * Conclusions
+       * @default []
+       */
+      conclusions: string[];
+      /**
+       * Where It Stood
+       * @default []
+       */
+      where_it_stood: string[];
+      /**
+       * Next Step
+       * @default
+       */
+      next_step: string;
+    };
+    /**
+     * TaskSummaryOut
+     * @description One task in the cross-persona list — state, spend, and whether it's paused (the matrix).
+     */
+    TaskSummaryOut: {
+      /** Task Id */
+      task_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Goal */
+      goal: string;
+      /** Status */
+      status: string;
+      /** Paused */
+      paused: boolean;
+      /** Spent Micros */
+      spent_micros: number;
+      /** Budget Cap Micros */
+      budget_cap_micros: number;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
+      /** Stuck Cause */
+      stuck_cause?: string | null;
+    };
+    /**
      * ToolRecommendation
      * @description One recommended capability for a persona (spec 26 T09 / spec 27 T10).
      *
@@ -3323,6 +4298,21 @@ export interface components {
       name: string;
       /** Description */
       description: string;
+    };
+    /**
+     * UpcomingItem
+     * @description One entry in the compact upcoming strip (from A8's occurrences — the engine's own fires).
+     */
+    UpcomingItem: {
+      /**
+       * Fire At
+       * Format: date-time
+       */
+      fire_at: string;
+      /** Persona Id */
+      persona_id: string | null;
+      /** Label */
+      label: string;
     };
     /**
      * UpdateMCPServerRequest
@@ -4409,6 +5399,26 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_nav_counts_v1_me_nav_counts_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NavCountsResponse"];
         };
       };
     };
@@ -5725,6 +6735,572 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ConnectorLinkArtifact"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_approvals_v1_approvals_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApprovalOut"][];
+        };
+      };
+    };
+  };
+  get_approval_v1_approvals__proposal_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        proposal_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApprovalOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  decide_approval_v1_approvals__proposal_id__decision_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        proposal_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ApprovalDecisionRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApprovalDecisionResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_review_v1_autonomy_review_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MorningDigest"];
+        };
+      };
+    };
+  };
+  get_autonomy_state_v1_autonomy_state_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AutonomyStateOut"];
+        };
+      };
+    };
+  };
+  pause_autonomy_v1_autonomy_pause_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AutonomyStateOut"];
+        };
+      };
+    };
+  };
+  resume_autonomy_v1_autonomy_resume_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AutonomyStateOut"];
+        };
+      };
+    };
+  };
+  get_persona_suspension_v1_autonomy_personas__persona_id__state_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaSuspensionOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  suspend_persona_v1_autonomy_personas__persona_id__suspend_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaSuspensionOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resume_persona_v1_autonomy_personas__persona_id__resume_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaSuspensionOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_initiative_dial_v1_autonomy_personas__persona_id__initiative_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeDialOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_persona_initiative_dial_v1_autonomy_personas__persona_id__initiative_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["InitiativeDialRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeDialOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  decline_initiative_v1_autonomy_initiatives__notice_id__decline_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        notice_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeDeclineOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_tasks_v1_tasks_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskSummaryOut"][];
+        };
+      };
+    };
+  };
+  get_task_v1_tasks__task_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskDetailOut"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_task_audit_v1_tasks__task_id__audit_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskAuditEntryOut"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  pause_task_v1_tasks__task_id__pause_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resume_task_v1_tasks__task_id__resume_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  cancel_task_v1_tasks__task_id__cancel_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  extend_budget_v1_tasks__task_id__budget_extend_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["BudgetExtendRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BudgetExtendResult"];
         };
       };
       /** @description Validation Error */

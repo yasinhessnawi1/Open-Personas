@@ -220,12 +220,17 @@ export function Sidebar({ data }: { data: SidebarData }) {
           {/* (3) Primary action. */}
           <NewPersonaButton collapsed={collapsed} label={t("newPersona")} />
 
-          {/* (4) Primary nav, with live counts (Spec 35 D-35-13). */}
+          {/* (4) Primary nav, with live counts (Spec 35 D-35-13; R9-010: honest
+              owner-scoped totals from /v1/me/nav-counts, zero-hidden). */}
           <Nav
             collapsed={collapsed}
             counts={{
-              personas: data.personas.length,
-              conversations: data.conversations.length,
+              personas: data.counts.personas,
+              conversations: data.counts.conversations,
+              calls: data.counts.calls,
+              activity: data.counts.activeTasks,
+              memory: data.counts.memoryNodes,
+              schedule: data.counts.schedules,
             }}
             memoryAvailable={data.memoryAvailable}
           />

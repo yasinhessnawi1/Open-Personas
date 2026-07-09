@@ -30,26 +30,45 @@ const ITEMS = [
     icon: MessagesSquare,
     count: "conversations",
   },
-  // Spec V9: the voice-call history surface.
-  { href: "/calls", key: "calls", icon: Phone, count: undefined },
+  // Spec V9: the voice-call history surface. R9-010: badge = total call records.
+  { href: "/calls", key: "calls", icon: Phone, count: "calls" },
   // Spec A6 (W5, A6-D-1): the Activity area — ONE nav row landing on the morning Review; Tasks +
   // Approvals are siblings WITHIN the area (the ActivityTabs sub-nav), not top-level rows. This
   // re-home retires the W2 interim "Activity → /tasks" entry and demotes `/runs` from a top-level
   // peer to the task-detail "Open run" drill only.
-  { href: "/review", key: "activity", icon: Activity, count: undefined },
+  // R9-010: badge = the active working set (non-terminal tasks), never history.
+  { href: "/review", key: "activity", icon: Activity, count: "activity" },
   // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."
-  { href: "/memory", key: "memory", icon: Waypoints, count: undefined },
+  // R9-010: badge = canonical graph node count.
+  { href: "/memory", key: "memory", icon: Waypoints, count: "memory" },
   // Spec A8: the schedule/calendar surface (time's view of the personas'
   // commitments). The route + calendar shipped styled but was unreachable —
   // reachable only by typed URL — until this nav row (R4-C1-10, built-but-inert
   // at the nav level). A6 may later re-home it alongside the review inbox.
-  { href: "/schedule", key: "schedule", icon: CalendarClock, count: undefined },
+  // R9-010: badge = schedule ROWS (a recurring schedule counts once, never fires).
+  {
+    href: "/schedule",
+    key: "schedule",
+    icon: CalendarClock,
+    count: "schedule",
+  },
 ] as const;
 
-/** Live counts shown on nav rows (Spec 35 D-35-13) — derived from sidebar data. */
+/**
+ * Live counts shown on nav rows (Spec 35 D-35-13; R9-010 extends the set to
+ * every row) — resolved from `GET /v1/me/nav-counts` via the sidebar data.
+ * A zero/undefined count renders NO badge (zero-hidden).
+ */
 export interface NavCounts {
   readonly personas?: number;
   readonly conversations?: number;
+  readonly calls?: number;
+  /** Non-terminal (in-progress / waiting) tasks — the active working set. */
+  readonly activity?: number;
+  /** Canonical knowledge-graph nodes. */
+  readonly memory?: number;
+  /** Schedule rows — a recurring schedule counts once, never its fires. */
+  readonly schedule?: number;
 }
 
 export function Nav({

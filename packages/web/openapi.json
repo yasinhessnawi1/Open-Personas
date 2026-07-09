@@ -1317,6 +1317,26 @@
         }
       }
     },
+    "/v1/me/nav-counts": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Get Nav Counts",
+        "description": "The caller's sidebar nav-badge counts in one round-trip (R9-010).\n\nSix owner-scoped, index-friendly ``COUNT``s (personas / chat conversations /\ncalls / non-terminal tasks / schedule rows / canonical graph nodes) \u2014 see\n:mod:`persona_api.services.nav_counts_service` for the pinned semantics.\nRLS-scoped like the sibling ``/v1/me`` routes; ``memory_nodes`` is ``0``\nwhen no graph store is wired (the Memory nav row is hidden then anyway).",
+        "operationId": "get_nav_counts_v1_me_nav_counts_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NavCountsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/profile": {
       "get": {
         "tags": ["me"],
@@ -1410,6 +1430,86 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OccurrencesResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule/preview": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Preview Schedule Create",
+        "description": "Preview a schedule CREATE \u2014 the engine's next-fire + full clause + quiet-hours warn.\n\nNo write (Spec A10, criterion 2/7): the create dialog shows this as the confirm echo\nbefore the user confirms \u2014 the SAME shape (and the same shared engine preview,\n``preview_schedule_cadence``) as A8's reschedule preview; the twins never fabricate a\ntime the DST gap/fold policy would shift. The body is the bare cadence envelope\n(pattern XOR one_time_at + tz) \u2014 a preview needs no executor/subject/key.",
+        "operationId": "preview_schedule_create_v1_me_schedule_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRescheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReschedulePreview"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Create Schedule",
+        "description": "Create a schedule + its backing task \u2014 the user's direct door (Spec A10, A10-D-1/2/6).\n\nDeterministic and model-free: picker-state in (no raw RRULE), A8's ``ScheduleStore``\nCAS door + the A2 task path underneath (one mechanism, A10-D-9). The named persona is\nthe executor; the user is the originator. Idempotent on the client-minted\n``idempotency_key`` (a double-click converges; two deliberate submits stay distinct).\n422 on a never-firing cadence; 404 on an executor persona that isn't the caller's.",
+        "operationId": "create_schedule_v1_me_schedule_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleCreateResult"
                 }
               }
             }
@@ -1640,6 +1740,24 @@
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/events": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Stream Events",
+        "description": "The persistent, RLS-scoped live channel (Spec A11) \u2014 the out-of-turn SSE feed\nthat makes a background delivery surface live (the bell + the open chat, no\nreload; closes R4-C1-23).\n\nThe me-scope is the **verified token's** user id (``get_current_user``), never a\nparam. One connection per open tab, heartbeat-kept, ``Last-Event-ID``-resumable\n(A11-D-3). Fail-soft: an unwired channel returns 503 so the web app degrades to\nP6's poll (never a broken shell); the active-run token stream is untouched (this\nis the out-of-turn channel).",
+        "operationId": "stream_events_v1_me_events_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
@@ -2556,6 +2674,51 @@
         }
       }
     },
+    "/v1/personas/{persona_id}/mcp-connections": {
+      "get": {
+        "tags": ["mcp"],
+        "summary": "List Persona Mcp Connections",
+        "description": "Per-assigned-server connection status for a persona (Spec N6, N6-D-6; R4-C1-21).\n\nSurfaces \"assigned but not connected\" so the UI shows it distinctly from \"working\".\nOne RLS-scoped read path (``persona_app``); no secret. Image-runtime servers report\nthrough their per-tenant runtime state; remote/BYO servers report connected (unaffected).",
+        "operationId": "list_persona_mcp_connections_v1_personas__persona_id__mcp_connections_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MCPConnectionStatus"
+                  },
+                  "title": "Response List Persona Mcp Connections V1 Personas  Persona Id  Mcp Connections Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/personas/{persona_id}/mcp-servers/{server_id}": {
       "put": {
         "tags": ["mcp"],
@@ -3020,10 +3183,764 @@
           }
         }
       }
+    },
+    "/v1/approvals": {
+      "get": {
+        "tags": ["approvals"],
+        "summary": "List Approvals",
+        "description": "Every pending approval across the caller's tasks, oldest-first (RLS-scoped, faithful).",
+        "operationId": "list_approvals_v1_approvals_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Approvals V1 Approvals Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approvals/{proposal_id}": {
+      "get": {
+        "tags": ["approvals"],
+        "summary": "Get Approval",
+        "description": "One pending approval, faithfully. 404 when it isn't the caller's / doesn't exist.",
+        "operationId": "get_approval_v1_approvals__proposal_id__get",
+        "parameters": [
+          {
+            "name": "proposal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Proposal Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approvals/{proposal_id}/decision": {
+      "post": {
+        "tags": ["approvals"],
+        "summary": "Decide Approval",
+        "description": "Approve / deny / modify a pending approval \u2014 the inbox twin of a chat reply (A6-D-3).\n\nGoes through the shared :class:`ApprovalResolutionService` (same floor, CAS, durable record). A\nrace with the chat path resolves ONCE; the loser gets ``outcome=None`` / ``not_pending`` and the\ndurable ``status`` shows what actually won \u2014 the surface reflects 'already handled'.",
+        "operationId": "decide_approval_v1_approvals__proposal_id__decision_post",
+        "parameters": [
+          {
+            "name": "proposal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Proposal Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/review": {
+      "get": {
+        "tags": ["autonomy"],
+        "summary": "Get Review",
+        "description": "The caller's morning review \u2014 waiting \u2192 stuck \u2192 done \u2192 initiatives + upcoming (A6-D-2).",
+        "operationId": "get_review_v1_autonomy_review_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MorningDigest"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/state": {
+      "get": {
+        "tags": ["autonomy"],
+        "summary": "Get Autonomy State",
+        "description": "Is the caller's autonomy paused? The durable presence read, RLS-scoped (B4).",
+        "operationId": "get_autonomy_state_v1_autonomy_state_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutonomyStateOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/pause": {
+      "post": {
+        "tags": ["autonomy"],
+        "summary": "Pause Autonomy",
+        "description": "Pause ALL of the caller's autonomy (SUSPEND-ALL). Idempotent \u2014 re-pausing is a calm no-op.",
+        "operationId": "pause_autonomy_v1_autonomy_pause_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutonomyStateOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/resume": {
+      "post": {
+        "tags": ["autonomy"],
+        "summary": "Resume Autonomy",
+        "description": "Resume the caller's autonomy. Idempotent \u2014 resuming when not paused is a calm no-op.",
+        "operationId": "resume_autonomy_v1_autonomy_resume_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutonomyStateOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/personas/{persona_id}/state": {
+      "get": {
+        "tags": ["autonomy"],
+        "summary": "Get Persona Suspension",
+        "description": "Is this persona's autonomy suspended? The durable presence read, RLS-scoped (B4).",
+        "operationId": "get_persona_suspension_v1_autonomy_personas__persona_id__state_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaSuspensionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/personas/{persona_id}/suspend": {
+      "post": {
+        "tags": ["autonomy"],
+        "summary": "Suspend Persona",
+        "description": "Suspend one persona's autonomy \u2014 no new legs for its tasks. Idempotent calm no-op.",
+        "operationId": "suspend_persona_v1_autonomy_personas__persona_id__suspend_post",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaSuspensionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/personas/{persona_id}/resume": {
+      "post": {
+        "tags": ["autonomy"],
+        "summary": "Resume Persona",
+        "description": "Resume one persona's autonomy \u2014 delete its suspension row. Idempotent calm no-op.",
+        "operationId": "resume_persona_v1_autonomy_personas__persona_id__resume_post",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaSuspensionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/personas/{persona_id}/initiative": {
+      "get": {
+        "tags": ["autonomy"],
+        "summary": "Get Initiative Dial",
+        "description": "This persona's durable initiative restraint level + the honest platform flag (B4).",
+        "operationId": "get_initiative_dial_v1_autonomy_personas__persona_id__initiative_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeDialOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["autonomy"],
+        "summary": "Set Persona Initiative Dial",
+        "description": "Set this persona's restraint level (the dial). Idempotent \u2014 re-setting the same is a no-op.\n\nThe level persists on the persona row regardless of the platform flag; when initiative is off,\nthe note is honest that it won't act until enabled (a true durable write, not a lie).",
+        "operationId": "set_persona_initiative_dial_v1_autonomy_personas__persona_id__initiative_put",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitiativeDialRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeDialOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/autonomy/initiatives/{notice_id}/decline": {
+      "post": {
+        "tags": ["autonomy"],
+        "summary": "Decline Initiative",
+        "description": "Decline a surfaced initiative \u2014 user-level, LEDGER-anchored, suppresses it for all personas.\n\nAnchored on the durable A5 ledger notice (never conversation metadata \u2014 the same anchor-on-\ndurable discipline as the resolver). Idempotent: a topic already live-declined is a calm no-op.",
+        "operationId": "decline_initiative_v1_autonomy_initiatives__notice_id__decline_post",
+        "parameters": [
+          {
+            "name": "notice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Notice Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeDeclineOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks": {
+      "get": {
+        "tags": ["tasks"],
+        "summary": "List Tasks",
+        "description": "Standing + recent tasks across the caller's personas \u2014 state, spend, paused (the matrix).",
+        "operationId": "list_tasks_v1_tasks_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TaskSummaryOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Tasks V1 Tasks Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}": {
+      "get": {
+        "tags": ["tasks"],
+        "summary": "Get Task",
+        "description": "The task detail \u2014 contract + grants, state, ledger, budget, terminal report, checkpoints.",
+        "operationId": "get_task_v1_tasks__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskDetailOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/audit": {
+      "get": {
+        "tags": ["tasks"],
+        "summary": "Get Task Audit",
+        "description": "The task's audit trail \u2014 budget events, lifecycle, provenance (A3's records, readable).",
+        "operationId": "get_task_audit_v1_tasks__task_id__audit_get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskAuditEntryOut"
+                  },
+                  "title": "Response Get Task Audit V1 Tasks  Task Id  Audit Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/pause": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Pause Task",
+        "description": "Pause a task (no new legs). Idempotent \u2014 pausing an already-paused task is a calm no-op.",
+        "operationId": "pause_task_v1_tasks__task_id__pause_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/resume": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Resume Task",
+        "description": "Resume a paused task. If the owner's autonomy is paused, reflect it \u2014 never silently arm.",
+        "operationId": "resume_task_v1_tasks__task_id__resume_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/cancel": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Cancel Task",
+        "description": "Cancel a task (terminal) \u2014 a running step finishes its current work first, stated plainly.",
+        "operationId": "cancel_task_v1_tasks__task_id__cancel_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/budget/extend": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Extend Budget",
+        "description": "Raise a budget-paused task's cap (bounded, at-most-once). Reports the old \u2192 new cap.",
+        "operationId": "extend_budget_v1_tasks__task_id__budget_extend_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetExtendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetExtendResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AcceptanceCriterionOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "statement": {
+            "type": "string",
+            "title": "Statement"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "statement", "status"],
+        "title": "AcceptanceCriterionOut"
+      },
       "ActiveTurnResponse": {
         "properties": {
           "message_id": {
@@ -3079,6 +3996,135 @@
         "required": ["catalog_name"],
         "title": "AdoptCatalogAppRequest",
         "description": "Self-adopt a catalog app for a persona (Spec N4, the B2-\u2462 setup-form target).\n\nThe connection ``url`` and ``auth_method`` are derived from the catalog entry\nserver-side (N4-D-10 \u2014 the catalog is the trust anchor for *where* it connects); the\ncaller supplies ONLY ``credential`` (when the app declares a secret). ``credential`` is\n``repr=False`` (redacted in logs), encrypted at rest via the store, and NEVER returned."
+      },
+      "ApprovalDecisionRequest": {
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["approve", "deny", "modify"],
+            "title": "Decision"
+          },
+          "edited_arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited Arguments"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["decision"],
+        "title": "ApprovalDecisionRequest",
+        "description": "An inbox approval decision (Spec A6, criterion 5) \u2014 the structured twin of a chat reply.\n\n``edited_arguments`` is required for (and only meaningful on) a ``modify`` \u2014 the inbox's\nmodify-inline edit; the resolver's floor decides materiality (a material edit re-confirms). A\nmaterial change presented as instantly-applied would be a lie, so the client reflects the\nresolver's outcome, never assumes. ``note`` is optional free text, recorded as the decision's\ndurable verbatim reply."
+      },
+      "ApprovalDecisionResult": {
+        "properties": {
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "executed": {
+            "type": "boolean",
+            "title": "Executed"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["outcome", "executed", "note", "status"],
+        "title": "ApprovalDecisionResult",
+        "description": "The result of an inbox decision \u2014 the outcome + the DURABLE post-state (A6-D-3).\n\n``status`` is read back from the durable A3 record after resolution, so a chat-vs-inbox race is\nhonest: the loser gets ``outcome=None`` / ``note=\"not_pending\"`` while ``status`` shows what\nactually won (``approved``/``denied``/\u2026). The surface reflects 'already handled', never errors."
+      },
+      "ApprovalOut": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "title": "Proposal Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "arguments": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "type": "object",
+            "title": "Arguments"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Categories"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "task_id",
+          "persona_id",
+          "tool_name",
+          "arguments",
+          "description",
+          "categories",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "ApprovalOut",
+        "description": "One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).\n\nThe proposal's exact ``arguments`` + ``description`` are returned VERBATIM \u2014 the inbox is a\nsafety surface, not a summary (approving a paraphrase would approve a different action). The\nweb client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content)."
       },
       "ArtifactItem": {
         "properties": {
@@ -3258,6 +4304,29 @@
         "title": "AuthoringDraft",
         "description": "The draft envelope returned by ``/author`` and ``/author/refine`` (D-10-2).\n\nA draft is NOT a persona row \u2014 the user reviews/refines it, then saves via\n``POST /v1/personas`` (which creates the row). ``errors`` is populated only\nwhen validation retries are exhausted (best-effort YAML returned for the form\nto fix, \u00a73.3); ``None`` on success."
       },
+      "AutonomyStateOut": {
+        "properties": {
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed",
+            "default": false
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["paused"],
+        "title": "AutonomyStateOut",
+        "description": "The owner's autonomy-pause state \u2014 the durable presence read, reflect never error (B4).\n\n``paused`` is read from the ``owner_autonomy_pause`` row (RLS-scoped). ``changed`` is false on\nan idempotent no-op \u2014 pausing an already-paused owner, or resuming one who isn't paused."
+      },
       "Body_create_upload_v1_personas__persona_id__uploads_post": {
         "properties": {
           "file": {
@@ -3280,6 +4349,81 @@
         "type": "object",
         "required": ["file"],
         "title": "Body_create_upload_v1_personas__persona_id__uploads_post"
+      },
+      "BudgetExtendRequest": {
+        "properties": {
+          "amount_micros": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Amount Micros"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["amount_micros"],
+        "title": "BudgetExtendRequest",
+        "description": "Raise a budget-paused task's cap by ``amount_micros`` (Spec A6, B2) \u2014 bounded server-side."
+      },
+      "BudgetExtendResult": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "applied": {
+            "type": "boolean",
+            "title": "Applied"
+          },
+          "old_cap_micros": {
+            "type": "integer",
+            "title": "Old Cap Micros"
+          },
+          "new_cap_micros": {
+            "type": "integer",
+            "title": "New Cap Micros"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "applied",
+          "old_cap_micros",
+          "new_cap_micros",
+          "state"
+        ],
+        "title": "BudgetExtendResult",
+        "description": "The result of a budget extension \u2014 bounded, at-most-once, with the old \u2192 new cap (B2)."
+      },
+      "BudgetOut": {
+        "properties": {
+          "cap_micros": {
+            "type": "integer",
+            "title": "Cap Micros"
+          },
+          "spent_micros": {
+            "type": "integer",
+            "title": "Spent Micros"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["cap_micros", "spent_micros", "state"],
+        "title": "BudgetOut",
+        "description": "Spend against the effective cap (contract bound + any extensions)."
       },
       "CallSummary": {
         "properties": {
@@ -3723,6 +4867,88 @@
         "title": "CreditsResponse",
         "description": "The user's current credit balance (stub counter).\n\n``low_balance`` is True when the balance is below\n:data:`credits_service.LOW_BALANCE_THRESHOLD` (10 000 by default) \u2014 the web\napp uses it to surface the under-limit warning (D-11-12)."
       },
+      "DigestItem": {
+        "properties": {
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DigestRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ran_because": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ran Because"
+          }
+        },
+        "type": "object",
+        "required": ["persona_id", "title"],
+        "title": "DigestItem",
+        "description": "One line in a section \u2014 persona-voiced where the persona speaks; verbatim-safe as text."
+      },
+      "DigestRef": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          }
+        },
+        "type": "object",
+        "required": ["kind", "id"],
+        "title": "DigestRef",
+        "description": "The durable referent a Review line deep-links to (A6-D-6; criterion-10 glance\u2192approve).\n\n``kind=\"approval\"`` \u2192 the proposal (``/approvals?id=``); ``kind=\"task\"`` \u2192 the task\n(``/tasks/{id}``). ``None`` on an item with no actionable target (a noticed initiative, a\ndeferred one-liner)."
+      },
+      "DigestSection": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DigestItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "overflow": {
+            "type": "integer",
+            "title": "Overflow",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": ["kind", "items"],
+        "title": "DigestSection",
+        "description": "A priority-ordered section, capped for the one-minute read (with an honest overflow)."
+      },
       "DocumentRef": {
         "properties": {
           "doc_ref": {
@@ -3833,6 +5059,23 @@
         "required": ["schedule_id", "at", "status"],
         "title": "FireEvent",
         "description": "One past fire/miss from the audit trail (the calendar's ran/missed markers)."
+      },
+      "GrantOut": {
+        "properties": {
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["category", "decision"],
+        "title": "GrantOut",
+        "description": "One row of \"what you authorised\" \u2014 a category and its effective decision (grants visible)."
       },
       "GrantToolRequest": {
         "properties": {
@@ -3960,6 +5203,114 @@
         "title": "IngestStrategy",
         "description": "The ingestion paths a document can take.\n\n``VISION_HANDOFF_REQUIRED`` is what :func:`ingest_document` returns when\nthe parser sets ``needs_vision_handoff=True`` \u2014 the caller (T13's\n:func:`persona_api.services.document_service.upload`) detects this and\nperforms the actual rasterisation + ImageContent creation (T21). The\ncaller-side outcome ``VISION_HANDOFF`` records the completed handoff\non the persisted :class:`DocumentRef`."
       },
+      "InitiativeDeclineOut": {
+        "properties": {
+          "notice_id": {
+            "type": "string",
+            "title": "Notice Id"
+          },
+          "opportunity_key": {
+            "type": "string",
+            "title": "Opportunity Key"
+          },
+          "declined": {
+            "type": "boolean",
+            "title": "Declined"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed",
+            "default": false
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["notice_id", "opportunity_key", "declined"],
+        "title": "InitiativeDeclineOut",
+        "description": "A declined initiative opportunity \u2014 user-level, LEDGER-anchored, reflect never error (B4).\n\nAnchored on the durable A5 ledger notice (never conversation metadata). A decline suppresses the\nopportunity for ALL personas until an explicit revival. ``changed`` is false when the topic was\nalready live-declined (an idempotent calm no-op)."
+      },
+      "InitiativeDialOut": {
+        "properties": {
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "dial": {
+            "type": "string",
+            "title": "Dial"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed",
+            "default": false
+          },
+          "initiative_enabled": {
+            "type": "boolean",
+            "title": "Initiative Enabled",
+            "default": false
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["persona_id", "dial"],
+        "title": "InitiativeDialOut",
+        "description": "A persona's initiative restraint level \u2014 the durable dial, honest about the flag (B4).\n\n``dial`` is the durable ``personas.initiative_dial`` (reflected, never assumed). ``changed`` is\nfalse when the requested level already matched. ``initiative_enabled`` mirrors the platform\n``PERSONA_INITIATIVE_ENABLED`` flag: the level persists regardless, but when it is false the UX\nmust be honest that initiative won't act until it is enabled."
+      },
+      "InitiativeDialRequest": {
+        "properties": {
+          "dial": {
+            "type": "string",
+            "enum": ["off", "propose_only", "act_within_envelope"],
+            "title": "Dial"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["dial"],
+        "title": "InitiativeDialRequest",
+        "description": "Set a persona's initiative restraint level (Spec A6, B4 \u2014 the dial switch).\n\n``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``\nlets all-safe plans execute. The level persists regardless of the platform initiative flag; the\nroute reflects whether initiative is globally enabled so the UX is honest about when it acts."
+      },
+      "JsonValue": {},
+      "LedgerOut": {
+        "properties": {
+          "model_micros": {
+            "type": "integer",
+            "title": "Model Micros"
+          },
+          "sandbox_micros": {
+            "type": "integer",
+            "title": "Sandbox Micros"
+          },
+          "external_micros": {
+            "type": "integer",
+            "title": "External Micros"
+          },
+          "total_micros": {
+            "type": "integer",
+            "title": "Total Micros"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "model_micros",
+          "sandbox_micros",
+          "external_micros",
+          "total_micros"
+        ],
+        "title": "LedgerOut",
+        "description": "The cost ledger, per kind + total (\u00b5-dollars)."
+      },
       "MCPCatalogSecret": {
         "properties": {
           "name": {
@@ -4072,6 +5423,34 @@
         "required": ["name", "description", "provider", "default_enabled"],
         "title": "MCPCatalogServer",
         "description": "An MCP server in the management catalog (spec 30 T11 + N1).\n\nA persona enables a server by adding ``mcp:<name>`` to its ``tools``\nallow-list. ``provider`` is the recommender tag (``mcp:builtin`` /\n``mcp:optional``); ``required_env`` lists env vars an operator must set.\n\nThe N1 fields below carry the Docker catalog-mirror display metadata the apps UX\n(N3) renders. They are **additive-with-default** so the existing five-field\ncontract is unchanged \u2014 a client written against spec 30 sees no break."
+      },
+      "MCPConnectionStatus": {
+        "properties": {
+          "server_name": {
+            "type": "string",
+            "title": "Server Name"
+          },
+          "connected": {
+            "type": "boolean",
+            "title": "Connected"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["server_name", "connected"],
+        "title": "MCPConnectionStatus",
+        "description": "One assigned MCP server's connection status (Spec N6, N6-D-6; R4-C1-21).\n\nMakes \"assigned\" visibly distinct from \"working\": ``connected`` \u21d2 the server's tools\nreach the model; otherwise ``reason`` names why (the T1 vocabulary \u2014 ``starting`` /\n``spawn_failed`` / ``stopped`` / ``fly_outage`` / ``no_key`` / ``unvetted`` /\n``runtime_capacity`` / ``not_enabled``). The web renders ``reason`` as a friendly badge \u2014\nnever the raw enum. No secret is ever included."
       },
       "MCPOAuthAuthorizeRequest": {
         "properties": {
@@ -4754,6 +6133,86 @@
         "title": "MessageView",
         "description": "A single message in a conversation history."
       },
+      "MorningDigest": {
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/DigestSection"
+            },
+            "type": "array",
+            "title": "Sections"
+          },
+          "upcoming": {
+            "items": {
+              "$ref": "#/components/schemas/UpcomingItem"
+            },
+            "type": "array",
+            "title": "Upcoming"
+          },
+          "total_spent_micros": {
+            "type": "integer",
+            "title": "Total Spent Micros",
+            "default": 0
+          },
+          "persona_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Persona Names",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": ["generated_at", "sections", "upcoming"],
+        "title": "MorningDigest",
+        "description": "The render-agnostic morning review \u2014 the same content the web surface and C0 both render."
+      },
+      "NavCountsResponse": {
+        "properties": {
+          "personas": {
+            "type": "integer",
+            "title": "Personas"
+          },
+          "conversations": {
+            "type": "integer",
+            "title": "Conversations"
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls"
+          },
+          "memory_nodes": {
+            "type": "integer",
+            "title": "Memory Nodes"
+          },
+          "active_tasks": {
+            "type": "integer",
+            "title": "Active Tasks"
+          },
+          "schedules": {
+            "type": "integer",
+            "title": "Schedules"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "personas",
+          "conversations",
+          "calls",
+          "memory_nodes",
+          "active_tasks",
+          "schedules"
+        ],
+        "title": "NavCountsResponse",
+        "description": "The owner-scoped totals behind the sidebar nav badges (R9-010).\n\nOne cheap round-trip for every nav-row count \u2014 each field is an\nindex-friendly ``COUNT`` over the caller's own rows (RLS-scoped like the\nsibling ``/v1/me`` routes):\n\n- ``personas`` / ``conversations``: honest TOTALS (the sidebar previously\n  derived these from its truncated preview lists). ``conversations``\n  counts chat-born threads only (``origin != 'call'`` \u2014 call transcripts\n  belong to the Calls surface).\n- ``calls``: all call records.\n- ``memory_nodes``: canonical knowledge-graph nodes (``merged_into IS\n  NULL``, matching what the Memory surface shows); ``0`` when no graph\n  store is wired (the Memory nav row is hidden then anyway).\n- ``active_tasks``: the active working set \u2014 non-terminal states only\n  (from :data:`persona.tasks.state.TERMINAL_STATES`'s complement), never\n  completed/failed/cancelled history.\n- ``schedules``: schedule ROWS \u2014 a recurring schedule counts once, never\n  its occurrences/fires."
+      },
       "NotificationMarkReadResult": {
         "properties": {
           "updated": {
@@ -5217,6 +6676,33 @@
         "title": "PersonaSummary",
         "description": "A persona in a list view (no full YAML).\n\nSpec 35: the library card surfaces a capability + identity glance. The\ncounts below are parsed from the SAME stored YAML the list query already\nloads (so they cost nothing extra), and ``conversation_count`` is a single\nGROUP-BY over the RLS-scoped conversations \u2014 not an N+1."
       },
+      "PersonaSuspensionOut": {
+        "properties": {
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "suspended": {
+            "type": "boolean",
+            "title": "Suspended"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed",
+            "default": false
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["persona_id", "suspended"],
+        "title": "PersonaSuspensionOut",
+        "description": "A single persona's autonomy-suspension state \u2014 presence-based, reflect never error (B4).\n\nRides the existing ``suspended_personas`` mechanism (the same row ``is_runnable`` consults).\n``suspended`` is the durable presence read (RLS-scoped); ``changed`` is false on an idempotent\nno-op \u2014 suspending an already-suspended persona, or resuming one that isn't suspended."
+      },
       "PostMessageRequest": {
         "properties": {
           "content": {
@@ -5595,6 +7081,126 @@
         "title": "RunSummary",
         "description": "A run in the Tasks index \u2014 a light projection without the steps JSON."
       },
+      "ScheduleCreateRequest": {
+        "properties": {
+          "pattern": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecurrencePattern"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "one_time_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "One Time At"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Timezone"
+          },
+          "persona_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Persona Id"
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Subject"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Idempotency Key"
+          },
+          "notify_on_fire": {
+            "type": "boolean",
+            "title": "Notify On Fire",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["timezone", "persona_id", "subject", "idempotency_key"],
+        "title": "ScheduleCreateRequest",
+        "description": "A user-initiated schedule create (Spec A10, A10-D-1 \u2014 the third verb on A8's door).\n\nThe A8 reschedule envelope + the create-only fields. **Picker-state in \u2014 NO raw RRULE\nfrom the client** (the A8 bar): exactly one of ``pattern`` / ``one_time_at`` (XOR,\nchecked in the route); the SERVER maps pattern \u2192 rule. The user is the originator; the\nnamed persona is the executor who delivers each fire. ``idempotency_key`` is minted by\nthe client once per create dialog (A10-D-6): retries/double-clicks converge on one\ntask+schedule, while two deliberate submits (two dialog-opens) stay distinct."
+      },
+      "ScheduleCreateResult": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "schedule_id": {
+            "type": "string",
+            "title": "Schedule Id"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created"
+          },
+          "human_terms": {
+            "type": "string",
+            "title": "Human Terms"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "quiet_hours_offer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiet Hours Offer"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "schedule_id",
+          "created",
+          "human_terms",
+          "timezone",
+          "next_fire",
+          "quiet_hours_offer"
+        ],
+        "title": "ScheduleCreateResult",
+        "description": "The create confirmation \u2014 the ids + the same echo shape the preview showed.\n\n``created`` is ``False`` on an idempotent replay (the task already existed for\nthis ``idempotency_key``) \u2014 same ids, nothing written twice."
+      },
       "ScheduleRescheduleRequest": {
         "properties": {
           "pattern": {
@@ -5758,6 +7364,410 @@
         "title": "StartRunRequest",
         "description": "Start an agentic run for a task (\u00a75.3)."
       },
+      "TaskAuditEntryOut": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["action", "target", "metadata", "created_at"],
+        "title": "TaskAuditEntryOut",
+        "description": "One audit-trail row for a task (budget / lifecycle / trigger provenance), readable."
+      },
+      "TaskCheckpointOut": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "progress_conclusions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Progress Conclusions"
+          },
+          "next_step": {
+            "type": "string",
+            "title": "Next Step"
+          },
+          "open_questions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Open Questions"
+          },
+          "blocked_on": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked On"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "seq",
+          "progress_conclusions",
+          "next_step",
+          "open_questions",
+          "blocked_on",
+          "updated_at"
+        ],
+        "title": "TaskCheckpointOut",
+        "description": "A checkpoint rendered as the human \"where it is / what's next\" (never raw transcripts)."
+      },
+      "TaskCommandResult": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed"
+          },
+          "owner_autonomy_paused": {
+            "type": "boolean",
+            "title": "Owner Autonomy Paused",
+            "default": false
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["task_id", "status", "paused", "changed"],
+        "title": "TaskCommandResult",
+        "description": "The durable result of a task command (pause/resume/cancel) \u2014 reflect, never error (B2)."
+      },
+      "TaskDetailOut": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "goal": {
+            "type": "string",
+            "title": "Goal"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/GrantOut"
+            },
+            "type": "array",
+            "title": "Grants"
+          },
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/AcceptanceCriterionOut"
+            },
+            "type": "array",
+            "title": "Acceptance Criteria"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
+          },
+          "max_legs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Legs"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/BudgetOut"
+          },
+          "ledger": {
+            "$ref": "#/components/schemas/LedgerOut"
+          },
+          "progress": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Progress"
+          },
+          "next_step": {
+            "type": "string",
+            "title": "Next Step"
+          },
+          "open_questions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Open Questions"
+          },
+          "wait_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Reason"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskReportOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/TaskCheckpointOut"
+            },
+            "type": "array",
+            "title": "Checkpoints"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "schedule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Id"
+          },
+          "run_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Run Ids"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "persona_id",
+          "goal",
+          "scope",
+          "status",
+          "paused",
+          "grants",
+          "acceptance_criteria",
+          "deadline",
+          "max_legs",
+          "budget",
+          "ledger",
+          "progress",
+          "next_step",
+          "open_questions",
+          "wait_reason",
+          "report",
+          "checkpoints",
+          "conversation_id",
+          "schedule_id",
+          "run_ids",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TaskDetailOut",
+        "description": "The task, above the run viewer: contract + grants, state, ledger, budget, report, waits."
+      },
+      "TaskReportOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "cause": {
+            "type": "string",
+            "title": "Cause",
+            "default": ""
+          },
+          "conclusions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Conclusions",
+            "default": []
+          },
+          "where_it_stood": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Where It Stood",
+            "default": []
+          },
+          "next_step": {
+            "type": "string",
+            "title": "Next Step",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["kind"],
+        "title": "TaskReportOut",
+        "description": "The terminal outcome \u2014 a distinct projection so a failure never renders as a success."
+      },
+      "TaskSummaryOut": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "goal": {
+            "type": "string",
+            "title": "Goal"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "paused": {
+            "type": "boolean",
+            "title": "Paused"
+          },
+          "spent_micros": {
+            "type": "integer",
+            "title": "Spent Micros"
+          },
+          "budget_cap_micros": {
+            "type": "integer",
+            "title": "Budget Cap Micros"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "stuck_cause": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stuck Cause"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "persona_id",
+          "goal",
+          "status",
+          "paused",
+          "spent_micros",
+          "budget_cap_micros",
+          "updated_at"
+        ],
+        "title": "TaskSummaryOut",
+        "description": "One task in the cross-persona list \u2014 state, spend, and whether it's paused (the matrix)."
+      },
       "ToolRecommendation": {
         "properties": {
           "tool_name": {
@@ -5822,6 +7832,34 @@
         "required": ["name", "description"],
         "title": "ToolSummary",
         "description": "A tool or skill name + description (read-only listing)."
+      },
+      "UpcomingItem": {
+        "properties": {
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fire At"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "type": "object",
+        "required": ["fire_at", "persona_id", "label"],
+        "title": "UpcomingItem",
+        "description": "One entry in the compact upcoming strip (from A8's occurrences \u2014 the engine's own fires)."
       },
       "UpdateMCPServerRequest": {
         "properties": {

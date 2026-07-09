@@ -14,7 +14,7 @@ import {
   CommandTrigger,
   OPEN_COMMAND_PALETTE_EVENT,
 } from "./command-palette";
-import type { SidebarData } from "./sidebar-data";
+import { EMPTY_NAV_COUNTS, type SidebarData } from "./sidebar-data";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -59,6 +59,7 @@ const DATA: SidebarData = {
     },
   ],
   calls: [],
+  counts: EMPTY_NAV_COUNTS,
   ownerName: null,
   memoryAvailable: false,
 };

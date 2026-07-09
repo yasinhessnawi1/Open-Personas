@@ -12,7 +12,11 @@ import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it, vi } from "vitest";
 import { NotificationProvider } from "@/components/providers/notification-provider";
 import { Sidebar } from "./sidebar";
-import type { SidebarConversation, SidebarData } from "./sidebar-data";
+import {
+  EMPTY_NAV_COUNTS,
+  type SidebarConversation,
+  type SidebarData,
+} from "./sidebar-data";
 
 vi.mock("@clerk/nextjs", () => ({
   useAuth: () => ({ getToken: async () => null }),
@@ -30,6 +34,10 @@ const messages = {
     home: "Home",
     personas: "Personas",
     conversations: "Conversations",
+    calls: "Calls",
+    activity: "Activity",
+    memory: "Memory",
+    schedule: "Schedule",
     newPersona: "New persona",
     settings: "Settings",
     sidebar: {
@@ -70,6 +78,7 @@ const data: SidebarData = {
   personas: [],
   conversations: manyConversations,
   calls: [],
+  counts: EMPTY_NAV_COUNTS,
   ownerName: null,
   memoryAvailable: false,
 };
@@ -123,6 +132,35 @@ describe("Sidebar layout contract", () => {
     expect(
       container.querySelector('[data-slot="sidebar-calls-list"]'),
     ).toBeNull();
+  });
+
+  it("shows honest count badges on nav rows and hides zero counts (R9-010)", () => {
+    const withCounts: SidebarData = {
+      ...data,
+      counts: {
+        personas: 12,
+        conversations: 34,
+        calls: 5,
+        memoryNodes: 0,
+        activeTasks: 2,
+        schedules: 3,
+      },
+      memoryAvailable: true,
+    };
+    wrap(<Sidebar data={withCounts} />);
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    const rowText = (label: string) =>
+      Array.from(nav.querySelectorAll("a")).find((a) =>
+        a.textContent?.includes(label),
+      )?.textContent;
+    // Badges come from the honest owner totals (not the truncated previews:
+    // data.personas is empty here, yet the badge reads 12).
+    expect(rowText("Personas")).toContain("12");
+    expect(rowText("Calls")).toContain("5");
+    expect(rowText("Activity")).toContain("2");
+    expect(rowText("Schedule")).toContain("3");
+    // Zero-hidden: the Memory row renders, its zero count does not.
+    expect(rowText("Memory")).toBe("Memory");
   });
 
   it("pins the account footer (non-shrinking) so it stays present with a long list", () => {

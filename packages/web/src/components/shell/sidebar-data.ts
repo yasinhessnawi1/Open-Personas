@@ -81,11 +81,42 @@ export interface SidebarCall {
   readonly persona: SidebarPersona | null;
 }
 
+/**
+ * The owner's nav-badge totals (R9-010) — `GET /v1/me/nav-counts`, resolved
+ * server-side with the rest of the sidebar data (one round-trip, RLS-scoped).
+ * Honest TOTALS, not preview-list lengths: `personas`/`conversations` were
+ * previously derived from the truncated rail/messages previews (capped at
+ * 4 / 30). `activeTasks` is the non-terminal working set; `schedules` counts
+ * schedule ROWS (a recurring schedule counts once, never occurrences);
+ * `memoryNodes` counts canonical graph nodes. Fail-soft: a failed fetch reads
+ * all-zero, which renders as no badges (zero-hidden).
+ */
+export interface SidebarNavCounts {
+  readonly personas: number;
+  readonly conversations: number;
+  readonly calls: number;
+  readonly memoryNodes: number;
+  readonly activeTasks: number;
+  readonly schedules: number;
+}
+
+/** The all-zero fail-soft counts (no badges rendered). */
+export const EMPTY_NAV_COUNTS: SidebarNavCounts = {
+  personas: 0,
+  conversations: 0,
+  calls: 0,
+  memoryNodes: 0,
+  activeTasks: 0,
+  schedules: 0,
+};
+
 /** The serialisable bundle the server shell hands to the client sidebar. */
 export interface SidebarData {
   readonly personas: readonly SidebarPersona[];
   readonly conversations: readonly SidebarConversation[];
   readonly calls: readonly SidebarCall[];
+  /** Nav-badge totals (R9-010); all-zero when the counts fetch failed. */
+  readonly counts: SidebarNavCounts;
   /**
    * R4 T1 / Spec K6: the account owner's display name resolved server-side from
    * our own DB (`/v1/me/profile`, given_name + family_name) — the source of
