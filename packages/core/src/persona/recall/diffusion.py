@@ -121,7 +121,7 @@ def apply_diffusion(
                 boosted.add(neighbour_id)
     except Exception:  # noqa: BLE001 — graceful degradation: never crash the turn
         get_logger(_LOG).warning(
-            "diffusion provider failed; single-hop order (n=%d)", len(candidates)
+            "diffusion provider failed; single-hop order (n={n})", n=len(candidates)
         )
         return list(candidates)
 
