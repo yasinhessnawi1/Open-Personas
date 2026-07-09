@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from persona.config import PersonaCoreConfig
 from persona.schema.skills import SkillSpec
 from persona.skills import BUILTIN_ROOT, SkillScanner
-from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_write_path
+from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_read_path
 from persona.tools import TOOL_CATALOG
 from persona.tools.mcp.catalog import BUILTIN_MCP_CATALOG, MCPServerCatalogEntry
 from persona.tools.mcp.mirror import load_mirror_catalog
@@ -90,7 +90,7 @@ def list_specialities(*, skill_mirror_path: Path | None = None) -> list[SkillSpe
     mirror_path = (
         skill_mirror_path
         if skill_mirror_path is not None
-        else resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+        else resolve_skill_mirror_read_path(PersonaCoreConfig().skill_mirror_path)
     )
     external = load_skill_mirror(mirror_path)
     seen = {s.name for s in builtin}

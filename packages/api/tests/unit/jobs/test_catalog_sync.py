@@ -105,10 +105,21 @@ def test_build_catalog_sync_disabled_returns_none() -> None:
     assert build_catalog_sync(config, dispatch_engine=MagicMock()) is None
 
 
-def test_build_catalog_sync_enabled_builds_task() -> None:
+def test_build_catalog_sync_enabled_builds_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PERSONA_MCP_MIRROR_PATH", str(tmp_path / "mirror.json"))
     config = APIConfig(mcp_catalog_sync_enabled=True)
     task = build_catalog_sync(config, dispatch_engine=MagicMock())
     assert isinstance(task, CatalogSyncTask)
+
+
+def test_build_catalog_sync_without_mirror_path_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R9-011: no PERSONA_MCP_MIRROR_PATH → the sync is skipped (warn), NOT pointed at
+    the bundled package-data snapshot (a committed file the sync must never rewrite)."""
+    monkeypatch.delenv("PERSONA_MCP_MIRROR_PATH", raising=False)
+    config = APIConfig(mcp_catalog_sync_enabled=True)
+    assert build_catalog_sync(config, dispatch_engine=MagicMock()) is None
 
 
 # --------------------------------------------------------------------------- #

@@ -165,8 +165,11 @@ def build_skill_catalog_sync(
     """Compose the skill-catalog-sync task from config, or ``None`` when disabled.
 
     Returns ``None`` when ``skill_catalog_sync_enabled`` is off (the opt-out — availability then
-    stays at the last-synced snapshot, fail-soft). Otherwise resolves the writable mirror path
-    from the core config override and builds the task on the worker's dispatch engine.
+    stays at the last-synced snapshot, fail-soft), or when no writable mirror path is configured
+    (``PERSONA_SKILL_MIRROR_PATH`` unset): the bundled package-data snapshot is a read-time
+    fallback ONLY (N2-D-1 posture), never a write target — writing it would mutate committed
+    package data in a checkout (R9-011) and fails on a deployed image anyway (root-owned
+    ``/app``). Otherwise builds the task on the worker's dispatch engine.
     """
     if not config.skill_catalog_sync_enabled:
         _log.info("skill catalog auto-sync disabled (PERSONA_SKILL_SYNC_ENABLED=false)")
@@ -174,6 +177,12 @@ def build_skill_catalog_sync(
     from persona.config import PersonaCoreConfig
 
     mirror_path = resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+    if mirror_path is None:
+        _log.warning(
+            "skill catalog auto-sync skipped: PERSONA_SKILL_MIRROR_PATH unset — the bundled "
+            "snapshot is read-only; set an explicit writable path to enable the sync"
+        )
+        return None
     return SkillCatalogSyncTask(
         dispatch_engine=dispatch_engine,
         mirror_path=mirror_path,

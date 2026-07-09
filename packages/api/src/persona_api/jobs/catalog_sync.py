@@ -151,9 +151,11 @@ def build_catalog_sync(config: APIConfig, *, dispatch_engine: Engine) -> Catalog
     """Compose the catalog-sync task from config, or ``None`` when disabled (N2-D-3).
 
     Returns ``None`` when ``mcp_catalog_sync_enabled`` is off (the opt-out — availability then
-    stays at the bundled snapshot, fail-soft). Otherwise resolves the writable mirror path from
-    the core config's ``mcp_mirror_path`` override (else the bundled default) and builds the task
-    on the worker's cross-tenant dispatch engine.
+    stays at the bundled snapshot, fail-soft), or when no writable mirror path is configured
+    (``PERSONA_MCP_MIRROR_PATH`` unset): the bundled package-data snapshot is a read-time
+    fallback ONLY (N2-D-1), never a write target — writing it would mutate committed package
+    data in a checkout (R9-011) and fails on a deployed image anyway (root-owned ``/app``).
+    Otherwise builds the task on the worker's cross-tenant dispatch engine.
     """
     if not config.mcp_catalog_sync_enabled:
         _log.info("catalog auto-sync disabled (PERSONA_MCP_SYNC_ENABLED=false)")
@@ -161,4 +163,10 @@ def build_catalog_sync(config: APIConfig, *, dispatch_engine: Engine) -> Catalog
     from persona.config import PersonaCoreConfig
 
     mirror_path = resolve_mirror_write_path(PersonaCoreConfig().mcp_mirror_path)
+    if mirror_path is None:
+        _log.warning(
+            "catalog auto-sync skipped: PERSONA_MCP_MIRROR_PATH unset — the bundled "
+            "snapshot is read-only (N2-D-1); set an explicit writable path to enable the sync"
+        )
+        return None
     return CatalogSyncTask(dispatch_engine=dispatch_engine, mirror_path=mirror_path)

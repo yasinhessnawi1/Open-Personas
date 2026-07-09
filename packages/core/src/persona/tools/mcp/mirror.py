@@ -102,11 +102,15 @@ def load_mirror_catalog(
     return fallback
 
 
-def resolve_mirror_write_path(override: Path | None) -> Path:
-    """The path the auto-sync writes the reconciled snapshot to (N2-D-1).
+def resolve_mirror_write_path(override: Path | None) -> Path | None:
+    """The path the auto-sync writes the reconciled snapshot to, or ``None`` (N2-D-1).
 
     The configured ``override`` (``PERSONA_MCP_MIRROR_PATH`` — the writable mirror on the
-    mounted volume) when set, else the bundled :data:`MIRROR_PATH` (dev / local default). In
-    production the override MUST be set: the bundled path is root-owned + lost on redeploy.
+    mounted volume) when set, else ``None`` — the sync must then SKIP (warn), never write.
+    The bundled :data:`MIRROR_PATH` is committed package data and a **read-time fallback
+    only** (N2-D-1: "the bundled file stays the read-time fallback"): on a deployed image
+    it is root-owned + lost on redeploy, and in a dev/test checkout writing it dirties the
+    git tree with a random-day snapshot (R9-011). Writes therefore REQUIRE an explicit
+    target; availability fail-softs to the bundled snapshot via :func:`load_mirror_catalog`.
     """
-    return override if override is not None else MIRROR_PATH
+    return override

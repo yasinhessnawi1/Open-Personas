@@ -1237,13 +1237,13 @@ class RuntimeFactory:
         from persona.skills.skill_mirror import (
             declared_mirror_skills,
             load_skill_mirror,
-            resolve_skill_mirror_write_path,
+            resolve_skill_mirror_read_path,
         )
 
         expanded = resolve_skill_aliases(expand_collections(list(persona.skills)))
         resolved_names = {getattr(s, "name", "") for s in scanned}
         mirror_specs = load_skill_mirror(
-            resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+            resolve_skill_mirror_read_path(PersonaCoreConfig().skill_mirror_path)
         )
         return list(
             declared_mirror_skills(

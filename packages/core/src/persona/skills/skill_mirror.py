@@ -37,6 +37,7 @@ __all__ = [
     "SKILL_MIRROR_PATH",
     "declared_mirror_skills",
     "load_skill_mirror",
+    "resolve_skill_mirror_read_path",
     "resolve_skill_mirror_write_path",
     "write_skill_mirror_atomic",
 ]
@@ -146,11 +147,25 @@ def declared_mirror_skills(
     return out
 
 
-def resolve_skill_mirror_write_path(override: Path | None) -> Path:
-    """The path the auto-sync writes the reconciled snapshot to (S2-D-1 / N2-D-1).
+def resolve_skill_mirror_read_path(override: Path | None) -> Path:
+    """The snapshot path LOADS read (S2-D-1 / N2-D-1): the override, else the bundled fallback.
 
-    The configured ``override`` (the writable mirror on the mounted volume) when set, else
-    the bundled :data:`SKILL_MIRROR_PATH` (dev / local default). In production the override
-    MUST be set: the bundled path is root-owned + lost on redeploy.
+    Loads may fall back to the bundled :data:`SKILL_MIRROR_PATH` — reading committed
+    package data is always safe (and :func:`load_skill_mirror` degrades to ``[]`` when it
+    is absent). Only WRITES require an explicit target
+    (:func:`resolve_skill_mirror_write_path`).
     """
     return override if override is not None else SKILL_MIRROR_PATH
+
+
+def resolve_skill_mirror_write_path(override: Path | None) -> Path | None:
+    """The path the auto-sync writes the reconciled snapshot to, or ``None`` (S2-D-1 / N2-D-1).
+
+    The configured ``override`` (``PERSONA_SKILL_MIRROR_PATH`` — the writable mirror on the
+    mounted volume) when set, else ``None`` — the sync must then SKIP (warn), never write.
+    The bundled :data:`SKILL_MIRROR_PATH` is committed package data and a **read-time
+    fallback only** (the N2-D-1 posture the skill mirror inherits): on a deployed image it
+    is root-owned + lost on redeploy, and in a dev/test checkout writing it dirties the git
+    tree (R9-011). Writes therefore REQUIRE an explicit target.
+    """
+    return override

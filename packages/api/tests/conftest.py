@@ -211,6 +211,45 @@ def _default_cloud_edition() -> Iterator[None]:
         os.environ["PERSONA_API_JWT_AUDIENCE"] = prior_aud
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _mirror_paths_to_tmp(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """R9-011 belt: no test may ever sync a catalog mirror into the source tree.
+
+    The N2 MCP catalog sync and the S2 skill-catalog sync write their reconciled
+    snapshot at ``PERSONA_MCP_MIRROR_PATH`` / ``PERSONA_SKILL_MIRROR_PATH``. With the
+    vars unset the syncs now skip (the bundled package-data snapshots are read-only by
+    contract) — but any test that DOES exercise a sync must land its writes in tmp, not
+    in ``packages/core/src/.../mirror.json`` (a committed file: three integration runs
+    dirtied the tree with real network-synced snapshots). Session-autouse so a future
+    test that boots the real worker loop (whose FIRST iteration runs both syncs) cannot
+    regress this even if it forgets the fixture. A test asserting the unset behavior
+    deletes the vars via its own ``monkeypatch``.
+    """
+    mirror_root = tmp_path_factory.mktemp("catalog-mirrors")
+    priors = {
+        name: os.environ.get(name)
+        for name in (
+            "PERSONA_MCP_MIRROR_PATH",
+            "PERSONA_SKILL_MIRROR_PATH",
+            "PERSONA_MCP_SYNC_ENABLED",
+            "PERSONA_SKILL_SYNC_ENABLED",
+        )
+    }
+    os.environ["PERSONA_MCP_MIRROR_PATH"] = str(mirror_root / "mirror.json")
+    os.environ["PERSONA_SKILL_MIRROR_PATH"] = str(mirror_root / "skill_mirror.json")
+    # Default the periodic syncs OFF for the suite: an app-boot test that starts the
+    # real worker loop must not `git clone` external registries mid-test (real network
+    # I/O). A test exercising the sync passes the enable kwarg / env explicitly.
+    os.environ["PERSONA_MCP_SYNC_ENABLED"] = "false"
+    os.environ["PERSONA_SKILL_SYNC_ENABLED"] = "false"
+    yield
+    for name, prior in priors.items():
+        if prior is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior
+
+
 class HashEmbedder384:
     """Deterministic 384-dim L2-normalised embedder for Postgres tests.
 

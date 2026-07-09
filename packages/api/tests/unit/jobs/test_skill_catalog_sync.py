@@ -9,6 +9,7 @@ so skill-sync leadership is orthogonal to MCP-catalog leadership.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from persona.skills.skill_mirror_reconcile import SkillMirrorSyncResult
@@ -17,6 +18,11 @@ from persona_api.jobs.skill_catalog_sync import (
     SKILL_CATALOG_SYNC_LEADER_LOCK_KEY,
     SkillCatalogSyncTask,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 
 class _FakeLeader:
@@ -76,3 +82,41 @@ def test_failsoft_on_sync_error_returns_none_and_resigns() -> None:
     # task catches, logs, returns None, and ALWAYS resigns the leader lock.
     assert _task(wins=True, runner=_explode, leaders=leaders).run_once() is None
     assert leaders[0].resigned is True
+
+
+# --------------------------------------------------------------------------- #
+# build_skill_catalog_sync — the opt-out + the read-only bundled snapshot     #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_skill_catalog_sync_disabled_returns_none() -> None:
+    from persona_api.config import APIConfig
+    from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
+
+    config = APIConfig(skill_catalog_sync_enabled=False)
+    assert build_skill_catalog_sync(config, dispatch_engine=MagicMock()) is None
+
+
+def test_build_skill_catalog_sync_enabled_builds_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from persona_api.config import APIConfig
+    from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
+
+    monkeypatch.setenv("PERSONA_SKILL_MIRROR_PATH", str(tmp_path / "skill_mirror.json"))
+    config = APIConfig(skill_catalog_sync_enabled=True)
+    task = build_skill_catalog_sync(config, dispatch_engine=MagicMock())
+    assert isinstance(task, SkillCatalogSyncTask)
+
+
+def test_build_skill_catalog_sync_without_mirror_path_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-011: no PERSONA_SKILL_MIRROR_PATH → the sync is skipped (warn), NOT pointed at
+    the bundled package-data snapshot (a committed file the sync must never rewrite)."""
+    from persona_api.config import APIConfig
+    from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
+
+    monkeypatch.delenv("PERSONA_SKILL_MIRROR_PATH", raising=False)
+    config = APIConfig(skill_catalog_sync_enabled=True)
+    assert build_skill_catalog_sync(config, dispatch_engine=MagicMock()) is None

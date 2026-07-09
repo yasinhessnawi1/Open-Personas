@@ -285,4 +285,11 @@ def test_unset_override_uses_bundled_path(tmp_path: Path) -> None:
 def test_resolve_mirror_write_path_prefers_override(tmp_path: Path) -> None:
     override = tmp_path / "vol" / "mirror.json"
     assert resolve_mirror_write_path(override) == override
-    assert resolve_mirror_write_path(None) == MIRROR_PATH
+
+
+def test_resolve_mirror_write_path_never_falls_back_to_bundled_file() -> None:
+    """R9-011 regression pin: with no override, the WRITE path is ``None`` — never the
+    bundled package-data ``MIRROR_PATH`` (a sync would rewrite a committed file)."""
+    resolved = resolve_mirror_write_path(None)
+    assert resolved is None
+    assert resolved != MIRROR_PATH

@@ -14,7 +14,10 @@ from pathlib import Path  # noqa: TC003 — used in fixture helpers at runtime
 
 from persona.schema.skills import SkillProvenance, SkillSpec, SkillTrust
 from persona.skills.skill_mirror import (
+    SKILL_MIRROR_PATH,
     load_skill_mirror,
+    resolve_skill_mirror_read_path,
+    resolve_skill_mirror_write_path,
     write_skill_mirror_atomic,
 )
 
@@ -71,3 +74,20 @@ def test_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
     # Only the snapshot remains; no ``.tmp`` sibling left behind.
     assert mirror_path.exists()
     assert [p.name for p in tmp_path.iterdir()] == ["skill_mirror.json"]
+
+
+def test_resolve_read_path_prefers_override_else_bundled(tmp_path: Path) -> None:
+    override = tmp_path / "vol" / "skill_mirror.json"
+    assert resolve_skill_mirror_read_path(override) == override
+    # LOADS may fall back to the bundled snapshot — reading package data is safe.
+    assert resolve_skill_mirror_read_path(None) == SKILL_MIRROR_PATH
+
+
+def test_resolve_write_path_never_falls_back_to_bundled_file(tmp_path: Path) -> None:
+    """R9-011 regression pin: with no override, the WRITE path is ``None`` — never the
+    bundled package-data ``SKILL_MIRROR_PATH`` (a sync would rewrite a committed file)."""
+    override = tmp_path / "vol" / "skill_mirror.json"
+    assert resolve_skill_mirror_write_path(override) == override
+    resolved = resolve_skill_mirror_write_path(None)
+    assert resolved is None
+    assert resolved != SKILL_MIRROR_PATH
