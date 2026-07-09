@@ -47,7 +47,7 @@ from persona_runtime.initiative import GroundingChecker, InitiativePipeline, Ini
 from persona_runtime.legs import CompactingCheckpointWriter
 
 from persona_api.approvals.kill_switch import KillSwitchStore
-from persona_api.db.audit_factory import build_audit_logger
+from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
 from persona_api.errors import CommunityDbError
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
 from persona_api.initiative.handler import (
@@ -71,6 +71,7 @@ from persona_api.initiative.readers import (
 )
 from persona_api.initiative.store import DeclineStore, InitiativeLedger
 from persona_api.jobs.catalog_sync import build_catalog_sync
+from persona_api.jobs.handlers.avatar import avatar_queue_ready, register_avatar_handler
 from persona_api.jobs.handlers.consolidation import (
     enqueue_graph_consolidation,
     register_graph_consolidation_handler,
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from persona.audit import AuditLogger
+    from persona.imagegen.protocol import ImageBackend
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
     from persona.tasks import ResumeTrigger, StuckReport, Task
@@ -113,6 +115,7 @@ if TYPE_CHECKING:
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.web_deliverer import LiveSessionRegistry
+    from persona_api.storage import FileStorage
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
 
 __all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
@@ -132,6 +135,8 @@ def build_worker_registry(
     edition: object | None = None,
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
+    image_backend: ImageBackend | None = None,
+    file_storage: FileStorage | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -158,6 +163,12 @@ def build_worker_registry(
         memory_backend: The edition's memory transport (the digest sender needs it).
             ``None`` → legs still run, digest updates are simply not delivered.
         edition: The open-core edition (the C0 recorder's RLS gate).
+        image_backend: The app's composed image-generation backend — the
+            ``avatar_generation`` tenant's generator runs on it (R9-013). Gated by
+            :func:`avatar_queue_ready`, the SAME predicate the create route's
+            producer consults: the tenant registers iff the route may enqueue.
+        file_storage: The app's storage backend (the avatar persist target); part
+            of the same shared gate.
     """
     backend = tier_registry.get(synthesis_tier)
     graph_backend = PostgresGraphBackend(engine=rls_engine)
@@ -421,6 +432,46 @@ def build_worker_registry(
                 wellbeing=ApiEventWellbeingCheck(graph_store),
                 audit=_event_candidate_audit,
             )
+    # Avatar generation (Spec A0 T9 → completed at R9-013): the durable create-time
+    # avatar tenant. Registered under avatar_queue_ready — the ONE gate the create
+    # route's producer shares — so an ``avatar_generation`` job is enqueued iff
+    # this handler exists (the half-shipped cutover enqueued into a handler-less
+    # worker → the unknown-type poison loop). The generator is the SAME
+    # generation+persist implementation the inline hook runs (ImagegenAvatarGenerator
+    # over the free build-time entry); the tool-audit sink follows the config-selected
+    # backend, same as the route (R5-D-2 worker parity).
+    if (
+        avatar_queue_ready(
+            avatar_via_queue=config.avatar_via_queue,
+            image_backend=image_backend,
+            file_storage=file_storage,
+        )
+        # Redundant with the predicate; repeated only to type-narrow the Optionals.
+        and image_backend is not None
+        and file_storage is not None
+    ):
+        from persona_api.imagegen.service import ImagegenAvatarGenerator
+
+        register_avatar_handler(
+            registry,
+            ImagegenAvatarGenerator(
+                backend=image_backend,
+                file_storage=file_storage,
+                audit_logger=build_tool_audit_logger(config, rls_engine),
+                timeout_s=config.avatar_gen_timeout_s,
+            ),
+        )
+    elif config.avatar_via_queue:
+        # Flag on but the gate fails (no image backend / no file storage composed
+        # for this worker): the route's shared predicate falls back to the inline
+        # no-op path — no dead jobs — and THIS is the once-per-boot why.
+        _log.warning(
+            "avatar_via_queue is ON but the avatar tenant was NOT registered "
+            "(image backend / file storage not composed); persona-create avatars "
+            "fall back to the inline path",
+            image_backend_present=image_backend is not None,
+            file_storage_present=file_storage is not None,
+        )
     _log.info(
         "worker registry composed",
         synthesis_tier=synthesis_tier,
@@ -871,6 +922,8 @@ def start_in_process_worker(
     memory_backend: Backend | None = None,
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
+    image_backend: ImageBackend | None = None,
+    file_storage: FileStorage | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -908,6 +961,10 @@ def start_in_process_worker(
         edition=config.edition,
         live_sessions=live_sessions,
         event_channel=event_channel,
+        # R9-013: the avatar tenant's substrate — shared with the create route's
+        # producer gate (avatar_queue_ready), so enqueue implies handler.
+        image_backend=image_backend,
+        file_storage=file_storage,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines

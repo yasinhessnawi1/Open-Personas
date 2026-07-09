@@ -24,7 +24,7 @@ from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.config import Edition
 from persona_api.errors import RefinementLimitError
 from persona_api.imagegen import service as imagegen_service
-from persona_api.jobs.handlers.avatar import enqueue_avatar_generation
+from persona_api.jobs.handlers.avatar import avatar_queue_ready, enqueue_avatar_generation
 from persona_api.middleware.rate_limit import rate_limit
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.routes._runtime_guard import require_model_backend
@@ -406,10 +406,20 @@ async def create_persona(
     # the avatar appears on a later GET. Both paths stay fail-soft.
     config = request.app.state.config
     job_queue = getattr(request.app.state, "job_queue", None)
+    # R9-013 gate unification: the producer consults avatar_queue_ready — the SAME
+    # predicate the worker root's registration consults — so a job is enqueued iff
+    # the worker has the avatar handler. Flag on without an image backend (or
+    # queue) falls back to the inline path (which no-ops fail-soft + audits);
+    # never enqueue a job no handler can run (the unknown-type poison loop).
+    # The why is logged once at boot (app.py, next to _compose_image_backend).
     avatar_via_queue = (
         body.avatar_url is None
-        and getattr(config, "avatar_via_queue", False)
         and job_queue is not None
+        and avatar_queue_ready(
+            avatar_via_queue=getattr(config, "avatar_via_queue", False),
+            image_backend=getattr(request.app.state, "image_backend", None),
+            file_storage=getattr(request.app.state, "file_storage", None),
+        )
     )
     background_tasks.add_task(
         _enrich_persona_after_create,

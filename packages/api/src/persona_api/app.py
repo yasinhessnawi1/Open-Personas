@@ -611,6 +611,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the chat TierRegistry (D-22-2 filter). ``None`` when OpenRouter is unused.
     openrouter_mode = _resolve_openrouter_subscription_mode()
     app.state.image_backend = _compose_image_backend(openrouter_mode)
+    if config.avatar_via_queue and app.state.image_backend is None:
+        # R9-013 once-per-boot honesty: the cutover flag is on but the shared
+        # avatar_queue_ready gate can never pass without an image backend, so
+        # persona-create falls back to the inline no-op avatar path (no queue
+        # job is ever enqueued — a dead job would poison-loop a handler-less
+        # worker). Configure PERSONA_IMAGEGEN_* to activate the queue cutover.
+        _LOG.warning(
+            "PERSONA_API_AVATAR_VIA_QUEUE is on but image generation is not "
+            "configured; persona-create avatars fall back to the inline no-op path"
+        )
 
     # Runtime composition root (T10): the TierRegistry (app-scoped) + the
     # per-request loop builders. Built only when a model backend is configured
@@ -788,6 +798,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # unchanged seams.
                 live_sessions=live_sessions,
                 event_channel=event_channel,
+                # R9-013: the avatar_generation tenant's substrate. Threading the
+                # app's composed image backend + file storage lets the worker
+                # register the avatar handler under the SAME avatar_queue_ready
+                # gate the create route's producer consults — enqueue iff handler.
+                image_backend=app.state.image_backend,
+                file_storage=app.state.file_storage,
             )
         except AuthenticationError:
             # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,

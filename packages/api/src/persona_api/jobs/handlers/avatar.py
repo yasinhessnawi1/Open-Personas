@@ -46,11 +46,28 @@ __all__ = [
     "AvatarGenerator",
     "AvatarResult",
     "avatar_idempotency_key",
+    "avatar_queue_ready",
     "enqueue_avatar_generation",
     "register_avatar_handler",
 ]
 
 AVATAR_JOB_TYPE = "avatar_generation"
+
+
+def avatar_queue_ready(
+    *, avatar_via_queue: bool, image_backend: object | None, file_storage: object | None
+) -> bool:
+    """THE one queue-cutover gate, shared by producer and registration (R9-013).
+
+    An ``avatar_generation`` job may be enqueued **iff the worker will have a
+    handler for it**: the cutover flag is on AND the image backend + file storage
+    the handler's generator needs are composed. The create route (the producer)
+    and :func:`~persona_api.background.worker_root.build_worker_registry` (the
+    registration) MUST both consult this predicate — a producer-only read of the
+    flag is exactly the half-shipped cutover that enqueued unknown-type jobs into
+    a handler-less worker (the R9-013 poison loop).
+    """
+    return bool(avatar_via_queue) and image_backend is not None and file_storage is not None
 
 
 def avatar_idempotency_key(persona_id: str) -> str:

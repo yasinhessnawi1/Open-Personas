@@ -59,6 +59,7 @@ References:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -69,6 +70,7 @@ from persona.imagegen import (
     GenerationResult,
     ImageGenError,
     ImageGenOptions,
+    craft_avatar_prompt,
     hash_prompt_for_audit,
     is_hard_line_violation,
 )
@@ -88,9 +90,15 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.editions import CreditsPolicy
+    from persona_api.jobs.handlers.avatar import AvatarResult
     from persona_api.storage import FileStorage
 
-__all__ = ["DEFAULT_COST_PER_IMAGE_CREDITS", "generate", "generate_avatar"]
+__all__ = [
+    "DEFAULT_COST_PER_IMAGE_CREDITS",
+    "ImagegenAvatarGenerator",
+    "generate",
+    "generate_avatar",
+]
 
 
 #: The avatar tool-name recorded on the audit event. Distinct from
@@ -626,3 +634,79 @@ def _emit_avatar_audit(
             metadata=metadata,
         )
     )
+
+
+class ImagegenAvatarGenerator:
+    """The real :class:`~persona_api.jobs.handlers.avatar.AvatarGenerator` (R9-013).
+
+    The durable-queue counterpart of the inline create hook
+    (``routes/personas.py::_maybe_generate_avatar``), composed at the worker root
+    when the ``avatar_via_queue`` cutover gate passes. It reuses the SAME
+    generation + persistence implementation the inline path runs: the
+    demographic-safe crafted prompt (D-29-1) over the persona's declared
+    identity, then the free build-time entry :func:`generate_avatar` (hard-line
+    filter, provider dispatch, D-13-4 workspace persist, one system-initiated
+    audit event), bounded by the same ``avatar_gen_timeout_s`` wall clock.
+
+    Outcome mapping onto the ``AvatarGenerator`` Protocol:
+
+    - **content rejection** (hard-line backstop or provider moderation) →
+      ``None`` — a deterministic decline, NOT a failure: the persona simply
+      keeps no avatar (the handler's documented no-op outcome);
+    - **provider error / timeout** → raise — the A0 retry policy retries the
+      transient class with backoff, then dead-letters honestly (the durable
+      queue's improvement over the inline hook's single fail-soft shot);
+    - **success** → the bare workspace ref (``uploads/<blake2b>.<ext>``) —
+      exactly the value the inline hook stores, which the web's authed-image
+      hook resolves; ``cost_micros=0`` (build-time avatar gen is free, D-29-2).
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: ImageBackend,
+        file_storage: FileStorage,
+        audit_logger: ToolAuditLogger | None = None,
+        timeout_s: float = 25.0,
+    ) -> None:
+        self._backend = backend
+        self._file_storage = file_storage
+        self._audit_logger = audit_logger
+        self._timeout_s = timeout_s
+
+    async def generate(
+        self, *, persona_id: str, owner_id: str, yaml_str: str
+    ) -> AvatarResult | None:
+        # Local imports: AvatarResult lives in the handler module (which this
+        # module must not import at module scope — the handler seam stays
+        # mechanism-agnostic) and persona_service pulls the store stack.
+        from persona_api.jobs.handlers.avatar import AvatarResult
+        from persona_api.services import persona_service
+
+        persona = persona_service.load_persona_from_yaml(
+            yaml_str, persona_id=persona_id, owner_id=owner_id
+        )
+        prompt = craft_avatar_prompt(persona.identity)
+        try:
+            result = await asyncio.wait_for(
+                generate_avatar(
+                    file_storage=self._file_storage,
+                    backend=self._backend,
+                    user_id=owner_id,
+                    persona_id=persona_id,
+                    prompt=prompt,
+                    audit_logger=self._audit_logger,
+                ),
+                timeout=self._timeout_s,
+            )
+        except ContentRejectedError:
+            # Deterministic decline (hard-line / provider moderation) — already
+            # audited inside generate_avatar. No avatar, no error, no retry.
+            return None
+        # ImageGenError (auth/rate/transient) and TimeoutError propagate: the
+        # executor's retry policy owns the transient class (R9-013 keeps
+        # genuinely-transient failures retryable).
+        workspace_path = result.images[0].workspace_path if result.images else None
+        if not workspace_path:
+            return None  # defensive — nothing to point at (mirrors the inline hook)
+        return AvatarResult(avatar_url=workspace_path, cost_micros=0, provider=result.provider)
