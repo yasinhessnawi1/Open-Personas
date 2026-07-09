@@ -761,10 +761,17 @@ class InProcessWorker:
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
-        """Launch the claim→execute loop as a background task. Idempotent."""
+        """Launch the claim→execute loop as a background task. Idempotent.
+
+        ``install_signal_handlers=False`` — signal ownership belongs to uvicorn
+        in this hosting mode (R9-004): the worker's ``loop.add_signal_handler``
+        would REPLACE uvicorn's ``signal.signal`` SIGINT/SIGTERM handlers, so ^C
+        would drain the worker but the server would keep serving forever. The
+        lifespan's :meth:`aclose` is the in-process drain path instead.
+        """
         if self._task is not None:
             return
-        self._task = asyncio.create_task(self._worker.run())
+        self._task = asyncio.create_task(self._worker.run(install_signal_handlers=False))
         _log.info("in-process worker started", worker_id=self._worker.worker_id)
 
     async def aclose(self) -> None:

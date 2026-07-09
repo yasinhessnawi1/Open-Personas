@@ -212,7 +212,7 @@ class Worker:
             await self._executor.execute(record)
         return len(records)
 
-    async def run(self) -> None:
+    async def run(self, *, install_signal_handlers: bool = True) -> None:
         """Run the continuous claim→execute loop until a drain signal, then drain.
 
         Each iteration claims only as many jobs as there are free concurrency
@@ -222,8 +222,22 @@ class Worker:
         drain signal wakes it immediately. On drain: stop claiming, let in-flight
         jobs finish within the drain bound, then exit; anything still running is
         cancelled and left for lease-expiry reclaim (D-A0-5).
+
+        Args:
+            install_signal_handlers: Whether this worker owns the PROCESS's
+                SIGTERM/SIGINT (D-A0-5). ``True`` (default) is the standalone
+                worker-process posture: a signal requests a graceful drain.
+                In-process hosting (the single-uvicorn deploy — D-08-5) MUST
+                pass ``False``: uvicorn owns process signals, and asyncio's
+                ``loop.add_signal_handler`` REPLACES the process-level handler
+                uvicorn installed via ``signal.signal`` — so a worker that
+                traps signals in uvicorn's process swallows ^C (the drain runs
+                but the server never shuts down — R9-004). In-process, the
+                drain path is the app lifespan: :meth:`InProcessWorker.aclose`
+                → :meth:`request_drain` → await this loop.
         """
-        self._install_signal_handlers()
+        if install_signal_handlers:
+            self._install_signal_handlers()
         _log.info(
             "worker loop started",
             worker_id=self._worker_id,
