@@ -25,15 +25,22 @@ K9-D-12's import isolation:
   abstention floor).
 - **CPU, one batch** — the device is explicit ``cpu`` (no auto-detect surprises on the
   V100 box), and the fused pool (≤ ~20 texts) is scored in a single ``predict`` batch.
-- **Finite-kernel self-check** — measured on this repo's dev box (M1/8 GB under swap
-  exhaustion, reproduced across torch 2.7 and 2.12): CPU GEMM kernels can emit ``inf``
-  mid-encoder from verifiably-clean fp32 weights and small inputs (mathematically
-  impossible from healthy arithmetic — a platform/memory-level fault, intermittent
-  SIGBUS included). The load therefore scores a canned padded batch FIRST and refuses
-  (raises) on any non-finite result — the model is not cached, so a later turn retries
-  cheaply and recovers if the platform does. Every real ``score`` keeps a finiteness
-  backstop — garbage NEVER becomes an ordering or an abstention-floor read; the shell
-  turns both refusals into the fused order.
+- **Finite-kernel self-check, sticky refusal** — measured on this repo's dev box
+  (M1/8 GB under swap exhaustion, reproduced across torch 2.7 and 2.12): CPU GEMM
+  kernels can emit ``inf`` mid-encoder from verifiably-clean fp32 weights and small
+  inputs (mathematically impossible from healthy arithmetic — a platform/memory-level
+  fault, intermittent SIGBUS included). The load therefore scores a canned padded batch
+  FIRST and refuses (raises) on any non-finite result — the broken model is dropped
+  (never cached, the ~90 MB weights are not pinned) and the verdict is CACHED on the
+  instance (R9-008): the scorer is a process-wide singleton per model id
+  (:func:`shared_scorer`), so every later ``score`` short-circuits the refusal
+  instantly — no reload, no re-check — and the composed shell keeps each turn on the
+  fused order. The refusal is logged ONCE at WARNING; short-circuits log at DEBUG.
+  Recovery from an intermittent platform fault is a process restart (the fault is a
+  platform-level corruption — paying a ~90 MB load + self-check per rerank forever to
+  probe for it was the R9-008 bug). Every real ``score`` keeps a finiteness backstop —
+  garbage NEVER becomes an ordering or an abstention-floor read; the shell turns both
+  refusals into the fused order.
 
 :func:`shared_scorer` keys one instance per model id process-wide (the model is ~90 MB —
 never load it twice), and :func:`build_scorer` is the composition-root factory both the
@@ -46,7 +53,7 @@ from __future__ import annotations
 
 import math
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from persona.logging import get_logger
 
@@ -86,6 +93,12 @@ class CrossEncoderScorer:
         self.model_name = model_name
         self._batch_size = batch_size
         self._model: object | None = None
+        # Sticky finite-kernel verdict (R9-008): once the load-time self-check refuses,
+        # every later score short-circuits here — no reload, no re-check. Instance-level
+        # is process-level in practice: ``shared_scorer`` keys ONE instance per model id
+        # for the whole process and never evicts, and both composition roots go through
+        # it. Read/written under the same double-checked discipline as ``_model``.
+        self._kernel_broken = False
         # The scorer is process-shared (``shared_scorer``) and first-scored from
         # reranker worker threads (chat DeadlineReranker / voice to_thread), possibly
         # concurrently across turns. The one-time construction serialises on the
@@ -99,9 +112,13 @@ class CrossEncoderScorer:
     def _load(self) -> object:
         if self._model is not None:
             return self._model
+        if self._kernel_broken:
+            self._raise_broken(first=False)
         with self._load_lock:
             if self._model is not None:
                 return self._model
+            if self._kernel_broken:  # double-checked: a concurrent first-call refused
+                self._raise_broken(first=False)
             # Lazy import (K9-D-12): the model runtime enters the process only when a
             # rerank actually happens — importing persona.recall stays model-free.
             from sentence_transformers import CrossEncoder
@@ -118,9 +135,37 @@ class CrossEncoderScorer:
                 device="cpu",
                 default_activation_function=nn.Sigmoid(),
             )
-            self._verify_finite_kernels(model)
+            if not self._kernels_are_finite(model):
+                # Sticky refusal (R9-008): record the verdict, drop the broken model
+                # (the ~90 MB weights must not stay pinned), and raise from a frame
+                # that no longer references it, so the propagating traceback cannot
+                # keep it alive either.
+                self._kernel_broken = True
+                del model
+                self._raise_broken(first=True)
             self._model = model
             return model
+
+    def _raise_broken(self, *, first: bool) -> NoReturn:
+        """Raise the sticky finite-kernel refusal (WARNING once, DEBUG after)."""
+        if first:
+            _log.warning(
+                "cross-encoder self-check emitted non-finite scores; refusing to serve "
+                "(model={model}) — reranking degrades to the fused order for the rest "
+                "of this process",
+                model=self.model_name,
+            )
+        else:
+            _log.debug(
+                "cross-encoder previously refused (sticky); fused order (model={model})",
+                model=self.model_name,
+            )
+        msg = (
+            f"cross-encoder {self.model_name!r} emits non-finite scores on this "
+            "platform (broken kernel path); refusing to serve — reranking degrades "
+            "to the fused order"
+        )
+        raise RuntimeError(msg)
 
     def _predict(self, model: object, query: str, texts: Sequence[str]) -> list[float]:
         scores = model.predict(  # type: ignore[attr-defined]
@@ -131,31 +176,18 @@ class CrossEncoderScorer:
         )
         return [float(s) for s in scores]
 
-    def _verify_finite_kernels(self, model: object) -> None:
-        """Refuse to serve a model whose kernels emit non-finite scores (load-time gate).
+    def _kernels_are_finite(self, model: object) -> bool:
+        """The load-time finite-kernel gate — ``False`` means refuse to serve.
 
         The measured fault (dev box, M1/8 GB under swap exhaustion; reproduced across
         torch 2.7 and 2.12): CPU GEMMs emit ``inf`` mid-encoder from verifiably-clean
         weights on padded batches — every score comes back NaN while the model "works".
-        A non-finite self-check raises, so the model is NOT cached and the composed
-        fail-soft shell keeps the turn on the fused order instead of an arbitrary NaN
-        sort; the next turn retries the load (cheap when the weights are OS-cached) and
-        recovers as soon as the platform computes finitely again.
+        Returns a verdict instead of raising so the caller (:meth:`_load`) can drop the
+        broken model reference BEFORE raising — a raise from this frame would pin the
+        ~90 MB weights in the propagating traceback.
         """
         scores = self._predict(model, _SELF_CHECK_QUERY, _SELF_CHECK_TEXTS)
-        if all(math.isfinite(s) for s in scores):
-            return
-        _log.warning(
-            "cross-encoder self-check emitted non-finite scores; refusing to serve "
-            "(model={model}) — reranking degrades to the fused order",
-            model=self.model_name,
-        )
-        msg = (
-            f"cross-encoder {self.model_name!r} emits non-finite scores on this "
-            "platform (broken kernel path); refusing to serve — reranking degrades "
-            "to the fused order"
-        )
-        raise RuntimeError(msg)
+        return all(math.isfinite(s) for s in scores)
 
     def score(self, query: str, texts: Sequence[str]) -> list[float]:
         """Score every text against ``query`` in one batch; ``[0, 1]``, index-aligned.
@@ -163,7 +195,8 @@ class CrossEncoderScorer:
         The first call triggers the model load (+ the finite-kernel self-check); a load,
         self-check, or inference failure — including a non-finite score — raises, and
         the composed :class:`~persona.recall.rerank.FailSoftReranker` degrades that turn
-        to the fused order.
+        to the fused order. A self-check refusal is sticky (R9-008): every later call
+        raises immediately — no reload, no re-check — so the degrade is instant.
         """
         if not texts:
             return []

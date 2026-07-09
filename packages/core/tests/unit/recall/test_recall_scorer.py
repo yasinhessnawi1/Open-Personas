@@ -3,19 +3,22 @@
 Pins the ``CrossEncoderScorer`` contract WITHOUT downloading a model (a fake
 ``sentence_transformers.CrossEncoder`` is injected into ``sys.modules``): Protocol
 conformance, lazy thread-safe load (first *score* — never construction), single-batch
-scoring, the finite-kernel self-check (the measured dev-box GEMM ``inf`` fault) with
-retry-on-a-later-turn recovery, load-failure propagation (so the composed
-``FailSoftReranker`` degrades to the fused order), the process-wide shared instance, and
-the composition-root factory gate (``rerank_enabled``). The real-model leg lives in
-``tests/integration/test_recall_scorer_live.py``.
+scoring, the finite-kernel self-check (the measured dev-box GEMM ``inf`` fault) with a
+STICKY refusal (R9-008: one load, one check, every later call short-circuits — no
+reload, and the broken model is dropped, never pinned), load-failure propagation (so
+the composed ``FailSoftReranker`` degrades to the fused order), the process-wide shared
+instance, and the composition-root factory gate (``rerank_enabled``). The real-model
+leg lives in ``tests/integration/test_recall_scorer_live.py``.
 """
 
 from __future__ import annotations
 
+import gc
 import sys
 import threading
 import time
 import types
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -218,25 +221,103 @@ def test_nonfinite_self_check_degrades_to_fused(
     assert [c.key for c in reranker.rerank("q", fused, top_k=2)] == ["a", "b"]
 
 
-def test_failed_self_check_is_retried_and_recovers_on_a_later_turn(
+def test_failed_self_check_is_sticky_and_never_reloads(
     fake_st: type[_FakeCrossEncoder],
 ) -> None:
-    # An intermittent platform fault (the measured one comes and goes with memory
-    # pressure) must not permanently disable reranking: a failed self-check leaves the
-    # model uncached, and the next score retries the load and serves once healthy.
-    calls = {"n": 0}
-
-    def _flaky(pairs: Sequence[tuple[str, str]]) -> list[float]:
-        calls["n"] += 1
-        broken = calls["n"] == 1  # only the first self-check batch is non-finite
-        return [float("nan") if broken else 0.7] * len(pairs)
-
-    fake_st.score_fn = staticmethod(_flaky)
-    scorer = CrossEncoderScorer(model_name="unit/model-flaky")
+    # R9-008: the measured fault is a platform-level corruption — re-probing it per
+    # rerank paid a fresh ~90 MB load + self-check for a deterministic refusal, forever.
+    # Once the self-check refuses, the verdict is cached: the SECOND score must
+    # short-circuit — the constructor runs exactly ONCE, the self-check exactly ONCE.
+    fake_st.score_fn = staticmethod(lambda pairs: [float("nan")] * len(pairs))
+    scorer = CrossEncoderScorer(model_name="unit/model-sticky")
     with pytest.raises(RuntimeError, match="non-finite"):
         scorer.score("q", ["a"])
-    assert scorer.score("q", ["a", "b"]) == [0.7, 0.7]  # recovered
-    assert len(fake_st.constructed) == 2  # reload on retry — never a poisoned cache
+    with pytest.raises(RuntimeError, match="non-finite"):
+        scorer.score("q", ["a", "b"])
+    assert len(fake_st.constructed) == 1  # ONE load — never re-entered after refusal
+    assert len(fake_st.predict_calls) == 1  # ONE self-check — no re-check either
+
+
+def test_refused_model_is_dropped_not_pinned(
+    fake_st: type[_FakeCrossEncoder], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # R9-008: the sticky flag alone gates future calls — the refused ~90 MB model
+    # object must be collectable (not cached on the scorer, not pinned by the raised
+    # exception's traceback frames).
+    refs: list[weakref.ref[_FakeCrossEncoder]] = []
+    original_init = fake_st.__init__
+
+    def _tracking_init(self: _FakeCrossEncoder, model_name: str, **kwargs: object) -> None:
+        original_init(self, model_name, **kwargs)
+        refs.append(weakref.ref(self))
+
+    monkeypatch.setattr(fake_st, "__init__", _tracking_init)
+    fake_st.score_fn = staticmethod(lambda pairs: [float("nan")] * len(pairs))
+    scorer = CrossEncoderScorer(model_name="unit/model-dropped")
+    with pytest.raises(RuntimeError, match="non-finite"):
+        scorer.score("q", ["a"])
+    gc.collect()
+    assert len(refs) == 1
+    assert refs[0]() is None, "refused model object is still alive (pinned reference)"
+
+
+def test_sticky_refusal_still_degrades_to_fused_through_build_reranker(
+    fake_st: type[_FakeCrossEncoder],
+) -> None:
+    # The caller-facing contract is unchanged by stickiness: every turn on a broken
+    # box degrades to the fused order through the SAME shell production composes —
+    # the second turn just gets there instantly (no reload).
+    fake_st.score_fn = staticmethod(lambda pairs: [float("nan")] * len(pairs))
+    scorer = CrossEncoderScorer(model_name="unit/model-sticky-fused")
+    reranker = build_reranker(
+        scorer=scorer, settings=RecallSettings(rerank_enabled=True), timeout_s=None
+    )
+    fused = [_cand("a", 1), _cand("b", 2)]
+    assert [c.key for c in reranker.rerank("q", fused, top_k=2)] == ["a", "b"]
+    assert [c.key for c in reranker.rerank("q", fused, top_k=2)] == ["a", "b"]
+    assert len(fake_st.constructed) == 1  # the second turn short-circuited
+
+
+def test_concurrent_first_scores_on_a_broken_box_load_exactly_once(
+    fake_st: type[_FakeCrossEncoder],
+) -> None:
+    # The sticky verdict must be correct under concurrent first-calls (double-checked
+    # like the load): racing threads must not each construct-and-refuse.
+    fake_st.init_delay_s = 0.05
+    fake_st.score_fn = staticmethod(lambda pairs: [float("nan")] * len(pairs))
+    scorer = CrossEncoderScorer(model_name="unit/model-race-broken")
+    start = threading.Barrier(4)
+    outcomes: list[str] = []
+
+    def _score() -> None:
+        start.wait()
+        try:
+            scorer.score("q", ["a"])
+            outcomes.append("served")
+        except RuntimeError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=_score) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert outcomes == ["refused"] * 4
+    assert len(fake_st.constructed) == 1  # one construction across the race
+    assert len(fake_st.predict_calls) == 1  # one self-check across the race
+
+
+def test_transient_load_failure_is_not_sticky(fake_st: type[_FakeCrossEncoder]) -> None:
+    # Only the finite-kernel VERDICT is sticky. A construction failure (network /
+    # download) stays retryable: the next turn reloads and serves once it succeeds.
+    fake_st.init_error = RuntimeError("no network")
+    scorer = CrossEncoderScorer(model_name="unit/model-transient")
+    with pytest.raises(RuntimeError, match="no network"):
+        scorer.score("q", ["a"])
+    fake_st.init_error = None
+    assert scorer.score("q", ["a", "b"]) == [0.5, 0.5]  # recovered on retry
+    assert len(fake_st.constructed) == 1  # the failed attempt never constructed
 
 
 def test_nonfinite_scores_after_a_healthy_load_raise_to_the_shell(

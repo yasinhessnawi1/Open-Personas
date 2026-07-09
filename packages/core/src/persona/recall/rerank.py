@@ -223,14 +223,16 @@ class FailSoftReranker:
         except RerankTimeoutError:
             return self._fused(candidates, top_k, reason="timeout")
         except Exception:  # noqa: BLE001 — deliberately fail-soft: never break the turn
-            get_logger(_LOG).warning("reranker error; fused order (n=%d)", len(candidates))
+            get_logger(_LOG).warning("reranker error; fused order (n={n})", n=len(candidates))
             return self._fused(candidates, top_k, reason="error")
 
     def _fused(
         self, candidates: Sequence[RecallCandidate], top_k: int, *, reason: str
     ) -> list[RecallCandidate]:
         if reason != "error":  # the error path already logged with its own detail
-            get_logger(_LOG).debug("rerank fallback=%s; fused (n=%d)", reason, len(candidates))
+            get_logger(_LOG).debug(
+                "rerank fallback={reason}; fused (n={n})", reason=reason, n=len(candidates)
+            )
         if self._on_fallback is not None:
             self._on_fallback(reason)
         return list(candidates[:top_k])
