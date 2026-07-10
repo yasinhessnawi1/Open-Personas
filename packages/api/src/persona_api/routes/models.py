@@ -15,6 +15,7 @@ verbatim).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -82,8 +83,13 @@ async def list_models(
     OpenRouter configuration returns 200 with ``stale=True`` and an
     empty/partial ``models`` list — never a 500. A persona's turn still runs on
     the tier default regardless of this route's health.
+
+    :func:`~persona_api.services.model_catalog_service.list_models` is
+    synchronous (a blocking ``httpx`` call, up to a 30s timeout on the cold
+    path) — offloaded via :func:`asyncio.to_thread` so a slow/hung catalog
+    fetch stalls a worker thread, never the shared event loop.
     """
-    result = model_catalog_service.list_models(scope=scope)
+    result = await asyncio.to_thread(model_catalog_service.list_models, scope=scope)
     return ModelsResponse(
         models=[
             ModelOut(

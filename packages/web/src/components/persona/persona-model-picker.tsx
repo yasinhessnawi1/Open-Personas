@@ -32,8 +32,11 @@ import { cn } from "@/lib/utils";
  * The default view shows only the curated shortlist (`recommended: true`) —
  * "Browse all" (a menu item with `closeOnClick={false}`, so it doesn't close
  * the menu) reveals the rest of whatever list the caller passed in. The
- * currently-selected model is always shown even if it isn't recommended (a
- * persona pinned to a since-de-listed model must still read as selected).
+ * currently-selected model is always shown in the menu even if it isn't
+ * recommended, and the trigger falls back to the raw id when `value` isn't in
+ * `models` at all (catalog outage, keyless env, a fully de-listed model) — a
+ * persona pinned to a since-de-listed model must still read as selected,
+ * never silently as "Use tier default".
  */
 export interface PersonaModelPickerProps {
   models: readonly ModelOption[];
@@ -57,7 +60,15 @@ export function PersonaModelPicker({
 
   const selected =
     value !== null ? (models.find((m) => m.id === value) ?? null) : null;
-  const selectedLabel = selected ? selected.label : t("tierDefault");
+  // A pinned `value` absent from `models` (catalog outage, keyless env, a
+  // de-listed model) is still an ACTIVE pin, not "no selection" — falls back
+  // to the raw id rather than misreporting it as the tier default. Raw model
+  // ids are technical identifiers, not translatable copy.
+  const selectedLabel = selected
+    ? selected.label
+    : value !== null
+      ? value
+      : t("tierDefault");
   const hasMore =
     !browseAll && models.some((m) => !m.recommended && m.id !== value);
   const visible = browseAll

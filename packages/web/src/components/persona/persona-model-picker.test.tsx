@@ -136,6 +136,15 @@ describe("PersonaModelPicker", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the raw id on the trigger when the pinned model is absent from the catalog", () => {
+    renderPicker(MODELS, "openai/gpt-5.1-delisted");
+    // Exact match: proves the trigger reads the raw id, not the "Use tier
+    // default" copy that `t("tierDefault")` would otherwise fall back to.
+    expect(
+      screen.getByLabelText("Model: openai/gpt-5.1-delisted"),
+    ).toBeInTheDocument();
+  });
+
   it("degrades to 'Use tier default' only + the fail-open empty copy when models is empty", async () => {
     renderPicker([]);
     await openMenu();

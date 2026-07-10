@@ -96,14 +96,22 @@ export async function createPersona(
   redirect(`/personas/${res.data.id}`);
 }
 
-/** Best-effort PATCH of the caller's sticky model default; swallows all errors. */
+/**
+ * Best-effort PATCH of the caller's sticky model default; swallows all errors.
+ *
+ * Always PATCHes, with the persona's chosen model id OR explicit `null` when
+ * the user left it on the tier default (design §9). A `null` is sent as an
+ * explicit JSON `null`, not omitted — the API treats that as a CLEAR (pinned
+ * by `test_patch_null_clears_preferred_model`) — so creating with the tier
+ * default selected resets a previously-stuck choice back to clean, rather
+ * than leaving a stale prior pick sticky forever.
+ */
 async function stickPreferredModel(
   api: Awaited<ReturnType<typeof serverApi>>,
   yaml: string,
 ): Promise<void> {
   try {
     const model = readPreferredModel(yamlToDoc(yaml));
-    if (model === null) return; // left on the tier default — nothing to stick
     await api.PATCH("/v1/me/profile", { body: { preferred_model: model } });
   } catch {
     // never blocks/fails persona creation

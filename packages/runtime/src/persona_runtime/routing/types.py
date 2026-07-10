@@ -171,4 +171,8 @@ class RoutingDecision(BaseModel):
     model_fallback_reason: str | None = None
     """One of ``"metadata_miss"`` / ``"no_candidates"`` /
     ``"capability_filtered"`` / ``"scoring_error"`` / ``"not_a_multi_model_tier"``
-    when :attr:`model_fallback_engaged` is ``True``; ``None`` otherwise."""
+    when :attr:`model_fallback_engaged` is ``True``. Since M1-T3, also set to
+    ``"preferred_model"`` when the persona's ``routing.preferred_model``
+    preempted tier routing for this turn — that is a direct pick, not a
+    fallback, so :attr:`model_fallback_engaged` stays ``False`` in that case.
+    ``None`` when neither applies."""
