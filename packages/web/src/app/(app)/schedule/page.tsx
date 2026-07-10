@@ -15,8 +15,14 @@ import { serverApi } from "@/lib/api/server";
 export default async function SchedulePage() {
   const api = await serverApi();
   const [personas, profile] = await Promise.all([
-    unwrap(await api.GET("/v1/personas")).catch(() => []),
-    unwrap(await api.GET("/v1/me/profile")).catch(() => null),
+    api
+      .GET("/v1/personas")
+      .then(unwrap)
+      .catch(() => []),
+    api
+      .GET("/v1/me/profile")
+      .then(unwrap)
+      .catch(() => null),
   ]);
   return (
     <CalendarView

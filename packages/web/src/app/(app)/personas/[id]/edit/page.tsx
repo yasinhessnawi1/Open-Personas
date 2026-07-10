@@ -30,9 +30,9 @@ export default async function EditPersonaPage({
   // N6 merge-back: the per-assigned-server connection status is FAIL-SOFT — an
   // error (older api, community without the runtime) yields [] → no badges.
   const [tools, skills, mcpCatalog, mcpConnections] = await Promise.all([
-    unwrap(await api.GET("/v1/tools")),
-    unwrap(await api.GET("/v1/skills")),
-    unwrap(await api.GET("/v1/mcp-catalog")),
+    api.GET("/v1/tools").then(unwrap),
+    api.GET("/v1/skills").then(unwrap),
+    api.GET("/v1/mcp-catalog").then(unwrap),
     fetchMcpConnections(api, id),
   ]);
 

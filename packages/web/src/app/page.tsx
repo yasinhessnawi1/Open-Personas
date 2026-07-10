@@ -70,12 +70,12 @@ export default async function RootPage() {
   // failure (e.g. the 402 exhausted cliff) degrades the stat tile rather than
   // breaking the whole dashboard.
   const [personas, conversations, creditsRes] = await Promise.all([
-    unwrap(await api.GET("/v1/personas")),
-    unwrap(
-      await api.GET("/v1/conversations", {
+    api.GET("/v1/personas").then(unwrap),
+    api
+      .GET("/v1/conversations", {
         params: { query: { limit: 50, offset: 0 } },
-      }),
-    ),
+      })
+      .then(unwrap),
     api.GET("/v1/me/credits"),
   ]);
   const credits = creditsRes.data?.balance ?? null;

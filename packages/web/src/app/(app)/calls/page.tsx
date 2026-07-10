@@ -24,12 +24,12 @@ export default async function CallsPage() {
   const t = await getTranslations("calls");
   const api = await serverApi();
   const [calls, personas] = await Promise.all([
-    unwrap(
-      await api.GET("/v1/calls", {
+    api
+      .GET("/v1/calls", {
         params: { query: { limit: CALL_HISTORY_LIMIT, offset: 0 } },
-      }),
-    ),
-    unwrap(await api.GET("/v1/personas")),
+      })
+      .then(unwrap),
+    api.GET("/v1/personas").then(unwrap),
   ]);
 
   const personaById: Record<string, CallHistoryPersona> = Object.fromEntries(

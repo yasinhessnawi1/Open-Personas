@@ -40,8 +40,8 @@ export default async function SettingsPage() {
   const api = await serverApi();
   const [user, credits, usage] = await Promise.all([
     currentUser(),
-    unwrap(await api.GET("/v1/me/credits")),
-    unwrap(await api.GET("/v1/me/usage")),
+    api.GET("/v1/me/credits").then(unwrap),
+    api.GET("/v1/me/usage").then(unwrap),
   ]);
 
   const email = user?.primaryEmailAddress?.emailAddress ?? "";

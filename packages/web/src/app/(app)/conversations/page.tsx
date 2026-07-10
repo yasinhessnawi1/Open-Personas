@@ -30,8 +30,8 @@ export default async function ConversationsPage() {
   const t = await getTranslations("conversations");
   const api = await serverApi();
   const [conversations, personas] = await Promise.all([
-    unwrap(await api.GET("/v1/conversations")),
-    unwrap(await api.GET("/v1/personas")),
+    api.GET("/v1/conversations").then(unwrap),
+    api.GET("/v1/personas").then(unwrap),
   ]);
 
   const personaMap = new Map<string, ConversationListPersona>(
