@@ -121,11 +121,13 @@ async def get_profile(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> UserProfileResponse:
-    """The caller's own profile — identity + optional name (Spec K6, K6-D-1).
+    """The caller's own profile — identity + optional name + preferences (Spec K6, K6-D-1).
 
-    Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
-    The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
-    means a genuine invariant break rather than a first-time user.
+    Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account, and
+    ``preferred_model`` (Spec M1, M1-T6 — the sticky last-choice default) is ``None``
+    until the caller has picked one. The row is provisioned by ``ensure_user`` in the
+    auth dependency, so a 404 here means a genuine invariant break rather than a
+    first-time user.
     """
     row = user_service.get_user_profile(request.app.state.rls_engine, user_id=user.id)
     if row is None:  # pragma: no cover - ensure_user guarantees the row exists
@@ -139,15 +141,19 @@ async def update_profile(
     body: UpdateProfileRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> UserProfileResponse:
-    """Set the caller's optional name + timezone (Spec K6/A8). PATCH — omitted = unchanged.
+    """Set the caller's optional name + timezone + model preference (Spec K6/A8/M1).
 
-    Only the fields the client actually sent are written (``exclude_unset``): a
-    string sets, an explicit ``null`` clears, an omitted field is left untouched.
-    Names are normalised (control-char strip, whitespace-only → unset) in the
-    service (K6-D-8). A provided ``timezone`` is validated as an IANA zone here
-    (Spec A8, A8-D-9) — an unknown zone is a fail-fast 422, never stored to
-    mis-fire in the tick; ``null`` clears it (→ falls back to the config default).
-    Scoped to the caller's own row — never another user's.
+    PATCH — omitted = unchanged. Only the fields the client actually sent are
+    written (``exclude_unset``): a string sets, an explicit ``null`` clears, an
+    omitted field is left untouched. Names are normalised (control-char strip,
+    whitespace-only → unset) in the service (K6-D-8). A provided ``timezone`` is
+    validated as an IANA zone here (Spec A8, A8-D-9) — an unknown zone is a
+    fail-fast 422, never stored to mis-fire in the tick; ``null`` clears it (→
+    falls back to the config default). ``preferred_model`` (Spec M1, M1-T6 — the
+    sticky last-choice default) needs no such call-out: the request schema already
+    rejects blank/whitespace-only (422), and its catalog validity is the WEB
+    picker's concern, not checked here; ``null`` clears it (→ falls back to the
+    tier-resolved default). Scoped to the caller's own row — never another user's.
     """
     provided = body.model_dump(exclude_unset=True)
     tz = provided.get("timezone")

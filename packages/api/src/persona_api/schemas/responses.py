@@ -527,6 +527,10 @@ class UserProfileResponse(_Output):
     #: user's timezone. Both ``None`` = off (off-until-set).
     quiet_hours_start: int | None = None
     quiet_hours_end: int | None = None
+    #: The caller's sticky last-choice model preference (Spec M1, M1-T6) — the
+    #: OpenRouter model id last picked in the web model picker. ``None`` when
+    #: unset, so the runtime loop falls back to the tier-resolved default.
+    preferred_model: str | None = None
     created_at: datetime
 
 

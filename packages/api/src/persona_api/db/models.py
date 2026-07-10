@@ -140,6 +140,15 @@ users = Table(
     # community SQLite edition byte-identical; range validation is at the app layer.
     Column("quiet_hours_start", Integer),
     Column("quiet_hours_end", Integer),
+    # The caller's sticky last-choice model preference (Spec M1, M1-T6). An opaque
+    # OpenRouter model id (e.g. ``z-ai/glm-4.6``) the user picked in the web model
+    # picker; nullable → falls back to the tier-resolved default (M1-T3) when unset.
+    # TEXT (not FK/ENUM): validity against the live catalog (M1-T5) is the WEB
+    # picker's concern — the API only stores the preference, never calls the
+    # catalog itself. Same split-home / TEXT posture as the name/timezone columns;
+    # blank/whitespace-only is rejected at the write boundary (422, the request
+    # schema), not by a DB CHECK.
+    Column("preferred_model", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 

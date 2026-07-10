@@ -151,3 +151,62 @@ def test_caller_only_touches_own_row(client: TestClient) -> None:
     b = client.get("/v1/me/profile", headers=_auth("k6_iso_b")).json()
     assert a["first_name"] == "AliceA"
     assert b["first_name"] == "BobB"
+
+
+# -- preferred_model: the sticky last-choice default (Spec M1, M1-T6) --------
+
+
+def test_fresh_account_has_null_preferred_model(client: TestClient) -> None:
+    r = client.get("/v1/me/profile", headers=_auth("k6_pm_fresh"))
+    assert r.status_code == 200
+    assert r.json()["preferred_model"] is None  # → the loop's tier-resolved default
+
+
+def test_patch_sets_preferred_model_then_get_reflects(client: TestClient) -> None:
+    uid = "k6_pm_set"
+    r = client.patch("/v1/me/profile", json={"preferred_model": "z-ai/glm-4.6"}, headers=_auth(uid))
+    assert r.status_code == 200
+    assert r.json()["preferred_model"] == "z-ai/glm-4.6"
+    got = client.get("/v1/me/profile", headers=_auth(uid)).json()
+    assert got["preferred_model"] == "z-ai/glm-4.6"
+
+
+def test_patch_null_clears_preferred_model(client: TestClient) -> None:
+    uid = "k6_pm_clear"
+    client.patch("/v1/me/profile", json={"preferred_model": "openai/gpt-5"}, headers=_auth(uid))
+    r = client.patch("/v1/me/profile", json={"preferred_model": None}, headers=_auth(uid))
+    assert r.status_code == 200
+    assert r.json()["preferred_model"] is None
+
+
+def test_patch_omitting_preferred_model_leaves_it_unchanged(client: TestClient) -> None:
+    uid = "k6_pm_partial"
+    client.patch(
+        "/v1/me/profile",
+        json={"preferred_model": "anthropic/claude-sonnet-4.6"},
+        headers=_auth(uid),
+    )
+    # A PATCH that touches an unrelated field must not disturb the sticky choice.
+    r = client.patch("/v1/me/profile", json={"first_name": "Ada"}, headers=_auth(uid))
+    assert r.status_code == 200
+    assert r.json()["preferred_model"] == "anthropic/claude-sonnet-4.6"
+    assert r.json()["first_name"] == "Ada"
+
+
+def test_blank_preferred_model_rejected_422(client: TestClient) -> None:
+    r = client.patch(
+        "/v1/me/profile", json={"preferred_model": "   "}, headers=_auth("k6_pm_blank")
+    )
+    assert r.status_code == 422
+
+
+def test_empty_string_preferred_model_rejected_422(client: TestClient) -> None:
+    r = client.patch("/v1/me/profile", json={"preferred_model": ""}, headers=_auth("k6_pm_empty"))
+    assert r.status_code == 422
+
+
+def test_overlong_preferred_model_rejected_422(client: TestClient) -> None:
+    r = client.patch(
+        "/v1/me/profile", json={"preferred_model": "x" * 257}, headers=_auth("k6_pm_long")
+    )
+    assert r.status_code == 422

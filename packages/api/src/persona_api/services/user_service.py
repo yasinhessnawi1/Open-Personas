@@ -138,7 +138,8 @@ def get_user_profile(engine: Engine, *, user_id: str) -> dict[str, object] | Non
     """
     stmt = text(
         "SELECT id, email, first_name, last_name, timezone, "
-        "quiet_hours_start, quiet_hours_end, created_at FROM users WHERE id = :id"
+        "quiet_hours_start, quiet_hours_end, preferred_model, created_at "
+        "FROM users WHERE id = :id"
     )
     with engine.connect() as conn:
         row = conn.execute(stmt, {"id": user_id}).mappings().first()
@@ -154,6 +155,7 @@ def update_user_profile(
     timezone: str | None | _Unset = UNSET,
     quiet_hours_start: int | None | _Unset = UNSET,
     quiet_hours_end: int | None | _Unset = UNSET,
+    preferred_model: str | None | _Unset = UNSET,
 ) -> dict[str, object] | None:
     """Set the caller's profile fields and return the updated profile row.
 
@@ -163,10 +165,14 @@ def update_user_profile(
     (K6-D-8); ``timezone`` is validated as an IANA zone at the request boundary
     (Spec A8, A8-D-9 — a bad zone is a 422, never reaching here), so it is written
     as-given (no normalisation, ``None`` clears → falls back to the config default).
-    With nothing provided this is a read (equivalent to :func:`get_user_profile`).
-    Dialect-safe (``UPDATE`` then re-``SELECT``; no ``RETURNING`` so the community
-    SQLite edition behaves identically). Scoped to ``WHERE id = :id`` — a caller can
-    only ever touch their own row.
+    ``preferred_model`` (Spec M1, M1-T6 — the sticky last-choice default) is likewise
+    written as-given: blank/whitespace-only is rejected at the request schema
+    boundary (422, never reaching here), and the catalog validity check is the WEB
+    picker's concern, not this layer's. With nothing provided this is a read
+    (equivalent to :func:`get_user_profile`). Dialect-safe (``UPDATE`` then
+    re-``SELECT``; no ``RETURNING`` so the community SQLite edition behaves
+    identically). Scoped to ``WHERE id = :id`` — a caller can only ever touch their
+    own row.
     """
     assignments: dict[str, str | int | None] = {}
     if not isinstance(first_name, _Unset):
@@ -179,10 +185,13 @@ def update_user_profile(
         assignments["quiet_hours_start"] = quiet_hours_start
     if not isinstance(quiet_hours_end, _Unset):
         assignments["quiet_hours_end"] = quiet_hours_end
+    if not isinstance(preferred_model, _Unset):
+        assignments["preferred_model"] = preferred_model
     if assignments:
         # Column names are a fixed internal allowlist ({first_name, last_name,
-        # timezone}), never user input — the f-string carries identifiers only; every
-        # value is bound. (No SQL injection surface.)
+        # timezone, quiet_hours_start, quiet_hours_end, preferred_model}), never
+        # user input — the f-string carries identifiers only; every value is
+        # bound. (No SQL injection surface.)
         set_clause = ", ".join(f"{col} = :{col}" for col in assignments)
         stmt = text(f"UPDATE users SET {set_clause} WHERE id = :id")  # noqa: S608 - fixed identifiers
         with engine.begin() as conn:

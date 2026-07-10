@@ -298,12 +298,12 @@ class UpdateMCPServerRequest(_Input):
 
 
 class UpdateProfileRequest(_Input):
-    """Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
+    """Set the caller's optional name + timezone + model preference (Spec K6/A8/M1).
 
-    All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
-    (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
-    fails fast at the boundary on egregious input; the service then strips control
-    characters and treats whitespace-only as unset (names,
+    PATCH semantics. All fields optional; **omitted = unchanged**, explicit ``null`` =
+    **clear** (distinguished server-side via ``model_dump(exclude_unset=True)``).
+    ``max_length`` fails fast at the boundary on egregious input; the service then
+    strips control characters and treats whitespace-only as unset (names,
     :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
     A8-D-9) is an IANA zone name whose validity is checked in the route handler
     (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
@@ -321,6 +321,16 @@ class UpdateProfileRequest(_Input):
     #: validated in the route handler (a 422), like the timezone IANA check.
     quiet_hours_start: int | None = Field(default=None, ge=0, le=1439)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=1439)
+    #: Sticky last-choice model preference (Spec M1, M1-T6): the OpenRouter model id
+    #: the caller picked in the web model picker. ``null`` clears it → the runtime
+    #: loop falls back to the tier-resolved default. Catalog validity (does this id
+    #: exist / is it chat-capable) is the WEB picker's concern (M1-T5) — the API only
+    #: stores the preference, it never calls the catalog here. ``min_length=1`` +
+    #: ``pattern=r"\\S"`` reject blank/whitespace-only as a structured 422 via Field
+    #: constraints alone (no custom ``field_validator`` — same rationale as the
+    #: ``timezone`` note above: a raised ``ValueError`` risks the 422 body's
+    #: ``json.dumps``).
+    preferred_model: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"\S")
 
 
 class ScheduleRescheduleRequest(_Input):

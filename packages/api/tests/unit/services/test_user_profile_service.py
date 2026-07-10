@@ -87,3 +87,23 @@ class TestUpdateProfileRequestSemantics:
     def test_rejects_unknown_field(self) -> None:
         with pytest.raises(ValidationError):
             UpdateProfileRequest(nickname="Ace")  # type: ignore[call-arg]
+
+    def test_preferred_model_provided_field_is_tracked(self) -> None:
+        body = UpdateProfileRequest(preferred_model="z-ai/glm-4.6")
+        assert body.model_dump(exclude_unset=True) == {"preferred_model": "z-ai/glm-4.6"}
+
+    def test_preferred_model_explicit_null_is_a_clear_not_an_omission(self) -> None:
+        body = UpdateProfileRequest(preferred_model=None)
+        assert body.model_dump(exclude_unset=True) == {"preferred_model": None}
+
+    def test_rejects_blank_preferred_model(self) -> None:
+        with pytest.raises(ValidationError):
+            UpdateProfileRequest(preferred_model="   ")
+
+    def test_rejects_empty_preferred_model(self) -> None:
+        with pytest.raises(ValidationError):
+            UpdateProfileRequest(preferred_model="")
+
+    def test_rejects_overlong_preferred_model_at_boundary(self) -> None:
+        with pytest.raises(ValidationError):
+            UpdateProfileRequest(preferred_model="x" * 257)
