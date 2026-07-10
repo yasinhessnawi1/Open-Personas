@@ -57,13 +57,16 @@ export function ByoMcpManager({
 
   const reload = useCallback(async () => {
     const api = await client();
+    // Fire both GETs concurrently (no `await` before Promise.all sees them) —
+    // awaiting each request before building the array would run them
+    // sequentially and could race an early rejection as unhandled.
     const [all, mine] = await Promise.all([
-      unwrap(await api.GET("/v1/mcp-servers")),
-      unwrap(
-        await api.GET("/v1/personas/{persona_id}/mcp-servers", {
+      api.GET("/v1/mcp-servers").then(unwrap),
+      api
+        .GET("/v1/personas/{persona_id}/mcp-servers", {
           params: { path: { persona_id: personaId } },
-        }),
-      ),
+        })
+        .then(unwrap),
     ]);
     setServers(all);
     setAssigned(new Set(mine.map((s) => s.id)));

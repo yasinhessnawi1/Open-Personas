@@ -164,4 +164,75 @@ describe("ByoMcpManager (spec 30 T12)", () => {
       ).toBe(true);
     });
   });
+
+  it("reload() dispatches both GETs concurrently and stays fail-soft when one rejects", async () => {
+    // Regression pin: reload() used to do
+    // `Promise.all([unwrap(await api.GET(a)), unwrap(await api.GET(b))])`,
+    // which awaits `a` to completion before `b` is even requested (no real
+    // parallelism) and can race an early rejection as unhandled. Hold the
+    // first response open to prove the second is requested anyway, then fail
+    // the first and confirm it degrades the same way a fresh, empty mount
+    // would — never as a Node-level unhandled rejection.
+    const captured: Captured[] = [];
+    const original = globalThis.fetch;
+    let releaseServers: ((response: Response) => void) | undefined;
+    const serversGate = new Promise<Response>((resolve) => {
+      releaseServers = resolve;
+    });
+    globalThis.fetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const isReq = typeof input === "object" && "method" in input;
+        const req = isReq ? (input as Request) : null;
+        const url = req ? req.url : input.toString();
+        const method = init?.method ?? req?.method ?? "GET";
+        captured.push({ url, method, body: "" });
+        if (method === "GET" && url.endsWith("/v1/mcp-servers")) {
+          return serversGate; // held open until released below
+        }
+        if (method === "GET" && url.includes("/personas/p1/mcp-servers")) {
+          return jsonResponse([]);
+        }
+        return new Response(null, { status: 204 });
+      },
+    ) as unknown as typeof fetch;
+    restore = () => {
+      globalThis.fetch = original;
+    };
+
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      const { container } = renderManager();
+
+      // The persona-scoped GET must show up even though /v1/mcp-servers is
+      // still pending — this only holds if reload() fires both concurrently
+      // instead of awaiting the first before starting the second.
+      await waitFor(() => {
+        expect(captured.some((c) => c.url.endsWith("/v1/mcp-servers"))).toBe(
+          true,
+        );
+        expect(
+          captured.some((c) => c.url.includes("/personas/p1/mcp-servers")),
+        ).toBe(true);
+      });
+
+      // Now fail the still-pending request.
+      releaseServers?.(jsonResponse({ error: "boom" }, 500));
+
+      // Flush macrotask ticks so reload()'s rejection reaches the effect's
+      // `.catch(() => {})` and Node gets a chance to flag anything left
+      // unhandled.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).not.toHaveBeenCalled();
+      // Fail-soft: same empty state as a fresh mount, not a crash.
+      expect(
+        container.querySelectorAll('[data-slot="byo-server"]').length,
+      ).toBe(0);
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
 });
