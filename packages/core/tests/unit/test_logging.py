@@ -188,8 +188,7 @@ def test_no_exc_info_true_in_log_calls_repo_wide() -> None:
                 offenders.append(f"{src.relative_to(repo_root)}:{i}")
     assert not offenders, (
         "exc_info=True is a no-op on loguru loggers (drops the traceback). "
-        "Use `logger.opt(exception=True).warning(...)` instead. Offenders:\n"
-        + "\n".join(offenders)
+        "Use `logger.opt(exception=True).warning(...)` instead. Offenders:\n" + "\n".join(offenders)
     )
 
 
