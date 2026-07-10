@@ -182,6 +182,14 @@
     "choosePersona": "Choose a persona",
     "empty": "No personas yet. Create one to start a chat."
   },
+  "modelPicker": {
+    "title": "Model",
+    "tierDefault": "Use tier default — routes by task",
+    "browseAll": "Browse all models",
+    "pricePerM": "{in} in / {out} out per 1M tokens",
+    "empty": "No models available right now — using the tier default.",
+    "recommended": "Recommended"
+  },
   "calls": {
     "title": "Calls",
     "subtitle": "Every voice call you've had with your personas.",
@@ -609,6 +617,8 @@
     "sectionsNav": "Sections",
     "expand": "Expand section",
     "collapse": "Collapse section",
+    "modelTitle": "Model",
+    "modelHint": "Pin this persona to one model, or leave it on the tier default that routes by task.",
     "autonomyTitle": "Autonomy",
     "avatarReplace": "Replace image",
     "avatarUploading": "Uploading…",

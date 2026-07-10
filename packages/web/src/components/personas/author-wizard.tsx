@@ -16,6 +16,8 @@ import {
   docToYaml,
   emptyPersonaDoc,
   type PersonaDoc,
+  readPreferredModel,
+  writePreferredModel,
   yamlToDoc,
 } from "@/lib/persona-draft";
 import type { PersonaExample } from "@/lib/persona-examples";
@@ -34,6 +36,21 @@ type Phase = "describe" | "loading" | "creating" | "review";
  * Preserved verbatim per audit.md §authoring.plumbing.
  */
 const MAX_REFINE_ROUNDS = 3;
+
+/**
+ * Spec M1 (M1-T7) — seed a fresh/regenerated doc with the caller's sticky
+ * per-user model default (`profile.preferred_model`, T6's PATCH target),
+ * UNLESS the doc already carries an explicit pick (never clobber one a
+ * starter/drafter/refine already authored).
+ */
+function withDefaultModel(
+  doc: PersonaDoc,
+  defaultModel: string | null | undefined,
+): PersonaDoc {
+  if (!defaultModel) return doc;
+  if (readPreferredModel(doc) !== null) return doc;
+  return writePreferredModel(doc, defaultModel);
+}
 
 /**
  * AuthorWizard — the new-persona flow (Spec 36 + Spec F2 T29 presentation).
@@ -61,10 +78,18 @@ export function AuthorWizard({
   tools,
   skills,
   mcpServers = [],
+  defaultModel = null,
 }: {
   tools: string[];
   skills: string[];
   mcpServers?: McpCatalogEntry[];
+  /**
+   * Spec M1 (M1-T7) — the caller's sticky per-user model default
+   * (`profile.preferred_model`, already fetched app-side by the /personas/new
+   * page), pre-selected on a fresh draft. `null`/omitted ⇒ no prefill (a
+   * fresh account, or the caller hasn't picked one yet).
+   */
+  defaultModel?: string | null;
 }) {
   const t = useTranslations("author");
   const { author, refine } = useAuthor();
@@ -97,7 +122,7 @@ export function AuthorWizard({
   // (openFullEditor) and inherits this exact doc, so quick edits carry over.
   function openDirect(seedDoc: PersonaDoc, seed: string) {
     setDraft(null);
-    setDoc(ensureSafetyConstraint(seedDoc));
+    setDoc(withDefaultModel(ensureSafetyConstraint(seedDoc), defaultModel));
     setSeedId(seed);
     setError(null);
   }
@@ -138,7 +163,7 @@ export function AuthorWizard({
 
   function applyDraft(next: AuthoringDraft): boolean {
     try {
-      setDoc(yamlToDoc(next.yaml));
+      setDoc(withDefaultModel(yamlToDoc(next.yaml), defaultModel));
       setDraft(next);
       return true;
     } catch {

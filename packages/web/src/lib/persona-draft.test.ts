@@ -3,9 +3,11 @@ import {
   docToYaml,
   type PersonaDoc,
   readIdentity,
+  readPreferredModel,
   readSelfFacts,
   readWorldview,
   writeIdentityField,
+  writePreferredModel,
   writeSelfFacts,
   writeStringList,
   writeWorldview,
@@ -152,5 +154,56 @@ routing:
     expect(
       (edited.routing as Record<string, unknown>).intelligent,
     ).toBeUndefined();
+  });
+});
+
+describe("preferred_model reader/writer (Spec M1, M1-T7): additive, preserves routing siblings", () => {
+  it("reads null when routing (or preferred_model) is absent", () => {
+    expect(readPreferredModel(yamlToDoc(SAMPLE))).toBeNull();
+    expect(readPreferredModel({})).toBeNull();
+  });
+
+  it("writes a fresh routing block on a doc with none", () => {
+    const doc: PersonaDoc = { schema_version: "1.0" };
+    const next = writePreferredModel(doc, "anthropic/claude-sonnet-4.6");
+    expect(readPreferredModel(next)).toBe("anthropic/claude-sonnet-4.6");
+  });
+
+  it("preserves sibling routing keys (a tier pin) when setting then clearing the model", () => {
+    const doc = yamlToDoc(SAMPLE); // routing: { tier_for_generation: auto }
+    const withModel = writePreferredModel(doc, "z-ai/glm-4.6");
+    expect(readPreferredModel(withModel)).toBe("z-ai/glm-4.6");
+    expect(
+      (withModel.routing as Record<string, unknown>).tier_for_generation,
+    ).toBe("auto");
+
+    const cleared = writePreferredModel(withModel, null);
+    expect(readPreferredModel(cleared)).toBeNull();
+    expect(
+      (cleared.routing as Record<string, unknown>).tier_for_generation,
+    ).toBe("auto");
+  });
+
+  it("clearing the only routing key drops the routing block entirely (no stray routing: {})", () => {
+    const doc: PersonaDoc = {
+      schema_version: "1.0",
+      routing: { preferred_model: "x/y" },
+    };
+    const cleared = writePreferredModel(doc, null);
+    expect(cleared.routing).toBeUndefined();
+  });
+
+  it("clearing an already-unset model on a pinned legacy block is a byte-identical no-op", () => {
+    const doc: PersonaDoc = {
+      schema_version: "1.0",
+      routing: { tier_for_generation: "mid", intelligent: { enabled: true } },
+    };
+    expect(writePreferredModel(doc, null)).toEqual(doc);
+  });
+
+  it("round-trips through YAML", () => {
+    const doc = writePreferredModel(yamlToDoc(SAMPLE), "openai/gpt-5.1");
+    const round = yamlToDoc(docToYaml(doc));
+    expect(readPreferredModel(round)).toBe("openai/gpt-5.1");
   });
 });

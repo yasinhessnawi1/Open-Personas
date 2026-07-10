@@ -18,11 +18,14 @@ import { serverApi } from "@/lib/api/server";
  */
 export default async function NewPersonaPage() {
   const api = await serverApi();
-  const [tools, skills, mcpCatalog] = await Promise.all([
+  const [tools, skills, mcpCatalog, profile] = await Promise.all([
     unwrap(await api.GET("/v1/tools")),
     unwrap(await api.GET("/v1/skills")),
     // Spec 30 T11 — built-in MCP servers for the unified capability section.
     unwrap(await api.GET("/v1/mcp-catalog")),
+    // Spec M1 (M1-T7) — the sticky per-user model default (T6), pre-selected
+    // in the Model section below.
+    unwrap(await api.GET("/v1/me/profile")),
   ]);
 
   return (
@@ -33,6 +36,7 @@ export default async function NewPersonaPage() {
         mcpServers={mapMcpCatalog(
           mcpCatalog as components["schemas"]["MCPCatalogServer"][],
         )}
+        defaultModel={profile.preferred_model ?? null}
       />
     </PageBody>
   );

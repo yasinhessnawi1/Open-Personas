@@ -75,10 +75,10 @@ beforeEach(() => {
   captured.props = null;
 });
 
-function renderWizard() {
+function renderWizard(defaultModel?: string | null) {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
-      <AuthorWizard tools={[]} skills={[]} />
+      <AuthorWizard tools={[]} skills={[]} defaultModel={defaultModel} />
     </NextIntlClientProvider>,
   );
 }
@@ -262,5 +262,54 @@ describe("AuthorWizard — streaming preview (P0)", () => {
     expect(bySlot(container, "author-wizard-loading-step").textContent).toBe(
       messages.author.streamRegenerating,
     );
+  });
+});
+
+describe("AuthorWizard — sticky model prefill (Spec M1, M1-T7)", () => {
+  it("seeds routing.preferred_model from the profile default (start from scratch)", () => {
+    const { container } = renderWizard("anthropic/claude-sonnet-4.6");
+    fireEvent.click(bySlot(container, "author-wizard-scratch"));
+    fireEvent.click(bySlot(container, "quick-open-full"));
+    const doc = captured.props?.initialDoc as {
+      routing?: { preferred_model?: string };
+    };
+    expect(doc.routing?.preferred_model).toBe("anthropic/claude-sonnet-4.6");
+  });
+
+  it("seeds the prefill on a prebuilt starter too", () => {
+    const { container, getByLabelText } = renderWizard("z-ai/glm-4.6");
+    pickFirstStarter(getByLabelText);
+    fireEvent.click(bySlot(container, "quick-open-full"));
+    const doc = captured.props?.initialDoc as {
+      routing?: { preferred_model?: string };
+    };
+    expect(doc.routing?.preferred_model).toBe("z-ai/glm-4.6");
+  });
+
+  it("does not author a routing block when the profile has no default", () => {
+    const { container } = renderWizard(null);
+    fireEvent.click(bySlot(container, "author-wizard-scratch"));
+    fireEvent.click(bySlot(container, "quick-open-full"));
+    const doc = captured.props?.initialDoc as { routing?: unknown };
+    expect(doc.routing).toBeUndefined();
+  });
+
+  it("seeds a drafted persona too (the applyDraft path)", async () => {
+    author.mockImplementationOnce(async () => ({
+      yaml: 'schema_version: "1.0"\nidentity:\n  name: Drafted\n',
+      questions: [],
+    }));
+    const { container } = renderWizard("openai/gpt-5.1");
+    const textarea = bySlot(
+      container,
+      "author-wizard-description",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "a tenancy assistant" } });
+    fireEvent.click(bySlot(container, "author-wizard-generate"));
+    await waitFor(() => expect(bySlot(container, "mock-editor")).toBeTruthy());
+    const doc = captured.props?.initialDoc as {
+      routing?: { preferred_model?: string };
+    };
+    expect(doc.routing?.preferred_model).toBe("openai/gpt-5.1");
   });
 });

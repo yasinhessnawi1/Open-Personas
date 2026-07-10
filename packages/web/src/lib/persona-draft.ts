@@ -168,3 +168,49 @@ export function writeStringList(
 // stored block survives every writer above untouched (spread-preserved), so an
 // old persona with a pinned tier loads byte-identically and still routes by
 // its pin server-side.
+
+// ----- model (Spec M1, M1-T1/M1-T7): additive-optional, NOT the retired tuning surface -----
+//
+// `routing.preferred_model` is a DIFFERENT field from the Spec-31/P9 tuning
+// knobs above (tier pins, intelligent/budget config) — those stay deliberately
+// unread/unwritten (P9-D-5). This is a direct "pick one model" choice (T1):
+// read/written here so the picker (T7) can wire it without resurrecting the
+// retired tuning UI. Every other routing key — including a legacy pin —
+// survives untouched: `writePreferredModel` only ever touches its own key,
+// and clearing it drops the whole `routing` block ONLY when nothing else is
+// left in it, so a fresh doc round-trips back to no `routing` key at all.
+
+function asRouting(doc: PersonaDoc): Record<string, unknown> {
+  return asRecord(doc.routing);
+}
+
+/** The persona's chosen model id (`routing.preferred_model`), or `null` (tier default). */
+export function readPreferredModel(doc: PersonaDoc): string | null {
+  const value = asRouting(doc).preferred_model;
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Set (or clear, via `null`) the persona's `routing.preferred_model`. Every
+ * sibling routing key (a legacy tier pin, `intelligent`, `budget`) is
+ * preserved verbatim; clearing the LAST remaining routing key removes the
+ * `routing` block itself rather than leaving a stray `routing: {}`.
+ */
+export function writePreferredModel(
+  doc: PersonaDoc,
+  modelId: string | null,
+): PersonaDoc {
+  const routing = asRouting(doc);
+  if (modelId === null) {
+    if (!("preferred_model" in routing)) return doc; // already absent — no-op
+    const rest = { ...routing };
+    delete rest.preferred_model;
+    if (Object.keys(rest).length === 0) {
+      const withoutRouting: PersonaDoc = { ...doc };
+      delete withoutRouting.routing;
+      return withoutRouting;
+    }
+    return { ...doc, routing: rest };
+  }
+  return { ...doc, routing: { ...routing, preferred_model: modelId } };
+}

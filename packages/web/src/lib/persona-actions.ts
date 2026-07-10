@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { serverApi } from "@/lib/api/server";
+import { readPreferredModel, yamlToDoc } from "@/lib/persona-draft";
 
 interface PydanticError {
   msg?: string;
@@ -85,5 +86,26 @@ export async function createPersona(
       error: formatDetail(body.detail, body.error ?? "save_failed"),
     };
   }
+  // Spec M1 (M1-T7): a model the user actively picked for THIS persona becomes
+  // their sticky per-user default for next time (T6's `preferred_model`).
+  // Best-effort / fire-and-forget: a hiccup here must never fail or delay the
+  // persona that was just successfully created. Awaited (not a detached
+  // promise) because `redirect()` below throws and unwinds the call stack —
+  // any code placed after it would never run, so this has to happen first.
+  await stickPreferredModel(api, yaml);
   redirect(`/personas/${res.data.id}`);
+}
+
+/** Best-effort PATCH of the caller's sticky model default; swallows all errors. */
+async function stickPreferredModel(
+  api: Awaited<ReturnType<typeof serverApi>>,
+  yaml: string,
+): Promise<void> {
+  try {
+    const model = readPreferredModel(yamlToDoc(yaml));
+    if (model === null) return; // left on the tier default — nothing to stick
+    await api.PATCH("/v1/me/profile", { body: { preferred_model: model } });
+  } catch {
+    // never blocks/fails persona creation
+  }
 }

@@ -2,6 +2,7 @@
 
 import {
   Code2,
+  Cpu,
   Save,
   Settings2,
   SlidersHorizontal,
@@ -9,20 +10,25 @@ import {
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useTranslations } from "next-intl";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuth } from "@/auth";
 import {
   AutonomyConsentSection,
   type AutonomyLevel,
 } from "@/components/persona/autonomy-consent-section";
+import { PersonaModelPicker } from "@/components/persona/persona-model-picker";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import type { ClarifyingQuestion } from "@/lib/api";
+import { getModels, type ModelOption } from "@/lib/api/models-client";
 import {
   docToYaml,
   type PersonaDoc,
   readIdentity,
+  readPreferredModel,
   readStringList,
+  writePreferredModel,
   writeStringList,
   yamlToDoc,
 } from "@/lib/persona-draft";
@@ -48,6 +54,11 @@ const AUTONOMY_LEVELS: readonly AutonomyLevel[] = [
   "balanced",
   "decisive",
 ];
+
+// Spec M1 (M1-T7) — the Model section self-fetches the catalog client-side,
+// same Clerk JWT-template convention as VoiceSelector / SpecialitiesChooser /
+// useApi().
+const MODEL_TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
 /** Read the doc's autonomy field, defaulting to the schema default "cautious". */
 function readAutonomy(doc: PersonaDoc): AutonomyLevel {
@@ -146,6 +157,37 @@ export function PersonaEditor({
   const [avatarUrl, setAvatarUrl] = useState<string | null>(
     initialAvatarUrl ?? null,
   );
+
+  // Spec M1 (M1-T7) — the Model section's catalog (id/label/prices/recommended).
+  // Self-fetched once (`scope=all`: the picker filters recommended-vs-all
+  // locally, T7) — fail-open to `[]` on any transport/auth failure, so the
+  // picker degrades to "Use tier default" only, never an error state (matches
+  // T5's own fail-open contract). The token getter is held in a ref (not an
+  // effect dependency): Clerk memoises it in production, but a fresh function
+  // identity per render (as a test mock legitimately returns) would otherwise
+  // re-run the effect every render (VoiceSelector's precedent for the same hazard).
+  const { getToken } = useAuth();
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
+  const [models, setModels] = useState<ModelOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getTokenRef.current(
+          MODEL_TEMPLATE ? { template: MODEL_TEMPLATE } : undefined,
+        );
+        const list = await getModels(token, "all");
+        if (!cancelled) setModels(list);
+      } catch {
+        if (!cancelled) setModels([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const onFormChange = useCallback((next: PersonaDoc) => {
     setDoc(next);
@@ -252,6 +294,24 @@ export function PersonaEditor({
             mcpConnections={mcpConnections}
             personaId={personaId}
           />
+
+          {/* Model — Spec M1 (M1-T7): pick a specific priced model for this
+              persona, or leave it on the tier default. Rides
+              `routing.preferred_model` (T1, additive-optional) — NOT the
+              retired P9 tuning surface (P9-D-5): a direct model choice, not a
+              tier/weights/budget dial. Renders in BOTH the create wizard and
+              the edit flow (no personaId gate — the choice rides the YAML
+              itself; no separate PATCH needed here). */}
+          <CollapsibleSection id="model" title={t("modelTitle")} icon={Cpu}>
+            <p className="type-caption text-muted-foreground">
+              {t("modelHint")}
+            </p>
+            <PersonaModelPicker
+              models={models}
+              value={readPreferredModel(doc)}
+              onSelect={(id) => onFormChange(writePreferredModel(doc, id))}
+            />
+          </CollapsibleSection>
 
           {/* Autonomy + consent: existing-persona edit only (D-31-X-autonomy-placement). */}
           {personaId && onConsentChange ? (

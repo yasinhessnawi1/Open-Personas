@@ -676,11 +676,13 @@ export interface paths {
     };
     /**
      * Get Profile
-     * @description The caller's own profile — identity + optional name (Spec K6, K6-D-1).
+     * @description The caller's own profile — identity + optional name + preferences (Spec K6, K6-D-1).
      *
-     *     Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account.
-     *     The row is provisioned by ``ensure_user`` in the auth dependency, so a 404 here
-     *     means a genuine invariant break rather than a first-time user.
+     *     Null-safe: ``first_name``/``last_name`` are ``None`` for a nameless account, and
+     *     ``preferred_model`` (Spec M1, M1-T6 — the sticky last-choice default) is ``None``
+     *     until the caller has picked one. The row is provisioned by ``ensure_user`` in the
+     *     auth dependency, so a 404 here means a genuine invariant break rather than a
+     *     first-time user.
      */
     get: operations["get_profile_v1_me_profile_get"];
     put?: never;
@@ -690,15 +692,19 @@ export interface paths {
     head?: never;
     /**
      * Update Profile
-     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH — omitted = unchanged.
+     * @description Set the caller's optional name + timezone + model preference (Spec K6/A8/M1).
      *
-     *     Only the fields the client actually sent are written (``exclude_unset``): a
-     *     string sets, an explicit ``null`` clears, an omitted field is left untouched.
-     *     Names are normalised (control-char strip, whitespace-only → unset) in the
-     *     service (K6-D-8). A provided ``timezone`` is validated as an IANA zone here
-     *     (Spec A8, A8-D-9) — an unknown zone is a fail-fast 422, never stored to
-     *     mis-fire in the tick; ``null`` clears it (→ falls back to the config default).
-     *     Scoped to the caller's own row — never another user's.
+     *     PATCH — omitted = unchanged. Only the fields the client actually sent are
+     *     written (``exclude_unset``): a string sets, an explicit ``null`` clears, an
+     *     omitted field is left untouched. Names are normalised (control-char strip,
+     *     whitespace-only → unset) in the service (K6-D-8). A provided ``timezone`` is
+     *     validated as an IANA zone here (Spec A8, A8-D-9) — an unknown zone is a
+     *     fail-fast 422, never stored to mis-fire in the tick; ``null`` clears it (→
+     *     falls back to the config default). ``preferred_model`` (Spec M1, M1-T6 — the
+     *     sticky last-choice default) needs no such call-out: the request schema already
+     *     rejects blank/whitespace-only (422), and its catalog validity is the WEB
+     *     picker's concern, not checked here; ``null`` clears it (→ falls back to the
+     *     tier-resolved default). Scoped to the caller's own row — never another user's.
      */
     patch: operations["update_profile_v1_me_profile_patch"];
     trace?: never;
@@ -2010,6 +2016,31 @@ export interface paths {
      * @description Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap.
      */
     post: operations["extend_budget_v1_tasks__task_id__budget_extend_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/models": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Models
+     * @description The curated shortlist (default) or the full browse-all catalog, with prices.
+     *
+     *     Fail-open (spec_M1_design.md §4): a catalog fetch failure or missing
+     *     OpenRouter configuration returns 200 with ``stale=True`` and an
+     *     empty/partial ``models`` list — never a 500. A persona's turn still runs on
+     *     the tier default regardless of this route's health.
+     */
+    get: operations["list_models_v1_models_get"];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -3408,6 +3439,59 @@ export interface components {
         | null;
     };
     /**
+     * ModelOut
+     * @description One model in the ``GET /v1/models`` response (T7's web client consumes this verbatim).
+     *
+     *     Attributes:
+     *         id: The canonical OpenRouter model id.
+     *         label: Human display name.
+     *         provider: The id's provider prefix (e.g. ``"anthropic"``).
+     *         input_price_per_1m: USD per 1,000,000 INPUT tokens.
+     *         output_price_per_1m: USD per 1,000,000 OUTPUT tokens.
+     *         context_length: Maximum context window, tokens.
+     *         tools_supported: Whether the model advertises native tool calling.
+     *         recommended: Whether this id is in the curated shortlist.
+     */
+    ModelOut: {
+      /** Id */
+      id: string;
+      /** Label */
+      label: string;
+      /** Provider */
+      provider: string;
+      /** Input Price Per 1M */
+      input_price_per_1m: number;
+      /** Output Price Per 1M */
+      output_price_per_1m: number;
+      /** Context Length */
+      context_length: number;
+      /** Tools Supported */
+      tools_supported: boolean;
+      /** Recommended */
+      recommended: boolean;
+    };
+    /**
+     * ModelsResponse
+     * @description ``GET /v1/models`` response envelope.
+     *
+     *     Attributes:
+     *         models: The filtered, ordered entries for the requested ``scope``.
+     *         source: Always ``"openrouter"`` — the sole catalog source today.
+     *         stale: ``True`` when the catalog could not be fetched (fail-open —
+     *             ``models`` is then empty/partial, never a 500).
+     */
+    ModelsResponse: {
+      /** Models */
+      models: components["schemas"]["ModelOut"][];
+      /**
+       * Source
+       * @constant
+       */
+      source: "openrouter";
+      /** Stale */
+      stale: boolean;
+    };
+    /**
      * MorningDigest
      * @description The render-agnostic morning review — the same content the web surface and C0 both render.
      */
@@ -4346,12 +4430,12 @@ export interface components {
     };
     /**
      * UpdateProfileRequest
-     * @description Set the caller's optional name + timezone (Spec K6/A8). PATCH semantics.
+     * @description Set the caller's optional name + timezone + model preference (Spec K6/A8/M1).
      *
-     *     All fields optional; **omitted = unchanged**, explicit ``null`` = **clear**
-     *     (distinguished server-side via ``model_dump(exclude_unset=True)``). ``max_length``
-     *     fails fast at the boundary on egregious input; the service then strips control
-     *     characters and treats whitespace-only as unset (names,
+     *     PATCH semantics. All fields optional; **omitted = unchanged**, explicit ``null`` =
+     *     **clear** (distinguished server-side via ``model_dump(exclude_unset=True)``).
+     *     ``max_length`` fails fast at the boundary on egregious input; the service then
+     *     strips control characters and treats whitespace-only as unset (names,
      *     :func:`persona_api.services.user_service.normalize_name`). ``timezone`` (Spec A8,
      *     A8-D-9) is an IANA zone name whose validity is checked in the route handler
      *     (:func:`persona.timezone.validate_timezone` → 422) — the ``max_length`` here is
@@ -4371,6 +4455,8 @@ export interface components {
       quiet_hours_start?: number | null;
       /** Quiet Hours End */
       quiet_hours_end?: number | null;
+      /** Preferred Model */
+      preferred_model?: string | null;
     };
     /**
      * UsageEntry
@@ -4420,6 +4506,8 @@ export interface components {
       quiet_hours_start?: number | null;
       /** Quiet Hours End */
       quiet_hours_end?: number | null;
+      /** Preferred Model */
+      preferred_model?: string | null;
       /**
        * Created At
        * Format: date-time
@@ -7301,6 +7389,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["BudgetExtendResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_models_v1_models_get: {
+    parameters: {
+      query?: {
+        scope?: "recommended" | "all";
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ModelsResponse"];
         };
       };
       /** @description Validation Error */
