@@ -825,7 +825,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # in-process tasks didn't survive — D-08-5 single worker). Runs on the
     # RLS-bypassing engine (admin on cloud / the community engine on sqlite) so it
     # sees every tenant's rows; idempotent. Makes "viewable, not resumable" honest
-    # and stops a reattach from spinning on a dead turn/run.
+    # and stops a reattach from spinning on a dead turn/run. R9-022: this is the
+    # between-PROCESS half of orphaned-turn recovery (once, at boot); the
+    # between-restarts half is the lazy self-heal in chat_service.start_chat_turn.
     _sweep_engine = admin_engine if admin_engine is not None else rls_engine
     if _sweep_engine is not None:
         reconcile_in_flight_on_startup(engine=_sweep_engine)

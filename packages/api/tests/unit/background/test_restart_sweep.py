@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from persona import logging as plog
+from persona.config import PersonaCoreConfig
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.db.community import (
     create_community_schema,
@@ -122,3 +124,40 @@ def test_sweep_is_idempotent(engine: Engine) -> None:
 
 def test_sweep_noop_on_clean_database(engine: Engine) -> None:
     assert reconcile_in_flight_on_startup(engine=engine) == {"messages": 0, "runs": 0}
+
+
+def test_sweep_logs_a_warning_with_the_healed_count(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R9-022: healing an orphan must never be silent — the sweep logs at
+    WARNING (not INFO) with the per-table count, so an operator sees evidence
+    of an unclean prior shutdown even though the rows themselves are now
+    safely terminal."""
+    plog.reset_for_testing()  # fresh sinks bound to THIS test's (capsys-redirected) stderr
+    plog.get_logger("test.trigger", config=PersonaCoreConfig(log_format="pretty"))
+    with engine.begin() as conn:
+        _msg(conn, "m_running", "running")
+        _run(conn, "r_running", "running")
+
+    reconcile_in_flight_on_startup(engine=engine)
+
+    plog.reset_for_testing()  # flush before reading (mirrors persona.logging's own tests)
+    output = capsys.readouterr().err
+    assert "WARNING" in output
+    assert "turns_interrupted=1" in output
+    assert "runs_errored=1" in output
+
+
+def test_sweep_logs_nothing_on_a_clean_database(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The converse: a clean pass (nothing to heal) stays silent — WARNING is
+    reserved for evidence of an actual unclean shutdown, not routine boots."""
+    plog.reset_for_testing()
+    plog.get_logger("test.trigger", config=PersonaCoreConfig(log_format="pretty"))
+
+    reconcile_in_flight_on_startup(engine=engine)
+
+    plog.reset_for_testing()
+    output = capsys.readouterr().err
+    assert "restart sweep reconciled" not in output

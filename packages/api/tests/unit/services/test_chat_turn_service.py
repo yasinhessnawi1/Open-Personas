@@ -245,6 +245,148 @@ async def test_second_concurrent_turn_is_blocked_409(engine: Engine) -> None:
     await handle.task
 
 
+# -- R9-022: orphaned 'running' row — lazy self-heal + the TOCTOU race guard --
+#
+# The bug: a mid-stream crash/restart leaves an assistant row streaming_status=
+# 'running' forever (the owning ChatTurnRegistry entry died with the process).
+# The partial unique index (D-P1-one-active-turn) then 500s EVERY subsequent
+# turn on that conversation — no recovery path. The fix has two seams tested
+# here (the startup sweep, restart_sweep.py, is tested separately):
+# (1) registry empty + a 'running' row present → heal it, then open the new
+#     turn normally; (2) registry non-empty → the pre-existing 409 behaviour is
+#     byte-identical, and the healer must NEVER touch a genuinely live row;
+# (3) a true TOCTOU race (a competing turn opens between the heal-check and
+#     this call's own INSERT) maps to the SAME 409, never a raw IntegrityError.
+
+
+@pytest.mark.asyncio
+async def test_orphaned_running_row_is_healed_then_new_turn_opens(engine: Engine) -> None:
+    """Production shape: a PRIOR ``open_turn`` (user + running assistant) whose
+    owning process died before ``finalize`` ever ran — called directly on the
+    sink, exactly as ``start_chat_turn`` does, but with NO registry entry (the
+    registry is in-process and cannot survive what killed it). The very next
+    ``start_chat_turn`` on this conversation must heal it AND succeed, instead
+    of tripping the partial-unique index forever."""
+    sink = MessagesTurnSink(engine)
+    orphan_assistant_id = sink.open_turn(
+        conversation_id=_CONV, user_message="orphaned question", channel=None, images=None
+    )
+
+    registry = ChatTurnRegistry(sink=sink, rls_engine=engine)  # fresh — nothing registered
+    handle = await chat_service.start_chat_turn(
+        rls_engine=engine,
+        sink=sink,
+        registry=registry,
+        loop_builder=_loop_builder(_ScriptedLoop(["hi again"])),  # type: ignore[arg-type]
+        owner_id=_OWNER,
+        conversation_id=_CONV,
+        user_message="a fresh question",
+        channel=None,
+    )
+    [f async for f in chat_service.stream_turn(handle)]
+    await handle.task
+
+    rows = _rows(engine)
+    assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant"]
+    orphan = next(r for r in rows if r["id"] == orphan_assistant_id)
+    assert orphan["streaming_status"] == "interrupted"  # healed, never left running
+    assert orphan["content"] == ""  # preserved as-is (it never got a checkpoint)
+    new_assistant = rows[-1]
+    assert new_assistant["streaming_status"] == "complete"  # the new turn ran clean
+    assert new_assistant["content"] == "hi again"
+
+
+@pytest.mark.asyncio
+async def test_registry_active_turn_blocks_409_without_touching_the_running_row(
+    engine: Engine,
+) -> None:
+    """When the registry DOES have a live turn, the 409 path must stay
+    byte-identical to before — the healer must never run (healing a row that is
+    genuinely, legitimately in flight would itself be a correctness bug)."""
+    sink = MessagesTurnSink(engine)
+    registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
+
+    async def _start_one(loop: object) -> object:
+        return await chat_service.start_chat_turn(
+            rls_engine=engine,
+            sink=sink,
+            registry=registry,
+            loop_builder=_loop_builder(loop),  # type: ignore[arg-type]
+            owner_id=_OWNER,
+            conversation_id=_CONV,
+            user_message="hi",
+            channel=None,
+        )
+
+    handle = await _start_one(_ScriptedLoop(["x"]))
+    running_id = handle.assistant_message_id  # type: ignore[attr-defined]
+    with pytest.raises(TurnAlreadyActiveError):
+        await _start_one(_ScriptedLoop(["y"]))
+
+    # The genuinely in-flight row is untouched — still 'running', never 'interrupted'.
+    row = next(r for r in _rows(engine) if r["id"] == running_id)
+    assert row["streaming_status"] == "running"
+    await handle.task  # type: ignore[attr-defined]
+
+
+class _RacingSink(MessagesTurnSink):
+    """A sink that injects a COMPETING 'running' row right after its own heal
+    check — simulating a genuine concurrent writer landing a turn for the SAME
+    conversation in the gap between the registry-check/heal and this call's own
+    ``open_turn`` INSERT (the real TOCTOU window R9-022 point 3 closes)."""
+
+    def __init__(self, engine: Engine, *, racer_conversation_id: str) -> None:
+        super().__init__(engine)
+        self._racer_conversation_id = racer_conversation_id
+        self._raced = False
+
+    def heal_orphaned_running(self, *, conversation_id: str) -> str | None:
+        healed = super().heal_orphaned_running(conversation_id=conversation_id)
+        if not self._raced and conversation_id == self._racer_conversation_id:
+            self._raced = True
+            # A DIFFERENT writer wins the race: its open_turn lands a 'running'
+            # row for this conversation before ours does.
+            with self._engine.begin() as conn:
+                conn.execute(
+                    insert(messages_t).values(
+                        id="msg_racer_assistant",
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content="",
+                        streaming_status="running",
+                        stream_events=[],
+                    )
+                )
+        return healed
+
+
+@pytest.mark.asyncio
+async def test_toctou_race_on_open_turn_maps_to_409_not_a_raw_500(engine: Engine) -> None:
+    """A genuine race between the heal-check and the INSERT (a competing turn
+    opens in that exact gap) must surface as the SAME 409 (TurnAlreadyActiveError)
+    the registry's early check produces — never a raw IntegrityError/500."""
+    sink = _RacingSink(engine, racer_conversation_id=_CONV)
+    registry = ChatTurnRegistry(sink=sink, rls_engine=engine)  # empty — no in-process turn
+
+    with pytest.raises(TurnAlreadyActiveError):
+        await chat_service.start_chat_turn(
+            rls_engine=engine,
+            sink=sink,
+            registry=registry,
+            loop_builder=_loop_builder(_ScriptedLoop(["should not run"])),  # type: ignore[arg-type]
+            owner_id=_OWNER,
+            conversation_id=_CONV,
+            user_message="hi",
+            channel=None,
+        )
+
+    # The racer's row survives untouched; OUR turn never got to insert anything
+    # (the whole open_turn transaction rolled back on the constraint violation).
+    rows = _rows(engine)
+    assert [r["id"] for r in rows] == ["msg_racer_assistant"]
+    assert rows[0]["streaming_status"] == "running"
+
+
 @pytest.mark.asyncio
 async def test_error_turn_persists_partial_emits_error_no_done_no_bill(engine: Engine) -> None:
     creds = _RecordingCredits()

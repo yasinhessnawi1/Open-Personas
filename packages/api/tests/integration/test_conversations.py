@@ -958,6 +958,108 @@ def test_completed_turn_leaves_no_active_turn(client: tuple[TestClient, str, str
     assert [m["role"] for m in hist["messages"]] == ["user", "assistant"]
 
 
+# -- R9-022: a crash-orphaned 'running' row self-heals through the real HTTP path --
+#
+# The bug: a mid-stream crash/restart left an assistant row streaming_status=
+# 'running' forever (its ChatTurnRegistry entry died with the process — the
+# registry is in-process and cannot survive what killed it). Every subsequent
+# POST /messages on that conversation then 500'd at chat_turn_sink.open_turn on
+# uq_messages_one_streaming_per_conversation — no recovery path. This drives the
+# REAL trigger chain: seed the exact row shape production leaves behind, then
+# hit the real route with a FRESH TestClient (registry empty), exactly like the
+# next request after a restart.
+
+
+def test_post_messages_self_heals_an_orphaned_running_row(
+    client: tuple[TestClient, str, str],
+) -> None:
+    """A POST that would have 500'd forever now heals the orphan and succeeds."""
+    from datetime import timedelta
+
+    c, uid, persona_id = client
+    conv_id = _new_conversation(c, uid, persona_id)
+
+    # The production orphan shape: a user + running-assistant pair (mirroring
+    # open_turn's own INSERT, including its microsecond created_at offset so
+    # ordering is deterministic) with NO in-process registry entry — this
+    # test's fresh TestClient/registry never saw it, exactly what a crashed
+    # prior process leaves behind.
+    su = make_rls_engine(os.environ["DATABASE_URL"])
+    orphan_assistant_id = f"msg_orphan_assistant_{conv_id}"
+    now = datetime.now(UTC)
+    with su.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) "
+                "VALUES (:id, :cid, 'user', 'orphaned question', :created_at)"
+            ),
+            {"id": f"msg_orphan_user_{conv_id}", "cid": conv_id, "created_at": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO messages "
+                "(id, conversation_id, role, content, streaming_status, stream_events, created_at) "
+                "VALUES (:id, :cid, 'assistant', '', 'running', '[]'::jsonb, :created_at)"
+            ),
+            {
+                "id": orphan_assistant_id,
+                "cid": conv_id,
+                "created_at": now + timedelta(microseconds=1),
+            },
+        )
+    su.dispose()
+
+    # Before the fix this was a raw 500 (UniqueViolation at open_turn) — forever.
+    resp = c.post(
+        f"/v1/conversations/{conv_id}/messages",
+        json={"content": "a fresh question"},
+        headers=_auth(uid),
+    )
+    assert resp.status_code == 200, resp.text
+    events = _read_sse(resp.text)
+    assert events[-1][0] == "done"
+
+    hist = c.get(f"/v1/conversations/{conv_id}", headers=_auth(uid)).json()
+    roles = [m["role"] for m in hist["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assert hist["messages"][3]["content"] == "Hello there!"  # the new turn ran clean
+
+    # The orphan itself is healed (interrupted), not silently dropped or left running.
+    su = make_rls_engine(os.environ["DATABASE_URL"])
+    with su.begin() as conn:
+        orphan = (
+            conn.execute(
+                text("SELECT streaming_status, content FROM messages WHERE id = :id"),
+                {"id": orphan_assistant_id},
+            )
+            .mappings()
+            .first()
+        )
+    su.dispose()
+    assert orphan is not None
+    assert orphan["streaming_status"] == "interrupted"
+    assert orphan["content"] == ""  # preserved as-is — it never got a checkpoint
+
+    # The conversation is healthy going forward — a second turn is unaffected.
+    resp2 = c.post(
+        f"/v1/conversations/{conv_id}/messages",
+        json={"content": "one more"},
+        headers=_auth(uid),
+    )
+    assert resp2.status_code == 200, resp2.text
+
+
+# NB: the "registry HAS an active turn → unchanged / healer never touches a
+# genuinely live row" scenario is covered at the unit level
+# (test_chat_turn_service.py, test_registry_active_turn_blocks_409_without_
+# touching_the_running_row) — not here, since driving true concurrency through
+# TestClient would need cross-thread synchronization against the SAME
+# app/registry instance, which is fragile and adds no coverage beyond what the
+# unit test already proves deterministically: heal_orphaned_running is only
+# ever reached AFTER the registry check passes, so it is unreachable whenever
+# a turn is genuinely still registered.
+
+
 # -- V9 T1: the origin marker contract (V9-D-3) -----------------------------
 
 

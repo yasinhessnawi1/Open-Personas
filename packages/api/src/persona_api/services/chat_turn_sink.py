@@ -16,12 +16,19 @@ turn is **resumable** — the DB always reflects the latest progress.
   content + the conversation compaction state (the credits deduct rides this
   path — wired in T2b, D-P1-billing-contract); ``cancelled`` / ``error`` /
   ``interrupted`` mark the partial terminal without touching conversation state.
+- :meth:`heal_orphaned_running` — the R9-022 lazy self-heal: called by
+  ``chat_service.start_chat_turn`` once it has confirmed the in-process
+  ``ChatTurnRegistry`` has no active turn for a conversation, so any surviving
+  ``running`` row is provably an orphan (its owning process died mid-turn — a
+  crash/restart, or an out-of-band task cancellation that skipped
+  ``finalize``). Marks it ``interrupted`` so the next ``open_turn`` INSERT
+  never trips the one-active-turn partial unique index on a dead row.
 
 All writes are RLS-scoped via the ``current_user_id`` contextvar the caller
-binds (the route for ``open_turn``; the worker for ``checkpoint`` / ``finalize``).
-``streaming_status`` / ``stream_events`` are DB columns only — never
-``ConversationMessage`` fields (the C0 lesson; the byte-for-byte corpus is the
-canary).
+binds (the route for ``open_turn`` / ``heal_orphaned_running``; the worker for
+``checkpoint`` / ``finalize``). ``streaming_status`` / ``stream_events`` are DB
+columns only — never ``ConversationMessage`` fields (the C0 lesson; the
+byte-for-byte corpus is the canary).
 """
 
 from __future__ import annotations
@@ -110,6 +117,58 @@ class MessagesTurnSink:
                 .values(updated_at=now)
             )
         return assistant_id
+
+    def heal_orphaned_running(self, *, conversation_id: str) -> str | None:
+        """Self-heal an orphaned ``running`` row with no live in-process turn (R9-022).
+
+        The partial unique index (``uq_messages_one_streaming_per_conversation``
+        — D-P1-one-active-turn) allows at most one ``running`` assistant row per
+        conversation. A caller that has already confirmed the
+        ``ChatTurnRegistry`` (the in-process liveness authority) has NO active
+        turn for ``conversation_id`` knows any surviving ``running`` row is
+        provably orphaned — its owning process died (a crash / restart
+        mid-turn, or an out-of-band task cancellation that skipped
+        ``finalize``; see ``chat_turn_worker``'s shutdown-cancel path) without
+        ever writing a terminal state. The startup sweep
+        (``background/restart_sweep.py``, D-P1-restart-sweep) reconciles the
+        same class of row on the NEXT process boot; this is the lazy,
+        between-restarts counterpart — applied the moment the conversation is
+        next used, rather than only after an operator restarts the process.
+
+        UPDATEs the row to ``'interrupted'`` — the vocabulary's exact terminal
+        value for a non-clean end — WITHOUT touching its checkpointed
+        ``content`` / ``stream_events``: this mirrors what
+        ``finalize(status="interrupted", ...)`` would have written had the
+        worker reached its terminal write, using whatever the last checkpoint
+        left behind (there is no in-memory buffer left to finalize with — the
+        process that held it is gone).
+
+        A no-op (returns ``None``) when there is no ``running`` row for this
+        conversation — the overwhelmingly common case, since a healthy
+        conversation never carries one between turns.
+
+        Callers MUST call this only after confirming the registry has no
+        active turn for ``conversation_id`` — the sink holds no reference to
+        the registry, so it cannot check this itself (see
+        ``chat_service.start_chat_turn``'s registry-check → heal → insert
+        ordering).
+
+        Returns:
+            The healed assistant message id, or ``None`` if nothing needed
+            healing.
+        """
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(messages_t)
+                .where(
+                    messages_t.c.conversation_id == conversation_id,
+                    messages_t.c.streaming_status == "running",
+                )
+                .values(streaming_status="interrupted")
+                .returning(messages_t.c.id)
+            )
+            row = result.first()
+        return str(row[0]) if row is not None else None
 
     def append_user_message(self, *, conversation_id: str, content: str) -> None:
         """Persist a single user message — no assistant row (Spec A6 chat-twin approval reply).

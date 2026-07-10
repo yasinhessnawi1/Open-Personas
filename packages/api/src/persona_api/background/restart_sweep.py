@@ -15,6 +15,20 @@ and ``error`` for runs (S08-2: viewable, not resumable). It runs on the
 RLS-bypassing engine (the admin engine on cloud / the community engine on
 sqlite) so it reconciles every tenant's rows, and it is **idempotent**: once the
 rows are terminal a second pass matches nothing.
+
+R9-022: this is the deploy's SINGLE-WRITER assumption made load-bearing — cloud
+runs exactly one API process (D-08-5) and community's embedded/self-hosted
+Postgres is the same single-process shape, so "no live registry entry survives
+a restart" is universally true for every ``running`` row this sweep finds; there
+is no second writer whose in-flight turn this could ever mistakenly interrupt.
+It is the BETWEEN-PROCESS half of the orphaned-turn recovery story — it only
+runs once, at boot. The BETWEEN-RESTARTS half (a long-lived process sitting on
+an orphan for hours before its next restart) is the lazy self-heal in
+``chat_service.start_chat_turn`` (``MessagesTurnSink.heal_orphaned_running``),
+which reconciles the identical row shape the moment the conversation is next
+used, without waiting for a boot. A healed count is logged at WARNING (never
+silent) — an orphan is evidence of an unclean prior shutdown, worth an
+operator's attention even though the row itself is now safely terminal.
 """
 
 from __future__ import annotations
@@ -68,7 +82,10 @@ def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
         )
     counts = {"messages": msg_result.rowcount, "runs": run_result.rowcount}
     if counts["messages"] or counts["runs"]:
-        _log.info(
+        # R9-022: WARNING, not INFO — never silent (this repo's standing rule). A
+        # nonzero count means the PRIOR process died mid-turn/mid-run; the rows are
+        # now safely terminal, but an operator should still see that it happened.
+        _log.warning(
             "restart sweep reconciled orphaned in-flight rows "
             "turns_interrupted={turns} runs_errored={runs}",
             turns=counts["messages"],

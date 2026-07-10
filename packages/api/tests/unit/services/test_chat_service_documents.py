@@ -328,6 +328,9 @@ class _FakeSink:
 
     def finalize(self, **_kwargs: object) -> None: ...
 
+    def heal_orphaned_running(self, **_kwargs: object) -> str | None:
+        return None  # R9-022: nothing to heal in this scripted fixture
+
 
 class _FakeConn:
     def __enter__(self) -> _FakeConn:

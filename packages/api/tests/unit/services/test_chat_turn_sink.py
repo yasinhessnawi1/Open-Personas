@@ -196,3 +196,57 @@ def test_open_turn_twice_violates_one_streaming_per_conversation(engine: Engine)
     # assistant row for the same conversation — the DB-level backstop.
     with pytest.raises(IntegrityError):
         sink.open_turn(conversation_id=_CONV, user_message="second", channel=None, images=None)
+
+
+# -- R9-022: heal_orphaned_running (the lazy self-heal DB primitive) ---------
+
+
+def test_heal_orphaned_running_marks_the_row_interrupted_and_returns_its_id(
+    engine: Engine,
+) -> None:
+    sink = MessagesTurnSink(engine)
+    msg_id = sink.open_turn(conversation_id=_CONV, user_message="q", channel=None, images=None)
+    sink.checkpoint(
+        conversation_id=_CONV,
+        assistant_message_id=msg_id,
+        content="partial before the crash",
+        events=[{"kind": "text", "delta": "partial before the crash"}],
+    )
+
+    healed_id = sink.heal_orphaned_running(conversation_id=_CONV)
+
+    assert healed_id == msg_id
+    assistant = _rows(engine)[1]
+    assert assistant["streaming_status"] == "interrupted"
+    # The checkpointed partial is preserved byte-for-byte — the heal only flips
+    # the lifecycle column, exactly like finalize's non-complete branch would.
+    assert assistant["content"] == "partial before the crash"
+    assert assistant["stream_events"] == [{"kind": "text", "delta": "partial before the crash"}]
+
+
+def test_heal_orphaned_running_is_a_noop_when_nothing_is_running(engine: Engine) -> None:
+    sink = MessagesTurnSink(engine)
+    msg_id = sink.open_turn(conversation_id=_CONV, user_message="q", channel=None, images=None)
+    sink.finalize(
+        conversation_id=_CONV,
+        assistant_message_id=msg_id,
+        conversation=Conversation(conversation_id=_CONV, persona_id=_PERSONA, messages=[]),
+        status="complete",
+        content="done",
+        events=[],
+    )
+
+    # The overwhelmingly common case: a healthy, already-finalized turn — no
+    # 'running' row exists, so the heal touches nothing and reports it.
+    assert sink.heal_orphaned_running(conversation_id=_CONV) is None
+    assistant = _rows(engine)[1]
+    assert assistant["streaming_status"] == "complete"  # untouched
+    assert assistant["content"] == "done"
+
+
+def test_heal_orphaned_running_on_a_fresh_conversation_is_a_noop(engine: Engine) -> None:
+    # No messages at all yet (the very first turn on a brand-new conversation) —
+    # must not raise, must report nothing healed.
+    sink = MessagesTurnSink(engine)
+    assert sink.heal_orphaned_running(conversation_id=_CONV) is None
+    assert _rows(engine) == []

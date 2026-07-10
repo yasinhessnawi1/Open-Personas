@@ -33,6 +33,7 @@ from persona.errors import PersonaError, PersonaNotFoundError
 from persona.logging import get_logger
 from persona.schema.conversation import Conversation, ConversationMessage
 from sqlalchemy import delete, func, insert, over, select, update
+from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import aware_utc
 from persona_api.db.models import conversations as conversations_t
@@ -412,6 +413,30 @@ def _sse(event: str, data: dict[str, object]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+# R9-022: the partial unique index that backstops D-P1-one-active-turn
+# (``db/models.py``'s ``uq_messages_one_streaming_per_conversation``). A true
+# concurrent race — two requests both pass the registry check (+ the R9-022
+# heal) before either persists — surfaces here as an ``IntegrityError`` from
+# the ``open_turn`` INSERT; :func:`_is_one_active_turn_race` recognises it so
+# it can be remapped to the SAME 409 the registry's early check produces,
+# never a raw 500.
+#
+# Matched by substring in the driver's error text rather than
+# ``exc.orig.diag.constraint_name`` (the ``ApprovalStore`` precedent) because
+# that attribute is psycopg-only: Postgres's message quotes the index name
+# verbatim, but SQLite (community) reports the conflicting column instead —
+# this is the ONLY unique index on ``messages`` over ``conversation_id``, so
+# the column-shaped fallback is an unambiguous match on that dialect too.
+_ONE_ACTIVE_TURN_INDEX = "uq_messages_one_streaming_per_conversation"
+_ONE_ACTIVE_TURN_SQLITE_TEXT = "UNIQUE constraint failed: messages.conversation_id"
+
+
+def _is_one_active_turn_race(exc: IntegrityError) -> bool:
+    """True iff ``exc`` is the one-active-turn partial-unique violation (either dialect)."""
+    text = str(exc)
+    return _ONE_ACTIVE_TURN_INDEX in text or _ONE_ACTIVE_TURN_SQLITE_TEXT in text
+
+
 async def start_chat_turn(
     *,
     rls_engine: Engine,
@@ -437,16 +462,28 @@ async def start_chat_turn(
     1. Reject early if a turn is already streaming for this conversation (→ 409,
        block-don't-queue, D-P1-one-active-turn) — BEFORE any DB write, so the
        partial-unique index never has to fire.
-    2. Persist the user message + an in-progress assistant row (``open_turn``),
-       so a reload mid-turn refetches both (acceptance #2).
-    3. Resolve the turn's images / documents (request scope — needs
+    2. R9-022 lazy self-heal: step 1 only proves the in-process registry has no
+       active turn for this conversation — a ``running`` row can still be a
+       crash orphan (its owning process died mid-turn; D-P1-restart-sweep's
+       startup sweep is the between-PROCESS backstop, this is the
+       between-restarts one, applied the moment the conversation is next
+       used). Heal it to ``interrupted`` here, before the next persist, so it
+       never blocks a legitimate new turn.
+    3. Persist the user message + an in-progress assistant row (``open_turn``),
+       so a reload mid-turn refetches both (acceptance #2). A residual race
+       here (another request truly won the turn between steps 1-2 and this
+       INSERT) surfaces as the same partial-unique violation the DB
+       backstops — remapped to the SAME 409 as step 1, never a raw 500
+       (R9-022).
+    4. Resolve the turn's images / documents (request scope — needs
        ``workspace_root``) and build the loop, exactly as the inline path did.
-    4. Launch the detached task via the registry; a client disconnect no longer
+    5. Launch the detached task via the registry; a client disconnect no longer
        cancels it. The worker drives the loop, checkpoints, finalizes, and bills
        on clean completion (D-P1-billing-contract); the request streams the live
        tail via :func:`stream_turn`.
 
-    Raises :class:`~persona_api.errors.TurnAlreadyActiveError` (→ 409),
+    Raises :class:`~persona_api.errors.TurnAlreadyActiveError` (→ 409 — the
+    already-active check in step 1 OR the residual-race remap in step 3),
     :class:`~persona_api.errors.ConversationNotFoundError` (→ 404), etc. cleanly
     BEFORE the SSE response starts — never mid-stream.
     """
@@ -456,6 +493,27 @@ async def start_chat_turn(
         raise TurnAlreadyActiveError(
             "a turn is already running for this conversation",
             context={"conversation_id": conversation_id},
+        )
+
+    # R9-022 lazy self-heal: the registry (the in-process liveness authority) has
+    # just proven there is no active turn for this conversation, but an unclean
+    # end (a process crash/restart mid-turn, or an out-of-band cancellation that
+    # skips ``finalize`` — see ``chat_turn_worker``'s shutdown-cancel path) can
+    # still leave a ``running`` assistant row behind. The startup sweep
+    # (``restart_sweep.py``, D-P1-restart-sweep) heals the same class of row on
+    # the NEXT process boot, but a long-lived process can sit on the orphan far
+    # longer than that — heal it lazily, right here, so the very next turn on
+    # this conversation is never blocked by a row the registry itself proves is
+    # dead. Ordering is load-bearing: registry-check (above) → heal (here) →
+    # the ``open_turn`` INSERT (below) — never the other way round.
+    healed_id = sink.heal_orphaned_running(conversation_id=conversation_id)
+    if healed_id is not None:
+        _log.warning(
+            "chat turn self-heal: conversation {cid} had an orphaned 'running' "
+            "assistant message {mid} with no live in-process turn — healed to "
+            "'interrupted' so the new turn can proceed (R9-022)",
+            cid=conversation_id,
+            mid=healed_id,
         )
 
     # Spec R7 (R7-D-4): reserve the durable per-user long-op slot BEFORE any persist,
@@ -529,12 +587,29 @@ async def start_chat_turn(
             loop = await loop_builder(persona_id)
         finally:
             reset_sandbox_request_context(_scope_token)
-        assistant_message_id = sink.open_turn(
-            conversation_id=conversation_id,
-            user_message=user_message,
-            channel=channel,
-            images=images,
-        )
+        try:
+            assistant_message_id = sink.open_turn(
+                conversation_id=conversation_id,
+                user_message=user_message,
+                channel=channel,
+                images=images,
+            )
+        except IntegrityError as exc:
+            # R9-022: a true concurrent race — another request's turn opened for
+            # this SAME conversation in the gap between the registry-check/heal
+            # above and this INSERT (the partial unique index,
+            # D-P1-one-active-turn, is the final backstop). Map it to the SAME
+            # 409 shape the registry's early check produces — never a raw 500.
+            # Any OTHER integrity error (unrelated to this constraint) is a real
+            # bug and propagates unchanged.
+            if not _is_one_active_turn_race(exc):
+                raise
+            from persona_api.errors import TurnAlreadyActiveError  # noqa: PLC0415
+
+            raise TurnAlreadyActiveError(
+                "a turn is already running for this conversation",
+                context={"conversation_id": conversation_id},
+            ) from exc
 
         # Auto-title the first turn from its first user message (best-effort, small
         # tier) on the detached completion path — never delays / breaks the turn.
