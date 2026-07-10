@@ -37,7 +37,10 @@ def build_openrouter_passthrough(model_id: str) -> ChatBackend | None:
     import os
 
     if not os.environ.get(OPENROUTER_KEY_ENV, "").strip():
-        _log.debug("openrouter passthrough unavailable: key env unset")
+        _log.warning(
+            "PERSONA_OPENROUTER_API_KEY is not set — persona preferred_model cannot route "
+            "via OpenRouter; tier defaults serve"
+        )
         return None
     if not model_id.strip():
         return None

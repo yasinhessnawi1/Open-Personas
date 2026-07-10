@@ -23,10 +23,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from _fakes import FakeStore, ScriptedBackend, ScriptedRound  # type: ignore[import-not-found]
+from persona import logging as plog
 from persona.backends import BackendConfig
 from persona.backends.errors import BackendTimeoutError
 from persona.backends.model_metadata import ModelMetadata
 from persona.backends.multi_model import MultiModelChatBackend
+from persona.config import PersonaCoreConfig
 from persona.history import ConversationHistoryManager
 from persona.schema.conversation import Conversation
 from persona.schema.persona import (
@@ -397,3 +399,88 @@ def test_metadata_for_resolves_and_fails_open() -> None:
     assert router.metadata_for("unknown/model") is None
     router_raise = IntelligentRouter(tier_registry=registry, metadata_resolver=_RaisingResolver())
     assert router_raise.metadata_for(_PREFERRED_ID) is None
+
+
+# ----- M1 follow-up: fail-open paths must WARN, never stay DEBUG-silent -----------------
+#
+# This repo has been burned repeatedly by silent fail-soft (R9-016/R9-019): "the user chose
+# a model but the tier served instead" must be visible at the DEFAULT log level (INFO), not
+# only when an operator happens to be running at DEBUG. Both tests below reconfigure the
+# shared loguru sink against pytest's ``capsys``-substituted stderr (the same capture idiom
+# ``packages/core/tests/unit/test_logging.py`` uses: ``reset_for_testing()`` to clear any
+# stale sink bound to a PRE-capsys stderr, then ``get_logger(..., config=...)`` to attach a
+# fresh sink the current test's ``capsys`` can see) and restore a clean slate afterwards so
+# no state leaks into later tests.
+
+
+def test_capability_gate_skip_logs_warning_not_debug(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The capability-gate skip (tools-incapable preferred model on a tools-requiring turn)
+    # must WARN. Calling the gate twice proves the once-per-loop-instance dedup
+    # (``_preferred_gate_logged``) still holds at the new level — exactly one line, not two.
+    registry, _subs = _frontier_registry_with_subs()
+    passthrough = ScriptedBackend(
+        [ScriptedRound(text="preferred says hi")],
+        provider_name="openrouter",
+        model_name=_PREFERRED_ID,
+    )
+    resolver = _MapResolver({_PREFERRED_ID: _md(tools_supported=False)})
+    loop, _writer = _build_loop(
+        persona=_persona(
+            preferred_model=_PREFERRED_ID, intelligent=IntelligentRoutingConfig(enabled=True)
+        ),
+        registry=registry,
+        preferred_backend_provider=_provider_returning(passthrough),
+        intelligent_router=IntelligentRouter(tier_registry=registry, metadata_resolver=resolver),
+    )
+    tools_ctx = loop._build_routing_context(
+        "hello", _conversation(), turn_has_image=False
+    ).model_copy(update={"requires_strong_tools": True})
+
+    plog.reset_for_testing()
+    plog.get_logger("runtime.loop", config=PersonaCoreConfig(log_format="pretty"))
+    try:
+        assert loop._preferred_model_for_turn(tools_ctx) is None
+        assert loop._preferred_model_for_turn(tools_ctx) is None  # second call: no re-log
+    finally:
+        plog.reset_for_testing()
+    out = capsys.readouterr().err
+
+    assert "WARNING" in out
+    assert _PREFERRED_ID in out
+    warn_lines = [ln for ln in out.splitlines() if _PREFERRED_ID in ln]
+    assert len(warn_lines) == 1, f"expected exactly one warning line, got {warn_lines!r}"
+
+
+def test_provider_none_logs_warning_with_actionable_cause(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A ``preferred_backend_provider`` returning None (no PERSONA_OPENROUTER_API_KEY
+    # in-process, or passthrough construction failed) must WARN with the actionable cause
+    # named in the message — an operator should not have to guess why the tier served
+    # instead of the persona's chosen model. Calling twice proves the once-per-loop-instance
+    # dedup (``_preferred_provider_none_logged``) still holds at the new level.
+    registry, subs = _frontier_registry_with_subs()
+    loop, _writer = _build_loop(
+        persona=_persona(preferred_model=_PREFERRED_ID),
+        registry=registry,
+        preferred_backend_provider=_provider_returning(None),  # always None: no passthrough
+    )
+
+    plog.reset_for_testing()
+    plog.get_logger("runtime.loop", config=PersonaCoreConfig(log_format="pretty"))
+    try:
+        fronted_1 = loop._front_preferred_backend(subs[0], _PREFERRED_ID)
+        fronted_2 = loop._front_preferred_backend(subs[0], _PREFERRED_ID)  # no re-log
+    finally:
+        plog.reset_for_testing()
+    out = capsys.readouterr().err
+
+    assert fronted_1 is subs[0]  # fail-open: tier backend unchanged
+    assert fronted_2 is subs[0]
+    assert "WARNING" in out
+    assert _PREFERRED_ID in out
+    assert "PERSONA_OPENROUTER_API_KEY" in out
+    warn_lines = [ln for ln in out.splitlines() if _PREFERRED_ID in ln]
+    assert len(warn_lines) == 1, f"expected exactly one warning line, got {warn_lines!r}"

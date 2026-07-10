@@ -2143,7 +2143,7 @@ class ConversationLoop:
         tools-requiring turn (``context.requires_strong_tools``) whose chosen model's
         metadata reports ``tools_supported is False``. Metadata / router ``None`` ⇒ ALLOW
         (fail-open; the runtime tier-chain fallback still protects). The gate-skip logs at
-        most once per loop instance at DEBUG.
+        most once per loop instance at WARNING.
         """
         raw = self._persona.routing.preferred_model
         if raw is None or self._preferred_backend_provider is None:
@@ -2155,7 +2155,7 @@ class ConversationLoop:
             metadata = self._intelligent_router.metadata_for(preferred)
             if metadata is not None and metadata.tools_supported is False:
                 if not self._preferred_gate_logged:
-                    _logger.debug(
+                    _logger.warning(
                         "preferred model {m} lacks tool support for a tools-requiring turn; "
                         "routing via the tier default",
                         m=preferred,
@@ -2172,7 +2172,7 @@ class ConversationLoop:
         fallback. Otherwise ask the injected provider for a passthrough backend and compose
         ``[passthrough, *subs]`` so a passthrough error falls through to the tier chain
         (D-20-9). A ``None`` provider result (misconfigured id / no key) leaves the tier
-        backend unchanged (fail-open; logged at most once per loop instance at DEBUG).
+        backend unchanged (fail-open; logged at most once per loop instance at WARNING).
         """
         if isinstance(backend, MultiModelChatBackend):
             subs: list[ChatBackend] = list(backend.backends)
@@ -2191,9 +2191,10 @@ class ConversationLoop:
         passthrough = provider(preferred_id)
         if passthrough is None:
             if not self._preferred_provider_none_logged:
-                _logger.debug(
-                    "preferred model {m} has no passthrough backend (provider returned None); "
-                    "using the tier default",
+                _logger.warning(
+                    "preferred model {m} has no passthrough backend (no "
+                    "PERSONA_OPENROUTER_API_KEY in this process, or construction failed — "
+                    "see earlier log); serving the tier default",
                     m=preferred_id,
                 )
                 self._preferred_provider_none_logged = True
