@@ -147,6 +147,18 @@ def _fire_values(schedule: Schedule) -> dict[str, Any]:
     }
 
 
+def _is_zombie(schedule: Schedule) -> bool:
+    """A one-time that has already fired but is still (wrongly) claimable (R9-023).
+
+    The invariant :meth:`~persona.schedules.Schedule.with_next_fire` now enforces
+    on every live write: a one-time with ``fire_count > 0`` must have
+    ``next_fire_at IS NULL``. A row violating it can only be a leftover from the
+    since-closed origin bug (an edit re-armed an already-fired one-time before the
+    model-level guard existed) — never a state a current write path can produce.
+    """
+    return schedule.is_one_time and schedule.fire_count > 0 and schedule.next_fire_at is not None
+
+
 class ScheduleStore:
     """Owner-scoped, audited CRUD + lifecycle over the ``schedules`` table.
 
@@ -256,14 +268,23 @@ class ScheduleStore:
 
         Recomputing from ``now`` (criterion 7) means a schedule resumed after a
         long pause fires next on its rhythm, not a stale missed instant. CAS-guarded.
+
+        Routes the recomputed ``next_fire_at`` through :meth:`Schedule.with_next_fire`
+        (R9-023) like every other mutator, so a paused, already-fired one-time can
+        never resume into a re-armed state either — the model-level guard is the
+        single choke point, not just the edit door.
         """
 
         def _compute(current: Schedule) -> tuple[Schedule, dict[str, Any]]:
             next_fire = next_fire_after(current, after=now)
-            resumed = current.model_copy(
-                update={"paused": False, "next_fire_at": next_fire, "updated_at": now}
+            resumed = current.with_next_fire(next_fire, now=now).model_copy(
+                update={"paused": False}
             )
-            return resumed, {"paused": False, "next_fire_at": next_fire, "updated_at": now}
+            return resumed, {
+                "paused": False,
+                "next_fire_at": next_fire,
+                "updated_at": resumed.updated_at,
+            }
 
         return self._mutate(owner_id, schedule_id, compute=_compute, action="schedule.resume")
 
@@ -400,6 +421,47 @@ class ScheduleStore:
             owner_id, schedule_id, missed_fire_time=missed_fire_time, now=now
         )
 
+    def heal_zombie_one_time(
+        self, owner_id: str, schedule_id: str, *, now: datetime, expected_revision: int
+    ) -> Schedule:
+        """Self-heal a one-time wrongly re-armed after it already fired (R9-023).
+
+        A one-time's ``next_fire_at`` must never be non-null once ``fire_count >
+        0`` — :meth:`~persona.schedules.Schedule.with_next_fire` enforces this at
+        every LIVE write path now (create/edit/resume/skip), but a handful of rows
+        were corrupted by the since-closed origin bug (an edit re-armed an
+        already-fired one-time without resetting fire state, before the guard
+        existed). Rather than let the tick claim such a row every cycle and fail
+        loud on :meth:`~persona.schedules.Schedule.record_fire` (an infinite,
+        silent error-skip loop — the original symptom), the tick calls this to
+        reconcile it TERMINAL: force ``next_fire_at`` to ``NULL`` (never claimable
+        again). Audited as ``schedule.zombie_reconciled`` — deliberately DISTINCT
+        from the routine ``schedule.miss`` note, since this is a corrupted-state
+        repair, not a missed-fire policy decision.
+
+        CAS-guarded on the claimed ``expected_revision`` like every other tick
+        write; a miss re-reads and re-checks (:meth:`_reconcile_zombie`) so a
+        concurrent write can never double-heal, nor wrongly "heal" a row that has
+        since been legitimately changed away from the zombie shape. Idempotent: a
+        row that is not (or no longer) a zombie is a no-op — safe to call
+        speculatively, and safe on a CAS-miss retry.
+        """
+        current = self.get(owner_id, schedule_id)
+        if not _is_zombie(current):
+            return current
+        healed = current.with_next_fire(None, now=now)
+        values = {"next_fire_at": None, "updated_at": healed.updated_at}
+        if self._cas_update(owner_id, schedule_id, values, expected=expected_revision):
+            bumped = healed.model_copy(update={"revision": expected_revision + 1})
+            self._audit(
+                owner_id,
+                "schedule.zombie_reconciled",
+                bumped,
+                extra={"reason": "one_time_fired_with_non_null_next_fire_at"},
+            )
+            return bumped
+        return self._reconcile_zombie(owner_id, schedule_id, now=now)
+
     def _reconcile_fire(
         self, owner_id: str, schedule_id: str, *, fire_time: datetime, now: datetime, late: bool
     ) -> Schedule:
@@ -443,6 +505,28 @@ class ScheduleStore:
                 return bumped
         raise ScheduleConcurrentEditError(
             "skip re-arm lost the concurrency race",
+            context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
+        )
+
+    def _reconcile_zombie(self, owner_id: str, schedule_id: str, *, now: datetime) -> Schedule:
+        """CAS-miss reconciliation for :meth:`heal_zombie_one_time`: re-read, re-check, retry."""
+        for _ in range(_MAX_CAS_RETRIES):
+            current = self.get(owner_id, schedule_id)
+            if not _is_zombie(current):
+                return current
+            healed = current.with_next_fire(None, now=now)
+            values = {"next_fire_at": None, "updated_at": healed.updated_at}
+            if self._cas_update(owner_id, schedule_id, values, expected=current.revision):
+                bumped = healed.model_copy(update={"revision": current.revision + 1})
+                self._audit(
+                    owner_id,
+                    "schedule.zombie_reconciled",
+                    bumped,
+                    extra={"reason": "one_time_fired_with_non_null_next_fire_at"},
+                )
+                return bumped
+        raise ScheduleConcurrentEditError(
+            "zombie reconciliation lost the concurrency race",
             context={"schedule_id": schedule_id, "attempts": str(_MAX_CAS_RETRIES)},
         )
 

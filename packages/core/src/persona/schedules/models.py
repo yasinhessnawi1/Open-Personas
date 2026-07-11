@@ -425,7 +425,24 @@ class Schedule(BaseModel):
 
         Used when a rule edit or a resume changes the next due fire without firing.
         ``now`` advances ``updated_at`` (tz-aware UTC).
+
+        Raises :class:`~persona.errors.ScheduleStateError` when ``next_fire_at`` is
+        non-``None`` and this schedule is a one-time that has already fired
+        (``fire_count > 0``) — R9-023: a one-time is a single-shot fact, so once it
+        has fired NOTHING may re-arm it (an edit/reschedule of a fired one-time must
+        create a new schedule instead). Setting ``None`` is always allowed (a rule
+        completing, or a pause/resume landing on a schedule with no future
+        occurrence) — only a non-null RE-ARM on an already-fired one-time is
+        illegal. This is the single choke point every ``next_fire_at`` write outside
+        of :meth:`record_fire` routes through (``ScheduleStore`` create/edit/resume/
+        skip all call this rather than setting the field inline), so no caller —
+        present or future — can bypass the guard.
         """
+        if next_fire_at is not None and self.is_one_time and self.fire_count > 0:
+            raise ScheduleStateError(
+                "one-time schedule already fired — create a new schedule",
+                context={"schedule_id": self.id, "operation": "with_next_fire"},
+            )
         return self.model_copy(
             update={"next_fire_at": next_fire_at, "updated_at": _ensure_utc(now)}
         )

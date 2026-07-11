@@ -14,7 +14,8 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
-from persona.errors import ScheduleNotFoundError
+from fastapi.testclient import TestClient
+from persona.errors import ScheduleNotFoundError, ScheduleStateError
 from persona.schedules import (
     RecurrenceFreq,
     RecurrenceKind,
@@ -23,6 +24,9 @@ from persona.schedules import (
     Schedule,
     next_fire_after,
 )
+from persona_api.app import create_app
+from persona_api.auth import AuthenticatedUser
+from persona_api.config import APIConfig
 from persona_api.schedules import ScheduleStore
 from persona_api.services.calendar_reschedule_service import (
     apply_calendar_reschedule,
@@ -83,6 +87,40 @@ def _create(store: ScheduleStore, owner: str = "user_a", hour: int = 8) -> Sched
 
 def _daily_pattern(hour: int) -> RecurrencePattern:
     return RecurrencePattern(kind=RecurrenceKind.DAILY, hour=hour, minute=0)
+
+
+def _fired_one_time(store: ScheduleStore, owner: str = "user_a") -> Schedule:
+    """A one-time schedule that has already fired once (fire_count=1, next_fire_at=None)."""
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(
+        Schedule(
+            id="s1",
+            owner_id=owner,
+            timezone="Europe/Oslo",
+            one_time_at=when,
+            target_job_type="briefing",
+            created_at=_CREATED,
+            updated_at=_CREATED,
+        ),
+        now=_CREATED,
+    )
+    return store.record_fire(owner, "s1", fire_time=when)
+
+
+def _never_fired_one_time(store: ScheduleStore, owner: str = "user_a") -> Schedule:
+    """A one-time schedule that has NOT fired yet (fire_count=0) — the (c) sanity case."""
+    return store.create(
+        Schedule(
+            id="s1",
+            owner_id=owner,
+            timezone="Europe/Oslo",
+            one_time_at=datetime(2026, 3, 1, 6, 0, tzinfo=UTC),
+            target_job_type="briefing",
+            created_at=_CREATED,
+            updated_at=_CREATED,
+        ),
+        now=_CREATED,
+    )
 
 
 def _reschedule_audit(engine: Engine) -> list[dict[str, object]]:
@@ -197,3 +235,107 @@ def test_apply_is_rls_scoped(store: ScheduleStore, engine: Engine, migrated_engi
             now=_NOW,
         )
     assert store.get("user_a", "s1").recurrence.byhour == (8,)  # type: ignore[union-attr] — unchanged
+
+
+# --- R9-023: a fired one-time can never be re-armed through this door -------
+
+
+def test_apply_rejects_reschedule_of_a_fired_one_time(
+    store: ScheduleStore, engine: Engine, migrated_engine: Engine
+) -> None:
+    """The service-level guard: re-arming an already-fired one-time raises, row unchanged."""
+    _seed_user(migrated_engine, "user_a")
+    fired = _fired_one_time(store)
+    assert fired.fire_count == 1
+    assert fired.next_fire_at is None
+
+    with pytest.raises(ScheduleStateError, match="already fired"):
+        apply_calendar_reschedule(
+            store,
+            engine,
+            owner_id="user_a",
+            schedule_id="s1",
+            pattern=None,
+            one_time_at=datetime(2030, 1, 1, 9, 0, tzinfo=UTC),  # after _NOW — a re-arm attempt
+            timezone="Europe/Oslo",
+            now=_NOW,
+        )
+    unchanged = store.get("user_a", "s1")
+    assert unchanged.next_fire_at is None
+    assert unchanged.fire_count == 1
+    assert _reschedule_audit(migrated_engine) == []  # no schedule.reschedule write landed
+
+
+# --- R9-023: through the REAL HTTP route (POST /v1/me/schedule/{id}/reschedule) ---
+
+
+def _auth(uid: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {uid}"}
+
+
+@pytest.fixture
+def client(migrated_engine: Engine, tmp_path: object) -> Iterator[TestClient]:
+    app_url = os.environ.get("APP_DATABASE_URL")
+    if not app_url:
+        pytest.skip("APP_DATABASE_URL not set")
+    cfg = APIConfig(app_database_url=app_url, audit_root=str(tmp_path) + "/audit")
+    app = create_app(cfg)
+
+    async def _verify(token: str) -> AuthenticatedUser:
+        return AuthenticatedUser(id=token, email=f"{token}@example.test")
+
+    with TestClient(app) as c:
+        app.state.verify_token = _verify
+        if hasattr(app.state, "tier_registry"):
+            app.state.tier_registry = None
+        yield c
+
+
+def test_route_rejects_reschedule_of_fired_one_time_with_409(
+    client: TestClient, store: ScheduleStore, migrated_engine: Engine
+) -> None:
+    """The real HTTP door: a fired one-time reschedule attempt is a structured 409, not a 500."""
+    _seed_user(migrated_engine, "route_a")
+    fired = _fired_one_time(store, owner="route_a")
+    assert fired.fire_count == 1
+
+    resp = client.post(
+        "/v1/me/schedule/s1/reschedule",
+        json={
+            "one_time_at": "2030-01-01T09:00:00Z",  # comfortably after the route's real "now"
+            "timezone": "Europe/Oslo",
+        },
+        headers=_auth("route_a"),
+    )
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "schedule_state_conflict"
+    assert "already fired" in body["detail"]
+    # The row is untouched by the rejected attempt.
+    unchanged = store.get("route_a", "s1")
+    assert unchanged.next_fire_at is None
+    assert unchanged.fire_count == 1
+
+
+def test_route_allows_reschedule_of_never_fired_one_time(
+    client: TestClient, store: ScheduleStore, migrated_engine: Engine
+) -> None:
+    """Sanity (design ask 4c): a NEVER-fired one-time reschedule still works, real route."""
+    _seed_user(migrated_engine, "route_b")
+    _never_fired_one_time(store, owner="route_b")
+
+    resp = client.post(
+        "/v1/me/schedule/s1/reschedule",
+        json={
+            "one_time_at": "2030-01-01T09:00:00Z",  # comfortably after the route's real "now"
+            "timezone": "Europe/Oslo",
+        },
+        headers=_auth("route_b"),
+    )
+
+    assert resp.status_code == 200
+    applied = store.get("route_b", "s1")
+    assert applied.one_time_at == datetime(2030, 1, 1, 9, 0, tzinfo=UTC)
+    assert applied.next_fire_at == datetime(2030, 1, 1, 9, 0, tzinfo=UTC)
+    assert applied.fire_count == 0

@@ -23,6 +23,7 @@ from persona.errors import (
     PersonaError,
     PersonaNotFoundError,
     RuntimeWriteForbiddenError,
+    ScheduleStateError,
     SchemaVersionMismatchError,
     ToolNotAllowedError,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "RateLimitExceededError",
     "RefinementLimitError",
     "RunNotFoundError",
+    "ScheduleStateError",
     "TurnAlreadyActiveError",
     "TurnNotActiveError",
     "register_exception_handlers",
@@ -472,6 +474,25 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_409_CONFLICT,
             content=_body(
                 "turn_already_active", exc.message or "a turn is already running", exc.context
+            ),
+        )
+
+    @app.exception_handler(ScheduleStateError)
+    async def _schedule_state_409(_: Request, exc: ScheduleStateError) -> JSONResponse:
+        """An illegal schedule-state transition (→ 409; R9-023).
+
+        Chiefly: re-arming (setting a non-null ``next_fire_at``) on a one-time
+        schedule that has already fired — ``Schedule.with_next_fire``'s
+        model-level guard raises this for every edit/reschedule write path
+        (calendar PATCH, the chat reschedule verb, a persona-proposed apply). A
+        genuine conflict with the resource's current state, not a leaked 500; the
+        message is author-controlled (set at the raise site) and safe to show —
+        never a raw provider/internal detail.
+        """
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=_body(
+                "schedule_state_conflict", exc.message or "invalid schedule state", exc.context
             ),
         )
 

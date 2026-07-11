@@ -189,9 +189,34 @@ class SchedulerTick:
 
         In every case ``next_fire_at`` coalesces to the next occurrence after NOW
         (the structural no-burst floor), so a backlog never replays.
+
+        **Zombie self-heal (R9-023).** A one-time schedule's ``next_fire_at`` must
+        never be non-null once it has fired (``fire_count > 0``) — a row in that
+        shape is a leftover from the since-closed origin bug (an edit re-armed an
+        already-fired one-time). Attempting the normal FIRE path would call
+        :meth:`~persona.schedules.Schedule.record_fire`, which raises for exactly
+        this state — an infinite, silent error-skip loop (the original symptom:
+        the row is re-claimed and re-fails every tick, forever). Detected BEFORE
+        the missed-fire policy runs, reconciled terminal via
+        :meth:`~persona_api.schedules.store.ScheduleStore.heal_zombie_one_time`
+        (``next_fire_at`` → ``NULL``, audited ``schedule.zombie_reconciled``), and
+        logged as a single WARNING — never an enqueue, never a fire_count bump.
+        Once healed the row is no longer due, so this fires (heals) exactly once
+        per zombie, never repeating on subsequent ticks.
         """
         fire_time = schedule.next_fire_at
         if fire_time is None:  # pragma: no cover — the claim filters these out
+            return FireAction.SKIP
+        if schedule.is_one_time and schedule.fire_count > 0:
+            self._store.heal_zombie_one_time(
+                schedule.owner_id, schedule.id, now=now, expected_revision=schedule.revision
+            )
+            _log.warning(
+                "zombie one-time schedule reconciled: already fired, next_fire_at cleared",
+                schedule_id=schedule.id,
+                owner_id=schedule.owner_id,
+                fire_count=schedule.fire_count,
+            )
             return FireAction.SKIP
         next_fire = next_fire_after(schedule, after=now)
         lateness = (now - fire_time).total_seconds()

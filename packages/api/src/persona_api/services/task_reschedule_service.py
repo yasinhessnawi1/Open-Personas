@@ -10,6 +10,9 @@ cross-tenant reschedule is impossible — the task read + the door both scope to
 
 ``skip_next`` is the bounded special case (A8-D-2): suppress exactly the next occurrence, no cadence
 change. A rescheduled task with no ``schedule_id`` (a non-schedule-backed task) is a logged no-op.
+So is a reschedule that targets a one-time schedule which has already fired (R9-023) — the door's
+model-level guard rejects the re-arm; there is no live HTTP response to surface it on from here (the
+worker runs after the turn already streamed its reply), so it is a loud, specific log line instead.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
-from persona.errors import ScheduleNotFoundError, TaskNotFoundError
+from persona.errors import ScheduleNotFoundError, ScheduleStateError, TaskNotFoundError
 from persona.logging import get_logger
 from persona.schedules import RecurrenceRule
 
@@ -76,6 +79,19 @@ class TaskRescheduleService:
         except ScheduleNotFoundError:
             _logger.warning(
                 "reschedule target schedule not found; skipping", schedule_id=schedule_id
+            )
+        except ScheduleStateError as exc:
+            # R9-023: a fired one-time can never be re-armed — the model-level guard
+            # (Schedule.with_next_fire) rejects it. The runtime already confirmed the
+            # new time with the user in-conversation before this event fired, and this
+            # runs on the worker AFTER the turn's response already streamed — there is
+            # no synchronous channel back to tell the user it didn't apply. Logging with
+            # a specific, searchable reason (rather than letting this fall into the
+            # caller's generic catch-all) is the best this best-effort seam can do.
+            _logger.warning(
+                "reschedule target already fired; a one-time cannot be re-armed",
+                schedule_id=schedule_id,
+                error=str(exc),
             )
 
     def _apply_cadence(

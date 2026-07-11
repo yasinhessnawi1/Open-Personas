@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
-from persona.errors import ScheduleNotFoundError
+from persona.errors import ScheduleNotFoundError, ScheduleStateError
 from persona.schedules import RecurrenceFreq, RecurrenceRule, Schedule
 from persona_api.schedules import ScheduleStore
 from sqlalchemy import create_engine, text
@@ -174,6 +174,53 @@ def test_edit_cannot_reset_count_via_recreated_anchor(
     assert edited.next_fire_at is None  # still exhausted — no extra fire from the edit
 
 
+# --- edit: the R9-023 re-arm guard on a fired one-time -----------------------
+
+
+def test_edit_rejects_rearm_of_fired_one_time(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    """The origin fix: rescheduling a ONE-TIME that already fired to a new future
+    instant must be rejected — never silently re-armed (the R9-023 bug)."""
+    _seed_users(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(_schedule(one_time_at=when), now=_NOW)
+    store.record_fire("user_a", "s1", fire_time=when)
+    before = store.get("user_a", "s1")
+    assert before.fire_count == 1
+    assert before.next_fire_at is None  # one-time COMPLETION
+
+    new_when = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # a future re-arm attempt
+    proposed = before.model_copy(update={"one_time_at": new_when})
+    with pytest.raises(ScheduleStateError, match="already fired"):
+        store.edit(proposed, now=datetime(2026, 1, 5, 12, 0, tzinfo=UTC))
+
+    # The row is UNCHANGED — the CAS write never happened (the raise is before it).
+    unchanged = store.get("user_a", "s1")
+    assert unchanged.next_fire_at is None
+    assert unchanged.one_time_at == when  # the OLD fired instant, not the rejected new one
+    assert unchanged.fire_count == 1
+    assert unchanged.revision == before.revision  # no CAS write landed
+
+
+def test_edit_allows_non_cadence_change_on_fired_one_time(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    """The guard is scoped to a non-null RE-ARM — editing an unrelated field on a
+    fired one-time (its recomputed next_fire_at is still None) must still work."""
+    _seed_users(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(_schedule(one_time_at=when), now=_NOW)
+    store.record_fire("user_a", "s1", fire_time=when)
+    before = store.get("user_a", "s1")
+
+    proposed = before.model_copy(update={"target_job_type": "digest"})
+    edited = store.edit(proposed, now=datetime(2026, 1, 5, 12, 0, tzinfo=UTC))
+    assert edited.target_job_type == "digest"
+    assert edited.next_fire_at is None  # unchanged — never re-armed
+    assert edited.fire_count == 1
+
+
 # --- pause / resume ---------------------------------------------------------
 
 
@@ -191,6 +238,38 @@ def test_pause_preserves_next_fire_then_resume_recomputes(
     resumed = store.resume("user_a", "s1", now=resume_now)
     assert resumed.paused is False
     assert resumed.next_fire_at == datetime(2026, 1, 9, 6, 0, tzinfo=UTC)  # next 07:00 CET
+
+
+def test_resume_rejects_rearm_of_a_corrupted_fired_one_time(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    """Defense in depth (R9-023): resume() now routes next_fire_at through the SAME
+    model-level guard as edit(), so even a paused, already-fired one-time whose
+    ``one_time_at`` was corrupted into the future (the pre-fix zombie shape) cannot
+    resume into a re-armed state. This can only be reached via a direct row edit
+    (the guard makes it unreachable through any live write path) — proving the
+    choke point holds even for a hand-corrupted row, not just the edit door.
+    """
+    _seed_users(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(_schedule(one_time_at=when), now=_NOW)
+    store.record_fire("user_a", "s1", fire_time=when)
+    store.pause("user_a", "s1", now=datetime(2026, 1, 2, 0, 0, tzinfo=UTC))
+
+    # Simulate the pre-fix corruption directly at the row (bypasses the model guard —
+    # the only way to reconstruct this shape now that the guard closes every live path).
+    # Must stay AFTER the resume "now" below so next_fire_after recomputes non-null.
+    future_one_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE schedules SET one_time_at = :o WHERE id = 's1'"), {"o": future_one_time}
+        )
+
+    with pytest.raises(ScheduleStateError, match="already fired"):
+        store.resume("user_a", "s1", now=datetime(2026, 6, 2, 0, 0, tzinfo=UTC))
+    unchanged = store.get("user_a", "s1")
+    assert unchanged.paused is True  # the CAS write never happened
+    assert unchanged.next_fire_at is None
 
 
 # --- record_fire / one-time completion --------------------------------------
@@ -213,6 +292,89 @@ def test_record_fire_completes_one_time(migrated_engine: Engine, store: Schedule
     assert fired.fire_count == 1
     assert fired.next_fire_at is None  # one-time COMPLETION
     assert not fired.is_active
+
+
+# --- heal_zombie_one_time (R9-023 self-heal) ---------------------------------
+
+
+def _corrupt_into_zombie(engine: Engine, schedule_id: str, *, next_fire_at: datetime) -> None:
+    """Force a fired one-time's next_fire_at back to non-null — the pre-fix shape.
+
+    The model/store guard now makes this state unreachable through any live write
+    path, so a raw UPDATE is the only way left to reconstruct the exact corrupted
+    row shape the self-heal targets (mirrors the dev-DB zombie evidence).
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE schedules SET next_fire_at = :d WHERE id = :i"),
+            {"d": next_fire_at, "i": schedule_id},
+        )
+
+
+_HEAL_NOW = datetime(2026, 1, 11, 17, 28, tzinfo=UTC)  # mirrors the R9-023 dev-evidence instant
+
+
+def test_heal_zombie_one_time_clears_next_fire_and_audits(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    _seed_users(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(_schedule(one_time_at=when), now=_NOW)
+    store.record_fire("user_a", "s1", fire_time=when)
+    zombie_next_fire = datetime(2026, 1, 11, 14, 43, tzinfo=UTC)
+    _corrupt_into_zombie(migrated_engine, "s1", next_fire_at=zombie_next_fire)
+    zombie = store.get("user_a", "s1")
+    assert zombie.next_fire_at == zombie_next_fire  # corrupted shape confirmed
+    assert zombie.fire_count == 1
+
+    healed = store.heal_zombie_one_time(
+        "user_a", "s1", now=_HEAL_NOW, expected_revision=zombie.revision
+    )
+    assert healed.next_fire_at is None
+    assert healed.fire_count == 1  # untouched — this is not a fire
+    assert "schedule.zombie_reconciled" in _audit_actions(migrated_engine, "s1")
+
+    refetched = store.get("user_a", "s1")
+    assert refetched.next_fire_at is None
+
+
+def test_heal_zombie_one_time_is_idempotent_and_ignores_non_zombies(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    """Calling heal on an already-healthy (or already-healed) row is a safe no-op."""
+    _seed_users(migrated_engine, "user_a")
+    store.create(_schedule(), now=_NOW)  # a normal, never-fired RECURRING schedule
+    current = store.get("user_a", "s1")
+
+    result = store.heal_zombie_one_time(
+        "user_a", "s1", now=_NOW, expected_revision=current.revision
+    )
+    assert result == current  # no-op: not a one-time, not a zombie
+    assert "schedule.zombie_reconciled" not in _audit_actions(migrated_engine, "s1")
+
+
+def test_heal_zombie_one_time_handles_the_fire_count_8_shape(
+    migrated_engine: Engine, store: ScheduleStore
+) -> None:
+    """Regression for the exact dev-DB evidence shape (fire_count as high as 8)."""
+    _seed_users(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    store.create(_schedule(one_time_at=when), now=_NOW)
+    store.record_fire("user_a", "s1", fire_time=when)
+    # Bump fire_count to 8 directly (record_fire forbids a second real fire on a
+    # one-time by design — this simulates the historical accumulation being healed).
+    with migrated_engine.begin() as conn:
+        conn.execute(text("UPDATE schedules SET fire_count = 8 WHERE id = 's1'"))
+    zombie_next_fire = datetime(2026, 1, 11, 14, 43, tzinfo=UTC)
+    _corrupt_into_zombie(migrated_engine, "s1", next_fire_at=zombie_next_fire)
+    zombie = store.get("user_a", "s1")
+    assert zombie.fire_count == 8
+
+    healed = store.heal_zombie_one_time(
+        "user_a", "s1", now=_HEAL_NOW, expected_revision=zombie.revision
+    )
+    assert healed.next_fire_at is None
+    assert healed.fire_count == 8  # preserved — the heal never touches fire_count
 
 
 # --- delete -----------------------------------------------------------------

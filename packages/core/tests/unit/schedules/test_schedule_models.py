@@ -238,6 +238,55 @@ def test_with_next_fire_updates_without_firing() -> None:
     assert updated.fire_count == 0  # no fire recorded
 
 
+# --- Schedule: with_next_fire re-arm guard (R9-023) -------------------------
+
+
+def test_with_next_fire_rejects_rearm_on_fired_one_time() -> None:
+    """The origin guard: a fired one-time can never get a non-null next_fire_at again."""
+    sched = _schedule(recurrence=None, one_time_at=_NOW + timedelta(days=1))
+    fired = sched.record_fire(fire_time=_NOW + timedelta(days=1), next_fire_at=None)
+    assert fired.fire_count == 1
+    assert fired.next_fire_at is None
+
+    with pytest.raises(ScheduleStateError, match="already fired") as exc_info:
+        fired.with_next_fire(_NOW + timedelta(days=5), now=_NOW + timedelta(days=2))
+
+    # The guard's context names the schedule + the operation (structured, D-01-12).
+    assert exc_info.value.context["schedule_id"] == fired.id
+    assert exc_info.value.context["operation"] == "with_next_fire"
+
+
+def test_with_next_fire_allows_null_on_fired_one_time() -> None:
+    """Terminating (NULL) a fired one-time is always allowed — only a non-null RE-ARM is illegal.
+
+    This is the self-heal path's write shape (R9-023): a corrupted zombie row is
+    reconciled by clearing next_fire_at, which must never itself raise.
+    """
+    sched = _schedule(recurrence=None, one_time_at=_NOW + timedelta(days=1))
+    fired = sched.record_fire(fire_time=_NOW + timedelta(days=1), next_fire_at=None)
+    healed = fired.with_next_fire(None, now=_NOW + timedelta(days=2))
+    assert healed.next_fire_at is None
+    assert healed.fire_count == 1  # unchanged — this is not a fire
+
+
+def test_with_next_fire_allows_non_null_on_never_fired_one_time() -> None:
+    """A one-time with fire_count == 0 may still get a next_fire_at set (create/edit path)."""
+    sched = _schedule(recurrence=None, one_time_at=_NOW + timedelta(days=1))
+    assert sched.fire_count == 0
+    updated = sched.with_next_fire(_NOW + timedelta(days=1), now=_NOW)
+    assert updated.next_fire_at == _NOW + timedelta(days=1)
+
+
+def test_with_next_fire_allows_non_null_on_recurring_with_fire_count() -> None:
+    """The guard is one-time-specific: a recurring schedule's normal fire_count > 0 is fine."""
+    sched = _schedule()  # daily recurrence
+    fired = sched.record_fire(fire_time=_NOW, next_fire_at=_NOW + timedelta(days=1))
+    assert fired.fire_count == 1
+    later_next = _NOW + timedelta(days=2)
+    updated = fired.with_next_fire(later_next, now=_NOW + timedelta(days=1, hours=1))
+    assert updated.next_fire_at == later_next
+
+
 def test_missed_fire_policy_default_is_fire_late_once() -> None:
     assert _schedule().missed_fire_policy is MissedFirePolicy.FIRE_LATE_ONCE
 

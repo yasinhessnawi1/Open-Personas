@@ -16,6 +16,7 @@ from persona_api.errors import (
     CreditsExhaustedError,
     RateLimitExceededError,
     RunNotFoundError,
+    ScheduleStateError,
     register_exception_handlers,
 )
 from pydantic import BaseModel
@@ -60,6 +61,15 @@ def _app() -> FastAPI:
     async def _schema() -> None:
         raise SchemaVersionMismatchError("bad version")
 
+    @app.get("/schedule-state")
+    async def _schedule_state() -> None:
+        # R9-023: a one-time re-arm attempt on an already-fired schedule. Pre-fix this
+        # exception had no specific handler and fell through the catch-all _domain_500.
+        raise ScheduleStateError(
+            "one-time schedule already fired — create a new schedule",
+            context={"schedule_id": "s1"},
+        )
+
     @app.get("/provider-auth")
     async def _provider_auth() -> None:
         # Spec R2 F-07: the PROVIDER-key auth error (a rotated/invalid cloud model
@@ -95,6 +105,7 @@ def client() -> TestClient:
         ("/run", 404, "run_not_found"),
         ("/rate", 429, "rate_limit_exceeded"),
         ("/schema", 422, "schema_version_mismatch"),
+        ("/schedule-state", 409, "schedule_state_conflict"),
     ],
 )
 def test_exception_maps_to_status_and_body(
@@ -138,6 +149,14 @@ def test_rate_limit_sets_headers(client: TestClient) -> None:
 def test_context_appears_in_body(client: TestClient) -> None:
     resp = client.get("/tool")
     assert resp.json()["context"] == {"allowed": "web_search"}
+
+
+def test_schedule_state_conflict_carries_the_message_and_schedule_id(client: TestClient) -> None:
+    """R9-023: the 409 body carries the clear, user-facing message + the schedule id context."""
+    resp = client.get("/schedule-state")
+    body = resp.json()
+    assert body["detail"] == "one-time schedule already fired — create a new schedule"
+    assert body["context"] == {"schedule_id": "s1"}
 
 
 def test_invalid_body_returns_structured_422(client: TestClient) -> None:

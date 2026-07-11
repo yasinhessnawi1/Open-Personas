@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.errors import TaskNotFoundError
 from persona.schedules import RecurrenceFreq, RecurrenceRule, Schedule, next_fire_after
 from persona_api.schedules import SchedulerLeader, SchedulerTick, ScheduleStore
@@ -179,3 +180,61 @@ def test_cross_tenant_reschedule_is_impossible(
     )
     # A's schedule is untouched (non-vacuous: it DOES still exist at 08:00 for A).
     assert store.get("user_a", "s1").recurrence.byhour == (8,)  # type: ignore[union-attr]
+
+
+# --- R9-023: a fired one-time can never be re-armed through the chat verb ----
+
+
+def test_reschedule_verb_on_fired_one_time_is_logged_not_raised(
+    store: ScheduleStore, app_engine: Engine, migrated_engine: Engine
+) -> None:
+    """The chat verb runs on the worker AFTER the turn already streamed its reply — there is
+    no synchronous channel back to the user, so the service must swallow the door's
+    ScheduleStateError (never let it escape into the worker's generic catch-all) and log a
+    specific, searchable warning. The row must stay exactly as it was: fired, terminal.
+    """
+    _seed_user(migrated_engine, "user_a")
+    when = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+    store.create(
+        Schedule(
+            id="s1",
+            owner_id="user_a",
+            timezone="Europe/Oslo",
+            one_time_at=when,
+            target_job_type="briefing",
+            created_at=_CREATED,
+            updated_at=_CREATED,
+        ),
+        now=_CREATED,
+    )
+    store.record_fire("user_a", "s1", fire_time=when)
+    before = store.get("user_a", "s1")
+    assert before.fire_count == 1
+    assert before.next_fire_at is None
+
+    svc = TaskRescheduleService(
+        task_reader=_FakeTaskReader("s1"), schedule_store=store, engine=app_engine
+    )
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(captured.append, level="WARNING", format="{message} | {extra}")
+    try:
+        svc.reschedule(
+            {
+                "owner_id": "user_a",
+                "task_id": "task-1",
+                "timezone": "Europe/Oslo",
+                "recurrence_rrule": None,
+                "one_time_at": "2030-01-01T09:00:00Z",  # a re-arm attempt on a fired one-time
+                "skip_next": False,
+            }
+        )  # must not raise — this is a best-effort worker seam
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    after = store.get("user_a", "s1")
+    assert after.fire_count == 1
+    assert after.next_fire_at is None  # unchanged — the re-arm was rejected
+    assert after.one_time_at == when  # the OLD fired instant, not the rejected new one
+    fired_warnings = [line for line in captured if "already fired" in line]
+    assert len(fired_warnings) == 1
+    assert "s1" in fired_warnings[0]
