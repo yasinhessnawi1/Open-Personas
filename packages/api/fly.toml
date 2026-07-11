@@ -115,8 +115,9 @@ kill_timeout = "30s"
   timeout = "5s"
 
 [[vm]]
-  # bge-small-en-v1.5 (sentence-transformers) loads ~150 MB resident; FastAPI +
-  # Python ~ 150 MB; chat working set ~ 100 MB. 1 GB has headroom for soak +
-  # concurrency. Bump to 2 GB if OOM surfaces.
+  # bge-small-en-v1.5 (~150 MB) + the crisis-detection encoder's multilingual
+  # MiniLM (v1.1.0, R1 safety gate) + FastAPI/Python + chat working set no longer
+  # fit in 1 GB — prod OOM-killed on 2026-07-11 (the "bump if OOM surfaces" case).
+  # 2 GB matches the live `fly scale memory 2048` applied that day.
   size = "shared-cpu-1x"
-  memory = "1024mb"
+  memory = "2048mb"
