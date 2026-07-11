@@ -21,7 +21,7 @@ from pydantic import SecretStr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_SID = "AC0123456789abcdef0123456789abcdef"
+_SID = "AC" + "0" * 32  # scanner-safe fake (GH push protection flags realistic SIDs)
 _TOKEN = "SUPER-SECRET-AUTH-TOKEN"  # noqa: S105 — test literal
 
 
