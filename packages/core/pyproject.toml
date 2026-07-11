@@ -1,6 +1,6 @@
 [project]
 name = "persona-core"
-version = "1.0.0"
+version = "1.1.0"
 description = "Build AI personas with typed memory and tier-routed model selection."
 readme = "README.md"
 requires-python = ">=3.11"

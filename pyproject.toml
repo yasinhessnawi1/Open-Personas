@@ -1,6 +1,6 @@
 [project]
 name = "persona-workspace"
-version = "1.0.0"
+version = "1.1.0"
 description = "Open Persona — a four-layer platform for building and running AI personas with typed memory and tier-routed model selection."
 requires-python = ">=3.11"
 # Root depends on every workspace member so a plain `uv sync` installs the

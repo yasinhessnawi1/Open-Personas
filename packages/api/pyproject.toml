@@ -1,6 +1,6 @@
 [project]
 name = "persona-api"
-version = "1.0.0"
+version = "1.1.0"
 description = "Hosted FastAPI service for Persona"
 requires-python = ">=3.11"
 # Source-available, noncommercial use only. NOT OSI-approved (Spec 33). See

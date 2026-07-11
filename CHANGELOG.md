@@ -11,6 +11,55 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-11
+
+### Per-persona model selection — pick the brain, see the price (Spec M1, 2026-07-10)
+
+> Choose the LLM a persona runs on from the live OpenRouter catalog, price tags
+> included, with today's tier system as the default and the safety net.
+
+#### Added
+- **`routing.preferred_model`** on the persona (additive-optional): a capable
+  chosen model serves the persona's chat turns via a single OpenRouter
+  passthrough backend (any catalog id, env-gated on `PERSONA_OPENROUTER_API_KEY`,
+  fail-open); any runtime error falls down the real tier chain. Personas without
+  a choice are byte-identical to before — proven fail-closed e2e at the
+  composition root.
+- **`GET /v1/models`** — curated ten-model shortlist (live-validated, announced-EOL
+  filtered) + browse-all, with USD-per-1M input/output prices served from the
+  Spec-22 catalog client; fail-open `stale:true` envelope; `asyncio.to_thread`
+  keeps the event loop clear.
+- **`PersonaModelPicker`** in the persona editor (price tags, browse-all,
+  "Use tier default"), plus a sticky per-user default: the last-chosen model
+  pre-selects on the next persona create, and creating on tier-default clears it
+  (`users.preferred_model`, migration 045, profile GET/PATCH).
+
+### Operator-fix wave — chat titles, turn healing, schedule integrity (R9-020…023, 2026-07-10/11)
+
+#### Fixed
+- **Chat titles are real again — and self-improving** (R9-020): titling moved off
+  the small tier (the documented confabulation root) onto its own surface
+  (default mid, `PERSONA_API_TITLE_TIER`); a durable `title_refresh` job
+  re-titles the whole conversation as it crosses 4/10/24/50/100 messages (a bad
+  generation keeps the existing title); every title write pushes a live sidebar
+  update.
+- **A mid-stream crash can no longer brick a conversation** (R9-022): orphaned
+  `running` assistant messages self-heal at the next turn start (in-process
+  registry is the liveness authority), the startup sweep warns instead of
+  whispering, and the residual insert race maps to 409 — never a raw 500.
+- **Fired one-time schedules cannot become tick zombies** (R9-023): every
+  re-arm path routes through one guarded seam (409 `schedule_state_conflict`
+  on re-arming a fired one-time — including the fired-recurring→one-time
+  conversion that once carried fire counts across); the scheduler tick
+  reconciles existing zombies terminally, before any enqueue.
+- **`personas.updated_at` bumps on every row mutation** (R9-021) — recently-
+  updated ordering works; all seven write sites healed by one column `onupdate`.
+- Preferred-model fallbacks (capability gate, missing passthrough key) now log
+  at WARNING, once per conversation loop — a chosen-but-unroutable model is
+  never silent; seven web page loaders fetch genuinely in parallel; the
+  recall-scorer live suite skips honestly on the one documented dev-box GEMM
+  fault instead of training everyone to ignore red.
+
 ### Event triggers — the persona's third impulse: react to typed events (Spec A7)
 
 > "When an email from my landlord arrives, summarise it." A7 adds reaction to
