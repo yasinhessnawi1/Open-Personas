@@ -126,9 +126,7 @@ def _make_zombie_one_time(
     store.record_fire(owner, schedule_id, fire_time=fire_at)
     with superuser_engine.begin() as conn:
         conn.execute(
-            text(
-                "UPDATE schedules SET next_fire_at = :d, fire_count = :fc WHERE id = :i"
-            ),
+            text("UPDATE schedules SET next_fire_at = :d, fire_count = :fc WHERE id = :i"),
             {"d": due_at, "fc": fire_count, "i": schedule_id},
         )
 

@@ -319,9 +319,7 @@ def test_worker_refreshes_the_title_and_publishes_and_is_idempotent(
         # Idempotency 1 — the PRODUCER's re-enqueue of the same threshold is
         # A0's ON CONFLICT no-op (same key, no second row).
         assert (
-            enqueue_title_refresh(
-                JobQueue(su), owner_id=uid, conversation_id=conv_id, threshold=4
-            )
+            enqueue_title_refresh(JobQueue(su), owner_id=uid, conversation_id=conv_id, threshold=4)
             is None
         )
         assert len(_title_jobs(su, uid)) == 1
