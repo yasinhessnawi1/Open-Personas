@@ -180,7 +180,19 @@ personas = Table(
     # persona YAML schema, so it does not move ``schema_version``.
     Column("avatar_source", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # R9-021: onupdate stamps every Core update(personas_t) that doesn't set the
+    # column explicitly (all current write sites omit it) — without this the value
+    # freezes at INSERT time forever. Client-side SQLAlchemy behavior, both dialects
+    # (community SQLite inherits it via the to_metadata() copy in db/community.py);
+    # no migration needed. Semantics: ANY persona-row mutation bumps updated_at
+    # (yaml save, avatar, consent/dial toggles) — "recently updated" = recently touched.
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
     # Spec 21 T09 (D-21-7): tri-state auto-dispatch consent. NULL = never asked /
     # revoked-to-ask, TRUE = granted, FALSE = explicitly declined (stable, never
     # auto-re-prompts — D-21-17). Added by migration 008; nullable so existing

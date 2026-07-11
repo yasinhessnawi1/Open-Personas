@@ -9,6 +9,8 @@ invalid YAML → 422, and authoring (scripted backend) produces a valid persona.
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -97,6 +99,10 @@ def client(
 
 def _auth(user_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {user_id}"}
+
+
+def _parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def test_create_get_patch_delete_round_trip(client: tuple[TestClient, str]) -> None:
@@ -258,3 +264,67 @@ def test_consent_is_rls_scoped(client: tuple[TestClient, str]) -> None:
     pid = c.post("/v1/personas", json={"yaml": _VALID_YAML}, headers=_auth(uid)).json()["id"]
     resp = c.patch(f"/v1/personas/{pid}/consent", json={"granted": True}, headers=_auth("intruder"))
     assert resp.status_code == 404
+
+
+# -- R9-021: personas.updated_at bumps on every row mutation (onupdate=func.now()) ----------
+
+
+def test_updated_at_matches_created_at_on_create(client: tuple[TestClient, str]) -> None:
+    """A freshly created row's ``updated_at`` is pinned to ``created_at`` (same INSERT txn).
+
+    Both columns share ``server_default=func.now()``; Postgres' ``now()`` is stable
+    within one transaction, so a single INSERT stamps them identically.
+    """
+    c, uid = client
+    resp = c.post("/v1/personas", json={"yaml": _VALID_YAML}, headers=_auth(uid))
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    created = _parse_ts(body["created_at"])
+    updated = _parse_ts(body["updated_at"])
+    assert abs((updated - created).total_seconds()) < 1.0
+
+
+def test_updated_at_bumps_on_yaml_patch(client: tuple[TestClient, str]) -> None:
+    """R9-021: a yaml-changing PATCH strictly advances ``updated_at``.
+
+    Regression test for the ``Column("updated_at", ...)`` missing ``onupdate`` —
+    before the fix this value was frozen at INSERT time forever (docs/specs/phase3/
+    spec_R9/issues.md R9-021).
+    """
+    c, uid = client
+    resp = c.post("/v1/personas", json={"yaml": _VALID_YAML}, headers=_auth(uid))
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
+    before = _parse_ts(resp.json()["updated_at"])
+
+    time.sleep(0.05)  # guarantee wall-clock separation from the create's now()
+    updated_yaml = _VALID_YAML.replace("tenancy law assistant", "rental disputes assistant")
+    resp = c.patch(f"/v1/personas/{pid}", json={"yaml": updated_yaml}, headers=_auth(uid))
+    assert resp.status_code == 200, resp.text
+    after = _parse_ts(resp.json()["updated_at"])
+    assert after > before
+
+    # persists — a fresh GET sees the bumped value too, not just the PATCH echo.
+    refetched = _parse_ts(c.get(f"/v1/personas/{pid}", headers=_auth(uid)).json()["updated_at"])
+    assert refetched == after
+
+
+def test_updated_at_bumps_on_consent_toggle(client: tuple[TestClient, str]) -> None:
+    """R9-021: ANY persona-row mutation bumps ``updated_at``, not only yaml saves.
+
+    Pins the "recently updated = recently touched" semantics: a consent/dial
+    toggle is a real row mutation and must bump ``updated_at`` exactly like a
+    yaml save or avatar change (all route through the same ``update(personas_t)``
+    write path, healed once at the column level).
+    """
+    c, uid = client
+    resp = c.post("/v1/personas", json={"yaml": _VALID_YAML}, headers=_auth(uid))
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
+    before = _parse_ts(resp.json()["updated_at"])
+
+    time.sleep(0.05)  # guarantee wall-clock separation from the create's now()
+    resp = c.patch(f"/v1/personas/{pid}/consent", json={"granted": True}, headers=_auth(uid))
+    assert resp.status_code == 200, resp.text
+    after = _parse_ts(resp.json()["updated_at"])
+    assert after > before
