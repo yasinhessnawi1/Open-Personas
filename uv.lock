@@ -3132,7 +3132,7 @@ wheels = [
 
 [[package]]
 name = "persona-api"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/api" }
 dependencies = [
     { name = "alembic" },
@@ -3190,7 +3190,7 @@ requires-dist = [
 
 [[package]]
 name = "persona-core"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "anthropic" },
@@ -3274,7 +3274,7 @@ provides-extras = ["local", "postgres", "turbovec", "sandbox", "test"]
 
 [[package]]
 name = "persona-runtime"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/runtime" }
 dependencies = [
     { name = "persona-core" },
@@ -3293,7 +3293,7 @@ requires-dist = [
 
 [[package]]
 name = "persona-voice"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/voice" }
 dependencies = [
     { name = "cartesia", extra = ["websockets"] },
@@ -3318,7 +3318,7 @@ requires-dist = [
 
 [[package]]
 name = "persona-workspace"
-version = "1.0.0"
+version = "1.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "persona-api" },
