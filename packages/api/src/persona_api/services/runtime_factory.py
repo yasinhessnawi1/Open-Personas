@@ -1649,13 +1649,21 @@ class RuntimeFactory:
 
     async def build_title(self, first_message: str) -> str:
         """Generate a short (≤5-word) conversation title from the first message,
-        using the background tier (Spec P9: unread, narrow — small). Returns
-        the title text; the caller (chat_service) applies it best-effort."""
+        on the TITLE tier (R9-020: mid by default via the ``title`` surface row,
+        env-overridable via ``PERSONA_API_TITLE_TIER`` — the exact recognition
+        precedent). Titles are user-read chrome; the background/small tier
+        echoed the titling instruction, so R4's sanitizer fell back to
+        first-words on ~every conversation. Returns the title text; the caller
+        (chat_service) sanitizes + applies it best-effort."""
         from datetime import UTC, datetime
 
         from persona.schema.conversation import ConversationMessage
 
-        backend = self._tier_registry.get(tier_for("background"))
+        title_tier = tier_for(
+            "title",
+            override=(self._api_config.title_tier if self._api_config is not None else None),
+        )
+        backend = self._tier_registry.get(title_tier)
         now = datetime.now(UTC)
         prompt = [
             ConversationMessage(

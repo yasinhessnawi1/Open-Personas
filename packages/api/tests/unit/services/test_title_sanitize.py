@@ -8,7 +8,10 @@ title. ``sanitize_conversation_title`` is the storage-path guard.
 
 from __future__ import annotations
 
-from persona_api.services.chat_service import sanitize_conversation_title
+from persona_api.services.chat_service import (
+    sanitize_conversation_title,
+    sanitize_title_candidate,
+)
 
 # The exact class of string the bug produced: the titling instruction echoed
 # back (or reasoned about) instead of an actual title.
@@ -64,4 +67,46 @@ def test_takes_only_the_first_non_empty_line() -> None:
             first_message="x",
         )
         == "Budget planning"
+    )
+
+
+# -- R9-020: the STRICT half (no fallback) the title_refresh job consumes ----
+# A refresh must be able to DISTINGUISH "bad generation" (None → keep the
+# existing title) from "usable title" — the fallback-composing function above
+# cannot, so the split itself is the contract under test.
+
+
+def test_candidate_clean_title_is_returned() -> None:
+    assert sanitize_title_candidate("Norwegian tenancy question") == "Norwegian tenancy question"
+
+
+def test_candidate_rejects_instruction_echo_with_none() -> None:
+    assert sanitize_title_candidate(_INSTRUCTION_ECHO) is None
+
+
+def test_candidate_rejects_empty_and_whitespace_with_none() -> None:
+    assert sanitize_title_candidate("") is None
+    assert sanitize_title_candidate("   \n  ") is None
+
+
+def test_candidate_rejects_punctuation_only_with_none() -> None:
+    assert sanitize_title_candidate('"..."') is None
+    assert sanitize_title_candidate("?!.") is None
+
+
+def test_candidate_strips_quotes_punctuation_and_caps_words() -> None:
+    assert sanitize_title_candidate('"Lease question."') == "Lease question"
+    assert (
+        sanitize_title_candidate("one two three four five six seven eight nine ten")
+        == "one two three four five six seven eight"
+    )
+
+
+def test_fallback_wrapper_matches_the_strict_half() -> None:
+    # sanitize_conversation_title == strict-half OR fallback, byte-for-byte.
+    assert sanitize_conversation_title("Budget planning", first_message="x") == (
+        sanitize_title_candidate("Budget planning")
+    )
+    assert sanitize_conversation_title(_INSTRUCTION_ECHO, first_message="my words here") == (
+        "my words here"
     )

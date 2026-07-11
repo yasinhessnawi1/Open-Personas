@@ -353,6 +353,9 @@ async def post_message(
         user_message=body.content,
         channel=body.channel,
         title_builder=getattr(request.app.state, "title_builder", None),
+        # R9-020: the R9-012 live channel — a first-turn title write publishes
+        # sidebar.changed so open tabs pick the new title up without a reload.
+        event_channel=getattr(request.app.state, "event_channel", None),
         images=list(body.images) if body.images else None,
         turn_has_image=turn_has_image,
         document_context=document_context,

@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
 
     from persona_api.background.chat_turn_worker import ChatTurnHandle, ChatTurnRegistry
+    from persona_api.realtime.channel import UserEventChannel
     from persona_api.schemas import ChannelContext
     from persona_api.schemas import ImageRef as ImageRefSchema
     from persona_api.services.chat_turn_sink import MessagesTurnSink
@@ -126,6 +127,32 @@ def _fallback_title(first_message: str) -> str:
     return " ".join(words[:_FALLBACK_TITLE_WORDS])
 
 
+def sanitize_title_candidate(raw: str) -> str | None:
+    """The strict half of title sanitisation: a cleaned title, or ``None`` when
+    the generation is unusable (R9-020).
+
+    Rejects an instruction echo (the R4 bug class), strips wrapping quotes +
+    trailing punctuation, and caps the word count + length. Returns ``None``
+    instead of falling back so REFRESH callers (the ``title_refresh`` job) can
+    keep an existing good title rather than regress it to first-words — the
+    first-turn path composes its fallback via :func:`sanitize_conversation_title`.
+    """
+    if not raw:
+        return None
+    # First non-empty line only — a model may wrap the title in prose.
+    line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+    cleaned = line.strip("\"'“”‘’`").strip()
+    if any(marker in cleaned.lower() for marker in _TITLE_ECHO_MARKERS):
+        return None
+    cleaned = cleaned.rstrip(".!?,;:").strip()
+    if not cleaned:
+        return None
+    words = cleaned.split()
+    if len(words) > _MAX_TITLE_WORDS:
+        cleaned = " ".join(words[:_MAX_TITLE_WORDS])
+    return cleaned[:_MAX_TITLE_LEN] or None
+
+
 def sanitize_conversation_title(raw: str, *, first_message: str) -> str:
     """Turn a title-model's raw output into a safe conversation title (R4 T3).
 
@@ -137,21 +164,8 @@ def sanitize_conversation_title(raw: str, *, first_message: str) -> str:
     the first words of the user's message (or a default) on a bad generation.
     Always returns a non-empty, human-readable title.
     """
-    fallback = _fallback_title(first_message)
-    if not raw:
-        return fallback
-    # First non-empty line only — a model may wrap the title in prose.
-    line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-    cleaned = line.strip("\"'“”‘’`").strip()
-    if any(marker in cleaned.lower() for marker in _TITLE_ECHO_MARKERS):
-        return fallback
-    cleaned = cleaned.rstrip(".!?,;:").strip()
-    if not cleaned:
-        return fallback
-    words = cleaned.split()
-    if len(words) > _MAX_TITLE_WORDS:
-        cleaned = " ".join(words[:_MAX_TITLE_WORDS])
-    return cleaned or fallback
+    candidate = sanitize_title_candidate(raw)
+    return candidate if candidate is not None else _fallback_title(first_message)
 
 
 # Server-side cap on the last-message preview returned by the LIST endpoint, so
@@ -454,6 +468,7 @@ async def start_chat_turn(
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
     file_storage: FileStorage | None = None,
+    event_channel: UserEventChannel | None = None,
 ) -> ChatTurnHandle:
     """Persist the turn at START + launch it detached; return the live handle (P1, T2b).
 
@@ -611,14 +626,22 @@ async def start_chat_turn(
                 context={"conversation_id": conversation_id},
             ) from exc
 
-        # Auto-title the first turn from its first user message (best-effort, small
-        # tier) on the detached completion path — never delays / breaks the turn.
+        # Auto-title the first turn from its first user message (best-effort, title
+        # tier — R9-020) on the detached completion path — never delays / breaks the
+        # turn. A successful write publishes sidebar.changed so open tabs update live.
         on_complete: Callable[[], Awaitable[None]] | None = None
         if is_first_turn and title_builder is not None:
             _title_builder = title_builder
 
             async def on_complete() -> None:
-                await _maybe_set_title(rls_engine, conversation_id, user_message, _title_builder)
+                await _maybe_set_title(
+                    rls_engine,
+                    conversation_id,
+                    user_message,
+                    _title_builder,
+                    owner_id=owner_id,
+                    event_channel=event_channel,
+                )
 
         handle = registry.start(
             conversation_id=conversation_id,
@@ -913,10 +936,19 @@ async def _maybe_set_title(
     conversation_id: str,
     first_message: str,
     title_builder: Callable[[str], Awaitable[str]],
+    *,
+    owner_id: str | None = None,
+    event_channel: UserEventChannel | None = None,
 ) -> None:
     """Generate + persist a short title from the first message. Best-effort: any
     failure (model error, timeout) is logged and swallowed — the conversation
-    keeps its default title rather than breaking the turn."""
+    keeps its default title rather than breaking the turn.
+
+    R9-020: a successful title write publishes ``sidebar.changed``
+    (reason=``conversation.title_updated``) post-commit, so the owner's open
+    tabs pick the new title up live (the R9-012 channel; best-effort, no
+    channel / no tab → the sidebar catches up on its next refetch).
+    """
     try:
         raw = await title_builder(first_message)
         # R4 T3: sanitise the model output (reject an instruction echo, strip
@@ -927,5 +959,13 @@ async def _maybe_set_title(
             set_title(
                 rls_engine=rls_engine, conversation_id=conversation_id, title=title[:_MAX_TITLE_LEN]
             )
+            if owner_id is not None:
+                from persona_api.services.notifications_service import (  # noqa: PLC0415
+                    publish_sidebar_changed,
+                )
+
+                publish_sidebar_changed(
+                    event_channel, owner_id=owner_id, reason="conversation.title_updated"
+                )
     except Exception as exc:  # noqa: BLE001 — auto-title must never break a chat turn
         _log.warning("auto-title failed for {cid}: {err}", cid=conversation_id, err=str(exc))

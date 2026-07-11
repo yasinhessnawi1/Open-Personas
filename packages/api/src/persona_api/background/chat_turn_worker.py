@@ -250,6 +250,12 @@ class ChatTurnRegistry:
             SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.conversation_id)
         )
         handle._last_flush = time.monotonic()
+        # R9-020: snapshot the PRE-turn message count now — the loop appends this
+        # turn's user+assistant pair to ``conversation.messages`` while it runs, so
+        # a post-loop ``len()`` is the new total, not the prior one. The durable
+        # truth after a clean completion is exactly ``prior + 2`` (open_turn's two
+        # rows, finalized), which is what the title-refresh crossing window needs.
+        prior_message_count = len(conversation.messages)
         tier = "frontier"  # fallback; replaced by the router's real choice (tier event)
         routing: dict[str, object] | None = None
         last_chunk: StreamChunk | None = None
@@ -349,6 +355,7 @@ class ChatTurnRegistry:
             if status == "complete":
                 self._deduct(handle)
                 self._enqueue_synthesis(handle, conversation)
+                self._enqueue_title_refresh(handle, prior_message_count)
                 await self._originate_task(originated)
                 await self._apply_steering(steered)
                 await self._apply_reschedule(rescheduled)
@@ -458,6 +465,28 @@ class ChatTurnRegistry:
             conversation_id=handle.conversation_id,
             persona_id=conversation.persona_id,
             message_count=len(conversation.messages) + 1,
+        )
+
+    def _enqueue_title_refresh(self, handle: ChatTurnHandle, prior_message_count: int) -> None:
+        """Enqueue a whole-conversation title refresh at threshold crossings (R9-020).
+
+        Same clean-completion boundary as synthesis; additive + no-op without a
+        queue. ``prior_message_count`` is the pre-turn snapshot from ``_run_turn``
+        (taken before the loop mutated the conversation), so the completed turn
+        grew the durable total ``prior → prior + 2`` — the crossing window the
+        trigger evaluates against ``{4, 10, 24, 50, 100}``. NEVER blocks/affects
+        the reply already streamed.
+        """
+        from persona_api.services.title_trigger import (  # noqa: PLC0415
+            enqueue_conversation_title_refresh,
+        )
+
+        enqueue_conversation_title_refresh(
+            self._job_queue,
+            owner_id=handle.owner_id,
+            conversation_id=handle.conversation_id,
+            previous_count=prior_message_count,
+            new_count=prior_message_count + 2,
         )
 
     async def _run_on_complete(

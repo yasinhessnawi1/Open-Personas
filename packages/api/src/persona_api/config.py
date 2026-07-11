@@ -335,6 +335,12 @@ class APIConfig(BaseSettings):
     # confabulation root (the recognizer never fired) and is measurably slower than
     # mid (P9-R-2). Override to ``frontier`` for reliability-critical deploys.
     recognition_tier: str = Field(default="mid", validation_alias="PERSONA_API_RECOGNITION_TIER")
+    # R9-020: the tier conversation titles are generated on — the first-turn
+    # auto-title AND the ``title_refresh`` background job. ``mid`` by default
+    # (the "title" surface row): titles are user-read chrome, and small was the
+    # measured echo→first-words-fallback root (the R4 sanitizer's fallback fired
+    # on ~every turn). Override to ``frontier`` for maximum title quality.
+    title_tier: str = Field(default="mid", validation_alias="PERSONA_API_TITLE_TIER")
     # Spec P9 (P9-D-4/D-7): the GLOBAL gate for the Spec-23 intelligent
     # (model-within-tier) routing machinery. Default OFF — the deliberate
     # surface→tier policy is the path; the scorer is a dormant, reversible

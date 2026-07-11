@@ -702,7 +702,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.authoring_tier = config.authoring_tier
             app.state.build_conversation_loop = runtime_factory.build_conversation_loop
             app.state.build_agentic_loop = runtime_factory.build_agentic_loop
-            app.state.title_builder = runtime_factory.build_title  # auto-title (small tier)
+            app.state.title_builder = runtime_factory.build_title  # auto-title (title tier, R9-020)
             # Spec K2 (T8d): expose the graph store on the factory so the
             # ``record_user_fact`` direct-write tool can merge into the user's
             # graph per request (the request-path graph wiring). Built once on the

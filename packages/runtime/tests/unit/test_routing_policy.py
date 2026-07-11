@@ -96,6 +96,17 @@ class TestPolicyTable:
         # User-read run output (Phase 1 gate ruling).
         assert SURFACE_TIER_POLICY["agentic_step"] == "frontier"
 
+    def test_title_is_mid_never_small(self) -> None:
+        # R9-020: titles are user-read chrome; small was the echo→first-words
+        # fallback root (the R4 sanitizer fired on ~every conversation). This
+        # guard FAILS if anyone re-pins titles to small — that re-opens the bug.
+        assert SURFACE_TIER_POLICY["title"] == "mid"
+
+    def test_title_override_beats_the_table(self) -> None:
+        # The PERSONA_API_TITLE_TIER plumbing (the recognition precedent).
+        assert tier_for("title") == "mid"
+        assert tier_for("title", override="frontier") == "frontier"
+
     def test_table_is_exhaustive_over_the_surface_literal(self) -> None:
         assert set(SURFACE_TIER_POLICY) == set(get_args(Surface))
 

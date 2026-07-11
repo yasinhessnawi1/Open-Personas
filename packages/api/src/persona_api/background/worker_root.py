@@ -45,6 +45,7 @@ from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 from persona_runtime.legs import CompactingCheckpointWriter
+from persona_runtime.routing import tier_for
 
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
@@ -81,6 +82,10 @@ from persona_api.jobs.handlers.episodic_consolidation import (
     register_episodic_consolidation_handler,
 )
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
+from persona_api.jobs.handlers.title_refresh import (
+    build_title_refresh_generator,
+    register_title_refresh_handler,
+)
 from persona_api.jobs.queue import JobQueue
 from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
 from persona_api.jobs.worker import build_worker
@@ -221,6 +226,22 @@ def build_worker_registry(
         runner=synthesizer,
         repository=PgSynthesisRepository(),
         enqueue_consolidation=enqueue_consolidation,
+    )
+
+    # Title refresh (R9-020): dynamic self-improving conversation titles. The
+    # backend is resolved ONCE here on the TITLE tier (P9 ``title`` surface — mid
+    # by default, ``PERSONA_API_TITLE_TIER`` overridable; the recognition
+    # precedent) and closed over, the same build-time pattern as the synthesis
+    # backend above. Registered unconditionally — the producer (the chat turn
+    # worker's threshold trigger) is already no-op without a queue, and a
+    # keyless boot never reaches this root (the app catches AuthenticationError
+    # around ``start_in_process_worker``). A successful refresh pings
+    # ``sidebar.changed`` through the SAME channel the SSE endpoint serves.
+    title_backend = tier_registry.get(tier_for("title", override=config.title_tier))
+    register_title_refresh_handler(
+        registry,
+        generator=build_title_refresh_generator(title_backend),
+        event_channel=event_channel,
     )
 
     # The K8 sleep-time engine (Spec K8, K8-D-8) — registered ONLY when enabled

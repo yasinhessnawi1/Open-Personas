@@ -19,8 +19,13 @@ message. :data:`SURFACE_TIER_POLICY` is the whole policy, stated once:
   ``PERSONA_API_RECOGNITION_TIER`` (the override arrives through
   :func:`tier_for`'s ``override`` parameter — the runtime stays env-free;
   the API composition root owns env reads).
-* ``background`` → ``small`` — synthesis, titles, summaries: narrow, unread,
+* ``background`` → ``small`` — synthesis, summaries: narrow, unread,
   high-volume, latency-insensitive.
+* ``title`` → ``mid`` — conversation titles are USER-READ chrome (every
+  sidebar row), and small was the measured confabulation root there too
+  (R9-020: the small tier echoed the titling instruction, so R4's sanitizer
+  fell back to first-words on ~every conversation). Env-overridable via
+  ``PERSONA_API_TITLE_TIER`` (same override plumbing as recognition).
 
 :class:`PolicyRouter` carries the policy through the Spec 18
 :class:`~persona_runtime.routing.protocol.Router` Protocol so the
@@ -59,13 +64,20 @@ __all__ = [
 ]
 
 
-Surface = Literal["chat", "voice", "background", "recognition", "authoring", "agentic_step"]
+Surface = Literal[
+    "chat", "voice", "background", "recognition", "authoring", "agentic_step", "title"
+]
 """The P9-D-1 surface set — every model-calling job maps to exactly one.
 
 ``agentic_step`` is its own row (not an alias of ``chat``) because its
 composition site (:meth:`AgenticLoop._tier_for_step`) is not profile-driven;
 per the Phase 1 gate ruling, agentic steps produce user-read run output and
 route frontier.
+
+``title`` is its own row (not ``background``) because titles are user-read
+chrome, and re-pinning them to small re-opens the R4 echo→fallback bug
+(R9-020). ``background`` keeps its other consumers (synthesis, summaries)
+untouched.
 """
 
 
@@ -77,6 +89,7 @@ SURFACE_TIER_POLICY: Final[Mapping[Surface, str]] = MappingProxyType(
         "recognition": "mid",  # P9-D-2 — min viable for intent parsing
         "authoring": "frontier",  # incl. the tool/capability recommenders
         "agentic_step": "frontier",  # user-read run output
+        "title": "mid",  # R9-020 — user-read chrome; small = the echo→fallback root
     }
 )
 """The policy table. One place, one statement, no inference."""
