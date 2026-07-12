@@ -11,15 +11,20 @@
  * quiet-hours warn) → confirm → apply through the SAME CAS door (bar 4).
  */
 
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/auth";
+import { useConfirm } from "@/components/providers/confirm-provider";
+import { useNotify } from "@/components/providers/notification-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   applyReschedule,
+  deleteSchedule,
   fetchOccurrences,
   previewReschedule,
   type ReschedulePreview,
+  ScheduleApiError,
 } from "@/lib/api/schedule-client";
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { personaIdentityStyle } from "@/lib/persona-identity";
@@ -54,11 +59,18 @@ export interface CalendarViewProps {
   personas?: ReminderPersona[];
   /** The profile timezone the create flow anchors to (browser tz when unset). */
   defaultTimezone?: string | null;
+  /**
+   * R9-024: scope the calendar to one persona's schedules — the chat right-panel instance.
+   * Unset (the `/schedule` page) shows every owned schedule, exactly as before (the
+   * server-side filter is additive-optional — same component, no fork).
+   */
+  personaId?: string;
 }
 
 export function CalendarView({
   personas = [],
   defaultTimezone,
+  personaId,
 }: CalendarViewProps) {
   const { getToken } = useAuth();
   const refreshSidebar = useSidebarRefresh();
@@ -77,14 +89,14 @@ export function CalendarView({
 
   const load = useCallback(async () => {
     try {
-      setData(await fetchOccurrences(await getToken(), from, to));
+      setData(await fetchOccurrences(await getToken(), from, to, personaId));
       setError(null);
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to load your schedule.",
       );
     }
-  }, [getToken, from, to]);
+  }, [getToken, from, to, personaId]);
 
   useEffect(() => {
     void load();
@@ -304,17 +316,44 @@ interface RescheduleDialogProps {
 }
 
 /** The calendar's edit twin: build cadence → preview (engine) → confirm → apply (same door).
- * Inherits the one-time kind from the shared builder (Spec A10, A10-D-5) for free. */
+ * Inherits the one-time kind from the shared builder (Spec A10, A10-D-5) for free.
+ *
+ * R9-024: also the delete affordance. Every write (preview/apply/delete) is caught — a 409
+ * (`schedule_state_conflict`, R9-023's fired-one-time re-arm guard) surfaces as a named
+ * conflict toast; any other failure surfaces a generic one. Never an uncaught rejection. */
 function RescheduleDialog({
   occurrence,
   onClose,
   onApplied,
 }: RescheduleDialogProps) {
   const { getToken } = useAuth();
+  const { notify } = useNotify();
+  const confirm = useConfirm();
+  const refreshSidebar = useSidebarRefresh();
+  const t = useTranslations("schedule.calendar");
+  const tc = useTranslations("confirm");
   const [cadence, setCadence] = useState<CadenceInput | null>(null);
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const tz = occurrence.timezone;
+
+  const surfaceFailure = useCallback(
+    (e: unknown, fallback: string) => {
+      if (
+        e instanceof ScheduleApiError &&
+        e.code === "schedule_state_conflict"
+      ) {
+        notify({
+          level: "error",
+          title: t("conflictTitle"),
+          body: t("conflictBody"),
+        });
+        return;
+      }
+      notify({ level: "error", title: fallback });
+    },
+    [notify, t],
+  );
 
   async function doPreview() {
     if (!cadence) return;
@@ -327,6 +366,8 @@ function RescheduleDialog({
           timezone: tz,
         }),
       );
+    } catch (e) {
+      surfaceFailure(e, t("previewFailed"));
     } finally {
       setBusy(false);
     }
@@ -342,7 +383,27 @@ function RescheduleDialog({
         timezone: tz,
       });
       await onApplied();
-    } finally {
+    } catch (e) {
+      surfaceFailure(e, t("rescheduleFailed"));
+      setBusy(false);
+    }
+  }
+
+  async function doDelete() {
+    const ok = await confirm({
+      title: t("deleteConfirmTitle"),
+      description: t("deleteConfirmBody"),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await deleteSchedule(await getToken(), occurrence.schedule_id);
+      refreshSidebar(); // R9-012: the Schedule badge reflects the removed row
+      await onApplied();
+    } catch (e) {
+      surfaceFailure(e, t("deleteFailed"));
       setBusy(false);
     }
   }
@@ -368,6 +429,14 @@ function RescheduleDialog({
       <div className="v-reschedule-actions">
         <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
           Cancel
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          onClick={doDelete}
+          disabled={busy}
+        >
+          {t("deleteButton")}
         </Button>
         {preview ? (
           <Button type="button" onClick={doApply} disabled={busy || !cadence}>

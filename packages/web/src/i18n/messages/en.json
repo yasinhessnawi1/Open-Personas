@@ -649,6 +649,10 @@
       "downloadShort": "Download",
       "selectPrompt": "Select a file to preview"
     },
+    "calendar": {
+      "button": "Calendar",
+      "title": "{name}'s schedule"
+    },
     "toolRunning": "{name} is using {tool}…",
     "toolUsing": "Used {tool}",
     "toolUsingNow": "Using {tool}…",
@@ -882,6 +886,18 @@
     "duplicate": "Duplicate",
     "deleteTitle": "Delete {name}?",
     "duplicateTitle": "Duplicate {name}?"
+  },
+  "schedule": {
+    "calendar": {
+      "deleteButton": "Delete",
+      "deleteConfirmTitle": "Delete this reminder?",
+      "deleteConfirmBody": "This can't be undone.",
+      "deleteFailed": "Couldn't delete this reminder. Try again.",
+      "conflictTitle": "Already fired",
+      "conflictBody": "This reminder already ran — create a new one instead.",
+      "rescheduleFailed": "Couldn't update this reminder. Try again.",
+      "previewFailed": "Couldn't preview this change. Try again."
+    }
   },
   "notifications": {
     "open": "Notifications",

@@ -25,6 +25,7 @@ from persona_api.db.engine import rls_connection
 from persona_api.schedules.store import ScheduleStore
 
 if TYPE_CHECKING:
+    from persona.schedules import Schedule
     from sqlalchemy import Engine
 
     from persona_api.config import APIConfig
@@ -78,7 +79,13 @@ class OccurrencesResult(BaseModel):
 
 
 def list_occurrences(
-    engine: Engine, *, owner_id: str, from_: datetime, to: datetime, config: APIConfig
+    engine: Engine,
+    *,
+    owner_id: str,
+    from_: datetime,
+    to: datetime,
+    config: APIConfig,
+    persona_id: str | None = None,
 ) -> OccurrencesResult:
     """Compute the owner's occurrences in ``[from_, to]`` + recent history, server-capped.
 
@@ -86,6 +93,15 @@ def list_occurrences(
     ``schedule_occurrences_max_count``; ``truncated`` is set when either binds. Occurrences come
     from :func:`occurrences_between` (the tick's own engine path); history from the ``audit_log``
     fire/miss notes. Everything is owner-scoped (RLS).
+
+    ``persona_id`` (R9-024, additive-optional) restricts the result to schedules that resolve to
+    that persona — the chat right-panel calendar's server-side filter. Resolution is INDIRECT
+    (schedules carry no ``persona_id`` column, :func:`_resolved_persona_id`): a task-backed
+    schedule (``task_scheduled_fire``) resolves through the SAME ``_task_by_schedule`` join
+    already computed for every occurrence's ``task_id``/``persona_id`` fields (no extra query); a
+    schedule with no backing task (``initiative_scan``) resolves from its own
+    ``payload_template.persona_id``. ``None`` (the default) is byte-identical to pre-R9-024
+    behaviour — no schedule is ever filtered out.
     """
     max_count = config.schedule_occurrences_max_count
     horizon = timedelta(days=config.schedule_occurrences_max_horizon_days)
@@ -98,6 +114,10 @@ def list_occurrences(
 
     collected: list[Occurrence] = []
     for schedule in schedules:
+        if persona_id is not None:
+            resolved = _resolved_persona_id(schedule, task_by_schedule)
+            if resolved != persona_id:
+                continue
         # Cap each schedule at the global budget; the merged list is truncated below.
         for fire_at in occurrences_between(schedule, from_, effective_to, cap=max_count):
             task = task_by_schedule.get(schedule.id)
@@ -129,6 +149,25 @@ def list_occurrences(
         window_to=effective_to,
         truncated=truncated,
     )
+
+
+def _resolved_persona_id(
+    schedule: Schedule, task_by_schedule: dict[str, tuple[str, str]]
+) -> str | None:
+    """The schedule's owning persona for filtering (R9-024) — never exposed on the wire.
+
+    Two linkage kinds, resolved in priority order: a task-backed schedule
+    (``task_scheduled_fire``) is owned by its task's ``persona_id`` (the ``_task_by_schedule``
+    join); a schedule with no backing task (``initiative_scan``) carries ``persona_id`` directly
+    in its ``payload_template``. Neither present → ``None`` (never matches a filter). This is
+    STRICTLY an internal filter signal — the ``Occurrence.persona_id`` field keeps its existing
+    task-only derivation (unchanged) so the absent-filter response stays byte-identical.
+    """
+    task = task_by_schedule.get(schedule.id)
+    if task is not None:
+        return task[1]
+    raw = schedule.payload_template.get("persona_id")
+    return raw if isinstance(raw, str) else None
 
 
 def _task_by_schedule(engine: Engine, owner_id: str) -> dict[str, tuple[str, str]]:

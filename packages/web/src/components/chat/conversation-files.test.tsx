@@ -140,4 +140,62 @@ describe("ConversationFiles", () => {
     fireEvent.click(screen.getByRole("button", { name: "Files" }));
     expect(screen.getByText("No files yet")).toBeInTheDocument();
   });
+
+  // R9-024: the controlled open/onOpenChange escape hatch — lets a sibling
+  // right panel (the new chat Calendar) close this one, "one panel at a time".
+  describe("controlled open (R9-024)", () => {
+    it("open=false renders the button but never auto-opens the panel", () => {
+      setItems([]);
+      render(
+        <NextIntlClientProvider locale="en" messages={messages}>
+          <ConversationFiles
+            personaId="mara"
+            conversationId="conv_1"
+            personaName="Mara"
+            open={false}
+            onOpenChange={() => {}}
+          />
+        </NextIntlClientProvider>,
+      );
+      expect(screen.queryByText("Files in this conversation")).toBeNull();
+    });
+
+    it("open=true renders the panel without a button click", () => {
+      setItems([]);
+      render(
+        <NextIntlClientProvider locale="en" messages={messages}>
+          <ConversationFiles
+            personaId="mara"
+            conversationId="conv_1"
+            personaName="Mara"
+            open
+            onOpenChange={() => {}}
+          />
+        </NextIntlClientProvider>,
+      );
+      expect(
+        screen.getByText("Files in this conversation"),
+      ).toBeInTheDocument();
+    });
+
+    it("clicking the button calls onOpenChange(true) instead of managing its own state", () => {
+      setItems([]);
+      const onOpenChange = vi.fn();
+      render(
+        <NextIntlClientProvider locale="en" messages={messages}>
+          <ConversationFiles
+            personaId="mara"
+            conversationId="conv_1"
+            personaName="Mara"
+            open={false}
+            onOpenChange={onOpenChange}
+          />
+        </NextIntlClientProvider>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Files" }));
+      expect(onOpenChange).toHaveBeenCalledWith(true);
+      // Controlled: the panel does NOT open on its own (the parent didn't flip the prop).
+      expect(screen.queryByText("Files in this conversation")).toBeNull();
+    });
+  });
 });

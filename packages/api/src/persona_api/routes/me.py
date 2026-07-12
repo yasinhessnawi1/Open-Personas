@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — used in cast() + Query at runtime
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from persona.errors import (
     InvalidTimezoneError,
@@ -176,6 +176,7 @@ async def get_schedule_occurrences(
     request: Request,
     from_: datetime = Query(alias="from"),
     to: datetime = Query(alias="to"),
+    persona_id: str | None = Query(default=None),
     user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — RLS via contextvar
 ) -> OccurrencesResult:
     """The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).
@@ -183,6 +184,11 @@ async def get_schedule_occurrences(
     Computed from the engine's own recurrence path (never a client reimplementation), RLS-scoped
     to the caller. The window is server-capped (horizon + count); the response's ``truncated``
     marker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.
+
+    ``persona_id`` (R9-024, additive-optional) scopes the result to one persona's schedules — the
+    chat right-panel calendar. Server-side resolved (see
+    :func:`persona_api.services.occurrences_service._resolved_persona_id`); omitted, the response
+    is byte-identical to pre-R9-024 (every owned schedule, as before).
     """
     if from_ > to:
         raise HTTPException(status_code=422, detail="'from' must be <= 'to'")
@@ -192,6 +198,7 @@ async def get_schedule_occurrences(
         from_=from_,
         to=to,
         config=request.app.state.config,
+        persona_id=persona_id,
     )
 
 
@@ -379,6 +386,33 @@ async def apply_schedule_reschedule(
         one_time_at=body.one_time_at,
         timezone=applied.timezone,
         now=now,
+    )
+
+
+@router.delete("/schedule/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_schedule(
+    schedule_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> None:
+    """Delete a schedule (R9-024 — the calendar's delete affordance, chat + ``/schedule``).
+
+    RLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant
+    id is indistinguishable from a missing one (both 404 — no existence oracle). The backing task
+    (if any — a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops
+    future fires, matching the store's existing compensating-delete semantics used elsewhere
+    (``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.
+    """
+    try:
+        ScheduleStore(request.app.state.rls_engine).delete(user.id, schedule_id)
+    except ScheduleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="schedule not found") from exc
+    # R9-012: post-commit sidebar liveness ping — the Schedule badge on the owner's
+    # other tabs/devices catches up (data-only; best-effort).
+    notifications_service.publish_sidebar_changed(
+        getattr(request.app.state, "event_channel", None),
+        owner_id=user.id,
+        reason="schedule.deleted",
     )
 
 

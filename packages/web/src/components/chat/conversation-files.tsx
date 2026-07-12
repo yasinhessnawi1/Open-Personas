@@ -110,10 +110,20 @@ export function ConversationFiles({
   personaId,
   conversationId,
   personaName,
+  open: openProp,
+  onOpenChange,
 }: {
   personaId: string;
   conversationId: string;
   personaName: string;
+  /**
+   * R9-024: controlled-open escape hatch so a sibling right-panel (the new chat
+   * Calendar) can close this one on open — "only one right panel at a time".
+   * Omitted (every existing call site, including this component's own tests),
+   * the panel keeps its uncontrolled internal `open` state — byte-identical.
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const t = useTranslations("chat.files");
   const tr = useTranslations("chat.output.renderer");
@@ -123,7 +133,9 @@ export function ConversationFiles({
     conversationId,
   );
 
-  const [open, setOpen] = useState(false);
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = onOpenChange ?? setOpenState;
   const [selectedRef, setSelectedRef] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("rendered");
 

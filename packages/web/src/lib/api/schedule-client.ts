@@ -47,6 +47,45 @@ export interface ReschedulePreview {
   quiet_hours_offer: string | null;
 }
 
+/** The structured `{error, detail, context?}` shape every persona-api handler returns. */
+interface ScheduleErrorBody {
+  error?: string;
+  detail?: string;
+  context?: Record<string, string>;
+}
+
+/**
+ * A failed schedule-API call — carries the HTTP status + (when the body parsed as the
+ * project's structured error shape) the machine-readable `code` (R9-024: lets a caller
+ * distinguish a 409 `schedule_state_conflict` — R9-023's fired-one-time re-arm guard —
+ * from any other failure, instead of pattern-matching a message string).
+ */
+export class ScheduleApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(
+    status: number,
+    path: string,
+    body: ScheduleErrorBody | undefined,
+  ) {
+    super(body?.detail ?? `request to ${path} failed: ${status}`);
+    this.name = "ScheduleApiError";
+    this.status = status;
+    this.code = body?.error;
+  }
+}
+
+async function parseErrorBody(
+  res: Response,
+): Promise<ScheduleErrorBody | undefined> {
+  try {
+    return (await res.json()) as ScheduleErrorBody;
+  } catch {
+    return undefined; // a non-JSON failure body (e.g. a proxy/5xx page) — status alone still surfaces
+  }
+}
+
 async function authFetch<T>(
   path: string,
   token: string | null | undefined,
@@ -57,24 +96,58 @@ async function authFetch<T>(
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
   if (!res.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${path} failed: ${res.status}`);
+    throw new ScheduleApiError(res.status, path, await parseErrorBody(res));
   }
   return (await res.json()) as T;
 }
 
-/** The owner's occurrences + fire history in a window — the engine's own computation (criterion 5). */
+/** Like {@link authFetch}, for a 204-No-Content verb (delete) — never parses a JSON body. */
+async function authFetchVoid(
+  path: string,
+  token: string | null | undefined,
+  init?: RequestInit,
+): Promise<void> {
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+  if (!res.ok) {
+    throw new ScheduleApiError(res.status, path, await parseErrorBody(res));
+  }
+}
+
+/** The owner's occurrences + fire history in a window — the engine's own computation (criterion 5).
+ *
+ * `personaId` (R9-024, optional): the chat right-panel calendar's server-side filter — omitted,
+ * this is byte-identical to the `/schedule` page's unfiltered call.
+ */
 export function fetchOccurrences(
   token: string | null | undefined,
   from: Date,
   to: Date,
+  personaId?: string,
 ): Promise<OccurrencesResult> {
   const q = new URLSearchParams({
     from: from.toISOString(),
     to: to.toISOString(),
   });
+  if (personaId) q.set("persona_id", personaId);
   return authFetch<OccurrencesResult>(
     `/v1/me/schedule/occurrences?${q.toString()}`,
     token,
+  );
+}
+
+/** Delete a schedule (R9-024) — the calendar's delete affordance, chat + `/schedule` alike. */
+export function deleteSchedule(
+  token: string | null | undefined,
+  scheduleId: string,
+): Promise<void> {
+  return authFetchVoid(
+    `/v1/me/schedule/${encodeURIComponent(scheduleId)}`,
+    token,
+    {
+      method: "DELETE",
+    },
   );
 }
 

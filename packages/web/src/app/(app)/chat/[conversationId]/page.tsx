@@ -2,8 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { ChatPresenceOrb } from "@/components/chat/chat-presence-orb";
+import { ChatRightPanelGroup } from "@/components/chat/chat-right-panel-group";
 import { ChatWindow } from "@/components/chat/chat-window";
-import { ConversationFiles } from "@/components/chat/conversation-files";
 import type { ChatMessageView } from "@/components/chat/message-element";
 import { ActiveCallIndicator } from "@/components/voice/active-call-indicator";
 import { CallControl } from "@/components/voice/call-control";
@@ -111,8 +111,10 @@ export default async function ChatPage({
         {/* V7 D-V7-5: live cue + one-tap return, only when this persona is on a call. */}
         <ActiveCallIndicator personaId={conv.persona_id} />
         {/* Spec 35 — conversation Files viewer (next to Call, per the v1 design):
-            the unified uploads + generated-artifact index with inline preview. */}
-        <ConversationFiles
+            the unified uploads + generated-artifact index with inline preview.
+            R9-024 — plus the persona-scoped Calendar, coordinated so only one of
+            the two right panels is open at a time. */}
+        <ChatRightPanelGroup
           personaId={conv.persona_id}
           conversationId={conversationId}
           personaName={name}
