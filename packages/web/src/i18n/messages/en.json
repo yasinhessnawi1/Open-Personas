@@ -637,7 +637,6 @@
     "you": "You",
     "openPersona": "Open {name}'s details",
     "remembers": "remembers {count, plural, one {# conversation} other {# conversations}}",
-    "hintMemory": "Shared memory with voice · constraints enforced",
     "hintKeys": "Enter to send · Shift+Enter for newline",
     "files": {
       "button": "Files",
