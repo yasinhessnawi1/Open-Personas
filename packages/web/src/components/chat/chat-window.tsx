@@ -367,9 +367,7 @@ export function ChatWindow({
           }}
           className="border-t bg-background/80 backdrop-blur"
         >
-          {/* R9-026: trimmed from py-3 — the composer sat with excess vertical
-              padding, pushing the input higher than needed above the fold. */}
-          <div className="mx-auto flex w-full max-w-2xl flex-col gap-2 px-4 py-2">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-2 px-4 py-3">
             {/* Spec 35: one compact plain-chip row for the message's pending
                 attachments — images + documents alike (no big preview tray).
                 The files also persist in the header Files viewer. */}
@@ -428,10 +426,7 @@ export function ChatWindow({
                 }}
                 placeholder={t("placeholder", { name: persona.name })}
                 rows={1}
-                // R9-026: py-1 trims the Textarea primitive's default py-2 — the
-                // input's own internal padding sat the text noticeably high in
-                // the box; min-h-10 still keeps a comfortable tap target.
-                className="max-h-40 min-h-10 flex-1 resize-none field-sizing-content py-1"
+                className="max-h-40 min-h-10 flex-1 resize-none field-sizing-content"
               />
               <button
                 type="submit"

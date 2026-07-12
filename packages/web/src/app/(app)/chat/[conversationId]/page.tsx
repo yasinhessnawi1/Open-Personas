@@ -24,8 +24,19 @@ import { personaIdentityStyle } from "@/lib/persona-identity";
  *
  * DO NOT TOUCH: the serverApi() conversation + persona fetches, the
  * notFound() on 404, parsePersonaYaml, the conversation-message → view
- * mapping, the h-[calc(100svh-3.5rem)] viewport calculation. Audit
- * §chat.plumbing covers the strangler-fig inventory.
+ * mapping. Audit §chat.plumbing covers the strangler-fig inventory.
+ *
+ * R9-026 REOPEN: the root's height was a flat `h-[calc(100svh-3.5rem)]` —
+ * correct only below `md`, where AppShell's mobile-only sticky header
+ * (`h-14` = 3.5rem, `md:hidden`) actually consumes that space above
+ * `<main>`. At `md` and up that header is hidden (0px), but the calc kept
+ * subtracting 3.5rem anyway, so this root sat a fixed 56px short of
+ * `<main>`'s true (flex-grown, viewport-filling) height on desktop — a
+ * dead band below the composer. `<main className="flex flex-1 flex-col">`
+ * (components/shell/app-shell.tsx) DOES fill the viewport on desktop
+ * (verified: Sidebar's `md:h-svh` gives the outer shell row a definite
+ * cross size that stretches through to `<main>`), so `md:h-full` here
+ * correctly resolves against it. Mobile keeps the header-aware calc.
  */
 export default async function ChatPage({
   params,
@@ -76,7 +87,7 @@ export default async function ChatPage({
   );
 
   return (
-    <div className="flex h-[calc(100svh-3.5rem)] flex-col">
+    <div className="flex h-[calc(100svh-3.5rem)] flex-col md:h-full">
       {/* Spec 35: chat header on the editorial .v-chat__head. The avatar + name
           route to the persona detail; the presence avatar (#3) pulses while
           live; the role line surfaces the real shared-memory count. */}
