@@ -117,6 +117,10 @@ _turn_logs_t = Table(
     Column("completion_tokens", Integer, nullable=False),
     Column("latency_ms", Float, nullable=False),
     Column("cost_cents", Float, nullable=False),
+    # Spec M2 (D-M2-4, migration 046): pricing provenance — the mirror must
+    # declare it or ``list_turn_usage``'s select() won't project it and the
+    # /v1/me/usage route can't surface it. NULL = legacy pre-M2 row.
+    Column("cost_basis", Text),
     Column("tool_calls", Integer, nullable=False),
     Column("skill_used", Text),
     Column("history_compacted", Boolean, nullable=False),

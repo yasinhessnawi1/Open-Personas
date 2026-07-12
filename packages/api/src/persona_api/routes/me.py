@@ -82,6 +82,9 @@ async def get_usage(
             prompt_tokens=int(cast("int", r["prompt_tokens"])),
             completion_tokens=int(cast("int", r["completion_tokens"])),
             cost_cents=float(cast("float", r["cost_cents"])),
+            # Spec M2 (D-M2-4): pricing provenance; NULL = legacy pre-M2 row
+            # (the web renders it as an estimate).
+            cost_basis=cast("str | None", r.get("cost_basis")),
             created_at=cast("datetime", r["created_at"]),
         )
         for r in rows

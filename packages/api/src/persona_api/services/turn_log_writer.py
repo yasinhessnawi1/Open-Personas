@@ -44,6 +44,8 @@ class PostgresTurnLogWriter:
                     completion_tokens=log.completion_tokens,
                     latency_ms=log.latency_ms,
                     cost_cents=log.cost_cents,
+                    # Spec M2 (D-M2-4): the pricing provenance rides the row.
+                    cost_basis=log.cost_basis,
                     tool_calls=log.tool_calls,
                     skill_used=log.skill_used,
                     history_compacted=log.history_compacted,

@@ -492,7 +492,19 @@ class CreditsResponse(_Output):
 
 
 class UsageEntry(_Output):
-    """One usage-log row (per-turn telemetry, paginated)."""
+    """One usage-log row (per-turn telemetry, paginated).
+
+    Spec M2 (D-M2-4) additive fields — the web can label estimates vs actuals:
+
+    * ``cost_basis`` — how ``cost_cents`` was derived: ``"actual_openrouter"``
+      (the OpenRouter response's own cost — what we actually paid),
+      ``"estimate_static"`` / ``"estimate_catalog"`` (resolver-chain
+      estimates), ``"unpriced"`` (no data; 0.0). ``None`` = legacy pre-M2
+      row — render as an estimate.
+    * ``pricing_source`` — constant ``"unified"`` marker: rows are priced by
+      the unified Spec-22/23 source (per-row so the list response shape is
+      unchanged — no envelope break for generated clients).
+    """
 
     persona_id: str | None = None
     tier_used: str
@@ -500,6 +512,8 @@ class UsageEntry(_Output):
     prompt_tokens: int
     completion_tokens: int
     cost_cents: float
+    cost_basis: str | None = None
+    pricing_source: Literal["unified"] = "unified"
     created_at: datetime
 
 

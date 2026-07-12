@@ -643,6 +643,10 @@ turn_logs = Table(
     Column("completion_tokens", Integer, nullable=False),
     Column("latency_ms", Float, nullable=False),
     Column("cost_cents", Float, nullable=False, server_default=text("0")),
+    # Spec M2 (D-M2-4, migration 046): how ``cost_cents`` was derived —
+    # "actual_openrouter" | "estimate_static" | "estimate_catalog" |
+    # "unpriced". NULL = legacy pre-M2 row (rendered as an estimate).
+    Column("cost_basis", Text),
     Column("tool_calls", Integer, nullable=False, server_default=text("0")),
     Column("skill_used", Text),
     Column(
