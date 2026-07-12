@@ -57,6 +57,14 @@ const messages = {
     thinking: "{name} is thinking…",
     recalling: "Recalling from {store} memory",
     toolRunning: "{name} is using {tool}…",
+    actions: {
+      copy: "Copy message",
+      copied: "Copied",
+      retry: "Retry",
+      readAloud: "Read aloud",
+      stopReading: "Stop reading",
+      loadingAudio: "Loading audio…",
+    },
   },
 };
 
@@ -93,7 +101,12 @@ describe("MessageElement", () => {
     expect(wrap).not.toBeNull();
     expect(wrap?.getAttribute("data-role")).toBe("user");
     expect(wrap?.className).toContain("justify-end");
-    const bubble = wrap?.firstElementChild as HTMLElement | null;
+    // R9-025a: the bubble is targeted by its explicit data-slot (not
+    // `firstElementChild`) — it now shares a column with the hover/focus
+    // message-action-bar, so its DOM position is no longer index 0.
+    const bubble = container.querySelector(
+      '[data-slot="message-bubble"]',
+    ) as HTMLElement | null;
     expect(bubble?.className).toContain("bg-secondary");
     expect(bubble?.textContent).toBe("Hello Astrid");
   });

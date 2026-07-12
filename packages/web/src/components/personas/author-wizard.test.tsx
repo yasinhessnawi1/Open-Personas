@@ -23,6 +23,16 @@ import { PERSONA_EXAMPLE_CATEGORIES } from "@/lib/persona-examples";
 import { SAFETY_CONSTRAINT } from "@/lib/persona-safety";
 import { AuthorWizard } from "./author-wizard";
 
+// R9-025a — the description field now mounts <MicDictation>, which reads
+// the auth façade for a Bearer token. Stub it so the suite needs no Clerk
+// provider (mirrors message-element.test.tsx's exact double-mock).
+vi.mock("@clerk/nextjs", () => ({
+  useAuth: () => ({ getToken: () => Promise.resolve("test-token") }),
+}));
+vi.mock("@/auth", () => ({
+  useAuth: () => ({ getToken: () => Promise.resolve("test-token") }),
+}));
+
 type AuthorHandlers = {
   onChunk?: (delta: string) => void;
   onRetry?: (reason: string) => void;

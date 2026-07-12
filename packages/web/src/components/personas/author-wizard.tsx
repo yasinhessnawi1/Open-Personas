@@ -3,6 +3,7 @@
 import { Sparkles, Wand2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
+import { MicDictation } from "@/components/chat/mic-dictation";
 import { Stack } from "@/components/layout";
 import { SkeletonLine } from "@/components/patterns/loading";
 import { buttonVariants } from "@/components/ui/button";
@@ -94,6 +95,10 @@ export function AuthorWizard({
   const t = useTranslations("author");
   const { author, refine } = useAuthor();
   const [description, setDescription] = useState("");
+  // R9-025a — mic dictation for the free-text description: describing the
+  // persona by speaking gives the author full control over how detailed the
+  // description is, without typing it all out.
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
   const [phase, setPhase] = useState<Phase>("describe");
   // `draft` is the DRAFTER output (carries clarifying questions); it is null for
   // the prebuilt-starter and start-from-scratch paths, which need no refinement.
@@ -368,14 +373,25 @@ export function AuthorWizard({
       <Stack gap={4} data-slot="author-wizard-own">
         <p className="type-body text-muted-foreground">{t("describeHint")}</p>
 
-        <Textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={5}
-          placeholder={t("describePlaceholder")}
-          className="resize-none"
-          data-slot="author-wizard-description"
-        />
+        {/* R9-025a: the mic sits inside the field, bottom-right — describe
+            the persona by speaking instead of typing. */}
+        <div className="relative">
+          <Textarea
+            ref={descriptionRef}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={5}
+            placeholder={t("describePlaceholder")}
+            className="resize-none pr-10"
+            data-slot="author-wizard-description"
+          />
+          <MicDictation
+            value={description}
+            onChange={setDescription}
+            textareaRef={descriptionRef}
+            className="absolute right-2 bottom-2"
+          />
+        </div>
 
         {/* Drafter-path errors only; quick-edit errors render in the card. */}
         {error && !doc ? (

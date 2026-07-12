@@ -32,6 +32,7 @@ import { surfaceValidationFailure } from "./composer/validation-toast";
 import { FileRendererProvider } from "./file-renderer-context";
 import { FileRendererPanel } from "./file-renderer-panel";
 import { type ChatMessageView, MessageElement } from "./message-element";
+import { MicDictation } from "./mic-dictation";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
@@ -90,6 +91,23 @@ export function ChatWindow({
   const { getToken } = useAuth();
   const { messages, streaming, error, send, respondToProactive, reload } =
     useChat(conversationId, initialMessages, persona.id);
+  // R9-025a — retry: find the NEAREST preceding user message (a backward
+  // search, not just `prevMessage`, since a rare historical/proactive-reply
+  // sequence could have consecutive persona messages) and re-send its TEXT
+  // as a new turn via the SAME `send()` the composer uses — see the
+  // retry-seam decision note in message-element.tsx.
+  const handleRetryMessage = useCallback(
+    (assistantMessageId: string) => {
+      const idx = messages.findIndex((m) => m.id === assistantMessageId);
+      for (let i = idx - 1; i >= 0; i--) {
+        if (messages[i].role === "user") {
+          void send(messages[i].content);
+          return;
+        }
+      }
+    },
+    [messages, send],
+  );
   // Spec A11: a BACKGROUND message.delivered for THIS open conversation appears live —
   // refetch the authoritative conversation (never trust the pushed payload; `reload`
   // reconciles by message id, so an already-rendered message is not doubled — A11-D-4).
@@ -343,6 +361,8 @@ export function ChatWindow({
                 persona={persona}
                 prevMessage={i > 0 ? messages[i - 1] : undefined}
                 onRespondToProactive={respondToProactive}
+                onRetryMessage={handleRetryMessage}
+                retryDisabled={streaming}
               />
             ))}
             {error ? (
@@ -413,6 +433,15 @@ export function ChatWindow({
                 currentImageCount={attach.attachedImages.length}
                 imageAttachDisabled={imageAttachDisabled}
                 documentsDisabled={false}
+              />
+              {/* R9-025a — in-chat mic dictation: record -> transcribe ->
+                  insert the editable transcript at the caret. Hidden when
+                  the voice feature is absent (fail-soft). */}
+              <MicDictation
+                value={input}
+                onChange={setInput}
+                textareaRef={textareaRef}
+                disabled={streaming}
               />
               <Textarea
                 ref={textareaRef}

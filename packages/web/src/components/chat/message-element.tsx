@@ -64,6 +64,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { AuthedImage } from "./authed-image";
 import { BudgetIndicator } from "./budget-indicator";
+import { MessageActionBar } from "./message-action-bar";
 import { OutputDispatcher } from "./output/dispatcher";
 import { ImageLightbox } from "./output/image-lightbox";
 import { StreamingTextRenderer } from "./streaming-text-renderer";
@@ -210,6 +211,14 @@ interface MessageElementProps {
     answer: string,
     opts: { isAccept: boolean; proposal?: ProactiveProposal },
   ) => Promise<void>;
+  /**
+   * R9-025a — retry: client-side re-send of the preceding user message as a
+   * NEW turn (see the retry-seam decision note above PersonaMessage). Omit
+   * to hide the retry button entirely (e.g. a read-only transcript viewer).
+   */
+  onRetryMessage?: (assistantMessageId: string) => void;
+  /** R9-025a — disable retry while a turn is active (mirrors the composer's own `sendBlocked`). */
+  retryDisabled?: boolean;
 }
 
 export function MessageElement({
@@ -218,6 +227,8 @@ export function MessageElement({
   prevMessage,
   className,
   onRespondToProactive,
+  onRetryMessage,
+  retryDisabled,
 }: MessageElementProps) {
   if (message.role === "user") {
     return (
@@ -231,6 +242,8 @@ export function MessageElement({
       prevMessage={prevMessage}
       className={className}
       onRespondToProactive={onRespondToProactive}
+      onRetryMessage={onRetryMessage}
+      retryDisabled={retryDisabled}
     />
   );
 }
@@ -252,51 +265,62 @@ function UserMessage({
 
   return (
     <div
-      className={cn("flex items-start justify-end gap-2.5", className)}
+      className={cn("group flex items-start justify-end gap-2.5", className)}
       data-slot="message-element"
       data-role="user"
     >
-      <div className="type-body flex max-w-[80%] flex-col gap-2 rounded-2xl rounded-br-sm bg-secondary px-4 py-2.5 text-secondary-foreground">
-        {hasImages ? (
-          <div
-            className="flex flex-wrap gap-2"
-            data-slot="message-images"
-            data-count={message.images?.length}
-          >
-            {message.images?.map((img) => (
-              <AuthedImage
-                key={img.workspace_path}
-                personaId={persona.id}
-                workspacePath={img.workspace_path}
-                mediaType={img.media_type}
-                alt={img.workspace_path.split("/").pop() ?? "attached image"}
-              />
-            ))}
-          </div>
-        ) : null}
-        {/* Spec 35: attached documents render as read-only plain chips (no
-            preview) so the user sees the file they sent in the thread. */}
-        {hasDocuments ? (
-          <div
-            className="flex flex-wrap gap-2"
-            data-slot="message-documents"
-            data-count={message.documents?.length}
-          >
-            {message.documents?.map((d) => (
-              <DocumentChip
-                key={d.doc_ref}
-                docRef={d.doc_ref}
-                filename={d.filename}
-                format={d.format}
-                sizeBytes={d.size_bytes}
-                strategy={d.strategy}
-              />
-            ))}
-          </div>
-        ) : null}
-        {message.content ? (
-          <span className="whitespace-pre-wrap">{message.content}</span>
-        ) : null}
+      {/* R9-025a: the bubble + hover/focus action bar share a column so the
+          bar sits BELOW the bubble, right-aligned to match it. The bubble
+          itself keeps `data-slot="message-bubble"` + every existing class —
+          tests target it by that slot (not `firstElementChild`) precisely
+          so this wrapper can exist without becoming a fragile coupling. */}
+      <div className="flex max-w-[80%] flex-col items-end gap-1">
+        <div
+          data-slot="message-bubble"
+          className="type-body flex w-full flex-col gap-2 rounded-2xl rounded-br-sm bg-secondary px-4 py-2.5 text-secondary-foreground"
+        >
+          {hasImages ? (
+            <div
+              className="flex flex-wrap gap-2"
+              data-slot="message-images"
+              data-count={message.images?.length}
+            >
+              {message.images?.map((img) => (
+                <AuthedImage
+                  key={img.workspace_path}
+                  personaId={persona.id}
+                  workspacePath={img.workspace_path}
+                  mediaType={img.media_type}
+                  alt={img.workspace_path.split("/").pop() ?? "attached image"}
+                />
+              ))}
+            </div>
+          ) : null}
+          {/* Spec 35: attached documents render as read-only plain chips (no
+              preview) so the user sees the file they sent in the thread. */}
+          {hasDocuments ? (
+            <div
+              className="flex flex-wrap gap-2"
+              data-slot="message-documents"
+              data-count={message.documents?.length}
+            >
+              {message.documents?.map((d) => (
+                <DocumentChip
+                  key={d.doc_ref}
+                  docRef={d.doc_ref}
+                  filename={d.filename}
+                  format={d.format}
+                  sizeBytes={d.size_bytes}
+                  strategy={d.strategy}
+                />
+              ))}
+            </div>
+          ) : null}
+          {message.content ? (
+            <span className="whitespace-pre-wrap">{message.content}</span>
+          ) : null}
+        </div>
+        <MessageActionBar messageRole="user" content={message.content} />
       </div>
       {/* Spec 35: the user's own profile avatar on their turns — mirrors the
           persona avatar on the other side of the thread. */}
@@ -305,12 +329,27 @@ function UserMessage({
   );
 }
 
+/**
+ * R9-025a retry-seam decision: NO server-side regenerate/replace-last-turn
+ * capability exists (verified: conversations.py has no PATCH/PUT on a
+ * message, `PostMessageRequest` carries only `{content, channel?, images?}`,
+ * `chat_turn_sink.open_turn` unconditionally INSERTs a fresh user+assistant
+ * pair every call). So retry is a CLIENT-SIDE re-send of the preceding user
+ * message as a brand-new turn — reusing `useChat.send()` verbatim, the exact
+ * seam `respondToProactive`'s "surface-and-retry" already uses. `send()`
+ * itself already self-blocks while a turn is streaming and silently
+ * reattaches on a raced 409, so retry never bypasses the one-active-turn
+ * invariant; `retryDisabled` (mirrors the composer's `sendBlocked`) is the
+ * belt-and-braces UI-level guard.
+ */
 function PersonaMessage({
   message,
   persona,
   prevMessage,
   className,
   onRespondToProactive,
+  onRetryMessage,
+  retryDisabled,
 }: {
   message: MessageElementView;
   persona: AvatarPersona;
@@ -321,6 +360,8 @@ function PersonaMessage({
     answer: string,
     opts: { isAccept: boolean; proposal?: ProactiveProposal },
   ) => Promise<void>;
+  onRetryMessage?: (assistantMessageId: string) => void;
+  retryDisabled?: boolean;
 }) {
   // D-F2-7 once-per-turn rule: render the avatar UNLESS the previous message
   // was also a persona message (then this is a continuation of the same
@@ -341,7 +382,7 @@ function PersonaMessage({
   return (
     <div
       style={personaIdentityStyle(persona)}
-      className={cn("v-msg__persona", className)}
+      className={cn("v-msg__persona group", className)}
       data-slot="message-element"
       data-role="persona"
       data-shows-avatar={showAvatar ? "true" : "false"}
@@ -401,6 +442,21 @@ function PersonaMessage({
             <ActivityState activities={message.activities} />
           ) : null}
         </div>
+
+        {/* R9-025a: copy / retry / read-aloud — a terminal-only turn action
+            (mid-stream content isn't final yet; retry mid-stream would race
+            the in-progress turn rather than respect it). */}
+        {!message.streaming ? (
+          <MessageActionBar
+            messageRole="persona"
+            content={message.content}
+            personaId={persona.id}
+            onRetry={
+              onRetryMessage ? () => onRetryMessage(message.id) : undefined
+            }
+            retryDisabled={retryDisabled}
+          />
+        ) : null}
 
         {message.tier && !message.streaming ? (
           <div className="v-msg__foot" data-slot="turn-transparency">

@@ -659,6 +659,14 @@
     "error": "Something went wrong while streaming. The conversation was reloaded.",
     "empty": "Send a message to start.",
     "tierLabel": "Model tier: {tier}",
+    "actions": {
+      "copy": "Copy message",
+      "copied": "Copied",
+      "retry": "Retry",
+      "readAloud": "Read aloud",
+      "stopReading": "Stop reading",
+      "loadingAudio": "Loading audio…"
+    },
     "composer": {
       "attach": {
         "label": "Attach file",
@@ -1291,5 +1299,11 @@
       "done": "Disconnected {platform}.",
       "failed": "Couldn't disconnect {platform}. Please try again."
     }
+  },
+  "mic": {
+    "start": "Dictate with your voice",
+    "stop": "Stop recording",
+    "transcribing": "Transcribing…",
+    "permissionDenied": "Microphone access denied — allow it in your browser settings to dictate"
   }
 }

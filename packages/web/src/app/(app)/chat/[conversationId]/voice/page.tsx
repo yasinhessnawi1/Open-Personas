@@ -33,7 +33,12 @@ export default async function VoiceCallPage({
     : null;
 
   return (
-    <div className="h-[calc(100svh-3.5rem)]">
+    // R9-025a rider: the identical unconditional h-[calc(100svh-3.5rem)] bug
+    // fixed on the chat page in ee4a314 — the calc only accounts for
+    // AppShell's mobile-only sticky header (h-14, md:hidden), so at md+ it
+    // sat a fixed 56px short of the viewport. md:h-full overrides at that
+    // breakpoint; mobile keeps the header-aware calc.
+    <div className="h-[calc(100svh-3.5rem)] md:h-full">
       <VoiceCallSurface
         conversationId={conversationId}
         persona={{
