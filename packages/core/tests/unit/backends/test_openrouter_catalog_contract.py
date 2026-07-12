@@ -36,6 +36,11 @@ _STABLE_PUBLIC_SURFACE: frozenset[str] = frozenset(
         "OpenRouterPricing",
         "OpenRouterSubscriptionMode",
         "OpenRouterSubscriptionState",
+        # Spec M2 (D-M2-6) — a conscious contract extension, not leakage: the
+        # catalog TTL default + its env reader join the stable surface (the
+        # composition roots that build priced-data clients import them).
+        "DEFAULT_CATALOG_TTL_S",
+        "catalog_ttl_from_env",
         "free_mode_fallback",
         "subscription_state_from_key_info",
     }
@@ -70,8 +75,19 @@ class TestCatalogClientSurface:
         sig = inspect.signature(OpenRouterCatalogClient.__init__)
         params = sig.parameters
         assert "api_key" in params
-        for kw in ("base_url", "timeout_s", "transport"):
+        # ``ttl_s`` joined at Spec M2 (D-M2-6) — keyword-only like its peers,
+        # defaulted so every pre-M2 construction site is untouched.
+        for kw in ("base_url", "timeout_s", "transport", "ttl_s"):
             assert params[kw].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_ttl_surface_present(self) -> None:
+        # Spec M2 (D-M2-6): the freshness surface the /v1/models path and the
+        # api lifespan task consume. ``list_models`` semantics are UNCHANGED
+        # (staleness is advisory; only refresh_if_stale fetches).
+        assert isinstance(OpenRouterCatalogClient.is_stale, property)
+        assert isinstance(OpenRouterCatalogClient.ttl_s, property)
+        sig = inspect.signature(OpenRouterCatalogClient.refresh_if_stale)
+        assert list(sig.parameters) == ["self"]
 
 
 class TestModelEntryMetadataSurface:

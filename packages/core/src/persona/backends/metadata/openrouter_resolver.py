@@ -99,6 +99,30 @@ class OpenRouterModelMetadataResolver:
         self._index = None
         self._ensure_index(force_refresh=True)
 
+    @property
+    def warm(self) -> bool:
+        """Whether the id→metadata index has been built (Spec M2, D-M2-6).
+
+        ``False`` on a cold resolver — the state in which the turn path's
+        :meth:`resolve_no_fetch` answers ``None``. The lifespan freshness task
+        reads this to decide whether a boot-time index build is still needed
+        when the client cache was already warmed by another consumer.
+        """
+        return self._index is not None
+
+    def reindex(self) -> None:
+        """Rebuild the id→metadata index from the client's CURRENT cache (Spec M2, D-M2-6).
+
+        The TTL companion to :meth:`refresh`: after
+        ``OpenRouterCatalogClient.refresh_if_stale`` already fetched a fresh
+        catalog, the derived index must follow — WITHOUT forcing a second
+        HTTP fetch (``refresh`` would). Also serves as the boot-time warm's
+        index build (the client's lazy first fetch happens inside, off-turn
+        by the caller's contract). Fail-open like every index build.
+        """
+        self._index = None
+        self._ensure_index()
+
     # ------------------------------------------------------------------ #
 
     def _ensure_index(self, *, force_refresh: bool = False) -> dict[str, ModelMetadata]:

@@ -80,7 +80,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from persona.backends.errors import OpenRouterCatalogError
 from persona.backends.metadata.openrouter_resolver import OpenRouterModelMetadataResolver
-from persona.backends.openrouter_catalog import OpenRouterCatalogClient
+from persona.backends.openrouter_catalog import OpenRouterCatalogClient, catalog_ttl_from_env
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
@@ -196,7 +196,9 @@ def _default_client() -> OpenRouterCatalogClient | None:
     if not api_key:
         return None
     base_url = os.environ.get(_BASE_URL_ENV, "").strip() or None
-    return OpenRouterCatalogClient(api_key, base_url=base_url)
+    # Spec M2 (D-M2-6): the module client carries the catalog TTL so the
+    # request-path refresh hook below can keep browse prices fresh.
+    return OpenRouterCatalogClient(api_key, base_url=base_url, ttl_s=catalog_ttl_from_env())
 
 
 @lru_cache(maxsize=1)
@@ -278,6 +280,18 @@ def list_models(
             scope=scope,
         )
         return ModelCatalogResult(models=(), source="openrouter", stale=True)
+
+    # Spec M2 (D-M2-6): the ``/v1/models`` request IS a sanctioned freshness
+    # trigger — the route already runs this whole function off the event loop
+    # (``asyncio.to_thread``), so a TTL-expired catalog re-fetches here, and
+    # the paired module resolver's derived index follows (reindex — never a
+    # second fetch). Fail-open by construction: ``refresh_if_stale`` serves
+    # the stale copy on failure. Default-client path ONLY — an injected test
+    # client keeps its scripted cache untouched.
+    if client is None:
+        default_resolver = _default_resolver()
+        if catalog_client.refresh_if_stale() and default_resolver is not None:
+            default_resolver.reindex()
 
     try:
         entries = catalog_client.list_models()

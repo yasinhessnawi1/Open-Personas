@@ -14,6 +14,8 @@ requires it.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -821,6 +823,26 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             in_process_worker = None
     app.state.in_process_worker = in_process_worker
 
+    # Spec M2 (D-M2-6 + the F5 closure): warm the OpenRouter catalog + the
+    # metadata index OFF the event loop at boot, then keep them TTL-fresh.
+    # The turn path NEVER fetches (compute_turn_cost resolves with
+    # allow_fetch=False) — this task is what makes the catalog arm of the
+    # cost estimator actually serve. No key → no client → no task
+    # (static-only chain, nothing to warm). Held on app.state so it is not
+    # GC'd (the crisis-warmup precedent); cancelled at shutdown below.
+    catalog_refresh_task: asyncio.Task[None] | None = None
+    if runtime_factory is not None and runtime_factory.catalog_client is not None:
+        from persona_api.services.catalog_freshness import run_catalog_refresh_loop
+
+        catalog_refresh_task = asyncio.create_task(
+            run_catalog_refresh_loop(
+                runtime_factory.catalog_client,
+                runtime_factory.openrouter_resolver,
+            ),
+            name="m2-catalog-freshness",
+        )
+        app.state.catalog_refresh_task = catalog_refresh_task
+
     # Restart sweep (Spec P1, D-P1-restart-sweep): BEFORE serving, reconcile any
     # chat turn / run left non-terminal by a previous process's death (their
     # in-process tasks didn't survive — D-08-5 single worker). Runs on the
@@ -836,6 +858,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Spec M2 (D-M2-6): stop the catalog-freshness poller before the
+        # engines/factory close (it only sleeps or runs a to_thread fetch;
+        # cancellation is clean at either point).
+        if catalog_refresh_task is not None:
+            catalog_refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await catalog_refresh_task
         # Flush + stop telemetry FIRST so a final drain lands before engines close
         # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:

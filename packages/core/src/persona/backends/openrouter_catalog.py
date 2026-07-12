@@ -30,6 +30,8 @@ References:
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access
 from decimal import Decimal
 from typing import Any, Final, Literal
@@ -46,6 +48,7 @@ from persona.backends.errors import (
 from persona.logging import get_logger
 
 __all__ = [
+    "DEFAULT_CATALOG_TTL_S",
     "OpenRouterArchitecture",
     "OpenRouterCatalogClient",
     "OpenRouterKeyInfo",
@@ -53,11 +56,44 @@ __all__ = [
     "OpenRouterPricing",
     "OpenRouterSubscriptionMode",
     "OpenRouterSubscriptionState",
+    "catalog_ttl_from_env",
     "free_mode_fallback",
     "subscription_state_from_key_info",
 ]
 
 _LOG = get_logger("backends.openrouter_catalog")
+
+#: Spec M2 (D-M2-6): default catalog freshness window — 6 h. Billing-grade
+#: estimates want current per-route prices; six hours bounds drift without
+#: meaningful load (one /models fetch per window, off the turn path).
+DEFAULT_CATALOG_TTL_S: Final[float] = 21600.0
+
+_CATALOG_TTL_ENV: Final[str] = "PERSONA_OPENROUTER_CATALOG_TTL_S"
+
+
+def catalog_ttl_from_env() -> float:
+    """The catalog TTL from ``PERSONA_OPENROUTER_CATALOG_TTL_S`` (D-M2-6).
+
+    Unset/blank → :data:`DEFAULT_CATALOG_TTL_S` (6 h). ``<= 0`` → TTL off
+    (process-lifetime cache, the pre-M2 D-22-5 semantics). Malformed →
+    default, with one WARNING (an operator typo must not change freshness
+    semantics silently). Called by the composition roots that construct a
+    :class:`OpenRouterCatalogClient` for priced-data consumers.
+    """
+    raw = os.environ.get(_CATALOG_TTL_ENV, "").strip()
+    if not raw:
+        return DEFAULT_CATALOG_TTL_S
+    try:
+        return float(raw)
+    except ValueError:
+        _LOG.warning(
+            "malformed catalog TTL env value; using the default",
+            env_var=_CATALOG_TTL_ENV,
+            value=raw,
+            default_s=DEFAULT_CATALOG_TTL_S,
+        )
+        return DEFAULT_CATALOG_TTL_S
+
 
 OpenRouterSubscriptionMode = Literal["free", "paid"]
 
@@ -191,6 +227,7 @@ class OpenRouterCatalogClient:
         base_url: str | None = None,
         timeout_s: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        ttl_s: float = DEFAULT_CATALOG_TTL_S,
     ) -> None:
         """Construct the client.
 
@@ -202,6 +239,14 @@ class OpenRouterCatalogClient:
             timeout_s: Per-request timeout in seconds.
             transport: Optional ``httpx`` transport (tests inject a
                 :class:`httpx.MockTransport`).
+            ttl_s: Catalog freshness window in seconds (Spec M2, D-M2-6).
+                ``<= 0`` disables the TTL — the process-lifetime cache
+                semantics (D-22-5) are then unchanged. The TTL NEVER makes
+                :meth:`list_models` re-fetch on its own; expiry only marks the
+                cache stale so an off-turn caller (the ``/v1/models`` request
+                path or the api lifespan refresh task) can
+                :meth:`refresh_if_stale`. Composition roots pass
+                :func:`catalog_ttl_from_env`.
         """
         self._base_url = base_url or DEFAULT_BASE_URLS["openrouter"]
         self._client = httpx.Client(
@@ -211,6 +256,57 @@ class OpenRouterCatalogClient:
             transport=transport,
         )
         self._models_cache: tuple[OpenRouterModelEntry, ...] | None = None
+        self._ttl_s = ttl_s
+        self._fetched_at: float | None = None
+
+    @property
+    def ttl_s(self) -> float:
+        """The configured catalog TTL in seconds (``<= 0`` = TTL off)."""
+        return self._ttl_s
+
+    @property
+    def is_stale(self) -> bool:
+        """Whether the cached catalog is due a refresh (D-M2-6).
+
+        ``True`` when nothing was ever fetched (the warm case), or — with a
+        positive TTL — when the last successful fetch is older than ``ttl_s``.
+        With the TTL off (``<= 0``) a fetched cache is never stale
+        (process-lifetime semantics, D-22-5). Staleness is advisory:
+        :meth:`list_models` keeps serving the cached copy regardless — only
+        :meth:`refresh_if_stale` acts on it, off the turn path.
+        """
+        if self._models_cache is None or self._fetched_at is None:
+            return True
+        if self._ttl_s <= 0:
+            return False
+        return (time.monotonic() - self._fetched_at) > self._ttl_s
+
+    def refresh_if_stale(self) -> bool:
+        """Re-fetch the catalog iff :attr:`is_stale` — fail-open (D-M2-6).
+
+        The ONLY sanctioned freshness trigger. Callers are off-turn by
+        contract (the ``/v1/models`` request path, already off the event loop
+        via ``asyncio.to_thread``; the api lifespan warm/refresh task). On a
+        fetch failure the previous cache keeps serving — stale-forever beats
+        empty — with one WARNING.
+
+        Returns:
+            ``True`` when a fresh catalog was fetched (consumers holding a
+            derived index should rebuild it — e.g.
+            ``OpenRouterModelMetadataResolver.reindex``); ``False`` when the
+            cache was already fresh OR the refresh failed (stale-serve).
+        """
+        if not self.is_stale:
+            return False
+        try:
+            self.list_models(force_refresh=True)
+        except OpenRouterCatalogError as exc:
+            _LOG.warning(
+                "openrouter catalog refresh failed; serving the stale copy",
+                reason=exc.context.get("reason", ""),
+            )
+            return False
+        return True
 
     def list_models(self, *, force_refresh: bool = False) -> tuple[OpenRouterModelEntry, ...]:
         """Fetch (and cache) the OpenRouter model catalog (D-22-1 / D-22-5).
@@ -254,6 +350,9 @@ class OpenRouterCatalogClient:
                     error=str(exc),
                 )
         self._models_cache = tuple(entries)
+        # D-M2-6: stamp the freshness clock on every SUCCESSFUL fetch (both
+        # the lazy first fetch and force_refresh paths land here).
+        self._fetched_at = time.monotonic()
         return self._models_cache
 
     def get_key_info(self) -> OpenRouterKeyInfo:

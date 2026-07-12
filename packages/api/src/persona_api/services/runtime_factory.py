@@ -23,7 +23,7 @@ from persona.backends.metadata import (
     OpenRouterModelMetadataResolver,
     StaticModelMetadataResolver,
 )
-from persona.backends.openrouter_catalog import OpenRouterCatalogClient
+from persona.backends.openrouter_catalog import OpenRouterCatalogClient, catalog_ttl_from_env
 from persona.backends.openrouter_passthrough import build_openrouter_passthrough
 from persona.config import PersonaCoreConfig
 from persona.errors import PersonaNotFoundError
@@ -251,7 +251,9 @@ class RuntimeFactory:
         # IntelligentRouter and every loop's ``cost_source``. The catalog client
         # handle is kept for the D-M2-6 TTL/off-loop-warm path (``None`` when no
         # ``PERSONA_OPENROUTER_API_KEY`` — static-only chain, zero network).
-        self._catalog_client, self._metadata_resolver = self._build_metadata_resolver()
+        self._catalog_client, self._openrouter_resolver, self._metadata_resolver = (
+            self._build_metadata_resolver()
+        )
         # Spec P9 (P9-D-4/D-7): the Spec-23 scorer is DORMANT by default — the
         # global gate (``PERSONA_ROUTING_INTELLIGENT_ENABLED``, default off) is
         # consulted BEFORE the persona flag ever is. The stored per-persona
@@ -602,9 +604,32 @@ class RuntimeFactory:
 
         return sync
 
+    @property
+    def catalog_client(self) -> OpenRouterCatalogClient | None:
+        """The shared OpenRouter catalog client (Spec M2, D-M2-6), or ``None``.
+
+        Read by the api lifespan's catalog-freshness task (warm at boot +
+        periodic ``refresh_if_stale`` off the event loop). ``None`` when no
+        ``PERSONA_OPENROUTER_API_KEY`` is configured — static-only chain,
+        nothing to warm or refresh.
+        """
+        return self._catalog_client
+
+    @property
+    def openrouter_resolver(self) -> OpenRouterModelMetadataResolver | None:
+        """The chain's OpenRouter link (Spec M2, D-M2-6), or ``None``.
+
+        Read by the api lifespan's catalog-freshness task so a refreshed
+        catalog is followed by a derived-index rebuild (``reindex`` — never a
+        second fetch). Same ``None`` condition as :attr:`catalog_client`.
+        """
+        return self._openrouter_resolver
+
     @staticmethod
     def _build_metadata_resolver() -> tuple[
-        OpenRouterCatalogClient | None, ChainedModelMetadataResolver
+        OpenRouterCatalogClient | None,
+        OpenRouterModelMetadataResolver | None,
+        ChainedModelMetadataResolver,
     ]:
         """Compose the shared metadata chain (static + optional OpenRouter catalog).
 
@@ -619,21 +644,25 @@ class RuntimeFactory:
         Catalog client construction is network-free (D-22-11). The first fetch
         belongs to the lifespan warm / D-M2-6 TTL path — NEVER the turn path:
         ``compute_turn_cost`` resolves with ``allow_fetch=False``, so a cold
-        index is an honest miss (static / unpriced), not a blocking fetch.
+        index is an honest miss (static / unpriced), not a blocking fetch. The
+        client carries the D-M2-6 TTL (``catalog_ttl_from_env``); the OR link
+        is returned alongside so the freshness task can ``reindex`` it.
         """
         import os
 
         client: OpenRouterCatalogClient | None = None
-        openrouter = None
+        openrouter: OpenRouterModelMetadataResolver | None = None
         api_key = os.environ.get("PERSONA_OPENROUTER_API_KEY", "").strip()
         if api_key:
             base_url = os.environ.get("PERSONA_OPENROUTER_BASE_URL", "").strip() or None
-            client = OpenRouterCatalogClient(api_key, base_url=base_url)
+            client = OpenRouterCatalogClient(
+                api_key, base_url=base_url, ttl_s=catalog_ttl_from_env()
+            )
             openrouter = OpenRouterModelMetadataResolver(client)
         resolver = ChainedModelMetadataResolver(
             static=StaticModelMetadataResolver(), openrouter=openrouter
         )
-        return client, resolver
+        return client, openrouter, resolver
 
     @staticmethod
     def _build_intelligent_router(
