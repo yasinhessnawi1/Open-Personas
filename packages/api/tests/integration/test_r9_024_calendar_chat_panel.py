@@ -77,7 +77,7 @@ def client(migrated_engine: Engine, tmp_path: object) -> Iterator[TestClient]:
 
 @pytest.fixture
 def engine() -> Iterator[Engine]:
-    """The ``persona_app`` RLS engine direct seeding rides (mirrors A10's fixture)."""
+    """The ``persona_app`` RLS engine the service runs on (seeding rides the superuser)."""
     app_url = os.environ.get("APP_DATABASE_URL")
     if not app_url:
         pytest.skip("APP_DATABASE_URL not set")
@@ -154,10 +154,14 @@ def _payload_linked_schedule(
 
 
 def test_persona_filter_matches_task_linked_schedule(
-    client: TestClient, engine: Engine, store: ScheduleStore, tasks: TaskStore
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
 ) -> None:
     owner = "r9024_task"
-    _seed_owner_with_personas(engine, owner, ["r9024_ta", "r9024_tb"])
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_ta", "r9024_tb"])
     sched_a = _task_linked_schedule(
         engine, store, tasks, owner=owner, persona="r9024_ta", key="k-task-a"
     )
@@ -173,10 +177,10 @@ def test_persona_filter_matches_task_linked_schedule(
 
 
 def test_persona_filter_matches_payload_linked_schedule(
-    client: TestClient, engine: Engine, store: ScheduleStore
+    client: TestClient, engine: Engine, store: ScheduleStore, migrated_engine: Engine
 ) -> None:
     owner = "r9024_payload"
-    _seed_owner_with_personas(engine, owner, ["r9024_pa"])
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_pa"])
     sched_id = _payload_linked_schedule(
         store, owner=owner, persona="r9024_pa", schedule_id="r9024_initsched"
     )
@@ -192,12 +196,16 @@ def test_persona_filter_matches_payload_linked_schedule(
 
 
 def test_persona_filter_excludes_another_personas_schedule(
-    client: TestClient, engine: Engine, store: ScheduleStore, tasks: TaskStore
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
 ) -> None:
     """One owner, two personas, both linkage kinds — filtering by A returns ONLY A's
     occurrences (both of A's schedules), never B's; and vice versa."""
     owner = "r9024_excl"
-    _seed_owner_with_personas(engine, owner, ["r9024_ea", "r9024_eb"])
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_ea", "r9024_eb"])
     sched_a_task = _task_linked_schedule(
         engine, store, tasks, owner=owner, persona="r9024_ea", key="k-excl-a"
     )
@@ -228,12 +236,16 @@ def test_persona_filter_excludes_another_personas_schedule(
 
 
 def test_absent_persona_filter_is_unchanged(
-    client: TestClient, engine: Engine, store: ScheduleStore, tasks: TaskStore
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
 ) -> None:
     """Omitting ``persona_id`` returns every owned schedule's occurrences — the
     additive-optional contract (today's behaviour, byte-identical)."""
     owner = "r9024_absent"
-    _seed_owner_with_personas(engine, owner, ["r9024_aa", "r9024_ab"])
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_aa", "r9024_ab"])
     sched_a = _task_linked_schedule(
         engine, store, tasks, owner=owner, persona="r9024_aa", key="k-absent-a"
     )
@@ -251,10 +263,14 @@ def test_absent_persona_filter_is_unchanged(
 
 
 def test_delete_schedule_removes_it(
-    client: TestClient, engine: Engine, store: ScheduleStore, tasks: TaskStore
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
 ) -> None:
     owner = "r9024_del"
-    _seed_owner_with_personas(engine, owner, ["r9024_da"])
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_da"])
     sched_id = _task_linked_schedule(
         engine, store, tasks, owner=owner, persona="r9024_da", key="k-del"
     )
@@ -274,12 +290,16 @@ def test_delete_missing_schedule_is_404(client: TestClient) -> None:
 
 
 def test_delete_is_cross_tenant_404_and_never_deletes(
-    client: TestClient, engine: Engine, store: ScheduleStore, tasks: TaskStore
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
 ) -> None:
     owner_a = "r9024_del_a"
     owner_b = "r9024_del_b"
-    _seed_owner_with_personas(engine, owner_a, ["r9024_daa"])
-    _seed_owner_with_personas(engine, owner_b, ["r9024_dbb"])
+    _seed_owner_with_personas(migrated_engine, owner_a, ["r9024_daa"])
+    _seed_owner_with_personas(migrated_engine, owner_b, ["r9024_dbb"])
     sched_id = _task_linked_schedule(
         engine, store, tasks, owner=owner_a, persona="r9024_daa", key="k-del-cross"
     )
