@@ -33,6 +33,18 @@ const messages = {
       readAloud: "Read aloud",
       stopReading: "Stop reading",
       loadingAudio: "Loading audio…",
+      turnIntoFile: {
+        label: "Turn into file",
+        formatMenu: "Choose file format",
+        toast: "Creating file…",
+        errorToast: "Couldn't start the file — try again",
+        format: {
+          pdf: "PDF",
+          md: "Markdown",
+          xlsx: "Excel",
+          csv: "CSV",
+        },
+      },
     },
   },
 };
@@ -215,6 +227,87 @@ describe("MessageActionBar", () => {
       );
       // A second click after stopping fetches again (no client-side cache).
       expect(fetchPersonaTtsMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("turn into file — R9-025b", () => {
+    it("renders for a persona message when onTurnIntoFile is wired", () => {
+      renderBar({
+        messageRole: "persona",
+        personaId: undefined,
+        onTurnIntoFile: () => {},
+      });
+      expect(
+        screen.getByRole("button", { name: "Turn into file" }),
+      ).toBeTruthy();
+      expect(
+        screen.getByRole("button", { name: "Choose file format" }),
+      ).toBeTruthy();
+    });
+
+    it("does not render for a user message (assistant messages only)", () => {
+      renderBar({
+        messageRole: "user",
+        personaId: undefined,
+        onTurnIntoFile: () => {},
+      });
+      expect(
+        screen.queryByRole("button", { name: "Turn into file" }),
+      ).toBeNull();
+    });
+
+    it("does not render when onTurnIntoFile is not wired (no seam)", () => {
+      renderBar({ messageRole: "persona", personaId: undefined });
+      expect(
+        screen.queryByRole("button", { name: "Turn into file" }),
+      ).toBeNull();
+    });
+
+    it("the main button fires the calm default (auto) on a plain click", () => {
+      const onTurnIntoFile = vi.fn();
+      renderBar({
+        messageRole: "persona",
+        personaId: undefined,
+        onTurnIntoFile,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Turn into file" }));
+      expect(onTurnIntoFile).toHaveBeenCalledWith("auto");
+    });
+
+    it.each([
+      ["PDF", "pdf"],
+      ["Markdown", "md"],
+      ["Excel", "xlsx"],
+      ["CSV", "csv"],
+    ])("the format menu fires the explicit %s pick", async (label, format) => {
+      const onTurnIntoFile = vi.fn();
+      renderBar({
+        messageRole: "persona",
+        personaId: undefined,
+        onTurnIntoFile,
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Choose file format" }),
+      );
+      const item = await screen.findByRole("menuitem", { name: label });
+      fireEvent.click(item);
+      expect(onTurnIntoFile).toHaveBeenCalledWith(format);
+    });
+
+    it("is disabled while a turn is active (turnIntoFileDisabled) and does not fire", () => {
+      const onTurnIntoFile = vi.fn();
+      renderBar({
+        messageRole: "persona",
+        personaId: undefined,
+        onTurnIntoFile,
+        turnIntoFileDisabled: true,
+      });
+      const button = screen.getByRole("button", {
+        name: "Turn into file",
+      }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+      expect(onTurnIntoFile).not.toHaveBeenCalled();
     });
   });
 });

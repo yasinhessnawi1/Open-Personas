@@ -458,6 +458,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/conversations/{conversation_id}/messages/{message_id}/turn-into-file": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Turn Message Into File
+     * @description "Turn into file" (R9-025b): enqueue a durable extraction job for one message.
+     *
+     *     Message action → api endpoint → durable ``file_extract`` job (see that
+     *     module's docstring for the episodic-context + doc-gen-sandbox-boundary
+     *     decisions) — a shortcut replacing the ritual "now draft that as a PDF"
+     *     follow-up turn.
+     *
+     *     RLS-scoped via ``chat_service.get_conversation`` → 404 if the conversation
+     *     isn't the caller's (cross-tenant) or doesn't exist. 404 if ``message_id``
+     *     isn't a message of THIS conversation. 422 if the target isn't an
+     *     ``assistant`` message — v1 scope: the ritual this replaces is "draft THAT
+     *     REPLY as a file," not the user's own words. 503 if the feature isn't
+     *     configured (no model backend / no sandbox pool composed) — the
+     *     ``file_extract_queue_ready`` gate mirrors ``avatar_queue_ready``'s R9-013
+     *     lesson: never enqueue into a handler-less worker.
+     */
+    post: operations["turn_message_into_file_v1_conversations__conversation_id__messages__message_id__turn_into_file_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/calls": {
     parameters: {
       query?: never;
@@ -723,6 +757,11 @@ export interface paths {
      *     Computed from the engine's own recurrence path (never a client reimplementation), RLS-scoped
      *     to the caller. The window is server-capped (horizon + count); the response's ``truncated``
      *     marker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.
+     *
+     *     ``persona_id`` (R9-024, additive-optional) scopes the result to one persona's schedules — the
+     *     chat right-panel calendar. Server-side resolved (see
+     *     :func:`persona_api.services.occurrences_service._resolved_persona_id`); omitted, the response
+     *     is byte-identical to pre-R9-024 (every owned schedule, as before).
      */
     get: operations["get_schedule_occurrences_v1_me_schedule_occurrences_get"];
     put?: never;
@@ -827,6 +866,32 @@ export interface paths {
      */
     post: operations["apply_schedule_reschedule_v1_me_schedule__schedule_id__reschedule_post"];
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/schedule/{schedule_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Schedule
+     * @description Delete a schedule (R9-024 — the calendar's delete affordance, chat + ``/schedule``).
+     *
+     *     RLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant
+     *     id is indistinguishable from a missing one (both 404 — no existence oracle). The backing task
+     *     (if any — a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops
+     *     future fires, matching the store's existing compensating-delete semantics used elsewhere
+     *     (``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.
+     */
+    delete: operations["delete_schedule_v1_me_schedule__schedule_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -2037,10 +2102,67 @@ export interface paths {
      *     OpenRouter configuration returns 200 with ``stale=True`` and an
      *     empty/partial ``models`` list — never a 500. A persona's turn still runs on
      *     the tier default regardless of this route's health.
+     *
+     *     :func:`~persona_api.services.model_catalog_service.list_models` is
+     *     synchronous (a blocking ``httpx`` call, up to a 30s timeout on the cold
+     *     path) — offloaded via :func:`asyncio.to_thread` so a slow/hung catalog
+     *     fetch stalls a worker thread, never the shared event loop.
      */
     get: operations["list_models_v1_models_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/personas/{persona_id}/tts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Post Persona Tts
+     * @description Read-aloud: synthesise ``text`` in THE PERSONA's configured voice.
+     *
+     *     Ownership: :func:`persona_service.get_persona` is RLS-scoped — a
+     *     cross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`
+     *     (→ 404 via the existing handler), never a leak. Fails soft to 503 when
+     *     the voice service is unconfigured/unreachable OR the persona has no
+     *     configured voice; 413 passes through when the text is too long.
+     */
+    post: operations["post_persona_tts_v1_personas__persona_id__tts_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/stt": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Post Stt
+     * @description In-chat + authoring dictation: transcribe an uploaded audio clip.
+     *
+     *     Owner-scoped only (``get_current_user`` sets the RLS contextvar; no
+     *     persona is involved — dictation runs before a persona necessarily
+     *     exists, e.g. the author wizard's description field). Fails soft to 503
+     *     when the voice service is unconfigured/unreachable; 413 passes through
+     *     when the audio is too large.
+     */
+    post: operations["post_stt_v1_stt_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -2296,6 +2418,11 @@ export interface components {
       file: string;
       /** Conversation Id */
       conversation_id?: string | null;
+    };
+    /** Body_post_stt_v1_stt_post */
+    Body_post_stt_v1_stt_post: {
+      /** Audio */
+      audio: string;
     };
     /**
      * BudgetExtendRequest
@@ -3828,6 +3955,16 @@ export interface components {
       note: string;
     };
     /**
+     * PersonaTTSRequest
+     * @description Body for ``POST /v1/personas/{persona_id}/tts``. The persona's
+     *     configured voice is resolved server-side — the caller supplies only the
+     *     text.
+     */
+    PersonaTTSRequest: {
+      /** Text */
+      text: string;
+    };
+    /**
      * PostMessageRequest
      * @description Send a user message; the response streams over SSE (§5.2).
      *
@@ -4021,6 +4158,14 @@ export interface components {
       started_at: string;
       /** Finished At */
       finished_at?: string | null;
+    };
+    /**
+     * STTProxyResponse
+     * @description Result of ``POST /v1/stt`` (transcript passthrough from persona-voice).
+     */
+    STTProxyResponse: {
+      /** Transcript */
+      transcript: string;
     };
     /**
      * ScheduleCreateRequest
@@ -4384,6 +4529,44 @@ export interface components {
       description: string;
     };
     /**
+     * TurnIntoFileRequest
+     * @description "Turn into file" (R9-025b) — extract one assistant message into a document.
+     *
+     *     ``format`` is optional; ``"auto"`` (the default, the calm popover pick) lets
+     *     the extraction job decide pdf vs xlsx from the content's shape. An explicit
+     *     choice is honoured verbatim regardless of the content's natural shape (the
+     *     renderer degrades honestly on a mismatch — see ``file_extract``'s
+     *     ``_tabular_rows``).
+     */
+    TurnIntoFileRequest: {
+      /**
+       * Format
+       * @default auto
+       * @enum {string}
+       */
+      format: "auto" | "pdf" | "md" | "xlsx" | "csv";
+    };
+    /**
+     * TurnIntoFileResponse
+     * @description 202 acknowledgment for "Turn into file" (R9-025b) — a durable job reference.
+     *
+     *     The file itself is NOT ready yet — it lands (or the job dead-letters) some
+     *     seconds later, out of band; the client's Files surface picks it up on its
+     *     own refresh/poll (see ``file_extract``'s module docstring for the exact
+     *     refresh-signal decision). ``job_id`` is ``None`` only on the (safe,
+     *     idempotent) duplicate-enqueue path — the SAME (message, format) job is
+     *     already queued/running from an earlier click.
+     */
+    TurnIntoFileResponse: {
+      /** Job Id */
+      job_id: string | null;
+      /**
+       * Status
+       * @constant
+       */
+      status: "queued";
+    };
+    /**
      * UpcomingItem
      * @description One entry in the compact upcoming strip (from A8's occurrences — the engine's own fires).
      */
@@ -4461,6 +4644,17 @@ export interface components {
     /**
      * UsageEntry
      * @description One usage-log row (per-turn telemetry, paginated).
+     *
+     *     Spec M2 (D-M2-4) additive fields — the web can label estimates vs actuals:
+     *
+     *     * ``cost_basis`` — how ``cost_cents`` was derived: ``"actual_openrouter"``
+     *       (the OpenRouter response's own cost — what we actually paid),
+     *       ``"estimate_static"`` / ``"estimate_catalog"`` (resolver-chain
+     *       estimates), ``"unpriced"`` (no data; 0.0). ``None`` = legacy pre-M2
+     *       row — render as an estimate.
+     *     * ``pricing_source`` — constant ``"unified"`` marker: rows are priced by
+     *       the unified Spec-22/23 source (per-row so the list response shape is
+     *       unchanged — no envelope break for generated clients).
      */
     UsageEntry: {
       /** Persona Id */
@@ -4475,6 +4669,14 @@ export interface components {
       completion_tokens: number;
       /** Cost Cents */
       cost_cents: number;
+      /** Cost Basis */
+      cost_basis?: string | null;
+      /**
+       * Pricing Source
+       * @default unified
+       * @constant
+       */
+      pricing_source: "unified";
       /**
        * Created At
        * Format: date-time
@@ -5224,6 +5426,42 @@ export interface operations {
       };
     };
   };
+  turn_message_into_file_v1_conversations__conversation_id__messages__message_id__turn_into_file_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+        message_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TurnIntoFileRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TurnIntoFileResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_calls_v1_calls_get: {
     parameters: {
       query?: {
@@ -5569,6 +5807,7 @@ export interface operations {
       query: {
         from: string;
         to: string;
+        persona_id?: string | null;
       };
       header?: never;
       path?: never;
@@ -5720,6 +5959,35 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["ReschedulePreview"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_schedule_v1_me_schedule__schedule_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        schedule_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {
@@ -7420,6 +7688,74 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ModelsResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  post_persona_tts_v1_personas__persona_id__tts_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PersonaTTSRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  post_stt_v1_stt_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "multipart/form-data": components["schemas"]["Body_post_stt_v1_stt_post"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["STTProxyResponse"];
         };
       };
       /** @description Validation Error */

@@ -15,6 +15,8 @@ import { removeDocument } from "@/lib/document-actions";
 import { useChat } from "@/lib/hooks/use-chat";
 import { notifyConversationFilesChanged } from "@/lib/hooks/use-conversation-artifacts";
 import { useConversationDocuments } from "@/lib/hooks/use-conversation-documents";
+import type { TurnIntoFileFormat } from "@/lib/turn-into-file";
+import { turnMessageIntoFile } from "@/lib/turn-into-file";
 import type { DocumentRef } from "@/lib/upload";
 import { cn } from "@/lib/utils";
 import { CHAT_STREAMING_EVENT } from "./chat-presence-orb";
@@ -107,6 +109,29 @@ export function ChatWindow({
       }
     },
     [messages, send],
+  );
+  // R9-025b — "Turn into file": fire-and-forget the durable extraction job.
+  // Optimistic toast (transient — the job runs out of band; the Files panel
+  // picks the artifact up on its own refresh/poll, see the api's
+  // `file_extract` module docstring for the exact refresh-signal decision).
+  const handleTurnIntoFile = useCallback(
+    (assistantMessageId: string, format: TurnIntoFileFormat) => {
+      notify({
+        level: "info",
+        title: t("actions.turnIntoFile.toast"),
+        persist: false,
+      });
+      void turnMessageIntoFile(conversationId, assistantMessageId, format, () =>
+        getToken(TEMPLATE ? { template: TEMPLATE } : undefined),
+      ).catch(() => {
+        notify({
+          level: "error",
+          title: t("actions.turnIntoFile.errorToast"),
+          persist: false,
+        });
+      });
+    },
+    [conversationId, getToken, notify, t],
   );
   // Spec A11: a BACKGROUND message.delivered for THIS open conversation appears live —
   // refetch the authoritative conversation (never trust the pushed payload; `reload`
@@ -363,6 +388,8 @@ export function ChatWindow({
                 onRespondToProactive={respondToProactive}
                 onRetryMessage={handleRetryMessage}
                 retryDisabled={streaming}
+                onTurnIntoFile={handleTurnIntoFile}
+                turnIntoFileDisabled={streaming}
               />
             ))}
             {error ? (

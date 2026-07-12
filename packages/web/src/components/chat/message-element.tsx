@@ -61,6 +61,7 @@ import type {
   QuestionOption,
   RoutingSummary,
 } from "@/lib/sse-types";
+import type { TurnIntoFileFormat } from "@/lib/turn-into-file";
 import { cn } from "@/lib/utils";
 import { AuthedImage } from "./authed-image";
 import { BudgetIndicator } from "./budget-indicator";
@@ -219,6 +220,17 @@ interface MessageElementProps {
   onRetryMessage?: (assistantMessageId: string) => void;
   /** R9-025a — disable retry while a turn is active (mirrors the composer's own `sendBlocked`). */
   retryDisabled?: boolean;
+  /**
+   * R9-025b — "Turn into file": fires the extraction job for this assistant
+   * message at the chosen format. Omit to hide the action entirely (e.g. a
+   * read-only transcript viewer, or the feature not wired).
+   */
+  onTurnIntoFile?: (
+    assistantMessageId: string,
+    format: TurnIntoFileFormat,
+  ) => void;
+  /** R9-025b — disable while a turn is active (mirrors `retryDisabled`, the same 2a `streaming` guard). */
+  turnIntoFileDisabled?: boolean;
 }
 
 export function MessageElement({
@@ -229,6 +241,8 @@ export function MessageElement({
   onRespondToProactive,
   onRetryMessage,
   retryDisabled,
+  onTurnIntoFile,
+  turnIntoFileDisabled,
 }: MessageElementProps) {
   if (message.role === "user") {
     return (
@@ -244,6 +258,8 @@ export function MessageElement({
       onRespondToProactive={onRespondToProactive}
       onRetryMessage={onRetryMessage}
       retryDisabled={retryDisabled}
+      onTurnIntoFile={onTurnIntoFile}
+      turnIntoFileDisabled={turnIntoFileDisabled}
     />
   );
 }
@@ -350,6 +366,8 @@ function PersonaMessage({
   onRespondToProactive,
   onRetryMessage,
   retryDisabled,
+  onTurnIntoFile,
+  turnIntoFileDisabled,
 }: {
   message: MessageElementView;
   persona: AvatarPersona;
@@ -362,6 +380,11 @@ function PersonaMessage({
   ) => Promise<void>;
   onRetryMessage?: (assistantMessageId: string) => void;
   retryDisabled?: boolean;
+  onTurnIntoFile?: (
+    assistantMessageId: string,
+    format: TurnIntoFileFormat,
+  ) => void;
+  turnIntoFileDisabled?: boolean;
 }) {
   // D-F2-7 once-per-turn rule: render the avatar UNLESS the previous message
   // was also a persona message (then this is a continuation of the same
@@ -455,6 +478,12 @@ function PersonaMessage({
               onRetryMessage ? () => onRetryMessage(message.id) : undefined
             }
             retryDisabled={retryDisabled}
+            onTurnIntoFile={
+              onTurnIntoFile
+                ? (format) => onTurnIntoFile(message.id, format)
+                : undefined
+            }
+            turnIntoFileDisabled={turnIntoFileDisabled}
           />
         ) : null}
 

@@ -10,12 +10,28 @@
  * `display:none`) so keyboard users can reach them.
  */
 
-import { Check, Copy, Loader2, RotateCcw, Square, Volume2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  FileOutput,
+  Loader2,
+  RotateCcw,
+  Square,
+  Volume2,
+} from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/auth";
 import { buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ApiError } from "@/lib/api/client";
+import type { TurnIntoFileFormat } from "@/lib/turn-into-file";
 import { cn } from "@/lib/utils";
 import { fetchPersonaTts } from "@/lib/voice/tts";
 
@@ -33,6 +49,15 @@ export interface MessageActionBarProps {
   retryDisabled?: boolean;
   /** Persona role only — required for read-aloud (resolves the persona's voice). */
   personaId?: string;
+  /**
+   * R9-025b — persona role only. Omit to hide "Turn into file" entirely (e.g.
+   * no seam wired). Fires immediately with the given format — ``"auto"`` on a
+   * plain click of the main button (the calm default), or an explicit
+   * pdf/md/xlsx/csv pick from the disclosure menu.
+   */
+  onTurnIntoFile?: (format: TurnIntoFileFormat) => void;
+  /** Mirrors ``retryDisabled`` — disabled while ANY turn is active (2a's `streaming` guard). */
+  turnIntoFileDisabled?: boolean;
   className?: string;
 }
 
@@ -42,6 +67,8 @@ export function MessageActionBar({
   onRetry,
   retryDisabled,
   personaId,
+  onTurnIntoFile,
+  turnIntoFileDisabled,
   className,
 }: MessageActionBarProps) {
   return (
@@ -58,6 +85,12 @@ export function MessageActionBar({
       ) : null}
       {messageRole === "persona" && personaId ? (
         <ReadAloudButton personaId={personaId} text={content} />
+      ) : null}
+      {messageRole === "persona" && onTurnIntoFile ? (
+        <TurnIntoFileControl
+          onTurnIntoFile={onTurnIntoFile}
+          disabled={!!turnIntoFileDisabled}
+        />
       ) : null}
     </div>
   );
@@ -220,5 +253,71 @@ function ReadAloudButton({
         <Volume2 className="size-4" aria-hidden="true" />
       )}
     </button>
+  );
+}
+
+/**
+ * R9-025b — "Turn into file": a split control. The main button fires
+ * IMMEDIATELY with the calm default (``format="auto"``) — no menu, no
+ * confirmation, one click. A small chevron disclosure opens a menu offering
+ * the explicit pdf/md/xlsx/csv picks for when the caller wants a specific
+ * format. Both paths call the SAME ``onTurnIntoFile`` callback — the parent
+ * (chat-window) owns the actual fetch + the optimistic toast.
+ */
+function TurnIntoFileControl({
+  onTurnIntoFile,
+  disabled,
+}: {
+  onTurnIntoFile: (format: TurnIntoFileFormat) => void;
+  disabled: boolean;
+}) {
+  const t = useTranslations("chat");
+  const mainLabel = t("actions.turnIntoFile.label");
+  const menuLabel = t("actions.turnIntoFile.formatMenu");
+  return (
+    <div
+      className="flex items-center"
+      data-slot="message-action-turn-into-file"
+    >
+      <button
+        type="button"
+        onClick={() => onTurnIntoFile("auto")}
+        disabled={disabled}
+        aria-label={mainLabel}
+        title={mainLabel}
+        data-slot="message-action-turn-into-file-auto"
+        className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
+      >
+        <FileOutput className="size-4" aria-hidden="true" />
+      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          disabled={disabled}
+          aria-label={menuLabel}
+          title={menuLabel}
+          data-slot="message-action-turn-into-file-menu-trigger"
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "icon-sm" }),
+            "w-4",
+          )}
+        >
+          <ChevronDown className="size-3" aria-hidden="true" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => onTurnIntoFile("pdf")}>
+            {t("actions.turnIntoFile.format.pdf")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onTurnIntoFile("md")}>
+            {t("actions.turnIntoFile.format.md")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onTurnIntoFile("xlsx")}>
+            {t("actions.turnIntoFile.format.xlsx")}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onTurnIntoFile("csv")}>
+            {t("actions.turnIntoFile.format.csv")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }

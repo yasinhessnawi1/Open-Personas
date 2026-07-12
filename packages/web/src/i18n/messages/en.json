@@ -665,7 +665,19 @@
       "retry": "Retry",
       "readAloud": "Read aloud",
       "stopReading": "Stop reading",
-      "loadingAudio": "Loading audio…"
+      "loadingAudio": "Loading audio…",
+      "turnIntoFile": {
+        "label": "Turn into file",
+        "formatMenu": "Choose file format",
+        "toast": "Creating file…",
+        "errorToast": "Couldn't start the file — try again",
+        "format": {
+          "pdf": "PDF",
+          "md": "Markdown",
+          "xlsx": "Excel",
+          "csv": "CSV"
+        }
+      }
     },
     "composer": {
       "attach": {

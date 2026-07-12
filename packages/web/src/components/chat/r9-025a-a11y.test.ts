@@ -66,6 +66,15 @@ describe("R9-025a — every referenced i18n key resolves in en.json", () => {
     "mic.stop",
     "mic.transcribing",
     "mic.permissionDenied",
+    // R9-025b — "Turn into file" additions to the SAME action bar component.
+    "chat.actions.turnIntoFile.label",
+    "chat.actions.turnIntoFile.formatMenu",
+    "chat.actions.turnIntoFile.toast",
+    "chat.actions.turnIntoFile.errorToast",
+    "chat.actions.turnIntoFile.format.pdf",
+    "chat.actions.turnIntoFile.format.md",
+    "chat.actions.turnIntoFile.format.xlsx",
+    "chat.actions.turnIntoFile.format.csv",
   ];
 
   it.each(KEYS)("%s is defined", (key) => {

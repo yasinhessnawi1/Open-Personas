@@ -945,6 +945,66 @@
         }
       }
     },
+    "/v1/conversations/{conversation_id}/messages/{message_id}/turn-into-file": {
+      "post": {
+        "tags": ["conversations"],
+        "summary": "Turn Message Into File",
+        "description": "\"Turn into file\" (R9-025b): enqueue a durable extraction job for one message.\n\nMessage action \u2192 api endpoint \u2192 durable ``file_extract`` job (see that\nmodule's docstring for the episodic-context + doc-gen-sandbox-boundary\ndecisions) \u2014 a shortcut replacing the ritual \"now draft that as a PDF\"\nfollow-up turn.\n\nRLS-scoped via ``chat_service.get_conversation`` \u2192 404 if the conversation\nisn't the caller's (cross-tenant) or doesn't exist. 404 if ``message_id``\nisn't a message of THIS conversation. 422 if the target isn't an\n``assistant`` message \u2014 v1 scope: the ritual this replaces is \"draft THAT\nREPLY as a file,\" not the user's own words. 503 if the feature isn't\nconfigured (no model backend / no sandbox pool composed) \u2014 the\n``file_extract_queue_ready`` gate mirrors ``avatar_queue_ready``'s R9-013\nlesson: never enqueue into a handler-less worker.",
+        "operationId": "turn_message_into_file_v1_conversations__conversation_id__messages__message_id__turn_into_file_post",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TurnIntoFileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnIntoFileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/calls": {
       "get": {
         "tags": ["calls"],
@@ -1399,7 +1459,7 @@
       "get": {
         "tags": ["me"],
         "summary": "Get Schedule Occurrences",
-        "description": "The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).\n\nComputed from the engine's own recurrence path (never a client reimplementation), RLS-scoped\nto the caller. The window is server-capped (horizon + count); the response's ``truncated``\nmarker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.",
+        "description": "The caller's upcoming schedule occurrences + fire history (Spec A8, A8-D-11).\n\nComputed from the engine's own recurrence path (never a client reimplementation), RLS-scoped\nto the caller. The window is server-capped (horizon + count); the response's ``truncated``\nmarker says so honestly when a wide ``from/to`` is clamped. ``from`` must be ``<= to``.\n\n``persona_id`` (R9-024, additive-optional) scopes the result to one persona's schedules \u2014 the\nchat right-panel calendar. Server-side resolved (see\n:func:`persona_api.services.occurrences_service._resolved_persona_id`); omitted, the response\nis byte-identical to pre-R9-024 (every owned schedule, as before).",
         "operationId": "get_schedule_occurrences_v1_me_schedule_occurrences_get",
         "parameters": [
           {
@@ -1420,6 +1480,22 @@
               "type": "string",
               "format": "date-time",
               "title": "To"
+            }
+          },
+          {
+            "name": "persona_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Persona Id"
             }
           }
         ],
@@ -1615,6 +1691,40 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/schedule/{schedule_id}": {
+      "delete": {
+        "tags": ["me"],
+        "summary": "Delete Schedule",
+        "description": "Delete a schedule (R9-024 \u2014 the calendar's delete affordance, chat + ``/schedule``).\n\nRLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant\nid is indistinguishable from a missing one (both 404 \u2014 no existence oracle). The backing task\n(if any \u2014 a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops\nfuture fires, matching the store's existing compensating-delete semantics used elsewhere\n(``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.",
+        "operationId": "delete_schedule_v1_me_schedule__schedule_id__delete",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -3922,7 +4032,7 @@
       "get": {
         "tags": ["models"],
         "summary": "List Models",
-        "description": "The curated shortlist (default) or the full browse-all catalog, with prices.\n\nFail-open (spec_M1_design.md \u00a74): a catalog fetch failure or missing\nOpenRouter configuration returns 200 with ``stale=True`` and an\nempty/partial ``models`` list \u2014 never a 500. A persona's turn still runs on\nthe tier default regardless of this route's health.",
+        "description": "The curated shortlist (default) or the full browse-all catalog, with prices.\n\nFail-open (spec_M1_design.md \u00a74): a catalog fetch failure or missing\nOpenRouter configuration returns 200 with ``stale=True`` and an\nempty/partial ``models`` list \u2014 never a 500. A persona's turn still runs on\nthe tier default regardless of this route's health.\n\n:func:`~persona_api.services.model_catalog_service.list_models` is\nsynchronous (a blocking ``httpx`` call, up to a 30s timeout on the cold\npath) \u2014 offloaded via :func:`asyncio.to_thread` so a slow/hung catalog\nfetch stalls a worker thread, never the shared event loop.",
         "operationId": "list_models_v1_models_get",
         "parameters": [
           {
@@ -3944,6 +4054,95 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/personas/{persona_id}/tts": {
+      "post": {
+        "tags": ["voice"],
+        "summary": "Post Persona Tts",
+        "description": "Read-aloud: synthesise ``text`` in THE PERSONA's configured voice.\n\nOwnership: :func:`persona_service.get_persona` is RLS-scoped \u2014 a\ncross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`\n(\u2192 404 via the existing handler), never a leak. Fails soft to 503 when\nthe voice service is unconfigured/unreachable OR the persona has no\nconfigured voice; 413 passes through when the text is too long.",
+        "operationId": "post_persona_tts_v1_personas__persona_id__tts_post",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaTTSRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stt": {
+      "post": {
+        "tags": ["voice"],
+        "summary": "Post Stt",
+        "description": "In-chat + authoring dictation: transcribe an uploaded audio clip.\n\nOwner-scoped only (``get_current_user`` sets the RLS contextvar; no\npersona is involved \u2014 dictation runs before a persona necessarily\nexists, e.g. the author wizard's description field). Fails soft to 503\nwhen the voice service is unconfigured/unreachable; 413 passes through\nwhen the audio is too large.",
+        "operationId": "post_stt_v1_stt_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_post_stt_v1_stt_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/STTProxyResponse"
                 }
               }
             }
@@ -4392,6 +4591,18 @@
         "type": "object",
         "required": ["file"],
         "title": "Body_create_upload_v1_personas__persona_id__uploads_post"
+      },
+      "Body_post_stt_v1_stt_post": {
+        "properties": {
+          "audio": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Audio"
+          }
+        },
+        "type": "object",
+        "required": ["audio"],
+        "title": "Body_post_stt_v1_stt_post"
       },
       "BudgetExtendRequest": {
         "properties": {
@@ -6821,6 +7032,20 @@
         "title": "PersonaSuspensionOut",
         "description": "A single persona's autonomy-suspension state \u2014 presence-based, reflect never error (B4).\n\nRides the existing ``suspended_personas`` mechanism (the same row ``is_runnable`` consults).\n``suspended`` is the durable presence read (RLS-scoped); ``changed`` is false on an idempotent\nno-op \u2014 suspending an already-suspended persona, or resuming one that isn't suspended."
       },
+      "PersonaTTSRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["text"],
+        "title": "PersonaTTSRequest",
+        "description": "Body for ``POST /v1/personas/{persona_id}/tts``. The persona's\nconfigured voice is resolved server-side \u2014 the caller supplies only the\ntext."
+      },
       "PostMessageRequest": {
         "properties": {
           "content": {
@@ -7198,6 +7423,19 @@
         "required": ["id", "persona_id", "task", "status", "started_at"],
         "title": "RunSummary",
         "description": "A run in the Tasks index \u2014 a light projection without the steps JSON."
+      },
+      "STTProxyResponse": {
+        "properties": {
+          "transcript": {
+            "type": "string",
+            "title": "Transcript"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["transcript"],
+        "title": "STTProxyResponse",
+        "description": "Result of ``POST /v1/stt`` (transcript passthrough from persona-voice)."
       },
       "ScheduleCreateRequest": {
         "properties": {
@@ -7951,6 +8189,45 @@
         "title": "ToolSummary",
         "description": "A tool or skill name + description (read-only listing)."
       },
+      "TurnIntoFileRequest": {
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": ["auto", "pdf", "md", "xlsx", "csv"],
+            "title": "Format",
+            "default": "auto"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TurnIntoFileRequest",
+        "description": "\"Turn into file\" (R9-025b) \u2014 extract one assistant message into a document.\n\n``format`` is optional; ``\"auto\"`` (the default, the calm popover pick) lets\nthe extraction job decide pdf vs xlsx from the content's shape. An explicit\nchoice is honoured verbatim regardless of the content's natural shape (the\nrenderer degrades honestly on a mismatch \u2014 see ``file_extract``'s\n``_tabular_rows``)."
+      },
+      "TurnIntoFileResponse": {
+        "properties": {
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "const": "queued",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["job_id", "status"],
+        "title": "TurnIntoFileResponse",
+        "description": "202 acknowledgment for \"Turn into file\" (R9-025b) \u2014 a durable job reference.\n\nThe file itself is NOT ready yet \u2014 it lands (or the job dead-letters) some\nseconds later, out of band; the client's Files surface picks it up on its\nown refresh/poll (see ``file_extract``'s module docstring for the exact\nrefresh-signal decision). ``job_id`` is ``None`` only on the (safe,\nidempotent) duplicate-enqueue path \u2014 the SAME (message, format) job is\nalready queued/running from an earlier click."
+      },
       "UpcomingItem": {
         "properties": {
           "fire_at": {
@@ -8189,6 +8466,23 @@
             "type": "number",
             "title": "Cost Cents"
           },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "pricing_source": {
+            "type": "string",
+            "const": "unified",
+            "title": "Pricing Source",
+            "default": "unified"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -8206,7 +8500,7 @@
           "created_at"
         ],
         "title": "UsageEntry",
-        "description": "One usage-log row (per-turn telemetry, paginated)."
+        "description": "One usage-log row (per-turn telemetry, paginated).\n\nSpec M2 (D-M2-4) additive fields \u2014 the web can label estimates vs actuals:\n\n* ``cost_basis`` \u2014 how ``cost_cents`` was derived: ``\"actual_openrouter\"``\n  (the OpenRouter response's own cost \u2014 what we actually paid),\n  ``\"estimate_static\"`` / ``\"estimate_catalog\"`` (resolver-chain\n  estimates), ``\"unpriced\"`` (no data; 0.0). ``None`` = legacy pre-M2\n  row \u2014 render as an estimate.\n* ``pricing_source`` \u2014 constant ``\"unified\"`` marker: rows are priced by\n  the unified Spec-22/23 source (per-row so the list response shape is\n  unchanged \u2014 no envelope break for generated clients)."
       },
       "UserProfileResponse": {
         "properties": {
