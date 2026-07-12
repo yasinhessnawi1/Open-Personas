@@ -627,6 +627,15 @@ class ConversationLoop:
         # feeds the soft per-session budget ramp.
         self._intelligent_router = intelligent_router
         self._session_spent_cents: float = 0.0
+        # Spec M2 (D-M2-5): the LAST completed turn's recorded cost + basis —
+        # loop-owned state (the ``_session_spent_cents`` / ``budget_snapshot``
+        # precedent) the api's detached chat-turn worker reads post-turn to
+        # compute the proportional credits charge. Set by ``_write_turn_log``;
+        # RESET at every turn start so a turn that legitimately writes no
+        # TurnLog (e.g. the R1 safety bypass — no model ran) can never leak a
+        # PREVIOUS turn's cost into billing.
+        self._last_turn_cost_cents: float | None = None
+        self._last_turn_cost_basis: str | None = None
         # Spec M1 (M1-T3): the persona's chosen model preempts the Spec 23 scorer.
         # ``None`` (the default) is the pre-M1 path — every existing caller stays
         # byte-identical (the hook short-circuits before touching routing). The
@@ -733,6 +742,11 @@ class ConversationLoop:
         persona_id = self._require_persona_id()
         started = time.perf_counter()
         self.deferred_input_files.clear()  # M1a per-turn reset (D-16-2)
+        # Spec M2 (D-M2-5): per-turn reset — a turn that completes WITHOUT a
+        # TurnLog (the R1 bypass path below) must read as "no recorded cost"
+        # (flat-floor billing), never a stale previous turn's number.
+        self._last_turn_cost_cents = None
+        self._last_turn_cost_basis = None
 
         # R1 turn-time safety gate (Spec V11, V11-D-5). Classify the user message
         # ONCE per turn (sub-ms, no model call). R1-hard (acute, explicit W1) is the
@@ -2056,6 +2070,28 @@ class ConversationLoop:
         """
         return self._session_spent_cents
 
+    @property
+    def last_turn_cost_cents(self) -> float | None:
+        """The LAST completed turn's recorded ``cost_cents`` (Spec M2, D-M2-5).
+
+        Read post-turn by the api's detached chat-turn worker to compute the
+        proportional credits charge — the SAME number ``_write_turn_log``
+        persisted, so the bill and the telemetry row always agree. ``None``
+        when the current/last turn wrote no TurnLog (reset at turn start —
+        e.g. the R1 safety bypass) ⇒ the worker charges the flat floor.
+        Read-only (CQS); the ``budget_snapshot`` loop-owned-state precedent.
+        """
+        return self._last_turn_cost_cents
+
+    @property
+    def last_turn_cost_basis(self) -> str | None:
+        """The LAST completed turn's ``cost_basis`` (Spec M2, D-M2-5).
+
+        ``"unpriced"`` (and ``None``) turns are charged the flat floor —
+        proportional billing only ever rides a PRICED record. Read-only.
+        """
+        return self._last_turn_cost_basis
+
     def budget_snapshot(self) -> dict[str, float] | None:
         """Per-session budget snapshot for the Spec 31 budget indicator (D-31-2).
 
@@ -2432,6 +2468,13 @@ class ConversationLoop:
         # per-session tally that feeds the soft per-session budget ramp on the
         # NEXT turn. Loop-owned, never on the stateless router/backend.
         self._session_spent_cents += cost
+        # Spec M2 (D-M2-5): expose THIS turn's recorded cost + basis for the
+        # api worker's post-success proportional deduction (read via the
+        # ``last_turn_cost_cents`` / ``last_turn_cost_basis`` properties —
+        # the same values the TurnLog row below persists, so billing and the
+        # audit record can never disagree).
+        self._last_turn_cost_cents = cost
+        self._last_turn_cost_basis = cost_basis
         # Spec 25 T11 (§2.9): observability-only refusal detection — flag any
         # AVAILABLE tool the assistant text refused to use. No correction here.
         tool_refusal_detected = detect_tool_refusals(assistant_text, self._toolbox.names())

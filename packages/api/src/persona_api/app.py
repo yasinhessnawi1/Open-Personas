@@ -519,6 +519,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             rls_engine=rls_engine,
             credits_policy=app.state.credits_policy,
             credits_per_turn=config.credits_per_turn,
+            # Spec M2 (D-M2-5): proportional chat-turn billing (floor above);
+            # PERSONA_API_PROPORTIONAL_CREDITS=false is the rollback hatch.
+            proportional_credits=config.proportional_credits,
             job_queue=app.state.job_queue,
             origination_service=origination_service,
             task_steering_service=task_steering_service,

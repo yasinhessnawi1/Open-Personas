@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
+from decimal import ROUND_CEILING, Decimal
 from typing import TYPE_CHECKING, Protocol
 
 from persona.logging import get_logger
@@ -151,6 +153,7 @@ class ChatTurnRegistry:
         rls_engine: Engine | None = None,
         credits_policy: CreditsPolicy | None = None,
         credits_per_turn: int = 1,
+        proportional_credits: bool = True,
         job_queue: JobQueue | None = None,
         origination_service: OriginationService | None = None,
         task_steering_service: TaskSteeringService | None = None,
@@ -161,6 +164,11 @@ class ChatTurnRegistry:
         self._engine = rls_engine
         self._credits_policy = credits_policy
         self._credits_per_turn = credits_per_turn
+        # Spec M2 (D-M2-5): proportional billing — max(floor, ceil(cost_cents))
+        # at 1 credit = 1¢, computed in ``_turn_charge`` from the loop's
+        # recorded turn cost. False = the pre-M2 flat charge (the approved
+        # rollback hatch, PERSONA_API_PROPORTIONAL_CREDITS).
+        self._proportional_credits = proportional_credits
         # Spec K2 (T8d): off-critical-path synthesis enqueue at the turn boundary.
         # Relocated from the old inline ``stream_turn`` to the detached worker's
         # clean-completion path; ``None`` → no-op (D-K2-2).
@@ -353,7 +361,7 @@ class ChatTurnRegistry:
                 tier=tier,
             )
             if status == "complete":
-                self._deduct(handle)
+                self._deduct(handle, loop)
                 self._enqueue_synthesis(handle, conversation)
                 self._enqueue_title_refresh(handle, prior_message_count)
                 await self._originate_task(originated)
@@ -411,13 +419,57 @@ class ChatTurnRegistry:
         handle._chars_since_flush = 0
         handle._last_flush = now
 
-    def _deduct(self, handle: ChatTurnHandle) -> None:
+    def _turn_charge(self, loop: ConversationLoop) -> tuple[int, str]:
+        """The credits amount + ledger reason for one completed turn (Spec M2, D-M2-5).
+
+        PROPORTIONAL (owner-ruled): ``max(credits_per_turn, ceil(cost_cents))``
+        at 1 credit = 1 cent, where ``cost_cents`` is the loop's recorded cost
+        for the just-completed turn (``last_turn_cost_cents`` — the SAME number
+        the TurnLog row persisted, actual or estimate per ``cost_basis``).
+        The flat floor arms:
+
+        * kill-switch OFF (``PERSONA_API_PROPORTIONAL_CREDITS=false``) — the
+          pre-M2 flat charge, byte-identical (the rollback hatch);
+        * ``unpriced`` basis / no recorded turn (legacy loops, the R1 bypass
+          path) — a priceless turn is never guessed at, it costs the floor;
+        * defensively, a non-finite recorded number (money path: never let a
+          bad float overcharge).
+
+        The ceil is ``Decimal(str(...))``-based: it ceils the number as
+        PRINTED, so a genuinely-fractional cost (``1.000001`` → 2) rounds up
+        per ceil semantics while binary-float representation noise can never
+        manufacture an extra credit. The ledger reason carries the basis
+        (``"chat_turn:<basis>"``) so audit rows record amount AND provenance
+        (the R7 constraint); flat-floor charges keep the bare ``"chat_turn"``.
+        """
+        if not self._proportional_credits:
+            return self._credits_per_turn, "chat_turn"
+        cost = getattr(loop, "last_turn_cost_cents", None)
+        basis = getattr(loop, "last_turn_cost_basis", None)
+        if (
+            not isinstance(cost, (int, float))
+            or not math.isfinite(cost)
+            or not isinstance(basis, str)
+            or basis == "unpriced"
+        ):
+            return self._credits_per_turn, "chat_turn"
+        ceiled = int(Decimal(str(cost)).to_integral_value(rounding=ROUND_CEILING))
+        return max(self._credits_per_turn, ceiled), f"chat_turn:{basis}"
+
+    def _deduct(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
         """Bill one turn on clean completion (D-P1-billing-contract; D-08-6 revision).
 
         Fires regardless of client presence (the turn ran), via the owner's bound
         RLS scope. ``None`` policy/engine → no billing (unit / community-unmetered).
 
-        Spec R2 F-04: the decrement is now a conditional atomic floor that raises
+        Spec M2 (D-M2-5): the amount is PROPORTIONAL to the turn's recorded
+        cost (``_turn_charge`` — floor ``credits_per_turn``, 1 credit = 1¢),
+        read from the loop the worker just drove (the ``budget_snapshot``
+        loop-owned-state precedent). ``MeteredCreditsPolicy`` is UNTOUCHED —
+        it was always amount-agnostic, and the R7 day-cap books this same
+        amount atomically inside the core deduct by construction.
+
+        Spec R2 F-04: the decrement is a conditional atomic floor that raises
         :class:`CreditsExhaustedError` rather than driving the balance negative.
         This is **post-success** billing of an already-completed turn, so an
         exhausted balance must NOT discard the work — the floor already kept the
@@ -426,19 +478,21 @@ class ChatTurnRegistry:
         """
         if self._credits_policy is None or self._engine is None:
             return
+        amount, reason = self._turn_charge(loop)
         try:
             self._credits_policy.deduct(
                 rls_engine=self._engine,
                 user_id=handle.owner_id,
-                amount=self._credits_per_turn,
-                reason="chat_turn",
+                amount=amount,
+                reason=reason,
             )
         except CreditsExhaustedError:
             _log.warning(
                 "post-turn billing skipped: insufficient credits to bill the completed turn "
-                "(balance floored at 0); owner={owner} conversation={conv}",
+                "(balance floored at 0); owner={owner} conversation={conv} amount={amount}",
                 owner=handle.owner_id,
                 conv=handle.conversation_id,
+                amount=amount,
             )
 
     def _enqueue_synthesis(self, handle: ChatTurnHandle, conversation: Conversation) -> None:

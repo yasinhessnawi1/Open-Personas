@@ -506,8 +506,15 @@ class APIConfig(BaseSettings):
     # is ample — it reads the persona identity + the compact catalogue.
     voice_pick_tier: str = "small"
 
-    # Credits (D-08-6): flat per successful chat turn + per authoring call.
+    # Credits (D-08-6): per successful chat turn + per authoring call.
+    # Spec M2 (D-M2-5): ``credits_per_turn`` is now the FLOOR of the
+    # proportional chat-turn charge (max(floor, ceil(cost_cents)) at
+    # 1 credit = 1¢), not the whole price. Authoring stays flat.
     credits_per_turn: int = 1
+    # Spec M2 (D-M2-5, owner-approved rollback hatch): False reverts the chat
+    # turn charge to the pre-M2 flat ``credits_per_turn`` (telemetry layers
+    # unaffected). Read from PERSONA_API_PROPORTIONAL_CREDITS.
+    proportional_credits: bool = True
     authoring_credit_cost: int = 1000
 
     # CORS origins allowed to call the API from a browser (spec-09 web app).
