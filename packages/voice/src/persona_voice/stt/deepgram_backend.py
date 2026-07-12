@@ -63,6 +63,18 @@ ENGINEERING_STANDARDS §1 — no bare Any without a reason). The
 ``# ruff: noqa: ARG002`` carve-out covers the unused
 ``_client`` / ``_close`` callback positional arguments the SDK requires
 in every handler signature even when our adapter ignores them.
+
+**R9-025a addition — one-shot prerecorded transcription.**
+:func:`transcribe_prerecorded` is a SECOND, distinct entry point into the
+same deepgram-sdk boundary: Deepgram's REST ``listen.asyncrest`` prerecorded
+endpoint (record-stop → text, no live session) rather than the live
+WebSocket :class:`DeepgramStreamingSTT` drives. It shares this module's
+:class:`StreamingSTTConfig` and :class:`STTError` mapping
+(:func:`_raise_mapped_deepgram_error`, factored out of
+:meth:`DeepgramStreamingSTT._raise_mapped` so both call sites map the same
+provider-exception shapes once) — kept in THIS module, not a sibling one, so
+the "only place the workspace touches deepgram-sdk" invariant above stays
+true of the whole STT surface, not just the streaming half.
 """
 
 # ruff: noqa: ANN401, ARG002
@@ -89,7 +101,7 @@ if TYPE_CHECKING:
     from persona_voice.stt.config import StreamingSTTConfig
 
 
-__all__ = ["DeepgramStreamingSTT"]
+__all__ = ["DeepgramStreamingSTT", "transcribe_prerecorded"]
 
 
 _DEEPGRAM_INBOUND_SAMPLE_RATE_HZ: int = 16_000
@@ -436,74 +448,184 @@ class DeepgramStreamingSTT:
     def _raise_mapped(self, exc: BaseException) -> None:
         """Re-raise a provider exception through the STT domain hierarchy.
 
-        The mapping mirrors Spec 02's :func:`persona.backends.openai_compat`
-        adapter-boundary discipline:
-
-        * Status 401 / 403 / API-key errors → :class:`STTAuthenticationError`
-        * Status 429 → :class:`STTRateLimitError` (with ``retry_after_s``
-          context when the provider surfaces it)
-        * Status 400 with audio-format diagnostics → :class:`STTAudioFormatError`
-        * Anything else with a Deepgram identity → :class:`STTStreamFailureError`
-
-        Domain exceptions raised by the backend itself pass through
-        unchanged.
+        Thin delegator onto the module-level :func:`_raise_mapped_deepgram_error`
+        (shared with :func:`transcribe_prerecorded`'s REST error mapping, R9-025a)
+        — see that function's docstring for the mapping rules.
         """
-        if isinstance(
-            exc,
-            (
-                STTAuthenticationError,
-                STTRateLimitError,
-                STTStreamFailureError,
-                STTAudioFormatError,
-            ),
-        ):
-            raise exc
+        _raise_mapped_deepgram_error(exc, model=self._config.model)
 
-        message = str(exc) or exc.__class__.__name__
-        status = self._extract_status(exc)
-        context: dict[str, str] = {
-            "provider": "deepgram",
-            "model": self._config.model,
-        }
-        if status is not None:
-            context["status"] = status
 
-        if self._is_auth_error(exc, status):
-            raise STTAuthenticationError(message, context=context) from exc
-        if status == "429":
-            retry_after = self._extract_retry_after(exc)
-            if retry_after is not None:
-                context["retry_after_s"] = retry_after
-            raise STTRateLimitError(message, context=context) from exc
-        if status == "400" and self._is_format_error(message):
-            raise STTAudioFormatError(message, context=context) from exc
-        raise STTStreamFailureError(message, context=context) from exc
+# ---------------------------------------------------------------------------
+# Shared provider-exception mapping (WebSocket live path + REST one-shot path)
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def _extract_status(exc: BaseException) -> str | None:
-        status = getattr(exc, "status", None)
-        if status is None:
-            status = getattr(exc, "status_code", None)
-        if status is None:
-            return None
-        return str(status)
 
-    @staticmethod
-    def _extract_retry_after(exc: BaseException) -> str | None:
-        retry = getattr(exc, "retry_after", None)
-        if retry is None:
-            return None
-        return str(retry)
+def _raise_mapped_deepgram_error(exc: BaseException, *, model: str) -> None:
+    """Re-raise a provider exception through the STT domain hierarchy.
 
-    @staticmethod
-    def _is_auth_error(exc: BaseException, status: str | None) -> bool:
-        if exc.__class__.__name__ == "DeepgramApiKeyError":
-            return True
-        return status in {"401", "403"}
+    Shared by :meth:`DeepgramStreamingSTT._raise_mapped` (the live WebSocket
+    path) and :func:`transcribe_prerecorded` (the R9-025a one-shot REST
+    ``POST /v1/stt`` path) — both adapter-boundary call sites in this module
+    map the SAME deepgram-sdk exception shapes (a ``.status``/``.status_code``
+    attribute + class-name checks) onto the identical :class:`STTError`
+    hierarchy, so the mapping lives once here rather than twice.
 
-    @staticmethod
-    def _is_format_error(message: str) -> bool:
-        lowered = message.lower()
-        return any(
-            token in lowered for token in ("encoding", "sample_rate", "channels", "audio format")
+    The mapping mirrors Spec 02's :func:`persona.backends.openai_compat`
+    adapter-boundary discipline:
+
+    * Status 401 / 403 / API-key errors → :class:`STTAuthenticationError`
+    * Status 429 → :class:`STTRateLimitError` (with ``retry_after_s``
+      context when the provider surfaces it)
+    * Status 400 with audio-format diagnostics → :class:`STTAudioFormatError`
+    * Anything else with a Deepgram identity → :class:`STTStreamFailureError`
+
+    Domain exceptions raised by the backend itself pass through unchanged.
+    """
+    if isinstance(
+        exc,
+        (
+            STTAuthenticationError,
+            STTRateLimitError,
+            STTStreamFailureError,
+            STTAudioFormatError,
+        ),
+    ):
+        raise exc
+
+    message = str(exc) or exc.__class__.__name__
+    status = _extract_status(exc)
+    context: dict[str, str] = {
+        "provider": "deepgram",
+        "model": model,
+    }
+    if status is not None:
+        context["status"] = status
+
+    if _is_auth_error(exc, status):
+        raise STTAuthenticationError(message, context=context) from exc
+    if status == "429":
+        retry_after = _extract_retry_after(exc)
+        if retry_after is not None:
+            context["retry_after_s"] = retry_after
+        raise STTRateLimitError(message, context=context) from exc
+    if status == "400" and _is_format_error(message):
+        raise STTAudioFormatError(message, context=context) from exc
+    raise STTStreamFailureError(message, context=context) from exc
+
+
+def _extract_status(exc: BaseException) -> str | None:
+    status = getattr(exc, "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    if status is None:
+        return None
+    return str(status)
+
+
+def _extract_retry_after(exc: BaseException) -> str | None:
+    retry = getattr(exc, "retry_after", None)
+    if retry is None:
+        return None
+    return str(retry)
+
+
+def _is_auth_error(exc: BaseException, status: str | None) -> bool:
+    if exc.__class__.__name__ == "DeepgramApiKeyError":
+        return True
+    return status in {"401", "403"}
+
+
+def _is_format_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        token in lowered for token in ("encoding", "sample_rate", "channels", "audio format")
+    )
+
+
+async def transcribe_prerecorded(
+    audio: bytes,
+    *,
+    config: StreamingSTTConfig,
+    content_type: str | None = None,
+) -> str:
+    """One-shot Deepgram prerecorded transcription (R9-025a ``POST /v1/stt``).
+
+    A DISTINCT SDK surface from :class:`DeepgramStreamingSTT` — Deepgram's
+    REST ``listen.asyncrest`` prerecorded endpoint, not the live WebSocket —
+    but the SAME adapter-boundary module, the SAME :class:`StreamingSTTConfig`
+    (``PERSONA_STT_*``), and the SAME :class:`STTError` mapping
+    (:func:`_raise_mapped_deepgram_error`). This is the "Deepgram prerecorded
+    one-shot" leg the R9-025 RESCOPE calls for: record-stop → text, no live
+    session, no VAD/turn-taking involved — used by the voice HTTP app's
+    ``POST /v1/stt`` route (in-chat dictation + persona-authoring dictation,
+    proxied through persona-api).
+
+    Args:
+        audio: Raw audio bytes in whatever container the caller captured
+            (Deepgram's prerecorded endpoint sniffs common containers when
+            ``content_type`` is not given).
+        config: The same :class:`StreamingSTTConfig` the live backend reads.
+            ``api_key`` missing/empty fails fast per D-02-10, mirroring
+            :meth:`DeepgramStreamingSTT.__init__`.
+        content_type: Optional MIME type from the caller's upload (e.g.
+            ``"audio/webm"``), forwarded as the request ``Content-Type`` so
+            Deepgram does not have to sniff the container.
+
+    Returns:
+        The best transcript alternative's text — ``""`` for a silent/empty
+        clip (not an error; mirrors :meth:`DeepgramStreamingSTT._on_transcript`'s
+        tolerant "no speech" handling).
+
+    Raises:
+        STTAuthenticationError: missing/empty ``PERSONA_STT_API_KEY``, or the
+            provider rejects the (configured) key at call time (401/403).
+        STTRateLimitError: provider 429.
+        STTStreamFailureError: any other provider/transport failure.
+    """
+    if config.api_key is None or not config.api_key.get_secret_value():
+        raise STTAuthenticationError(
+            "PERSONA_STT_API_KEY required for deepgram",
+            context={"provider": "deepgram"},
         )
+
+    # Lazy import — mirrors DeepgramStreamingSTT._open_connection (the module
+    # stays importable without the deepgram-sdk extra resolved).
+    from deepgram import DeepgramClient, DeepgramClientOptions, PrerecordedOptions
+
+    api_key_value = config.api_key.get_secret_value()
+    client_options = (
+        DeepgramClientOptions(url=config.base_url) if config.base_url is not None else None
+    )
+    try:
+        client = DeepgramClient(api_key_value, config=client_options)
+        rest = client.listen.asyncrest.v("1")
+    except Exception as exc:  # noqa: BLE001 — adapter-boundary mapping
+        _raise_mapped_deepgram_error(exc, model=config.model)
+
+    options = PrerecordedOptions(
+        model=config.model,
+        language=config.language_hint or "en",
+        smart_format=True,
+    )
+    headers = {"Content-Type": content_type} if content_type else None
+    try:
+        response = await rest.transcribe_file({"buffer": audio}, options, headers=headers)
+    except Exception as exc:  # noqa: BLE001 — adapter-boundary mapping
+        _raise_mapped_deepgram_error(exc, model=config.model)
+
+    return _extract_transcript(response)
+
+
+def _extract_transcript(response: Any) -> str:
+    """Pull the best-alternative transcript out of a Deepgram prerecorded response.
+
+    Defensive against a malformed/empty response shape (no channels /
+    alternatives) — returns ``""`` rather than raising, mirroring
+    :meth:`DeepgramStreamingSTT._on_transcript`'s tolerant extraction.
+    """
+    try:
+        channel = response.results.channels[0]
+        alternative = channel.alternatives[0]
+        return str(alternative.transcript or "")
+    except (AttributeError, IndexError, TypeError):
+        return ""

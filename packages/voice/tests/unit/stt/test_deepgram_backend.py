@@ -49,7 +49,7 @@ from persona_voice.stt import (
     STTRateLimitError,
     STTStreamFailureError,
 )
-from persona_voice.stt.deepgram_backend import DeepgramStreamingSTT
+from persona_voice.stt.deepgram_backend import DeepgramStreamingSTT, transcribe_prerecorded
 from persona_voice.stt.types import SpeechEndedEvent, SpeechStartedEvent
 
 # ---------- env hygiene ----------------------------------------------------
@@ -562,3 +562,194 @@ async def test_send_failure_maps_to_stream_failure(
     fake_connection.send = _boom  # type: ignore[method-assign]
     with pytest.raises(STTStreamFailureError):
         await backend.push_audio(b"\x01\x00" * 320, 16000)
+
+
+# ---------- transcribe_prerecorded() (R9-025a one-shot REST /v1/stt) ------
+#
+# A DISTINCT SDK surface from the WebSocket path above (``listen.asyncrest``,
+# not ``listen.asyncwebsocket``) — separate fakes, but the SAME
+# ``_FakeHttpError`` / ``_FakeDeepgramApiKeyError`` doubles feed the SAME
+# shared ``_raise_mapped_deepgram_error`` mapping the WS tests above already
+# cover exhaustively (401/403/429/400/generic); these tests confirm the
+# one-shot function routes provider failures through that SAME mapping
+# rather than re-asserting every status code again.
+
+
+class _FakeAlternativeResp:
+    def __init__(self, transcript: str) -> None:
+        self.transcript = transcript
+
+
+class _FakeChannelResp:
+    def __init__(self, alternatives: list[_FakeAlternativeResp]) -> None:
+        self.alternatives = alternatives
+
+
+class _FakeResultsResp:
+    def __init__(self, channels: list[_FakeChannelResp]) -> None:
+        self.channels = channels
+
+
+class _FakePrerecordedResponse:
+    """Stand-in for Deepgram's ``PrerecordedResponse`` (only the fields read)."""
+
+    def __init__(self, transcript: str) -> None:
+        self.results = _FakeResultsResp([_FakeChannelResp([_FakeAlternativeResp(transcript)])])
+
+
+class _FakeAsyncRestClient:
+    """Records ``transcribe_file`` calls; scripted response OR error."""
+
+    def __init__(self) -> None:
+        self.response: Any = _FakePrerecordedResponse("")
+        self.error: BaseException | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    async def transcribe_file(self, source: Any, options: Any, *, headers: Any = None) -> Any:
+        self.calls.append({"source": source, "options": options, "headers": headers})
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class _FakeAsyncRestNamespace:
+    def __init__(self, client: _FakeAsyncRestClient) -> None:
+        self._client = client
+
+    def v(self, _version: str) -> _FakeAsyncRestClient:
+        return self._client
+
+
+class _FakeListenPrerecorded:
+    def __init__(self, client: _FakeAsyncRestClient) -> None:
+        self.asyncrest = _FakeAsyncRestNamespace(client)
+
+
+class _FakeDeepgramClientPrerecorded:
+    def __init__(self, api_key: str = "", config: Any | None = None) -> None:
+        self.api_key = api_key
+        self.config = config
+        self.listen = _FakeListenPrerecorded(_PRERECORDED_REGISTRY[-1])
+
+
+# Module-level registry so each test owns a freshly-injected REST client
+# (mirrors ``_FAKE_CONNECTION_REGISTRY`` above for the WS path).
+_PRERECORDED_REGISTRY: list[_FakeAsyncRestClient] = []
+
+
+@pytest.fixture
+def fake_rest_client(monkeypatch: pytest.MonkeyPatch) -> _FakeAsyncRestClient:
+    """Inject a fresh :class:`_FakeAsyncRestClient` for the test.
+
+    ``transcribe_prerecorded`` lazy-imports ``DeepgramClient`` inside its own
+    body via ``from deepgram import DeepgramClient, ...`` — patching the
+    ``deepgram`` module attribute (NOT the backend module) is what
+    intercepts that import, same technique as ``fake_connection`` above.
+    """
+    import deepgram
+
+    client = _FakeAsyncRestClient()
+    _PRERECORDED_REGISTRY.append(client)
+    monkeypatch.setattr(deepgram, "DeepgramClient", _FakeDeepgramClientPrerecorded)
+    yield client
+    _PRERECORDED_REGISTRY.pop()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_without_api_key_raises_authentication_error() -> None:
+    """Spec 02 D-02-10 fail-fast, mirroring :meth:`DeepgramStreamingSTT.__init__`."""
+    config = StreamingSTTConfig(provider="deepgram")
+    with pytest.raises(STTAuthenticationError) as exc_info:
+        await transcribe_prerecorded(b"fake-audio-bytes", config=config)
+    assert exc_info.value.context["provider"] == "deepgram"
+    assert "PERSONA_STT_API_KEY" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_returns_best_alternative_transcript(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    fake_rest_client.response = _FakePrerecordedResponse("hello world")
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    transcript = await transcribe_prerecorded(b"pcm-bytes", config=config)
+    assert transcript == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_sends_the_raw_audio_as_a_buffer_source(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    await transcribe_prerecorded(b"raw-pcm-bytes", config=config)
+    assert fake_rest_client.calls[0]["source"] == {"buffer": b"raw-pcm-bytes"}
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_forwards_content_type_as_header(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    await transcribe_prerecorded(b"pcm-bytes", config=config, content_type="audio/webm")
+    assert fake_rest_client.calls[0]["headers"] == {"Content-Type": "audio/webm"}
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_no_content_type_omits_headers(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    await transcribe_prerecorded(b"pcm-bytes", config=config)
+    assert fake_rest_client.calls[0]["headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_empty_transcript_is_not_an_error(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """A silent/empty clip yields ``""`` — not an :class:`STTError`."""
+    fake_rest_client.response = _FakePrerecordedResponse("")
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    transcript = await transcribe_prerecorded(b"silence", config=config)
+    assert transcript == ""
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_malformed_response_returns_empty_string(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """Defensive extraction: no ``.results`` at all → ``""``, never a crash."""
+    fake_rest_client.response = object()
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    transcript = await transcribe_prerecorded(b"pcm-bytes", config=config)
+    assert transcript == ""
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_maps_401_to_authentication_error(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    fake_rest_client.error = _FakeHttpError("401", "unauthorized")
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    with pytest.raises(STTAuthenticationError) as exc_info:
+        await transcribe_prerecorded(b"pcm-bytes", config=config)
+    assert exc_info.value.context["provider"] == "deepgram"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_maps_429_to_rate_limit_error(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    fake_rest_client.error = _FakeHttpError("429", "too many requests")
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    with pytest.raises(STTRateLimitError):
+        await transcribe_prerecorded(b"pcm-bytes", config=config)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_maps_generic_failure_to_stream_failure_error(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    fake_rest_client.error = RuntimeError("transport dropped")
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    with pytest.raises(STTStreamFailureError):
+        await transcribe_prerecorded(b"pcm-bytes", config=config)

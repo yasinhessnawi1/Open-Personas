@@ -19,41 +19,89 @@ Ownership check is intentionally minimal at v0.1: a single ``SELECT`` against
 ships for the audio loop is a different concern (per-session lifecycle vs.
 per-request). When persona-voice grows additional HTTP routes (post-V1), the
 two patterns may consolidate.
+
+**R9-025a — one-shot ``POST /v1/tts`` + ``POST /v1/stt``.** Two REST
+primitives sitting beside the realtime call stack, NOT inside it: no LiveKit
+Room, no session, no turn-taking. ``POST /v1/tts`` synthesises ``{text,
+voice_id}`` into a playable WAV clip by feeding the SAME cached
+``CartesiaStreamingTTS`` instance ``GET /v1/voices`` warms a single-chunk
+text stream and collecting the PCM16 output (D-V1-6 rail, wrapped in a WAV
+header for direct ``<audio>`` playback). ``POST /v1/stt`` transcribes an
+uploaded audio clip via Deepgram's prerecorded REST endpoint
+(:func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded` — a
+distinct SDK surface from the live WebSocket backend). Both routes share
+``GET /v1/voices``'s auth posture (any signed-in user via
+:func:`get_current_user`; no persona scoping here — persona-api's proxy
+resolves persona → voice_id / ownership before calling through,
+server-to-server) and bound their inputs (``_TTS_TEXT_MAX_CHARS`` /
+``_STT_AUDIO_MAX_BYTES`` → 413). Provider failures map to a clean 502 (or,
+for a credential/config problem, 503 — mirroring persona-api's
+``ImageGenUnavailableError`` precedent) with a FIXED vocabulary reason,
+never the provider's raw payload.
 """
 
 from __future__ import annotations
 
+import io
 import uuid
+import wave
 
-# NOTE: `Request`, `Awaitable`, `Callable` are RUNTIME imports (NOT under
-# TYPE_CHECKING) because FastAPI resolves dependency / route signatures via
-# ``get_type_hints`` at startup — with ``from __future__ import annotations``
-# every annotation is a string, so every name in a dependency's signature must
-# be importable at runtime or FastAPI mis-reads the params (e.g. treating
-# ``request: Request`` as a query parameter). Same pattern as
-# persona-api ``auth/deps.py``.
+# NOTE: `Request`, `Awaitable`, `Callable`, `UploadFile` are RUNTIME imports
+# (NOT under TYPE_CHECKING) because FastAPI resolves dependency / route
+# signatures via ``get_type_hints`` at startup — with ``from __future__
+# import annotations`` every annotation is a string, so every name in a
+# dependency's signature must be importable at runtime or FastAPI mis-reads
+# the params (e.g. treating ``request: Request`` as a query parameter). Same
+# pattern as persona-api ``auth/deps.py``.
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from persona.auth.jwt_verifier import AuthenticatedUser, make_jwt_verifier
 from persona.credits import require_credits as _require_credits_core
 from persona.errors import AuthenticationError, CreditsExhaustedError
 from persona.language_capability import default_capability_registry
-from pydantic import BaseModel, ConfigDict
+from persona.logging import get_logger
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Engine, create_engine, event, text
 
 from persona_voice.config import VoiceConfig
+from persona_voice.stt.errors import (
+    STTAudioFormatError,
+    STTAuthenticationError,
+    STTError,
+    STTRateLimitError,
+    STTStreamFailureError,
+)
 from persona_voice.tokens.issuer import RoomAccessToken, mint_room_access_token
-from persona_voice.tts.types import VoiceCatalogueEntry
+from persona_voice.tts.audio import OUTBOUND_SAMPLE_RATE
+from persona_voice.tts.errors import (
+    TTSAudioFormatError,
+    TTSAuthenticationError,
+    TTSError,
+    TTSRateLimitError,
+    TTSStreamFailureError,
+)
+from persona_voice.tts.types import ResolvedVoice, VoiceCatalogueEntry
 
 if TYPE_CHECKING:
+    from persona_voice.stt.config import StreamingSTTConfig
     from persona_voice.tts.catalogue import VoiceCatalogue
+    from persona_voice.tts.protocol import StreamingTTS
 
 __all__ = ["build_app", "create_app", "get_voice_config"]
+
+_logger = get_logger("voice.http")
+
+#: R9-025a bounded sizes — a client-input-shaped 413, distinct from a
+#: provider/config failure (502/503). ~4k chars is comfortably above a long
+#: chat reply; ~10MB covers several minutes of compressed dictation audio.
+_TTS_TEXT_MAX_CHARS = 4000
+_STT_AUDIO_MAX_BYTES = 10 * 1024 * 1024
 
 # Sentinel distinguishing "catalogue not yet built" from "built, but None
 # (TTS unconfigured)" on app.state.
@@ -150,6 +198,30 @@ class VoiceListResponse(BaseModel):
 
     provider: str | None
     voices: list[VoiceCatalogueEntry]
+
+
+class TTSRequest(BaseModel):
+    """Body for ``POST /v1/tts`` (R9-025a one-shot synthesis).
+
+    ``voice_id`` is the provider-scoped catalogue handle (a
+    :class:`persona_voice.tts.types.VoiceCatalogueEntry.voice_id` /
+    :class:`persona.schema.persona.CatalogueVoice.voice_id`) — the voice
+    service is persona-agnostic, so the caller (persona-api's proxy) resolves
+    a persona to a voice_id server-side before calling here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str = Field(min_length=1)
+    voice_id: str = Field(min_length=1)
+
+
+class STTResponse(BaseModel):
+    """Result of ``POST /v1/stt`` (R9-025a one-shot prerecorded transcription)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    transcript: str
 
 
 def get_voice_config(request: Request) -> VoiceConfig:
@@ -300,6 +372,125 @@ def _make_ownership_engine(url: str) -> Engine:
             cursor.close()
 
     return engine
+
+
+# ---------------------------------------------------------------------------
+# R9-025a — one-shot TTS/STT helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_tts_backend(request: Request) -> StreamingTTS | None:
+    """The cached one-shot-capable TTS backend, or ``None`` if unconfigured.
+
+    ``CartesiaStreamingTTS`` conforms to BOTH ``VoiceCatalogue`` (listing,
+    what :func:`_get_voice_catalogue` types it as) and ``StreamingTTS``
+    (synthesis) — reusing that function's cached ``app.state.voice_catalogue``
+    instance for ``POST /v1/tts`` means the route opens no new provider
+    client and shares the startup prewarm. This IS "reuse the existing
+    backend class" (R9-025a), in the most literal sense: the same object.
+    """
+    catalogue = _get_voice_catalogue(request)
+    if catalogue is None:
+        return None
+    return cast("StreamingTTS", catalogue)
+
+
+async def _synthesize_once(backend: StreamingTTS, *, text: str, voice_id: str) -> bytes:
+    """Feed ``text`` through the streaming backend as a single chunk; collect PCM16.
+
+    No LiveKit session, no chunker, no barge-in — the backend's ``synthesize``
+    is driven exactly as the realtime call stack drives it (a text stream +
+    a :class:`ResolvedVoice`), just with a one-item stream and the output
+    collected instead of framed onto a transport.
+    """
+
+    async def _one_chunk() -> AsyncIterator[str]:
+        yield text
+
+    resolved = ResolvedVoice(provider=backend.provider_name, voice_ref=voice_id)
+    pcm = bytearray()
+    async for chunk in backend.synthesize(_one_chunk(), resolved):
+        pcm.extend(chunk.data)
+    return bytes(pcm)
+
+
+def _pcm16_to_wav(pcm: bytes, *, sample_rate: int, channels: int = 1) -> bytes:
+    """Wrap headerless PCM16LE mono bytes (the D-V1-6 outbound rail) in a WAV container.
+
+    A one-shot REST response needs only a header — no resampling/transcoding,
+    since the rail already matches WAV's most common PCM shape. WAV (not raw
+    PCM) so a browser ``<audio>`` element can play the response directly with
+    no client-side decoding.
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # PCM16
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _tts_error_reason(exc: TTSError) -> str:
+    """Fixed-vocabulary reason for a 502 ``tts_provider_error`` body.
+
+    Never interpolates ``str(exc)`` (which may carry the provider's raw
+    message) into a response — provider payloads stay server-side (logged),
+    never echoed to the caller verbatim.
+    """
+    if isinstance(exc, TTSRateLimitError):
+        return "provider_rate_limited"
+    if isinstance(exc, TTSAudioFormatError):
+        return "provider_audio_format_error"
+    if isinstance(exc, TTSStreamFailureError):
+        return "provider_stream_failed"
+    return "provider_error"
+
+
+def _get_stt_config(request: Request) -> StreamingSTTConfig:
+    """The active STT config — overridable via ``app.state.stt_config`` (tests).
+
+    Mirrors :func:`get_voice_config`'s override convention. Falls back to the
+    env-driven :class:`StreamingSTTConfig` (``PERSONA_STT_*``) — the SAME
+    config the realtime call stack's Deepgram backend reads.
+    """
+    cfg = getattr(request.app.state, "stt_config", None)
+    if cfg is not None:
+        return cast("StreamingSTTConfig", cfg)
+    from persona_voice.stt.config import StreamingSTTConfig
+
+    return StreamingSTTConfig()
+
+
+def _get_stt_transcriber(request: Request) -> Callable[..., Awaitable[str]]:
+    """The active one-shot transcriber — overridable via ``app.state.transcribe_audio``.
+
+    Mirrors the ``owns_persona`` / ``require_credits`` test-seam convention
+    already used throughout this module. Defaults to
+    :func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded` — the
+    D-V2-1 LOCK launch provider's one-shot REST leg (no dispatch/factory: a
+    single provider implements the one-shot path today).
+    """
+    override = getattr(request.app.state, "transcribe_audio", None)
+    if override is not None:
+        return cast("Callable[..., Awaitable[str]]", override)
+    from persona_voice.stt.deepgram_backend import transcribe_prerecorded
+
+    return transcribe_prerecorded
+
+
+def _stt_error_reason(exc: STTError) -> str:
+    """Fixed-vocabulary reason for a 502 ``stt_provider_error`` body.
+
+    See :func:`_tts_error_reason` — same rationale, mirrored for STT.
+    """
+    if isinstance(exc, STTRateLimitError):
+        return "provider_rate_limited"
+    if isinstance(exc, STTAudioFormatError):
+        return "provider_audio_format_error"
+    if isinstance(exc, STTStreamFailureError):
+        return "provider_stream_failed"
+    return "provider_error"
 
 
 def build_app(config: VoiceConfig) -> FastAPI:
@@ -458,6 +649,113 @@ def build_app(config: VoiceConfig) -> FastAPI:
         except Exception:  # noqa: BLE001 — a provider/network error → empty list
             return VoiceListResponse(provider=catalogue.provider_name, voices=[])
         return VoiceListResponse(provider=catalogue.provider_name, voices=list(entries))
+
+    @app.post("/v1/tts")
+    async def synthesize_speech(
+        body: TTSRequest,
+        request: Request,
+        _user: AuthenticatedUser = Depends(get_current_user),
+    ) -> Response:
+        """One-shot synthesis (R9-025a): ``{text, voice_id}`` → a playable WAV clip.
+
+        Auth matches ``GET /v1/voices`` (any signed-in user; persona-agnostic
+        — persona-api's proxy resolves persona → voice_id before calling
+        here). No LiveKit session; reuses the SAME cached backend instance
+        ``GET /v1/voices`` warms. ``text`` bounded to
+        :data:`_TTS_TEXT_MAX_CHARS` → 413. Missing/rejected provider
+        credentials → 503 (mirrors persona-api's ``ImageGenUnavailableError``
+        precedent: a deployment/config problem, not a transient one);
+        any other provider failure → 502 with a fixed-vocabulary reason.
+        """
+        if len(body.text) > _TTS_TEXT_MAX_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "tts_text_too_long",
+                    "detail": "text exceeds the synthesis size limit",
+                },
+            )
+        backend = _get_tts_backend(request)
+        if backend is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "tts_unavailable",
+                    "detail": "text-to-speech is not configured",
+                },
+            )
+        try:
+            pcm = await _synthesize_once(backend, text=body.text, voice_id=body.voice_id)
+        except TTSAuthenticationError as exc:
+            _logger.warning("tts one-shot synthesis unavailable: {err}", err=repr(exc)[:200])
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "tts_unavailable",
+                    "detail": "text-to-speech is not configured",
+                },
+            ) from exc
+        except TTSError as exc:
+            _logger.warning("tts one-shot synthesis failed: {err}", err=repr(exc)[:200])
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "tts_provider_error", "reason": _tts_error_reason(exc)},
+            ) from exc
+        if not pcm:
+            # The backend's own fail-soft path (e.g. a language the voice can't
+            # speak even in the English fallback) can legitimately yield zero
+            # audio for the realtime call; a one-shot caller asked for speech
+            # and got silence, which is honest to surface as a provider error
+            # rather than a 200 with an empty/silent clip.
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "tts_provider_error", "reason": "no_audio_produced"},
+            )
+        wav_bytes = _pcm16_to_wav(pcm, sample_rate=OUTBOUND_SAMPLE_RATE)
+        return Response(content=wav_bytes, media_type="audio/wav")
+
+    @app.post("/v1/stt", response_model=STTResponse)
+    async def transcribe_audio(
+        request: Request,
+        audio: UploadFile = File(...),
+        _user: AuthenticatedUser = Depends(get_current_user),
+    ) -> STTResponse:
+        """One-shot prerecorded transcription (R9-025a): record-stop → text.
+
+        Auth matches ``GET /v1/voices``. Bounded to
+        :data:`_STT_AUDIO_MAX_BYTES` → 413. Missing/rejected provider
+        credentials → 503; any other provider failure → 502 with a
+        fixed-vocabulary reason (never the provider payload verbatim).
+        """
+        data = await audio.read()
+        if len(data) > _STT_AUDIO_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "stt_audio_too_large",
+                    "detail": "audio exceeds the transcription size limit",
+                },
+            )
+        config = _get_stt_config(request)
+        transcriber = _get_stt_transcriber(request)
+        try:
+            transcript = await transcriber(data, config=config, content_type=audio.content_type)
+        except STTAuthenticationError as exc:
+            _logger.warning("stt one-shot transcription unavailable: {err}", err=repr(exc)[:200])
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "stt_unavailable",
+                    "detail": "speech-to-text is not configured",
+                },
+            ) from exc
+        except STTError as exc:
+            _logger.warning("stt one-shot transcription failed: {err}", err=repr(exc)[:200])
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "stt_provider_error", "reason": _stt_error_reason(exc)},
+            ) from exc
+        return STTResponse(transcript=transcript)
 
     return app
 

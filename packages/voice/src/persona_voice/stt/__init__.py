@@ -44,6 +44,16 @@ from persona_voice.stt.types import (
     SpeechStartedEvent,
 )
 
+# NOTE: neither the concrete `DeepgramStreamingSTT` backend NOR the R9-025a
+# one-shot `transcribe_prerecorded` function are re-exported here — mirrors
+# the existing discipline that only the Protocol/config/errors/factory are
+# part of this package's public surface (consumers go through
+# `load_streaming_stt`, never a concrete provider class), AND keeps this
+# package importable without the `deepgram-sdk` extra resolved (T04 lazy-
+# import discipline, `_factory.py`). Callers that need the one-shot REST leg
+# (`persona_voice.http.app`) import `transcribe_prerecorded` directly from
+# `persona_voice.stt.deepgram_backend`.
+
 __all__ = [
     "Provider",
     "SpeechActivityEvent",

@@ -8,6 +8,8 @@ failure modes.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
@@ -15,7 +17,11 @@ from persona.auth.jwt_verifier import AuthenticatedUser
 from persona.errors import AuthenticationError, CreditsExhaustedError
 from persona_voice.config import VoiceConfig
 from persona_voice.http.app import build_app
-from persona_voice.tts.types import VoiceCatalogueEntry
+from persona_voice.loop.streaming import AudioChunk
+from persona_voice.stt.config import StreamingSTTConfig
+from persona_voice.stt.errors import STTAuthenticationError, STTStreamFailureError
+from persona_voice.tts.errors import TTSAuthenticationError, TTSStreamFailureError
+from persona_voice.tts.types import ResolvedVoice, VoiceCatalogueEntry
 from pydantic import SecretStr
 
 
@@ -297,3 +303,277 @@ def test_voices_endpoint_returns_empty_when_tts_unconfigured() -> None:
     resp = client.get("/v1/voices", headers={"Authorization": "Bearer good"})
     assert resp.status_code == 200
     assert resp.json() == {"provider": None, "voices": []}
+
+
+# ---------- POST /v1/tts (R9-025a one-shot synthesis) -----------------------
+
+
+class _FakeTTSBackend:
+    """A ``StreamingTTS``-conforming double for ``POST /v1/tts`` route tests.
+
+    Also satisfies ``VoiceCatalogue`` (a bare ``provider_name`` + unused
+    ``list_voices``) since ``_get_tts_backend`` reuses the SAME
+    ``app.state.voice_catalogue`` seam ``GET /v1/voices`` tests already use.
+    """
+
+    def __init__(
+        self,
+        *,
+        chunks: list[bytes] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._chunks = [b"\x01\x00" * 100] if chunks is None else chunks
+        self._error = error
+        self.seen_texts: list[str] = []
+        self.seen_voice_refs: list[str] = []
+
+    @property
+    def provider_name(self) -> str:
+        return "cartesia"
+
+    async def list_voices(self, **_kwargs: object) -> tuple[VoiceCatalogueEntry, ...]:
+        return ()
+
+    async def synthesize(
+        self, text_stream: AsyncIterator[str], voice: ResolvedVoice
+    ) -> AsyncIterator[AudioChunk]:
+        self.seen_voice_refs.append(voice.voice_ref)
+        async for chunk in text_stream:
+            self.seen_texts.append(chunk)
+        if self._error is not None:
+            raise self._error
+        for data in self._chunks:
+            yield AudioChunk(
+                data=data, sample_rate=24000, num_channels=1, samples_per_channel=len(data) // 2
+            )
+
+
+def test_tts_endpoint_requires_bearer() -> None:
+    client = _build_test_client()
+    resp = client.post("/v1/tts", json={"text": "hello", "voice_id": "v1"})
+    assert resp.status_code == 401
+
+
+def test_tts_endpoint_503_when_tts_unconfigured() -> None:
+    client = _build_test_client()
+    client.app.state.voice_catalogue = None
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hello", "voice_id": "v1"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "tts_unavailable"
+
+
+def test_tts_endpoint_returns_playable_wav_audio() -> None:
+    client = _build_test_client()
+    backend = _FakeTTSBackend(chunks=[b"\x01\x00" * 500])
+    client.app.state.voice_catalogue = backend
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "Hello there.", "voice_id": "v_clara"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "audio/wav"
+    # Canonical RIFF/WAVE header — a browser <audio> element can play this
+    # directly with no client-side decoding.
+    assert resp.content[:4] == b"RIFF"
+    assert resp.content[8:12] == b"WAVE"
+    assert len(resp.content) > 44  # header + actual PCM payload
+    assert backend.seen_texts == ["Hello there."]
+    assert backend.seen_voice_refs == ["v_clara"]
+
+
+def test_tts_endpoint_reuses_the_cached_catalogue_backend_instance() -> None:
+    """R9-025a's "reuse the existing backend class": the SAME object GET
+    /v1/voices warms is the one POST /v1/tts synthesizes through — no new
+    provider client, no duplicate connections."""
+    client = _build_test_client()
+    backend = _FakeTTSBackend()
+    client.app.state.voice_catalogue = backend
+    client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v1"},
+    )
+    voices_resp = client.get("/v1/voices", headers={"Authorization": "Bearer good"})
+    assert voices_resp.status_code == 200
+    # Still the exact same instance on app.state — nothing replaced it.
+    assert client.app.state.voice_catalogue is backend
+
+
+def test_tts_endpoint_413_when_text_too_long() -> None:
+    client = _build_test_client()
+    client.app.state.voice_catalogue = _FakeTTSBackend()
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "x" * 4001, "voice_id": "v1"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["error"] == "tts_text_too_long"
+
+
+def test_tts_endpoint_rejects_body_with_extra_fields() -> None:
+    client = _build_test_client()
+    client.app.state.voice_catalogue = _FakeTTSBackend()
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v1", "owner_id": "spoofed"},
+    )
+    assert resp.status_code == 422
+
+
+def test_tts_endpoint_503_on_authentication_error_never_leaks_provider_payload() -> None:
+    client = _build_test_client()
+    client.app.state.voice_catalogue = _FakeTTSBackend(
+        error=TTSAuthenticationError(
+            "raw provider secret leak: sk-cartesia-abc123", context={"provider": "cartesia"}
+        )
+    )
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v1"},
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["detail"]["error"] == "tts_unavailable"
+    assert "sk-cartesia-abc123" not in resp.text  # never the raw provider payload
+
+
+def test_tts_endpoint_502_on_provider_stream_failure_with_fixed_reason() -> None:
+    client = _build_test_client()
+    client.app.state.voice_catalogue = _FakeTTSBackend(
+        error=TTSStreamFailureError(
+            "raw provider secret leak: sk-cartesia-abc123", context={"provider": "cartesia"}
+        )
+    )
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v1"},
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["detail"]["error"] == "tts_provider_error"
+    assert body["detail"]["reason"] == "provider_stream_failed"
+    assert "sk-cartesia-abc123" not in resp.text
+
+
+def test_tts_endpoint_502_when_no_audio_produced() -> None:
+    """The backend's own fail-soft "no audio" path (e.g. an unsupported
+    language even in English fallback) surfaces as a provider error here —
+    a one-shot caller asked for speech, silence is not a 200."""
+    client = _build_test_client()
+    client.app.state.voice_catalogue = _FakeTTSBackend(chunks=[])
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v1"},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["reason"] == "no_audio_produced"
+
+
+# ---------- POST /v1/stt (R9-025a one-shot prerecorded transcription) ------
+
+
+class _FakeTranscriber:
+    """A callable double matching ``transcribe_prerecorded``'s signature.
+
+    Installed on ``app.state.transcribe_audio`` — the same test-seam
+    convention as ``owns_persona`` / ``require_credits`` elsewhere in this
+    file (see :func:`persona_voice.http.app._get_stt_transcriber`).
+    """
+
+    def __init__(self, *, transcript: str = "hello world", error: Exception | None = None) -> None:
+        self._transcript = transcript
+        self._error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self,
+        audio: bytes,
+        *,
+        config: StreamingSTTConfig,
+        content_type: str | None = None,
+    ) -> str:
+        self.calls.append({"audio": audio, "config": config, "content_type": content_type})
+        if self._error is not None:
+            raise self._error
+        return self._transcript
+
+
+def test_stt_endpoint_requires_bearer() -> None:
+    client = _build_test_client()
+    resp = client.post("/v1/stt", files={"audio": ("clip.wav", b"RIFF....", "audio/wav")})
+    assert resp.status_code == 401
+
+
+def test_stt_endpoint_returns_transcript() -> None:
+    client = _build_test_client()
+    transcriber = _FakeTranscriber(transcript="hello there")
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"\x00\x01fake-audio-bytes", "audio/webm")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transcript": "hello there"}
+    assert transcriber.calls[0]["content_type"] == "audio/webm"
+    assert transcriber.calls[0]["audio"] == b"\x00\x01fake-audio-bytes"
+
+
+def test_stt_endpoint_413_when_audio_too_large() -> None:
+    client = _build_test_client()
+    client.app.state.transcribe_audio = _FakeTranscriber()
+    oversized = b"\x00" * (10 * 1024 * 1024 + 1)
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.wav", oversized, "audio/wav")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["error"] == "stt_audio_too_large"
+
+
+def test_stt_endpoint_503_on_authentication_error_never_leaks_provider_payload() -> None:
+    client = _build_test_client()
+    client.app.state.transcribe_audio = _FakeTranscriber(
+        error=STTAuthenticationError(
+            "raw provider secret leak: dg-abc123", context={"provider": "deepgram"}
+        )
+    )
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.wav", b"fake-bytes", "audio/wav")},
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["detail"]["error"] == "stt_unavailable"
+    assert "dg-abc123" not in resp.text
+
+
+def test_stt_endpoint_502_on_provider_stream_failure_with_fixed_reason() -> None:
+    client = _build_test_client()
+    client.app.state.transcribe_audio = _FakeTranscriber(
+        error=STTStreamFailureError(
+            "raw provider secret leak: dg-abc123", context={"provider": "deepgram"}
+        )
+    )
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.wav", b"fake-bytes", "audio/wav")},
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["detail"]["error"] == "stt_provider_error"
+    assert body["detail"]["reason"] == "provider_stream_failed"
+    assert "dg-abc123" not in resp.text
