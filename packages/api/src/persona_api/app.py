@@ -94,6 +94,7 @@ from persona_api.routes import (
     tasks,
     tools,
     uploads,
+    voice,
 )
 from persona_api.sandbox import (
     HostedSandbox,
@@ -985,3 +986,4 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(autonomy.router)  # spec A6: the morning review (the shared digest)
     app.include_router(tasks.router)  # spec A6: the tasks read surface (list / detail / audit)
     app.include_router(models.router)  # spec M1: model catalog — curated shortlist + browse-all
+    app.include_router(voice.router)  # R9-025a: tts/stt proxy — read-aloud + mic dictation

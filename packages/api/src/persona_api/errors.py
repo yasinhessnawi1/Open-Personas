@@ -67,6 +67,7 @@ __all__ = [
     "ScheduleStateError",
     "TurnAlreadyActiveError",
     "TurnNotActiveError",
+    "VoiceServiceUnavailableError",
     "register_exception_handlers",
 ]
 
@@ -347,6 +348,23 @@ class ConnectorServiceUnavailableError(PersonaError):
     upstream), the front-door **fails soft** with this first-class 503 so the surface can
     show the platform "temporarily unavailable" — never a dead spinner or a leaked 500.
     ``context`` carries the ``platform`` only; never the caller's bearer or any secret.
+    """
+
+
+class VoiceServiceUnavailableError(PersonaError):
+    """The voice service could not synthesize/transcribe (→ 503; R9-025a).
+
+    Mirrors :class:`ConnectorServiceUnavailableError` verbatim: the tts/stt
+    proxy routes (``POST /v1/personas/{id}/tts`` + ``POST /v1/stt``) fail
+    soft on an unset ``PERSONA_VOICE_SERVICE_URL``, an unreachable service, a
+    timeout, or a non-2xx upstream (other than a client-input-shaped 413,
+    which passes through as its own 413 — see ``routes/voice.py``) — never a
+    dead spinner or a leaked 500. The SAME shape also covers a persona with
+    no configured voice (``context["reason"] = "no_voice_configured"``): from
+    the caller's perspective this is indistinguishable from the feature
+    being absent (read-aloud/dictation hide), even though it is diagnosable
+    server-side via ``context``. ``context`` never carries the caller's
+    bearer or any provider secret.
     """
 
 
@@ -690,6 +708,25 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=_body(
                 "connector_unavailable",
                 exc.message or "the connector service is temporarily unavailable",
+                exc.context,
+            ),
+            headers={"Retry-After": "15"},
+        )
+
+    @app.exception_handler(VoiceServiceUnavailableError)
+    async def _voice_unavailable_503(_: Request, exc: VoiceServiceUnavailableError) -> JSONResponse:
+        """Voice service unreachable/unconfigured, or persona has no voice (R9-025a).
+
+        The web maps ``voice_unavailable`` to hiding/disabling the read-aloud
+        + mic-dictation affordances — never a dead spinner, never a crash.
+        ``Retry-After: 15`` mirrors the connector-service precedent (a brief
+        back-off hint, not a guarantee of recovery on an unset config).
+        """
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=_body(
+                "voice_unavailable",
+                exc.message or "the voice service is temporarily unavailable",
                 exc.context,
             ),
             headers={"Retry-After": "15"},
