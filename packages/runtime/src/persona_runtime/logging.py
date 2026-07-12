@@ -71,6 +71,17 @@ class TurnLog(BaseModel):
     Frozen + ``extra="forbid"``. ``timestamp`` must be tz-aware (UTC), matching
     the spec-01 model convention.
 
+    Spec M2 (D-M2-2) — SEMANTIC CORRECTION to :attr:`model_name` /
+    :attr:`provider` / :attr:`cost_cents`: they now describe the model that
+    ACTUALLY SERVED the turn. Pre-M2, a fallback-engaged turn carried the
+    multi-model wrapper's PRIMARY identity here (the wrapper's
+    ``provider_name`` / ``model_name`` report the primary by design) — so the
+    persisted row, ``/v1/me/usage``, and the cost estimate all named a model
+    that never ran. Post-M2 they agree with :attr:`tier_model_chosen` /
+    :attr:`tier_provider_used` (which are now redundant-on-success duplicates,
+    kept additive-safe for existing consumers); primary-only turns are
+    byte-identical.
+
     Spec 18 (T12; D-18-X-turnlog-extension) extends the shape additively with
     routing observability:
 

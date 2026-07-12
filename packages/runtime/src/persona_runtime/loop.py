@@ -2393,6 +2393,25 @@ class ConversationLoop:
     ) -> None:
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
+        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.
+        # The wrapper's per-call attempt ledger lives on ``last_attempts``;
+        # single-backend (non-wrapper) callers safely return an empty list
+        # via ``getattr(..., None) or []``, yielding the zero-fallback
+        # default shape (backward compat). Computed FIRST (Spec M2, D-M2-2):
+        # the served-model identity below derives from this projection.
+        fallback_kwargs = _compute_fallback_fields(backend)
+        # Spec M2 (D-M2-2): the turn is priced and NAMED as the model that
+        # ACTUALLY served it. On a fallback-engaged turn the wrapper's own
+        # ``provider_name`` / ``model_name`` report the PRIMARY by design
+        # (multi_model.py contract) — pre-M2 that mis-attributed every
+        # fallback turn's ``model_name`` / ``provider`` / ``cost_cents`` to
+        # the never-invoked primary. The resolved winner sits in the tier_*
+        # projection; the or-fallback is defensive for the typed ``str | None``
+        # (``_compute_fallback_fields`` assigns real identities on both
+        # branches — ``None`` only in the never-reaching-here exhaustion case).
+        # Primary-only turns: served == primary, byte-identical.
+        served_model = fallback_kwargs["tier_model_chosen"] or backend.model_name
+        served_provider = fallback_kwargs["tier_provider_used"] or backend.provider_name
         # Spec M2 (D-M2-1): resolver-backed cost — ONE pricing truth (the
         # Spec-22/23 metadata chain injected by the composition root; bare
         # loops fall to the zero-network static-only default). Replaces the
@@ -2401,8 +2420,8 @@ class ConversationLoop:
         # The D-M2-3 response-side actual (``usage.cost_usd``) lands at M2-T3
         # and will take precedence here (basis "actual_openrouter").
         cost, cost_basis = compute_turn_cost(
-            provider=backend.provider_name,
-            model=backend.model_name,
+            provider=served_provider,
+            model=served_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             actual_cost_usd=None,
@@ -2425,28 +2444,24 @@ class ConversationLoop:
         if reasoning_text:
             reasoning_text_hash = hashlib.sha256(reasoning_text.encode("utf-8")).hexdigest()
             reasoning_total_tokens = len(reasoning_text.split())
-        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.
-        # The wrapper's per-call attempt ledger lives on ``last_attempts``;
-        # single-backend (non-wrapper) callers safely return an empty list
-        # via ``getattr(..., None) or []``, yielding the zero-fallback
-        # default shape (backward compat).
-        fallback_kwargs = _compute_fallback_fields(backend)
         # Spec 25 T12 (§2.1 / D-25-5/6): feed this turn's fallback signal into
         # the rolling window and resolve the alert state (hysteresis + logging
-        # handled in the helper).
+        # handled in the helper). Served identity in the log context (D-M2-2).
         fallback_rate_alert = self._update_fallback_window(
             engaged=fallback_kwargs["fallback_engaged"],
             conversation_id=conversation.conversation_id,
-            provider=backend.provider_name,
-            model=backend.model_name,
+            provider=served_provider,
+            model=served_model,
         )
         self._turn_log_writer.write(
             TurnLog(
                 conversation_id=conversation.conversation_id,
                 turn_index=conversation.turn_count,
                 tier_used=tier,
-                model_name=backend.model_name,
-                provider=backend.provider_name,
+                # D-M2-2: the SERVED model names the turn (semantic correction —
+                # pre-M2 these carried the wrapper's primary on fallback turns).
+                model_name=served_model,
+                provider=served_provider,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
