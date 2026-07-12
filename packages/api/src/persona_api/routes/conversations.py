@@ -11,13 +11,17 @@ import json
 from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from persona.approvals import is_decision_cue
 
 from persona_api.approvals import ApprovalStore
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import TurnNotActiveError
+from persona_api.jobs.handlers.file_extract import (
+    enqueue_file_extract,
+    file_extract_queue_ready,
+)
 from persona_api.middleware.rate_limit import rate_limit
 from persona_api.routes._runtime_guard import require_runtime_wired
 from persona_api.schemas import (
@@ -27,6 +31,8 @@ from persona_api.schemas import (
     CreateConversationRequest,
     MessageView,
     PostMessageRequest,
+    TurnIntoFileRequest,
+    TurnIntoFileResponse,
 )
 from persona_api.services import (
     audit_service,
@@ -501,3 +507,88 @@ async def cancel_active_turn(
         target=conversation_id,
     )
     return {"status": "cancelling"}
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/turn-into-file",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=TurnIntoFileResponse,
+    dependencies=[Depends(rate_limit("default"))],
+)
+async def turn_message_into_file(
+    conversation_id: str,
+    message_id: str,
+    body: TurnIntoFileRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> TurnIntoFileResponse:
+    """ "Turn into file" (R9-025b): enqueue a durable extraction job for one message.
+
+    Message action → api endpoint → durable ``file_extract`` job (see that
+    module's docstring for the episodic-context + doc-gen-sandbox-boundary
+    decisions) — a shortcut replacing the ritual "now draft that as a PDF"
+    follow-up turn.
+
+    RLS-scoped via ``chat_service.get_conversation`` → 404 if the conversation
+    isn't the caller's (cross-tenant) or doesn't exist. 404 if ``message_id``
+    isn't a message of THIS conversation. 422 if the target isn't an
+    ``assistant`` message — v1 scope: the ritual this replaces is "draft THAT
+    REPLY as a file," not the user's own words. 503 if the feature isn't
+    configured (no model backend / no sandbox pool composed) — the
+    ``file_extract_queue_ready`` gate mirrors ``avatar_queue_ready``'s R9-013
+    lesson: never enqueue into a handler-less worker.
+    """
+    conv = chat_service.get_conversation(
+        rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
+    )
+    conv_messages = cast("list[dict[str, Any]]", conv["messages"])
+    target = next((m for m in conv_messages if m["id"] == message_id), None)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "message_not_found",
+                "reason": "no such message in this conversation",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+            },
+        )
+    if target["role"] != "assistant":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "wrong_message_role",
+                "reason": "only an assistant message can be turned into a file",
+                "role": target["role"],
+            },
+        )
+
+    job_queue = getattr(request.app.state, "job_queue", None)
+    tier_registry = getattr(request.app.state, "tier_registry", None)
+    sandbox_pool = getattr(request.app.state, "sandbox_pool", None)
+    if job_queue is None or not file_extract_queue_ready(
+        tier_registry=tier_registry, sandbox_pool=sandbox_pool
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "file_extract_unavailable",
+                "reason": "turn-into-file is not configured on this deployment",
+            },
+        )
+
+    record = enqueue_file_extract(
+        job_queue,
+        owner_id=user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        format=body.format,
+    )
+    audit_service.record(
+        engine=request.app.state.rls_engine,
+        user_id=user.id,
+        action="conversation.message.turn_into_file",
+        target=message_id,
+        metadata={"format": body.format},
+    )
+    return TurnIntoFileResponse(job_id=record.id if record is not None else None, status="queued")

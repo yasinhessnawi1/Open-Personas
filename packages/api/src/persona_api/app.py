@@ -811,6 +811,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # gate the create route's producer consults — enqueue iff handler.
                 image_backend=app.state.image_backend,
                 file_storage=app.state.file_storage,
+                # R9-025b: the file_extract tenant's substrate — the SAME hosted
+                # sandbox pool the live chat path's code_execution tool acquires
+                # from (None when no E2B key is configured; the tenant is then
+                # simply not registered, paired with the route's own
+                # file_extract_queue_ready gate). workspace_root is always set.
+                sandbox_pool=sandbox_pool,
+                workspace_root=app.state.workspace_root,
             )
         except AuthenticationError:
             # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,

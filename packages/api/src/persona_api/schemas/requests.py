@@ -29,6 +29,7 @@ __all__ = [
     "RefinePersonaRequest",
     "RespondToRunRequest",
     "StartRunRequest",
+    "TurnIntoFileRequest",
     "UpdateMCPServerRequest",
     "UpdatePersonaRequest",
     "UpdateProfileRequest",
@@ -225,6 +226,19 @@ class RespondToRunRequest(_Input):
     """Answer an ask-user question raised by a running agentic loop (§5.3)."""
 
     answer: str
+
+
+class TurnIntoFileRequest(_Input):
+    """ "Turn into file" (R9-025b) — extract one assistant message into a document.
+
+    ``format`` is optional; ``"auto"`` (the default, the calm popover pick) lets
+    the extraction job decide pdf vs xlsx from the content's shape. An explicit
+    choice is honoured verbatim regardless of the content's natural shape (the
+    renderer degrades honestly on a mismatch — see ``file_extract``'s
+    ``_tabular_rows``).
+    """
+
+    format: Literal["auto", "pdf", "md", "xlsx", "csv"] = "auto"
 
 
 class CreateMCPServerRequest(_Input):

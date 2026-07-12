@@ -27,6 +27,7 @@ __all__ = [
     "DailySpendCapExceededError",
     "ApprovalNotFoundError",
     "DuplicateJobTypeError",
+    "FileExtractionError",
     "GatedActionProposedError",
     "InvalidRecurrenceRuleError",
     "InvalidTimezoneError",
@@ -227,6 +228,28 @@ class UnknownDocumentTemplateError(PersonaError):
     Carries ``context={"template": ..., "available": ...}``. Templates are
     bundled Markdown files registered in
     :mod:`persona.skills.document_generation.registry` (D-24-2).
+    """
+
+
+class FileExtractionError(PersonaError):
+    """Raised by the ``file_extract`` background job on an unrecoverable pass (R9-025b).
+
+    "Turn into file": an LLM extraction + doc-gen sandbox render that failed and
+    produced NO partial file. ``context={"reason": ...}`` from a fixed, closed
+    vocabulary so job failures are grep-able/observable:
+
+    - ``"llm_extraction_failed"`` — the extraction call raised, timed out, or
+      returned content the lenient parser could not turn into usable structured
+      output (empty/malformed JSON).
+    - ``"sandbox_execution_failed"`` — the sandbox was unavailable, or the
+      generated render code exited non-ok (error/timeout/oom/killed).
+    - ``"empty_output"`` — the sandbox run exited ``ok`` but produced no file
+      (or only a 0-byte one) — a silent-failure guard, never surfaced as success.
+
+    An ordinary exception (not :class:`PermanentJobError`): the job retries per
+    the job system's default :class:`~persona.jobs.RetryPolicy`, exactly like
+    any other transient background failure. Raising this never touches the
+    conversation/message rows — the feature is additive-only, out of band.
     """
 
 

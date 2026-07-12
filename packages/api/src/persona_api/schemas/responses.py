@@ -476,6 +476,21 @@ class ActiveTurnResponse(_Output):
     stream_events: list[dict[str, object]] = Field(default_factory=list)
 
 
+class TurnIntoFileResponse(_Output):
+    """202 acknowledgment for "Turn into file" (R9-025b) — a durable job reference.
+
+    The file itself is NOT ready yet — it lands (or the job dead-letters) some
+    seconds later, out of band; the client's Files surface picks it up on its
+    own refresh/poll (see ``file_extract``'s module docstring for the exact
+    refresh-signal decision). ``job_id`` is ``None`` only on the (safe,
+    idempotent) duplicate-enqueue path — the SAME (message, format) job is
+    already queued/running from an earlier click.
+    """
+
+    job_id: str | None
+    status: Literal["queued"]
+
+
 # -- credits / usage (§5.5) -------------------------------------------------
 
 

@@ -81,6 +81,13 @@ from persona_api.jobs.handlers.episodic_consolidation import (
     build_core_block_refresher,
     register_episodic_consolidation_handler,
 )
+from persona_api.jobs.handlers.file_extract import (
+    SandboxFileRenderer,
+    build_file_extract_episodic_query,
+    build_file_extract_generator,
+    file_extract_queue_ready,
+    register_file_extract_handler,
+)
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.handlers.title_refresh import (
     build_title_refresh_generator,
@@ -117,6 +124,7 @@ if TYPE_CHECKING:
     from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
     from persona_api.jobs.worker import Worker
     from persona_api.realtime.channel import UserEventChannel
+    from persona_api.sandbox.pool import SandboxPool
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.web_deliverer import LiveSessionRegistry
@@ -142,6 +150,8 @@ def build_worker_registry(
     event_channel: UserEventChannel | None = None,
     image_backend: ImageBackend | None = None,
     file_storage: FileStorage | None = None,
+    sandbox_pool: SandboxPool | None = None,
+    workspace_root: Path | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -174,6 +184,15 @@ def build_worker_registry(
             producer consults: the tenant registers iff the route may enqueue.
         file_storage: The app's storage backend (the avatar persist target); part
             of the same shared gate.
+        sandbox_pool: The app's composed hosted-sandbox pool (R9-025b) — the
+            SAME pool the live chat path's ``code_execution`` tool acquires
+            from. ``None`` when no E2B key is configured; the ``file_extract``
+            tenant then simply is NOT registered (paired with the route's own
+            ``file_extract_queue_ready`` gate, so a job is never enqueued into
+            a handler-less worker).
+        workspace_root: The app's workspace root (the ``file_extract``
+            renderer's persist target — the SAME root the code_execution
+            produced-file persister writes under).
     """
     backend = tier_registry.get(synthesis_tier)
     graph_backend = PostgresGraphBackend(engine=rls_engine)
@@ -243,6 +262,35 @@ def build_worker_registry(
         generator=build_title_refresh_generator(title_backend),
         event_channel=event_channel,
     )
+
+    # Turn-into-file (R9-025b): message action -> LLM extraction (mid tier by
+    # default, PERSONA_API_FILE_EXTRACT_TIER overridable, resolved ONCE here and
+    # closed over — the SAME build-time pattern as title/synthesis above) -> a
+    # render via the doc-gen sandbox boundary. Gated on `file_extract_queue_ready`
+    # (the avatar_queue_ready precedent, R9-013): registered iff BOTH a model
+    # backend AND a sandbox pool are composed — the SAME predicate the route
+    # consults before enqueueing, so a job is never dropped into a handler-less
+    # worker. `sandbox_pool`/`workspace_root` absent (no E2B key configured, or a
+    # boot with no workspace) -> the tenant is simply not registered; the route's
+    # own gate keeps the producer honest about that.
+    if file_extract_queue_ready(tier_registry=tier_registry, sandbox_pool=sandbox_pool):
+        assert sandbox_pool is not None  # noqa: S101 — narrowed by the gate above
+        assert workspace_root is not None  # noqa: S101 — always set alongside sandbox_pool at boot
+        file_extract_backend = tier_registry.get(config.file_extract_tier)
+        episodic_query = (
+            build_file_extract_episodic_query(
+                memory_backend, build_audit_logger(config, rls_engine)
+            )
+            if memory_backend is not None
+            else None
+        )
+        register_file_extract_handler(
+            registry,
+            extractor=build_file_extract_generator(file_extract_backend),
+            renderer=SandboxFileRenderer(pool=sandbox_pool, workspace_root=workspace_root),
+            episodic_query=episodic_query,
+            event_channel=event_channel,
+        )
 
     # The K8 sleep-time engine (Spec K8, K8-D-8) — registered ONLY when enabled
     # (built-but-inert guard; the turn-tail trigger gates on the same switch).
@@ -945,6 +993,8 @@ def start_in_process_worker(
     event_channel: UserEventChannel | None = None,
     image_backend: ImageBackend | None = None,
     file_storage: FileStorage | None = None,
+    sandbox_pool: SandboxPool | None = None,
+    workspace_root: Path | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -986,6 +1036,10 @@ def start_in_process_worker(
         # producer gate (avatar_queue_ready), so enqueue implies handler.
         image_backend=image_backend,
         file_storage=file_storage,
+        # R9-025b: the file_extract tenant's substrate — shared with the route's
+        # producer gate (file_extract_queue_ready), so enqueue implies handler.
+        sandbox_pool=sandbox_pool,
+        workspace_root=workspace_root,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines
