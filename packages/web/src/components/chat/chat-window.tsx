@@ -402,7 +402,7 @@ export function ChatWindow({
               </div>
             ) : null}
 
-            <div className="flex items-end gap-2">
+            <div className="flex items-center gap-2">
               {/* F3 T07 — attach control. documentsDisabled is always false
                 here (we're inside a conversation context per
                 D-F3-X-document-attach-conversation-binding). */}

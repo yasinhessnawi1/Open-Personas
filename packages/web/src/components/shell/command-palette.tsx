@@ -326,7 +326,7 @@ export function CommandTrigger({ collapsed = false }: { collapsed?: boolean }) {
   return (
     <button
       type="button"
-      className="v-cmd"
+      className="v-cmd m-0"
       onClick={fire}
       aria-label={t("open")}
     >
