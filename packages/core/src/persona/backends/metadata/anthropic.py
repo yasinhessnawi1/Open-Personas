@@ -13,6 +13,31 @@ from persona.backends.model_metadata import ModelMetadata
 __all__ = ["MODELS"]
 
 MODELS: dict[str, ModelMetadata] = {
+    # $3 / $15 per Mtok (platform.claude.com/docs pricing, live-verified
+    # 2026-07-12). 1M-token context at standard pricing (same page, long-context
+    # section). Added at M2-T1 for coverage parity with the deleted runtime
+    # ``_PRICE_TABLE`` — the deployed frontier fallback must keep estimating.
+    "anthropic/claude-sonnet-4-6": ModelMetadata(
+        cost_input_per_1k_tokens=0.30,
+        cost_output_per_1k_tokens=1.50,
+        latency_p50_ms=400.0,
+        quality_benchmark=0.90,
+        tools_supported=True,
+        vision_supported=True,
+        context_length=1_000_000,
+    ),
+    # $1 / $5 per Mtok (same page, live-verified 2026-07-12). NB the deleted
+    # ``_PRICE_TABLE`` carried (0.08, 0.40) for this id — that is Haiku 3.5's
+    # rate, a placeholder artifact; do not resurrect it. Added at M2-T1.
+    "anthropic/claude-haiku-4-5": ModelMetadata(
+        cost_input_per_1k_tokens=0.10,
+        cost_output_per_1k_tokens=0.50,
+        latency_p50_ms=250.0,
+        quality_benchmark=0.80,
+        tools_supported=True,
+        vision_supported=True,
+        context_length=200_000,
+    ),
     # $3 / $15 per Mtok.
     "anthropic/claude-3.5-sonnet": ModelMetadata(
         cost_input_per_1k_tokens=0.30,

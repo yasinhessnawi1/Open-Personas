@@ -84,7 +84,10 @@ def _conv() -> Conversation:
 
 
 @pytest.mark.asyncio
-async def test_cost_basis_verify_at_deploy_for_nvidia_turn() -> None:
+async def test_cost_basis_estimate_static_for_nvidia_turn() -> None:
+    # Spec M2 (D-M2-1): the bare NVIDIA model name canonicalises to the
+    # provider-prefixed static-table id — basis is the resolver provenance
+    # (the old "verify-at-deploy" flag lived in the deleted ``_PRICE_TABLE``).
     backend = ScriptedBackend(
         [ScriptedRound(text="hi")],
         provider_name="nvidia",
@@ -92,17 +95,34 @@ async def test_cost_basis_verify_at_deploy_for_nvidia_turn() -> None:
     )
     loop, writer = _make_loop(backend)
     _ = [c async for c in loop.turn(_conv(), "hello")]
-    assert writer.logs[-1].cost_basis == "verify-at-deploy"
+    assert writer.logs[-1].cost_basis == "estimate_static"
 
 
 @pytest.mark.asyncio
-async def test_cost_basis_published_for_anthropic_turn() -> None:
+async def test_cost_basis_estimate_static_for_anthropic_turn() -> None:
+    # The M2-T1 parity row (anthropic/claude-sonnet-4-6) prices the deployed
+    # frontier fallback through the static chain — a bare loop with no
+    # injected cost_source uses the zero-network static-only default.
     backend = ScriptedBackend(
         [ScriptedRound(text="hi")], provider_name="anthropic", model_name="claude-sonnet-4-6"
     )
     loop, writer = _make_loop(backend)
     _ = [c async for c in loop.turn(_conv(), "hello")]
-    assert writer.logs[-1].cost_basis == "published"
+    assert writer.logs[-1].cost_basis == "estimate_static"
+    assert writer.logs[-1].cost_cents > 0.0
+
+
+@pytest.mark.asyncio
+async def test_cost_basis_unpriced_for_unknown_model_turn() -> None:
+    # Honest degrade (M2 §2): no metadata anywhere → unpriced + cost 0.0,
+    # never a guess.
+    backend = ScriptedBackend(
+        [ScriptedRound(text="hi")], provider_name="acme", model_name="mystery-sweep-model"
+    )
+    loop, writer = _make_loop(backend)
+    _ = [c async for c in loop.turn(_conv(), "hello")]
+    assert writer.logs[-1].cost_basis == "unpriced"
+    assert writer.logs[-1].cost_cents == 0.0
 
 
 @pytest.mark.asyncio
@@ -141,7 +161,7 @@ def test_all_spec25_fields_coexist_and_roundtrip() -> None:
         completion_tokens=5,
         latency_ms=1.0,
         cost_cents=0.04,
-        cost_basis="verify-at-deploy",
+        cost_basis="estimate_static",
         fallback_rate_alert=True,
         tool_refusal_detected=["generate_image"],
         refusal_retry_engaged=True,
@@ -153,7 +173,7 @@ def test_all_spec25_fields_coexist_and_roundtrip() -> None:
         fallback_engaged=True,
     )
     restored = TurnLog.model_validate_json(log.model_dump_json())
-    assert restored.cost_basis == "verify-at-deploy"
+    assert restored.cost_basis == "estimate_static"
     assert restored.fallback_rate_alert is True
     assert restored.tool_refusal_detected == ["generate_image"]
     assert restored.refusal_retry_engaged is True

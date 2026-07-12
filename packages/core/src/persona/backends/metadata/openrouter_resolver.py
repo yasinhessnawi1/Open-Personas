@@ -80,6 +80,20 @@ class OpenRouterModelMetadataResolver:
         index = self._ensure_index()
         return index.get(strip_dynamic_variant(model_id))
 
+    def resolve_no_fetch(self, model_id: str) -> ModelMetadata | None:
+        """Like :meth:`resolve`, but NEVER triggers the catalog fetch (Spec M2, D-M2-1).
+
+        The turn-path cost estimator calls this: pricing must never block or
+        delay a turn (spec M2 §2 invariant), so a cold — not-yet-warmed —
+        index is a plain miss (``None``, defer to static / unpriced) rather
+        than a synchronous HTTP fetch on the event loop. The index is warmed
+        off the turn path (api lifespan / the D-M2-6 TTL refresh); once warm,
+        this is the same dict lookup as :meth:`resolve`.
+        """
+        if self._index is None:
+            return None
+        return self._index.get(strip_dynamic_variant(model_id))
+
     def refresh(self) -> None:
         """Force a catalog re-fetch + re-index (D-23-8 on-staleness path)."""
         self._index = None

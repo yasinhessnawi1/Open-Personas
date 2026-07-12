@@ -29,12 +29,17 @@ selection for that turn (criterion 9), never crashing.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from persona.backends.model_metadata import ModelMetadata, ModelMetadataResolver
 
-__all__ = ["ChainedModelMetadataResolver"]
+__all__ = ["ChainedModelMetadataResolver", "MetadataSource"]
+
+#: Which chain link answered a :meth:`ChainedModelMetadataResolver.resolve_with_source`
+#: lookup — the provenance the Spec M2 cost estimator maps to ``cost_basis``
+#: (``"static"`` → ``estimate_static``, ``"catalog"`` → ``estimate_catalog``).
+MetadataSource = Literal["static", "catalog"]
 
 
 class ChainedModelMetadataResolver:
@@ -69,4 +74,38 @@ class ChainedModelMetadataResolver:
                 return static_hit
         if self._openrouter is not None:
             return self._openrouter.resolve(model_id)
+        return None
+
+    def resolve_with_source(
+        self, model_id: str, *, allow_fetch: bool = True
+    ) -> tuple[ModelMetadata, MetadataSource] | None:
+        """Resolve like :meth:`resolve` but also report WHICH link answered (Spec M2, D-M2-1).
+
+        The M2 cost estimator needs two things :meth:`resolve` cannot give it:
+
+        * **Provenance** — the TurnLog's ``cost_basis`` distinguishes an
+          authored static-table estimate (``"static"``) from a derived
+          OpenRouter-catalog one (``"catalog"``).
+        * **A no-network guarantee on the turn path** — with
+          ``allow_fetch=False`` the OpenRouter link is consulted through
+          ``resolve_no_fetch`` (a cold catalog index is a miss, never a
+          fetch). A composed resolver that does not expose ``resolve_no_fetch``
+          cannot promise fetch-free resolution and is SKIPPED under
+          ``allow_fetch=False`` — pricing must never block a turn (M2 §2), so
+          the honest degrade (static / unpriced) beats a maybe-fetch.
+
+        The IntelligentRouter keeps calling :meth:`resolve` unchanged.
+        """
+        if self._static is not None:
+            static_hit = self._static.resolve(model_id)
+            if static_hit is not None:
+                return static_hit, "static"
+        if self._openrouter is not None:
+            if allow_fetch:
+                catalog_hit = self._openrouter.resolve(model_id)
+            else:
+                no_fetch = getattr(self._openrouter, "resolve_no_fetch", None)
+                catalog_hit = no_fetch(model_id) if callable(no_fetch) else None
+            if catalog_hit is not None:
+                return catalog_hit, "catalog"
         return None

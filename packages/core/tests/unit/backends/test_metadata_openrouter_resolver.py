@@ -89,6 +89,30 @@ class TestOpenRouterResolver:
         assert md.quality_benchmark == 0.5  # neutral sentinel (no catalog benchmark)
         assert md.cost_verified_at_deploy is False  # derived pricing
 
+    def test_resolve_no_fetch_cold_index_is_a_miss_without_http(self) -> None:
+        # Spec M2 (D-M2-1): the turn-path cost estimator must never trigger the
+        # catalog fetch — a cold index is a plain miss, and the transport sees
+        # ZERO requests.
+        requests = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+            nonlocal requests
+            requests += 1
+            return httpx.Response(200, json=_CATALOG)
+
+        client = OpenRouterCatalogClient("sk-or-test", transport=httpx.MockTransport(handler))
+        resolver = OpenRouterModelMetadataResolver(client)
+        assert resolver.resolve_no_fetch("anthropic/claude-3.5-sonnet") is None
+        assert requests == 0
+
+    def test_resolve_no_fetch_serves_once_warm(self) -> None:
+        resolver = OpenRouterModelMetadataResolver(_client())
+        assert resolver.resolve("anthropic/claude-3.5-sonnet") is not None  # warms the index
+        md = resolver.resolve_no_fetch("anthropic/claude-3.5-sonnet")
+        assert md is not None
+        # Same dynamic-variant strip as resolve() (D-22-6).
+        assert resolver.resolve_no_fetch("anthropic/claude-3.5-sonnet:nitro") is not None
+
     def test_negative_sentinel_pricing_entry_is_skipped_not_crash(self) -> None:
         # Operator-pass regression: the LIVE catalog carries entries with
         # negative sentinel pricing ("-1" = variable / not-applicable) which

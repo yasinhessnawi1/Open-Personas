@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.backends.metadata import anthropic, deepseek, google, nvidia, openai
+from persona.backends.metadata import anthropic, deepseek, google, groq, nvidia, openai
 
 if TYPE_CHECKING:
     from persona.backends.model_metadata import ModelMetadata
@@ -32,7 +32,14 @@ def _merge() -> dict[str, ModelMetadata]:
     a last-writer-wins silent override — guarded against below.
     """
     merged: dict[str, ModelMetadata] = {}
-    for table in (anthropic.MODELS, openai.MODELS, google.MODELS, deepseek.MODELS, nvidia.MODELS):
+    for table in (
+        anthropic.MODELS,
+        openai.MODELS,
+        google.MODELS,
+        deepseek.MODELS,
+        groq.MODELS,
+        nvidia.MODELS,
+    ):
         for model_id, metadata in table.items():
             if model_id in merged:
                 msg = f"duplicate static metadata id across provider tables: {model_id!r}"

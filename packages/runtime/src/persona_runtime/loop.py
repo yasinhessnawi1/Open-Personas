@@ -62,6 +62,7 @@ from persona.tools import format_tool_result
 from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should_ask
+from persona_runtime.cost import compute_turn_cost
 from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
 from persona_runtime.errors import ScheduleParseError
 from persona_runtime.graph_window import set_recent_window_from_messages
@@ -76,9 +77,7 @@ from persona_runtime.initiative.verbs import (
 from persona_runtime.logging import (
     SkillInvocation,
     TurnLog,
-    cost_basis_for,
     detect_tool_refusals,
-    estimate_cost_cents,
 )
 from persona_runtime.proactive_mcp_gap import build_mcp_gap_question, detect_mcp_gap
 from persona_runtime.proactive_tool_gap import build_tool_gap_question, detect_tool_gap
@@ -136,6 +135,7 @@ if TYPE_CHECKING:
     from persona.tasks import TaskStateReader
     from persona.tools import Toolbox
 
+    from persona_runtime.cost import CostSource
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.images import TurnImage
     from persona_runtime.logging import TurnLogWriter
@@ -501,6 +501,7 @@ class ConversationLoop:
         initiative_pending_provider: Callable[[], str | None] | None = None,
         unified_recall: Callable[[str], UnifiedProjection] | None = None,
         core_block_provider: Callable[[], str | None] | None = None,
+        cost_source: CostSource | None = None,
     ) -> None:
         self._persona = persona
         self._stores = stores
@@ -590,6 +591,12 @@ class ConversationLoop:
         self._router = router
         self._tiers = tier_registry
         self._turn_log_writer = turn_log_writer
+        # Spec M2 (D-M2-1): the provenance-carrying metadata source the
+        # turn-cost computation reads — the SAME chained resolver the
+        # IntelligentRouter consults, injected by the composition root
+        # (RuntimeFactory). ``None`` (bare / CLI / test loops) ⇒
+        # ``compute_turn_cost``'s zero-network static-only default.
+        self._cost_source = cost_source
         self._max_tool_rounds = max_tool_rounds
         # Spec 25 T12 (§2.1 / D-25-5/6 / D-25-X-t12-window-location): rolling
         # 10-turn fallback-rate window lives HERE in the turn loop (turns ≠
@@ -2386,17 +2393,25 @@ class ConversationLoop:
     ) -> None:
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
-        cost = estimate_cost_cents(
-            backend.provider_name, backend.model_name, prompt_tokens, completion_tokens
+        # Spec M2 (D-M2-1): resolver-backed cost — ONE pricing truth (the
+        # Spec-22/23 metadata chain injected by the composition root; bare
+        # loops fall to the zero-network static-only default). Replaces the
+        # deleted ``_PRICE_TABLE`` estimator. ``cost_basis`` carries the
+        # provenance: "estimate_static", "estimate_catalog", or "unpriced".
+        # The D-M2-3 response-side actual (``usage.cost_usd``) lands at M2-T3
+        # and will take precedence here (basis "actual_openrouter").
+        cost, cost_basis = compute_turn_cost(
+            provider=backend.provider_name,
+            model=backend.model_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            actual_cost_usd=None,
+            source=self._cost_source,
         )
         # Spec 23 T11 (D-23-7): accumulate this turn's cost into the loop-owned
         # per-session tally that feeds the soft per-session budget ramp on the
         # NEXT turn. Loop-owned, never on the stateless router/backend.
         self._session_spent_cents += cost
-        # Spec 25 T13 (§2.6 / D-25-7): surface how ``cost`` was derived so
-        # operators can tell provider-listed rates from verify-at-deploy
-        # shadow-price estimates (e.g. NVIDIA).
-        cost_basis = cost_basis_for(backend.provider_name, backend.model_name)
         # Spec 25 T11 (§2.9): observability-only refusal detection — flag any
         # AVAILABLE tool the assistant text refused to use. No correction here.
         tool_refusal_detected = detect_tool_refusals(assistant_text, self._toolbox.names())

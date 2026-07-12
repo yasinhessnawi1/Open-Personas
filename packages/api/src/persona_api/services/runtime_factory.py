@@ -244,6 +244,14 @@ class RuntimeFactory:
         # loop actually consults the router — existing personas (default off)
         # route byte-identically (criterion 11).
         self._latency_tracker = FirstTokenLatencyTracker()
+        # Spec M2 (D-M2-1): the metadata resolver chain is built UNCONDITIONALLY
+        # — hoisted out of ``_build_intelligent_router`` because turn-cost
+        # estimation reads it on EVERY turn, while the routing flag below only
+        # gates the router CONSUMER. One shared instance serves both the
+        # IntelligentRouter and every loop's ``cost_source``. The catalog client
+        # handle is kept for the D-M2-6 TTL/off-loop-warm path (``None`` when no
+        # ``PERSONA_OPENROUTER_API_KEY`` — static-only chain, zero network).
+        self._catalog_client, self._metadata_resolver = self._build_metadata_resolver()
         # Spec P9 (P9-D-4/D-7): the Spec-23 scorer is DORMANT by default — the
         # global gate (``PERSONA_ROUTING_INTELLIGENT_ENABLED``, default off) is
         # consulted BEFORE the persona flag ever is. The stored per-persona
@@ -251,10 +259,12 @@ class RuntimeFactory:
         # unset-as-enabled), not a deliberate choice — it only means something
         # when an operator turns the global gate on. NB re-enable prerequisite:
         # repopulate the model-metadata tables first, or every pick silently
-        # degrades to rule-based slot-0 (metadata covers zero deployed models,
-        # measured at P9 Phase 2).
+        # degrades to rule-based slot-0 (metadata coverage: M2-T1 added the
+        # deployed anthropic/groq rows; re-verify before flipping the gate).
         self._intelligent_router = (
-            self._build_intelligent_router(tier_registry, self._latency_tracker)
+            self._build_intelligent_router(
+                tier_registry, self._latency_tracker, self._metadata_resolver
+            )
             if api_config is not None and getattr(api_config, "routing_intelligent_enabled", False)
             else None
         )
@@ -593,31 +603,52 @@ class RuntimeFactory:
         return sync
 
     @staticmethod
-    def _build_intelligent_router(
-        tier_registry: TierRegistry, latency_tracker: FirstTokenLatencyTracker
-    ) -> IntelligentRouter:
-        """Compose the IntelligentRouter (static metadata + optional OpenRouter).
+    def _build_metadata_resolver() -> tuple[
+        OpenRouterCatalogClient | None, ChainedModelMetadataResolver
+    ]:
+        """Compose the shared metadata chain (static + optional OpenRouter catalog).
 
-        The static per-provider tables are always available (the authoritative,
-        offline source). When ``PERSONA_OPENROUTER_API_KEY`` is set, the
-        OpenRouter catalog is added as the broad-coverage fallback
-        (D-23-X-resolver-precedence: static-authoritative-on-overlap). Catalog
-        client construction is network-free (D-22-11); the first ``list_models``
-        fetch is lazy + fail-open (D-22-1). The shared ``latency_tracker`` lets
-        the router consult live per-model latency (D-23-6).
+        Spec M2 (D-M2-1): hoisted OUT of ``_build_intelligent_router`` so the
+        chain exists regardless of the routing flag — the loops' resolver-backed
+        cost estimates (``compute_turn_cost``) read it on every turn. The static
+        per-provider tables are always available (the authoritative, offline
+        source); when ``PERSONA_OPENROUTER_API_KEY`` is set, the OpenRouter
+        catalog is added as the broad-coverage fallback
+        (D-23-X-resolver-precedence: static-authoritative-on-overlap).
+
+        Catalog client construction is network-free (D-22-11). The first fetch
+        belongs to the lifespan warm / D-M2-6 TTL path — NEVER the turn path:
+        ``compute_turn_cost`` resolves with ``allow_fetch=False``, so a cold
+        index is an honest miss (static / unpriced), not a blocking fetch.
         """
         import os
 
+        client: OpenRouterCatalogClient | None = None
         openrouter = None
         api_key = os.environ.get("PERSONA_OPENROUTER_API_KEY", "").strip()
         if api_key:
             base_url = os.environ.get("PERSONA_OPENROUTER_BASE_URL", "").strip() or None
-            openrouter = OpenRouterModelMetadataResolver(
-                OpenRouterCatalogClient(api_key, base_url=base_url)
-            )
+            client = OpenRouterCatalogClient(api_key, base_url=base_url)
+            openrouter = OpenRouterModelMetadataResolver(client)
         resolver = ChainedModelMetadataResolver(
             static=StaticModelMetadataResolver(), openrouter=openrouter
         )
+        return client, resolver
+
+    @staticmethod
+    def _build_intelligent_router(
+        tier_registry: TierRegistry,
+        latency_tracker: FirstTokenLatencyTracker,
+        resolver: ChainedModelMetadataResolver,
+    ) -> IntelligentRouter:
+        """Compose the IntelligentRouter over the SHARED metadata chain (D-M2-1).
+
+        The resolver is the factory-scoped instance ``_build_metadata_resolver``
+        composed — the same one every loop's cost path reads — so routing and
+        pricing can never disagree about a model's metadata. The shared
+        ``latency_tracker`` lets the router consult live per-model latency
+        (D-23-6).
+        """
         return IntelligentRouter(
             tier_registry=tier_registry,
             metadata_resolver=resolver,
@@ -1516,6 +1547,10 @@ class RuntimeFactory:
             # byte-identically (criterion 11).
             latency_tracker=self._latency_tracker,
             intelligent_router=self._intelligent_router,
+            # Spec M2 (D-M2-1): the shared metadata chain prices every turn
+            # (resolver-backed ``compute_turn_cost`` — cost estimation works
+            # with intelligent routing OFF; the flag gates only the router).
+            cost_source=self._metadata_resolver,
             # Spec M1 (M1-T4): the per-persona ``preferred_model`` choice (T1,
             # additive-optional) resolves through the OpenRouter passthrough (T2) — any
             # catalog id, no tier pre-registration needed. Fail-open: an unset key or a

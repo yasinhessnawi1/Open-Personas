@@ -9,13 +9,21 @@ from persona.backends.metadata import (
     anthropic,
     deepseek,
     google,
+    groq,
     nvidia,
     openai,
 )
 from persona.backends.metadata.nvidia import MODELS as NVIDIA_MODELS
 from persona.backends.model_metadata import ModelMetadata, ModelMetadataResolver
 
-ALL_TABLES = (anthropic.MODELS, openai.MODELS, google.MODELS, deepseek.MODELS, nvidia.MODELS)
+ALL_TABLES = (
+    anthropic.MODELS,
+    openai.MODELS,
+    google.MODELS,
+    deepseek.MODELS,
+    groq.MODELS,
+    nvidia.MODELS,
+)
 
 
 class TestProviderTables:
@@ -72,6 +80,40 @@ class TestStaticResolver:
         resolver = StaticModelMetadataResolver(table=custom)
         assert resolver.resolve("x/y") is not None
         assert resolver.resolve("anthropic/claude-3.5-sonnet") is None
+
+
+class TestM2ParityRows:
+    """Spec M2 (M2-T1, F4): the deleted runtime ``_PRICE_TABLE``'s coverage.
+
+    The three keys the static tables did NOT already carry (current-gen
+    anthropic + the groq module) were added with vendor-page-verified numbers
+    (live-verified 2026-07-12) so deleting the placeholder table regresses
+    nothing to unpriced.
+    """
+
+    def test_claude_sonnet_4_6_row(self) -> None:
+        md = STATIC_MODEL_METADATA["anthropic/claude-sonnet-4-6"]
+        # $3 / $15 per Mtok → cents/1k = $/Mtok × 0.1.
+        assert md.cost_input_per_1k_tokens == pytest.approx(0.30)
+        assert md.cost_output_per_1k_tokens == pytest.approx(1.50)
+        assert md.cost_verified_at_deploy is True
+        assert md.context_length == 1_000_000  # 1M standard (pricing docs)
+
+    def test_claude_haiku_4_5_row(self) -> None:
+        md = STATIC_MODEL_METADATA["anthropic/claude-haiku-4-5"]
+        # $1 / $5 per Mtok — NOT the deleted table's Haiku-3.5 placeholder
+        # (0.08 / 0.40).
+        assert md.cost_input_per_1k_tokens == pytest.approx(0.10)
+        assert md.cost_output_per_1k_tokens == pytest.approx(0.50)
+        assert md.cost_verified_at_deploy is True
+
+    def test_groq_llama_row(self) -> None:
+        md = STATIC_MODEL_METADATA["groq/llama-3.1-8b-instant"]
+        # $0.05 / $0.08 per Mtok (groq.com/pricing).
+        assert md.cost_input_per_1k_tokens == pytest.approx(0.005)
+        assert md.cost_output_per_1k_tokens == pytest.approx(0.008)
+        assert md.cost_verified_at_deploy is True
+        assert md.vision_supported is False
 
 
 class TestNvidiaReconciliation:

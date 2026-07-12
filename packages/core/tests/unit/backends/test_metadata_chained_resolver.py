@@ -73,3 +73,80 @@ class TestChainedResolverPrecedence:
 
     def test_empty_chain_returns_none(self) -> None:
         assert ChainedModelMetadataResolver(static=None, openrouter=None).resolve("a/b") is None
+
+
+class _NoFetchMapResolver(_MapResolver):
+    """A catalog-link fake exposing the M2 ``resolve_no_fetch`` arm.
+
+    ``resolve`` counts as a fetch (a cold real resolver would hit the network
+    there); ``resolve_no_fetch`` serves only when ``warm``.
+    """
+
+    def __init__(self, table: dict[str, ModelMetadata], *, warm: bool) -> None:
+        super().__init__(table)
+        self.warm = warm
+        self.fetch_calls = 0
+
+    def resolve(self, model_id: str) -> ModelMetadata | None:
+        self.fetch_calls += 1
+        return super().resolve(model_id)
+
+    def resolve_no_fetch(self, model_id: str) -> ModelMetadata | None:
+        return super().resolve(model_id) if self.warm else None
+
+
+class TestResolveWithSource:
+    """Spec M2 (D-M2-1): provenance + the no-fetch turn-path arm."""
+
+    def test_static_hit_reports_static(self) -> None:
+        resolver = ChainedModelMetadataResolver(
+            static=_MapResolver({"a/b": _md(0.9)}), openrouter=_MapResolver({"a/b": _md(0.5)})
+        )
+        hit = resolver.resolve_with_source("a/b")
+        assert hit is not None
+        metadata, source = hit
+        assert source == "static"
+        assert metadata.quality_benchmark == 0.9  # precedence preserved
+
+    def test_catalog_hit_reports_catalog(self) -> None:
+        resolver = ChainedModelMetadataResolver(
+            static=_MapResolver({}), openrouter=_MapResolver({"long/tail": _md(0.5)})
+        )
+        hit = resolver.resolve_with_source("long/tail")
+        assert hit is not None
+        assert hit[1] == "catalog"
+
+    def test_both_miss_returns_none(self) -> None:
+        resolver = ChainedModelMetadataResolver(
+            static=_MapResolver({}), openrouter=_MapResolver({})
+        )
+        assert resolver.resolve_with_source("nope/none") is None
+
+    def test_no_fetch_uses_the_no_fetch_arm(self) -> None:
+        catalog = _NoFetchMapResolver({"long/tail": _md(0.5)}, warm=True)
+        resolver = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=catalog)
+        hit = resolver.resolve_with_source("long/tail", allow_fetch=False)
+        assert hit is not None
+        assert hit[1] == "catalog"
+        assert catalog.fetch_calls == 0  # never went near resolve()
+
+    def test_no_fetch_cold_catalog_is_a_miss(self) -> None:
+        catalog = _NoFetchMapResolver({"long/tail": _md(0.5)}, warm=False)
+        resolver = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=catalog)
+        assert resolver.resolve_with_source("long/tail", allow_fetch=False) is None
+        assert catalog.fetch_calls == 0
+
+    def test_no_fetch_skips_a_resolver_without_the_arm(self) -> None:
+        # A composed resolver that cannot promise fetch-free lookup is skipped
+        # under allow_fetch=False (honest miss beats a maybe-fetch, M2 §2).
+        resolver = ChainedModelMetadataResolver(
+            static=_MapResolver({}), openrouter=_MapResolver({"long/tail": _md(0.5)})
+        )
+        assert resolver.resolve_with_source("long/tail", allow_fetch=False) is None
+
+    def test_allow_fetch_true_uses_resolve(self) -> None:
+        catalog = _NoFetchMapResolver({"long/tail": _md(0.5)}, warm=False)
+        resolver = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=catalog)
+        hit = resolver.resolve_with_source("long/tail", allow_fetch=True)
+        assert hit is not None
+        assert catalog.fetch_calls == 1  # the router arm may fetch

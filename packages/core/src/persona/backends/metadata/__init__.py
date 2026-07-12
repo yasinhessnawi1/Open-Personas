@@ -25,7 +25,7 @@ miss → the IntelligentRouter degrades to rule-based selection (D-23-5, criteri
 
 from __future__ import annotations
 
-from persona.backends.metadata import anthropic, deepseek, google, nvidia, openai
+from persona.backends.metadata import anthropic, deepseek, google, groq, nvidia, openai
 from persona.backends.metadata.chained_resolver import ChainedModelMetadataResolver
 from persona.backends.metadata.openrouter_resolver import OpenRouterModelMetadataResolver
 from persona.backends.metadata.static_resolver import (
@@ -41,6 +41,7 @@ __all__ = [
     "anthropic",
     "deepseek",
     "google",
+    "groq",
     "nvidia",
     "openai",
 ]

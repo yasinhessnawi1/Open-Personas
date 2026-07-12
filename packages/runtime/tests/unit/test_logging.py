@@ -12,7 +12,6 @@ from persona_runtime.logging import (
     MemoryTurnLogWriter,
     TurnLog,
     TurnLogWriter,
-    estimate_cost_cents,
 )
 
 if TYPE_CHECKING:
@@ -102,22 +101,22 @@ class TestJSONLTurnLogWriter:
         assert (tmp_path / "tl" / "b.jsonl").exists()
 
 
-class TestCostEstimation:
-    def test_known_pair_computes_from_table(self) -> None:
-        # anthropic/claude-sonnet-4-6 = (0.30, 1.50) cents per 1k tokens.
-        cost = estimate_cost_cents("anthropic", "claude-sonnet-4-6", 1000, 500)
-        assert cost == pytest.approx(0.30 * 1.0 + 1.50 * 0.5)  # 0.30 + 0.75 = 1.05
+class TestCostBasisField:
+    """Spec M2 (M2-T1): the repurposed ``cost_basis`` field on TurnLog.
 
-    def test_zero_tokens_zero_cost(self) -> None:
-        assert estimate_cost_cents("anthropic", "claude-sonnet-4-6", 0, 0) == 0.0
+    The ``TestCostEstimation`` class that lived here tested the deleted
+    ``_PRICE_TABLE`` estimator; its replacement coverage is ``test_cost.py``
+    (resolver-backed ``compute_turn_cost``). This class pins the FIELD:
+    honest-unknown default + legacy-vocabulary rows still validate.
+    """
 
-    def test_unknown_pair_returns_zero(self) -> None:
-        assert estimate_cost_cents("acme", "mystery-model-v9", 1000, 1000) == 0.0
+    def test_default_is_unpriced(self) -> None:
+        # An unset basis must not claim a price existed (D-M2-1).
+        assert _log().cost_basis == "unpriced"
 
-    def test_unknown_pair_called_twice_is_stable(self) -> None:
-        # Two calls with the same unknown pair both cost 0.0; the once-only
-        # warning guard (an internal set) must not change the return value.
-        c1 = estimate_cost_cents("zzz", "once-only-model", 500, 500)
-        c2 = estimate_cost_cents("zzz", "once-only-model", 500, 500)
-        assert c1 == 0.0
-        assert c2 == 0.0
+    def test_legacy_jsonl_vocabulary_still_validates(self) -> None:
+        # Pre-M2 JSONL rows carry "published" / "verify-at-deploy"; the field
+        # stays ``str`` so history remains readable.
+        for legacy in ("published", "verify-at-deploy"):
+            restored = TurnLog.model_validate_json(_log(cost_basis=legacy).model_dump_json())
+            assert restored.cost_basis == legacy

@@ -1,4 +1,4 @@
-"""Per-turn telemetry — TurnLog, the writer port, and cost estimation (T06).
+"""Per-turn telemetry — TurnLog and the writer port (T06).
 
 Every completed turn produces one :class:`TurnLog` (spec §7) recording the tier,
 model, token usage, latency, estimated cost, tool-call count, skill used, and
@@ -11,10 +11,11 @@ the same port against the Postgres ``turn_logs`` table.
 crosses the API/Postgres boundary and needs ``model_dump_json`` + tz-aware
 datetime validation, following the D-02-2 / D-03-3 precedent.
 
-Cost (D-05-10, S05-3) is an *estimate* from a hand-maintained price table — not
-a billing record. Unknown ``(provider, model)`` pairs cost ``0.0`` and log a
-warning. **Prices are illustrative v0.1 placeholders; verify against provider
-pricing pages before any billing use.**
+Cost: since Spec M2 (D-M2-1) the per-turn ``cost_cents`` / ``cost_basis`` are
+computed by :func:`persona_runtime.cost.compute_turn_cost` over the Spec-22/23
+metadata resolver chain (static tables + OpenRouter catalog) — the
+hand-maintained ``_PRICE_TABLE`` that lived in this module was deleted. This
+module keeps the TurnLog shape, the writer ports, and refusal detection.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ import threading
 from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access for TurnLog.timestamp
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from persona_runtime.routing import (
@@ -40,12 +40,8 @@ __all__ = [
     "SkillInvocation",
     "TurnLog",
     "TurnLogWriter",
-    "cost_basis_for",
     "detect_tool_refusals",
-    "estimate_cost_cents",
 ]
-
-_logger = get_logger("runtime.turnlog")
 
 
 class SkillInvocation(BaseModel):
@@ -197,12 +193,17 @@ class TurnLog(BaseModel):
     # detected conservatively by :func:`detect_tool_refusals`. Observability
     # only: NO auto-retry / system-message injection here (that is T21).
     tool_refusal_detected: list[str] = Field(default_factory=list)
-    # Spec 25 T13 (§2.6 / D-25-7; D-13-3 reframed estimate+flag, NOT reopened).
-    # ``cost_basis`` records how ``cost_cents`` was derived: "published"
-    # (provider-listed rate) or "verify-at-deploy" (best-estimate shadow price,
-    # e.g. NVIDIA — re-anchor against the actual host before billing use).
-    # Populated by the turn loop from :func:`cost_basis_for`.
-    cost_basis: str = Field(default="published")
+    # Spec M2 (D-M2-1; supersedes the Spec 25 D-25-7 two-value vocabulary).
+    # ``cost_basis`` records how ``cost_cents`` was derived:
+    # "actual_openrouter" (the OpenRouter response's own ``usage.cost`` — what
+    # we actually paid), "estimate_static" (Spec-23 static per-provider table,
+    # vendor-published), "estimate_catalog" (OpenRouter catalog, derived), or
+    # "unpriced" (no data; cost recorded 0.0 — never a guess). Populated by
+    # the turn loop from :func:`persona_runtime.cost.compute_turn_cost`. Kept
+    # ``str`` (not Literal) so legacy JSONL rows ("published" /
+    # "verify-at-deploy") still validate on read; the default is the honest
+    # unknown — an unset basis must not claim a price existed.
+    cost_basis: str = Field(default="unpriced")
     # Spec 25 T12 (§2.1 / D-25-5/6; D-18-1 NOT reopened) — chronic-fallback
     # alert. ``True`` on every turn while the runtime turn-loop's rolling
     # 10-turn fallback-rate window is in the ALERTING state (>30% = ≥4/10).
@@ -327,95 +328,15 @@ class MemoryTurnLogWriter:
         self.logs.append(log)
 
 
-# Hand-maintained estimate (S05-3 / D-05-10): (provider, model) ->
-# (prompt_cents_per_1k_tokens, completion_cents_per_1k_tokens).
-# v0.1 PLACEHOLDERS — verify against provider pricing before any billing use.
-#
-# Spec 25 T13 (§2.6 / D-25-7): NVIDIA entries added as SHADOW prices — NVIDIA
-# publishes no first-party per-token rate, so these are the cheapest credible
-# third-party-host comparable (cents/1k = USD-per-Mtok ÷ 10; see
-# decisions.md §R-25-3). They carry ``cost_basis="verify-at-deploy"`` in
-# :data:`_COST_BASIS`; all others are provider-listed ("published").
-_PRICE_TABLE: dict[tuple[str, str], tuple[float, float]] = {
-    ("anthropic", "claude-sonnet-4-6"): (0.30, 1.50),
-    ("anthropic", "claude-haiku-4-5"): (0.08, 0.40),
-    ("deepseek", "deepseek-chat"): (0.014, 0.028),
-    ("groq", "llama-3.1-8b-instant"): (0.005, 0.008),
-    # NVIDIA shadow-price estimates (D-25-7 / R-25-3) — verify-at-deploy.
-    ("nvidia", "llama-3.3-nemotron-super-49b-v1.5"): (0.040, 0.040),
-    ("nvidia", "nemotron-3-super-120b-a12b"): (0.060, 0.120),
-    ("nvidia", "nemotron-3-nano-omni-30b-a3b-reasoning"): (0.020, 0.040),
-    # NOTE: NVIDIA vision model deferred to its T13 model-ID lock (R-25-3
-    # OQ-R3-5); image-gen omitted entirely (per-image, not per-token —
-    # D-25-X-per-image-cost-model-deferred).
-}
-
-# Spec 25 T13 (D-25-7): per-entry cost-derivation flag. Only non-"published"
-# entries are listed; :func:`cost_basis_for` defaults to "published".
-# ``Literal`` kept at two values per D-25-X-cost-basis-two-values (re-openable
-# for a 3rd "shadow-price" value if Spec 23 needs it).
-_COST_BASIS: dict[tuple[str, str], str] = {
-    ("nvidia", "llama-3.3-nemotron-super-49b-v1.5"): "verify-at-deploy",
-    ("nvidia", "nemotron-3-super-120b-a12b"): "verify-at-deploy",
-    ("nvidia", "nemotron-3-nano-omni-30b-a3b-reasoning"): "verify-at-deploy",
-}
-
-_warned_unknown: set[tuple[str, str]] = set()
-
-
-def _normalize_model_key(provider: str, model: str) -> str:
-    """Strip a leading ``"{provider}/"`` catalog prefix from ``model``.
-
-    Spec 25 D-25-X-nvidia-model-name-normalization (§2.6 silent-miss root
-    cause): NVIDIA catalog IDs arrive prefixed (``"nvidia/llama-3.3-..."``)
-    while :data:`_PRICE_TABLE` keys are bare (``"llama-3.3-..."``). Without
-    this strip every NVIDIA entry silently misses → the 0.0-cost path. Only
-    the provider-matching prefix is stripped, so legitimately-slashed names
-    (e.g. ``"stabilityai/..."``) for a different provider are untouched.
-    """
-    prefix = f"{provider}/"
-    return model[len(prefix) :] if model.startswith(prefix) else model
-
-
-def cost_basis_for(provider: str, model: str) -> str:
-    """Return the ``cost_basis`` flag for a ``(provider, model)`` pair.
-
-    ``"verify-at-deploy"`` for shadow-price entries (D-25-7), else
-    ``"published"``. Applies the same catalog-prefix normalization as
-    :func:`estimate_cost_cents` so a prefixed NVIDIA model resolves.
-    """
-    key = (provider, _normalize_model_key(provider, model))
-    return _COST_BASIS.get(key, "published")
-
-
-def estimate_cost_cents(
-    provider: str,
-    model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-) -> float:
-    """Estimate the turn cost in cents from the price table (S05-3).
-
-    Returns ``0.0`` for an unknown ``(provider, model)`` pair and logs a warning
-    once per unknown pair. This is an estimate for telemetry, not a billing
-    record. NVIDIA catalog-prefixed model names are normalized first
-    (D-25-X-nvidia-model-name-normalization) so prefixed IDs resolve to the
-    bare-keyed table entries instead of silently estimating 0 (§2.6).
-    """
-    normalized = _normalize_model_key(provider, model)
-    key = (provider, normalized)
-    prices = _PRICE_TABLE.get(key)
-    if prices is None:
-        if key not in _warned_unknown:
-            _warned_unknown.add(key)
-            _logger.warning(
-                "no price-table entry; cost estimated as 0 provider={provider} model={model}",
-                provider=provider,
-                model=model,
-            )
-        return 0.0
-    prompt_price, completion_price = prices
-    return (prompt_tokens / 1000.0) * prompt_price + (completion_tokens / 1000.0) * completion_price
+# Spec M2 (D-M2-1): the hand-maintained ``_PRICE_TABLE`` / ``_COST_BASIS``
+# estimator (S05-3 / D-05-10 / D-25-7) that lived here was DELETED — it was the
+# fourth, orphaned price table (no MAINTENANCE.md cadence, no ``openrouter``
+# keys, placeholder numbers diverging 2-15x from the quarterly-reviewed Spec-23
+# tables). Turn cost now comes from
+# :func:`persona_runtime.cost.compute_turn_cost` over the Spec-22/23 metadata
+# resolver chain; the coverage this table provided was folded into the static
+# tables (``persona.backends.metadata`` — incl. new anthropic current-gen +
+# groq rows, M2-T1).
 
 
 # Spec 25 T11 (§2.9) — tool-refusal detection patterns.
