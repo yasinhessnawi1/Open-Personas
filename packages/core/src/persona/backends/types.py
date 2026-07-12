@@ -41,6 +41,13 @@ class TokenUsage(BaseModel):
         completion_tokens: Tokens emitted by the model in the response.
         total_tokens: Sum of the above. Validated to equal
             ``prompt_tokens + completion_tokens``.
+        cost_usd: Response-side ACTUAL cost in USD (Spec M2, D-M2-3) — what the
+            routed request really cost, parsed fail-open from OpenRouter usage
+            accounting (``usage.cost``; OpenRouter credits ≈ USD). ``None``
+            when the provider reported none — every non-OpenRouter backend,
+            and any absent/malformed value (never a guess). ``0.0`` is a valid
+            actual (``:free`` routes). Additive-optional: pre-M2 constructors
+            are untouched.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -48,6 +55,7 @@ class TokenUsage(BaseModel):
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
+    cost_usd: float | None = Field(default=None, ge=0.0)
 
     @model_validator(mode="after")
     def _total_matches_sum(self) -> TokenUsage:

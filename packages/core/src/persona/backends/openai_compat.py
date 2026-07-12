@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import time
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -670,6 +671,29 @@ class OpenAICompatibleBackend:
     # OpenAI / DeepSeek / Groq / Together dispatch
     # ------------------------------------------------------------------
 
+    def _openai_extra_body(self) -> dict[str, Any] | None:
+        """The request ``extra_body``: D-20-3 pass-through + the M2 opt-in.
+
+        Spec M2 (D-M2-3): OpenRouter-served requests opt into OpenRouter usage
+        accounting (``usage: {"include": true}``) so the response's final
+        usage carries ``cost`` — the per-route ACTUAL we paid, captured by
+        :func:`_usage_cost_usd`. No generation-id follow-up call; the actual
+        rides the same response.
+
+        Precedence (D-20-3): the operator-configured ``extra_body`` is an
+        opaque pass-through and WINS on any key collision — including
+        ``"usage"`` itself, so an explicit operator override can disable the
+        opt-in. Non-OpenRouter providers get the configured dict unchanged
+        (byte-identical requests).
+        """
+        configured = self._config.extra_body
+        if self._provider != "openrouter":
+            return configured
+        merged: dict[str, Any] = {"usage": {"include": True}}
+        if configured:
+            merged.update(configured)  # operator keys win (D-20-3)
+        return merged
+
     async def _chat_openai(
         self,
         messages: list[ConversationMessage],
@@ -719,9 +743,10 @@ class OpenAICompatibleBackend:
             # R4-C1-13: cover history tool_calls so a strict provider (groq) does
             # not 400 on a hallucinated call the model already got an error for.
             kwargs["tools"] = _openai_tools_covering_history(tools, messages)
-        # D-20-3: opaque pass-through to the vendor SDK's ``extra_body``.
-        if self._config.extra_body is not None:
-            kwargs["extra_body"] = self._config.extra_body
+        # D-20-3 pass-through + Spec M2 D-M2-3 OpenRouter usage-accounting opt-in.
+        extra_body = self._openai_extra_body()
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
 
         response = await self._openai.chat.completions.create(**kwargs)
         return _parse_openai_response(response, self._provider, use_native)
@@ -772,9 +797,10 @@ class OpenAICompatibleBackend:
             # R4-C1-13: cover history tool_calls so a strict provider (groq) does
             # not 400 on a hallucinated call the model already got an error for.
             kwargs["tools"] = _openai_tools_covering_history(tools, messages)
-        # D-20-3: opaque pass-through to the vendor SDK's ``extra_body``.
-        if self._config.extra_body is not None:
-            kwargs["extra_body"] = self._config.extra_body
+        # D-20-3 pass-through + Spec M2 D-M2-3 OpenRouter usage-accounting opt-in.
+        extra_body = self._openai_extra_body()
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
 
         usage: TokenUsage | None = None
         stream = await self._openai.chat.completions.create(**kwargs)
@@ -791,6 +817,12 @@ class OpenAICompatibleBackend:
                     completion_tokens=chunk_usage.completion_tokens or 0,
                     total_tokens=(chunk_usage.prompt_tokens or 0)
                     + (chunk_usage.completion_tokens or 0),
+                    # Spec M2 (D-M2-3): the OpenRouter response-side actual
+                    # rides the final usage chunk. OpenRouter-only — no other
+                    # provider's "cost" field is trusted.
+                    cost_usd=(
+                        _usage_cost_usd(chunk_usage) if self._provider == "openrouter" else None
+                    ),
                 )
             choices = getattr(chunk, "choices", []) or []
             if not choices:
@@ -1453,6 +1485,32 @@ def _recover_textual_tool_call(content: str) -> ToolCall | None:
     return ToolCall(name=name, args=args, call_id="")
 
 
+def _usage_cost_usd(usage_obj: Any) -> float | None:  # noqa: ANN401 — SDK extra attr
+    """Parse the OpenRouter response-side actual: ``usage.cost`` in USD (Spec M2, D-M2-3).
+
+    OpenRouter usage accounting (opted into via ``usage: {"include": true}``,
+    see ``_openai_extra_body``) reports the routed request's real cost as a
+    ``cost`` field on the final usage object — OpenRouter credits ≈ USD. The
+    openai SDK surfaces it as a Pydantic extra attribute.
+
+    FAIL-OPEN by construction — pricing telemetry must never break response
+    parsing (M2 §2): accepts ``int`` / ``float`` / ``Decimal`` / decimal-string
+    values that are finite and >= 0; anything else (absent, ``None``, bool,
+    negative, NaN/inf, malformed string, wrong type) is ``None`` — the caller
+    records the turn estimate-based instead. Never raises.
+    """
+    raw = getattr(usage_obj, "cost", None)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0.0:
+        return None
+    return value
+
+
 def _parse_openai_response(
     response: Any,  # noqa: ANN401 — SDK type
     provider: str,
@@ -1517,6 +1575,9 @@ def _parse_openai_response(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+        # Spec M2 (D-M2-3): OpenRouter-only response-side actual (see
+        # _usage_cost_usd); every other provider stays None.
+        cost_usd=(_usage_cost_usd(usage_obj) if provider == "openrouter" and usage_obj else None),
     )
     return ChatResponse(
         content=content,

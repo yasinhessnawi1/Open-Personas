@@ -2412,19 +2412,20 @@ class ConversationLoop:
         # Primary-only turns: served == primary, byte-identical.
         served_model = fallback_kwargs["tier_model_chosen"] or backend.model_name
         served_provider = fallback_kwargs["tier_provider_used"] or backend.provider_name
-        # Spec M2 (D-M2-1): resolver-backed cost — ONE pricing truth (the
-        # Spec-22/23 metadata chain injected by the composition root; bare
-        # loops fall to the zero-network static-only default). Replaces the
-        # deleted ``_PRICE_TABLE`` estimator. ``cost_basis`` carries the
-        # provenance: "estimate_static", "estimate_catalog", or "unpriced".
-        # The D-M2-3 response-side actual (``usage.cost_usd``) lands at M2-T3
-        # and will take precedence here (basis "actual_openrouter").
+        # Spec M2 (D-M2-1 / D-M2-3): resolver-backed cost — ONE pricing truth
+        # (the Spec-22/23 metadata chain injected by the composition root;
+        # bare loops fall to the zero-network static-only default). Replaces
+        # the deleted ``_PRICE_TABLE`` estimator. When the served backend was
+        # OpenRouter, the response's own ``usage.cost_usd`` (the per-route
+        # ACTUAL we paid, D-M2-3) takes precedence — basis
+        # "actual_openrouter"; otherwise the chain estimates — basis
+        # "estimate_static" / "estimate_catalog" / "unpriced".
         cost, cost_basis = compute_turn_cost(
             provider=served_provider,
             model=served_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            actual_cost_usd=None,
+            actual_cost_usd=usage.cost_usd if usage is not None else None,
             source=self._cost_source,
         )
         # Spec 23 T11 (D-23-7): accumulate this turn's cost into the loop-owned
