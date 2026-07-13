@@ -22,8 +22,8 @@ you can drive from Python or the terminal. It ships:
   behind a `MemoryStore` protocol, with a file-based **Chroma** backend (default,
   zero-infra) and a **Postgres + pgvector** backend (hosted);
 - a **model backend** layer behind a `ChatBackend` protocol — Anthropic, OpenAI,
-  DeepSeek, Groq, Together, NVIDIA, OpenRouter (native tool calls), plus local
-  **Ollama** and local **Hugging Face** (prompt-shim fallback);
+  DeepSeek, Groq, Together, NVIDIA, Cloudflare, OpenRouter (native tool calls),
+  plus local **Ollama** and local **Hugging Face** (prompt-shim fallback);
 - a sandboxed **tool** layer (`Toolbox`, an MCP client, a known-tool catalog, and
   built-in tools) and a **skills** layer (`SkillScanner` + `SkillInjector` +
   composition + a `skills.toml` catalog + built-in skill packs);
@@ -71,8 +71,8 @@ pip install persona-core[turbovec]       # + turbovec for the optional quantized
 Python ≥ 3.11. For workspace development from the monorepo:
 
 ```bash
-git clone https://github.com/yasinhessnawi1/Open-Persona.git
-cd Open-Persona
+git clone https://github.com/yasinhessnawi1/Open-Personas-ai.git
+cd Open-Personas-ai
 uv sync --all-packages
 ```
 
@@ -83,40 +83,78 @@ Author and chat with a persona from the terminal — no API or web app required:
 ```bash
 persona init                                      # interactive → a persona.yaml
 persona validate examples/astrid_tenancy_law.yaml
-export PERSONA_PROVIDER=deepseek
-export PERSONA_MODEL=deepseek-chat
+export PERSONA_PROVIDER=groq                      # any of the ten providers
+export PERSONA_MODEL=llama-3.3-70b-versatile
 export PERSONA_API_KEY=<your-key>
 persona chat examples/astrid_tenancy_law.yaml     # local REPL chat
-persona run examples/astrid_tenancy_law.yaml "Draft a complaint about my landlord"
 persona audit examples/astrid_tenancy_law.yaml    # tail the JSONL audit log
 ```
 
-Three example personas ship in [`examples/`](examples/):
-`astrid_tenancy_law.yaml` (Norwegian tenancy-law assistant), `kai_research.yaml`
-(research assistant), and `maren_writing_coach.yaml` (tool-free writing coach).
+## Examples
+
+[`examples/`](examples/) ships five personas and four runnable scripts. All the
+scripts except `03` work **without a model key**; each is verified end-to-end.
+
+| Persona | What it shows |
+| --- | --- |
+| [`astrid_tenancy_law.yaml`](examples/astrid_tenancy_law.yaml) | A domain expert: Norwegian tenancy law, tools + skills wired, `nb` default language, honesty constraints. |
+| [`kai_research.yaml`](examples/kai_research.yaml) | A research assistant. |
+| [`maren_writing_coach.yaml`](examples/maren_writing_coach.yaml) | A tool-free coach — everything is voice and judgement. |
+| [`viggo_code_reviewer.yaml`](examples/viggo_code_reviewer.yaml) | A senior code reviewer: sandboxed execution, diffs, severity-ordered constraints. |
+| [`embla_storyteller.yaml`](examples/embla_storyteller.yaml) | A folklore bedtime storyteller — a worldview-rich, deliberately tool-free companion. |
+
+| Script | What it shows | Key needed |
+| --- | --- | --- |
+| [`01_load_and_inspect.py`](examples/01_load_and_inspect.py) | A persona is typed data: identity, constraints, confidence-tagged self-facts, epistemic-tagged worldview. | no |
+| [`02_typed_memory.py`](examples/02_typed_memory.py) | Write / semantic-query / version / `history()` / `rollback()` on a real store, with the audit trail. | no |
+| [`03_chat_backend.py`](examples/03_chat_backend.py) | One streamed in-character turn — the same code runs on any of the ten providers via env vars. | yes |
+| [`04_toolbox.py`](examples/04_toolbox.py) | Compose the persona's toolbox, dispatch real tools, and watch the allow-list refuse an ungranted one. | no |
+
+```bash
+cd packages/core/examples
+uv run python 02_typed_memory.py
+```
+
+```text
+v1 written: 'Prefers espresso; drinks tea only when it rains.'
+query hit:  'Prefers espresso; drinks tea only when it rains.'
+v2 written: 'Switched to oat-milk cortados; espresso demoted to deadline fuel.'
+
+history (2 versions):
+  v1 (superseded)    'Prefers espresso; drinks tea only when it rains.'
+  v2 (current)       'Switched to oat-milk cortados; espresso demoted to deadline fuel.'
+
+after rollback, current: 'Prefers espresso; drinks tea only when it rains.'
+```
 
 ## Usage
 
+One streamed, in-character turn — provider chosen entirely by env vars
+(`PERSONA_PROVIDER` / `PERSONA_MODEL` / `PERSONA_API_KEY`):
+
 ```python
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
-from persona.schema.persona import Persona
+from persona.backends import BackendConfig, load_backend
 from persona.schema.conversation import ConversationMessage
-from persona.backends import OpenAICompatibleBackend, BackendConfig
+from persona.schema.persona import Persona
 
 
 async def main() -> None:
     persona = Persona.from_yaml(Path("examples/astrid_tenancy_law.yaml"))
-    backend = OpenAICompatibleBackend(
-        BackendConfig(provider="deepseek", model="deepseek-chat")
-    )
+    backend = load_backend(BackendConfig())
     system = f"You are {persona.identity.name}, {persona.identity.role}."
-    reply = await backend.chat([
-        ConversationMessage(role="system", content=system, created_at=None),
-        ConversationMessage(role="user", content="Hva sier husleieloven om mugg?", created_at=None),
-    ])
-    print(reply.content)
+    now = datetime.now(UTC)
+    async for chunk in backend.chat_stream(messages=[
+        ConversationMessage(role="system", content=system, created_at=now),
+        ConversationMessage(role="user", content="Hva sier husleieloven om mugg?", created_at=now),
+    ]):
+        if chunk.delta:
+            print(chunk.delta, end="", flush=True)
+        if chunk.is_final:
+            break
 
 
 asyncio.run(main())
@@ -140,10 +178,10 @@ per-turn logging — compose `persona-core` with
   `EpisodicStore.reinforce`), pinned/important memories never compress, and old
   memory is down-rankable but never rank-dead. Tunables via `PERSONA_EPISODIC_*`
   (`persona.stores.lifecycle.EpisodicSettings`).
-- **Eight+ model providers** behind one protocol — native tool calls for Anthropic
-  / OpenAI / DeepSeek / Groq / Together / NVIDIA / OpenRouter, plus a prompt-shim
-  fallback for local Ollama / HF. Embeddings via `bge-small-en-v1.5` (384-dim),
-  recorded in the schema for re-index safety.
+- **Ten model providers** behind one protocol — native tool calls for Anthropic
+  / OpenAI / DeepSeek / Groq / Together / NVIDIA / Cloudflare / OpenRouter, plus a
+  prompt-shim fallback for local Ollama / HF. Embeddings via `bge-small-en-v1.5`
+  (384-dim), recorded in the schema for re-index safety.
 - **Tools.** Built-ins include `web_search`, `web_fetch`, sandboxed `file_read` /
   `file_write` (the path resolver rejects `..`, absolute paths, symlink escape, NUL
   bytes, mixed separators), `calculator` (safe AST eval), `datetime`,
