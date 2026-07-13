@@ -49,7 +49,7 @@ from persona_api.schemas.responses import (
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
-from persona_api.textline import DETAIL_BUDGET, one_line
+from persona_api.textline import DETAIL_BUDGET, full_text, one_line
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -149,25 +149,32 @@ def _stuck_causes(engine: Engine, owner_id: str, task_ids: list[str]) -> dict[st
 
 
 def _report(task: Task, checkpoint: TaskCheckpoint | None, now: datetime) -> TaskReportOut | None:
-    """The terminal outcome as its distinct projection (a failure never renders as success)."""
+    """The terminal outcome as its distinct projection (a failure never renders as success).
+
+    The report is where the COMPLETE outcome is read (owner-ruled, R11-B2) — every field
+    keeps its full text, markup-cleaned but never clipped; only the summary projections
+    (checkpoints, causes at list level, progress) flatten through the clamped `_clean`.
+    """
     if task.state is TaskState.COMPLETED:
         completion = build_completion_report(task, checkpoint, now=now)
-        return TaskReportOut(kind="completed", conclusions=_clean_list(completion.conclusions))
+        return TaskReportOut(
+            kind="completed", conclusions=[full_text(c) for c in completion.conclusions]
+        )
     if task.state is TaskState.FAILED:
         cause = (checkpoint.blocked_on if checkpoint is not None else None) or ""
         stuck = build_stuck_report(task, checkpoint, cause=cause, now=now)
         return TaskReportOut(
             kind="stuck",
-            cause=_clean(stuck.cause),
-            where_it_stood=_clean_list(stuck.where_it_stood),
-            next_step=_clean(stuck.next_step),
+            cause=full_text(stuck.cause),
+            where_it_stood=[full_text(w) for w in stuck.where_it_stood],
+            next_step=full_text(stuck.next_step),
         )
     if task.state is TaskState.CANCELLED:
         cancelled = build_cancellation_summary(task, checkpoint, now=now)
         return TaskReportOut(
             kind="cancelled",
-            where_it_stood=_clean_list(cancelled.where_it_stood),
-            next_step=_clean(cancelled.next_step),
+            where_it_stood=[full_text(w) for w in cancelled.where_it_stood],
+            next_step=full_text(cancelled.next_step),
         )
     return None
 

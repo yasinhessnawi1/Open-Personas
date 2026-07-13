@@ -12,7 +12,7 @@ through (stored rows stay verbose; surfaces read one calm line).
 from __future__ import annotations
 
 from persona_api.routes.tasks import _clean, _clean_list, _clean_opt
-from persona_api.textline import DETAIL_BUDGET
+from persona_api.textline import DETAIL_BUDGET, full_text
 
 DUMP = (
     "{{#warm}} Hi there — it's your scheduled check-in. **Reminder: Stretch for "
@@ -42,3 +42,17 @@ def test_clean_opt_passes_none_through() -> None:
 def test_clean_list_flattens_every_conclusion() -> None:
     out = _clean_list(["{{#warm}} one", "two\nlines"])
     assert out == ["one", "two lines"]
+
+
+# owner-ruled (2026-07-13): the terminal report keeps every word — clean, never clip.
+def test_full_text_never_clips_the_report() -> None:
+    out = full_text(DUMP)
+    assert "{{" not in out
+    assert "**" not in out
+    assert not out.endswith("…")
+    assert "sched-7d939ffda6b2a15229ace8b784a88ca1" in out  # the tail survives
+    assert "Wrist and ankle circles" in out
+
+
+def test_full_text_keeps_paragraph_breaks() -> None:
+    assert full_text("para one.\n\n\n\npara **two**.") == "para one.\n\npara two."

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["DETAIL_BUDGET", "LINE_BUDGET", "one_line"]
+__all__ = ["DETAIL_BUDGET", "LINE_BUDGET", "full_text", "one_line"]
 
 #: Digest items — the under-a-minute read means ~a sentence per item.
 LINE_BUDGET = 160
@@ -35,3 +35,20 @@ def one_line(text: str, budget: int = LINE_BUDGET) -> str:
         return cleaned
     cut = cleaned[:budget].rsplit(" ", 1)[0].rstrip(" ,;:—–-")
     return f"{cut}…"
+
+
+_HWS_RE = re.compile(r"[ \t]+")
+_PARA_RE = re.compile(r"\n{3,}")
+
+
+def full_text(text: str) -> str:
+    """Clean markup out of a FULL record without cutting a word (owner-ruled,
+    R11-B2): the task's terminal report is the place the complete outcome is
+    read, so it keeps every sentence — only the voice-markup/markdown markers
+    go, horizontal whitespace collapses, and runaway blank lines settle to
+    paragraph breaks. Summary projections (digest lines, checkpoints, causes)
+    keep using :func:`one_line`."""
+    cleaned = _MD_EMPHASIS_RE.sub("", _VOICE_MARKUP_RE.sub(" ", text))
+    cleaned = _HWS_RE.sub(" ", cleaned)
+    cleaned = _PARA_RE.sub("\n\n", cleaned)
+    return cleaned.strip()
