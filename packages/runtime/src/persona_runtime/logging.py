@@ -82,6 +82,23 @@ class TurnLog(BaseModel):
     kept additive-safe for existing consumers); primary-only turns are
     byte-identical.
 
+    M2 review (finding I2) — MULTI-ROUND COVERAGE for :attr:`prompt_tokens` /
+    :attr:`completion_tokens` / :attr:`cost_cents`: a turn that ran the tool
+    sub-loop for N rounds (each a SEPARATE billed request on OpenRouter) has
+    every round summed by :func:`persona_runtime.loop._aggregate_round_usage`
+    before this row is built — pre-fix these fields carried only the LAST
+    round's numbers (last-writer-wins), understating a heavy tool-use turn's
+    true tokens/cost by up to N-1 rounds' worth. :attr:`cost_basis` stays
+    ``"actual_openrouter"`` only when EVERY usage-carrying round reported an
+    actual; a turn where some rounds did and some fell back mid-turn to a
+    non-OpenRouter model drops the partial actual and prices the SUMMED
+    tokens as an estimate instead (never a part-actual mislabelled as the
+    whole). Attribution is a SEPARATE axis, UNCHANGED by this fix — per the
+    paragraph above, :attr:`model_name` / :attr:`provider` describe only the
+    FINAL round's served pair even though the token/cost fields cover every
+    round. Single-round turns (still the overwhelming majority) are
+    byte-identical.
+
     Spec 18 (T12; D-18-X-turnlog-extension) extends the shape additively with
     routing observability:
 

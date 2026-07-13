@@ -225,6 +225,100 @@ def _final_chunk(usage: TokenUsage | None) -> StreamChunk:
     return StreamChunk(delta="", is_final=True, usage=usage)
 
 
+class _AggregatedUsage(NamedTuple):
+    """One turn's usage, summed across every round (M2 review, finding I2).
+
+    Attributes:
+        usage: The turn-level :class:`TokenUsage` — ``None`` only when NO
+            round in the turn carried any usage telemetry at all (the
+            pre-fix ``usage=None`` shape, unchanged). Otherwise
+            ``prompt_tokens`` / ``completion_tokens`` / ``total_tokens`` are
+            the SUM across every round; ``cost_usd`` follows the
+            mixed-round honesty rule documented on
+            :func:`_aggregate_round_usage`.
+        mixed_actuals_dropped: ``True`` when SOME (not all, not zero) of the
+            usage-carrying rounds reported a ``cost_usd`` — the partial
+            actual was dropped and the caller must log this once (never
+            silently).
+    """
+
+    usage: TokenUsage | None
+    mixed_actuals_dropped: bool
+
+
+def _aggregate_round_usage(round_usages: list[TokenUsage]) -> _AggregatedUsage:
+    """Sum every round's usage into ONE turn-level total (M2 review, I2).
+
+    A multi-round agentic turn — tool-calling rounds, the cap-forced final
+    generation, the refusal-retry round — is N separate model requests, and
+    on OpenRouter each is its own paid request with its own ``usage.cost``.
+    Pre-fix the loop kept only the LAST round's :class:`TokenUsage`
+    (``usage = round_usage``, last-writer-wins, never summed) — a 5-round
+    agentic turn recorded and billed only the final round's tokens/actual,
+    understating both by up to N-1 rounds' worth. This function is the fix's
+    arithmetic core:
+
+    * **Tokens always sum.** ``prompt_tokens`` / ``completion_tokens`` /
+      ``total_tokens`` are the sum across every round that carried usage —
+      every downstream reader (the TurnLog row, ``/v1/me/usage``, the SSE
+      ``done`` event, the loop's own per-session soft-budget ramp via
+      ``_session_spent_cents``, and the credits/day-cap billing) wants the
+      turn's TRUE total, never one round's slice (consumer audit, M2-I2:
+      every one of these reads the single post-turn ``usage`` this function
+      returns, or the ``cost_cents`` derived from it — none does its own
+      per-round math, so summing once here is sufficient and safe).
+    * **Actuals follow a mixed-round honesty rule.** Let the "usage-carrying
+      rounds" be every round whose :class:`TokenUsage` is present (a round
+      with NO usage telemetry at all contributes 0 tokens and is invisible
+      to this rule — the existing single-round convention, just applied per
+      round, since there is genuinely no data to reason about):
+
+      - every usage-carrying round reported a ``cost_usd`` -> the turn's
+        actual is their SUM (the caller's ``compute_turn_cost`` then keeps
+        basis ``actual_openrouter`` — unchanged mechanics, summed input).
+      - none did -> ``cost_usd=None`` (today's estimate-on-tokens path, now
+        computed over the SUMMED tokens instead of one round's).
+      - SOME did and some didn't (e.g. round 1 served OpenRouter, round 2
+        fell back mid-turn to a non-OpenRouter tier model) -> the partial
+        actual is DROPPED (``cost_usd=None``, ``mixed_actuals_dropped=True``)
+        rather than summed and mislabelled as the whole turn's actual —
+        conservative and honest beats a part-actual, part-guess number
+        wearing the "actual" basis.
+
+    Single-round turns are byte-identical: summing a length-1 list
+    reproduces that lone round's own token counts and ``cost_usd`` exactly.
+    Attribution — WHICH model/provider names the turn — is a SEPARATE axis
+    untouched by this function; it stays last-round-served (see
+    ``_write_turn_log``'s ``served_model`` / ``served_provider``).
+
+    Args:
+        round_usages: Every round's :class:`TokenUsage` this turn produced,
+            in round order (order does not affect the sum), already
+            filtered to exclude ``None`` entries — a round with no usage
+            telemetry at all is never appended by the caller.
+
+    Returns:
+        The turn-level :class:`_AggregatedUsage`.
+    """
+    if not round_usages:
+        return _AggregatedUsage(usage=None, mixed_actuals_dropped=False)
+    from persona.backends import TokenUsage
+
+    prompt_tokens = sum(u.prompt_tokens for u in round_usages)
+    completion_tokens = sum(u.completion_tokens for u in round_usages)
+    reported_costs: list[float] = [u.cost_usd for u in round_usages if u.cost_usd is not None]
+    all_reported = len(reported_costs) == len(round_usages)
+    mixed = bool(reported_costs) and not all_reported
+    cost_usd: float | None = sum(reported_costs) if reported_costs and all_reported else None
+    aggregated = TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        cost_usd=cost_usd,
+    )
+    return _AggregatedUsage(usage=aggregated, mixed_actuals_dropped=mixed)
+
+
 #: The persona's reply on a confirmed contract (Spec A4). The actual task create happens api-side
 #: off the emitted event; this is the immediate, honest acknowledgement.
 _CONTRACT_CONFIRMED_TEXT = "Done — I've set that up. I'll keep you posted."
@@ -1302,7 +1396,14 @@ class ConversationLoop:
         # ToolResult.metadata["sandbox_session_recreated"] flag (set by the
         # sandbox tool wrapper's auto-recovery, T09).
         session_recreated = False
-        usage: TokenUsage | None = None
+        # M2 review (I2): every round's own TokenUsage is collected here — the
+        # tool sub-loop's rounds, the cap-forced final generation, and the
+        # refusal-retry round are each a SEPARATE billed request on
+        # OpenRouter. Reduced to one turn-level ``usage`` via
+        # ``_aggregate_round_usage`` right before write-back — never
+        # last-writer-wins (see that function for the summing + mixed-round
+        # actual honesty rule).
+        round_usages: list[TokenUsage] = []
         assistant_text = ""
         # Turn-resilience buffer: every text delta yielded to the client this
         # turn is appended here, across ALL rounds. ``assistant_text`` holds only
@@ -1374,13 +1475,18 @@ class ConversationLoop:
             round_text, round_calls, round_usage = outcome.text, outcome.calls, outcome.usage
             assistant_text = round_text
             reasoning_buffer += outcome.reasoning_text
+            # M2 review (I2): accumulate THIS round's usage unconditionally —
+            # covers the normal-completion round, every tool round, AND the
+            # round that trips the cap below (pre-fix its usage was silently
+            # dropped rather than summed; the cap-forced final generation a
+            # few lines down is accumulated separately where IT streams).
+            if round_usage is not None:
+                round_usages.append(round_usage)
 
             at_cap = rounds >= self._max_tool_rounds
             if round_calls and not at_cap:
                 # The round's pre-tool narration (e.g. "Astrid is searching…")
                 # already streamed delta-by-delta above (architecture §7.2).
-                if round_usage is not None:
-                    usage = round_usage
                 # Surface the round's tool calls (the chat/run-viewer SSE
                 # `tool_calling` event) before dispatching them.
                 if on_event is not None:
@@ -1481,15 +1587,20 @@ class ConversationLoop:
                     if safe:
                         yield _text_chunk(safe)
                 assistant_text = final_outcome.text
-                round_usage = final_outcome.usage
                 reasoning_buffer += final_outcome.reasoning_text
+                # M2 review (I2): the cap-forced final generation is its OWN
+                # separately-billed round — accumulate it too (pre-fix this
+                # replaced the capped round's usage instead of adding to it,
+                # so the capped round's own tokens/cost vanished entirely).
+                if final_outcome.usage is not None:
+                    round_usages.append(final_outcome.usage)
 
             # Normal completion (or post-cap final text) — the text already
             # streamed delta-by-delta above. The single is_final=True chunk is
             # yielded AFTER write-back so a consumer that stops at is_final still
-            # triggers the write (D-05-12).
-            if round_usage is not None:
-                usage = round_usage
+            # triggers the write (D-05-12). Every round's usage is already
+            # accumulated above (the primary round, and — on the cap path —
+            # the forced final one); nothing left to capture here.
             break
 
         # Spec 25 T21 (§2.9 RISKY half; default-OFF) — refusal auto-retry.
@@ -1540,14 +1651,36 @@ class ConversationLoop:
                         yield _text_chunk(safe)
                 if retry_outcome.text:
                     assistant_text = retry_outcome.text
+                # M2 review (I2): the refusal-retry is ALSO a separately
+                # billed round — accumulate rather than overwrite.
                 if retry_outcome.usage is not None:
-                    usage = retry_outcome.usage
+                    round_usages.append(retry_outcome.usage)
                 reasoning_buffer += retry_outcome.reasoning_text
                 _logger.info(
                     "refusal-retry engaged: corrected a tool refusal tools={tools} tier={tier}",
                     tools=",".join(refused),
                     tier=tier,
                 )
+
+        # M2 review (I2): fold every round's usage into ONE turn-level total —
+        # tokens always sum (every round genuinely happened and genuinely
+        # cost tokens); cost_usd only sums when EVERY usage-carrying round
+        # reported one (else the honest estimate path takes over, priced on
+        # the summed tokens — see ``_aggregate_round_usage`` for the full
+        # three-arm rule). Feeds both the TurnLog write-back below and the
+        # final SSE chunk's ``usage`` payload.
+        aggregated_usage = _aggregate_round_usage(round_usages)
+        usage = aggregated_usage.usage
+        if aggregated_usage.mixed_actuals_dropped:
+            _logger.warning(
+                "multi-round turn had a mixed cost_usd report across rounds "
+                "(some rounds served OpenRouter with a real actual, at least "
+                "one round did not) — dropping the partial actual and "
+                "pricing the turn on its summed tokens instead (an "
+                "incomplete actual is never claimed as the whole turn's "
+                "actual) conversation={conv}",
+                conv=conversation.conversation_id,
+            )
 
         # N5-A7: flush the display converter — a trailing partial tag left by the
         # last delta is resolved now (unclosed → stripped, literal braces → kept;
@@ -2427,6 +2560,18 @@ class ConversationLoop:
         mcp_invocations: list[str] | None = None,
         mcp_unavailable_requested: list[str] | None = None,
     ) -> None:
+        # M2 review (I2): ``usage`` arrives ALREADY summed across every round
+        # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
+        # agentic turn's ``prompt_tokens`` / ``completion_tokens`` below are
+        # the SUM of all 5 rounds, never just the last one. Attribution
+        # (WHICH model/provider names the turn, just below) is a SEPARATE
+        # axis and stays last-round-served: on a multi-round turn the served
+        # pair reflects only the FINAL round's resolution (the wrapper's
+        # ``last_attempts`` ledger resets on every ``chat_stream`` call —
+        # see ``MultiModelChatBackend.last_attempts``); earlier rounds may
+        # have served/fallen-back differently and that detail is not
+        # attributed per-round (out of scope — one TurnLog row per turn,
+        # not one per round).
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
         # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.

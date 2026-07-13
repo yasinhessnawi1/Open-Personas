@@ -45,6 +45,7 @@ class ScriptedRound:
         tool_args: dict[str, Any] | None = None,
         raw_arguments: str | None = None,
         call_id: str = "call-1",
+        usage: TokenUsage | None = None,
     ) -> None:
         self.text = text
         # When set, the round streams these as SEPARATE chunks (exercises
@@ -58,6 +59,12 @@ class ScriptedRound:
         # final parse fails and the call is marked truncated.
         self.raw_arguments = raw_arguments
         self.call_id = call_id
+        # M2 review (I2): per-round usage override (incl. ``cost_usd``) for
+        # multi-round token/actual-summing tests. ``None`` (the default)
+        # keeps the pre-existing fixed shape (``TokenUsage(prompt_tokens=10,
+        # completion_tokens=5, total_tokens=15)``, no cost) — every existing
+        # caller across the suite is byte-identical.
+        self.usage = usage
 
 
 class ScriptedBackend:
@@ -204,7 +211,11 @@ class ScriptedBackend:
         yield StreamChunk(
             delta="",
             is_final=True,
-            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            usage=(
+                rnd.usage
+                if rnd.usage is not None
+                else TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            ),
         )
 
 

@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import pytest
 from _fakes import FakeStore, ScriptedBackend, ScriptedRound  # type: ignore[import-not-found]
 from persona.backends import BackendConfig
+from persona.backends.types import TokenUsage
 from persona.history import ConversationHistoryManager
 from persona.schema.conversation import Conversation, ConversationMessage
 from persona.schema.persona import Persona, PersonaIdentity
@@ -30,7 +31,7 @@ from persona.skills._tokens import count_tokens
 from persona.tools import Toolbox
 from persona.tools.protocol import tool
 from persona_runtime.logging import MemoryTurnLogWriter
-from persona_runtime.loop import ConversationLoop
+from persona_runtime.loop import ConversationLoop, _aggregate_round_usage
 from persona_runtime.prompt import PromptBuilder
 from persona_runtime.router import Router
 from persona_runtime.tier import TierConfig, TierRegistry
@@ -773,3 +774,105 @@ class TestR1HardBypass:
 
         assert backend.chat_stream_calls == 1
         assert "Hello, I'm Astrid." in "".join(c.delta for c in chunks)
+
+
+class TestAggregateRoundUsage:
+    """M2 review, finding I2 — the pure summing + mixed-round honesty rule.
+
+    Unit-level pins for ``_aggregate_round_usage`` in isolation (no loop
+    machinery needed); the full multi-round trigger chain through a REAL
+    ``ConversationLoop.turn()`` is pinned separately in
+    ``packages/runtime/tests/integration/test_m2_multiround_usage.py``.
+    """
+
+    def test_empty_list_returns_no_usage(self) -> None:
+        result = _aggregate_round_usage([])
+
+        assert result.usage is None
+        assert result.mixed_actuals_dropped is False
+
+    def test_single_round_with_no_actual_sums_to_itself(self) -> None:
+        lone = TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+        result = _aggregate_round_usage([lone])
+
+        assert result.usage == lone
+        assert result.mixed_actuals_dropped is False
+
+    def test_single_round_with_an_actual_sums_to_itself(self) -> None:
+        # Byte-identical pin: N=1 must reproduce the lone round's cost_usd
+        # exactly (not merely approximately) — the design-frame requirement.
+        lone = TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.00042)
+
+        result = _aggregate_round_usage([lone])
+
+        assert result.usage is not None
+        assert result.usage.cost_usd == 0.00042
+        assert result.mixed_actuals_dropped is False
+
+    def test_multiple_rounds_sum_tokens_with_no_actuals_anywhere(self) -> None:
+        rounds = [
+            TokenUsage(prompt_tokens=100, completion_tokens=40, total_tokens=140),
+            TokenUsage(prompt_tokens=220, completion_tokens=55, total_tokens=275),
+            TokenUsage(prompt_tokens=50, completion_tokens=25, total_tokens=75),
+        ]
+
+        result = _aggregate_round_usage(rounds)
+
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 370
+        assert result.usage.completion_tokens == 120
+        assert result.usage.total_tokens == 490
+        assert result.usage.cost_usd is None
+        assert result.mixed_actuals_dropped is False
+
+    def test_multiple_rounds_sum_actuals_when_every_round_reports_one(self) -> None:
+        rounds = [
+            TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.0001),
+            TokenUsage(prompt_tokens=20, completion_tokens=8, total_tokens=28, cost_usd=0.0002),
+            TokenUsage(prompt_tokens=5, completion_tokens=2, total_tokens=7, cost_usd=0.00005),
+        ]
+
+        result = _aggregate_round_usage(rounds)
+
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 35
+        assert result.usage.completion_tokens == 15
+        assert result.usage.cost_usd == pytest.approx(0.00035)
+        assert result.mixed_actuals_dropped is False
+
+    def test_zero_cost_round_counts_as_a_reported_actual(self) -> None:
+        # A ``:free`` OpenRouter route's actual IS 0.0 — it must count as
+        # REPORTED (``is not None``), never as "did not report".
+        rounds = [
+            TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.0),
+            TokenUsage(prompt_tokens=20, completion_tokens=8, total_tokens=28, cost_usd=0.0),
+        ]
+
+        result = _aggregate_round_usage(rounds)
+
+        assert result.usage is not None
+        assert result.usage.cost_usd == 0.0
+        assert result.mixed_actuals_dropped is False
+
+    def test_mixed_rounds_drop_the_actual_and_flag_mixed(self) -> None:
+        # Round 1 served OpenRouter with a real actual; round 2 fell back
+        # mid-turn to a model that reported no cost. The partial actual must
+        # be DROPPED (never summed as if the missing round cost 0), and the
+        # caller told to log it (mixed_actuals_dropped=True).
+        rounds = [
+            TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.0001),
+            TokenUsage(prompt_tokens=20, completion_tokens=8, total_tokens=28, cost_usd=None),
+            TokenUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10, cost_usd=0.0003),
+        ]
+
+        result = _aggregate_round_usage(rounds)
+
+        assert result.usage is not None
+        # Tokens ALWAYS sum, even when the actual is dropped.
+        assert result.usage.prompt_tokens == 37
+        assert result.usage.completion_tokens == 16
+        # The actual is dropped, not partially summed (0.0004 would be the
+        # bug: silently treating the missing round as free).
+        assert result.usage.cost_usd is None
+        assert result.mixed_actuals_dropped is True
