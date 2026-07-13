@@ -15,7 +15,8 @@
 
 import { Dialog } from "@base-ui/react/dialog";
 import {
-  Home,
+  Activity,
+  Cable,
   ListChecks,
   MessagesSquare,
   Plus,
@@ -54,7 +55,7 @@ interface CommandItem {
   /** A persona to render its real identity avatar (keep real avatars, D-35-9). */
   readonly persona?: SidebarData["personas"][number];
   /** A lucide icon for non-persona rows. */
-  readonly icon?: typeof Home;
+  readonly icon?: typeof Activity;
 }
 
 /** macOS uses ⌘; everything else uses Ctrl. Resolved post-mount (navigator). */
@@ -108,12 +109,15 @@ export function CommandPalette({ data }: { data: SidebarData }) {
       },
     ];
     const nav: CommandItem[] = [
+      // R11-B1: Home retired (D-R11-1) — Activity is the landing surface, and
+      // Connectors joined the top-level nav (D-R11-3). Tasks goes to the
+      // consolidated Activity area, not the /runs execution drill (D-R11-4).
       {
-        id: "nav-home",
+        id: "nav-activity",
         group: "groupNavigate",
-        label: tn("home"),
-        href: "/",
-        icon: Home,
+        label: tn("activity"),
+        href: "/activity",
+        icon: Activity,
       },
       {
         id: "nav-personas",
@@ -133,8 +137,15 @@ export function CommandPalette({ data }: { data: SidebarData }) {
         id: "nav-tasks",
         group: "groupNavigate",
         label: tn("tasks"),
-        href: "/runs",
+        href: "/activity/tasks",
         icon: ListChecks,
+      },
+      {
+        id: "nav-connectors",
+        group: "groupNavigate",
+        label: tn("connectors"),
+        href: "/connectors",
+        icon: Cable,
       },
     ];
     const personas: CommandItem[] = data.personas.map((p) => ({

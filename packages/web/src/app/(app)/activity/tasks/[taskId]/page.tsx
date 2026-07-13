@@ -32,7 +32,7 @@ export default async function TaskDetailPage({
   return (
     <PageBody width="narrow">
       <Link
-        href="/tasks"
+        href="/activity/tasks"
         className="mb-2 inline-flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ChevronLeft className="size-4" />

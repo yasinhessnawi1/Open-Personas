@@ -2,8 +2,8 @@
 
 import {
   Activity,
+  Cable,
   CalendarClock,
-  Home,
   Phone,
   Sparkles,
   Waypoints,
@@ -21,7 +21,12 @@ import { cn } from "@/lib/utils";
 // Primary nav links. Settings is NOT here — it lives in the account footer
 // menu (Spec 35 D-35-16). Each item may carry a live count (Spec 35 D-35-13).
 const ITEMS = [
-  { href: "/", key: "home", icon: Home, count: undefined },
+  // R11-B1 (D-R11-1/2): Home is retired; Activity is the FEATURED first row and
+  // the app's landing surface (`/` redirects signed-in users to /activity).
+  // Spec A6 (W5, A6-D-1): the Activity area — ONE nav row landing on the morning Review; Tasks +
+  // Approvals are siblings WITHIN the area (the ActivityTabs sub-nav), not top-level rows.
+  // R9-010: badge = the active working set (non-terminal tasks), never history.
+  { href: "/activity", key: "activity", icon: Activity, count: "activity" },
   { href: "/personas", key: "personas", icon: Sparkles, count: "personas" },
   // R9-009: the Conversations row is FOLDED into the MESSAGES section — its
   // "All chats (N)" affordance links to /conversations (the route + page stay;
@@ -29,12 +34,6 @@ const ITEMS = [
   // deliberately remains — that's search, not nav.
   // Spec V9: the voice-call history surface. R9-010: badge = total call records.
   { href: "/calls", key: "calls", icon: Phone, count: "calls" },
-  // Spec A6 (W5, A6-D-1): the Activity area — ONE nav row landing on the morning Review; Tasks +
-  // Approvals are siblings WITHIN the area (the ActivityTabs sub-nav), not top-level rows. This
-  // re-home retires the W2 interim "Activity → /tasks" entry and demotes `/runs` from a top-level
-  // peer to the task-detail "Open run" drill only.
-  // R9-010: badge = the active working set (non-terminal tasks), never history.
-  { href: "/review", key: "activity", icon: Activity, count: "activity" },
   // Spec K5: the interactive knowledge-graph — "what your personas know, yours to shape."
   // R9-010: badge = canonical graph node count.
   { href: "/memory", key: "memory", icon: Waypoints, count: "memory" },
@@ -49,6 +48,10 @@ const ITEMS = [
     icon: CalendarClock,
     count: "schedule",
   },
+  // R11-B1 (D-R11-3): Connectors takes the sidebar slot Home vacated — promoted
+  // from the account-menu /settings/connectors subsection to a first-class tab.
+  // No live count: connection state is a set-and-forget roster, not an inbox.
+  { href: "/connectors", key: "connectors", icon: Cable, count: undefined },
 ] as const;
 
 /**

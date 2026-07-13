@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
 
+import { LEGACY_REDIRECTS } from "./src/lib/legacy-redirects";
+
 // Spec 33 (D-33-2): the auth layer is edition-selected at BUILD time. Build is
 // Turbopack (Next 16), so the swap is `turbopack.resolveAlias` (a webpack alias
 // would break `next build`). `@/auth*` resolves to the edition's variant; a
@@ -36,6 +38,11 @@ const CLERK_FRONTEND_API_HOST =
 
 const nextConfig: NextConfig = {
   turbopack: { resolveAlias: authResolveAlias },
+  // Spec R11 (B1): the v3 IA re-homes — /activity consolidation + the
+  // /connectors tab. Table + rationale live in src/lib/legacy-redirects.ts.
+  async redirects() {
+    return [...LEGACY_REDIRECTS];
+  },
   // The Clerk auto-proxy rewrite is cloud-only — community has no Clerk.
   ...(EDITION === "cloud"
     ? {

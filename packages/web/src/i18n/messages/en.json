@@ -71,7 +71,6 @@
     }
   },
   "nav": {
-    "home": "Home",
     "personas": "Personas",
     "conversations": "Conversations",
     "calls": "Calls",
@@ -81,7 +80,7 @@
     "memory": "Memory",
     "schedule": "Schedule",
     "settings": "Settings",
-    "connectors": "Connected platforms",
+    "connectors": "Connectors",
     "newPersona": "New persona",
     "menu": "Open menu",
     "primary": "Primary",

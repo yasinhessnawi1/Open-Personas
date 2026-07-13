@@ -20,12 +20,13 @@ import {
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { useTaskSignal } from "@/lib/task-signal";
 
-/** The per-item deep-link target (A6-D-6): approval → the inbox item, task → the task detail. */
+/** The per-item deep-link target (A6-D-6): approval → the inbox item, task → the task detail.
+ * R11-B1: targets live under the consolidated /activity area (D-R11-4). */
 function refHref(ref: DigestRef | null): string | null {
   if (!ref) return null;
   if (ref.kind === "approval")
-    return `/approvals?id=${encodeURIComponent(ref.id)}`;
-  return `/tasks/${encodeURIComponent(ref.id)}`;
+    return `/activity/approvals?id=${encodeURIComponent(ref.id)}`;
+  return `/activity/tasks/${encodeURIComponent(ref.id)}`;
 }
 
 /** persona voice: an identity dot + the persona's name, then their own words (A6-D-2). */
@@ -101,7 +102,7 @@ function StuckItem({
         <p className="type-caption text-muted-foreground">{item.ran_because}</p>
       ) : null}
       <Link
-        href={refHref(item.ref) ?? "/tasks"}
+        href={refHref(item.ref) ?? "/activity/tasks"}
         className="inline-flex w-fit items-center gap-1 text-sm text-foreground hover:underline"
       >
         {resolveLabel}

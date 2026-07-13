@@ -11,15 +11,7 @@
  * sign-out; community degrades to settings + appearance only.
  */
 
-import {
-  Cable,
-  LogOut,
-  Monitor,
-  Moon,
-  Settings,
-  Sun,
-  UserCog,
-} from "lucide-react";
+import { LogOut, Monitor, Moon, Settings, Sun, UserCog } from "lucide-react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
@@ -132,11 +124,6 @@ export function AccountMenu({
         <DropdownMenuItem render={<Link href="/settings" />}>
           <Settings />
           {tn("settings")}
-        </DropdownMenuItem>
-
-        <DropdownMenuItem render={<Link href="/settings/connectors" />}>
-          <Cable />
-          {tn("connectors")}
         </DropdownMenuItem>
 
         <DropdownMenuSub>

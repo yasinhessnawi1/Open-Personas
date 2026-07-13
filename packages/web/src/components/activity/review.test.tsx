@@ -129,7 +129,7 @@ describe("Review", () => {
     );
     renderReview();
     const link = await screen.findByRole("link", { name: /resolve/i });
-    expect(link.getAttribute("href")).toBe("/tasks/t_stuck");
+    expect(link.getAttribute("href")).toBe("/activity/tasks/t_stuck");
   });
 
   it("refetches the durable digest on a task.updated signal (W8, refetch-not-trust)", async () => {

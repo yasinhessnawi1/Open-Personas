@@ -55,7 +55,7 @@ describe("ConnectorsManager — OAuth return (adversarial)", () => {
     window.history.pushState(
       null,
       "",
-      "/settings/connectors?result=connected&platform=discord",
+      "/connectors?result=connected&platform=discord",
     );
   });
 
@@ -78,6 +78,6 @@ describe("ConnectorsManager — OAuth return (adversarial)", () => {
     expect(refreshMock).toHaveBeenCalled();
 
     // The URL is stripped so a reload / back never re-toasts (single-consume).
-    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/settings/connectors");
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/connectors");
   });
 });

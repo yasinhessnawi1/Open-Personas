@@ -13,10 +13,12 @@ import { cn } from "@/lib/utils";
  * is the A6-D-1 re-home the W2 interim "Activity → /tasks" entry stood in for — now a single top-
  * level "Activity" row lands here on Review, and `/runs` is demoted to the task-detail drill.
  */
+// R11-B1 (D-R11-4): the area consolidated under /activity — Review lands on the
+// area root, Tasks + Approvals are child routes. Old standalone routes redirect.
 const TABS = [
-  { href: "/review", key: "review" },
-  { href: "/tasks", key: "tasks" },
-  { href: "/approvals", key: "approvals" },
+  { href: "/activity", key: "review" },
+  { href: "/activity/tasks", key: "tasks" },
+  { href: "/activity/approvals", key: "approvals" },
 ] as const;
 
 export function ActivityTabs() {
@@ -28,7 +30,13 @@ export function ActivityTabs() {
       className="mb-6 flex gap-1 border-b border-border"
     >
       {TABS.map(({ href, key }) => {
-        const active = pathname === href || pathname.startsWith(`${href}/`);
+        // Review sits on the area ROOT, so it matches exactly — a prefix match
+        // would light it up on /activity/tasks too. The child tabs keep the
+        // prefix match (task detail keeps Tasks active).
+        const active =
+          href === "/activity"
+            ? pathname === href
+            : pathname === href || pathname.startsWith(`${href}/`);
         return (
           <Link
             key={href}
