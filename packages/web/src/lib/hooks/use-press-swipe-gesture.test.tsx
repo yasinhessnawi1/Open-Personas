@@ -46,7 +46,10 @@ function Harness({
         ref={gesture.elementRef}
         type="button"
         data-testid="target"
-        onPointerDown={gesture.handlers.onPointerDown}
+        // Spread first (matches the real call site, sidebar-sections.tsx's
+        // PersonaRailItem) so onClick below still overrides the spread's own
+        // onClick, exactly like the production wiring.
+        {...gesture.handlers}
         onClick={(event) => {
           gesture.handlers.onClick(event);
           if (!event.defaultPrevented) onTap();
@@ -414,5 +417,52 @@ describe("usePressSwipeGesture", () => {
     up(CENTER_Y + RADIUS + 5);
     expect(onCommitUp).not.toHaveBeenCalled();
     expect(onCommitDown).not.toHaveBeenCalled();
+  });
+
+  // Real-browser native-drag guard (R9-036 REOPEN #2). jsdom has no native
+  // drag-and-drop, so nothing above this line could ever have caught the
+  // bug these two tests pin: a[href]/img are draggable BY DEFAULT in every
+  // real browser, a press+move starts native drag instead of this hook's
+  // own tracking, and the browser fires `pointercancel` before the slop is
+  // even exceeded — the gesture died silently (no chips, no commit) while
+  // every test above still passed. Verified live in a real browser
+  // (R9-036-fix.md); these two tests are the regression pin.
+  it("the bound element carries draggable=false, so a real browser never starts native drag on it", () => {
+    render(
+      <Harness onCommitUp={vi.fn()} onCommitDown={vi.fn()} onTap={vi.fn()} />,
+    );
+    expect(screen.getByTestId("target")).toHaveAttribute("draggable", "false");
+  });
+
+  it("a dragstart on the bound element is prevented, and an in-flight gesture keeps tracking normally", () => {
+    const onCommitUp = vi.fn();
+    const onCommitDown = vi.fn();
+    const onTap = vi.fn();
+    render(
+      <Harness
+        onCommitUp={onCommitUp}
+        onCommitDown={onCommitDown}
+        onTap={onTap}
+      />,
+    );
+
+    down();
+    move(CENTER_Y + 10); // past slop — swiping, matches the moment a real
+    // browser would otherwise start native drag-and-drop on this element.
+    expect(screen.getByTestId("armed")).toHaveTextContent("true");
+
+    // `fireEvent.X` returns the raw `element.dispatchEvent(event)` result:
+    // `false` iff some handler called `preventDefault()` on a cancelable
+    // event — the direct, DOM-level proof `onDragStart` cancels it.
+    const notPrevented = fireEvent.dragStart(screen.getByTestId("target"));
+    expect(notPrevented).toBe(false);
+
+    // The already-in-flight pointer gesture is untouched by the dragstart —
+    // it keeps tracking and still commits normally on release past the rim.
+    move(CENTER_Y + RADIUS + 5);
+    expect(screen.getByTestId("highlight")).toHaveTextContent("down");
+    up(CENTER_Y + RADIUS + 5);
+    expect(onCommitDown).toHaveBeenCalledTimes(1);
+    expect(onCommitUp).not.toHaveBeenCalled();
   });
 });

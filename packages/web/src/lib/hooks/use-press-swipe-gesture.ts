@@ -61,9 +61,26 @@
  *     resize-drag already uses (components/shell/sidebar.tsx's
  *     `startDrag`/`onPointerMove`/`stopDrag`), and one jsdom can simulate
  *     without a `setPointerCapture` polyfill (jsdom doesn't implement it).
+ *     Re-verified for the real-browser fix below: a `document` listener
+ *     isn't scoped to the pressed element's box, so it keeps receiving
+ *     `pointermove` even once the pointer has physically left the avatar
+ *     mid-swipe — `setPointerCapture` would add nothing here.
  *   - Only one gesture is tracked at a time (by `pointerId`); a second
  *     concurrent pointer (e.g. a second finger) is ignored until the first
  *     one finishes.
+ *   - **Real-browser native-drag guard (R9-036 REOPEN #2 — verified live):**
+ *     `a[href]` and `img` are draggable BY DEFAULT in every real browser. A
+ *     press+move over either starts native drag-and-drop, which fires
+ *     `pointercancel` on this hook's tracked pointer before the slop is
+ *     ever exceeded — the whole gesture died silently (no chips, no
+ *     commit) in a real browser while all jsdom tests passed, because
+ *     jsdom has no native drag to trigger. `handlers` now carries
+ *     `draggable={false}` + an `onDragStart` that cancels the event, so
+ *     every consumer that spreads `handlers` onto its bound element is
+ *     immune by construction — see the `PressSwipeGesture.handlers` doc
+ *     below for the mechanism (including why the nested-`<img>` case needs
+ *     the bubbling `dragstart` cancel, not just `draggable={false}` on the
+ *     outer element).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -116,10 +133,33 @@ export interface PressSwipeGesture<T extends HTMLElement> {
   anchorRect: DOMRect | null;
   /** Attach to the SAME interactive element `handlers` is spread onto. */
   elementRef: React.RefObject<T | null>;
-  /** Spread onto the interactive element (a Link/anchor/button). */
+  /**
+   * Spread onto the interactive element (a Link/anchor/button) — e.g.
+   * `<Link {...gesture.handlers} .../>`. Includes the native-drag guard
+   * (`draggable` + `onDragStart`, see the file-level comment's "real browser"
+   * note) so ANY consumer that spreads this object is immune by
+   * construction, not just call sites that remember to wire it by hand.
+   */
   handlers: {
     onPointerDown: (event: React.PointerEvent<T>) => void;
     onClick: (event: React.MouseEvent<T>) => void;
+    /**
+     * `a[href]` and `img` are draggable BY DEFAULT in every real browser
+     * (jsdom has no native drag, so unit tests never see this) — a
+     * press-then-move over one starts the browser's native drag-and-drop
+     * instead of (or as well as) this hook's own pointer tracking. `false`
+     * here disables the bound element itself as a drag source.
+     */
+    draggable: false;
+    /**
+     * Belt-and-suspenders for `draggable`: a NESTED element (e.g. the
+     * avatar's own `<img>`) has its own independent default-draggable state
+     * regardless of what the ancestor sets — `draggable={false}` on the
+     * bound `<a>` does NOT make a child `<img>` non-draggable. `dragstart`
+     * bubbles, so catching it here and cancelling it stops the drag
+     * regardless of which descendant the browser picked as the drag source.
+     */
+    onDragStart: (event: React.DragEvent<T>) => void;
   };
 }
 
@@ -264,12 +304,25 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
     event.stopPropagation();
   }, []);
 
+  // Real-browser native-drag guard (verified missing — R9-036 REOPEN #2): a
+  // press+move over a[href]/img starts the browser's OWN drag-and-drop,
+  // which fires `pointercancel` on this hook's tracked pointer BEFORE the
+  // slop is ever exceeded — the gesture dies silently, no chips, no commit.
+  // jsdom has no native drag, so this was structurally invisible to every
+  // unit test. Cancelling `dragstart` (it bubbles from any draggable
+  // descendant, e.g. the avatar's own `<img>`) stops the browser from ever
+  // entering that state, so the pointer sequence this hook already tracks
+  // proceeds normally.
+  const onDragStart = useCallback((event: React.DragEvent<T>) => {
+    event.preventDefault();
+  }, []);
+
   return {
     armed,
     highlight,
     progress,
     anchorRect,
     elementRef,
-    handlers: { onPointerDown, onClick },
+    handlers: { onPointerDown, onClick, draggable: false, onDragStart },
   };
 }

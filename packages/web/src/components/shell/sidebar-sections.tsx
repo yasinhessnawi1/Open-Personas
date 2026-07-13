@@ -162,6 +162,18 @@ function PersonaRailItem({
             <Link
               ref={gesture.elementRef}
               href={`/personas/${persona.id}`}
+              // Spread FIRST so the explicit onClick below (which composes
+              // gesture.handlers.onClick with onNavigate) wins over the
+              // spread's own onClick — draggable/onDragStart/onPointerDown
+              // come from the spread unmodified. R9-036 REOPEN #2 (verified
+              // live): a real browser's native drag-and-drop on this
+              // a[href] (and its nested img — see PersonaAvatar) starts on
+              // press+move and fires `pointercancel`, killing the gesture
+              // before the slop ever shows a chip; jsdom has no native drag
+              // so every unit test was structurally blind to it. draggable
+              // + onDragStart (use-press-swipe-gesture.ts) close that gap
+              // for every consumer, not just this call site.
+              {...gesture.handlers}
               onClick={(event) => {
                 gesture.handlers.onClick(event);
                 // An armed gesture (commit OR cancel) already did its own
@@ -170,7 +182,6 @@ function PersonaRailItem({
                 // matching "today's click, byte-identical".
                 if (!event.defaultPrevented) onNavigate?.();
               }}
-              onPointerDown={gesture.handlers.onPointerDown}
               onContextMenu={(event) => {
                 // Suppress the OS long-press context menu / iOS "peek" while
                 // swiping — it would otherwise fight the live preview for
@@ -180,8 +191,12 @@ function PersonaRailItem({
               }}
               aria-label={persona.name}
               className={cn(
-                "block touch-none rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
-                "[-webkit-touch-callout:none]",
+                "block touch-none select-none rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+                // -webkit-touch-callout: no iOS long-press "peek" preview.
+                // -webkit-user-drag: belt-and-suspenders for `draggable`
+                // (Safari-specific; the onDragStart guard above is the
+                // cross-browser mechanism — see use-press-swipe-gesture.ts).
+                "[-webkit-touch-callout:none] [-webkit-user-drag:none]",
               )}
             />
           }

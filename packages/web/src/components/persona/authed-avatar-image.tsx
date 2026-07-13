@@ -53,7 +53,16 @@ export function AuthedAvatarImage({
       )}
     >
       {/* biome-ignore lint/performance/noImgElement: blob: URLs can't go through next/image */}
-      <img src={src} alt={alt} className="size-full object-cover" />
+      <img
+        src={src}
+        alt={alt}
+        // R9-036 REOPEN #2: img is draggable BY DEFAULT in every real
+        // browser, independent of whatever the wrapping Link sets — see
+        // use-press-swipe-gesture.ts's handlers doc for why the ancestor's
+        // draggable/onDragStart guard alone isn't enough for a nested img.
+        draggable={false}
+        className="size-full object-cover"
+      />
     </span>
   );
 }
