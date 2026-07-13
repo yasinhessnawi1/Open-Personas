@@ -303,8 +303,25 @@
     "title": "Overnight",
     "subtitle": "What your personas did while you slept — waiting on you first.",
     "loadFailed": "Couldn't load your review. Try again in a moment.",
-    "spentOvernight": "kr {amount} spent overnight",
-    "quietSpend": "Nothing spent overnight",
+    "dateline": {
+      "daypart": {
+        "night": "night",
+        "morning": "morning",
+        "afternoon": "afternoon",
+        "evening": "evening"
+      },
+      "moment": "{weekday} {daypart}.",
+      "nothing": "Nothing needs you.",
+      "needs": "<em>{count, plural, =1 {One thing} =2 {Two things} =3 {Three things} =4 {Four things} =5 {Five things} =6 {Six things} =7 {Seven things} =8 {Eight things} =9 {Nine things} other {# things}}</em> {count, plural, =1 {needs} other {need}} you.",
+      "worked": "{count, plural, =1 {1 persona worked overnight} other {# personas worked overnight}}",
+      "spent": "kr {amount} spent"
+    },
+    "quickAccess": {
+      "heading": "Quick access",
+      "chatWith": "Chat with {name}",
+      "callWith": "Call {name}",
+      "untitled": "Untitled conversation"
+    },
     "emptyTitle": "A quiet night",
     "emptyBody": "Nothing needed you and nothing went wrong. Your personas will surface anything worth your time here.",
     "needsYou": "Needs you",
@@ -371,6 +388,15 @@
     "taskPlaceholder": "Describe the task to hand off…",
     "dispatch": "Dispatch task",
     "dispatching": "Dispatching…",
+    "dialogTitle": "Hand a task to a persona",
+    "dialogIntro": "Describe the goal and who should run it. They'll work in the background and check in when they hit a real fork.",
+    "goalLabel": "What should get done?",
+    "whoLabel": "Who runs it?",
+    "dialogPreview": "<b>{name}</b> will work toward this in the background. You'll see progress and any approvals here in Activity.",
+    "dialogCancel": "Cancel",
+    "startNow": "Start now",
+    "ctaTitle": "Hand off something new",
+    "ctaBody": "Delegate a goal to a persona — they'll work in the background.",
     "noPersonas": "Create a persona first to dispatch a task.",
     "dispatchError": "Couldn't start the task. Try again.",
     "previous": "Previous tasks",

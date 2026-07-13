@@ -141,6 +141,56 @@ describe("Review", () => {
     await waitFor(() => expect(api.fetchReview).toHaveBeenCalledTimes(2));
   });
 
+  it("renders the A6-R-1 dateline: worded needs-you count incl. overflow, workers, spend (R11-B2)", async () => {
+    api.fetchReview.mockResolvedValue(
+      digest({
+        total_spent_micros: 6_400, // kr 0.64
+        sections: [
+          {
+            kind: "waiting",
+            items: [item({ persona_id: "kai" })],
+            overflow: 1, // honest: the "+1 more" still needs you
+          },
+          {
+            kind: "stuck",
+            items: [item({ persona_id: "iris", title: "stuck thing" })],
+            overflow: 0,
+          },
+          {
+            kind: "done",
+            items: [item({ persona_id: "kai", title: "done thing" })],
+            overflow: 0,
+          },
+        ],
+      }),
+    );
+    renderReview();
+    const dateline = await waitFor(() => {
+      const el = document.querySelector("[data-slot='review-dateline']");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    // 1 waiting + 1 waiting-overflow + 1 stuck = Three things, worded + accent em.
+    expect(dateline.querySelector("em")?.textContent).toBe("Three things");
+    expect(dateline.textContent).toContain("need you.");
+    // 2 distinct personas across sections; spend rendered in kr.
+    expect(dateline.textContent).toContain("2 personas worked overnight");
+    expect(dateline.textContent).toContain("kr 0.64 spent");
+  });
+
+  it("reads 'Nothing needs you.' on a quiet digest — no fabricated segments", async () => {
+    api.fetchReview.mockResolvedValue(digest());
+    renderReview();
+    const dateline = await waitFor(() => {
+      const el = document.querySelector("[data-slot='review-dateline']");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(dateline.textContent).toContain("Nothing needs you.");
+    expect(dateline.textContent).not.toContain("worked overnight");
+    expect(dateline.textContent).not.toContain("spent");
+  });
+
   it("renders A7 'ran because' provenance when present (the W8 wiring target)", async () => {
     api.fetchReview.mockResolvedValue(
       digest({

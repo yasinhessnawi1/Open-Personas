@@ -1,13 +1,20 @@
 import { getTranslations } from "next-intl/server";
 
+import { startTask } from "@/app/(app)/runs/actions";
 import { ActivityTabs } from "@/components/activity/activity-tabs";
 import { AutonomyControls } from "@/components/activity/autonomy-controls";
+import { QuickAccess } from "@/components/activity/quick-access";
 import { Review } from "@/components/activity/review";
 import { Onboarding } from "@/components/home/onboarding";
 import { PageBody, PageHeader } from "@/components/layout";
 import { Separator } from "@/components/ui/separator";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
+import { rankPersonasByRecentUse } from "@/lib/quick-access";
+
+/** Quick-access sizing (D-R11-5): a strip, not a dashboard. */
+const QUICK_PERSONAS = 4;
+const QUICK_CONVERSATIONS = 4;
 
 /**
  * Spec A6 (W5) — the morning Review: "what did my personas do while I slept?" (criterion 11).
@@ -24,15 +31,25 @@ import { serverApi } from "@/lib/api/server";
  * brand-new-user empty state re-homes here: a CONFIRMED zero personas renders the onboarding
  * instead of an empty review (a failed personas fetch keeps the review — never show "create your
  * first persona" to a user whose personas merely failed to load).
+ *
+ * R11-B2: the review's own A6-R-1 dateline is the page heading (no separate PageHeader), the
+ * header carries the kit's New-task dialog, and the quick-access strip (D-R11-5) sits BELOW the
+ * triage sections — Home's quick-launch folded in without competing with waiting-first ordering.
+ * Conversations are fetched fail-soft: a failed fetch degrades the strip, never the review.
  */
 export default async function ActivityPage() {
-  const t = await getTranslations("review");
   const api = await serverApi();
   let personasKnown = true;
-  const personas = await unwrap(await api.GET("/v1/personas")).catch(() => {
-    personasKnown = false;
-    return [];
-  });
+  const [personas, conversations] = await Promise.all([
+    unwrap(await api.GET("/v1/personas")).catch(() => {
+      personasKnown = false;
+      return [];
+    }),
+    api
+      .GET("/v1/conversations", { params: { query: { limit: 50, offset: 0 } } })
+      .then((res) => res.data ?? [])
+      .catch(() => []),
+  ]);
   if (personasKnown && personas.length === 0) {
     const th = await getTranslations("home");
     return (
@@ -43,11 +60,34 @@ export default async function ActivityPage() {
     );
   }
   const personaList = personas.map((p) => ({ id: p.id, name: p.name }));
+
+  const personaById = new Map(personas.map((p) => [p.id, p]));
+  const quickPersonas = rankPersonasByRecentUse(
+    personas,
+    conversations,
+    QUICK_PERSONAS,
+  ).map((p) => ({ id: p.id, name: p.name, avatar_url: p.avatar_url }));
+  const quickConversations = conversations
+    .slice(0, QUICK_CONVERSATIONS)
+    .map((c) => {
+      const p = personaById.get(c.persona_id);
+      return {
+        id: c.id,
+        title: c.title,
+        persona: p
+          ? { id: p.id, name: p.name, avatar_url: p.avatar_url }
+          : null,
+      };
+    });
+
   return (
     <PageBody width="narrow">
       <ActivityTabs />
-      <PageHeader title={t("title")} subtitle={t("subtitle")} />
-      <Review />
+      <Review personas={personaList} newTaskAction={startTask} />
+      <QuickAccess
+        personas={quickPersonas}
+        conversations={quickConversations}
+      />
       <Separator className="my-8" />
       <AutonomyControls personas={personaList} />
     </PageBody>

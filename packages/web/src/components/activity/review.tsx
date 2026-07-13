@@ -6,9 +6,14 @@ import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/auth";
+import {
+  type NewTaskAction,
+  NewTaskDialog,
+  type NewTaskPersona,
+} from "@/components/activity/new-task-dialog";
+import { ReviewDateline } from "@/components/activity/review-dateline";
 import { EmptyState } from "@/components/patterns/empty-state";
 import { SkeletonBlock } from "@/components/patterns/loading";
-import { kr } from "@/components/tasks/task-row";
 import { Badge } from "@/components/ui/badge";
 import {
   type DigestItem,
@@ -112,7 +117,15 @@ function StuckItem({
   );
 }
 
-export function Review() {
+export function Review({
+  personas = [],
+  newTaskAction,
+}: {
+  /** Executor options for the header's New-task dialog (server-fetched). */
+  personas?: readonly NewTaskPersona[];
+  /** The dispatch server action, threaded from the page (R11-B2). */
+  newTaskAction?: NewTaskAction;
+}) {
   const t = useTranslations("review");
   const { getToken } = useAuth();
   const [digest, setDigest] = useState<MorningDigest | null | "error">(null);
@@ -135,7 +148,7 @@ export function Review() {
   if (digest === null) {
     return (
       <div className="flex flex-col gap-4">
-        <SkeletonBlock className="h-16" />
+        <SkeletonBlock className="h-20" />
         <SkeletonBlock className="h-32" />
       </div>
     );
@@ -150,12 +163,14 @@ export function Review() {
 
   return (
     <div className="flex flex-col gap-8" data-slot="review">
-      {/* the dateline: what the night cost, plainly */}
-      <p className="type-caption text-muted-foreground">
-        {digest.total_spent_micros > 0
-          ? t("spentOvernight", { amount: kr(digest.total_spent_micros) })
-          : t("quietSpend")}
-      </p>
+      {/* R11-B2: the A6-R-1 dateline header — the surface's h1 — with the kit's
+          persistent New-task affordance beside it. */}
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <ReviewDateline digest={digest} />
+        {personas.length > 0 && newTaskAction ? (
+          <NewTaskDialog personas={personas} action={newTaskAction} />
+        ) : null}
+      </div>
 
       {!hasContent ? (
         <EmptyState title={t("emptyTitle")} description={t("emptyBody")} />
