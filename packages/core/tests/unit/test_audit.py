@@ -82,6 +82,16 @@ class TestAuditEvent:
                 source=WriteSource.SYSTEM,
             )
 
+    def test_store_accepts_core_memory(self) -> None:
+        """R9-031: ``core_memory`` (Spec K9's CoreMemoryStore, a fifth
+        TypedStore) used to pydantic-literal_error here — EVERY core-block
+        refresh crashed at ``TypedStore._emit_audit``. Round-trips like any
+        other store kind."""
+        e = _event(store="core_memory")
+        assert e.store == "core_memory"
+        restored = AuditEvent.model_validate_json(e.model_dump_json())
+        assert restored == e
+
 
 class TestMemoryAuditLogger:
     def test_emit_and_read(self) -> None:

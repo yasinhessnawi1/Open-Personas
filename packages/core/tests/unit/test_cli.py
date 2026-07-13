@@ -142,6 +142,41 @@ class TestAuditCommand:
         )
         assert result.exit_code != 0
 
+    @pytest.mark.parametrize(
+        "store",
+        [
+            "identity",
+            "self_facts",
+            "worldview",
+            "episodic",
+            "episodic_gist",
+            "core_memory",
+            "knowledge_graph",
+            "skill",
+        ],
+    )
+    def test_audit_accepts_every_current_store_kind(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        store: str,
+    ) -> None:
+        """R9-031's "same class of gap": ``--store`` used to hardcode the
+        original four typed stores, silently rejecting every kind added since
+        (episodic_gist, knowledge_graph, skill — and now core_memory). It is
+        now derived from ``persona.audit.StoreKind`` itself, so it can never
+        drift again — this pins every CURRENT member accepted, not a
+        hand-copied subset."""
+        monkeypatch.setenv("PERSONA_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.setenv("PERSONA_AUDIT_PATH", str(tmp_path / "audit_dir"))
+        result = runner.invoke(
+            app,
+            ["audit", str(VALID_FIXTURES[0]), "--store", store],
+        )
+        assert result.exit_code == 0, result.stderr
+        assert "no audit events" in result.stdout
+
     def test_audit_invalid_since_value_is_rejected(
         self,
         runner: CliRunner,

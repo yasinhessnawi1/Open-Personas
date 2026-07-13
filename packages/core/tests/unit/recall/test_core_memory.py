@@ -131,11 +131,35 @@ def test_read_before_any_refresh_is_none() -> None:
 
 
 class _FakeBackend:
-    def __init__(self, rows: list[PersonaChunk]) -> None:
-        self._rows = rows
+    """A minimal in-memory ``Backend`` — enough of the surface for both the
+    read-only ``.current()`` tests below AND a real ``CoreMemoryStore.write()``
+    round-trip (R9-031): ``upsert``/``get_by_logical_ids`` are what
+    ``TypedStore.write``'s versioning path calls before it ever reaches
+    ``_emit_audit`` — mirrors ``test_stores_backend.py``'s ``_FakeBackend``
+    shape, scoped to just what this file's tests exercise."""
+
+    def __init__(self, rows: list[PersonaChunk] | None = None) -> None:
+        self._rows = list(rows or [])
 
     def get_all(self, *, persona_id: str, store_kind: str) -> list[PersonaChunk]:  # noqa: ARG002
         return list(self._rows)
+
+    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+        _ = (persona_id, store_kind)
+        by_id = {c.id: c for c in self._rows}
+        for new_chunk in chunks:
+            by_id[new_chunk.id] = new_chunk
+        self._rows = list(by_id.values())
+
+    def get_by_logical_ids(
+        self, *, persona_id: str, store_kind: str, logical_ids: list[str]
+    ) -> list[PersonaChunk]:
+        _ = (persona_id, store_kind)
+        return [
+            c
+            for c in self._rows
+            if c.provenance is not None and c.provenance.logical_id in logical_ids
+        ]
 
 
 def _versioned(cid: str, *, version: int, superseded_by: str | None) -> PersonaChunk:
@@ -165,3 +189,67 @@ def test_current_returns_the_unsuperseded_head() -> None:
 def test_current_is_none_when_empty() -> None:
     store = CoreMemoryStore(backend=_FakeBackend([]), audit_logger=MemoryAuditLogger())
     assert store.current("p") is None
+
+
+# ---- CoreMemoryStore.write — the real audit-emission path (R9-031) --------
+#
+# Every test above uses either `_FakeStore` (a duck-typed double that never
+# goes near TypedStore._emit_audit at all) or CoreMemoryStore.current (a READ
+# that never calls _emit_audit either) — so nothing in this file, pre-R9-031,
+# ever actually drove a REAL CoreMemoryStore through a REAL write. That is
+# exactly why `AuditEvent(store="core_memory")`'s pydantic literal_error went
+# unnoticed: the owner's traceback came from a live core-block refresh, a path
+# no existing test reached. These two tests close that gap directly.
+
+
+def test_core_memory_store_write_emits_the_audit_event_cleanly() -> None:
+    audit = MemoryAuditLogger()
+    store = CoreMemoryStore(backend=_FakeBackend(), audit_logger=audit)
+    chunk = PersonaChunk(
+        id="p::core_memory::abc123",
+        text="Yasin prefers concise answers; working on Open Persona.",
+        metadata={CORE_SOURCE_IDS_KEY: "c0,c1"},
+        created_at=NOW,
+        provenance=ChunkProvenance(
+            source=WriteSource.SYSTEM,
+            logical_id=core_logical_id("p"),
+            written_at=NOW,
+        ),
+    )
+
+    store.write("p", [chunk], source=WriteSource.SYSTEM, written_by="core.refresh")
+
+    events = audit.read("p")
+    assert len(events) == 1
+    assert events[0].store == "core_memory"  # would ValidationError pre-R9-031
+    assert events[0].action.value == "write"
+    assert events[0].written_by == "core.refresh"
+    assert events[0].chunk_ids == ["p::core_memory::abc123"]
+    assert store.current("p") is not None
+    assert store.current("p").id == "p::core_memory::abc123"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_refresh_core_block_round_trips_through_a_real_core_memory_store() -> None:
+    """The EXACT crash shape from the owner's traceback: a background
+    core-block refresh (``refresh_core_block``) writing through the REAL
+    ``CoreMemoryStore`` — not ``_FakeStore`` — so it actually reaches
+    ``TypedStore._emit_audit`` -> ``AuditEvent(store="core_memory")``."""
+    audit = MemoryAuditLogger()
+    store = CoreMemoryStore(backend=_FakeBackend(), audit_logger=audit)
+
+    block = await refresh_core_block(
+        "p",
+        summarizer=StubSummarizer(),
+        sources=[chunk("c0", text="Yasin moved to Oslo in 2023.")],
+        store=store,
+        target_tokens=200,
+        now=NOW,
+    )
+
+    assert block is not None
+    assert read_core_block(store, "p") == block  # the turn-path read sees it
+    events = audit.read("p")
+    assert len(events) == 1
+    assert events[0].store == "core_memory"
+    assert events[0].written_by == "core.refresh"  # refresh_core_block's default

@@ -37,13 +37,28 @@ __all__ = [
     "StoreKind",
 ]
 
-# The four typed stores (Spec 01) + the user-scoped knowledge graph (Spec K0 T8 —
-# additive: every graph mutation emits exactly one AuditEvent through this same
-# port; existing stores are unaffected) + the skill-injection event sentinel
-# (Spec S1 T4 — skill injection is not a store mutation, so ``"skill"`` is the
-# honest non-store ``store`` value, additive like ``knowledge_graph``).
+# The four original typed stores (Spec 01) + episodic_gist (K8's pyramid
+# summaries — persisted through the SAME episodic-family write path, not its
+# own TypedStore subclass) + core_memory (Spec K9 T7 — the K9-D-10
+# always-in-context block; a FIFTH TypedStore subclass,
+# persona.stores.core_memory.CoreMemoryStore — R9-031: this Literal drifted
+# from that class's STORE_KIND, so every real write — a background core-block
+# refresh — crashed at TypedStore._emit_audit with a pydantic literal_error;
+# fail-soft at the caller masked it into "core memory silently never
+# updates") + the user-scoped knowledge graph (Spec K0 T8 — additive: every
+# graph mutation emits exactly one AuditEvent through this same port; existing
+# stores are unaffected) + the skill-injection event sentinel (Spec S1 T4 —
+# skill injection is not a store mutation, so ``"skill"`` is the honest
+# non-store ``store`` value, additive like ``knowledge_graph``).
 StoreKind = Literal[
-    "identity", "self_facts", "worldview", "episodic", "episodic_gist", "knowledge_graph", "skill"
+    "identity",
+    "self_facts",
+    "worldview",
+    "episodic",
+    "episodic_gist",
+    "core_memory",
+    "knowledge_graph",
+    "skill",
 ]
 
 

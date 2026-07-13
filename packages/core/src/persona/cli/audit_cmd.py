@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 — typer needs runtime access
-from typing import Literal, cast
+from typing import cast, get_args
 
 import typer
 
@@ -16,6 +16,13 @@ from persona.schema.chunks import WriteSource
 from persona.schema.persona import Persona
 
 __all__ = ["audit"]
+
+# Derived from the Literal itself (never a hand-copied tuple) so this filter
+# can never drift from persona.audit.StoreKind again — R9-031 found exactly
+# that drift here: hardcoded to the original four typed stores, silently
+# rejecting --store episodic_gist/knowledge_graph/skill/core_memory once each
+# was added upstream (the same class of gap the Literal itself had).
+_STORE_KINDS: tuple[str, ...] = get_args(StoreKind)
 
 _DURATION_RE = re.compile(r"^(?P<n>\d+)(?P<unit>[smhd])$")
 _DURATION_UNIT_SECONDS: dict[str, int] = {
@@ -40,7 +47,7 @@ def audit(
         None, "--source", help="Filter to one of: system, user, persona_self."
     ),
     store: str | None = typer.Option(
-        None, "--store", help="Filter to one of: identity, self_facts, worldview, episodic."
+        None, "--store", help=f"Filter to one of: {', '.join(_STORE_KINDS)}."
     ),
 ) -> None:
     """Print audit events for ``persona_path``, applying optional filters."""
@@ -59,11 +66,11 @@ def audit(
     parsed_source = WriteSource(source) if source else None
     parsed_store: StoreKind | None = None
     if store:
-        if store not in ("identity", "self_facts", "worldview", "episodic"):
+        if store not in _STORE_KINDS:
             raise typer.BadParameter(
-                f"invalid --store {store!r}; expected identity/self_facts/worldview/episodic"
+                f"invalid --store {store!r}; expected one of {', '.join(_STORE_KINDS)}"
             )
-        parsed_store = cast("Literal['identity', 'self_facts', 'worldview', 'episodic']", store)
+        parsed_store = cast("StoreKind", store)
 
     events = logger.read(
         persona_id,
