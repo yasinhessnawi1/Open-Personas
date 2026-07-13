@@ -15,6 +15,7 @@ import {
 import { useTranslations } from "next-intl";
 import { type ComponentType, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/auth";
+import { useMeEvent } from "@/components/providers/me-events-provider";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import {
   type ArtifactItem,
@@ -160,6 +161,15 @@ export function ConversationFiles({
       window.removeEventListener(CONVERSATION_FILES_CHANGED_EVENT, onChanged);
     };
   }, [refresh]);
+
+  // R9-028 rider: a background-produced artifact (e.g. the R9-025b
+  // turn-into-file job) publishes `sidebar.changed`
+  // (reason=conversation.file_extracted) over the SAME R9-012 me-events
+  // channel title_refresh uses — reusing that established live-refresh
+  // subscription (not the window-event pair above, which only covers THIS
+  // tab's own foreground actions) so a file produced in the background
+  // appears without reopening the panel.
+  useMeEvent("sidebar.changed", () => void refresh());
 
   // Two-group split by provenance. Anything without source metadata is treated
   // as persona-made (the generated path is the common metadata-less case).

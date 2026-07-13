@@ -11,7 +11,8 @@
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MeEventHandler } from "@/components/providers/me-events-provider";
 import type { ArtifactItem } from "@/lib/hooks/use-conversation-artifacts";
 
 // Auth façade — the download path + provider read it; stub to avoid Clerk.
@@ -29,6 +30,7 @@ vi.mock("./renderers", () => ({
 
 // Drive the component off a controllable artifact list.
 const items: ArtifactItem[] = [];
+const refresh = vi.fn(() => Promise.resolve());
 vi.mock("@/lib/hooks/use-conversation-artifacts", () => ({
   CONVERSATION_FILES_CHANGED_EVENT: "conversation-files-changed",
   notifyConversationFilesChanged: () => {},
@@ -36,9 +38,23 @@ vi.mock("@/lib/hooks/use-conversation-artifacts", () => ({
     items,
     loading: false,
     error: null,
-    refresh: () => Promise.resolve(),
+    refresh,
   }),
 }));
+
+// R9-028 rider — capture the me-events subscription (the me-live-refresh.test.tsx
+// pattern) so the test can fire a `sidebar.changed` frame directly.
+const meEventHandlers = new Map<string, MeEventHandler[]>();
+vi.mock("@/components/providers/me-events-provider", () => ({
+  useMeEvent: (type: string, handler: MeEventHandler) => {
+    const list = meEventHandlers.get(type) ?? [];
+    list.push(handler);
+    meEventHandlers.set(type, list);
+  },
+}));
+function fireMeEvent(type: string, data: Record<string, unknown> = {}) {
+  for (const h of meEventHandlers.get(type) ?? []) h(data);
+}
 
 import { ConversationFiles } from "./conversation-files";
 
@@ -196,6 +212,52 @@ describe("ConversationFiles", () => {
       expect(onOpenChange).toHaveBeenCalledWith(true);
       // Controlled: the panel does NOT open on its own (the parent didn't flip the prop).
       expect(screen.queryByText("Files in this conversation")).toBeNull();
+    });
+  });
+
+  // R9-028 rider: a background-produced artifact (R9-025b's turn-into-file
+  // job, or any other future off-turn producer) publishes sidebar.changed —
+  // the panel must refetch WITHOUT being reopened, via the SAME me-events
+  // live-refresh subscription MeLiveRefresh uses (reused, not reinvented).
+  describe("live refresh on sidebar.changed (R9-028 rider)", () => {
+    beforeEach(() => {
+      refresh.mockClear();
+      meEventHandlers.clear();
+    });
+
+    it("subscribes to sidebar.changed", () => {
+      setItems([]);
+      renderFiles();
+      expect(meEventHandlers.has("sidebar.changed")).toBe(true);
+    });
+
+    it("a sidebar.changed frame triggers a refetch even while the panel is closed", () => {
+      setItems([]);
+      renderFiles();
+      refresh.mockClear(); // drop the initial-mount call noise, if any
+      fireMeEvent("sidebar.changed", { reason: "conversation.file_extracted" });
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it("the subscription is unconditional — not gated on the panel's open state", () => {
+      // The hook call sits at the component's top level (no `if (open)` guard),
+      // so a background artifact refreshes the registry whether or not the
+      // viewer happens to be open when it lands.
+      setItems([]);
+      render(
+        <NextIntlClientProvider locale="en" messages={messages}>
+          <ConversationFiles
+            personaId="mara"
+            conversationId="conv_1"
+            personaName="Mara"
+            open
+            onOpenChange={() => {}}
+          />
+        </NextIntlClientProvider>,
+      );
+      refresh.mockClear();
+      fireMeEvent("sidebar.changed");
+      expect(refresh).toHaveBeenCalledTimes(1);
     });
   });
 });
