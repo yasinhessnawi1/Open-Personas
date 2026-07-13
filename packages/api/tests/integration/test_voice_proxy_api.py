@@ -188,14 +188,29 @@ def test_tts_proxy_cross_tenant_persona_is_404_never_reaches_voice_service(
     assert resp.status_code == 404
 
 
-def test_tts_proxy_persona_without_configured_voice_is_503(
-    client: tuple[TestClient, str, str, Engine],
+def test_tts_proxy_persona_without_configured_voice_falls_back_to_default(
+    client: tuple[TestClient, str, str, Engine], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R9-025 reopen leg A: a voiceless persona no longer 503s locally — the request
+    proxies with ``voice_id: null`` and persona-voice applies its configured default
+    voice (``PERSONA_TTS_VOICE_DEFAULT``). The ``no_voice_configured`` 503 shape now
+    fires only when persona-voice itself rejects (no default configured upstream)."""
     c, uid_a, _uid_b, _su = client
     pid = _create_persona(c, uid_a, _YAML_NO_VOICE)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, content=b"RIFFdefaultvoiceWAVE", headers={"content-type": "audio/wav"}
+        )
+
+    _install_mock_httpx(monkeypatch, handler)
     resp = c.post(f"/v1/personas/{pid}/tts", json={"text": "hello"}, headers=_auth(uid_a))
-    assert resp.status_code == 503
-    assert resp.json()["context"]["reason"] == "no_voice_configured"
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"RIFFdefaultvoiceWAVE"
+    # No persona voice -> the pin rides through as null; the default is voice-side.
+    assert captured["body"] == {"text": "hello", "voice_id": None}
 
 
 def test_tts_proxy_fails_soft_when_voice_service_unconfigured(
