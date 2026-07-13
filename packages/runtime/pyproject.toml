@@ -54,10 +54,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yasinhessnawi1/Open-Persona"
-Repository = "https://github.com/yasinhessnawi1/Open-Persona"
-Issues = "https://github.com/yasinhessnawi1/Open-Persona/issues"
-Changelog = "https://github.com/yasinhessnawi1/Open-Persona/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/yasinhessnawi1/Open-Personas-ai"
+Repository = "https://github.com/yasinhessnawi1/Open-Personas-ai"
+Issues = "https://github.com/yasinhessnawi1/Open-Personas-ai/issues"
+Changelog = "https://github.com/yasinhessnawi1/Open-Personas-ai/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling>=1.27"]
