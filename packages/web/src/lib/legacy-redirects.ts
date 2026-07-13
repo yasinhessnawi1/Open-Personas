@@ -3,15 +3,12 @@
  *
  * D-R11-4: the Activity area consolidates under `/activity` (Review · Tasks ·
  * Approvals + task detail); the old standalone routes redirect so deep links
- * keep working. D-R11-3: Connectors is promoted from a settings subsection to
- * a first-class `/connectors` tab.
+ * keep working. (Connectors stays at `/settings/connectors` — the D-R11-3
+ * promotion was owner-reversed: one-time setup lives with settings.)
  *
  * Consumed by `next.config.ts` `redirects()`. Query strings are forwarded
- * automatically by Next, which two flows depend on:
- *   - `/approvals?id=…` (the A6-D-6 per-item deep link from digests/toasts)
- *   - `/settings/connectors?result=…` (the C6 OAuth 302-return; the redirect
- *     URI is registered with external providers, so the old path must keep
- *     resolving indefinitely)
+ * automatically by Next, which the A6-D-6 approval deep link
+ * (`/approvals?id=…` from digests/toasts) depends on.
  *
  * `permanent: false` (307) deliberately: browsers cache 308s aggressively, and
  * these targets may still be re-homed within the v3 adoption wave.
@@ -27,11 +24,6 @@ export const LEGACY_REDIRECTS = [
   {
     source: "/approvals",
     destination: "/activity/approvals",
-    permanent: false,
-  },
-  {
-    source: "/settings/connectors",
-    destination: "/connectors",
     permanent: false,
   },
 ] as const;

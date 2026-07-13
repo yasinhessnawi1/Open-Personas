@@ -7,9 +7,7 @@ import { resolveReturnToast } from "./connect-return";
 import type { ConnectorConnection } from "./use-connectors";
 
 /**
- * Spec C6 (T7) — handle the OAuth 302-return to the connectors surface, `?result=…` (C6-D-2).
- * R11-B1: the surface lives at `/connectors`; provider-registered return URIs may still
- * point at the old `/settings/connectors`, which redirects here with the query intact.
+ * Spec C6 (T7) — handle the OAuth 302-return to `/settings/connectors?result=…` (C6-D-2).
  *
  * Page-level, zero modal state (the full-page OAuth round-trip discards the ConnectFlow) — it
  * works on a cold load. On return it (1) refreshes the list — the SOLE confirmation oracle,

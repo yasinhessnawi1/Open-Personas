@@ -45,7 +45,7 @@ function renderWithIntl() {
 
 describe("ConnectorsManager — first-connection guidance", () => {
   beforeEach(() => {
-    window.history.pushState(null, "", "/connectors"); // clean URL (no OAuth return)
+    window.history.pushState(null, "", "/settings/connectors"); // clean URL (no OAuth return)
   });
 
   it("shows guidance that invites only backend-ready platforms (not Discord/Slack)", () => {

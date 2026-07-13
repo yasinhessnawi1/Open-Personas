@@ -2,7 +2,6 @@
 
 import {
   Activity,
-  Cable,
   CalendarClock,
   Phone,
   Sparkles,
@@ -48,10 +47,9 @@ const ITEMS = [
     icon: CalendarClock,
     count: "schedule",
   },
-  // R11-B1 (D-R11-3): Connectors takes the sidebar slot Home vacated — promoted
-  // from the account-menu /settings/connectors subsection to a first-class tab.
-  // No live count: connection state is a set-and-forget roster, not an inbox.
-  { href: "/connectors", key: "connectors", icon: Cable, count: undefined },
+  // Connectors deliberately has NO row here (R11-B1 amend, owner-ruled): it's a
+  // one-time setup surface, so it stays a settings subsection reached from the
+  // account menu + ⌘K — a permanent tab would outlive its usefulness.
 ] as const;
 
 /**

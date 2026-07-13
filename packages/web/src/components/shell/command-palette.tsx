@@ -109,9 +109,8 @@ export function CommandPalette({ data }: { data: SidebarData }) {
       },
     ];
     const nav: CommandItem[] = [
-      // R11-B1: Home retired (D-R11-1) — Activity is the landing surface, and
-      // Connectors joined the top-level nav (D-R11-3). Tasks goes to the
-      // consolidated Activity area, not the /runs execution drill (D-R11-4).
+      // R11-B1: Home retired (D-R11-1) — Activity is the landing surface. Tasks
+      // goes to the consolidated Activity area, not the /runs drill (D-R11-4).
       {
         id: "nav-activity",
         group: "groupNavigate",
@@ -140,11 +139,13 @@ export function CommandPalette({ data }: { data: SidebarData }) {
         href: "/activity/tasks",
         icon: ListChecks,
       },
+      // Connectors is a settings subsection (R11-B1 amend — one-time setup, no
+      // sidebar tab); the palette keeps it one keystroke away.
       {
         id: "nav-connectors",
         group: "groupNavigate",
         label: tn("connectors"),
-        href: "/connectors",
+        href: "/settings/connectors",
         icon: Cable,
       },
     ];

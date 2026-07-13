@@ -12,7 +12,7 @@ import { ExpiryCountdown } from "./expiry-countdown";
  * a plain anchor to `authorize_url` is an explicit FULL-PAGE navigation (no popup, no iframe),
  * and the copy says so honestly. The `state` in the URL is the C1 LinkToken (CSRF-covered,
  * C6-D-2); on the platform's redirect back, the connector service 302s to
- * `/connectors?result=…` (R11-B1 re-home; the old settings path redirects), handled page-level (`useConnectorReturn`) — the list stays
+ * `/settings/connectors?result=…`, handled page-level (`useConnectorReturn`) — the list stays
  * the sole confirmation oracle. The countdown reflects the server state-token expiry.
  */
 export function OAuthStep({

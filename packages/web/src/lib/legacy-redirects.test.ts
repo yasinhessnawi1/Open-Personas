@@ -17,8 +17,8 @@ describe("LEGACY_REDIRECTS (R11-B1)", () => {
     expect(bySource["/tasks/:taskId"]).toBe("/activity/tasks/:taskId");
   });
 
-  it("re-homes the connectors settings subsection to the /connectors tab", () => {
-    expect(bySource["/settings/connectors"]).toBe("/connectors");
+  it("leaves /settings/connectors alone — the D-R11-3 promotion was owner-reversed", () => {
+    expect(bySource["/settings/connectors"]).toBeUndefined();
   });
 
   it("uses temporary redirects only — 308s outlive an IA still in motion", () => {
