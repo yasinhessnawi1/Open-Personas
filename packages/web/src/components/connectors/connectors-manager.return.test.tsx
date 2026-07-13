@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import en from "@/i18n/messages/en.json";
@@ -67,10 +67,14 @@ describe("ConnectorsManager — OAuth return (adversarial)", () => {
     const replaceSpy = vi.spyOn(window.history, "replaceState");
     renderWithIntl();
 
-    // No card shows a connected state — the surface reflects the (empty) list, not the param.
-    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
-    const discordCard = document.querySelector('[data-platform="discord"]');
-    expect(discordCard).toHaveAttribute("data-connected", "false");
+    // No card shows a connected state — the surface reflects the (empty) list, not
+    // the param. (Queried via data-connected: the R11-B4 filter chips include an
+    // always-present "Connected" label, so a text query would false-positive.)
+    for (const card of document.querySelectorAll(
+      '[data-slot="connector-card"]',
+    )) {
+      expect(card).toHaveAttribute("data-connected", "false");
+    }
 
     // The toast keys off the refreshed list: no binding → "unconfirmed", never success.
     await waitFor(() => expect(toastSpies.warning).toHaveBeenCalledTimes(1));

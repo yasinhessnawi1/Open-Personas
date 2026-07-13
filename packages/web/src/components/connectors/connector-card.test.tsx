@@ -48,7 +48,12 @@ describe("ConnectorCard", () => {
         onConnect={onConnect}
       />,
     );
-    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    // R11-B4 (kit register): a ready platform shows its blurb + connect
+    // mechanism — the presence of Connect IS the not-connected state.
+    expect(
+      screen.getByText("Talk to your personas from Telegram."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Open the app link")).toBeInTheDocument();
     const connect = screen.getByRole("button", { name: "Connect" });
     fireEvent.click(connect);
     expect(onConnect).toHaveBeenCalledWith(meta("telegram"));

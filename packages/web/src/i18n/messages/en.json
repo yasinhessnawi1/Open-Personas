@@ -1281,8 +1281,8 @@
     }
   },
   "connectors": {
-    "title": "Connected platforms",
-    "subtitle": "Reach your personas on the platforms you already use.",
+    "title": "Reach your personas anywhere.",
+    "subtitle": "Connect the apps you already live in. A message to any of them reaches the same persona — same memory, same voice.",
     "intro": "Connect a platform and your personas become reachable there — message one by name to talk to it, and it can reach you back.",
     "notConnectedHint": "Not connected yet.",
     "linkedOn": "Linked {date}",
@@ -1294,7 +1294,8 @@
     "state": {
       "connected": "Connected",
       "notConnected": "Not connected",
-      "checking": "Checking…"
+      "checking": "Checking…",
+      "comingSoon": "Coming soon"
     },
     "identity": {
       "id": "ID {id}"
@@ -1357,6 +1358,30 @@
       "description": "{platform} ({identity}) will be unlinked — your personas will no longer be reachable there, and messages from that account will stop reaching them. You can reconnect anytime.",
       "done": "Disconnected {platform}.",
       "failed": "Couldn't disconnect {platform}. Please try again."
+    },
+    "searchPlaceholder": "Search connectors…",
+    "noMatches": "No connectors match.",
+    "filter": {
+      "label": "Filter connectors",
+      "all": "All",
+      "connected": "Connected"
+    },
+    "category": {
+      "messaging": "Messaging",
+      "email": "Email"
+    },
+    "mechanism": {
+      "deep_link": "Open the app link",
+      "code": "Send a code",
+      "oauth": "Sign in to authorize"
+    },
+    "desc": {
+      "telegram": "Talk to your personas from Telegram.",
+      "whatsapp": "Talk to your personas on WhatsApp.",
+      "sms": "Text a persona from your phone.",
+      "discord": "Bring a persona into your Discord.",
+      "slack": "Add a persona to your Slack workspace.",
+      "email": "Email a persona; it replies in thread."
     }
   },
   "mic": {

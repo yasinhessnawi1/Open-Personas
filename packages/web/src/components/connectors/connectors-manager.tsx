@@ -1,11 +1,13 @@
 "use client";
 
+import { Search } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useMemo, useState } from "react";
 import { Stack } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import {
   CONNECTOR_CATALOGUE,
+  type ConnectorCategory,
   type ConnectorMeta,
 } from "@/lib/connectors/catalogue";
 import { useConnectorReturn } from "@/lib/connectors/use-connector-return";
@@ -14,17 +16,23 @@ import {
   useConnectors,
 } from "@/lib/connectors/use-connectors";
 import { useDisconnect } from "@/lib/connectors/use-disconnect";
+import { cn } from "@/lib/utils";
 import { ConnectFlow } from "./connect-flow";
 import { ConnectorCard } from "./connector-card";
 
+type Filter = "all" | "connected" | ConnectorCategory;
+
+const CATEGORY_ORDER: readonly ConnectorCategory[] = ["messaging", "email"];
+
 /**
- * Spec C6 (T4) — the connectors surface: the six platforms with live connected /
- * not-connected state + the connected identity, merged from `GET /v1/me/connectors`.
+ * Spec C6 (T4) → R11-B4 — the connectors surface in the kit register
+ * (`connectors.html`): search + filter chips over the registry, category
+ * sections (Fraunces head + honest count), brand-tiled cards. Registry-driven:
+ * a new platform is one catalogue entry; grouping, search and the flows follow.
  *
- * T4 is the read surface + states; the connect flow (T5) and disconnect (T9) attach their
- * `onConnect` / `onDisconnect` handlers to the cards in those tasks. The list this renders
- * is also the flows' completion oracle (C6-D-1): `refresh()` re-syncs after a connect/
- * disconnect so state is the source of truth, never an optimistic chip.
+ * The list stays the flows' completion oracle (C6-D-1): `refresh()` re-syncs
+ * after a connect/disconnect — state is the source of truth, never an
+ * optimistic chip.
  */
 export function ConnectorsManager() {
   const t = useTranslations("connectors");
@@ -36,6 +44,8 @@ export function ConnectorsManager() {
   // The platform whose ConnectFlow is open (T5). Mounted per-open so the machine resets each
   // time; `null` closes it.
   const [connecting, setConnecting] = useState<ConnectorMeta | null>(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
 
   // First active binding per platform (the list is newest-first). v1 shows one connection
   // per platform even though the data model permits several.
@@ -61,8 +71,35 @@ export function ConnectorsManager() {
     return `${names.slice(0, -1).join(", ")}, ${t("firstConnection.or")} ${names[names.length - 1]}`;
   }, [t]);
 
+  const connectedCount = byPlatform.size;
+
+  // Search matches name + description; chips narrow to connected / a category.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return CONNECTOR_CATALOGUE.filter((m) => {
+      if (filter === "connected" && !byPlatform.has(m.key)) return false;
+      if (
+        (filter === "messaging" || filter === "email") &&
+        m.category !== filter
+      )
+        return false;
+      if (!q) return true;
+      return (
+        t(`platform.${m.key}`).toLowerCase().includes(q) ||
+        t(`desc.${m.key}`).toLowerCase().includes(q)
+      );
+    });
+  }, [query, filter, byPlatform, t]);
+
+  const chips: { key: Filter; label: string; count?: number }[] = [
+    { key: "all", label: t("filter.all"), count: CONNECTOR_CATALOGUE.length },
+    { key: "connected", label: t("filter.connected"), count: connectedCount },
+    { key: "messaging", label: t("category.messaging") },
+    { key: "email", label: t("category.email") },
+  ];
+
   return (
-    <Stack gap={4} data-slot="connectors-manager">
+    <Stack gap={5} data-slot="connectors-manager">
       {error ? (
         <div
           role="alert"
@@ -88,18 +125,89 @@ export function ConnectorsManager() {
         </div>
       ) : null}
 
-      <Stack gap={3}>
-        {CONNECTOR_CATALOGUE.map((meta) => (
-          <ConnectorCard
-            key={meta.key}
-            meta={meta}
-            connection={byPlatform.get(meta.key) ?? null}
-            loading={initialLoading}
-            onConnect={setConnecting}
-            onDisconnect={(connection) => void disconnect(meta, connection)}
+      {/* kit toolbar: search + filter chips over the registry */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-56 flex-1">
+          <Search
+            className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+            aria-hidden="true"
           />
-        ))}
-      </Stack>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("searchPlaceholder")}
+            aria-label={t("searchPlaceholder")}
+            className="h-10 w-full rounded-full border border-border bg-background pl-9 pr-4 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </div>
+        <fieldset
+          className="m-0 flex flex-wrap gap-1.5 border-0 p-0"
+          aria-label={t("filter.label")}
+        >
+          {chips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              aria-pressed={filter === chip.key}
+              onClick={() => setFilter(chip.key)}
+              className={cn(
+                "flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground",
+                filter === chip.key &&
+                  "border-primary/50 bg-primary/10 font-medium text-foreground",
+              )}
+            >
+              {chip.label}
+              {chip.count !== undefined ? (
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {chip.count}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </fieldset>
+      </div>
+
+      {visible.length === 0 ? (
+        <p className="type-body py-6 text-center text-muted-foreground">
+          {t("noMatches")}
+        </p>
+      ) : (
+        CATEGORY_ORDER.map((category) => {
+          const items = visible.filter((m) => m.category === category);
+          if (items.length === 0) return null;
+          return (
+            <section key={category} className="flex flex-col gap-3">
+              <div className="flex items-baseline gap-2.5">
+                <h3 className="font-heading text-lg font-medium tracking-tight">
+                  {t(`category.${category}`)}
+                </h3>
+                <span className="rounded-full border border-border/60 bg-muted px-1.5 py-px text-[11px] tabular-nums text-muted-foreground">
+                  {items.length}
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="h-px flex-1 self-center bg-border/60"
+                />
+              </div>
+              <div className="grid gap-3 lg:grid-cols-2">
+                {items.map((meta) => (
+                  <ConnectorCard
+                    key={meta.key}
+                    meta={meta}
+                    connection={byPlatform.get(meta.key) ?? null}
+                    loading={initialLoading}
+                    onConnect={setConnecting}
+                    onDisconnect={(connection) =>
+                      void disconnect(meta, connection)
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })
+      )}
 
       {connecting ? (
         <ConnectFlow

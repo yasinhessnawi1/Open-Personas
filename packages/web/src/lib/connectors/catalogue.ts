@@ -31,12 +31,16 @@ export type ConnectorPlatform =
 
 export type IdentityKind = "handle" | "phone" | "email" | "id";
 export type LinkMechanism = "deep_link" | "oauth" | "code";
+/** R11-B4: the catalogue's section grouping (kit `connectors.html`). */
+export type ConnectorCategory = "messaging" | "email";
 
 export interface ConnectorMeta {
   readonly key: ConnectorPlatform;
   readonly icon: LucideIcon;
   readonly identityKind: IdentityKind;
   readonly mechanism: LinkMechanism;
+  /** The kit's category section this platform files under (R11-B4). */
+  readonly category: ConnectorCategory;
   /**
    * Whether this platform's linking backend is wired in the running connector service today
    * (the wired-capability rule, T10). Discord/Slack OAuth issue routes exist but are NOT
@@ -50,6 +54,7 @@ export interface ConnectorMeta {
 export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   {
     key: "telegram",
+    category: "messaging",
     icon: Send,
     identityKind: "id",
     mechanism: "deep_link",
@@ -57,6 +62,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   },
   {
     key: "whatsapp",
+    category: "messaging",
     icon: MessageCircle,
     identityKind: "phone",
     mechanism: "code",
@@ -64,6 +70,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   },
   {
     key: "sms",
+    category: "messaging",
     icon: MessageSquare,
     identityKind: "phone",
     mechanism: "code",
@@ -71,6 +78,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   },
   {
     key: "discord",
+    category: "messaging",
     icon: MessagesSquare,
     identityKind: "id",
     mechanism: "oauth",
@@ -78,6 +86,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   },
   {
     key: "slack",
+    category: "messaging",
     icon: Hash,
     identityKind: "id",
     mechanism: "oauth",
@@ -85,6 +94,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
   },
   {
     key: "email",
+    category: "email",
     icon: Mail,
     identityKind: "email",
     mechanism: "code",
