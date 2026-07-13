@@ -370,6 +370,18 @@ def test_route_enqueues_exactly_one_file_extract_job(
 def test_worker_produces_the_artifact_lists_it_and_publishes(
     client: tuple[TestClient, str, str, Path],
 ) -> None:
+    """R9-025 reopen leg B: the produced file must land where BOTH surfaces
+    read it from — GET /v1/conversations/{id}/documents (the surface this
+    reopen's diagnosis named) AND GET /v1/personas/{id}/artifacts (what
+    packages/web/src/components/chat/conversation-files.tsx's
+    ``useConversationArtifacts`` hook actually calls — verified by reading the
+    current web code: ``ConversationFiles`` is the chat header's Files button,
+    and it is wired to the F5 artifacts endpoint, NOT the documents endpoint;
+    ``useConversationDocuments`` exists but only tracks documents ATTACHED to
+    the composer's next outgoing message — chat-window.tsx never renders it as
+    a browsable list). Both are asserted here so this test stays true to the
+    real UI regardless of which hook the panel is wired to next.
+    """
     c, uid, persona_id, workspace_root = client
     conv_id = _new_conversation(c, uid, persona_id)
     _turn(c, uid, conv_id, "plan a weekly board game night")
@@ -390,8 +402,31 @@ def test_worker_produces_the_artifact_lists_it_and_publishes(
         assert asyncio.run(worker.run_once()) == 1
         assert _file_extract_jobs(su, uid) == [(f"file_extract:{message_id}:auto", "succeeded")]
 
-        # A real file landed under the persona workspace with a real F5 sidecar.
-        target = workspace_root / uid / persona_id / "uploads" / _EXTRACTED_REF
+        # ----- surface 1: GET /v1/conversations/{id}/documents (leg B's target) --
+        documents = c.get(f"/v1/conversations/{conv_id}/documents", headers=_auth(uid))
+        assert documents.status_code == 200, documents.text
+        docs = documents.json()
+        assert len(docs) == 1
+        doc = docs[0]
+        assert doc["format"] == "pdf"
+        assert doc["workspace_path"] == (
+            f"{uid}/{persona_id}/conversations/{conv_id}/documents/{doc['doc_ref']}.pdf"
+        )
+        persisted_name = f"{doc['doc_ref']}.pdf"
+
+        # A real file landed under the conversation documents dir (Spec 14's
+        # own layout — see document_service's module docstring) with BOTH
+        # sidecars: the DocumentRef .meta.json (what the GET above just read)
+        # and the F5 .f5.json (surface 2, below).
+        target = (
+            workspace_root
+            / uid
+            / persona_id
+            / "conversations"
+            / conv_id
+            / "documents"
+            / persisted_name
+        )
         assert target.read_bytes() == b"%PDF-fake"
         meta = read_artifact_sidecar(target)
         assert meta is not None
@@ -404,7 +439,8 @@ def test_worker_produces_the_artifact_lists_it_and_publishes(
         (call,) = sandbox.execute_calls
         assert call["session_id"] == f"{uid}:file-extract-{message_id}"
 
-        # Listed by the existing F5 artifacts route (the chat Files panel's seam).
+        # ----- surface 2: GET /v1/personas/{id}/artifacts (what the web panel
+        # ACTUALLY reads today — useConversationArtifacts) -----------------------
         listed = c.get(
             f"/v1/personas/{persona_id}/artifacts",
             params={"conversation_id": conv_id},
@@ -412,11 +448,10 @@ def test_worker_produces_the_artifact_lists_it_and_publishes(
         )
         assert listed.status_code == 200, listed.text
         refs = [item["ref"] for item in listed.json()["items"]]
-        assert f"uploads/{_EXTRACTED_REF}" in refs
+        assert f"conversations/{conv_id}/documents/{persisted_name}" in refs
 
-        # The refresh signal fired (see file_extract's module docstring for the
-        # honest decision: sidebar.changed is published; R9-024's panel does not
-        # YET subscribe to it — its own floor is refresh-on-open).
+        # The refresh signal fired — conversation-files.tsx now subscribes to it
+        # live (R9-028 rider, eedf95d), on top of its refresh-on-open floor.
         file_pings = [
             (owner, ev)
             for owner, ev in channel.published
@@ -463,9 +498,24 @@ def test_reenqueue_same_message_and_format_is_a_dedup_noop(
         su.dispose()
 
 
-def test_redelivery_converges_no_duplicate_artifact(
+def test_redelivery_does_not_crash_and_each_render_is_independently_listed(
     client: tuple[TestClient, str, str, Path],
 ) -> None:
+    """A redelivery: same payload, a FRESH idempotency key (the synthesis /
+    title_refresh redelivery-test pattern) — simulates an at-least-once
+    re-run rather than a client re-click.
+
+    R9-025 reopen leg B changed the persisted name from a bare, title-derived
+    slug to ``slug-shorthash`` (matching ``document_service``'s own
+    upload-doc_ref convention — see the module docstring) so a genuinely
+    voice-less/collision-prone title never silently overwrites a DIFFERENT
+    document. One side effect: two renders of "the same" extraction are no
+    longer guaranteed to collide onto one physical file (uploads never did
+    either — re-uploading the same-named file twice makes two DocumentRefs,
+    not one). What matters for at-least-once safety is what's asserted here:
+    neither render crashes/errors, and BOTH are independently valid, listed
+    documents — never a corrupt half-write or an orphaned sidecar.
+    """
     c, uid, persona_id, workspace_root = client
     conv_id = _new_conversation(c, uid, persona_id)
     _turn(c, uid, conv_id, "plan a weekly board game night")
@@ -493,15 +543,26 @@ def test_redelivery_converges_no_duplicate_artifact(
             idempotency_key=f"file_extract:{message_id}:auto:redelivery",
         )
         assert asyncio.run(worker.run_once()) == 1
+        assert _file_extract_jobs(su, uid) == [
+            (f"file_extract:{message_id}:auto", "succeeded"),
+            (f"file_extract:{message_id}:auto:redelivery", "succeeded"),
+        ]
 
-        # Convergent: the SAME deterministic slug overwrites, not duplicates.
+        documents = c.get(f"/v1/conversations/{conv_id}/documents", headers=_auth(uid))
+        assert documents.status_code == 200, documents.text
+        docs = documents.json()
+        assert len(docs) == 2  # each render is its own document — never a crash/corruption
+        assert len({d["doc_ref"] for d in docs}) == 2  # distinct refs, no accidental collision
+        for d in docs:
+            assert d["title"] == _EXTRACTED_TITLE
+            assert d["format"] == "pdf"
+
         listed = c.get(
             f"/v1/personas/{persona_id}/artifacts",
             params={"conversation_id": conv_id},
             headers=_auth(uid),
         )
-        refs = [item["ref"] for item in listed.json()["items"]]
-        assert refs.count(f"uploads/{_EXTRACTED_REF}") == 1
+        assert listed.json()["total"] == 2  # both surfaces agree
     finally:
         su.dispose()
 

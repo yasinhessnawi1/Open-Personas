@@ -94,22 +94,27 @@ from __future__ import annotations
 import html
 import json
 import re
+import uuid
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from persona.documents.ingest import IngestStrategy
 from persona.errors import FileExtractionError
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.sandbox.errors import SandboxError
 from persona.sandbox.result import NetworkPolicy, ResourceLimits
+from persona.skills import count_tokens
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from persona_api.db.models import conversations, messages
 from persona_api.services.artifact_metadata import (
+    SPEC_14_SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
     utcnow,
     write_artifact_sidecar,
 )
+from persona_api.services.document_service import DOCUMENT_DIR_NAME, DocumentRef
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -654,10 +659,32 @@ class SandboxFileRenderer:
 
     Reuses :class:`persona_api.sandbox.pool.SandboxPool` (the app's own composed
     pool — one substrate, shared with the live chat path) with a DEDICATED,
-    isolated session per run (never the live conversation's session id), and
-    persists produced bytes with the SAME F5 sidecar convention the live
-    ``code_execution`` produced-file persister uses (Path-based, under
-    ``workspace_root`` — see the module decisions above).
+    isolated session per run (never the live conversation's session id).
+
+    **Persist target (R9-025 reopen leg B).** Produced bytes land in the SAME
+    conversation-scoped documents directory Spec 14 uploads use
+    (``conversations/{conversation_id}/documents/`` — see
+    :mod:`persona_api.services.document_service`'s workspace-layout doc),
+    carrying BOTH sidecars an uploaded document gets: a
+    :class:`~persona_api.services.document_service.DocumentRef` ``.meta.json``
+    (the shape ``GET /v1/conversations/{id}/documents`` reads) and the F5
+    ``.f5.json`` (the shape ``GET /v1/personas/{id}/artifacts`` reads — the
+    surface the chat Files viewer actually renders,
+    ``useConversationArtifacts``/``conversation-files.tsx``). Path-based I/O
+    throughout (not the ``FileStorage``/S3 seam) — mirrors the live
+    ``code_execution`` tool's own produced-file persister
+    (``runtime_tool.py``'s ``_persist_produced_file``) verbatim, the same
+    precedent this module already followed pre-reopen; ``copy_produced_file_to``
+    itself is a real-filesystem primitive that cannot address S3 objects.
+
+    The on-disk filename is ``{slug}-{shorthash}{ext}`` (a fresh
+    :func:`uuid.uuid4` suffix per render — the SAME convention
+    ``document_service._make_doc_ref`` uses for uploads), distinct from the
+    SANDBOX-internal produced filename (``{slug}{ext}``, deterministic —
+    :func:`render_sandbox_code` writes to that exact path); the two names are
+    bridged at the ``copy_produced_file_to`` step, which is exactly what
+    "copy out of the sandbox" already means (a rename-on-copy, not a NEW
+    capability).
     """
 
     def __init__(self, *, pool: SandboxPool, workspace_root: Path) -> None:
@@ -678,7 +705,14 @@ class SandboxFileRenderer:
             msg = f"file_extract: unsupported render format {format!r}"
             raise ValueError(msg)
         out_name = _slugify(content.title) or _OUT_NAME_FALLBACK
+        # The SANDBOX-internal produced filename — deterministic, matches
+        # render_sandbox_code's own `/workspace/out/{out_name}{ext}` write.
         expected_ref = f"{out_name}{_EXT_BY_FORMAT[format]}"
+        # The EXTERNAL persisted name — slug-shorthash, mirrors
+        # document_service._make_doc_ref's exact convention (uniqueness across
+        # repeat/retried extractions of the same or similarly-titled message).
+        doc_ref = f"{out_name}-{uuid.uuid4().hex[:8]}"
+        persisted_name = f"{doc_ref}{_EXT_BY_FORMAT[format]}"
         code = render_sandbox_code(content, format, out_name)
         scope_id = f"file-extract-{message_id}"
 
@@ -728,8 +762,15 @@ class SandboxFileRenderer:
                     },
                 )
 
-            persona_workspace = self._workspace_root / owner_id / persona_id
-            target = persona_workspace / "uploads" / expected_ref
+            documents_dir = (
+                self._workspace_root
+                / owner_id
+                / persona_id
+                / "conversations"
+                / conversation_id
+                / DOCUMENT_DIR_NAME
+            )
+            target = documents_dir / persisted_name
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 assert handle is not None  # noqa: S101 — set by the acquire() above, never reset
@@ -747,6 +788,37 @@ class SandboxFileRenderer:
                     },
                 ) from exc
 
+            # The DocumentRef `.meta.json` sidecar — the exact shape
+            # `document_service.list_for_conversation` (and therefore
+            # `GET /v1/conversations/{id}/documents`) reads. `strategy=RETRIEVAL`
+            # with no chunks written: honest-inert (the SAME "not yet ingested for
+            # recall" shape a RETRIEVAL doc has before its first query) rather than
+            # WHOLE_INJECT, which would auto-inject this generated file's full text
+            # into every later turn's prompt — a real behavior change nobody asked
+            # for here; wiring real ingestion is a follow-up, not this fix.
+            workspace_path = (
+                f"{owner_id}/{persona_id}/conversations/{conversation_id}"
+                f"/{DOCUMENT_DIR_NAME}/{persisted_name}"
+            )
+            doc = DocumentRef(
+                doc_ref=doc_ref,
+                filename=persisted_name,
+                title=content.title,
+                format=format,
+                workspace_path=workspace_path,
+                strategy=IngestStrategy.RETRIEVAL,
+                token_count=count_tokens(content.body_markdown),
+                size_bytes=produced.size_bytes,
+            )
+            target.with_name(target.name + SPEC_14_SIDECAR_SUFFIX).write_text(
+                doc.model_dump_json(), encoding="utf-8"
+            )
+
+            # The F5 `.f5.json` sidecar — UNCHANGED contract, new location; this is
+            # what GET /v1/personas/{id}/artifacts (the chat Files viewer's actual
+            # data source, useConversationArtifacts) reads. original_name carries
+            # the human-readable title (with extension) rather than the on-disk
+            # slug, so the panel shows "Board Game Night Plan.pdf", not the ref.
             write_artifact_sidecar(
                 target,
                 WorkspaceArtifactMetadata(
@@ -755,12 +827,12 @@ class SandboxFileRenderer:
                     producing_spec=_PRODUCING_SPEC_BY_FORMAT[format],  # type: ignore[arg-type]
                     conversation_id=conversation_id,
                     created_at=utcnow(),
-                    original_name=expected_ref,
+                    original_name=f"{content.title}{_EXT_BY_FORMAT[format]}",
                 ),
             )
 
             return RenderedFile(
-                workspace_path=f"uploads/{expected_ref}",
+                workspace_path=f"conversations/{conversation_id}/{DOCUMENT_DIR_NAME}/{persisted_name}",
                 media_type=_MEDIA_TYPE_BY_FORMAT[format],
                 size_bytes=produced.size_bytes,
                 format=format,
