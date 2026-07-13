@@ -53,7 +53,9 @@ build never pulls `@clerk/*` into the bundle (enforced by CI gates +
   toggle). The turn is a **persistent, resumable session**: it keeps running
   server-side when you navigate away or reload, and reattaches on return
   (seed-then-tail + reconcile), with a "working" indicator on the conversation
-  row + a global return-to-it bar.
+  row + a global return-to-it bar. Message actions: copy, retry, read-aloud
+  (persona-voiced TTS), and **turn-into-file** — extract a message's substance
+  into a real PDF/XLSX/Markdown file in the persona workspace.
 - **Agentic run viewer** — run timeline over SSE (catch-up + reconcile-on-drop,
   resumes the live tail on return), inline ask-user, Markdown final answer, cancel.
 - **Voice** — a browser voice client (LiveKit `livekit-client`) wired to the
@@ -67,6 +69,16 @@ build never pulls `@clerk/*` into the bundle (enforced by CI gates +
   server's occurrences engine (no client recurrence math); **New reminder**
   creates a schedule directly (humane picker → engine preview → confirm, with
   a quiet-hours warn/offer), and reschedules ride the same single edit door.
+- **Memory map** (`/memory`) — the user's shared knowledge graph as a live
+  force-directed map with typed links (semantic / entity / temporal / causal),
+  semantic search, node detail with provenance-as-story, and **correct /
+  delete** actions that re-index or remove what every persona retrieves.
+- **Activity & approvals** (`/tasks`, `/approvals`) — the autonomy surface:
+  what ran, what it produced, per-task spend caps, and parked approvals
+  resolvable from the inbox or inline in chat.
+- **Model picker** — per-persona preferred model from a live catalog with USD
+  price tags and a curated shortlist, "use tier default" as the safety net,
+  and a sticky last-choice default on create.
 - **Settings** — credit balance + per-turn usage, theme, tier-badge
   visibility, language toggle, conversations list.
 - **Connectors** (`/settings/connectors`) — link messaging platforms (Telegram,

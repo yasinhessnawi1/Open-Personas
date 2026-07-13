@@ -57,6 +57,14 @@ the CLI for local use, the tests in CI. The loop itself is stateless per request
   compare-and-set append), distils episodic memory at **milestone** granularity (no
   per-leg spam), and uses the token-bounded `CompactingCheckpointWriter` so a many-leg
   task never overflows the checkpoint budget.
+- **Safety, in the loop itself** — **character adherence** (a never-break rule
+  with researched carve-outs: the persona never claims to be human when
+  sincerely asked, and never roleplays through a wellbeing signal) and the
+  **turn-time crisis gate**, which takes the persona out of the loop entirely
+  on an acute, explicit signal — backed by a trained encoder for euphemistic
+  and non-English phrasing, with documented limits (explicit-acute is the
+  reliability claim; subtle phrasing is a named residual, not a solved
+  problem).
 - **`TurnLog`** + `JSONLTurnLogWriter` / `MemoryTurnLogWriter` — per-turn telemetry
   (model, tokens, cost, routing decision, latency, fallback), durable to JSONL or
   held in memory for tests.

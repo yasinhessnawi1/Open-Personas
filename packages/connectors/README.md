@@ -1,35 +1,56 @@
 # persona-connectors
 
-The **connector framework** (Spec C1) — the trunk that makes a persona reachable
-on messaging platforms (Telegram, Discord, Slack, WhatsApp, SMS, email). All
-per-platform adapters (C2–C5) plug into it.
+> The messaging trunk for Open Persona — DM your persona by name on Telegram, Discord, or Slack, with WhatsApp, SMS, and email adapters staged.
 
-**Product model:** *my persona, reachable by me* — an authenticated extension of
-the user's own account onto a platform, not a public bot. Ownership/RLS are
-unchanged from the web (Spec 08).
+**License:** [PolyForm Noncommercial 1.0.0](LICENSE) — the application layer, not the MIT engine.
 
-The framework owns everything shared across platforms:
+`persona-connectors` makes a persona reachable on the chat apps you already use.
+The **product model** is *my persona, reachable by me*: an authenticated
+extension of your own account onto a platform — never a public bot. Ownership
+isolation is identical to the web app's.
+
+## What the framework owns
+
+Everything shared across platforms lives in the framework, so each adapter is
+only its platform's glue:
 
 - the inbound → route → respond → outbound flow;
-- the `Connector` protocol + normalisation contracts (designed to fit all six
-  platforms — the email/SMS floor, with real-time/threads/formatting as optional
-  capabilities);
-- the **per-persona parallel-conversation model** (each persona has ≤1 active
-  conversation per user per channel; switching personas *suspends* — never ends —
-  the previous one; only `/new` and the idle-timeout end a conversation);
-- persona-selection / name-parsing;
-- account-linking and identity-mapping (the security spine);
-- the outbound path consuming C0 (identity-tagged delivery).
+- the `Connector` protocol + normalisation contracts (an email/SMS floor, with
+  real-time / threads / rich formatting as optional capabilities);
+- the **per-persona parallel-conversation model** — each persona holds at most
+  one active conversation per user per channel; switching personas *suspends*
+  (never ends) the previous one; only `/new` or the idle timeout end a
+  conversation;
+- persona selection by name;
+- account linking and identity mapping (the security spine);
+- identity-tagged outbound delivery.
+
+## Adapters
+
+| Platform | Status |
+| --- | --- |
+| Telegram | Shipped (link via deep link from the web app) |
+| Discord | Shipped (OAuth link) |
+| Slack | Shipped (OAuth link) |
+| WhatsApp | Staged — in the tree behind provider credentials |
+| SMS (Twilio) | Staged — in the tree behind provider credentials |
+| Email (Postmark) | Staged — in the tree behind provider credentials |
+
+Turn platforms on from the web app under **Settings → Connectors** — each shows
+what it is and what it can do before you connect it.
 
 ## Architecture
 
-`persona-connectors` is a separate long-lived process (the 3rd, after
-`persona-api` and `persona-voice`). Per **C1-D-1** it reuses `persona-api`'s
-reply-producing chat flow + C0's delivery router **in-process**, following the
-`run_worker.py` pattern (a separate process that imports api services and sets
-the `current_user_id` RLS contextvar). License: **PolyForm-Noncommercial-1.0.0**
-(the application layer), not the MIT engine license.
+`persona-connectors` runs as a separate long-lived process (the third, after
+`persona-api` and `persona-voice`). It reuses the API's reply-producing chat
+flow and the identity-tagged delivery router **in-process**, with the same
+per-user isolation contextvar the worker uses.
 
-The **owned surface** (`persona_connectors.domain`) is import-decoupled from
-`persona_api`; the api-coupling lives only in `persona_connectors.composition`,
-so a future extract-to-core is a dependency swap, not a reshape.
+The owned surface (`persona_connectors.domain`) is import-decoupled from
+`persona_api`; the api coupling lives only in `persona_connectors.composition`,
+so a future extraction is a dependency swap, not a reshape.
+
+---
+
+Part of [Open Persona](../../README.md) — see the root README for the full
+product tour and quick start.
