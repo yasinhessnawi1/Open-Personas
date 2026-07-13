@@ -1727,10 +1727,12 @@
 
 @layer components {
   /* ============================ SPEC A8 — SCHEDULE / CALENDAR ============================
-     The calendar surface's missing style layer (caught by the A8 render-evidence leg):
-     agenda cards, the 7-column week/month grids (scoped — the bare .v-grid utility stays
-     a plain grid), the reschedule dialog (scrim via 100vmax shadow), and the quiet-hours
-     preview strip. Tokens only (D-35-8). */
+     R11-B3: the persona-web v3 register (ui_kits 3 schedule.html) over the same engine —
+     mono kicker + Fraunces title, identity-railed agenda rows (whole row = the reschedule
+     door), mono day headings, separated week/month cells with a dow header + today ring,
+     tinted occ-chips, amber truncation, and the create/reschedule dialogs as real panels
+     (the create dialog previously had NO styles at all). Tokens only (D-35-8);
+     --attention / --good are the R11 semantic state colours from globals. */
   .v-schedule {
     display: flex;
     flex-direction: column;
@@ -1742,45 +1744,67 @@
   }
   .v-schedule-head {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 12px;
     flex-wrap: wrap;
   }
+  .v-schedule-kicker {
+    font-family: var(--font-geist-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--primary);
+    margin: 0 0 2px;
+  }
   .v-schedule-head h1 {
-    font-size: 1.35rem;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: clamp(1.6rem, 3vw, 2.1rem);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
     margin: 0;
   }
   .v-schedule-tz {
+    font-family: var(--font-geist-mono);
+    font-size: 0.7rem;
     color: color-mix(in oklch, var(--foreground) 55%, transparent);
-    font-size: 0.8rem;
-    margin-inline-end: auto;
+    margin-inline-start: auto;
+  }
+  .v-schedule-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
   }
   .v-schedule-views {
     display: inline-flex;
-    gap: 4px;
-    padding: 3px;
     border: 1px solid var(--v-hairline);
-    border-radius: 10px;
+    border-radius: 9px;
+    overflow: hidden;
+    margin-inline-start: auto;
   }
   .v-schedule-views button {
     border: 0;
     background: transparent;
-    border-radius: 7px;
-    padding: 4px 12px;
+    padding: 6px 14px;
     font-size: 0.85rem;
     cursor: pointer;
-    color: inherit;
+    color: color-mix(in oklch, var(--foreground) 60%, transparent);
   }
   .v-schedule-views button[aria-pressed="true"] {
-    background: var(--primary);
-    color: var(--primary-foreground);
+    background: var(--secondary);
+    color: var(--foreground);
+    font-weight: 500;
   }
   .v-schedule-truncation {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 0.82rem;
-    padding: 7px 12px;
-    border: 1px solid color-mix(in oklch, var(--primary) 35%, transparent);
-    background: color-mix(in oklch, var(--primary) 8%, transparent);
+    padding: 8px 12px;
+    color: var(--attention);
+    border: 1px solid color-mix(in oklch, var(--attention) 30%, transparent);
+    background: color-mix(in oklch, var(--attention) 8%, transparent);
     border-radius: 9px;
   }
   .v-schedule-loading,
@@ -1793,81 +1817,147 @@
   .v-agenda-day {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin-block-end: 10px;
+    gap: 9px;
+    margin-block-start: 12px;
   }
   .v-agenda-heading {
-    font-size: 0.78rem;
+    font-family: var(--font-geist-mono);
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: color-mix(in oklch, var(--foreground) 55%, transparent);
     border-block-end: 1px solid var(--v-hairline);
-    padding-block-end: 4px;
+    padding-block-end: 7px;
     margin: 0;
     display: flex;
     align-items: center;
     gap: 8px;
+    font-weight: 500;
   }
+  /* The whole row is the reschedule door (kit .occ): identity rail + mono time
+     + terms + who-line + chevron; hover lifts it. */
   .v-occurrence-card {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 14px;
-    padding: 12px 14px;
-    border-radius: 12px;
+    width: 100%;
+    text-align: start;
+    padding: 13px 15px;
+    border: 0;
+    border-radius: 11px;
     background: var(--card, var(--background));
     box-shadow: 0 0 0 1px var(--v-card-ring);
-    border-inline-start: 3px solid var(--v-id);
+    border-inline-start: 2px solid var(--v-id);
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+    transition: background 0.12s;
   }
-  .v-occurrence-card > :first-child {
+  .v-occurrence-card:hover {
+    background: color-mix(
+      in oklch,
+      var(--muted) 45%,
+      var(--card, var(--background))
+    );
+  }
+  .v-occurrence-time {
+    font-family: var(--font-geist-mono);
+    font-size: 0.82rem;
     font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    min-width: 3.2em;
+    width: 4em;
+    flex-shrink: 0;
   }
-  .v-occurrence-card > :last-child {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+  .v-occurrence-body {
+    flex: 1;
     min-width: 0;
-  }
-  .v-occurrence-terms {
-    margin: 0;
-    font-size: 0.85rem;
-    color: color-mix(in oklch, var(--foreground) 70%, transparent);
-    overflow-wrap: anywhere;
-  }
-  .v-day-status {
-    font-size: 0.72rem;
-    border-radius: 999px;
-    padding: 1px 8px;
-    border: 1px solid var(--v-hairline);
-    color: color-mix(in oklch, var(--foreground) 65%, transparent);
-  }
-  .v-day-status--missed {
-    border-color: color-mix(in oklch, var(--destructive) 55%, transparent);
-    color: var(--destructive);
-  }
-  .v-day-status--ran_late {
-    border-color: color-mix(in oklch, var(--primary) 45%, transparent);
-  }
-  /* Week/month: a real 7-column calendar grid — scoped so the shared .v-grid
-     utility keeps its plain display:grid contract. */
-  .v-schedule .v-grid {
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-    gap: 1px;
-    background: var(--v-hairline);
-    border: 1px solid var(--v-hairline);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  .v-grid-cell {
-    background: var(--background);
-    min-height: 96px;
-    padding: 6px;
     display: flex;
     flex-direction: column;
     gap: 3px;
+  }
+  .v-occurrence-terms {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .v-occurrence-who {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+  }
+  .v-iddot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--v-id);
+    flex-shrink: 0;
+  }
+  .v-occurrence-chev {
+    color: color-mix(in oklch, var(--foreground) 45%, transparent);
+    flex-shrink: 0;
+  }
+  /* Fire-status markers — mono, uppercase, state-coloured (kit .status). */
+  .v-day-status {
+    font-family: var(--font-geist-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    padding: 1px 7px;
+    border: 1px solid color-mix(in oklch, var(--good) 40%, transparent);
+    color: var(--good);
+  }
+  .v-day-status--missed {
+    border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+    color: var(--destructive);
+  }
+  .v-day-status--ran_late {
+    border-color: color-mix(in oklch, var(--attention) 45%, transparent);
+    color: var(--attention);
+  }
+  /* Week/month: separated cells (kit), a mono dow header, today ring. Scoped so
+     the shared .v-grid utility keeps its plain display:grid contract. */
+  .v-dowhead {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .v-dowhead span {
+    font-family: var(--font-geist-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: color-mix(in oklch, var(--foreground) 50%, transparent);
+    text-align: center;
+    padding: 4px 0;
+  }
+  .v-schedule .v-grid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .v-grid-cell {
+    background: var(--card, var(--background));
+    border: 1px solid var(--v-hairline);
+    border-radius: 8px;
+    min-height: 104px;
+    padding: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
     min-width: 0;
+  }
+  .v-grid--week .v-grid-cell {
+    min-height: 300px;
+  }
+  .v-grid-cell--muted {
+    opacity: 0.4;
+  }
+  .v-grid-cell--today {
+    border-color: color-mix(in oklch, var(--primary) 50%, transparent);
+    box-shadow: inset 0 0 0 1px
+      color-mix(in oklch, var(--primary) 30%, transparent);
   }
   .v-grid-daynum {
     font-size: 0.75rem;
@@ -1877,71 +1967,189 @@
     align-items: center;
     gap: 4px;
   }
-  .v-grid-cell--muted .v-grid-daynum {
-    opacity: 0.35;
-  }
   .v-grid-occ {
     display: block;
     width: 100%;
     text-align: start;
     border: 0;
     cursor: pointer;
-    font-size: 0.72rem;
-    line-height: 1.25;
-    padding: 2px 6px;
-    border-radius: 6px;
+    font-family: var(--font-geist-mono);
+    font-size: 0.66rem;
+    line-height: 1.3;
+    padding: 3px 6px;
+    border-radius: 5px;
     background: color-mix(in oklch, var(--v-id) 14%, transparent);
+    border-inline-start: 2px solid var(--v-id);
     color: inherit;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .v-grid-occ + .v-grid-occ {
-    margin-block-start: 2px;
+  .v-grid-occ:hover {
+    background: color-mix(in oklch, var(--v-id) 24%, transparent);
   }
-  /* The reschedule dialog: centered panel; the scrim is the 100vmax spread
-     shadow (no backdrop element exists on a plain div[role=dialog]). */
-  .v-reschedule-dialog {
+  .v-grid-more {
+    font-family: var(--font-geist-mono);
+    font-size: 0.62rem;
+    color: color-mix(in oklch, var(--foreground) 50%, transparent);
+  }
+  /* Dialog panels (create + reschedule share the register): centered card; the
+     scrim is the 100vmax spread shadow (no backdrop element on a plain
+     div[role=dialog]). */
+  .v-reschedule-dialog,
+  .v-create-reminder {
     position: fixed;
     inset-block-start: 50%;
     inset-inline-start: 50%;
     translate: -50% -50%;
     z-index: 60;
-    width: min(460px, calc(100vw - 32px));
+    width: min(480px, calc(100vw - 32px));
+    max-height: min(88vh, 720px);
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 18px;
-    border-radius: 14px;
-    background: var(--background);
+    padding: 22px;
+    border-radius: 16px;
+    background: var(--card, var(--background));
     box-shadow:
       0 0 0 1px var(--v-card-ring),
       0 18px 48px color-mix(in oklch, var(--foreground) 18%, transparent),
       0 0 0 100vmax color-mix(in oklch, var(--foreground) 25%, transparent);
   }
-  .v-reschedule-preview {
+  .v-dialog-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.25rem;
+    margin: 0;
+  }
+  .v-dialog-sub {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.82rem;
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    margin: -6px 0 0;
+  }
+  .v-create-reminder label,
+  .v-reschedule-dialog > label {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 7px;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .v-create-reminder input[type="text"],
+  .v-create-reminder select {
+    border: 1px solid var(--v-hairline);
+    background: var(--background);
+    color: inherit;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font: inherit;
+    font-weight: 400;
+  }
+  /* Out-specificities the column-label default above — no !important needed. */
+  .v-create-reminder label.v-create-notify {
+    flex-direction: row;
+    align-items: center;
+    font-weight: 400;
+    cursor: pointer;
+  }
+  .v-create-notify input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--primary);
+  }
+  /* The engine's confirm echo — primary-tinted (kit .preview). */
+  .v-reschedule-preview,
+  .v-create-preview {
     margin: 0;
     font-size: 0.85rem;
-    padding: 9px 12px;
+    line-height: 1.5;
+    padding: 11px 13px;
     border-radius: 9px;
-    border-inline-start: 3px solid var(--v-id);
-    background: color-mix(in oklch, var(--v-id) 8%, transparent);
+    border: 1px solid color-mix(in oklch, var(--primary) 24%, transparent);
+    background: color-mix(in oklch, var(--primary) 6%, transparent);
   }
-  .v-reschedule-actions {
+  /* The quiet-hours offer — amber, actionable, never blocking (kit .quiet). */
+  .v-create-quiet {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid color-mix(in oklch, var(--attention) 32%, transparent);
+    background: color-mix(in oklch, var(--attention) 9%, transparent);
+  }
+  .v-create-error {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--destructive);
+  }
+  .v-reschedule-actions,
+  .v-create-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
   }
+  /* Recurrence builder — the kit's cadence box: mono label, chip row, round
+     day picker. */
   .v-recur-builder {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
+    border: 1px solid var(--v-hairline);
+    border-radius: 11px;
+    padding: 14px;
+    background: color-mix(in oklch, var(--muted) 30%, transparent);
+  }
+  .v-recur-label {
+    font-family: var(--font-geist-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+    margin: 0;
+  }
+  .v-recur-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    border: 0;
+    padding: 0;
+    margin: 0;
+  }
+  .v-recur-chips legend {
+    padding: 0;
+    margin-block-end: 8px;
+  }
+  .v-recur-chips button {
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--v-hairline);
+    font-size: 0.8rem;
+    color: color-mix(in oklch, var(--foreground) 60%, transparent);
+    background: var(--background);
+    cursor: pointer;
+  }
+  .v-recur-chips button[aria-pressed="true"] {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: transparent;
+    font-weight: 500;
   }
   .v-recur-builder label {
     display: flex;
     align-items: center;
     gap: 8px;
     font-size: 0.85rem;
+    flex-wrap: wrap;
   }
   .v-recur-builder select,
   .v-recur-builder input {
@@ -1962,6 +2170,29 @@
     margin: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 5px;
+  }
+  .v-recur-weekdays legend {
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 0;
+    margin-block-end: 6px;
+  }
+  .v-recur-weekdays button {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    border: 1px solid var(--v-hairline);
+    font-size: 0.75rem;
+    color: color-mix(in oklch, var(--foreground) 60%, transparent);
+    background: var(--background);
+    cursor: pointer;
+    padding: 0;
+  }
+  .v-recur-weekdays button[aria-pressed="true"] {
+    background: var(--secondary);
+    color: var(--foreground);
+    border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+    font-weight: 600;
   }
 }

@@ -9,15 +9,21 @@
  * shown honestly (bar 2) and fire-status markers render in every view (bar 6). A reschedule opens
  * the twin of the chat verb: pick a cadence → PREVIEW (the engine's next-fire + full clause +
  * quiet-hours warn) → confirm → apply through the SAME CAS door (bar 4).
+ *
+ * R11-B3 — the persona-web v3 register (ui_kits 3 schedule.html): mono kicker + Fraunces title,
+ * the WHOLE agenda row is the reschedule door (identity rail, mono time, executor who-line,
+ * chevron), a mono dow header + today ring + separated cells on the grids, week chips carry
+ * time+terms while month chips clamp to three with an honest "+N more", and the dialogs are
+ * titled panels. Same engine, same doors — only the register changed.
  */
 
+import { ChevronRight, Info } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/auth";
 import { useConfirm } from "@/components/providers/confirm-provider";
 import { useNotify } from "@/components/providers/notification-provider";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   applyReschedule,
   deleteSchedule,
@@ -29,6 +35,7 @@ import {
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import {
+  dayKey,
   type FireStatus,
   fireStatusLabel,
   groupByDay,
@@ -49,13 +56,17 @@ import { type CadenceInput, RecurrenceBuilder } from "./recurrence-builder";
 
 const DISPLAY_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const WINDOW_DAYS = 45;
+const MONTH_CELL_CAP = 3;
 type View = "agenda" | "week" | "month";
+
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
 const _cellStyle = (occ: Occurrence) =>
   occ.persona_id ? personaIdentityStyle({ id: occ.persona_id }) : undefined;
 
 export interface CalendarViewProps {
-  /** The owner's personas — the create dialog's executor picker (Spec A10, A10-D-3). */
+  /** The owner's personas — the create dialog's executor picker (Spec A10, A10-D-3)
+   * AND the agenda rows' who-line (R11-B3). */
   personas?: ReminderPersona[];
   /** The profile timezone the create flow anchors to (browser tz when unset). */
   defaultTimezone?: string | null;
@@ -109,56 +120,74 @@ export function CalendarView({
   const notice = truncationNotice(data, DISPLAY_TZ);
   const byDay = occurrencesByDay(data.occurrences, DISPLAY_TZ);
   const hist = historyByDay(data.history, DISPLAY_TZ);
+  const today = dayKey(from.toISOString(), DISPLAY_TZ);
+  const nameOf = (id: string | null) =>
+    id ? (personas.find((p) => p.id === id)?.name ?? null) : null;
 
   return (
     <section className="v-schedule">
       <header className="v-schedule-head">
-        <h1>Calendar</h1>
-        <span className="v-schedule-tz">Times shown in {DISPLAY_TZ}</span>
+        <div>
+          <p className="v-schedule-kicker">Schedule</p>
+          <h1>Calendar</h1>
+        </div>
+        <span className="v-schedule-tz">Times in {DISPLAY_TZ}</span>
+      </header>
+
+      <div className="v-schedule-toolbar">
         {/* Spec A10 (T5): the user's direct create door (A10-D-9 — preview→confirm IS
             the one explicit confirmation; the write path stays A8's ScheduleStore). */}
         <Button type="button" onClick={() => setCreating(true)}>
-          New reminder
+          New routine
         </Button>
         <div className="v-schedule-views">
           {(["agenda", "week", "month"] as const).map((v) => (
-            <Button
+            <button
               key={v}
               type="button"
-              variant={view === v ? "default" : "outline"}
               aria-pressed={view === v}
               onClick={() => setView(v)}
             >
               {v[0].toUpperCase() + v.slice(1)}
-            </Button>
+            </button>
           ))}
         </div>
-      </header>
+      </div>
 
       {/* The honest truncation banner — shown in every view, never an infinite calendar. */}
-      {notice && <output className="v-schedule-truncation">{notice}</output>}
+      {notice && (
+        <output className="v-schedule-truncation">
+          <Info className="size-4 shrink-0" aria-hidden="true" />
+          {notice}
+        </output>
+      )}
 
       {view === "agenda" && (
         <AgendaView
           data={data}
           hist={hist}
+          nameOf={nameOf}
           onEdit={setEditing}
           onCreate={() => setCreating(true)}
         />
       )}
       {view === "week" && (
         <GridView
+          variant="week"
           cells={weekDays(from)}
           byDay={byDay}
           hist={hist}
+          today={today}
           onEdit={setEditing}
         />
       )}
       {view === "month" && (
         <GridView
+          variant="month"
           cells={monthGridWeeks(from.getFullYear(), from.getMonth()).flat()}
           byDay={byDay}
           hist={hist}
+          today={today}
           onEdit={setEditing}
         />
       )}
@@ -166,6 +195,7 @@ export function CalendarView({
       {editing && (
         <RescheduleDialog
           occurrence={editing}
+          personaName={nameOf(editing.persona_id)}
           onClose={() => setEditing(null)}
           onApplied={async () => {
             setEditing(null);
@@ -207,14 +237,51 @@ function DayStatus({ statuses }: { statuses: FireStatus[] | undefined }) {
   );
 }
 
+/** One agenda row — the WHOLE row opens the reschedule twin (kit `.occ`). */
+function OccurrenceRow({
+  occ,
+  name,
+  onEdit,
+}: {
+  occ: Occurrence;
+  name: string | null;
+  onEdit: (o: Occurrence) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="v-occurrence-card"
+      style={_cellStyle(occ)}
+      onClick={() => onEdit(occ)}
+      aria-label={`Reschedule: ${occ.human_terms}`}
+    >
+      <span className="v-occurrence-time">
+        {occurrenceTime(occ, DISPLAY_TZ)}
+      </span>
+      <span className="v-occurrence-body">
+        <span className="v-occurrence-terms">{occ.human_terms}</span>
+        {name ? (
+          <span className="v-occurrence-who">
+            <span className="v-iddot" aria-hidden="true" />
+            {name}
+          </span>
+        ) : null}
+      </span>
+      <ChevronRight className="v-occurrence-chev size-4" aria-hidden="true" />
+    </button>
+  );
+}
+
 function AgendaView({
   data,
   hist,
+  nameOf,
   onEdit,
   onCreate,
 }: {
   data: OccurrencesResult;
   hist: Map<string, FireStatus[]>;
+  nameOf: (id: string | null) => string | null;
   onEdit: (o: Occurrence) => void;
   onCreate: () => void;
 }) {
@@ -224,7 +291,7 @@ function AgendaView({
       <p className="v-schedule-empty">
         Nothing scheduled in this window.{" "}
         <Button type="button" variant="outline" onClick={onCreate}>
-          Create your first reminder
+          Create your first routine
         </Button>
       </p>
     );
@@ -236,25 +303,12 @@ function AgendaView({
             {group.heading} <DayStatus statuses={hist.get(group.day)} />
           </h2>
           {group.items.map((occ) => (
-            <Card
+            <OccurrenceRow
               key={`${occ.schedule_id}-${occ.fire_at}`}
-              className="v-occurrence-card"
-              style={_cellStyle(occ)}
-            >
-              <CardHeader>
-                <CardTitle>{occurrenceTime(occ, DISPLAY_TZ)}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="v-occurrence-terms">{occ.human_terms}</p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => onEdit(occ)}
-                >
-                  Reschedule
-                </Button>
-              </CardContent>
-            </Card>
+              occ={occ}
+              name={nameOf(occ.persona_id)}
+              onEdit={onEdit}
+            />
           ))}
         </div>
       ))}
@@ -262,55 +316,78 @@ function AgendaView({
   );
 }
 
-/** The week + month grids: pure layout over the day-keyed occurrences + history. */
+/** The week + month grids: pure layout over the day-keyed occurrences + history.
+ * Week chips carry time + terms (tall cells); month chips clamp to three with an
+ * honest "+N more" (kit behaviour — never a silently-overflowing cell). */
 function GridView({
+  variant,
   cells,
   byDay,
   hist,
+  today,
   onEdit,
 }: {
+  variant: "week" | "month";
   cells: string[] | { day: string; inMonth: boolean }[];
   byDay: Map<string, Occurrence[]>;
   hist: Map<string, FireStatus[]>;
+  today: string;
   onEdit: (o: Occurrence) => void;
 }) {
   const normalized = cells.map((c) =>
     typeof c === "string" ? { day: c, inMonth: true } : c,
   );
   return (
-    <div className="v-grid">
-      {normalized.map(({ day, inMonth }) => {
-        const items = byDay.get(day) ?? [];
-        return (
-          <div
-            key={day}
-            className={`v-grid-cell${inMonth ? "" : " v-grid-cell--muted"}`}
-          >
-            <div className="v-grid-daynum">
-              {Number.parseInt(day.slice(-2), 10)}
-              <DayStatus statuses={hist.get(day)} />
+    <div>
+      <div className="v-dowhead" aria-hidden="true">
+        {DOW.map((d) => (
+          <span key={d}>{d}</span>
+        ))}
+      </div>
+      <div className={`v-grid v-grid--${variant}`}>
+        {normalized.map(({ day, inMonth }) => {
+          const items = byDay.get(day) ?? [];
+          const shown =
+            variant === "month" ? items.slice(0, MONTH_CELL_CAP) : items;
+          const more = items.length - shown.length;
+          return (
+            <div
+              key={day}
+              className={`v-grid-cell${inMonth ? "" : " v-grid-cell--muted"}${
+                day === today ? " v-grid-cell--today" : ""
+              }`}
+            >
+              <div className="v-grid-daynum">
+                {Number.parseInt(day.slice(-2), 10)}
+                <DayStatus statuses={hist.get(day)} />
+              </div>
+              {shown.map((occ) => (
+                <button
+                  key={`${occ.schedule_id}-${occ.fire_at}`}
+                  type="button"
+                  className="v-grid-occ"
+                  style={_cellStyle(occ)}
+                  onClick={() => onEdit(occ)}
+                  title={occ.human_terms}
+                >
+                  {occurrenceTime(occ, DISPLAY_TZ)}
+                  {variant === "week" ? ` ${occ.human_terms}` : null}
+                </button>
+              ))}
+              {more > 0 ? (
+                <span className="v-grid-more">+{more} more</span>
+              ) : null}
             </div>
-            {items.map((occ) => (
-              <button
-                key={`${occ.schedule_id}-${occ.fire_at}`}
-                type="button"
-                className="v-grid-occ"
-                style={_cellStyle(occ)}
-                onClick={() => onEdit(occ)}
-                title={occ.human_terms}
-              >
-                {occurrenceTime(occ, DISPLAY_TZ)}
-              </button>
-            ))}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 interface RescheduleDialogProps {
   occurrence: Occurrence;
+  personaName: string | null;
   onClose: () => void;
   onApplied: () => Promise<void>;
 }
@@ -323,6 +400,7 @@ interface RescheduleDialogProps {
  * conflict toast; any other failure surfaces a generic one. Never an uncaught rejection. */
 function RescheduleDialog({
   occurrence,
+  personaName,
   onClose,
   onApplied,
 }: RescheduleDialogProps) {
@@ -409,12 +487,25 @@ function RescheduleDialog({
   }
 
   return (
-    <div className="v-reschedule-dialog" role="dialog" aria-label="Reschedule">
+    <div
+      className="v-reschedule-dialog"
+      role="dialog"
+      aria-label="Reschedule"
+      style={_cellStyle(occurrence)}
+    >
+      <h2 className="v-dialog-title">Reschedule</h2>
+      <p className="v-dialog-sub">
+        {occurrence.persona_id ? (
+          <span className="v-iddot" aria-hidden="true" />
+        ) : null}
+        {personaName ? `${personaName} · ` : null}
+        {occurrence.human_terms}
+      </p>
       <RecurrenceBuilder timezone={tz} onChange={setCadence} />
       {/* The confirm echo — the SAME full clause chat re-echoes, from the engine preview. */}
       {preview && (
         <p className="v-reschedule-preview">
-          When: {preview.human_terms} · {preview.timezone}
+          <b>When:</b> {preview.human_terms} · {preview.timezone}
           {preview.next_fire &&
             ` — next run ${new Intl.DateTimeFormat(undefined, {
               timeZone: tz,

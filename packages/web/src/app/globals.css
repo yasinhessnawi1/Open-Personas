@@ -197,6 +197,11 @@
   --accent: oklch(0.94 0.02 66);
   --accent-foreground: oklch(0.28 0.012 55);
   --destructive: oklch(0.577 0.245 27.325);
+  /* R11 semantic state colours (the A6-R-1 exploration's palette): "loud"
+   * carries information, held DISTINCT from the terracotta accent. attention =
+   * warm amber (waiting/late), good = calm green (ran/done). */
+  --attention: oklch(0.62 0.12 66);
+  --good: oklch(0.52 0.08 150);
   --border: oklch(0.9 0.012 72);
   --input: oklch(0.9 0.012 72);
   --ring: oklch(0.585 0.196 30);
@@ -275,6 +280,9 @@
   --accent: oklch(0.3 0.014 60);
   --accent-foreground: oklch(0.94 0.008 75);
   --destructive: oklch(0.704 0.191 22.216);
+  /* R11 semantic state colours — dark-theme lifts (the exploration's values). */
+  --attention: oklch(0.78 0.12 72);
+  --good: oklch(0.74 0.1 152);
   --border: oklch(0.92 0.015 75 / 10%);
   --input: oklch(0.92 0.015 75 / 14%);
   --ring: oklch(0.66 0.19 33);

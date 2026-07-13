@@ -17,7 +17,6 @@
 
 import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { RecurrencePatternInput } from "@/lib/api/schedule-client";
 
@@ -29,6 +28,15 @@ const WEEKDAYS: readonly { token: string; label: string }[] = [
   { token: "FR", label: "Fri" },
   { token: "SA", label: "Sat" },
   { token: "SU", label: "Sun" },
+];
+
+/** The cadence chip row (kit `.chips`) — the humane vocabulary, one chip each. */
+const KINDS: readonly { kind: string; label: string }[] = [
+  { kind: "once", label: "Once" },
+  { kind: "daily", label: "Every day" },
+  { kind: "weekly", label: "Weekly" },
+  { kind: "monthly_day", label: "Monthly" },
+  { kind: "hourly", label: "Hourly" },
 ];
 
 /** The builder's output: exactly one of a recurring pattern or a one-time instant (ISO UTC). */
@@ -116,24 +124,23 @@ export function RecurrenceBuilder({
 
   return (
     <div className="v-recur-builder" data-testid="recurrence-builder">
-      <label htmlFor="recur-kind">
-        Repeats
-        <select
-          id="recur-kind"
-          value={kind}
-          onChange={(e) => {
-            const k = e.target.value as Kind;
-            setKind(k);
-            emit({ kind: k });
-          }}
-        >
-          <option value="daily">Every day</option>
-          <option value="weekly">Weekly on…</option>
-          <option value="monthly_day">Monthly on a date</option>
-          <option value="hourly">Every N hours</option>
-          <option value="once">Once, at…</option>
-        </select>
-      </label>
+      {/* R11-B3: the kit's cadence chips replace the select — same kinds, same emit. */}
+      <fieldset className="v-recur-chips">
+        <legend className="v-recur-label">Cadence</legend>
+        {KINDS.map(({ kind: k, label }) => (
+          <button
+            key={k}
+            type="button"
+            aria-pressed={kind === k}
+            onClick={() => {
+              setKind(k as Kind);
+              emit({ kind: k as Kind });
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </fieldset>
 
       {kind === "once" && (
         <label htmlFor="recur-once">
@@ -190,17 +197,18 @@ export function RecurrenceBuilder({
 
       {kind === "weekly" && (
         <fieldset className="v-recur-weekdays">
-          <legend>Weekdays</legend>
+          <legend>On</legend>
           {WEEKDAYS.map((w) => (
-            <Button
+            <button
               key={w.token}
               type="button"
-              variant={weekdays.includes(w.token) ? "default" : "outline"}
               aria-pressed={weekdays.includes(w.token)}
+              aria-label={w.label}
+              title={w.label}
               onClick={() => toggleWeekday(w.token)}
             >
-              {w.label}
-            </Button>
+              {w.label[0]}
+            </button>
           ))}
         </fieldset>
       )}

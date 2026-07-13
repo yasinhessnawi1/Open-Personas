@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Spec A10 (T5) — the "New reminder" flow: the user's direct create door on the calendar.
+ * Spec A10 (T5) — the "New routine" flow (R11-B3 naming): the user's direct create door on the calendar.
  *
  * Three inputs above A8's reused picker — subject, executor persona (explicit + required,
  * A10-D-3), cadence (recurring or once, A10-D-5) — then build → PREVIEW (the engine's full
@@ -130,13 +130,16 @@ export function CreateReminderDialog({
     <div
       className="v-create-reminder"
       role="dialog"
-      aria-label="New reminder"
+      aria-label="New routine"
       data-testid="create-reminder-dialog"
     >
-      <h2>New reminder</h2>
+      <h2 className="v-dialog-title">New routine</h2>
+      <p className="v-dialog-sub">
+        Tell a persona what to do, and when. You'll preview before it's set.
+      </p>
 
       <label htmlFor="reminder-subject">
-        What should I remind you about?
+        What should I do for you?
         <Input
           id="reminder-subject"
           value={subject}
@@ -193,7 +196,7 @@ export function CreateReminderDialog({
       {/* The confirm echo — the SAME engine-framed clause the reschedule twin shows. */}
       {preview && (
         <p className="v-create-preview" data-testid="create-preview">
-          When: {preview.human_terms} · {preview.timezone}
+          <b>When:</b> {preview.human_terms} · {preview.timezone}
           {preview.next_fire &&
             ` — next run ${new Intl.DateTimeFormat(undefined, {
               timeZone: defaultTimezone,

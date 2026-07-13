@@ -144,7 +144,9 @@ describe("CalendarView — R9-024 persona scoping", () => {
   it("delete: confirms (danger tone), calls deleteSchedule, refreshes sidebar + reloads", async () => {
     renderCalendar();
     await screen.findByText("every day at 09:00");
-    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Reschedule: every day at 09:00/ }),
+    );
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await waitFor(() => expect(h.confirm).toHaveBeenCalledTimes(1));
@@ -162,7 +164,9 @@ describe("CalendarView — R9-024 persona scoping", () => {
     h.confirm.mockResolvedValue(false);
     renderCalendar();
     await screen.findByText("every day at 09:00");
-    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Reschedule: every day at 09:00/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await waitFor(() => expect(h.confirm).toHaveBeenCalledTimes(1));
     expect(h.deleteSchedule).not.toHaveBeenCalled();
@@ -177,7 +181,9 @@ describe("CalendarView — R9-024 persona scoping", () => {
     );
     renderCalendar();
     await screen.findByText("every day at 09:00");
-    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Reschedule: every day at 09:00/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
     await waitFor(() =>
@@ -195,7 +201,9 @@ describe("CalendarView — R9-024 persona scoping", () => {
     h.deleteSchedule.mockRejectedValue(new Error("network down"));
     renderCalendar();
     await screen.findByText("every day at 09:00");
-    fireEvent.click(screen.getByRole("button", { name: "Reschedule" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Reschedule: every day at 09:00/ }),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
     await waitFor(() =>

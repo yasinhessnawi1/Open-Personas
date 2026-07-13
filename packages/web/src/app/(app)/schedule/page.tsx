@@ -4,7 +4,7 @@ import { serverApi } from "@/lib/api/server";
 
 /**
  * Spec A8 (T8) — the calendar area: time's view of the owner's personas' commitments.
- * Spec A10 (T5) — plus the user's direct create door ("New reminder").
+ * Spec A10 (T5) — plus the user's direct create door ("New routine", R11-B3 naming).
  *
  * A sibling of the Tasks/Review area (A8-D-4) — one area family, two lenses (A6 is state's view;
  * this is time's). The client `CalendarView` renders occurrences from the engine's own API

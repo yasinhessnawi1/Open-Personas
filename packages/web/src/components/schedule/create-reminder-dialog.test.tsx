@@ -55,7 +55,7 @@ function timeInput(): HTMLInputElement {
 }
 
 function fillRequired() {
-  fireEvent.change(screen.getByLabelText(/what should i remind you/i), {
+  fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
     target: { value: "stretch for five minutes" },
   });
   fireEvent.change(screen.getByLabelText(/who should run it/i), {
@@ -80,7 +80,7 @@ describe("CreateReminderDialog", () => {
   it("emits the default cadence on mount so Preview enables with an untouched picker (R4-C1-24)", () => {
     makeDialog();
     // subject + persona ONLY — do NOT touch the recurrence builder.
-    fireEvent.change(screen.getByLabelText(/what should i remind you/i), {
+    fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
       target: { value: "stretch for five minutes" },
     });
     fireEvent.change(screen.getByLabelText(/who should run it/i), {
@@ -230,9 +230,8 @@ describe("RecurrenceBuilder one-time kind (A10-D-5)", () => {
         onChange={(c) => seen.push(c)}
       />,
     );
-    fireEvent.change(screen.getByLabelText(/repeats/i), {
-      target: { value: "once" },
-    });
+    // R11-B3: the kind selector is the kit's chip row now — click, not change.
+    fireEvent.click(screen.getByRole("button", { name: "Once" }));
     fireEvent.change(
       document.querySelector("#recur-once") as HTMLInputElement,
       { target: { value: "2026-08-01T09:00" } },

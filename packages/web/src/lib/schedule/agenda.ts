@@ -46,7 +46,7 @@ export interface DayGroup {
   items: Occurrence[];
 }
 
-function dayKey(iso: string, tz: string): string {
+export function dayKey(iso: string, tz: string): string {
   // en-CA yields YYYY-MM-DD; the tz option places the instant in the display day.
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
