@@ -200,17 +200,23 @@ async def test_402_preflight_is_unchanged(seeded: Engine) -> None:
 
 
 @pytest.mark.asyncio
-async def test_insufficient_balance_post_success_is_unchanged(seeded: Engine) -> None:
-    # Balance 1, proportional amount 3: the conditional atomic decrement
-    # REJECTS (no ledger row, balance untouched — never negative), the worker
-    # catches, the turn still completes. Byte-identical R2 F-04 semantics.
+async def test_insufficient_balance_post_success_now_partially_captures(seeded: Engine) -> None:
+    """Spec M2 review (C1): the conditional atomic decrement still REJECTS the
+    full charge (balance 1, proportional amount ceil(2.5)=3), but the worker
+    no longer walks away billing nothing — it falls back to capturing
+    whatever balance remains (floored at 0), marking the ledger row with a
+    ``:shortfall`` reason suffix. This supersedes the pre-review
+    ``test_insufficient_balance_post_success_is_unchanged`` pin: THAT
+    behaviour (balance stays 1, no ledger row, forever) was the C1 bug —
+    an expensive turn whose cost outran a shrinking balance became
+    permanently unbillable while pre-flight (``balance > 0``) kept passing it.
+    """
     _set_balance(seeded, 1)
-    before = _ledger(seeded)
     await _drive_turn(
         seeded, MeteredCreditsPolicy(), _CostLoop(cost_cents=2.5, cost_basis="estimate_static")
     )
-    assert _balance(seeded) == 1
-    assert _ledger(seeded) == before  # a failed decrement records nothing
+    assert _balance(seeded) == 0  # captured everything that remained; floored at 0
+    assert _ledger(seeded)[-1] == (-1, "chat_turn:estimate_static:shortfall")
 
 
 @pytest.mark.asyncio

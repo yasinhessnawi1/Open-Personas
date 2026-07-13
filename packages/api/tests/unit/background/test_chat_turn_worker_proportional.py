@@ -16,12 +16,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.backends.types import StreamChunk
 from persona.schema.conversation import Conversation
 from persona_api.background.chat_turn_worker import ChatTurnHandle, ChatTurnRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from persona_runtime.agentic.events import RunEvent
 
@@ -94,6 +95,7 @@ def _registry(
     *,
     credits_per_turn: int = 1,
     proportional: bool = True,
+    max_turn_credits: int = 500,
 ) -> ChatTurnRegistry:
     return ChatTurnRegistry(
         sink=_RecordingSink(),  # type: ignore[arg-type]
@@ -101,7 +103,59 @@ def _registry(
         credits_policy=billing,  # type: ignore[arg-type]
         credits_per_turn=credits_per_turn,
         proportional_credits=proportional,
+        max_turn_credits=max_turn_credits,
     )
+
+
+class _ShortfallCredits:
+    """Spec M2 review (C1/I3) double: ``deduct`` always rejects (insufficient
+    balance); ``capture_up_to`` records the call and reports a scripted
+    partial capture — optionally raising ``DailySpendCapExceededError``
+    itself (I3's defense-in-depth: the nested catch inside
+    ``_capture_shortfall``)."""
+
+    def __init__(self, *, captured: int = 1, day_cap_error: bool = False) -> None:
+        self.deducts: list[tuple[int, str]] = []
+        self.captures: list[tuple[int, str]] = []
+        self._captured = captured
+        self._day_cap_error = day_cap_error
+
+    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:  # noqa: ARG002
+        from persona.errors import CreditsExhaustedError
+
+        self.deducts.append((amount, reason))
+        raise CreditsExhaustedError("exhausted", context={"amount": str(amount)})
+
+    def capture_up_to(
+        self,
+        *,
+        rls_engine: object,  # noqa: ARG002
+        user_id: str,  # noqa: ARG002
+        amount: int,
+        reason: str,
+    ) -> tuple[int, int]:
+        self.captures.append((amount, reason))
+        if self._day_cap_error:
+            from persona.errors import DailySpendCapExceededError
+
+            raise DailySpendCapExceededError("capped", context={"cap": "5"})
+        return min(self._captured, amount), 0
+
+
+@pytest.fixture
+def loguru_capture() -> Iterator[list[str]]:
+    """Loguru sink capturing every emitted message string (>= WARNING).
+
+    The project's logging surface (``persona.logging.get_logger``) wraps
+    loguru, so pytest's stdlib-only ``caplog`` does not see records — mirrors
+    the pattern in ``test_tier_registry_multimodel.py``.
+    """
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    try:
+        yield captured
+    finally:
+        _loguru_logger.remove(sink_id)
 
 
 async def _run_turn(reg: ChatTurnRegistry, loop: object) -> ChatTurnHandle:
@@ -209,3 +263,130 @@ async def test_no_policy_means_no_billing_still() -> None:
     reg = ChatTurnRegistry(sink=_RecordingSink())  # type: ignore[arg-type]
     handle = await _run_turn(reg, _CostLoop(cost_cents=5.0, cost_basis="estimate_static"))
     assert handle.task is not None  # completed cleanly with zero deducts
+
+
+# ---------------------------------------------------------------------------
+# Spec M2 review — M2: bool excluded from the recorded-cost isinstance check.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bool_cost_excluded_charges_flat_no_exception() -> None:
+    """``bool`` is an ``int`` subclass — an upstream bug that sets
+    ``last_turn_cost_cents = True`` must not reach ``Decimal(str(True))``
+    (an ``InvalidOperation`` crash); it charges the flat floor instead,
+    symmetric with ``persona.backends.openai_compat._usage_cost_usd``'s own
+    bool exclusion."""
+    billing = _RecordingCredits()
+    reg = _registry(billing)
+    await _run_turn(reg, _CostLoop(cost_cents=True, cost_basis="estimate_static"))  # type: ignore[arg-type]
+    assert billing.deducts == [(1, "chat_turn")]
+
+
+# ---------------------------------------------------------------------------
+# Spec M2 review — sanity ceiling: clamp the charged amount, never the
+# persisted verbatim cost.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sanity_ceiling_clamps_an_absurd_charge_and_warns(
+    loguru_capture: list[str],
+) -> None:
+    """An absurd computed charge (a unit-scale pricing bug shape, e.g. a
+    resolver returning $/Mtok where cents/1k-tokens was expected — a 100x+
+    blowup here) is clamped to ``max_turn_credits``; the loop's OWN recorded
+    cost (the TurnLog's eventual source) is never mutated — only the charged
+    amount is clamped — and a WARNING names both numbers plus the basis."""
+    billing = _RecordingCredits()
+    reg = _registry(billing)  # default max_turn_credits=500
+    absurd_cost_cents = 50_000.0  # ceil() alone would charge 50,000 credits
+    loop = _CostLoop(cost_cents=absurd_cost_cents, cost_basis="estimate_static")
+    await _run_turn(reg, loop)
+    assert billing.deducts == [(500, "chat_turn:estimate_static")]  # clamped to the ceiling
+    assert loop.last_turn_cost_cents == absurd_cost_cents  # verbatim — never mutated
+    warnings = [m for m in loguru_capture if "clamped to the sanity ceiling" in m]
+    assert len(warnings) == 1
+    assert "computed=50000" in warnings[0]
+    assert "ceiling=500" in warnings[0]
+    assert "basis=estimate_static" in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_sanity_ceiling_non_positive_disables_the_clamp() -> None:
+    billing = _RecordingCredits()
+    reg = _registry(billing, max_turn_credits=0)
+    await _run_turn(reg, _CostLoop(cost_cents=50_000.0, cost_basis="estimate_static"))
+    assert billing.deducts == [(50_000, "chat_turn:estimate_static")]  # unclamped
+
+
+@pytest.mark.asyncio
+async def test_sanity_ceiling_below_the_charge_is_configurable() -> None:
+    # A tighter-than-default ceiling threaded through the constructor still clamps.
+    billing = _RecordingCredits()
+    reg = _registry(billing, max_turn_credits=10)
+    await _run_turn(reg, _CostLoop(cost_cents=25.0, cost_basis="estimate_static"))
+    assert billing.deducts == [(10, "chat_turn:estimate_static")]
+
+
+@pytest.mark.asyncio
+async def test_sanity_ceiling_does_not_clamp_under_the_limit() -> None:
+    billing = _RecordingCredits()
+    reg = _registry(billing)
+    await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="estimate_static"))
+    assert billing.deducts == [(6, "chat_turn:estimate_static")]  # unclamped, well under 500
+
+
+# ---------------------------------------------------------------------------
+# Spec M2 review — C1/I3: the partial-capture fallback wiring.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_insufficient_balance_on_proportional_charge_falls_back_to_capture() -> None:
+    """A genuinely-proportional charge (basis-qualified reason) that
+    ``deduct`` rejects falls back to ``capture_up_to`` with the SAME
+    amount/reason ``deduct`` was given."""
+    billing = _ShortfallCredits(captured=1)
+    reg = _registry(billing)  # type: ignore[arg-type]
+    await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="estimate_static"))  # ceil=6
+    assert billing.deducts == [(6, "chat_turn:estimate_static")]
+    assert billing.captures == [(6, "chat_turn:estimate_static")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("proportional", "cost_cents", "basis"),
+    [
+        (False, 5.3, "actual_openrouter"),  # kill-switch OFF
+        (True, 0.0, "unpriced"),  # unpriced, even with proportional billing ON
+    ],
+)
+async def test_insufficient_balance_on_flat_floor_charge_never_captures(
+    proportional: bool, cost_cents: float, basis: str
+) -> None:
+    """Pinned: the flat-floor path — kill-switch OFF, OR an unpriced/legacy
+    turn even with proportional billing ON — classic all-or-nothing rejects.
+    It NEVER falls back to ``capture_up_to``."""
+    billing = _ShortfallCredits(captured=1)
+    reg = _registry(billing, proportional=proportional)  # type: ignore[arg-type]
+    await _run_turn(reg, _CostLoop(cost_cents=cost_cents, cost_basis=basis))
+    assert billing.deducts == [(1, "chat_turn")]
+    assert billing.captures == []  # never attempted
+
+
+@pytest.mark.asyncio
+async def test_capture_shortfall_day_cap_refusal_does_not_escape() -> None:
+    """Spec M2 review (I3, defense-in-depth): even if ``capture_up_to``'s OWN
+    day-cap booking is refused, the exception is caught here too — the turn
+    still finishes cleanly (``await handle.task`` does not raise)."""
+    billing = _ShortfallCredits(captured=1, day_cap_error=True)
+    reg = _registry(billing)  # type: ignore[arg-type]
+    handle = await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="estimate_static"))
+    assert billing.captures == [(6, "chat_turn:estimate_static")]
+    items: list[object] = []
+    while not handle.events.empty():
+        items.append(handle.events.get_nowait())
+    kinds = [None if it is None else it[0] for it in items]  # type: ignore[index]
+    assert "done" in kinds, "the completion branch must still be reached"
+    assert kinds[-1] is None  # end-of-stream sentinel

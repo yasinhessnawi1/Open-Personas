@@ -150,10 +150,13 @@ class TestBasisMapping:
 
     def test_actual_overrides_estimate(self) -> None:
         # A response-side actual is authoritative even when the chain would hit.
-        source = _RecordingSource({"anthropic/claude-sonnet-4-6": (_META, "static")})
+        # Spec M2 review M1: the actual arm is gated on provider == "openrouter"
+        # (a real ``actual_cost_usd`` only ever arrives off an OpenRouter route),
+        # so this pin uses a realistic openrouter-served turn.
+        source = _RecordingSource({"z-ai/glm-4.6": (_META, "catalog")})
         cents, basis = compute_turn_cost(
-            provider="anthropic",
-            model="claude-sonnet-4-6",
+            provider="openrouter",
+            model="z-ai/glm-4.6",
             prompt_tokens=1000,
             completion_tokens=500,
             actual_cost_usd=0.0123,
@@ -345,3 +348,76 @@ class TestLegacyTableParity:
             completion_tokens=0,
         )
         assert (cents, basis) == (0.0, "estimate_static")
+
+
+class TestM2ReviewFixes:
+    """Spec M2 review — I1 (estimate-arm float rounding) + M1 (actual-arm provider gate)."""
+
+    def test_i1_exact_integer_cent_estimate_has_no_float_noise(self) -> None:
+        """The review's own reproduction: sonnet-4-6 static rates ($3/$15 per
+        Mtok -> 0.30/1.50 cents-per-1k), prompt=500/completion=5900 sums to
+        EXACTLY 9.0 cents on paper. Raw float arithmetic instead lands on
+        9.000000000000002 (1e-15 noise); the worker's printed-value ceil
+        (``Decimal(str(cost)).to_integral_value(ROUND_CEILING)``) then rounds
+        that noise UP to 10 credits instead of 9. ``round(cents, 6)`` must
+        remove the noise before it ever reaches the worker.
+        """
+        cents, basis = compute_turn_cost(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            prompt_tokens=500,
+            completion_tokens=5900,
+        )
+        assert basis == "estimate_static"
+        # Exact equality (not pytest.approx) is the whole point of I1's fix —
+        # an approx comparison would hide the very noise being eliminated.
+        assert cents == 9.0
+        # And the worker's ceil now lands on 9 credits, not 10 (the review's
+        # brute-forced overcharge).
+        from decimal import ROUND_CEILING, Decimal
+
+        assert int(Decimal(str(cents)).to_integral_value(rounding=ROUND_CEILING)) == 9
+
+    def test_i1_rounding_does_not_mask_a_genuine_fraction(self) -> None:
+        # A real fractional cost (not noise) still ceils up — I1 rounds to 6
+        # decimals, far finer than a genuine sub-cent difference.
+        cents, _ = compute_turn_cost(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            prompt_tokens=1,
+            completion_tokens=0,
+        )
+        # 1 token at $3/Mtok = 0.0003 cents — real, not noise; round(x, 6) keeps it.
+        assert cents == pytest.approx(0.0003, abs=1e-9)
+
+    def test_m1_non_openrouter_provider_with_cost_usd_never_mints_actual_basis(self) -> None:
+        """A future non-OpenRouter backend populating ``cost_usd`` (a different
+        currency of "cost") must not be mistaken for "what we actually paid" —
+        the actual arm is gated on ``provider == "openrouter"``. Falls through
+        to the honest resolver-chain estimate instead of a false actual."""
+        source = _RecordingSource({"anthropic/claude-sonnet-4-6": (_META, "static")})
+        cents, basis = compute_turn_cost(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            prompt_tokens=1000,
+            completion_tokens=500,
+            actual_cost_usd=0.0123,  # populated, but NOT an OpenRouter response
+            source=source,
+        )
+        assert basis == "estimate_static"  # honest: never "actual_openrouter"
+        assert cents == pytest.approx(0.30 + 1.50 * 0.5)
+        assert source.calls == [("anthropic/claude-sonnet-4-6", False)]  # the chain WAS consulted
+
+    def test_m1_openrouter_provider_with_cost_usd_still_mints_actual_basis(self) -> None:
+        # Unaffected-path pin: the real OpenRouter case still short-circuits
+        # to the actual, unchanged by the M1 gate.
+        cents, basis = compute_turn_cost(
+            provider="openrouter",
+            model="z-ai/glm-4.6",
+            prompt_tokens=1000,
+            completion_tokens=500,
+            actual_cost_usd=0.0123,
+            source=_RecordingSource({"z-ai/glm-4.6": (_META, "catalog")}),
+        )
+        assert basis == "actual_openrouter"
+        assert cents == pytest.approx(1.23)

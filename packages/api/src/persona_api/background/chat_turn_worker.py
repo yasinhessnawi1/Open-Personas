@@ -38,7 +38,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.logging import get_logger
 
-from persona_api.errors import CreditsExhaustedError, TurnAlreadyActiveError
+from persona_api.errors import (
+    CreditsExhaustedError,
+    DailySpendCapExceededError,
+    TurnAlreadyActiveError,
+)
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import (
     SandboxRequestContext,
@@ -71,6 +75,17 @@ __all__ = ["ChatTurnHandle", "ChatTurnRegistry", "ChatTurnSink"]
 # Never per-token; a tool event always flushes immediately regardless.
 _CHECKPOINT_CHAR_THRESHOLD = 256
 _CHECKPOINT_INTERVAL_S = 1.0
+
+# The bare (basis-less) reason ``_turn_charge`` returns for every FLAT-floor
+# charge — kill-switch OFF, an unpriced/legacy/non-finite recorded cost, or a
+# missing cost-recording surface altogether (every early-return in
+# ``_turn_charge`` before the real proportional ceil). Spec M2 review (C1)
+# gates the partial-capture fallback on the reason carrying a basis suffix
+# (``"chat_turn:<basis>"``) instead — i.e. NOT this constant — so the C1 fix
+# targets exactly what it audited (a genuinely-priced turn outrunning the
+# balance) and never changes the flat-floor path's classic all-or-nothing
+# behaviour (pinned: kill-switch OFF never partial-captures).
+_FLAT_CHARGE_REASON = "chat_turn"
 
 
 class ChatTurnSink(Protocol):
@@ -154,6 +169,7 @@ class ChatTurnRegistry:
         credits_policy: CreditsPolicy | None = None,
         credits_per_turn: int = 1,
         proportional_credits: bool = True,
+        max_turn_credits: int = 500,
         job_queue: JobQueue | None = None,
         origination_service: OriginationService | None = None,
         task_steering_service: TaskSteeringService | None = None,
@@ -169,6 +185,11 @@ class ChatTurnRegistry:
         # recorded turn cost. False = the pre-M2 flat charge (the approved
         # rollback hatch, PERSONA_API_PROPORTIONAL_CREDITS).
         self._proportional_credits = proportional_credits
+        # Spec M2 review (reviewer defense-in-depth, adjudicated TAKE): a hard
+        # ceiling on the per-turn PROPORTIONAL charge, clamping only the
+        # charged amount (never the persisted verbatim cost). <= 0 disables
+        # it. PERSONA_API_MAX_TURN_CREDITS, default 500.
+        self._max_turn_credits = max_turn_credits
         # Spec K2 (T8d): off-critical-path synthesis enqueue at the turn boundary.
         # Relocated from the old inline ``stream_turn`` to the detached worker's
         # clean-completion path; ``None`` → no-op (D-K2-2).
@@ -432,8 +453,12 @@ class ChatTurnRegistry:
           pre-M2 flat charge, byte-identical (the rollback hatch);
         * ``unpriced`` basis / no recorded turn (legacy loops, the R1 bypass
           path) — a priceless turn is never guessed at, it costs the floor;
-        * defensively, a non-finite recorded number (money path: never let a
-          bad float overcharge).
+        * defensively, a non-finite recorded number OR a ``bool`` (spec M2
+          review, finding M2 — ``bool`` is an ``int`` subclass, so it would
+          otherwise sail through ``isinstance(cost, (int, float))`` and then
+          crash ``Decimal(str(True))`` downstream; symmetric with
+          ``persona.backends.openai_compat._usage_cost_usd``'s bool
+          exclusion. Money path: never let a bad value overcharge OR raise).
 
         The ceil is ``Decimal(str(...))``-based: it ceils the number as
         PRINTED, so a genuinely-fractional cost (``1.000001`` → 2) rounds up
@@ -441,20 +466,41 @@ class ChatTurnRegistry:
         manufacture an extra credit. The ledger reason carries the basis
         (``"chat_turn:<basis>"``) so audit rows record amount AND provenance
         (the R7 constraint); flat-floor charges keep the bare ``"chat_turn"``.
+
+        Spec M2 review (reviewer defense-in-depth, adjudicated TAKE): the
+        PROPORTIONAL amount is additionally clamped to ``max_turn_credits``
+        (``<= 0`` disables the clamp) — a resolver/unit-scale pricing bug
+        must never bill a single turn thousands of credits. The clamp
+        touches ONLY the returned charge; the TurnLog/UsageEntry record
+        (written elsewhere, from the same ``loop.last_turn_cost_cents``)
+        keeps the verbatim true cost — basis honesty is never traded away to
+        protect the wallet. A WARNING logs the computed and clamped amounts
+        plus the basis whenever the ceiling actually bites.
         """
         if not self._proportional_credits:
             return self._credits_per_turn, "chat_turn"
         cost = getattr(loop, "last_turn_cost_cents", None)
         basis = getattr(loop, "last_turn_cost_basis", None)
         if (
-            not isinstance(cost, (int, float))
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
             or not math.isfinite(cost)
             or not isinstance(basis, str)
             or basis == "unpriced"
         ):
             return self._credits_per_turn, "chat_turn"
         ceiled = int(Decimal(str(cost)).to_integral_value(rounding=ROUND_CEILING))
-        return max(self._credits_per_turn, ceiled), f"chat_turn:{basis}"
+        charge = max(self._credits_per_turn, ceiled)
+        if self._max_turn_credits > 0 and charge > self._max_turn_credits:
+            _log.warning(
+                "turn charge clamped to the sanity ceiling: computed={computed} "
+                "ceiling={ceiling} basis={basis}",
+                computed=charge,
+                ceiling=self._max_turn_credits,
+                basis=basis,
+            )
+            charge = self._max_turn_credits
+        return charge, f"chat_turn:{basis}"
 
     def _deduct(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
         """Bill one turn on clean completion (D-P1-billing-contract; D-08-6 revision).
@@ -475,25 +521,108 @@ class ChatTurnRegistry:
         exhausted balance must NOT discard the work — the floor already kept the
         balance >= 0; we log and let the turn finish (``done`` + synthesis). The
         pre-flight :func:`require_credits` gate still refuses the NEXT turn.
+
+        Spec M2 review (C1): a REJECTED proportional charge used to deduct
+        NOTHING and raise — every time, forever, once the balance sat below
+        the turn's true cost. The balance never reached 0, so pre-flight kept
+        passing turns whose real cost we could no longer bill (expensive
+        turns became permanently free) and the R7 day-cap booked nothing on
+        the refusal either (the whole transaction rolled back). On a
+        genuinely-proportional charge — ``reason`` carries a basis suffix,
+        i.e. it is NOT :data:`_FLAT_CHARGE_REASON` — this now falls back to
+        :meth:`_capture_shortfall`, which captures whatever balance remains
+        (floor 0) instead. The flat-floor path (kill-switch OFF, unpriced,
+        legacy loop, non-finite/bool defensive fallback) is UNCHANGED —
+        pinned: it always classic all-or-nothing rejects at 0, never
+        partial-captures.
+
+        Spec M2 review (I3): a post-success :class:`DailySpendCapExceededError`
+        used to escape this method entirely — the policy already wrote its
+        durable audit row before re-raising (R7-D-5), but the exception then
+        skipped the WHOLE completion branch in ``_run_turn`` (the ``done``
+        event, synthesis enqueue, title refresh, A4 origination/steering/
+        reschedule/initiative applications), and repeated on every turn for
+        the rest of that UTC day. Caught here alongside exhaustion: the
+        refusal is already audited, so we log and let the turn's side effects
+        proceed unbilled.
         """
         if self._credits_policy is None or self._engine is None:
             return
+        policy = self._credits_policy
+        engine = self._engine
         amount, reason = self._turn_charge(loop)
         try:
-            self._credits_policy.deduct(
-                rls_engine=self._engine,
+            policy.deduct(
+                rls_engine=engine,
                 user_id=handle.owner_id,
                 amount=amount,
                 reason=reason,
             )
         except CreditsExhaustedError:
+            if self._proportional_credits and reason != _FLAT_CHARGE_REASON:
+                self._capture_shortfall(policy, engine, handle, amount=amount, reason=reason)
+            else:
+                _log.warning(
+                    "post-turn billing skipped: insufficient credits to bill the completed turn "
+                    "(balance floored at 0); owner={owner} conversation={conv} amount={amount}",
+                    owner=handle.owner_id,
+                    conv=handle.conversation_id,
+                    amount=amount,
+                )
+        except DailySpendCapExceededError:
             _log.warning(
-                "post-turn billing skipped: insufficient credits to bill the completed turn "
-                "(balance floored at 0); owner={owner} conversation={conv} amount={amount}",
+                "post-turn billing skipped: daily spend cap reached (refusal already "
+                "audited); owner={owner} conversation={conv} amount={amount}",
                 owner=handle.owner_id,
                 conv=handle.conversation_id,
                 amount=amount,
             )
+
+    def _capture_shortfall(
+        self,
+        policy: CreditsPolicy,
+        engine: Engine,
+        handle: ChatTurnHandle,
+        *,
+        amount: int,
+        reason: str,
+    ) -> None:
+        """Spec M2 review (C1): capture whatever balance remains instead of nothing.
+
+        Called ONLY from :meth:`_deduct`'s proportional branch, after ``deduct``
+        rejected the full charge outright. ``capture_up_to`` may itself raise
+        :class:`DailySpendCapExceededError` (the day-cap books the CAPTURED
+        amount, the same fail-closed discipline ``deduct`` already uses) —
+        caught here per I3 so a maxed-out day-cap still lets the turn's side
+        effects land rather than crashing the completion branch.
+        """
+        try:
+            captured, _new_balance = policy.capture_up_to(
+                rls_engine=engine,
+                user_id=handle.owner_id,
+                amount=amount,
+                reason=reason,
+            )
+        except DailySpendCapExceededError:
+            _log.warning(
+                "post-turn billing skipped: daily spend cap reached while capturing a "
+                "shortfall (refusal already audited); owner={owner} conversation={conv} "
+                "amount={amount}",
+                owner=handle.owner_id,
+                conv=handle.conversation_id,
+                amount=amount,
+            )
+            return
+        _log.warning(
+            "post-turn billing partially captured: balance exhausted mid-charge — "
+            "{captured}/{amount} credits captured (floored at 0); owner={owner} "
+            "conversation={conv} reason={reason}",
+            captured=captured,
+            amount=amount,
+            owner=handle.owner_id,
+            conv=handle.conversation_id,
+            reason=reason,
+        )
 
     def _enqueue_synthesis(self, handle: ChatTurnHandle, conversation: Conversation) -> None:
         """Enqueue off-critical-path conversation synthesis at the turn boundary (K2 T8d).

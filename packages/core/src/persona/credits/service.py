@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = [
     "LOW_BALANCE_THRESHOLD",
     "book_day_spend",
+    "capture_up_to",
     "deduct",
     "ensure_balance",
     "get_balance",
@@ -332,6 +333,101 @@ def deduct(
             )
         )
     return int(new_balance)
+
+
+#: Spec M2 review (C1): the opt-in partial-capture sibling of ``deduct``'s
+#: conditional decrement. ONE atomic statement: a CTE row-locks the caller's
+#: ``credits`` row and computes ``captured = LEAST(balance, :amount)``; the
+#: outer UPDATE decrements by exactly that (never more than the row has), so
+#: the result is floored at 0 by construction — no separate ``GREATEST``/CHECK
+#: race is needed. ``RETURNING`` hands back both the new balance and the
+#: captured delta in the same round trip (the CTE's ``capped.balance``/
+#: ``capped.captured`` are evaluated against the PRE-update snapshot the
+#: ``FOR UPDATE`` lock pinned, while ``credits.balance`` in RETURNING is the
+#: POST-update value — the standard Postgres old/new-in-one-statement idiom).
+_CAPTURE_UP_TO_SQL = text(
+    "WITH capped AS ("
+    "  SELECT user_id, balance, LEAST(balance, :amount) AS captured "
+    "  FROM credits WHERE user_id = :uid FOR UPDATE"
+    ") "
+    "UPDATE credits SET balance = credits.balance - capped.captured, updated_at = now() "
+    "FROM capped WHERE credits.user_id = capped.user_id "
+    "RETURNING credits.balance AS new_balance, capped.captured AS captured"
+)
+
+
+def capture_up_to(
+    *, rls_engine: Engine, user_id: str, amount: int, reason: str, daily_cap: int = 0
+) -> tuple[int, int]:
+    """Charge ``min(amount, balance)`` — PARTIAL when the balance is short (Spec M2 review, C1).
+
+    The opt-in sibling of :func:`deduct`, for ONE caller only: the chat-turn
+    worker's post-success billing (``persona_api.background.chat_turn_worker``).
+    Every other metered caller (authoring, imagegen, sandbox code execution)
+    keeps calling :func:`deduct` — its all-or-nothing semantics are UNCHANGED
+    by this function's existence.
+
+    The bug this closes: ``deduct``'s conditional decrement is all-or-nothing
+    (``WHERE balance >= :amount``), so a charge that exceeds the remaining
+    balance deducts NOTHING and raises — repeatedly, forever, once the balance
+    sits below the turn's cost. A completed (already-rendered, already-paid-for
+    upstream) turn would never get billed again: the balance never reaches 0,
+    so the pre-flight ``require_credits`` gate (``balance > 0``) keeps passing
+    turns that can no longer be charged their true cost.
+
+    This charges ``captured = min(amount, balance)`` in a SINGLE atomic
+    statement (:data:`_CAPTURE_UP_TO_SQL`) that floors the balance at 0 — a
+    short charge is captured in full up to what remains, rather than rejected
+    outright. The ledger row records the CAPTURED delta (never the requested
+    ``amount``); when ``captured < amount`` the ``reason`` is suffixed
+    ``":shortfall"`` so the audit trail is honest about the underpayment —
+    e.g. ``"chat_turn:estimate_static"`` becomes
+    ``"chat_turn:estimate_static:shortfall"``. A full capture (``captured ==
+    amount``) keeps the bare ``reason``, byte-identical to what ``deduct``
+    would have written. ``amount <= 0`` captures nothing (a no-op, no ledger
+    row) and returns the current balance.
+
+    Spec R7 (R7-D-1/3): when ``daily_cap > 0`` the CAPTURED amount (never the
+    requested one) is booked against the per-UTC-day spend counter, in the
+    SAME transaction as the decrement — so an over-cap booking raises
+    :class:`DailySpendCapExceededError` and rolls back the WHOLE capture
+    (fail-closed, the identical discipline :func:`deduct` already uses); the
+    chat-turn worker treats this as "billing skipped this turn, no exception
+    escapes" (spec M2 review I3), never a retry loop.
+
+    Returns ``(captured, new_balance)``.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    if amount <= 0:
+        return 0, ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        row = conn.execute(_CAPTURE_UP_TO_SQL, {"uid": user_id, "amount": amount}).mappings().one()
+        captured = int(row["captured"])
+        new_balance = int(row["new_balance"])
+        if daily_cap > 0 and captured > 0:
+            booked = _book_day_spend_conn(conn, user_id=user_id, cost=captured, cap=daily_cap)
+            if booked is None:
+                spent = _current_day_spent(conn, user_id=user_id)
+                raise DailySpendCapExceededError(
+                    "Daily spend cap reached — this resets at UTC midnight.",
+                    context={
+                        "cap": str(daily_cap),
+                        "spent": str(spent),
+                        "requested_cost": str(captured),
+                        "reset_epoch": str(_next_utc_midnight_epoch()),
+                    },
+                )
+        if captured > 0:
+            final_reason = reason if captured >= amount else f"{reason}:shortfall"
+            conn.execute(
+                insert(_credit_tx_t).values(
+                    id=f"ctx_{uuid.uuid4().hex}",
+                    user_id=user_id,
+                    delta=-captured,
+                    reason=final_reason,
+                )
+            )
+    return captured, new_balance
 
 
 def refund(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:

@@ -524,6 +524,18 @@ class APIConfig(BaseSettings):
     proportional_credits: bool = True
     authoring_credit_cost: int = 1000
 
+    # Spec M2 review (reviewer defense-in-depth, adjudicated TAKE): a hard
+    # ceiling on the per-turn PROPORTIONAL charge computed in
+    # ``ChatTurnRegistry._turn_charge``. A pricing/unit-scale bug (e.g. a
+    # resolver returning $/Mtok where cents/1k-tokens was expected — a 10_000x
+    # blowup) must never bill a single turn thousands of credits; the clamp
+    # applies ONLY to the charged amount — the persisted TurnLog/UsageEntry
+    # keeps the verbatim true cost (basis honesty is untouchable, M2 §2), and
+    # a WARNING logs both numbers + the basis whenever it actually clamps.
+    # ``<= 0`` disables the ceiling (unclamped — the pre-review shape). Read
+    # from ``PERSONA_API_MAX_TURN_CREDITS``.
+    max_turn_credits: int = 500
+
     # CORS origins allowed to call the API from a browser (spec-09 web app).
     # Comma-separated; the web dev server is http://localhost:3000 by default.
     # Empty disables CORS (server-to-server only). Read from PERSONA_API_CORS_ORIGINS.

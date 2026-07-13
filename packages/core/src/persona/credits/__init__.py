@@ -12,6 +12,9 @@ Public surface mirrors the prior ``persona_api.services.credits_service``:
 * :func:`require_credits` — pre-flight gate (raises :class:`CreditsExhaustedError`).
 * :func:`ensure_balance` / :func:`get_balance` — read current balance.
 * :func:`deduct` / :func:`refund` — atomic balance moves with ledger row.
+* :func:`capture_up_to` — the opt-in partial-capture sibling of ``deduct``
+  (Spec M2 review, C1); ONLY the chat-turn worker's post-success billing uses
+  it — every other caller keeps using ``deduct`` unchanged.
 * :func:`list_usage` / :func:`list_turn_usage` — paginated audit log views.
 * :data:`LOW_BALANCE_THRESHOLD` — UI warning threshold.
 
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 from persona.credits.service import (
     LOW_BALANCE_THRESHOLD,
+    capture_up_to,
     deduct,
     ensure_balance,
     get_balance,
@@ -38,6 +42,7 @@ from persona.credits.service import (
 
 __all__ = [
     "LOW_BALANCE_THRESHOLD",
+    "capture_up_to",
     "deduct",
     "ensure_balance",
     "get_balance",

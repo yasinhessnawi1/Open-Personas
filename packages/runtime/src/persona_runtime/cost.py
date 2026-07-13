@@ -40,9 +40,12 @@ _logger = get_logger("runtime.cost")
 
 CostBasis = Literal["actual_openrouter", "estimate_static", "estimate_catalog", "unpriced"]
 
-#: USD → cents rounding for response-side actuals: 6 decimals (micro-cent) so
-#: tiny turns don't collapse to 0.0 and float noise never leaks into the
-#: persisted record.
+#: Cents rounding applied to BOTH pricing arms: 6 decimals (micro-cent) so tiny
+#: turns don't collapse to 0.0 and float noise never leaks into the persisted
+#: record. Originally the response-side-actual's USD->cents rounding; spec M2
+#: review finding I1 extends the SAME treatment to the estimate arm's summed
+#: cents (static/catalog table lookups also pick up float noise, and the
+#: worker's printed-value ceil turns that noise into a real overcharge).
 _ACTUAL_ROUND_DECIMALS: Final[int] = 6
 
 
@@ -138,7 +141,14 @@ def compute_turn_cost(
         arithmetic; actuals round to micro-cents), basis per the module
         vocabulary.
     """
-    if actual_cost_usd is not None and actual_cost_usd >= 0.0:
+    # M1 (spec M2 review): gate the actual arm on the OpenRouter provider — the
+    # ``cost_usd`` field is a response-side actual ONLY when it came off an
+    # OpenRouter route (D-M2-3, the usage-accounting opt-in). A future non-OR
+    # backend that starts populating ``cost_usd`` (a different currency of
+    # "cost", e.g. a provider-reported estimate) must never be mistaken for
+    # "what we actually paid" and minted as ``actual_openrouter`` — it falls
+    # through to the honest resolver-chain estimate below instead.
+    if provider == "openrouter" and actual_cost_usd is not None and actual_cost_usd >= 0.0:
         return round(actual_cost_usd * 100.0, _ACTUAL_ROUND_DECIMALS), "actual_openrouter"
     chain = source if source is not None else _default_source()
     hit = chain.resolve_with_source(_canonical_model_id(provider, model), allow_fetch=False)
@@ -153,7 +163,16 @@ def compute_turn_cost(
             )
         return 0.0, "unpriced"
     metadata, link = hit
-    cents = (prompt_tokens / 1000.0) * metadata.cost_input_per_1k_tokens + (
-        completion_tokens / 1000.0
-    ) * metadata.cost_output_per_1k_tokens
+    # I1 (spec M2 review): round the estimate sum the SAME way the actual arm
+    # already rounds (``_ACTUAL_ROUND_DECIMALS``). Raw float arithmetic on an
+    # exact-integer-cent estimate can land a 1e-15 noise bit above the true
+    # value (e.g. 9.0 -> 9.000000000000002); the worker's printed-value ceil
+    # (``Decimal(str(cost))``) then rounds that noise UP to an extra whole
+    # credit. Rounding here — once, at the one place cents are computed —
+    # removes the noise before it ever reaches the ceil.
+    cents = round(
+        (prompt_tokens / 1000.0) * metadata.cost_input_per_1k_tokens
+        + (completion_tokens / 1000.0) * metadata.cost_output_per_1k_tokens,
+        _ACTUAL_ROUND_DECIMALS,
+    )
     return cents, "estimate_static" if link == "static" else "estimate_catalog"

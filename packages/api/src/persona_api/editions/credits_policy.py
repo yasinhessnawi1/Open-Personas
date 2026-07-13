@@ -25,6 +25,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.credits import (
+    capture_up_to as _capture_up_to,
+)
+from persona.credits import (
     deduct as _deduct,
 )
 from persona.credits import (
@@ -68,6 +71,18 @@ class CreditsPolicy(Protocol):
 
     def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
         """Deduct ``amount`` + record a ledger row. Returns the new balance."""
+        ...
+
+    def capture_up_to(
+        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+    ) -> tuple[int, int]:
+        """Charge ``min(amount, balance)``, floored at 0. Returns ``(captured, new_balance)``.
+
+        Spec M2 review (C1): the opt-in partial-capture path. ONLY the
+        chat-turn worker's post-success billing calls this — every other
+        metered caller keeps using :meth:`deduct`, whose all-or-nothing
+        semantics this method does not alter.
+        """
         ...
 
     def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
@@ -128,6 +143,32 @@ class MeteredCreditsPolicy:
             )
             raise
 
+    def capture_up_to(
+        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+    ) -> tuple[int, int]:
+        """Spec M2 review (C1): semantics-free passthrough to ``persona.credits.capture_up_to``.
+
+        This policy layer decides NOTHING about amounts, floors, or shortfall
+        marking — that arithmetic lives entirely in the core service (F7
+        precedent: the policy stays amount-agnostic). It only forwards the
+        day-cap it already owns (mirroring :meth:`deduct`) and, on a day-cap
+        refusal, writes the SAME durable audit row :meth:`deduct` writes
+        (R7-D-5 fail-loud + audited) before re-raising.
+        """
+        try:
+            return _capture_up_to(
+                rls_engine=rls_engine,
+                user_id=user_id,
+                amount=amount,
+                reason=reason,
+                daily_cap=self._daily_cap,
+            )
+        except DailySpendCapExceededError as exc:
+            self._audit_daily_cap_refusal(
+                rls_engine=rls_engine, user_id=user_id, context=exc.context
+            )
+            raise
+
     @staticmethod
     def _audit_daily_cap_refusal(
         *, rls_engine: Engine, user_id: str, context: dict[str, str]
@@ -175,6 +216,13 @@ class UnlimitedCreditsPolicy:
 
     def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
         return _UNLIMITED_BALANCE
+
+    def capture_up_to(
+        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+    ) -> tuple[int, int]:
+        # Never reached in practice (community's ``deduct`` never raises), but
+        # implemented for Protocol completeness: a no-op that "fully captures".
+        return amount, _UNLIMITED_BALANCE
 
     def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
         return _UNLIMITED_BALANCE
