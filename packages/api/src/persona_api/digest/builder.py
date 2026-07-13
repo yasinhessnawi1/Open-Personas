@@ -15,6 +15,7 @@ event carries its ``human`` string; a task that never fired from an event leaves
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta  # noqa: TC003 — runtime Pydantic field types
 from typing import TYPE_CHECKING
 
@@ -133,6 +134,32 @@ def _first(values: Sequence[str]) -> str:
     return values[0] if values else ""
 
 
+#: One-line budget for any digest line (title/detail) — the under-a-minute read
+#: means ~a sentence per item, never a dumped report (A6-R-1).
+_LINE_BUDGET = 160
+_VOICE_MARKUP_RE = re.compile(r"\{\{[^{}]*\}\}")
+_MD_EMPHASIS_RE = re.compile(r"\*\*|__|`")
+_WS_RE = re.compile(r"\s+")
+
+
+def _line(text: str, budget: int = _LINE_BUDGET) -> str:
+    """Collapse arbitrary persona/report text into ONE calm digest line.
+
+    Executors and personas write rich text — ``{{#warm}}`` voice-markup,
+    ``**markdown**`` emphasis, multi-paragraph delivery messages, trailing
+    internal ids. The digest contract (A6-R-1/A6-D-2) is a one-liner per item,
+    and these lines feed BOTH the Review surface and C0's morning message, so
+    the flattening happens here at the single seam: strip markup markers (keep
+    the words), collapse all whitespace, and truncate at a word boundary with
+    an honest ellipsis.
+    """
+    cleaned = _WS_RE.sub(" ", _MD_EMPHASIS_RE.sub("", _VOICE_MARKUP_RE.sub(" ", text))).strip()
+    if len(cleaned) <= budget:
+        return cleaned
+    cut = cleaned[:budget].rsplit(" ", 1)[0].rstrip(" ,;:—–-")
+    return f"{cut}…"
+
+
 def _section(kind: str, items: list[DigestItem]) -> DigestSection | None:
     """Cap the section and record the overflow; ``None`` when there is nothing to show."""
     if not items:
@@ -186,10 +213,12 @@ def build_morning_digest(
     ``deferred`` is the already-consumed over-cap chatter (a secondary input, folded into "done").
     Pure composition over the RLS engine + ``config`` (for occurrences) — no RuntimeFactory.
     """
+    # Every title/detail below passes through _line — the digest promises one
+    # calm line per item, whatever the executor/persona wrote (R11-B2 fix).
     waiting = [
         DigestItem(
             persona_id=p.persona_id,
-            title=p.description,
+            title=_line(p.description),
             ref=DigestRef(kind="approval", id=p.proposal_id),
         )
         for p in ApprovalStore(engine).list_pending_for_owner(owner_id)
@@ -211,8 +240,8 @@ def build_morning_digest(
             done.append(
                 DigestItem(
                     persona_id=task.persona_id,
-                    title=task.contract.goal,
-                    detail=_first(completion.conclusions),
+                    title=_line(task.contract.goal),
+                    detail=_line(_first(completion.conclusions)),
                     ref=DigestRef(kind="task", id=task.id),
                     ran_because=ran_because.get(task.id),
                 )
@@ -224,20 +253,20 @@ def build_morning_digest(
             stuck.append(
                 DigestItem(
                     persona_id=task.persona_id,
-                    title=task.contract.goal,
-                    detail=stuck_report.cause,
+                    title=_line(task.contract.goal),
+                    detail=_line(stuck_report.cause),
                     ref=DigestRef(kind="task", id=task.id),
                     ran_because=ran_because.get(task.id),
                 )
             )
     # secondary: the deferred chatter, as one-liners under "done" (never load-bearing).
-    done.extend(DigestItem(persona_id=d.persona_id, title=d.content) for d in deferred)
+    done.extend(DigestItem(persona_id=d.persona_id, title=_line(d.content)) for d in deferred)
 
     initiatives = [
         DigestItem(
             persona_id=n.persona_id,
-            title=n.candidate.observation,
-            detail=n.candidate.why_now,
+            title=_line(n.candidate.observation),
+            detail=_line(n.candidate.why_now),
         )
         for n in InitiativeLedger(engine).held_for_owner(owner_id)
     ]
