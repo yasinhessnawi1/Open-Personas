@@ -82,7 +82,18 @@ class StreamingSTTConfig(BaseSettings):
             Default 60.0 mirrors Spec 02 ``BackendConfig.request_timeout_s``.
         language_hint: Optional ISO-639-1 language code (e.g. ``"en"``,
             ``"no"``, ``"ar"``) the backend may pass to the provider as
-            a recognition hint. ``None`` lets the provider auto-detect.
+            a recognition hint. ``None`` lets the provider auto-detect —
+            true for the prerecorded one-shot path
+            (``persona_voice.stt.deepgram_backend.transcribe_prerecorded``,
+            Deepgram ``detect_language=true``, R9-025 reopen). The live
+            WebSocket backend has no such capability (Deepgram's streaming
+            API requires a language pinned before the socket opens) and
+            falls back to ``"en"``; in practice every call supplies a
+            concrete value first via per-call language routing
+            (``persona_voice.agent.language.apply_stt_route``, Spec 32),
+            which resolves the persona's declared ``identity.language_default``
+            — NOT this raw global default, which is a single-value-for-
+            the-whole-service stopgap that predates that routing.
         vad_library: Which speech-activity sensor T05 instantiates.
             ``silero`` is the LOCK primary path; ``webrtc`` is the
             v0.2 fallback.

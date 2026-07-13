@@ -702,6 +702,74 @@ async def test_transcribe_prerecorded_no_content_type_omits_headers(
     assert fake_rest_client.calls[0]["headers"] is None
 
 
+# ---------- transcribe_prerecorded() language handling (R9-025 reopen) ----
+#
+# This route is persona-agnostic — no call, no per-persona language routing
+# to fall back on (unlike the live WebSocket path's ``apply_stt_route``,
+# Spec 32) — see the function's own docstring for the full rationale. These
+# tests pin the EXACT ``PrerecordedOptions`` the fake REST transport receives
+# in both postures: no configured hint (real Deepgram auto-detect) vs. an
+# explicit hint (sent verbatim, never silently coerced to ``"en"``).
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_no_hint_requests_detect_language(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """No configured ``language_hint`` — real auto-detect, not a hard-coded ``"en"``."""
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
+    await transcribe_prerecorded(b"pcm-bytes", config=config)
+    options = fake_rest_client.calls[0]["options"]
+    assert options.detect_language is True
+    assert options.language is None
+    assert options.model == "nova-3"
+    assert options.smart_format is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_empty_string_hint_also_requests_detect_language(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """An empty-string hint (e.g. ``PERSONA_STT_LANGUAGE_HINT=""``) counts as unconfigured."""
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret", language_hint="")
+    await transcribe_prerecorded(b"pcm-bytes", config=config)
+    options = fake_rest_client.calls[0]["options"]
+    assert options.detect_language is True
+    assert options.language is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_explicit_hint_is_sent_verbatim(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """A configured hint (an operator's deliberate whole-service pin) wins outright: sent
+    verbatim, never swapped for a hard-coded ``"en"``, and ``detect_language`` is NOT also
+    requested. Uses a non-default ``model`` too, proving that value passes through
+    unchanged rather than being re-derived (same model family as the live config)."""
+    config = StreamingSTTConfig(
+        provider="deepgram", api_key="dg-secret", model="nova-2", language_hint="no"
+    )
+    await transcribe_prerecorded(b"pcm-bytes", config=config)
+    options = fake_rest_client.calls[0]["options"]
+    assert options.language == "no"
+    assert options.detect_language is None
+    assert options.model == "nova-2"
+    assert options.smart_format is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_prerecorded_explicit_english_hint_also_sent_verbatim(
+    fake_rest_client: _FakeAsyncRestClient,
+) -> None:
+    """Symmetric with the Norwegian case above — ``"en"`` is just another explicit hint,
+    not a special-cased default anymore."""
+    config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret", language_hint="en")
+    await transcribe_prerecorded(b"pcm-bytes", config=config)
+    options = fake_rest_client.calls[0]["options"]
+    assert options.language == "en"
+    assert options.detect_language is None
+
+
 @pytest.mark.asyncio
 async def test_transcribe_prerecorded_empty_transcript_is_not_an_error(
     fake_rest_client: _FakeAsyncRestClient,

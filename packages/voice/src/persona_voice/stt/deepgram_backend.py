@@ -74,7 +74,12 @@ WebSocket :class:`DeepgramStreamingSTT` drives. It shares this module's
 :meth:`DeepgramStreamingSTT._raise_mapped` so both call sites map the same
 provider-exception shapes once) — kept in THIS module, not a sibling one, so
 the "only place the workspace touches deepgram-sdk" invariant above stays
-true of the whole STT surface, not just the streaming half.
+true of the whole STT surface, not just the streaming half. Unlike
+``LiveOptions`` above, ``PrerecordedOptions`` supports ``detect_language`` —
+:func:`transcribe_prerecorded` uses it whenever ``config.language_hint`` is
+unset (R9-025 reopen), since this persona-agnostic route has no per-call
+language routing to fall back on (see its own docstring for the full
+rationale).
 """
 
 # ruff: noqa: ANN401, ARG002
@@ -560,13 +565,32 @@ async def transcribe_prerecorded(
     ``POST /v1/stt`` route (in-chat dictation + persona-authoring dictation,
     proxied through persona-api).
 
+    **Language handling (R9-025 reopen).** This route is persona-agnostic —
+    no call, no persona, no language signal from the caller (the web client
+    uploads only the audio blob; see ``packages/web/src/lib/voice/stt.ts``) —
+    unlike the live WebSocket path, which pins a concrete
+    ``config.language_hint`` per call via
+    :func:`persona_voice.agent.language.apply_stt_route` (Spec 32) before the
+    socket opens, resolved from the persona's declared
+    ``identity.language_default``. ``PrerecordedOptions`` (unlike
+    ``LiveOptions``, which has no such field) supports real automatic
+    detection, so this function mirrors the call pipeline's effective
+    behavior of always landing on the language actually spoken: a configured
+    ``config.language_hint`` is treated as a deliberate whole-service pin and
+    is sent verbatim; when unset (the normal case for this route),
+    ``detect_language=True`` is sent instead of silently forcing English —
+    the docstring contract :attr:`StreamingSTTConfig.language_hint` has
+    always made (``None`` ⇒ provider auto-detect) but this path did not
+    honor before this fix.
+
     Args:
         audio: Raw audio bytes in whatever container the caller captured
             (Deepgram's prerecorded endpoint sniffs common containers when
             ``content_type`` is not given).
         config: The same :class:`StreamingSTTConfig` the live backend reads.
             ``api_key`` missing/empty fails fast per D-02-10, mirroring
-            :meth:`DeepgramStreamingSTT.__init__`.
+            :meth:`DeepgramStreamingSTT.__init__`. ``language_hint`` drives
+            the auto-detect-vs-explicit choice above.
         content_type: Optional MIME type from the caller's upload (e.g.
             ``"audio/webm"``), forwarded as the request ``Content-Type`` so
             Deepgram does not have to sniff the container.
@@ -602,10 +626,16 @@ async def transcribe_prerecorded(
     except Exception as exc:  # noqa: BLE001 — adapter-boundary mapping
         _raise_mapped_deepgram_error(exc, model=config.model)
 
-    options = PrerecordedOptions(
-        model=config.model,
-        language=config.language_hint or "en",
-        smart_format=True,
+    # An explicit hint (an operator deliberately pinning the whole service to
+    # one language) wins outright; absent one, real Deepgram auto-detect —
+    # NOT a hard-coded "en" fallback (the prior bug: a raw, unrouted
+    # PERSONA_STT_LANGUAGE_HINT default — meant only as a single-value-for-
+    # the-whole-service stopgap predating Spec 32's per-call routing — leaked
+    # into this path as a hard lock, garbling any speech in another language).
+    options = (
+        PrerecordedOptions(model=config.model, language=config.language_hint, smart_format=True)
+        if config.language_hint
+        else PrerecordedOptions(model=config.model, detect_language=True, smart_format=True)
     )
     headers = {"Content-Type": content_type} if content_type else None
     try:
