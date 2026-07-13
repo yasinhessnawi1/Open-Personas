@@ -96,7 +96,9 @@
       "expand": "Expand sidebar",
       "resize": "Resize sidebar",
       "untitled": "Untitled conversation",
-      "unknownPersona": "Unknown persona"
+      "unknownPersona": "Unknown persona",
+      "callPersona": "Call {name}",
+      "newChat": "New chat"
     },
     "command": {
       "open": "Search and commands",

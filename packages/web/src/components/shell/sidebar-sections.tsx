@@ -11,11 +11,13 @@
  * collapse animation.
  */
 
-import { MessagesSquare, Phone } from "lucide-react";
+import { MessageSquare, MessagesSquare, Phone } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useFormatter, useTranslations } from "next-intl";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { startChat } from "@/app/actions";
+import { PressSwipePreview } from "@/components/patterns/press-swipe-preview";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
 import {
   Tooltip,
@@ -23,9 +25,15 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ActiveChatIndicator } from "@/components/work/active-chat-indicator";
+import { useApi } from "@/lib/api/use-api";
 import { formatCallDuration } from "@/lib/calls";
+import { usePressSwipeGesture } from "@/lib/hooks/use-press-swipe-gesture";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { cn } from "@/lib/utils";
+import {
+  type CallTarget,
+  useCallSession,
+} from "@/lib/voice/call-session-context";
 import type {
   SidebarCall,
   SidebarConversation,
@@ -37,6 +45,10 @@ import type {
  * access. Expanded: a wrapping row of avatar chips. Collapsed: a vertical
  * stack of avatars. Each links to the persona's page (`/personas/:id`), the
  * same target the rest of the app uses.
+ *
+ * R9-036: each avatar is now ALSO gesture-capable (press-and-hold to arm a
+ * call/chat live preview) — see `PersonaRailItem` below. Both collapsed and
+ * expanded modes share this ONE component/hook pairing (no forked logic).
  */
 export function PersonasRail({
   personas,
@@ -57,25 +69,134 @@ export function PersonasRail({
       data-slot="sidebar-personas-rail"
     >
       {personas.map((p) => (
-        <li key={p.id}>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Link
-                  href={`/personas/${p.id}`}
-                  onClick={onNavigate}
-                  aria-label={p.name}
-                  className="block rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0"
-                />
-              }
-            >
-              <PersonaAvatar persona={p} size="md" />
-            </TooltipTrigger>
-            <TooltipContent side="right">{p.name}</TooltipContent>
-          </Tooltip>
-        </li>
+        <PersonaRailItem
+          key={p.id}
+          persona={p}
+          collapsed={collapsed}
+          onNavigate={onNavigate}
+        />
       ))}
     </ul>
+  );
+}
+
+/**
+ * One PERSONAS-rail avatar (R9-036): the pre-existing click-through Link,
+ * now ALSO driving `usePressSwipeGesture` + `<PressSwipePreview>` — the
+ * reusable press-hold-swipe mechanic (lib/hooks/use-press-swipe-gesture.ts,
+ * components/patterns/press-swipe-preview.tsx). Press-and-hold ~250ms arms a
+ * live call/chat preview; dragging up past the threshold and releasing
+ * commits a call, dragging down commits a text chat; an early release or
+ * drag-back cancels; a plain tap (no hold) is BYTE-IDENTICAL to the prior
+ * click-through — the gesture hook never touches that path.
+ *
+ * Both actions go through the app's EXISTING origination seams (no new
+ * flow):
+ *   - call: mint an `origin: 'call'` conversation, then hand it to the
+ *     hoisted call session via `requestCall` — the identical sequence
+ *     `persona-library-card.tsx`'s `handleCall` and R9-028's
+ *     `new-call-button.tsx` already use (V7 D-V7-4: the one-call rule lives
+ *     in `requestCall` itself, so this can't bypass it).
+ *   - chat: the `startChat` server action (app/actions.ts) — the identical
+ *     call R9-014's `new-conversation-button.tsx` picker flow already makes.
+ */
+function PersonaRailItem({
+  persona,
+  collapsed,
+  onNavigate,
+}: {
+  persona: SidebarPersona;
+  collapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  const t = useTranslations("nav.sidebar");
+  const router = useRouter();
+  const api = useApi();
+  const { requestCall } = useCallSession();
+
+  const handleCall = useCallback(() => {
+    void (async () => {
+      const conv = await api.POST("/v1/personas/{persona_id}/conversations", {
+        params: { path: { persona_id: persona.id } },
+        body: { title: "", origin: "call" },
+      });
+      if (!conv.data) return;
+      const target: CallTarget = {
+        personaId: persona.id,
+        conversationId: conv.data.id,
+        personaName: persona.name,
+        personaAvatarUrl: persona.avatar_url ?? undefined,
+        personaRole: persona.role,
+      };
+      // "switch" opens the end-and-switch confirm, which navigates on
+      // confirm — don't navigate here (V7 D-V7-4, the one-call rule).
+      if (requestCall(target) !== "switch") {
+        router.push(`/chat/${conv.data.id}/voice`);
+      }
+    })();
+  }, [api, persona, requestCall, router]);
+
+  const handleChat = useCallback(() => {
+    void startChat(persona.id);
+  }, [persona.id]);
+
+  const gesture = usePressSwipeGesture<HTMLAnchorElement>({
+    onCommitUp: handleCall,
+    onCommitDown: handleChat,
+  });
+
+  return (
+    <li>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Link
+              ref={gesture.elementRef}
+              href={`/personas/${persona.id}`}
+              onClick={(event) => {
+                gesture.handlers.onClick(event);
+                // An armed gesture (commit OR cancel) already did its own
+                // thing — only a plain, un-armed tap should ALSO run the
+                // caller's onNavigate (e.g. closing the mobile sheet),
+                // matching "today's click, byte-identical".
+                if (!event.defaultPrevented) onNavigate?.();
+              }}
+              onPointerDown={gesture.handlers.onPointerDown}
+              onContextMenu={(event) => {
+                // Suppress the OS long-press context menu / iOS "peek" once
+                // armed — it would otherwise fight the live preview for the
+                // same hold. (Unverified without a real device — see the
+                // fix's evidence note.)
+                if (gesture.armed) event.preventDefault();
+              }}
+              aria-label={persona.name}
+              className={cn(
+                "block rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+                "[-webkit-touch-callout:none]",
+                gesture.armed && "touch-none",
+              )}
+            />
+          }
+        >
+          <PersonaAvatar persona={persona} size="md" />
+        </TooltipTrigger>
+        <TooltipContent side="right">{persona.name}</TooltipContent>
+      </Tooltip>
+      <PressSwipePreview
+        armed={gesture.armed}
+        highlight={gesture.highlight}
+        anchorRect={gesture.anchorRect}
+        collapsed={collapsed}
+        up={{
+          icon: <Phone className="size-3.5" aria-hidden="true" />,
+          label: t("callPersona", { name: persona.name }),
+        }}
+        down={{
+          icon: <MessageSquare className="size-3.5" aria-hidden="true" />,
+          label: t("newChat"),
+        }}
+      />
+    </li>
   );
 }
 
@@ -107,7 +228,13 @@ export function AllChatsLink({
 
   if (collapsed) {
     return (
-      <div className="flex justify-center pb-1">
+      // R9-036 rider: the button sat flush against the top of the MESSAGES
+      // section's flexible (mostly-empty, in collapsed mode) region, reading
+      // as "slightly too high" against the PERSONAS rail above it. A tiny
+      // `pt-1` (4px — the same small increment CollapseToggle/NotificationBell
+      // already use as their own icon-row gap in the header, sidebar.tsx)
+      // nudges it down without materially re-centering the whole section.
+      <div className="flex justify-center pt-1 pb-1">
         <Tooltip>
           <TooltipTrigger
             render={

@@ -5,9 +5,9 @@
  * conversation title, untitled/unknown fallbacks, active row, empty state,
  * collapsed-mode label suppression) and the PERSONAS rail links.
  */
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   SidebarCall,
   SidebarConversation,
@@ -24,10 +24,40 @@ vi.mock("@clerk/nextjs", () => ({
   useAuth: () => ({ getToken: async () => null }),
 }));
 
+// R9-036: PersonasRail's avatars are now gesture-capable — each one drives
+// useApi / useCallSession / useRouter / the startChat server action (the
+// SAME seams persona-library-card.tsx / new-call-button.tsx / R9-014's
+// new-conversation-button.tsx already use). Mocked with the identical
+// vi.hoisted pattern persona-library-card.test.tsx already established.
+const h = vi.hoisted(() => ({
+  push: vi.fn(),
+  requestCall: vi.fn(() => "started" as "started" | "current" | "switch"),
+  post: vi.fn(async () => ({ data: { id: "new-conv" } })),
+  startChat: vi.fn(),
+}));
+
 let pathname = "/";
 vi.mock("next/navigation", () => ({
   usePathname: () => pathname,
+  useRouter: () => ({ push: h.push, refresh: vi.fn() }),
 }));
+vi.mock("@/app/actions", () => ({
+  startChat: (id: string) => h.startChat(id),
+}));
+vi.mock("@/lib/api/use-api", () => ({
+  useApi: () => ({ POST: h.post, GET: vi.fn(), DELETE: vi.fn() }),
+}));
+vi.mock("@/lib/voice/call-session-context", () => ({
+  useCallSession: () => ({ requestCall: h.requestCall }),
+}));
+
+beforeEach(() => {
+  h.push.mockClear();
+  h.requestCall.mockReset();
+  h.requestCall.mockReturnValue("started");
+  h.post.mockClear();
+  h.startChat.mockClear();
+});
 
 const messages = {
   nav: {
@@ -38,6 +68,8 @@ const messages = {
       unknownPersona: "Unknown persona",
       callsEmpty: "No calls yet",
       callOngoing: "Call",
+      callPersona: "Call {name}",
+      newChat: "New chat",
     },
   },
 };
@@ -254,5 +286,144 @@ describe("PersonasRail", () => {
       <PersonasRail personas={[]} collapsed={false} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // R9-036 — press-and-hold + swipe. The gesture MECHANICS (arm timing, slop,
+  // threshold, cancel, tap-through) are exhaustively covered at the hook
+  // level (lib/hooks/use-press-swipe-gesture.test.tsx); these prove the
+  // SIDEBAR-SPECIFIC WIRING — that a committed "up" actually drives the call
+  // origination seam and a committed "down" actually calls `startChat` — in
+  // both collapsed and expanded mounts.
+  describe("press-and-hold gesture wiring", () => {
+    const POINTER_ID = 1;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // Fake timers + a mocked-async `api.POST` (a real Promise, resolved on
+    // the microtask queue) combine safely via `advanceTimersByTimeAsync`,
+    // which flushes microtasks between timer advances — unlike
+    // `vi.waitFor`'s real-time polling, which fake timers would otherwise
+    // starve. `pressHold`/`release` are async for exactly this reason.
+    async function pressHold(target: Element) {
+      fireEvent.pointerDown(target, {
+        clientX: 0,
+        clientY: 0,
+        pointerId: POINTER_ID,
+        pointerType: "touch",
+        button: 0,
+      });
+      await vi.advanceTimersByTimeAsync(250);
+    }
+
+    async function release(clientY: number) {
+      fireEvent.pointerMove(document, {
+        clientX: 0,
+        clientY,
+        pointerId: POINTER_ID,
+      });
+      fireEvent.pointerUp(document, {
+        clientX: 0,
+        clientY,
+        pointerId: POINTER_ID,
+      });
+      // Flush the commit callback's promise chain (api.POST → requestCall →
+      // router.push, or the mocked startChat call).
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    it.each([[false], [true]])(
+      "collapsed=%s: hold + drag UP + release calls the persona (mints a call-origin conversation → requestCall → navigate)",
+      async (collapsed) => {
+        wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
+        await pressHold(screen.getByRole("link"));
+        await release(-60); // past the 48px default threshold, upward
+        expect(h.post).toHaveBeenCalledTimes(1);
+        expect(h.post).toHaveBeenCalledWith(
+          "/v1/personas/{persona_id}/conversations",
+          expect.objectContaining({
+            params: { path: { persona_id: "astrid" } },
+            body: { title: "", origin: "call" },
+          }),
+        );
+        expect(h.requestCall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            personaId: "astrid",
+            conversationId: "new-conv",
+            personaName: "Astrid",
+          }),
+        );
+        expect(h.push).toHaveBeenCalledWith("/chat/new-conv/voice");
+        expect(h.startChat).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([[false], [true]])(
+      "collapsed=%s: hold + drag DOWN + release starts a chat via startChat",
+      async (collapsed) => {
+        wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
+        await pressHold(screen.getByRole("link"));
+        await release(60); // past the 48px default threshold, downward
+        expect(h.startChat).toHaveBeenCalledWith("astrid");
+        expect(h.post).not.toHaveBeenCalled();
+        expect(h.requestCall).not.toHaveBeenCalled();
+      },
+    );
+
+    it("the browser's post-release click is suppressed after a commit — onNavigate (e.g. closing the mobile sheet) does NOT also fire", async () => {
+      // jsdom, unlike a real browser, does not auto-synthesize a `click`
+      // after a pointerdown/pointerup pair — fire it explicitly, the same
+      // way the hook-level test does, to model what a real tap-release
+      // triggers natively. `onNavigate` is the one sidebar-visible effect a
+      // NORMAL click has (closing the mobile sheet) that an armed gesture's
+      // synthesized click must NOT also trigger.
+      const onNavigate = vi.fn();
+      wrap(
+        <PersonasRail
+          personas={[astrid]}
+          collapsed={false}
+          onNavigate={onNavigate}
+        />,
+      );
+      const link = screen.getByRole("link");
+      await pressHold(link);
+      await release(60); // commits "down" (startChat)
+      expect(h.startChat).toHaveBeenCalledTimes(1);
+      fireEvent.click(link);
+      expect(onNavigate).not.toHaveBeenCalled();
+      // Still exactly one action — the commit's own click was suppressed,
+      // not merely un-observed.
+      expect(h.startChat).toHaveBeenCalledTimes(1);
+      expect(h.post).not.toHaveBeenCalled();
+    });
+
+    it("a plain click (with onNavigate wired) still fires onNavigate — the gesture doesn't over-suppress ordinary taps", () => {
+      const onNavigate = vi.fn();
+      wrap(
+        <PersonasRail
+          personas={[astrid]}
+          collapsed={false}
+          onNavigate={onNavigate}
+        />,
+      );
+      fireEvent.click(screen.getByRole("link"));
+      expect(onNavigate).toHaveBeenCalledTimes(1);
+      expect(h.post).not.toHaveBeenCalled();
+      expect(h.startChat).not.toHaveBeenCalled();
+    });
+
+    it("call entry does NOT navigate when a switch confirm is pending (inherits the one-call rule)", async () => {
+      h.requestCall.mockReturnValue("switch");
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      await pressHold(screen.getByRole("link"));
+      await release(-60);
+      expect(h.requestCall).toHaveBeenCalled();
+      expect(h.push).not.toHaveBeenCalled();
+    });
   });
 });
