@@ -26,12 +26,21 @@ const EPISTEMIC: ReadonlySet<EpistemicStatus> = new Set([
 ]);
 
 describe("persona-examples dataset", () => {
-  it("has ten categories, each with at least four examples (~60 total)", () => {
+  it("has ten categories, featured first, each substantial (~70 total)", () => {
     expect(PERSONA_EXAMPLE_CATEGORIES).toHaveLength(10);
     for (const category of PERSONA_EXAMPLE_CATEGORIES) {
-      expect(category.examples.length).toBeGreaterThanOrEqual(4);
+      expect(category.examples.length).toBeGreaterThanOrEqual(
+        category.featured ? 3 : 4,
+      );
     }
-    expect(ALL_EXAMPLES.length).toBeGreaterThanOrEqual(60);
+    expect(ALL_EXAMPLES.length).toBeGreaterThanOrEqual(70);
+  });
+
+  it("leads with exactly one featured category (the flagship shelf)", () => {
+    const featured = PERSONA_EXAMPLE_CATEGORIES.filter((c) => c.featured);
+    expect(featured).toHaveLength(1);
+    expect(PERSONA_EXAMPLE_CATEGORIES[0]?.featured).toBe(true);
+    expect(PERSONA_EXAMPLE_CATEGORIES[0]?.id).toBe("featured");
   });
 
   it("uses unique ids across all examples and categories", () => {

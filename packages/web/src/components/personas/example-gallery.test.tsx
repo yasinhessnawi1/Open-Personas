@@ -49,20 +49,30 @@ describe("ExampleGallery", () => {
       <ExampleGallery onSelect={() => {}} />,
     );
 
-    // Six category sections.
+    // Every category renders: one featured hero section + standard sections.
+    const featured = PERSONA_EXAMPLE_CATEGORIES.filter((c) => c.featured);
+    expect(
+      container.querySelectorAll('[data-slot="example-category-featured"]'),
+    ).toHaveLength(featured.length);
     expect(
       container.querySelectorAll('[data-slot="example-category"]'),
-    ).toHaveLength(PERSONA_EXAMPLE_CATEGORIES.length);
+    ).toHaveLength(PERSONA_EXAMPLE_CATEGORIES.length - featured.length);
 
-    // Every example card is present.
+    // Every example card is present (hero cards + standard cards).
+    const featuredCount = featured.flatMap((c) => c.examples).length;
+    expect(
+      container.querySelectorAll('[data-slot="example-card-featured"]'),
+    ).toHaveLength(featuredCount);
     expect(
       container.querySelectorAll('[data-slot="example-card"]'),
-    ).toHaveLength(ALL_EXAMPLES.length);
+    ).toHaveLength(ALL_EXAMPLES.length - featuredCount);
 
     // Category labels resolve through i18n (spot-check two).
-    expect(getByText(messages.author.gallery.categoryWork)).toBeInTheDocument();
     expect(
-      getByText(messages.author.gallery.categoryCompanionship),
+      getByText(messages.author.gallery.categoryFeatured),
+    ).toBeInTheDocument();
+    expect(
+      getByText(messages.author.gallery.categoryCompany),
     ).toBeInTheDocument();
   });
 

@@ -32,16 +32,16 @@ import { cn } from "@/lib/utils";
 
 export const CATEGORY_LABEL_KEY: Record<PersonaExampleCategory["id"], string> =
   {
-    work: "gallery.categoryWork",
+    featured: "gallery.categoryFeatured",
+    company: "gallery.categoryCompany",
     learning: "gallery.categoryLearning",
-    creative: "gallery.categoryCreative",
+    "life-style": "gallery.categoryLifeStyle",
     wellness: "gallery.categoryWellness",
+    creative: "gallery.categoryCreative",
     experts: "gallery.categoryExperts",
-    companionship: "gallery.categoryCompanionship",
     mentors: "gallery.categoryMentors",
     companions: "gallery.categoryCompanions",
     voices: "gallery.categoryVoices",
-    "life-coaches": "gallery.categoryLifeCoaches",
   };
 
 /**
@@ -70,20 +70,146 @@ export function ExampleGallery({
   return (
     <section data-slot="example-gallery" aria-label={t("gallery.ownPathLabel")}>
       <Stack gap={8}>
-        {PERSONA_EXAMPLE_CATEGORIES.map((category, categoryIndex) => (
-          <CategorySection
-            key={category.id}
-            category={category}
-            label={t(CATEGORY_LABEL_KEY[category.id])}
-            useNamed={(name) => t("gallery.useNamed", { name })}
-            selectedLabel={t("gallery.selected")}
-            categoryIndex={categoryIndex}
-            onSelect={onSelect}
-            selectedId={selectedId}
-          />
-        ))}
+        {PERSONA_EXAMPLE_CATEGORIES.map((category, categoryIndex) =>
+          category.featured ? (
+            <FeaturedSection
+              key={category.id}
+              category={category}
+              label={t(CATEGORY_LABEL_KEY[category.id])}
+              useNamed={(name) => t("gallery.useNamed", { name })}
+              selectedLabel={t("gallery.selected")}
+              onSelect={onSelect}
+              selectedId={selectedId}
+            />
+          ) : (
+            <CategorySection
+              key={category.id}
+              category={category}
+              label={t(CATEGORY_LABEL_KEY[category.id])}
+              useNamed={(name) => t("gallery.useNamed", { name })}
+              selectedLabel={t("gallery.selected")}
+              categoryIndex={categoryIndex}
+              onSelect={onSelect}
+              selectedId={selectedId}
+            />
+          ),
+        )}
       </Stack>
     </section>
+  );
+}
+
+/**
+ * The flagship shelf: the featured assistants lead the gallery with larger
+ * cards that surface the hook line (the "it can do everything" pitch). Same
+ * colour discipline as the standard cards: accent rail via `--accent*`,
+ * per-persona ring via `--v-id`.
+ */
+function FeaturedSection({
+  category,
+  label,
+  useNamed,
+  selectedLabel,
+  onSelect,
+  selectedId,
+}: {
+  category: PersonaExampleCategory;
+  label: string;
+  useNamed: (name: string) => string;
+  selectedLabel: string;
+  onSelect: (example: PersonaExample) => void;
+  selectedId?: string | null;
+}) {
+  return (
+    <div
+      data-slot="example-category-featured"
+      style={accentStyle(category.accent)}
+      className="flex flex-col gap-3"
+    >
+      <div className="flex items-center gap-3">
+        <span
+          aria-hidden="true"
+          className="h-4 w-1 rounded-full bg-[var(--accent)]"
+        />
+        <h2 className="type-heading">{label}</h2>
+      </div>
+      <ul className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {category.examples.map((example, exampleIndex) => (
+          <li key={example.id}>
+            <FeaturedCard
+              example={example}
+              useNamed={useNamed}
+              selectedLabel={selectedLabel}
+              isSelected={selectedId === example.id}
+              index={exampleIndex}
+              onSelect={onSelect}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function FeaturedCard({
+  example,
+  useNamed,
+  selectedLabel,
+  isSelected,
+  index,
+  onSelect,
+}: {
+  example: PersonaExample;
+  useNamed: (name: string) => string;
+  selectedLabel: string;
+  isSelected: boolean;
+  index: number;
+  onSelect: (example: PersonaExample) => void;
+}) {
+  const idColor = derivePersonaIdentityColor({ id: example.id }).oklch;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(example)}
+      data-slot="example-card-featured"
+      data-selected={isSelected ? "true" : undefined}
+      aria-label={useNamed(example.name)}
+      style={
+        {
+          "--v-id": idColor,
+          animationDelay: `${Math.min(index, 8) * 40}ms`,
+        } as CSSProperties
+      }
+      className={cn(
+        "motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 group/featured flex h-full w-full flex-col gap-3 rounded-xl bg-card p-5 text-left ring-1 ring-foreground/10 outline-none transition-[transform,box-shadow] duration-[var(--motion-duration-normal)] ease-[var(--motion-ease-emphasized)] motion-safe:animate-in",
+        "hover:-translate-y-0.5 hover:shadow-[var(--elevation-2)] hover:ring-[var(--v-id)]",
+        "focus-visible:ring-2 focus-visible:ring-[var(--v-id)] focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        "data-[selected=true]:ring-2 data-[selected=true]:ring-[var(--v-id)]",
+      )}
+    >
+      <span className="flex items-center gap-4">
+        <PersonaAvatar
+          persona={{ id: example.id, name: example.name }}
+          size="lg"
+        />
+        <span className="min-w-0 flex-1">
+          <span className="type-heading block truncate text-lg leading-tight">
+            {example.name}
+          </span>
+          <span className="type-ui block truncate text-muted-foreground">
+            {example.role}
+          </span>
+        </span>
+        {isSelected ? (
+          <span className="type-caption shrink-0 font-mono text-[var(--v-id)] uppercase">
+            {selectedLabel}
+          </span>
+        ) : null}
+      </span>
+      <span className="type-ui line-clamp-2 text-muted-foreground">
+        {example.hook}
+      </span>
+    </button>
   );
 }
 
