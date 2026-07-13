@@ -40,6 +40,11 @@ from persona.jobs.synthesis import (
     make_conversation_synthesis_payload,
     synthesis_idempotency_key,
 )
+from persona.jobs.title import (
+    TITLE_REFRESH_JOB_TYPE,
+    TitleRefreshJobPayload,
+    title_refresh_idempotency_key,
+)
 
 __all__ = [
     "CHANNEL_CHAT",
@@ -51,6 +56,7 @@ __all__ = [
     "SHORT_LEASE",
     "SYNTHESIS_JOB_TYPE",
     "TERMINAL_STATES",
+    "TITLE_REFRESH_JOB_TYPE",
     "DelegatedTurnPayload",
     "Job",
     "JobContext",
@@ -62,11 +68,13 @@ __all__ = [
     "LeasePolicy",
     "RetryPolicy",
     "SynthesisJobPayload",
+    "TitleRefreshJobPayload",
     "can_transition",
     "delegated_turn_idempotency_key",
     "is_terminal",
     "make_conversation_synthesis_payload",
     "make_delegated_turn_payload",
     "synthesis_idempotency_key",
+    "title_refresh_idempotency_key",
     "validate_transition",
 ]

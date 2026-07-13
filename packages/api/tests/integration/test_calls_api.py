@@ -77,8 +77,14 @@ def _seed_call(
     started_at: datetime,
     duration_s: int | None = None,
     end_reason: str | None = None,
+    title: str = "",
 ) -> None:
-    """Seed a user → persona → conversation → call chain (superuser bypasses RLS)."""
+    """Seed a user → persona → conversation → call chain (superuser bypasses RLS).
+
+    ``title`` (R9-028) seeds the call-hosting conversation's title directly —
+    the ``calls`` table has none of its own; ``GET /v1/calls`` joins it in from
+    ``conversations.title``.
+    """
     persona_id = f"p_{owner_id}"
     conv_id = f"c_{call_id}"
     with engine.begin() as conn:
@@ -95,10 +101,10 @@ def _seed_call(
         )
         conn.execute(
             text(
-                "INSERT INTO conversations (id, owner_id, persona_id, origin) "
-                "VALUES (:c, :u, :p, 'call')"
+                "INSERT INTO conversations (id, owner_id, persona_id, origin, title) "
+                "VALUES (:c, :u, :p, 'call', :t)"
             ),
-            {"c": conv_id, "u": owner_id, "p": persona_id},
+            {"c": conv_id, "u": owner_id, "p": persona_id, "t": title},
         )
         conn.execute(
             text(
@@ -133,6 +139,7 @@ def test_list_calls_newest_first_with_transcript_link(
             started_at=_T0 + timedelta(hours=1),
             duration_s=125,
             end_reason="disconnect",
+            title="Bergen trip planning",
         )
     finally:
         su.dispose()
@@ -145,10 +152,14 @@ def test_list_calls_newest_first_with_transcript_link(
     assert newest["persona_id"] == f"p_{uid}"
     assert newest["duration_s"] == 125
     assert newest["end_reason"] == "disconnect"
-    # a live/just-seeded call with no end is still listed (envelope nullable).
+    # R9-028: the call row surfaces its conversation's (title_refresh-derived) title.
+    assert newest["title"] == "Bergen trip planning"
+    # a live/just-seeded call with no end is still listed (envelope nullable);
+    # an untitled call (no title_refresh run yet) reads as "" — never null/missing.
     assert rows[1]["ended_at"] is None
     assert rows[1]["duration_s"] is None
     assert rows[1]["end_reason"] is None
+    assert rows[1]["title"] == ""
 
 
 def test_calls_list_is_rls_scoped(client: tuple[TestClient, str]) -> None:

@@ -22,13 +22,25 @@ Idempotency: the enqueue key is ``title:{conversation_id}:{threshold}`` (A0's
 ``ON CONFLICT`` dedup — one refresh per conversation per threshold); the handler
 itself is convergent (temperature-0 regeneration + same-title short-circuit), the
 second line behind the key.
+
+R9-028: the payload/type/idempotency-key contract moved to
+``persona.jobs.title`` (the ``persona.jobs.synthesis`` V13 D-4-amended
+precedent) so persona-voice's call session-end writer
+(``persona_voice.session.title_enqueue``, API-free — a peer raw-INSERT) shares
+the SAME definition instead of drifting from it. Re-exported here unchanged so
+every existing import site (``title_trigger``, tests) is untouched.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
+from persona.jobs import MEDIUM_LEASE, JobTypeSpec, RetryPolicy
+from persona.jobs.title import (
+    TITLE_REFRESH_JOB_TYPE,
+    TitleRefreshJobPayload,
+    title_refresh_idempotency_key,
+)
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
@@ -58,8 +70,6 @@ __all__ = [
     "title_refresh_idempotency_key",
 ]
 
-TITLE_REFRESH_JOB_TYPE = "title_refresh"
-
 _logger = get_logger("jobs.title_refresh")
 
 # Roles whose text forms the titling transcript (the synthesis `_TRANSCRIPT_ROLES`
@@ -72,18 +82,6 @@ _TRANSCRIPT_ROLES = ("user", "assistant")
 _EXCERPT_HEAD_MESSAGES = 4
 _EXCERPT_TAIL_MESSAGES = 12
 _EXCERPT_MESSAGE_CHARS = 500
-
-
-class TitleRefreshJobPayload(JobPayload):
-    """Which conversation to re-title, keyed by the threshold that fired it."""
-
-    conversation_id: str
-    threshold: int
-
-
-def title_refresh_idempotency_key(payload: TitleRefreshJobPayload) -> str:
-    """``title:{conversation_id}:{threshold}`` — one refresh per threshold crossing."""
-    return f"title:{payload.conversation_id}:{payload.threshold}"
 
 
 class TitleRefreshData(BaseModel):

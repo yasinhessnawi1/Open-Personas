@@ -906,24 +906,40 @@ async def build_agent_session(
         owner_id=user_id,
     )
 
-    # V13 (V13-T5): post-call graph synthesis. At session-end the conversation is
-    # complete, so enqueue ONE durable synthesis job (post-call batch, D-4) over a
-    # FRESH short-lived session RLS engine — the session engine is disposed by
-    # ``session.end()`` before teardown (the V9 recorder pattern), and a fresh engine
-    # keeps this INSERT owner-scoped without holding a connection for the whole call.
-    # The twin raw-INSERT writer builds the SAME core payload the api writer builds.
-    def _enqueue_synthesis_on_end() -> None:
+    # V13 (V13-T5) + R9-028: post-call graph synthesis AND the transcript-title
+    # refresh. At session-end the conversation is complete, so enqueue ONE durable
+    # job of each kind (post-call batch, D-4) over a FRESH short-lived session RLS
+    # engine — the session engine is disposed by ``session.end()`` before teardown
+    # (the V9 recorder pattern), and a fresh engine keeps these INSERTs owner-scoped
+    # without holding a connection for the whole call. Each twin raw-INSERT writer
+    # builds the SAME core payload its api counterpart builds. The two enqueues are
+    # independently best-effort (own suppress each) — a DB hiccup on one must never
+    # skip the other; ``_teardown``'s outer suppress is only the final backstop.
+    def _on_call_complete() -> None:
         from persona_voice.session.synthesis_enqueue import enqueue_voice_synthesis
+        from persona_voice.session.title_enqueue import enqueue_voice_title_refresh
 
+        message_count = len(conversation.messages)
         eng = make_session_rls_engine(config.database_url, user_id=user_id)
         try:
-            enqueue_voice_synthesis(
-                eng,
-                owner_id=user_id,
-                conversation_id=conversation_id,
-                persona_id=persona_id,
-                message_count=len(conversation.messages),
-            )
+            with contextlib.suppress(Exception):
+                enqueue_voice_synthesis(
+                    eng,
+                    owner_id=user_id,
+                    conversation_id=conversation_id,
+                    persona_id=persona_id,
+                    message_count=message_count,
+                )
+            # R9-028: the web trigger's {4,10,24,50,100} thresholds under-fire for
+            # short calls — this fires ONCE, unconditionally, regardless of count.
+            # Keyed on the final count, so a re-run of teardown is a safe no-op.
+            with contextlib.suppress(Exception):
+                enqueue_voice_title_refresh(
+                    eng,
+                    owner_id=user_id,
+                    conversation_id=conversation_id,
+                    message_count=message_count,
+                )
         finally:
             eng.dispose()
 
@@ -945,7 +961,7 @@ async def build_agent_session(
         async_lane=async_lane,
         handback_poller=handback_poller,
         delegation_dispatcher=delegation_dispatcher,
-        on_call_complete=_enqueue_synthesis_on_end,
+        on_call_complete=_on_call_complete,
     )
 
 

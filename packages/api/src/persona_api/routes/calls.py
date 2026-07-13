@@ -40,6 +40,7 @@ def _call_summary(row: dict[str, object]) -> CallSummary:
         call_id=str(row["call_id"]),
         conversation_id=str(row["conversation_id"]),
         persona_id=str(row["persona_id"]),
+        title=str(row.get("title") or ""),
         started_at=cast("Any", row["started_at"]),
         ended_at=cast("Any", row.get("ended_at")),
         duration_s=cast("int | None", row.get("duration_s")),
