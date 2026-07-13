@@ -46,9 +46,10 @@ import type {
  * stack of avatars. Each links to the persona's page (`/personas/:id`), the
  * same target the rest of the app uses.
  *
- * R9-036: each avatar is now ALSO gesture-capable (press-and-hold to arm a
- * call/chat live preview) — see `PersonaRailItem` below. Both collapsed and
- * expanded modes share this ONE component/hook pairing (no forked logic).
+ * R9-036 REOPEN: each avatar is now ALSO gesture-capable (a real swipe —
+ * vertical drag past a small tap-slop shows a call/chat live preview) — see
+ * `PersonaRailItem` below. Both collapsed and expanded modes share this ONE
+ * component/hook pairing (no forked logic).
  */
 export function PersonasRail({
   personas,
@@ -81,14 +82,22 @@ export function PersonasRail({
 }
 
 /**
- * One PERSONAS-rail avatar (R9-036): the pre-existing click-through Link,
- * now ALSO driving `usePressSwipeGesture` + `<PressSwipePreview>` — the
- * reusable press-hold-swipe mechanic (lib/hooks/use-press-swipe-gesture.ts,
- * components/patterns/press-swipe-preview.tsx). Press-and-hold ~250ms arms a
- * live call/chat preview; dragging up past the threshold and releasing
- * commits a call, dragging down commits a text chat; an early release or
- * drag-back cancels; a plain tap (no hold) is BYTE-IDENTICAL to the prior
- * click-through — the gesture hook never touches that path.
+ * One PERSONAS-rail avatar (R9-036 REOPEN): the pre-existing click-through
+ * Link, now ALSO driving `usePressSwipeGesture` + `<PressSwipePreview>` —
+ * the reusable swipe mechanic (lib/hooks/use-press-swipe-gesture.ts,
+ * components/patterns/press-swipe-preview.tsx). NO hold, no timer: vertical
+ * movement past a small tap-slop immediately shows the live call/chat
+ * preview. The commit geometry is the avatar's OWN circle — dragging past
+ * its rendered radius (measured from the element's own rect) locks the
+ * direction; releasing while locked commits, dragging back inside or
+ * releasing unlocked cancels. A plain tap (release under slop) is
+ * BYTE-IDENTICAL to the prior click-through — the gesture hook never
+ * touches that path.
+ *
+ * Scroll trade-off (owner-ruled): the avatar Link carries `touch-none`
+ * UNCONDITIONALLY — a vertical drag starting on an avatar always belongs to
+ * this gesture, never to the sidebar's own scroll. The rest of the rail
+ * (non-avatar space) and wheel scrolling are unaffected.
  *
  * Both actions go through the app's EXISTING origination seams (no new
  * flow):
@@ -163,17 +172,16 @@ function PersonaRailItem({
               }}
               onPointerDown={gesture.handlers.onPointerDown}
               onContextMenu={(event) => {
-                // Suppress the OS long-press context menu / iOS "peek" once
-                // armed — it would otherwise fight the live preview for the
-                // same hold. (Unverified without a real device — see the
-                // fix's evidence note.)
+                // Suppress the OS long-press context menu / iOS "peek" while
+                // swiping — it would otherwise fight the live preview for
+                // the same drag. (Unverified without a real device — see
+                // the fix's evidence note.)
                 if (gesture.armed) event.preventDefault();
               }}
               aria-label={persona.name}
               className={cn(
-                "block rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+                "block touch-none rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
                 "[-webkit-touch-callout:none]",
-                gesture.armed && "touch-none",
               )}
             />
           }
@@ -185,6 +193,7 @@ function PersonaRailItem({
       <PressSwipePreview
         armed={gesture.armed}
         highlight={gesture.highlight}
+        progress={gesture.progress}
         anchorRect={gesture.anchorRect}
         collapsed={collapsed}
         up={{

@@ -1,38 +1,57 @@
 "use client";
 
 /**
- * R9-036 — press-and-hold-to-arm, drag-to-commit gesture.
+ * R9-036 REOPEN — real swipe, circle-radius commit geometry.
  *
- * The reusable mechanic behind "hold a persona avatar to reveal a call/chat
- * live preview, drag up/down to choose, release past a threshold to commit."
- * This hook is generic over WHAT commits — callers supply `onCommitUp` /
- * `onCommitDown`; it only knows about hold-timing, drag distance, and the
- * armed/highlight state machine. Any future surface (not just the sidebar)
+ * The reusable mechanic behind "swipe a persona avatar up/down to call or
+ * chat, with a live preview of the pending action." This hook is generic
+ * over WHAT commits — callers supply `onCommitUp` / `onCommitDown`; it only
+ * knows about slop, the pressed element's own circular geometry, and the
+ * swiping/locked state machine. Any future surface (not just the sidebar)
  * can reuse it for its own up/down pair — see `<PressSwipePreview>`
  * (components/patterns/press-swipe-preview.tsx) for the matching live-preview
  * chips this hook is designed to drive.
  *
  * Interaction contract (owner ruling, docs/specs/phase3/spec_R9/issues.md
- * R9-036):
- *   - press-and-hold ~250ms ARMS the gesture. The hold is what disambiguates
- *     a hold-to-drag from an ordinary scroll-drag (see "no-arm" below) —
- *     it's the only reason this needs a timer at all.
- *   - while armed, dragging vertically past `thresholdPx` highlights the
- *     corresponding direction; releasing while highlighted COMMITS that
- *     direction. An early release or a drag-back (magnitude under threshold
- *     at release) cancels cleanly — no commit, no navigation.
- *   - a plain tap (release before the hold timer fires) is UNCHANGED: this
- *     hook never calls `preventDefault` / `stopPropagation` on that path, so
- *     the element's native click (a Link's navigation) fires exactly as it
+ * "R9-036 REOPEN" — supersedes the original R9-036 hold-to-arm design):
+ *   - NO hold-to-arm and NO timer of any kind. pointer-down starts tracking
+ *     immediately; once the pointer's VERTICAL displacement from the
+ *     press position exceeds `slopPx` (default ~8px — just enough to keep an
+ *     ordinary tap's hand-tremor from misfiring), the gesture enters swiping
+ *     mode and the live-preview chips appear.
+ *   - the commit geometry is the PRESSED ELEMENT'S OWN CIRCLE: at
+ *     pointer-down we measure the element's rendered rect
+ *     (`getBoundingClientRect()`) and take its radius (half the smaller
+ *     side — the avatar is a circle, so width === height in practice, but
+ *     `min()` keeps this sane for any bound element). While swiping, the
+ *     pointer's vertical distance from the circle's own center (not the
+ *     press position — the owner's ruling is explicitly about the CIRCLE'S
+ *     rim, "halve the avatar circle") is compared against that radius:
+ *     crossing above the rim LOCKS "up" (call), crossing below LOCKS "down"
+ *     (chat). Dragging back inside the circle unlocks — this is fully
+ *     continuous, recomputed on every move, not a one-shot latch.
+ *   - release while locked COMMITS that direction. Release while swiping but
+ *     unlocked (inside the circle) CANCELS cleanly — no commit, no
+ *     navigation.
+ *   - a plain tap (release before slop is exceeded) is UNCHANGED: this hook
+ *     never calls `preventDefault` / `stopPropagation` on that path, so the
+ *     element's native click (a Link's navigation) fires exactly as it
  *     always did.
- *   - an immediate drag (movement past `slopPx` BEFORE the hold timer fires)
- *     never arms — the hook detaches without touching the event, so native
- *     scrolling (e.g. the sidebar rail) is never hijacked.
- *   - once armed, the pointer's eventual synthetic `click` (a pointerdown +
- *     pointerup pair with ~no net movement fires a native click, the same as
- *     any tap) is suppressed via `handlers.onClick` — an armed-then-
- *     cancelled/committed gesture must never ALSO trigger the element's
- *     ordinary click-navigation.
+ *   - once swiping starts, the pointer's eventual synthetic `click` (a
+ *     pointerdown + pointerup pair with ~no net movement fires a native
+ *     click, the same as any tap) is suppressed via `handlers.onClick` — a
+ *     swiped-then-cancelled/committed gesture must never ALSO trigger the
+ *     element's ordinary click-navigation.
+ *
+ * Scroll trade-off (owner-ruled, R9-036 REOPEN point 4): avatar-initiated
+ * vertical drags belong ENTIRELY to this gesture now — there is no more
+ * "immediate drag scrolls instead" escape hatch (that was the hold-era
+ * guard; R9-036 REOPEN explicitly removes it). Callers apply `touch-action:
+ * none` to the bound element UNCONDITIONALLY (not gated on any state from
+ * this hook) so a touch drag starting on the avatar never triggers the
+ * browser's native scroll in the first place; the surrounding strip still
+ * scrolls normally from non-avatar space and always via wheel (wheel
+ * scrolling is never touch-action-gated).
  *
  * Implementation notes:
  *   - Pointer Events (not separate touch/mouse handlers) unify touch, mouse,
@@ -52,45 +71,47 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export type SwipeDirection = "up" | "down";
 
 export interface PressSwipeGestureOptions {
-  /** Fires when the gesture commits with "up" highlighted at release. */
+  /** Fires when the gesture commits with "up" locked at release. */
   onCommitUp: () => void;
-  /** Fires when the gesture commits with "down" highlighted at release. */
+  /** Fires when the gesture commits with "down" locked at release. */
   onCommitDown: () => void;
   /**
-   * Hold duration (ms) before the gesture arms. Default 250 — the owner's
-   * ruling in R9-036 ("press-hold (~250ms) ARMS the gesture").
-   */
-  holdMs?: number;
-  /**
-   * Vertical drag distance (px) past which a direction highlights, and past
-   * which a release commits it. Default 48 — the midpoint of the owner's
-   * quoted 40-56px range: big enough that a shaky hold or a slightly
-   * overshot tap doesn't accidentally commit, small enough to feel
-   * responsive. It also roughly matches the `md` persona avatar's own
-   * footprint (40px, see persona-avatar.tsx's SIZE_CLASSES), so the drag
-   * reads as "about one avatar's height" — a distance the user is already
-   * looking at, rounded to the app's 4px spacing scale.
-   */
-  thresholdPx?: number;
-  /**
-   * Pre-arm movement slop (px). Movement past this BEFORE the hold timer
-   * fires cancels arming outright — the gesture never arms and nothing is
-   * suppressed. This is what keeps ordinary scrolling untouched. Default 10
-   * — a conventional small touch-slop, under the ~10-15px range browsers
-   * themselves use to tell a tap from a pan.
+   * Vertical movement (px) from the press position past which the gesture
+   * leaves "maybe a tap" and enters swiping mode (showing the live preview).
+   * Default 8 — the owner's ruling in R9-036 REOPEN ("small ~8px slop to
+   * keep taps clean").
    */
   slopPx?: number;
+  /**
+   * Override for the commit-lock radius (px). Defaults to HALF the pressed
+   * element's own rendered size — measured via `getBoundingClientRect()` at
+   * press time — which is the owner's explicit ruling ("the avatar circle
+   * should be halved"; the threshold is the circle's own geometry, not a
+   * hardcoded constant). This override exists for callers (tests, or a
+   * future non-circular surface) that can't or don't want to rely on real
+   * layout.
+   */
+  radiusPx?: number;
 }
 
 export interface PressSwipeGesture<T extends HTMLElement> {
-  /** True once the hold has armed the gesture — render the live-preview chips. */
+  /** True once past the tap-slop — a real swipe is in progress; render the live-preview chips. */
   armed: boolean;
-  /** Which direction is currently past the commit threshold, or `null` (neutral). */
+  /** Which direction is currently locked (past the circle's rim), or `null` (inside the circle). */
   highlight: SwipeDirection | null;
   /**
+   * Signed, continuous progress toward each lock, clamped to [-1, 1]:
+   * -1 = "up" locked (or beyond), +1 = "down" locked (or beyond), 0 =
+   * centered on the circle. Only meaningful while `armed`; 0 otherwise.
+   * Drives the live preview's approach animation (brighten/scale toward a
+   * direction as the pointer nears its rim) — `highlight` alone is only the
+   * discrete locked/unlocked edge.
+   */
+  progress: number;
+  /**
    * The armed element's viewport rect, captured the instant the gesture
-   * arms — the anchor a floating preview positions against. `null` until
-   * armed (and reset to `null` once the gesture ends).
+   * starts swiping (slop exceeded) — the anchor a floating preview positions
+   * against. `null` until swiping (and reset to `null` once the gesture ends).
    */
   anchorRect: DOMRect | null;
   /** Attach to the SAME interactive element `handlers` is spread onto. */
@@ -102,26 +123,32 @@ export interface PressSwipeGesture<T extends HTMLElement> {
   };
 }
 
-const DEFAULT_HOLD_MS = 250;
-const DEFAULT_THRESHOLD_PX = 48;
-const DEFAULT_SLOP_PX = 10;
+const DEFAULT_SLOP_PX = 8;
+/**
+ * Fallback commit radius when the pressed element's own rect can't be
+ * measured (e.g. zero-sized — an unmounted ref, or a test that doesn't stub
+ * `getBoundingClientRect`). Matches the sidebar's own "md" persona avatar
+ * (size-10 = 40px, see persona-avatar.tsx's SIZE_CLASSES) so the default
+ * behaves sanely even when real layout isn't available.
+ */
+const DEFAULT_RADIUS_FALLBACK_PX = 20;
 
 export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
   onCommitUp,
   onCommitDown,
-  holdMs = DEFAULT_HOLD_MS,
-  thresholdPx = DEFAULT_THRESHOLD_PX,
   slopPx = DEFAULT_SLOP_PX,
+  radiusPx,
 }: PressSwipeGestureOptions): PressSwipeGesture<T> {
   const [armed, setArmed] = useState(false);
   const [highlight, setHighlight] = useState<SwipeDirection | null>(null);
+  const [progress, setProgress] = useState(0);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
 
   const elementRef = useRef<T | null>(null);
   const suppressClickRef = useRef(false);
   // Any in-flight gesture's teardown — a defensive unmount-time cleanup (the
   // sidebar's own live-refresh, R9-012, can re-render/unmount this list from
-  // under an active hold).
+  // under an active swipe).
   const detachRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -140,23 +167,16 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
       if (detachRef.current !== null) return;
 
       const pointerId = event.pointerId;
-      const startX = event.clientX;
       const startY = event.clientY;
-      let isArmed = false;
-
-      let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-        timer = null;
-        isArmed = true;
-        setAnchorRect(elementRef.current?.getBoundingClientRect() ?? null);
-        setHighlight(null);
-        setArmed(true);
-      }, holdMs);
+      const rect = elementRef.current?.getBoundingClientRect() ?? null;
+      const measuredRadius = rect ? Math.min(rect.width, rect.height) / 2 : 0;
+      const radius =
+        radiusPx ??
+        (measuredRadius > 0 ? measuredRadius : DEFAULT_RADIUS_FALLBACK_PX);
+      const centerY = rect ? rect.top + rect.height / 2 : startY;
+      let isSwiping = false;
 
       const detach = () => {
-        if (timer !== null) {
-          clearTimeout(timer);
-          timer = null;
-        }
         document.removeEventListener("pointermove", handleMove);
         document.removeEventListener("pointerup", handleUp);
         document.removeEventListener("pointercancel", handleCancel);
@@ -164,14 +184,15 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
       };
 
       const finish = (commit: SwipeDirection | null) => {
-        const wasArmed = isArmed;
+        const wasSwiping = isSwiping;
         detach();
-        isArmed = false;
+        isSwiping = false;
         setArmed(false);
         setHighlight(null);
+        setProgress(0);
         setAnchorRect(null);
-        if (wasArmed) {
-          // The gesture reached "armed": its eventual click (the browser
+        if (wasSwiping) {
+          // The gesture reached "swiping": its eventual click (the browser
           // fires one for this pointerdown/pointerup pair whenever the net
           // movement is small, same as any tap) must not ALSO navigate.
           suppressClickRef.current = true;
@@ -180,41 +201,47 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
         else if (commit === "down") onCommitDown();
       };
 
+      // Recompute the locked direction + continuous progress from the
+      // pointer's CURRENT vertical distance to the circle's own center —
+      // fully continuous, called on every move AND once more at release, so
+      // "drag back inside cancels" and "release exactly at the rim" agree.
+      function lockedDirection(clientY: number): SwipeDirection | null {
+        const dyFromCenter = clientY - centerY;
+        if (dyFromCenter <= -radius) return "up";
+        if (dyFromCenter >= radius) return "down";
+        return null;
+      }
+
       function handleMove(moveEvent: PointerEvent) {
         if (moveEvent.pointerId !== pointerId) return;
         const dy = moveEvent.clientY - startY;
-        if (!isArmed) {
-          // Pre-arm: real movement means the user is scrolling/dragging, not
-          // holding. Abandon the timer and touch NOTHING else — no
-          // preventDefault, no state change — so native scroll (and, for a
-          // short drag-release, the native click) behaves exactly as if
-          // this hook didn't exist. This is the whole "immediate drag
-          // scrolls, never arms" guarantee.
-          const dx = moveEvent.clientX - startX;
-          if (Math.hypot(dx, dy) > slopPx) detach();
-          return;
+        if (!isSwiping) {
+          // Pre-swipe: still deciding tap vs. swipe. Touch-action:none on
+          // the bound element already keeps a touch drag from scrolling
+          // anything underneath (R9-036 REOPEN's scroll trade-off), so
+          // there's nothing else to guard here — just wait for slop.
+          if (Math.abs(dy) <= slopPx) return;
+          isSwiping = true;
+          setAnchorRect(rect);
+          setArmed(true);
+          // Fall through: this same move already crossed into swiping mode,
+          // so it also drives the first lock/progress read below.
         }
-        // Armed: this is the live-preview drag. Stop the page from ALSO
-        // scrolling underneath the preview and update the highlight.
         moveEvent.preventDefault();
-        if (dy <= -thresholdPx) setHighlight("up");
-        else if (dy >= thresholdPx) setHighlight("down");
-        else setHighlight(null);
+        const dyFromCenter = moveEvent.clientY - centerY;
+        setProgress(Math.max(-1, Math.min(1, dyFromCenter / radius)));
+        setHighlight(lockedDirection(moveEvent.clientY));
       }
 
       function handleUp(upEvent: PointerEvent) {
         if (upEvent.pointerId !== pointerId) return;
-        if (!isArmed) {
-          // Released before the hold armed — a plain tap (or a released
-          // micro-drag under slop). Detach quietly; the native click fires
-          // unmolested.
+        if (!isSwiping) {
+          // Released before slop was exceeded — a plain tap. Detach
+          // quietly; the native click fires unmolested.
           detach();
           return;
         }
-        const dy = upEvent.clientY - startY;
-        const commit: SwipeDirection | null =
-          dy <= -thresholdPx ? "up" : dy >= thresholdPx ? "down" : null;
-        finish(commit);
+        finish(lockedDirection(upEvent.clientY));
       }
 
       function handleCancel(cancelEvent: PointerEvent) {
@@ -227,7 +254,7 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
       document.addEventListener("pointerup", handleUp);
       document.addEventListener("pointercancel", handleCancel);
     },
-    [onCommitUp, onCommitDown, holdMs, thresholdPx, slopPx],
+    [onCommitUp, onCommitDown, slopPx, radiusPx],
   );
 
   const onClick = useCallback((event: React.MouseEvent<T>) => {
@@ -240,6 +267,7 @@ export function usePressSwipeGesture<T extends HTMLElement = HTMLElement>({
   return {
     armed,
     highlight,
+    progress,
     anchorRect,
     elementRef,
     handlers: { onPointerDown, onClick },

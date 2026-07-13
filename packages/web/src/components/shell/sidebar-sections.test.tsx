@@ -288,13 +288,21 @@ describe("PersonasRail", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  // R9-036 — press-and-hold + swipe. The gesture MECHANICS (arm timing, slop,
-  // threshold, cancel, tap-through) are exhaustively covered at the hook
-  // level (lib/hooks/use-press-swipe-gesture.test.tsx); these prove the
+  // R9-036 REOPEN — real swipe, no hold. The gesture MECHANICS (tap-slop,
+  // circle-radius geometry, lock/unlock, cancel, tap-through) are
+  // exhaustively covered at the hook level
+  // (lib/hooks/use-press-swipe-gesture.test.tsx); these prove the
   // SIDEBAR-SPECIFIC WIRING — that a committed "up" actually drives the call
   // origination seam and a committed "down" actually calls `startChat` — in
   // both collapsed and expanded mounts.
-  describe("press-and-hold gesture wiring", () => {
+  //
+  // Neither PersonaRailItem's Link nor jsdom stub `getBoundingClientRect`
+  // here, so the hook measures an all-zero rect and falls back to its
+  // documented default radius (20px — DEFAULT_RADIUS_FALLBACK_PX, matching
+  // the avatar's own real "md" size). Pressing at clientY:0, dy IS the
+  // distance from both the press position and the (zero) center, so a
+  // ±40px move is comfortably past the 8px tap-slop AND the 20px radius.
+  describe("swipe gesture wiring", () => {
     const POINTER_ID = 1;
 
     beforeEach(() => {
@@ -307,10 +315,11 @@ describe("PersonasRail", () => {
 
     // Fake timers + a mocked-async `api.POST` (a real Promise, resolved on
     // the microtask queue) combine safely via `advanceTimersByTimeAsync`,
-    // which flushes microtasks between timer advances — unlike
+    // which flushes microtasks after the synchronous swipe — unlike
     // `vi.waitFor`'s real-time polling, which fake timers would otherwise
-    // starve. `pressHold`/`release` are async for exactly this reason.
-    async function pressHold(target: Element) {
+    // starve. `swipe` is async for exactly this reason (there's no hold to
+    // wait out anymore — the whole gesture is one pointerdown/move/up).
+    async function swipe(target: Element, clientY: number) {
       fireEvent.pointerDown(target, {
         clientX: 0,
         clientY: 0,
@@ -318,10 +327,6 @@ describe("PersonasRail", () => {
         pointerType: "touch",
         button: 0,
       });
-      await vi.advanceTimersByTimeAsync(250);
-    }
-
-    async function release(clientY: number) {
       fireEvent.pointerMove(document, {
         clientX: 0,
         clientY,
@@ -338,11 +343,10 @@ describe("PersonasRail", () => {
     }
 
     it.each([[false], [true]])(
-      "collapsed=%s: hold + drag UP + release calls the persona (mints a call-origin conversation → requestCall → navigate)",
+      "collapsed=%s: swipe UP past the circle's radius and release calls the persona (mints a call-origin conversation → requestCall → navigate)",
       async (collapsed) => {
         wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
-        await pressHold(screen.getByRole("link"));
-        await release(-60); // past the 48px default threshold, upward
+        await swipe(screen.getByRole("link"), -40); // past slop and the 20px fallback radius, upward
         expect(h.post).toHaveBeenCalledTimes(1);
         expect(h.post).toHaveBeenCalledWith(
           "/v1/personas/{persona_id}/conversations",
@@ -364,14 +368,23 @@ describe("PersonasRail", () => {
     );
 
     it.each([[false], [true]])(
-      "collapsed=%s: hold + drag DOWN + release starts a chat via startChat",
+      "collapsed=%s: swipe DOWN past the circle's radius and release starts a chat via startChat",
       async (collapsed) => {
         wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
-        await pressHold(screen.getByRole("link"));
-        await release(60); // past the 48px default threshold, downward
+        await swipe(screen.getByRole("link"), 40); // past slop and the 20px fallback radius, downward
         expect(h.startChat).toHaveBeenCalledWith("astrid");
         expect(h.post).not.toHaveBeenCalled();
         expect(h.requestCall).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([[false], [true]])(
+      "collapsed=%s: swiping past slop but releasing before the circle's radius cancels — neither seam fires",
+      async (collapsed) => {
+        wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
+        await swipe(screen.getByRole("link"), -12); // past the 8px slop, under the 20px fallback radius
+        expect(h.post).not.toHaveBeenCalled();
+        expect(h.startChat).not.toHaveBeenCalled();
       },
     );
 
@@ -380,7 +393,7 @@ describe("PersonasRail", () => {
       // after a pointerdown/pointerup pair — fire it explicitly, the same
       // way the hook-level test does, to model what a real tap-release
       // triggers natively. `onNavigate` is the one sidebar-visible effect a
-      // NORMAL click has (closing the mobile sheet) that an armed gesture's
+      // NORMAL click has (closing the mobile sheet) that a swiped gesture's
       // synthesized click must NOT also trigger.
       const onNavigate = vi.fn();
       wrap(
@@ -391,8 +404,7 @@ describe("PersonasRail", () => {
         />,
       );
       const link = screen.getByRole("link");
-      await pressHold(link);
-      await release(60); // commits "down" (startChat)
+      await swipe(link, 40); // commits "down" (startChat)
       expect(h.startChat).toHaveBeenCalledTimes(1);
       fireEvent.click(link);
       expect(onNavigate).not.toHaveBeenCalled();
@@ -420,8 +432,7 @@ describe("PersonasRail", () => {
     it("call entry does NOT navigate when a switch confirm is pending (inherits the one-call rule)", async () => {
       h.requestCall.mockReturnValue("switch");
       wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
-      await pressHold(screen.getByRole("link"));
-      await release(-60);
+      await swipe(screen.getByRole("link"), -40);
       expect(h.requestCall).toHaveBeenCalled();
       expect(h.push).not.toHaveBeenCalled();
     });
