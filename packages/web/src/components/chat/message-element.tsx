@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 
 /**
  * Spec F2 T15 + T26 — MessageElement.
@@ -47,8 +47,10 @@ import { ActivityState } from "@/components/activity-state";
 import type { AvatarPersona } from "@/components/persona/persona-avatar";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
 import { AskUserPrompt } from "@/components/runs/ask-user-prompt";
+import { buttonVariants } from "@/components/ui/button";
 import { DocumentChip } from "@/components/ui/document-chip";
 import { Markdown } from "@/components/ui/markdown";
+import { Textarea } from "@/components/ui/textarea";
 import type { ActivityView } from "@/lib/activity";
 import type { OutputContent } from "@/lib/api/output-content";
 import { operationFor, projectToolResult } from "@/lib/normalisers/_classify";
@@ -213,13 +215,24 @@ interface MessageElementProps {
     opts: { isAccept: boolean; proposal?: ProactiveProposal },
   ) => Promise<void>;
   /**
-   * R9-025a — retry: client-side re-send of the preceding user message as a
-   * NEW turn (see the retry-seam decision note above PersonaMessage). Omit
-   * to hide the retry button entirely (e.g. a read-only transcript viewer).
+   * R9-025 leg C — regenerate: a REAL server-side retry of the tail assistant
+   * reply (see use-chat.ts's `regenerate`). Omit to hide the retry button
+   * entirely (e.g. a read-only transcript viewer, or — per the v1
+   * conversation-TAIL-only scope — this isn't the last assistant message; the
+   * caller, chat-window.tsx, only wires this for the tail).
    */
   onRetryMessage?: (assistantMessageId: string) => void;
-  /** R9-025a — disable retry while a turn is active (mirrors the composer's own `sendBlocked`). */
+  /** Disable retry while a turn is active (mirrors the composer's own `sendBlocked`). */
   retryDisabled?: boolean;
+  /**
+   * R9-025 leg C — edit: save-and-rerun the LAST user message's content (see
+   * use-chat.ts's `editAndRerun`). Omit to hide the edit button entirely
+   * (same v1 tail-only gating as `onRetryMessage`, mirrored for the user
+   * side — the caller only wires this for the last user message).
+   */
+  onEditMessage?: (userMessageId: string, newContent: string) => void;
+  /** Mirrors `retryDisabled` — disabled while ANY turn is active. */
+  editDisabled?: boolean;
   /**
    * R9-025b — "Turn into file": fires the extraction job for this assistant
    * message at the chosen format. Omit to hide the action entirely (e.g. a
@@ -241,12 +254,20 @@ export function MessageElement({
   onRespondToProactive,
   onRetryMessage,
   retryDisabled,
+  onEditMessage,
+  editDisabled,
   onTurnIntoFile,
   turnIntoFileDisabled,
 }: MessageElementProps) {
   if (message.role === "user") {
     return (
-      <UserMessage message={message} persona={persona} className={className} />
+      <UserMessage
+        message={message}
+        persona={persona}
+        className={className}
+        onEditMessage={onEditMessage}
+        editDisabled={editDisabled}
+      />
     );
   }
   return (
@@ -268,16 +289,43 @@ function UserMessage({
   message,
   persona,
   className,
+  onEditMessage,
+  editDisabled,
 }: {
   message: MessageElementView;
   persona: AvatarPersona;
   className?: string;
+  onEditMessage?: (userMessageId: string, newContent: string) => void;
+  editDisabled?: boolean;
 }) {
   // F3 (T10) — attached images render INSIDE the bubble, above the text,
   // via AuthedImage (Bearer-fetched blob URLs per D-F3-X-image-serve-auth).
   // Empty/absent `images` → text-only path renders byte-for-byte unchanged.
   const hasImages = message.images && message.images.length > 0;
   const hasDocuments = message.documents && message.documents.length > 0;
+
+  // R9-025 leg C — inline edit: local draft-text state owned HERE (not the
+  // action bar, which is a stateless control). `editing` swaps the bubble for
+  // a form; the pencil button (wired only when `onEditMessage` is present —
+  // chat-window.tsx only ever wires it for the LAST user message, the v1
+  // tail-only scope) opens it.
+  const t = useTranslations("chat");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+
+  const startEdit = useCallback(() => {
+    setDraft(message.content);
+    setEditing(true);
+  }, [message.content]);
+
+  const cancelEdit = useCallback(() => setEditing(false), []);
+
+  const saveEdit = useCallback(() => {
+    const trimmed = draft.trim();
+    if (!trimmed || !onEditMessage) return;
+    setEditing(false);
+    onEditMessage(message.id, trimmed);
+  }, [draft, onEditMessage, message.id]);
 
   return (
     <div
@@ -291,52 +339,106 @@ function UserMessage({
           tests target it by that slot (not `firstElementChild`) precisely
           so this wrapper can exist without becoming a fragile coupling. */}
       <div className="flex max-w-[80%] flex-col items-end gap-1">
-        <div
-          data-slot="message-bubble"
-          className="type-body flex w-full flex-col gap-2 rounded-2xl rounded-br-sm bg-secondary px-4 py-2.5 text-secondary-foreground"
-        >
-          {hasImages ? (
-            <div
-              className="flex flex-wrap gap-2"
-              data-slot="message-images"
-              data-count={message.images?.length}
-            >
-              {message.images?.map((img) => (
-                <AuthedImage
-                  key={img.workspace_path}
-                  personaId={persona.id}
-                  workspacePath={img.workspace_path}
-                  mediaType={img.media_type}
-                  alt={img.workspace_path.split("/").pop() ?? "attached image"}
-                />
-              ))}
+        {editing ? (
+          <div
+            data-slot="message-edit-form"
+            className="type-body flex w-full flex-col gap-2 rounded-2xl bg-secondary px-3 py-2.5 text-secondary-foreground"
+          >
+            <Textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={!!editDisabled}
+              autoFocus
+              rows={3}
+              aria-label={t("actions.edit")}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  saveEdit();
+                } else if (e.key === "Escape") {
+                  cancelEdit();
+                }
+              }}
+              className="bg-background"
+            />
+            <div className="flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={cancelEdit}
+                data-slot="message-edit-cancel"
+                className={buttonVariants({ variant: "ghost", size: "sm" })}
+              >
+                {t("actions.editCancel")}
+              </button>
+              <button
+                type="button"
+                onClick={saveEdit}
+                disabled={!draft.trim() || !!editDisabled}
+                data-slot="message-edit-save"
+                className={buttonVariants({ variant: "default", size: "sm" })}
+              >
+                {t("actions.editSave")}
+              </button>
             </div>
-          ) : null}
-          {/* Spec 35: attached documents render as read-only plain chips (no
-              preview) so the user sees the file they sent in the thread. */}
-          {hasDocuments ? (
+          </div>
+        ) : (
+          <>
             <div
-              className="flex flex-wrap gap-2"
-              data-slot="message-documents"
-              data-count={message.documents?.length}
+              data-slot="message-bubble"
+              className="type-body flex w-full flex-col gap-2 rounded-2xl rounded-br-sm bg-secondary px-4 py-2.5 text-secondary-foreground"
             >
-              {message.documents?.map((d) => (
-                <DocumentChip
-                  key={d.doc_ref}
-                  docRef={d.doc_ref}
-                  filename={d.filename}
-                  format={d.format}
-                  sizeBytes={d.size_bytes}
-                  strategy={d.strategy}
-                />
-              ))}
+              {hasImages ? (
+                <div
+                  className="flex flex-wrap gap-2"
+                  data-slot="message-images"
+                  data-count={message.images?.length}
+                >
+                  {message.images?.map((img) => (
+                    <AuthedImage
+                      key={img.workspace_path}
+                      personaId={persona.id}
+                      workspacePath={img.workspace_path}
+                      mediaType={img.media_type}
+                      alt={
+                        img.workspace_path.split("/").pop() ?? "attached image"
+                      }
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {/* Spec 35: attached documents render as read-only plain chips
+                  (no preview) so the user sees the file they sent in the
+                  thread. */}
+              {hasDocuments ? (
+                <div
+                  className="flex flex-wrap gap-2"
+                  data-slot="message-documents"
+                  data-count={message.documents?.length}
+                >
+                  {message.documents?.map((d) => (
+                    <DocumentChip
+                      key={d.doc_ref}
+                      docRef={d.doc_ref}
+                      filename={d.filename}
+                      format={d.format}
+                      sizeBytes={d.size_bytes}
+                      strategy={d.strategy}
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {message.content ? (
+                <span className="whitespace-pre-wrap">{message.content}</span>
+              ) : null}
             </div>
-          ) : null}
-          {message.content ? (
-            <span className="whitespace-pre-wrap">{message.content}</span>
-          ) : null}
-        </div>
-        <MessageActionBar messageRole="user" content={message.content} />
+            <MessageActionBar
+              messageRole="user"
+              content={message.content}
+              onEdit={onEditMessage ? startEdit : undefined}
+              editDisabled={editDisabled}
+            />
+          </>
+        )}
       </div>
       {/* Spec 35: the user's own profile avatar on their turns — mirrors the
           persona avatar on the other side of the thread. */}
@@ -346,17 +448,18 @@ function UserMessage({
 }
 
 /**
- * R9-025a retry-seam decision: NO server-side regenerate/replace-last-turn
- * capability exists (verified: conversations.py has no PATCH/PUT on a
- * message, `PostMessageRequest` carries only `{content, channel?, images?}`,
- * `chat_turn_sink.open_turn` unconditionally INSERTs a fresh user+assistant
- * pair every call). So retry is a CLIENT-SIDE re-send of the preceding user
- * message as a brand-new turn — reusing `useChat.send()` verbatim, the exact
- * seam `respondToProactive`'s "surface-and-retry" already uses. `send()`
- * itself already self-blocks while a turn is streaming and silently
- * reattaches on a raced 409, so retry never bypasses the one-active-turn
+ * R9-025 leg C retry-seam decision (supersedes the R9-025a note): the operator
+ * pass on the wave-2a client-side echo-resend ("re-send the preceding user
+ * message as a brand-new turn") found the model saw its OWN just-superseded
+ * reply still sitting in context and produced a confused answer. Retry now
+ * calls `POST …/messages/{id}/regenerate` (`useChat.regenerate`) — a REAL
+ * server-side turn that supersedes the old reply (excluded from BOTH the next
+ * model prompt and the listing) before re-running. `regenerate` mirrors
+ * `send()`'s own concurrency posture (self-blocks while streaming, reattaches
+ * on a raced 409), so retry still never bypasses the one-active-turn
  * invariant; `retryDisabled` (mirrors the composer's `sendBlocked`) is the
- * belt-and-braces UI-level guard.
+ * belt-and-braces UI-level guard. `onRetryMessage` is wired ONLY on the LAST
+ * assistant message (chat-window.tsx) — the v1 conversation-TAIL-only scope.
  */
 function PersonaMessage({
   message,

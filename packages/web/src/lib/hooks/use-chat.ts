@@ -166,6 +166,11 @@ export function useChat(
         return persistedToView(m);
       });
     });
+    // R9-025 leg C: the RAW server list (real persisted ids), returned so
+    // `regenerate` / `editAndRerun` can resolve their tail target's REAL id
+    // synchronously — `setMessages` above is React-scheduled, so the `messages`
+    // state closure isn't updated yet when this function returns.
+    return incoming;
   }, [conversationId, token]);
 
   const send = useCallback(
@@ -271,6 +276,241 @@ export function useChat(
       }
     },
     [conversationId, streaming, token],
+  );
+
+  /**
+   * R9-025 leg C — regenerate: a REAL server-side retry of the tail assistant
+   * reply (`POST …/messages/{id}/regenerate`), replacing the wave-2a
+   * client-side echo-resend the owner rejected ("the LLM is now confused" —
+   * the old reply was never excluded from context). The API supersedes the
+   * target and re-runs the SAME preceding user turn with the old reply
+   * provably absent from the prompt.
+   *
+   * `reload()` runs FIRST: `send()`'s optimistic assistant turn carries a
+   * CLIENT-side random id until the next natural reload reconciles it with
+   * the server's real persisted id (`send()` itself never reloads on clean
+   * completion) — the MOST common regenerate click (right after a reply just
+   * finished streaming) would otherwise target an id the server has never
+   * heard of. Falls back to the CURRENT last message when the clicked id
+   * isn't found post-reload (that stale-id case) — chat-window.tsx only ever
+   * wires `onRetryMessage` onto the tail assistant message (v1 scope), so
+   * "whatever is now last" IS what was clicked, reconciled.
+   *
+   * Streams the SAME frame shapes as `send()` via the identical
+   * `applyTurnFrame` reducer, replacing the target bubble'S content IN PLACE
+   * (same array slot, same id) rather than appending a new one — the visual
+   * "replaced, not duplicated" contract the api's supersede filtering backs.
+   */
+  const regenerate = useCallback(
+    async (assistantMessageId: string) => {
+      if (streaming) return;
+      setError(false);
+      const fresh = await reload().catch(() => null);
+      if (!fresh) {
+        setError(true);
+        return;
+      }
+      const target =
+        fresh.find((m) => m.id === assistantMessageId) ??
+        fresh[fresh.length - 1];
+      if (!target || target.role !== "assistant") return;
+      const targetId = target.id;
+
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.id === targetId
+            ? {
+                ...msg,
+                content: "",
+                tools: [],
+                events: [],
+                streaming: true,
+                working: false,
+              }
+            : msg,
+        ),
+      );
+      setStreaming(true);
+      streamingRef.current = true;
+
+      const patch: Patch = (fn) =>
+        setMessages((m) =>
+          m.map((msg) => (msg.id === targetId ? fn(msg) : msg)),
+        );
+
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      try {
+        const jwt = await token();
+        for await (const raw of consumeSSE(
+          `${API}/v1/conversations/${conversationId}/messages/${targetId}/regenerate`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${jwt}` },
+            signal: ctrl.signal,
+          },
+        )) {
+          if (applyTurnFrame(raw, patch) === "error") {
+            setError(true);
+            break;
+          }
+        }
+        patch((a) => ({ ...a, streaming: false, working: false }));
+        setStreaming(false);
+        streamingRef.current = false;
+        // Reconcile the NEW reply's real id + persisted content — the clean-
+        // completion reload send() itself skips, but regenerate needs (the
+        // NEXT regenerate click must resolve a REAL id again).
+        await reload().catch(() => {});
+      } catch (e) {
+        if ((e as Error)?.name === "AbortError") return;
+        setStreaming(false);
+        streamingRef.current = false;
+        patch((a) => ({ ...a, streaming: false, working: false }));
+        if (abortRef.current === ctrl) abortRef.current = null;
+        if (e instanceof ApiError && e.status === 409) {
+          await reattachRef.current();
+          return;
+        }
+        setError(true);
+        if (!(e instanceof ApiError))
+          await reattachRef.current().catch(() => {});
+      } finally {
+        if (abortRef.current === ctrl) abortRef.current = null;
+      }
+    },
+    [conversationId, streaming, token, reload],
+  );
+
+  /**
+   * R9-025 leg C — edit-and-rerun: save an edit to the LAST user message and
+   * immediately re-run (`PATCH …/messages/{id}/edit`). The API supersedes the
+   * old user+reply pair and starts a brand-new turn on the edited content —
+   * the OLD wording is excluded from the next prompt exactly like a
+   * regenerated reply is.
+   *
+   * Same `reload()`-first id reconciliation as `regenerate` (see its
+   * docstring) — PLUS a position-based fallback when the clicked id isn't
+   * found post-reload: falls back to whichever message IS the current last
+   * user message (the true tail, or the second-to-last when the tail is that
+   * message's own assistant reply — the normal completed-turn shape).
+   * message-element.tsx only ever wires `onEditMessage` onto that ONE message
+   * (v1 tail-only scope), so this recovers the common "just sent, never
+   * reloaded" case rather than silently dropping the edit.
+   */
+  const editAndRerun = useCallback(
+    async (userMessageId: string, newContent: string) => {
+      const trimmed = newContent.trim();
+      if (!trimmed || streaming) return;
+      setError(false);
+      const fresh = await reload().catch(() => null);
+      if (!fresh) {
+        setError(true);
+        return;
+      }
+
+      let targetIdx = fresh.findIndex((m) => m.id === userMessageId);
+      if (targetIdx === -1 || fresh[targetIdx]?.role !== "user") {
+        if (fresh.length > 0 && fresh[fresh.length - 1].role === "user") {
+          targetIdx = fresh.length - 1;
+        } else if (
+          fresh.length > 1 &&
+          fresh[fresh.length - 1].role === "assistant" &&
+          fresh[fresh.length - 2].role === "user"
+        ) {
+          targetIdx = fresh.length - 2;
+        } else {
+          targetIdx = -1;
+        }
+      }
+      if (targetIdx === -1) return;
+      const targetId = fresh[targetIdx].id;
+      const hasTrailingReply =
+        targetIdx === fresh.length - 2 &&
+        fresh[fresh.length - 1]?.role === "assistant";
+      const asstId = hasTrailingReply
+        ? fresh[fresh.length - 1].id
+        : crypto.randomUUID();
+
+      setMessages((prev) => {
+        const base = prev.map((msg) =>
+          msg.id === targetId ? { ...msg, content: trimmed } : msg,
+        );
+        if (hasTrailingReply) {
+          return base.map((msg) =>
+            msg.id === asstId
+              ? {
+                  ...msg,
+                  content: "",
+                  tools: [],
+                  events: [],
+                  streaming: true,
+                  working: false,
+                }
+              : msg,
+          );
+        }
+        return [
+          ...base,
+          {
+            id: asstId,
+            role: "assistant" as const,
+            content: "",
+            tools: [],
+            events: [],
+            streaming: true,
+          },
+        ];
+      });
+      setStreaming(true);
+      streamingRef.current = true;
+
+      const patch: Patch = (fn) =>
+        setMessages((m) => m.map((msg) => (msg.id === asstId ? fn(msg) : msg)));
+
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      try {
+        const jwt = await token();
+        for await (const raw of consumeSSE(
+          `${API}/v1/conversations/${conversationId}/messages/${targetId}/edit`,
+          {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${jwt}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ content: trimmed }),
+            signal: ctrl.signal,
+          },
+        )) {
+          if (applyTurnFrame(raw, patch) === "error") {
+            setError(true);
+            break;
+          }
+        }
+        patch((a) => ({ ...a, streaming: false, working: false }));
+        setStreaming(false);
+        streamingRef.current = false;
+        await reload().catch(() => {});
+      } catch (e) {
+        if ((e as Error)?.name === "AbortError") return;
+        setStreaming(false);
+        streamingRef.current = false;
+        patch((a) => ({ ...a, streaming: false, working: false }));
+        if (abortRef.current === ctrl) abortRef.current = null;
+        if (e instanceof ApiError && e.status === 409) {
+          await reattachRef.current();
+          return;
+        }
+        setError(true);
+        if (!(e instanceof ApiError))
+          await reattachRef.current().catch(() => {});
+      } finally {
+        if (abortRef.current === ctrl) abortRef.current = null;
+      }
+    },
+    [conversationId, streaming, token, reload],
   );
 
   // Spec P1 — reattach to a live turn on mount/return. Detect via
@@ -431,5 +671,7 @@ export function useChat(
     reload,
     reattach,
     respondToProactive,
+    regenerate,
+    editAndRerun,
   };
 }

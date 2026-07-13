@@ -30,6 +30,7 @@ const messages = {
       copy: "Copy message",
       copied: "Copied",
       retry: "Retry",
+      edit: "Edit message",
       readAloud: "Read aloud",
       stopReading: "Stop reading",
       loadingAudio: "Loading audio…",
@@ -103,11 +104,17 @@ describe("MessageActionBar", () => {
   });
 
   describe("role gating", () => {
-    it("user role: only the copy button renders (no retry, no read-aloud)", () => {
+    it("user role: only the copy button renders (no retry, no edit, no read-aloud) when onEdit isn't wired", () => {
       renderBar({ messageRole: "user", onRetry: () => {}, personaId: "p1" });
       expect(screen.getByRole("button", { name: "Copy message" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Edit message" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Read aloud" })).toBeNull();
+    });
+
+    it("persona role: no edit affordance even when onEdit is (nonsensically) wired", () => {
+      renderBar({ messageRole: "persona", onEdit: () => {}, personaId: "p1" });
+      expect(screen.queryByRole("button", { name: "Edit message" })).toBeNull();
     });
 
     it("persona role without onRetry wired: no dead retry affordance", () => {
@@ -147,6 +154,31 @@ describe("MessageActionBar", () => {
       expect(button.disabled).toBe(true);
       fireEvent.click(button);
       expect(onRetry).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("edit (R9-025 leg C)", () => {
+    it("calls onEdit when clicked", () => {
+      const onEdit = vi.fn();
+      renderBar({ messageRole: "user", onEdit, personaId: undefined });
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      expect(onEdit).toHaveBeenCalledTimes(1);
+    });
+
+    it("is disabled while a turn is active (editDisabled) and does not fire", () => {
+      const onEdit = vi.fn();
+      renderBar({
+        messageRole: "user",
+        onEdit,
+        editDisabled: true,
+        personaId: undefined,
+      });
+      const button = screen.getByRole("button", {
+        name: "Edit message",
+      }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+      expect(onEdit).not.toHaveBeenCalled();
     });
   });
 

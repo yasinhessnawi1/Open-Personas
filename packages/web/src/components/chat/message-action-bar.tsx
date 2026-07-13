@@ -2,12 +2,13 @@
 
 /**
  * R9-025a — the hover/focus message action bar: copy (both roles), retry
- * (persona messages — client-side re-send of the preceding user message as
- * a NEW turn; see message-element.tsx's retry-seam decision note), read
- * aloud (persona messages — plays the persona's REAL voice via the api TTS
- * proxy). Visible on hover/focus of the message row (the parent applies
- * `group`); buttons stay in the tab order regardless (opacity-only hide, not
- * `display:none`) so keyboard users can reach them.
+ * (persona messages — R9-025 leg C: a REAL server-side regenerate, see
+ * use-chat.ts's `regenerate`), read aloud (persona messages — plays the
+ * persona's REAL voice via the api TTS proxy). R9-025 leg C also adds edit
+ * (user messages — opens the inline edit form owned by message-element.tsx's
+ * `UserMessage`). Visible on hover/focus of the message row (the parent
+ * applies `group`); buttons stay in the tab order regardless (opacity-only
+ * hide, not `display:none`) so keyboard users can reach them.
  */
 
 import {
@@ -16,6 +17,7 @@ import {
   Copy,
   FileOutput,
   Loader2,
+  Pencil,
   RotateCcw,
   Square,
   Volume2,
@@ -44,9 +46,18 @@ export interface MessageActionBarProps {
   messageRole: "user" | "persona";
   /** The message's raw text (markdown source) — copy target + read-aloud input. */
   content: string;
-  /** Persona role only. Omit to hide the retry button (e.g. no seam wired). */
+  /** Persona role only. Omit to hide the retry button (e.g. no seam wired, or not the tail message). */
   onRetry?: () => void;
   retryDisabled?: boolean;
+  /**
+   * R9-025 leg C — user role only. Omit to hide the edit button entirely
+   * (e.g. no seam wired, or — per the v1 conversation-TAIL-only scope — this
+   * isn't the last user message). Opens the inline edit form; no arguments
+   * (the caller, `UserMessage`, owns the draft-text state).
+   */
+  onEdit?: () => void;
+  /** Mirrors `retryDisabled` — disabled while ANY turn is active. */
+  editDisabled?: boolean;
   /** Persona role only — required for read-aloud (resolves the persona's voice). */
   personaId?: string;
   /**
@@ -66,6 +77,8 @@ export function MessageActionBar({
   content,
   onRetry,
   retryDisabled,
+  onEdit,
+  editDisabled,
   personaId,
   onTurnIntoFile,
   turnIntoFileDisabled,
@@ -80,6 +93,9 @@ export function MessageActionBar({
       data-slot="message-action-bar"
     >
       <CopyMessageButton content={content} />
+      {messageRole === "user" && onEdit ? (
+        <EditButton onEdit={onEdit} disabled={!!editDisabled} />
+      ) : null}
       {messageRole === "persona" && onRetry ? (
         <RetryButton onRetry={onRetry} disabled={!!retryDisabled} />
       ) : null}
@@ -155,6 +171,30 @@ function RetryButton({
       className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
     >
       <RotateCcw className="size-4" aria-hidden="true" />
+    </button>
+  );
+}
+
+function EditButton({
+  onEdit,
+  disabled,
+}: {
+  onEdit: () => void;
+  disabled: boolean;
+}) {
+  const t = useTranslations("chat");
+  const label = t("actions.edit");
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      data-slot="message-action-edit"
+      className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
+    >
+      <Pencil className="size-4" aria-hidden="true" />
     </button>
   );
 }

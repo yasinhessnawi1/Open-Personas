@@ -11,6 +11,10 @@ import { buttonVariants } from "@/components/ui/button";
 import { DocumentChip } from "@/components/ui/document-chip";
 import { Textarea } from "@/components/ui/textarea";
 import type { ApiError } from "@/lib/api/client";
+import {
+  isLastAssistantMessage,
+  isLastUserMessage,
+} from "@/lib/chat/tail-target";
 import { removeDocument } from "@/lib/document-actions";
 import { useChat } from "@/lib/hooks/use-chat";
 import { notifyConversationFilesChanged } from "@/lib/hooks/use-conversation-artifacts";
@@ -91,24 +95,32 @@ export function ChatWindow({
   // transient validation passes persist:false so it toasts without the bell.
   const { notify } = useNotify();
   const { getToken } = useAuth();
-  const { messages, streaming, error, send, respondToProactive, reload } =
-    useChat(conversationId, initialMessages, persona.id);
-  // R9-025a — retry: find the NEAREST preceding user message (a backward
-  // search, not just `prevMessage`, since a rare historical/proactive-reply
-  // sequence could have consecutive persona messages) and re-send its TEXT
-  // as a new turn via the SAME `send()` the composer uses — see the
-  // retry-seam decision note in message-element.tsx.
+  const {
+    messages,
+    streaming,
+    error,
+    send,
+    respondToProactive,
+    reload,
+    regenerate,
+    editAndRerun,
+  } = useChat(conversationId, initialMessages, persona.id);
+  // R9-025 leg C — retry: a REAL server-side regenerate (supersedes the old
+  // reply, re-runs on the SAME preceding user turn) — see the retry-seam
+  // decision note in message-element.tsx and use-chat.ts's `regenerate`.
   const handleRetryMessage = useCallback(
     (assistantMessageId: string) => {
-      const idx = messages.findIndex((m) => m.id === assistantMessageId);
-      for (let i = idx - 1; i >= 0; i--) {
-        if (messages[i].role === "user") {
-          void send(messages[i].content);
-          return;
-        }
-      }
+      void regenerate(assistantMessageId);
     },
-    [messages, send],
+    [regenerate],
+  );
+  // R9-025 leg C — edit: save-and-rerun the LAST user message's content — see
+  // use-chat.ts's `editAndRerun`.
+  const handleEditMessage = useCallback(
+    (userMessageId: string, newContent: string) => {
+      void editAndRerun(userMessageId, newContent);
+    },
+    [editAndRerun],
   );
   // R9-025b — "Turn into file": fire-and-forget the durable extraction job.
   // Optimistic toast (transient — the job runs out of band; the Files panel
@@ -379,19 +391,34 @@ export function ChatWindow({
                 {t("empty")}
               </p>
             ) : null}
-            {messages.map((m, i) => (
-              <MessageElement
-                key={m.id}
-                message={m}
-                persona={persona}
-                prevMessage={i > 0 ? messages[i - 1] : undefined}
-                onRespondToProactive={respondToProactive}
-                onRetryMessage={handleRetryMessage}
-                retryDisabled={streaming}
-                onTurnIntoFile={handleTurnIntoFile}
-                turnIntoFileDisabled={streaming}
-              />
-            ))}
+            {messages.map((m, i) => {
+              // R9-025 leg C — v1 scope: regenerate/edit render ONLY on the
+              // conversation TAIL (`lib/chat/tail-target.ts`, mirroring the
+              // api's `_tail_target` rule exactly).
+              return (
+                <MessageElement
+                  key={m.id}
+                  message={m}
+                  persona={persona}
+                  prevMessage={i > 0 ? messages[i - 1] : undefined}
+                  onRespondToProactive={respondToProactive}
+                  onRetryMessage={
+                    isLastAssistantMessage(messages, i)
+                      ? handleRetryMessage
+                      : undefined
+                  }
+                  retryDisabled={streaming}
+                  onEditMessage={
+                    isLastUserMessage(messages, i)
+                      ? handleEditMessage
+                      : undefined
+                  }
+                  editDisabled={streaming}
+                  onTurnIntoFile={handleTurnIntoFile}
+                  turnIntoFileDisabled={streaming}
+                />
+              );
+            })}
             {error ? (
               <p className="text-sm text-destructive">{t("error")}</p>
             ) : null}

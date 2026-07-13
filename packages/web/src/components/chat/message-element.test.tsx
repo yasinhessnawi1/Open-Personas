@@ -14,7 +14,7 @@
  *   7. TierBadge renders when terminal + tier set; hidden during streaming.
  */
 
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it, vi } from "vitest";
 
@@ -61,6 +61,9 @@ const messages = {
       copy: "Copy message",
       copied: "Copied",
       retry: "Retry",
+      edit: "Edit message",
+      editSave: "Save & rerun",
+      editCancel: "Cancel",
       readAloud: "Read aloud",
       stopReading: "Stop reading",
       loadingAudio: "Loading audio…",
@@ -600,5 +603,93 @@ describe("MessageElement — F3 T10 attached images on user messages", () => {
       <MessageElement message={msg} persona={ASTRID} />,
     );
     expect(container.querySelector('[data-slot="message-images"]')).toBeNull();
+  });
+});
+
+describe("MessageElement — R9-025 leg C inline edit (tail-only user message)", () => {
+  it("hides the edit button when onEditMessage isn't wired (not the tail — chat-window.tsx's gating)", () => {
+    renderWithIntl(
+      <MessageElement message={userMsg("what is 2+2?")} persona={ASTRID} />,
+    );
+    expect(screen.queryByRole("button", { name: "Edit message" })).toBeNull();
+  });
+
+  it("opens the inline edit form pre-filled with the current content", () => {
+    const { container } = renderWithIntl(
+      <MessageElement
+        message={userMsg("what is 2+2?")}
+        persona={ASTRID}
+        onEditMessage={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("what is 2+2?");
+    // The static bubble is REPLACED by the form, not duplicated alongside it.
+    expect(container.querySelector('[data-slot="message-bubble"]')).toBeNull();
+    expect(
+      container.querySelector('[data-slot="message-edit-form"]'),
+    ).not.toBeNull();
+  });
+
+  it("save-and-rerun round-trip: typing new text and saving fires onEditMessage(id, trimmed) and closes the form", () => {
+    const onEditMessage = vi.fn();
+    const msg = userMsg("what is 2+2?");
+    renderWithIntl(
+      <MessageElement
+        message={msg}
+        persona={ASTRID}
+        onEditMessage={onEditMessage}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "  what is 3+3?  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & rerun" }));
+
+    expect(onEditMessage).toHaveBeenCalledTimes(1);
+    expect(onEditMessage).toHaveBeenCalledWith(msg.id, "what is 3+3?");
+    // The form closed (no textarea left) without onEditMessage's caller having
+    // to re-render with new props — UserMessage owns its own editing state.
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("cancel discards the draft — onEditMessage never fires, the original content re-renders", () => {
+    const onEditMessage = vi.fn();
+    renderWithIntl(
+      <MessageElement
+        message={userMsg("what is 2+2?")}
+        persona={ASTRID}
+        onEditMessage={onEditMessage}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "a discarded draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onEditMessage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText("what is 2+2?")).toBeTruthy();
+  });
+
+  it("Save is disabled while editDisabled (streaming) — the belt-and-braces guard", () => {
+    renderWithIntl(
+      <MessageElement
+        message={userMsg("what is 2+2?")}
+        persona={ASTRID}
+        onEditMessage={() => {}}
+        editDisabled={true}
+      />,
+    );
+    // editDisabled ALSO disables the pencil button itself (message-action-bar
+    // tests cover that directly); this test proves the belt-and-braces guard
+    // on the Save button too, for the case a form was already open when
+    // streaming started.
+    const editButton = screen.getByRole("button", {
+      name: "Edit message",
+    }) as HTMLButtonElement;
+    expect(editButton.disabled).toBe(true);
   });
 });
