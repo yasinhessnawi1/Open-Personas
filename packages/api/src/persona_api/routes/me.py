@@ -309,6 +309,7 @@ async def create_schedule(
             idempotency_key=body.idempotency_key,
             now=datetime.now(UTC),
             notify_on_fire=body.notify_on_fire,
+            intent=body.intent,
         )
         # R9-012: post-commit sidebar liveness ping — the Schedule badge on the
         # owner's OTHER tabs/devices catches up (data-only; best-effort).

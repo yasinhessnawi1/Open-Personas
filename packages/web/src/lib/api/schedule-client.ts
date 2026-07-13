@@ -185,6 +185,9 @@ export interface ScheduleCreateBody extends RescheduleBody {
   idempotency_key: string;
   /** Opt into the coalesced fire bell (server default true; the dialog checkbox is default-on). */
   notify_on_fire: boolean;
+  /** R11-B2: "reminder" (default) composes the remind-and-update contract; "task"
+   * schedules the subject AS the goal verbatim (the Activity dialog's Schedule-for-later). */
+  intent?: "reminder" | "task";
 }
 
 /** The create confirmation — ids + the same echo shape the preview showed. */

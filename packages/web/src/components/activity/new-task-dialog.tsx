@@ -1,13 +1,16 @@
 "use client";
 
 import { Dialog } from "@base-ui/react/dialog";
-import { Play, Plus, Sparkles } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { CalendarClock, Play, Plus, Sparkles } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 import { useFormStatus } from "react-dom";
 
+import { useAuth } from "@/auth";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { createSchedule } from "@/lib/api/schedule-client";
 import { cn } from "@/lib/utils";
 
 /**
@@ -16,12 +19,17 @@ import { cn } from "@/lib/utils";
  * hand-off CTA (the kit README's persistent create affordance — /tasks the
  * standalone route retired in B1).
  *
- * HONEST SUBSET (D-R11-8): the kit mocks budget-cap, autonomy and
- * schedule-for-later controls, but the only real dispatch door today is
- * `POST /v1/personas/{id}/runs` (goal + persona — the same `startTask` server
- * action the /runs page uses; budget/autonomy ride the A-track defaults).
- * Those controls arrive when an A-track create-task door exists — shipping
- * them now would render knobs that silently do nothing.
+ * Two real doors, per the kit's footer:
+ *   - **Start now** — `POST /v1/personas/{id}/runs` (the /runs `startTask`
+ *     server action, threaded as a prop — the NewTaskForm pattern).
+ *   - **Schedule for later** — the A10 one-door (`POST /v1/me/schedule`) with
+ *     `intent: "task"`, so the backing task carries the goal VERBATIM and
+ *     shows up under Tasks as Scheduled until it fires (A4 Option-B: all
+ *     tasks are schedule-backed).
+ *
+ * HONEST SUBSET (D-R11-8): the kit's budget-cap / autonomy knobs are NOT
+ * shipped — no dispatch door carries them yet; knobs that silently do nothing
+ * would violate the honesty rule.
  */
 
 export interface NewTaskPersona {
@@ -45,6 +53,167 @@ function SubmitButton({ disabled }: { disabled: boolean }) {
   );
 }
 
+/** The dialog body — mounted fresh per open (state resets; the idempotency key
+ * is minted once per dialog-open, A10-D-6). */
+function DialogBody({
+  personas,
+  action,
+}: {
+  personas: readonly NewTaskPersona[];
+  action: NewTaskAction;
+}) {
+  const t = useTranslations("tasks");
+  const locale = useLocale();
+  const router = useRouter();
+  const { getToken } = useAuth();
+
+  const [goal, setGoal] = useState("");
+  const [personaId, setPersonaId] = useState("");
+  const [when, setWhen] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
+
+  const ready = goal.trim().length > 0 && personaId.length > 0;
+  const personaName = personas.find((p) => p.id === personaId)?.name;
+  const whenDate = when ? new Date(when) : null;
+  const whenValid =
+    whenDate !== null &&
+    !Number.isNaN(whenDate.getTime()) &&
+    whenDate.getTime() > Date.now();
+  const scheduling = when.length > 0;
+
+  async function schedule() {
+    if (!ready || !whenValid || whenDate === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await createSchedule(await getToken(), {
+        pattern: null,
+        one_time_at: whenDate.toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        persona_id: personaId,
+        subject: goal.trim(),
+        idempotency_key: idempotencyKey,
+        notify_on_fire: true,
+        intent: "task",
+      });
+      router.push(`/activity/tasks/${encodeURIComponent(result.task_id)}`);
+    } catch {
+      setError(t("scheduleError"));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form action={action} className="flex flex-col gap-4 px-6 pt-4">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="nt-goal" className="text-sm font-medium">
+          {t("goalLabel")}
+        </label>
+        <Textarea
+          id="nt-goal"
+          name="task"
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          placeholder={t("taskPlaceholder")}
+          className="min-h-16 field-sizing-content resize-y"
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="nt-persona" className="text-sm font-medium">
+          {t("whoLabel")}
+        </label>
+        <select
+          id="nt-persona"
+          name="persona_id"
+          value={personaId}
+          onChange={(e) => setPersonaId(e.target.value)}
+          className="h-10 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="" disabled>
+            {t("personaPlaceholder")}
+          </option>
+          {personas.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="nt-when" className="text-sm font-medium">
+          {t("whenLabel")}
+        </label>
+        <input
+          id="nt-when"
+          type="datetime-local"
+          value={when}
+          onChange={(e) => setWhen(e.target.value)}
+          className="h-10 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <p className="text-xs text-muted-foreground">
+          {scheduling && !whenValid ? (
+            <span className="text-destructive">{t("schedulePast")}</span>
+          ) : (
+            t("whenHint")
+          )}
+        </p>
+      </div>
+      {ready && personaName ? (
+        <div className="flex items-start gap-2.5 rounded-md border border-primary/25 bg-primary/5 px-3.5 py-3 text-sm leading-relaxed">
+          <Sparkles
+            className="mt-0.5 size-4 shrink-0 text-primary"
+            aria-hidden="true"
+          />
+          <p className="m-0">
+            {scheduling && whenValid && whenDate
+              ? t.rich("schedulePreview", {
+                  name: personaName,
+                  when: whenDate.toLocaleString(locale, {
+                    weekday: "short",
+                    day: "numeric",
+                    month: "short",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  }),
+                  b: (chunks) => <b className="font-semibold">{chunks}</b>,
+                })
+              : t.rich("dialogPreview", {
+                  name: personaName,
+                  b: (chunks) => <b className="font-semibold">{chunks}</b>,
+                })}
+          </p>
+        </div>
+      ) : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      <div className="-mx-6 mt-2 flex items-center gap-2 border-t border-border bg-muted/40 px-6 py-4">
+        <Dialog.Close
+          render={
+            <Button type="button" variant="ghost">
+              {t("dialogCancel")}
+            </Button>
+          }
+        />
+        <div className="flex-1" />
+        {scheduling ? (
+          <Button
+            type="button"
+            disabled={!ready || !whenValid || busy}
+            onClick={() => void schedule()}
+            className="gap-2"
+          >
+            <CalendarClock className="size-4" aria-hidden="true" />
+            {busy ? t("scheduling") : t("scheduleForLater")}
+          </Button>
+        ) : (
+          <SubmitButton disabled={!ready} />
+        )}
+      </div>
+    </form>
+  );
+}
+
 export function NewTaskDialog({
   personas,
   action,
@@ -56,10 +225,6 @@ export function NewTaskDialog({
   trigger?: React.ReactElement;
 }) {
   const t = useTranslations("tasks");
-  const [goal, setGoal] = useState("");
-  const [personaId, setPersonaId] = useState("");
-  const ready = goal.trim().length > 0 && personaId.length > 0;
-  const personaName = personas.find((p) => p.id === personaId)?.name;
 
   if (personas.length === 0) return null;
 
@@ -86,67 +251,7 @@ export function NewTaskDialog({
               {t("dialogIntro")}
             </Dialog.Description>
           </div>
-          <form action={action} className="flex flex-col gap-4 px-6 pt-4">
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="nt-goal" className="text-sm font-medium">
-                {t("goalLabel")}
-              </label>
-              <Textarea
-                id="nt-goal"
-                name="task"
-                value={goal}
-                onChange={(e) => setGoal(e.target.value)}
-                placeholder={t("taskPlaceholder")}
-                className="min-h-16 field-sizing-content resize-y"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="nt-persona" className="text-sm font-medium">
-                {t("whoLabel")}
-              </label>
-              <select
-                id="nt-persona"
-                name="persona_id"
-                value={personaId}
-                onChange={(e) => setPersonaId(e.target.value)}
-                className="h-10 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option value="" disabled>
-                  {t("personaPlaceholder")}
-                </option>
-                {personas.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {ready && personaName ? (
-              <div className="flex items-start gap-2.5 rounded-md border border-primary/25 bg-primary/5 px-3.5 py-3 text-sm leading-relaxed">
-                <Sparkles
-                  className="mt-0.5 size-4 shrink-0 text-primary"
-                  aria-hidden="true"
-                />
-                <p className="m-0">
-                  {t.rich("dialogPreview", {
-                    name: personaName,
-                    b: (chunks) => <b className="font-semibold">{chunks}</b>,
-                  })}
-                </p>
-              </div>
-            ) : null}
-            <div className="-mx-6 mt-2 flex items-center gap-2 border-t border-border bg-muted/40 px-6 py-4">
-              <Dialog.Close
-                render={
-                  <Button type="button" variant="ghost">
-                    {t("dialogCancel")}
-                  </Button>
-                }
-              />
-              <div className="flex-1" />
-              <SubmitButton disabled={!ready} />
-            </div>
-          </form>
+          <DialogBody personas={personas} action={action} />
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

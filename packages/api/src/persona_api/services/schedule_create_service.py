@@ -29,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import unicodedata
 from datetime import datetime  # noqa: TC003 — a runtime Pydantic field type
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from persona.errors import (
     PersonaNotFoundError,
@@ -114,6 +114,7 @@ def create_user_schedule(
     idempotency_key: str,
     now: datetime,
     notify_on_fire: bool = True,
+    intent: Literal["reminder", "task"] = "reminder",
 ) -> ScheduleCreateResult:
     """Create the backing task + schedule for a user-initiated reminder (A10-D-1/2/6).
 
@@ -125,6 +126,10 @@ def create_user_schedule(
     ``notify_on_fire`` (default True — this is a reminder; you want reminding) opts the
     schedule into the coalesced fire bell; the subject rides the schedule so each fire can
     title its bell entry. The user can turn it off in the create dialog.
+
+    ``intent`` (R11-B2): ``"reminder"`` composes the remind-and-update contract (the A10
+    shape); ``"task"`` makes the subject the goal VERBATIM — the Activity dialog's
+    "Schedule for later" hands off real work, not a nudge about it. Same door either way.
     """
     cleaned_subject = normalize_subject(subject)
     if not cleaned_subject:
@@ -177,7 +182,9 @@ def create_user_schedule(
         task_id=task_id,
         owner_id=owner_id,
         persona_id=persona_id,
-        contract=_reminder_contract(cleaned_subject),
+        contract=_task_contract(cleaned_subject)
+        if intent == "task"
+        else _reminder_contract(cleaned_subject),
         conversation_id=None,  # no originating chat turn — the calendar is the door
         schedule_id=schedule_id,
         now=now,
@@ -221,6 +228,15 @@ def _reminder_contract(subject: str) -> Contract:
     return Contract(
         goal=f"Remind and update the user about: {subject}",
         scope="Deliver a short, useful update on this subject at each scheduled fire.",
+    )
+
+
+def _task_contract(goal: str) -> Contract:
+    """The task-shaped contract (R11-B2 intent="task"): the goal verbatim — the user is
+    scheduling the work itself for later, not asking to be reminded about it."""
+    return Contract(
+        goal=goal,
+        scope="Work toward this goal when the schedule fires.",
     )
 
 

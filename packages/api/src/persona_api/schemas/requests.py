@@ -396,6 +396,10 @@ class ScheduleCreateRequest(_Input):
     # Opt into the coalesced fire bell (default True — this door is always a user reminder;
     # the dialog's "Notify me in the bell" checkbox is checked by default and can be unset).
     notify_on_fire: bool = True
+    # R11-B2: what the backing task IS. "reminder" (the A10 default) composes the
+    # remind-and-update contract; "task" schedules the subject AS the goal verbatim —
+    # the Activity dialog's "Schedule for later" leg (same one-door underneath).
+    intent: Literal["reminder", "task"] = "reminder"
 
 
 class BudgetExtendRequest(_Input):
