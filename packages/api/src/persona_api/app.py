@@ -758,6 +758,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # boot, so the first user never pays it (the built-but-inert failure class).
             # Non-blocking: the warm window is fail-soft (encoder score times out → the
             # turn runs lexical-only). The task is held on app.state so it is not GC'd.
+            # R9-027 posture: the load rides a dedicated DAEMON thread under a hard
+            # deadline (PERSONA_CRISIS_WARMUP_DEADLINE_S, default 120 s) — on deadline
+            # the boot serves lexical-only and the load keeps going in the background.
+            # /livez and /healthz never consult this task (readiness/liveness never
+            # block on warm-up), and the task is cancelled in the finally below so
+            # shutdown neither waits for nor joins a stuck load.
             if crisis_encoder is not None:
                 app.state.crisis_encoder_warmup = start_crisis_encoder_warmup(crisis_encoder)
 
@@ -871,6 +877,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # R9-027: stop AWAITING the crisis-encoder warm-up first. Cancelling the
+        # task ends the awaiting side promptly; the load itself (if still running)
+        # continues on its daemon thread and is deliberately NEVER joined — neither
+        # here nor by the loop's executor teardown — so a stuck HF download can no
+        # longer hang TestClient.__exit__ or a real SIGTERM (the 2026-07-11 CI hang).
+        crisis_warmup_task = getattr(app.state, "crisis_encoder_warmup", None)
+        if crisis_warmup_task is not None:
+            crisis_warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await crisis_warmup_task
         # Spec M2 (D-M2-6): stop the catalog-freshness poller before the
         # engines/factory close (it only sleeps or runs a to_thread fetch;
         # cancellation is clean at either point).

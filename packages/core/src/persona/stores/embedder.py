@@ -7,6 +7,26 @@ loading means CLI commands that only read or only list don't pay it.
 The :class:`Embedder` protocol exists so spec 07's Postgres backend (or a
 future remote-embedding adapter) can swap in without changing the store
 layer. ``SentenceTransformerEmbedder`` is the v0.1 concrete.
+
+Network posture of the lazy load (R9-027, verified against the installed
+libs — huggingface_hub 0.36.x, sentence-transformers 3.4.x): a COLD cache
+makes ``_load`` a network dependency on huggingface.co. What the libs honor:
+
+* Cache location: ``HF_HOME`` (cache base; hub cache = ``$HF_HOME/hub``) /
+  ``HF_HUB_CACHE`` (hub-subdir override). sentence-transformers honors
+  ``SENTENCE_TRANSFORMERS_HOME`` but falls through to the hub cache when it
+  is unset — deploys pin ``HF_HOME`` onto a persistent volume so machine
+  replacements reuse weights (packages/api/fly.toml).
+* Offline: ``HF_HUB_OFFLINE=1`` (or ``TRANSFORMERS_OFFLINE=1``) short-circuits
+  every hub request at the session layer (read at *import* time); a warm
+  cache still loads, a cold one fails fast instead of downloading.
+* Bounds: ``HF_HUB_ETAG_TIMEOUT`` / ``HF_HUB_DOWNLOAD_TIMEOUT`` are
+  PER-REQUEST socket timeouts (default 10 s each); hub requests retry up to
+  5× with exponential backoff (1→8 s). There is NO aggregate bound — across
+  a model's many files the retry ladder can eat minutes (the 2026-07-11 CI
+  hang). Callers that need a hard wall-clock bound must wrap the load
+  off-loop with their own deadline; the crisis encoder's warm-up
+  (``persona_runtime.crisis_encoder``) is the pattern.
 """
 
 from __future__ import annotations

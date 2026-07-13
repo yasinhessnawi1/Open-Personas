@@ -25,15 +25,28 @@ load/fit/score is the CALLER's to absorb: `classify_user_message` treats an enco
 error as *no encoder signal* and falls back to the lexical + R0 floor (fail-soft→R0,
 R6-D-5). This module raises :class:`CrisisEncoderError` on a genuine fault rather than
 returning a silent 0.0, so the caller's ``except`` path is the single fail-soft seam.
+
+**Bounded + never joined (R9-027).** The cold load is a NETWORK dependency when the HF
+cache is cold, and huggingface_hub's own bounds are per-request only (its retry ladder
+is unbounded in aggregate — see ``persona.stores.embedder``). So the warm-up (a) runs on
+a dedicated **daemon thread**, never ``asyncio.to_thread``'s default executor, whose
+stuck worker is exactly what ``loop.shutdown_default_executor`` (TestClient ``__exit__``
+/ ``asyncio.run`` teardown) then joins without bound — the 2026-07-11 CI hang; and
+(b) is awaited under a **hard deadline** (:func:`warmup_deadline_from_env`): on
+deadline the boot logs a WARNING and serves lexical-only while the load continues in
+the background and starts serving if it ever completes. Readiness/liveness never block
+on the warm-up, and shutdown never joins the load thread.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import threading
 from functools import lru_cache
 from importlib import resources
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import yaml
 from persona.logging import get_logger
@@ -49,11 +62,13 @@ __all__ = [
     "CRISIS_ENCODER_T_HARD",
     "CRISIS_ENCODER_T_SOFT",
     "CRISIS_ENCODER_VERSION",
+    "DEFAULT_WARMUP_DEADLINE_S",
     "CrisisEncoder",
     "CrisisEncoderError",
     "CrisisScorer",
     "build_crisis_encoder",
     "start_crisis_encoder_warmup",
+    "warmup_deadline_from_env",
 ]
 
 #: Version of the crisis-encoder artifact (few-shot set + base model + head config +
@@ -83,6 +98,54 @@ CRISIS_ENCODER_T_SOFT = 0.49
 #: hold the false-BYPASS controls at 0 with margin: the top-scoring control on the T2
 #: suite is 0.624, so 0.75 keeps a 0.126 precision margin. ``score ≥ T_hard`` → HARD.
 CRISIS_ENCODER_T_HARD = 0.75
+
+#: Default warm-up hard deadline (R9-027) — a HANG-GUARD, not a latency SLA. The
+#: measured cold load is ~40 s on the prod VM class and seconds on a warm HF cache;
+#: 120 s is ~3× the worst legitimate load, far below huggingface_hub's unbounded
+#: aggregate retry ladder (per-request timeouts are 10 s, but 5 exponential-backoff
+#: retries × many files add up without limit — the 2026-07-11 CI evidence). On
+#: deadline the boot degrades to lexical-only (fail-soft→R0) and the load continues
+#: on its daemon thread.
+DEFAULT_WARMUP_DEADLINE_S: Final[float] = 120.0
+
+_WARMUP_DEADLINE_ENV: Final[str] = "PERSONA_CRISIS_WARMUP_DEADLINE_S"
+
+#: Name of the dedicated warm-up load thread — asserted by tests to prove the load
+#: never rides the asyncio default executor (whose shutdown join was the CI hang).
+WARMUP_THREAD_NAME: Final[str] = "crisis-encoder-warmup"
+
+#: Bounded call-time acquire on the fit lock (R9-027). While the warm-up thread holds
+#: the lock mid-load, a concurrent turn's ``score`` reaches ``_fit`` on one of the
+#: safety-intercept pool's (non-daemon) workers; an UNBOUNDED acquire would wedge that
+#: worker for as long as the load takes — and wedged pool workers are what interpreter
+#: exit (``concurrent.futures``' atexit hook) then joins, hanging a real SIGTERM. 5 s
+#: is far above any post-warm contention (the lock is only ever held long during the
+#: one-time load) and far below the load itself, so the call degrades fast instead.
+_FIT_LOCK_TIMEOUT_S: Final[float] = 5.0
+
+
+def warmup_deadline_from_env() -> float:
+    """The warm-up deadline from ``PERSONA_CRISIS_WARMUP_DEADLINE_S`` (R9-027).
+
+    Unset/blank → :data:`DEFAULT_WARMUP_DEADLINE_S`. ``<= 0`` → no deadline (the
+    pre-R9-027 unbounded wait — an explicit operator opt-out, e.g. a first boot on a
+    known-slow link where lexical-only in the interim is unwanted). Malformed →
+    default, with one WARNING (an operator typo must not change the hang-guard
+    silently). Mirrors ``catalog_ttl_from_env``.
+    """
+    raw = os.environ.get(_WARMUP_DEADLINE_ENV, "").strip()
+    if not raw:
+        return DEFAULT_WARMUP_DEADLINE_S
+    try:
+        return float(raw)
+    except ValueError:
+        _log.warning(
+            "malformed crisis warm-up deadline env value; using the default",
+            env_var=_WARMUP_DEADLINE_ENV,
+            value=raw,
+            default_s=DEFAULT_WARMUP_DEADLINE_S,
+        )
+        return DEFAULT_WARMUP_DEADLINE_S
 
 
 @runtime_checkable
@@ -167,19 +230,34 @@ class CrisisEncoder:
         if self._embedder is None:
             # Pinned to CPU, the codebase-wide convention (the bge default_embedder + the K9
             # cross-encoder do the same): ``device="auto"`` selects Apple MPS on a Mac, where
-            # this lazy/threaded load (warmup runs via asyncio.to_thread) intermittently raises
-            # "Cannot copy out of meta tensor". MiniLM-L12 encodes fast on CPU (R6's measured
-            # ~85-90 ms onset already assumed it), so CPU is both robust and fast enough.
+            # this lazy/threaded load (warmup runs on a dedicated daemon thread, R9-027)
+            # intermittently raises "Cannot copy out of meta tensor". MiniLM-L12 encodes fast
+            # on CPU (R6's measured ~85-90 ms onset already assumed it), so CPU is both robust
+            # and fast enough.
             self._embedder = SentenceTransformerEmbedder(
                 model_name=self.model_name, normalize=True, device="cpu"
             )
         return self._embedder
 
     def _fit(self) -> _LogRegHead:
-        """Lazily fit the head over the frozen-body embeddings (once, thread-safe)."""
+        """Lazily fit the head over the frozen-body embeddings (once, thread-safe).
+
+        The acquire is BOUNDED (R9-027): while the warm-up thread holds the lock
+        mid-load, a concurrent call-time ``score`` fails fast into the caller's
+        fail-soft→R0 seam (:class:`CrisisEncoderError`) instead of wedging its
+        pool worker on the lock for as long as the load takes — a wedged
+        non-daemon pool worker is exactly what a real SIGTERM's interpreter-exit
+        join then hangs on. Once the load completes, the fast path serves.
+        """
         if self._head is not None:
             return self._head
-        with self._fit_lock:
+        if not self._fit_lock.acquire(timeout=_FIT_LOCK_TIMEOUT_S):
+            msg = (
+                "crisis-encoder is still loading/fitting on another thread; "
+                "this call degrades to lexical-only until the warm-up completes"
+            )
+            raise CrisisEncoderError(msg)
+        try:
             if self._head is not None:
                 return self._head
             try:
@@ -205,6 +283,8 @@ class CrisisEncoder:
             )
             self._head = head
             return head
+        finally:
+            self._fit_lock.release()
 
     def warmup(self) -> None:
         """Pay the cold model load + head fit once, OFF the event loop (R6-D-2).
@@ -263,24 +343,98 @@ def build_crisis_encoder() -> CrisisEncoder:
     return CrisisEncoder()
 
 
-async def _run_warmup(encoder: CrisisEncoder) -> None:
+async def _run_warmup(encoder: CrisisEncoder, *, deadline_s: float | None = None) -> None:
+    """Drive :meth:`CrisisEncoder.warmup` on a dedicated daemon thread, deadline-bounded.
+
+    R9-027 mechanics (see the module docstring for the WHY):
+
+    * The load runs on a plain ``threading.Thread(daemon=True)`` — deliberately NOT
+      ``asyncio.to_thread`` (whose default-executor worker gets an unbounded join from
+      ``loop.shutdown_default_executor`` at TestClient exit / ``asyncio.run`` teardown)
+      and NOT a ``ThreadPoolExecutor`` (whose non-daemon workers get joined by
+      ``concurrent.futures``' atexit hook on real SIGTERM). Nothing ever joins this
+      thread; a stuck load is abandoned, never waited on.
+    * The awaiting side is bounded by ``deadline_s`` (default:
+      :func:`warmup_deadline_from_env`). On deadline: one WARNING, then the boot
+      proceeds lexical-only. The thread keeps loading in the background — if it ever
+      completes, ``_fit``'s fast path starts serving encoder verdicts (late-arrival
+      recovery for free).
+    * A load that finishes AFTER the event loop closed (test client exited mid-load)
+      finds ``call_soon_threadsafe`` raising ``RuntimeError`` — swallowed; there is
+      nobody left to notify.
+    """
+    deadline = warmup_deadline_from_env() if deadline_s is None else deadline_s
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def _resolve(exc: BaseException | None) -> None:
+        # Runs ON the event loop. After a deadline, ``wait_for`` has cancelled
+        # ``done`` — setting a result then would raise InvalidStateError.
+        if done.done():
+            return
+        if exc is None:
+            done.set_result(None)
+        else:
+            done.set_exception(exc)
+
+    def _target() -> None:
+        err: BaseException | None
+        try:
+            encoder.warmup()
+            err = None
+        except BaseException as exc:  # noqa: BLE001 — marshalled to the awaiting task
+            err = exc
+        # RuntimeError ⇒ the loop already closed (test client exited mid-load;
+        # process shutting down) — nobody left to notify; the daemon thread ends.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(_resolve, err)
+
+    threading.Thread(target=_target, name=WARMUP_THREAD_NAME, daemon=True).start()
     try:
-        await asyncio.to_thread(encoder.warmup)
-        _log.info("crisis-encoder warm (version={ver})", ver=CRISIS_ENCODER_VERSION)
+        if deadline > 0:
+            await asyncio.wait_for(done, timeout=deadline)
+        else:
+            await done
+    except TimeoutError:
+        _log.warning(
+            "crisis-encoder warm-up exceeded its {deadline_s}s deadline; serving "
+            "lexical-only (fail-soft→R0) while the load continues on its daemon "
+            "thread — encoder verdicts resume automatically if it completes "
+            "(model={model})",
+            deadline_s=deadline,
+            model=encoder.model_name,
+        )
+        return
+    except asyncio.CancelledError:
+        # Shutdown cancelled the warm task (app.py's lifespan finally). The daemon
+        # thread is abandoned — never joined — so shutdown cannot hang on it.
+        raise
     except Exception as exc:  # noqa: BLE001 — best-effort; classify fails soft to lexical
         _log.warning(
             "crisis-encoder warm-up failed; lexical-only until it succeeds (error={error})",
             error=str(exc),
         )
+        return
+    _log.info("crisis-encoder warm (version={ver})", ver=CRISIS_ENCODER_VERSION)
 
 
-def start_crisis_encoder_warmup(encoder: CrisisEncoder) -> asyncio.Task[None]:
+def start_crisis_encoder_warmup(
+    encoder: CrisisEncoder, *, deadline_s: float | None = None
+) -> asyncio.Task[None]:
     """Kick the encoder cold-load OFF the event loop at boot (R6-D-2 / T6 / T8).
 
     The composition root calls this at startup so the FIRST user never pays the ~40 s
     load (the built-but-inert failure class). Best-effort and non-blocking: the boot
-    proceeds immediately; during the warm window a turn's encoder score times out (the
-    2 s hang-guard) and the turn runs lexical-only (fail-soft→R0), so the warm window is
-    degraded-but-safe, never blocked. Mirrors the bge ``start_embedder_warmup`` precedent.
+    proceeds immediately; during the warm window a turn's encoder score fails/times
+    out fast (the 2 s hang-guard + the bounded ``_fit`` acquire) and the turn runs
+    lexical-only (fail-soft→R0), so the warm window is degraded-but-safe, never
+    blocked. Mirrors the bge ``start_embedder_warmup`` precedent.
+
+    R9-027: the load rides a dedicated daemon thread under a hard deadline
+    (``deadline_s``; default ``PERSONA_CRISIS_WARMUP_DEADLINE_S`` → 120 s) — see
+    :func:`_run_warmup`. Readiness/liveness never block on this task, and neither
+    TestClient ``__exit__`` nor a real SIGTERM ever joins the load thread; callers
+    should still ``cancel()`` the returned task at shutdown (the api lifespan does)
+    so the awaiting side ends promptly.
     """
-    return asyncio.create_task(_run_warmup(encoder))
+    return asyncio.create_task(_run_warmup(encoder, deadline_s=deadline_s))
