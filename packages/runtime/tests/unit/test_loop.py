@@ -321,6 +321,50 @@ class TestMaxToolRoundsCap:
         # nudge + final. Exactly 1 tool call dispatched.
         assert writer.logs[0].tool_calls == 1
 
+    @pytest.mark.asyncio
+    async def test_cap_path_sums_tokens_including_the_cap_tripping_round(self) -> None:
+        # M2 re-verify RIDER H3: the cap path's TOKEN ARITHMETIC (the sibling
+        # tests above pin call/stream counts only). Every round carries a
+        # DISTINCT usage so each absence is visible in the sum: two dispatched
+        # tool rounds (100/10, 200/20), the round that TRIPS the cap — its tool
+        # call is never dispatched but its generation is real and billed
+        # (300/30; the I2 pre-fix bug dropped exactly this one) — and the
+        # forced tool-free final generation (400/40).
+        rounds = [
+            ScriptedRound(
+                tool_name="echo",
+                tool_args={"message": "x"},
+                call_id="c0",
+                usage=TokenUsage(prompt_tokens=100, completion_tokens=10, total_tokens=110),
+            ),
+            ScriptedRound(
+                tool_name="echo",
+                tool_args={"message": "y"},
+                call_id="c1",
+                usage=TokenUsage(prompt_tokens=200, completion_tokens=20, total_tokens=220),
+            ),
+            ScriptedRound(
+                tool_name="echo",
+                tool_args={"message": "z"},
+                call_id="c2",
+                usage=TokenUsage(prompt_tokens=300, completion_tokens=30, total_tokens=330),
+            ),
+            ScriptedRound(
+                text="best-effort answer",
+                usage=TokenUsage(prompt_tokens=400, completion_tokens=40, total_tokens=440),
+            ),
+        ]
+        backend = ScriptedBackend(rounds)
+        loop, _stores, writer = _make_loop(backend, max_tool_rounds=2)
+        _ = [c async for c in loop.turn(_conv(2), "loop forever")]
+
+        log = writer.logs[0]
+        # The turn's persisted usage is the SUM over all four generations.
+        # Pre-I2 failure shapes this pins out: 400/40 (last-writer-wins) and
+        # 700/70 (cap-tripping round dropped, everything else summed).
+        assert log.prompt_tokens == 1000
+        assert log.completion_tokens == 100
+
 
 class TestEmptyFinalRoundFallback:
     """A tool-heavy turn whose final round produces no text must still persist

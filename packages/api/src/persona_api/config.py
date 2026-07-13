@@ -517,6 +517,11 @@ class APIConfig(BaseSettings):
     # Spec M2 (D-M2-5): ``credits_per_turn`` is now the FLOOR of the
     # proportional chat-turn charge (max(floor, ceil(cost_cents)) at
     # 1 credit = 1¢), not the whole price. Authoring stays flat.
+    # Rollback fidelity (M2 re-verify, rider H2): kill-switch OFF
+    # (PERSONA_API_PROPORTIONAL_CREDITS=false) + credits_per_turn > 1 restores
+    # the full pre-M2 classic-reject semantics INCLUDING the balance < amount
+    # NO-CHARGE arm (all-or-nothing reject — partial capture engages only on
+    # basis-qualified proportional charges, never on the flat arm). Intended.
     credits_per_turn: int = 1
     # Spec M2 (D-M2-5, owner-approved rollback hatch): False reverts the chat
     # turn charge to the pre-M2 flat ``credits_per_turn`` (telemetry layers

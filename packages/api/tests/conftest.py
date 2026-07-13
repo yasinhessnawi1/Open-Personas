@@ -27,6 +27,29 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Engine
 
+# --- R9-027: the api suite NEVER touches huggingface.co ---------------------
+# huggingface_hub reads HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE ONCE, at IMPORT
+# time (constants.py), and mounts an offline adapter on every hub HTTP session
+# it creates. Setting the vars HERE — conftest module import runs before any
+# test module (or the pytest_configure pre-import below) can import
+# huggingface_hub — makes the whole api suite hermetic:
+# * Unit runs — including the app-factory / community-boot tests that boot the
+#   REAL lifespan, whose crisis-encoder warmup once DOWNLOADED its model on a
+#   cold CI runner during an HF outage and ate the 120 s pytest timeout
+#   (CI run 29162120623) — can never reach the network; a cold-cache load
+#   fails FAST and the boot degrades (lexical-only) instead of hanging.
+# * Integration runs load the real bge embedder FROM CACHE: CI's "warm
+#   embedder cache" step (.github/workflows/ci.yml) downloads it in a separate
+#   process before pytest; dev machines have it from any prior run. A warm
+#   cache loads fine under offline mode.
+# First-ever run on a fresh machine: pre-download once (the CI step's
+# one-liner) or export HF_HUB_OFFLINE=0. ``setdefault``: an explicit operator
+# value wins. The mechanism (import-time constants actually offline) is pinned
+# by test_api_boot_hermetic.py, so an import-order regression cannot silently
+# re-open the network.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 
 def _derive_isolated_db_name() -> str:
     """A per-worktree throwaway test-DB name, so parallel worktrees never collide.
