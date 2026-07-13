@@ -84,6 +84,26 @@ kill_timeout = "30s"
   # same mounted volume as the API workspace so produced files persist
   # across deploys.
   PERSONA_TOOLS_SANDBOX_ROOT = "/var/lib/persona/tools"
+  # HF model cache → the persistent volume (R9-027). The default cache
+  # (~/.cache/huggingface) lives in the CONTAINER LAYER, so a machine
+  # REPLACEMENT (not just a redeploy) re-downloads the full model set — the
+  # bge-small memory embedder + the v1.1.0 crisis-detection MiniLM (~2 GB
+  # with tokenizers/configs) — from huggingface.co on boot. Slow at best;
+  # during an HF outage it turns a routine machine replacement into a
+  # degraded boot (the 2026-07-11 incident class). Which var does what,
+  # verified against the installed libs (huggingface_hub 0.36.x,
+  # sentence-transformers 3.4.x):
+  #   - HF_HOME is the cache BASE huggingface_hub honors (hub cache =
+  #     $HF_HOME/hub; HF_HUB_CACHE would override just the hub subdir —
+  #     unnecessary once HF_HOME points at the volume).
+  #   - sentence-transformers honors SENTENCE_TRANSFORMERS_HOME but, when it
+  #     is UNSET, resolves models through the huggingface_hub cache above —
+  #     so HF_HOME alone covers BOTH libraries. SENTENCE_TRANSFORMERS_HOME is
+  #     deliberately NOT set: setting it would fork a second cache tree.
+  # First deploy after this change downloads once INTO the volume; every
+  # machine replacement after that reuses the cached weights without touching
+  # huggingface.co.
+  HF_HOME = "/var/lib/persona/hf"
 
 [mounts]
   source = "persona_audit"

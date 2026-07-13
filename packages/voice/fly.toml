@@ -71,6 +71,15 @@ kill_timeout = "30s"
 # No [mounts]: the agent's JSONL audit log writes to the OS temp dir
 # (tempfile.gettempdir(), ephemeral /tmp) — nothing needs to persist across
 # deploys. The embedder warm-up + STT/TTS clients are in-memory only.
+#
+# KNOWN EXPOSURE (R9-027, OWNER DECISION pending): with no volume, the HF
+# model cache lives in the container layer, so a machine REPLACEMENT
+# re-downloads the bge-small embedder + Silero VAD from huggingface.co on
+# boot (the api app's incident class; here it is absorbed by the 300s TCP
+# grace below, but an HF outage during a replacement still means a degraded
+# boot). Fixing it needs a paid volume + `HF_HOME = "/<mount>/hf"` in [env]
+# (mirroring packages/api/fly.toml). Deliberately NOT added unilaterally —
+# volumes cost money and pin the machine to one zone; the owner rules.
 
 [[vm]]
   # The in-process agent loads the bge-small-en-v1.5 embedder (~150 MB),
