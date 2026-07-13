@@ -65,6 +65,8 @@ class MessagesTurnSink:
         user_message: str,
         channel: ChannelContext | None,
         images: list[ImageRef] | None,
+        persist_user_message: bool = True,
+        edited_from: str | None = None,
     ) -> str:
         """Persist the user message + an in-progress assistant row at turn START.
 
@@ -77,11 +79,31 @@ class MessagesTurnSink:
         Bumps ``conversations.updated_at`` so the conversation surfaces as active
         the moment the turn starts.
 
+        R9-025 leg C:
+
+        - ``persist_user_message=False`` (regenerate) skips the user-row INSERT
+          entirely — the preceding user message already exists (the caller,
+          ``chat_service.regenerate_turn``, has already superseded its old
+          reply); only the new in-progress assistant row is written, so the
+          conversation never gets a duplicate user turn. ``user_message`` /
+          ``channel`` / ``images`` are ignored in this mode.
+        - ``edited_from`` (edit-and-rerun) stamps the NEW user row's ``channel``
+          with ``{"edited_from": <old_message_id>}`` instead of the caller's
+          ``channel`` (which is always ``None`` on this path — v1 edit is
+          text-only) — a durable, queryable marker distinguishing an edited turn
+          from an ordinary send. Harmless to every existing ``channel`` reader:
+          :func:`persona_api.services.message_metadata.metadata_from_channel`
+          only ever looks for its OWN ``runtime_metadata`` namespace and ignores
+          unknown keys (fail-soft), and the A9 delegation/connector-passthrough
+          readers key off their own top-level names the same way.
+
         Raises ``IntegrityError`` if a turn is already streaming for this
         conversation (the partial unique index — D-P1-one-active-turn).
         """
         assistant_id = f"msg_{uuid.uuid4().hex}"
         channel_json = channel.model_dump() if channel is not None else None
+        if edited_from is not None:
+            channel_json = {"edited_from": edited_from}
         images_json: list[dict[str, str]] | None = (
             [{"workspace_path": img.workspace_path, "media_type": img.media_type} for img in images]
             if images
@@ -89,17 +111,18 @@ class MessagesTurnSink:
         )
         now = datetime.now(UTC)
         with self._engine.begin() as conn:
-            conn.execute(
-                insert(messages_t).values(
-                    id=f"msg_{uuid.uuid4().hex}",
-                    conversation_id=conversation_id,
-                    role="user",
-                    content=user_message,
-                    created_at=now,
-                    channel=channel_json,
-                    images=images_json,
+            if persist_user_message:
+                conn.execute(
+                    insert(messages_t).values(
+                        id=f"msg_{uuid.uuid4().hex}",
+                        conversation_id=conversation_id,
+                        role="user",
+                        content=user_message,
+                        created_at=now,
+                        channel=channel_json,
+                        images=images_json,
+                    )
                 )
-            )
             conn.execute(
                 insert(messages_t).values(
                     id=assistant_id,
@@ -117,6 +140,42 @@ class MessagesTurnSink:
                 .values(updated_at=now)
             )
         return assistant_id
+
+    def supersede_message(self, *, message_id: str) -> bool:
+        """Mark one message excluded from future context + listings (R9-025 leg C).
+
+        Sets ``superseded_at`` (migration 047) — the additive-invariant supersede
+        marker: the row is NEVER deleted or content-mutated, only flagged. Every
+        reader that must not see it again filters ``superseded_at IS NULL``
+        (``chat_service._load_conversation`` for the model prompt,
+        ``chat_service.get_conversation`` for the web listing,
+        ``chat_service.list_conversations``'s latest-message preview).
+
+        The UPDATE is conditioned on ``superseded_at IS NULL`` and uses
+        ``RETURNING`` to report whether THIS call did the superseding — mirrors
+        :meth:`heal_orphaned_running`'s own atomic conditional-update idiom, and
+        makes a duplicate call idempotent-safe: a second supersede of an
+        already-superseded row is a no-op that returns ``False`` rather than
+        silently "succeeding" twice. Callers (``chat_service.regenerate_turn`` /
+        ``edit_and_rerun_turn``) treat ``False`` as "no longer a valid target"
+        (the same 422 a stale/duplicate click gets from the tail-eligibility
+        check) — the narrow, documented residual race this codebase already
+        accepts for the one-active-turn invariant (see
+        ``chat_service.start_chat_turn``'s own docstring).
+
+        Returns:
+            ``True`` iff this call superseded the row; ``False`` if it was
+            already superseded (race or duplicate call).
+        """
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(messages_t)
+                .where(messages_t.c.id == message_id, messages_t.c.superseded_at.is_(None))
+                .values(superseded_at=datetime.now(UTC))
+                .returning(messages_t.c.id)
+            )
+            row = result.first()
+        return row is not None
 
     def heal_orphaned_running(self, *, conversation_id: str) -> str | None:
         """Self-heal an orphaned ``running`` row with no live in-process turn (R9-022).

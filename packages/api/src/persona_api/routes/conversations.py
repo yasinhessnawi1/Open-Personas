@@ -29,6 +29,7 @@ from persona_api.schemas import (
     ConversationDetail,
     ConversationSummary,
     CreateConversationRequest,
+    EditMessageRequest,
     MessageView,
     PostMessageRequest,
     TurnIntoFileRequest,
@@ -379,15 +380,129 @@ async def post_message(
     # by the detached worker on clean completion (relocated from the old inline
     # path into ChatTurnRegistry, which holds app.state.job_queue — D-K2-2 +
     # D-P1-detached-execution). No call-site wiring needed here.
-    # The rate-limit dependency's headers don't auto-merge into a route-built
-    # StreamingResponse (FastAPI limitation) — copy them from the stashed
-    # decision so X-RateLimit-* appears on the SSE response too.
-    headers: dict[str, str] = {}
-    decision = getattr(request.state, "rate_limit_decision", None)
-    if decision is not None:
-        headers = decision.headers()
     return StreamingResponse(
-        chat_service.stream_turn(handle), media_type="text/event-stream", headers=headers
+        chat_service.stream_turn(handle),
+        media_type="text/event-stream",
+        headers=_turn_response_headers(request),
+    )
+
+
+def _turn_response_headers(request: Request) -> dict[str, str]:
+    """The rate-limit headers a chat-turn-shaped route copies onto its SSE response
+    (FastAPI doesn't auto-merge a dependency's headers into a route-built
+    ``StreamingResponse`` — shared by ``post_message`` / ``regenerate_message`` /
+    ``edit_message``)."""
+    decision = getattr(request.state, "rate_limit_decision", None)
+    return decision.headers() if decision is not None else {}
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{assistant_message_id}/regenerate",
+    dependencies=[Depends(rate_limit("messages"))],
+)
+async def regenerate_message(
+    conversation_id: str,
+    assistant_message_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> StreamingResponse:
+    """Regenerate the LAST assistant reply — a REAL retry (R9-025 leg C).
+
+    Supersedes ``assistant_message_id`` (excluded from every future model prompt
+    AND the message listing from this instant on — never deleted) and streams a
+    brand-new reply to the SAME preceding user turn, exactly like
+    ``POST …/messages`` streams a normal turn — reuses the identical detached
+    turn machinery (billing, telemetry, one-active-turn, the R9-022 self-heal).
+
+    422 (``chat_service.TurnTargetInvalidError``) unless ``assistant_message_id``
+    IS the conversation's CURRENT last assistant message — v1 is conversation-
+    TAIL-only (see ``chat_service.regenerate_turn``'s module docstring). Covers
+    three cases uniformly via ``context.reason``: ``not_found`` (no such message
+    in this conversation at all), ``not_last_assistant_message`` (exists but is
+    an older turn), or ``already_superseded`` (a duplicate click / a race). 409
+    (``TurnAlreadyActiveError``) if a turn is already streaming for this
+    conversation — checked BEFORE any write, so a blocked regenerate never
+    supersedes a reply with nothing queued to replace it.
+    """
+    chat_service.get_conversation(
+        rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
+    )
+    request.app.state.credits_policy.require_credits(
+        rls_engine=request.app.state.rls_engine, user_id=user.id
+    )
+    require_runtime_wired(request, "build_conversation_loop")
+
+    handle = await chat_service.regenerate_turn(
+        rls_engine=request.app.state.rls_engine,
+        sink=request.app.state.chat_turn_sink,
+        registry=request.app.state.chat_turn_registry,
+        loop_builder=request.app.state.build_conversation_loop,
+        owner_id=user.id,
+        conversation_id=conversation_id,
+        assistant_message_id=assistant_message_id,
+        title_builder=getattr(request.app.state, "title_builder", None),
+        event_channel=getattr(request.app.state, "event_channel", None),
+        workspace_root=getattr(request.app.state, "workspace_root", None),
+        max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
+        file_storage=getattr(request.app.state, "file_storage", None),
+    )
+    return StreamingResponse(
+        chat_service.stream_turn(handle),
+        media_type="text/event-stream",
+        headers=_turn_response_headers(request),
+    )
+
+
+@router.patch(
+    "/conversations/{conversation_id}/messages/{message_id}/edit",
+    dependencies=[Depends(rate_limit("messages"))],
+)
+async def edit_message(
+    conversation_id: str,
+    message_id: str,
+    body: EditMessageRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> StreamingResponse:
+    """Edit the LAST user message's content and immediately re-run — R9-025 leg C.
+
+    Supersedes ``message_id`` (and its assistant reply, when one already exists)
+    and starts a brand-new turn on the edited ``body.content`` — streams exactly
+    like ``POST …/messages`` (same detached turn machinery). See
+    ``chat_service.edit_and_rerun_turn``'s docstring for the supersede+new-row
+    representation decision and the ``{"edited_from": ...}`` marker.
+
+    422 / 409 mirror ``regenerate_message`` exactly, except the v1 tail rule is
+    "the LAST user message" (allowing for its own trailing assistant reply — the
+    normal completed-turn shape; see ``chat_service._tail_target``).
+    """
+    chat_service.get_conversation(
+        rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
+    )
+    request.app.state.credits_policy.require_credits(
+        rls_engine=request.app.state.rls_engine, user_id=user.id
+    )
+    require_runtime_wired(request, "build_conversation_loop")
+
+    handle = await chat_service.edit_and_rerun_turn(
+        rls_engine=request.app.state.rls_engine,
+        sink=request.app.state.chat_turn_sink,
+        registry=request.app.state.chat_turn_registry,
+        loop_builder=request.app.state.build_conversation_loop,
+        owner_id=user.id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        new_content=body.content,
+        title_builder=getattr(request.app.state, "title_builder", None),
+        event_channel=getattr(request.app.state, "event_channel", None),
+        workspace_root=getattr(request.app.state, "workspace_root", None),
+        max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
+        file_storage=getattr(request.app.state, "file_storage", None),
+    )
+    return StreamingResponse(
+        chat_service.stream_turn(handle),
+        media_type="text/event-stream",
+        headers=_turn_response_headers(request),
     )
 
 

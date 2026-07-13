@@ -67,6 +67,7 @@ __all__ = [
     "ScheduleStateError",
     "TurnAlreadyActiveError",
     "TurnNotActiveError",
+    "TurnTargetInvalidError",
     "VoiceServiceUnavailableError",
     "register_exception_handlers",
 ]
@@ -193,6 +194,22 @@ class TurnAlreadyActiveError(PersonaError):
     honest. ``context`` carries ``conversation_id``. Backstopped at the DB by the
     partial-unique index on ``messages(conversation_id) WHERE
     streaming_status='running'``.
+    """
+
+
+class TurnTargetInvalidError(PersonaError):
+    """Raised when a regenerate/edit target isn't the conversation's current TAIL (→ 422).
+
+    R9-025 leg C: v1 scope is conversation-tail-only — ``regenerate``'s target must be
+    the LAST assistant message; ``edit``'s target must be the LAST user message (or the
+    second-to-last message when the last is that user message's own assistant reply —
+    the normal completed-turn shape). No branching of older history (a future tree-
+    semantics feature). Checked AFTER :class:`TurnAlreadyActiveError` (a genuinely
+    active turn always 409s first) and covers three cases: the id doesn't belong to
+    this conversation at all, it belongs but isn't at the tail (an older turn), or it
+    was already superseded (a duplicate click / a race with a concurrent regenerate or
+    edit). ``context`` carries ``conversation_id``, ``message_id``, and ``reason``
+    (``not_last_assistant_message`` | ``not_last_user_message`` | ``already_superseded``).
     """
 
 
@@ -496,6 +513,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_409_CONFLICT,
             content=_body(
                 "turn_already_active", exc.message or "a turn is already running", exc.context
+            ),
+        )
+
+    @app.exception_handler(TurnTargetInvalidError)
+    async def _turn_target_422(_: Request, exc: TurnTargetInvalidError) -> JSONResponse:
+        # R9-025 leg C: a regenerate/edit target that isn't the conversation's
+        # current tail — an older turn, or already superseded by a race.
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_body(
+                "turn_target_invalid", exc.message or "invalid regenerate/edit target", exc.context
             ),
         )
 

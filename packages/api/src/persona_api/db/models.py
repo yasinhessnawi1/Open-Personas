@@ -302,6 +302,19 @@ messages = Table(
     # so a reattach-after-gap reconstructs the tool/text interleave, not just the
     # final text. NULL for legacy / text-only / non-streamed rows. DB-only.
     Column("stream_events", _json()),
+    # R9-025 leg C / migration 047: the regenerate + edit-and-rerun supersede
+    # marker. NULL (the default — every historical row) means "in force"; a
+    # non-NULL timestamp means this row has been REPLACED by a later one (a
+    # regenerated assistant reply, or an edited user message) and must be
+    # excluded from (a) every future model prompt
+    # (``chat_service._load_conversation``) and (b) the web message listing
+    # (``chat_service.get_conversation``) — see ``MessagesTurnSink.
+    # supersede_message``. The row itself is NEVER deleted or content-mutated
+    # (the additive invariant): a future tree/branch-history feature can still
+    # read it. V1 scope is conversation-TAIL-only (see ``chat_service``'s
+    # ``regenerate_turn`` / ``edit_and_rerun_turn`` module-level notes) — no
+    # older-history branching yet.
+    Column("superseded_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint("role IN ('system', 'user', 'assistant', 'tool')", name="messages_role_check"),
     # Spec P1 D-P1-checkpoint: the allowed streaming lifecycle values (NULL =

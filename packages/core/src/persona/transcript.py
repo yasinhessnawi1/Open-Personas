@@ -48,6 +48,11 @@ messages = Table(
     Column("originated", Boolean, nullable=False, server_default=text("false")),
     Column("streaming_status", Text),
     Column("stream_events", JSONB),
+    # R9-025 leg C / migration 047: the regenerate/edit supersede marker. The
+    # voice writer never sets this (a fresh voice turn is always "in force" —
+    # NULL); mirrored here purely so the contract test stays green (the voice
+    # transcript has no regenerate/edit surface of its own).
+    Column("superseded_at", DateTime(timezone=True)),
     # The DB fills this server-side (mirrors the api ``func.now()``); the writer
     # sets it explicitly per turn for the deterministic user-before-assistant order.
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),

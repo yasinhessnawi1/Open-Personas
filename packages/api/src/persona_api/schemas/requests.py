@@ -23,6 +23,7 @@ __all__ = [
     "ScheduleRescheduleRequest",
     "CreateMCPServerRequest",
     "CreatePersonaRequest",
+    "EditMessageRequest",
     "ImageRef",
     "MemoryCorrectionRequest",
     "PostMessageRequest",
@@ -214,6 +215,20 @@ class PostMessageRequest(_Input):
     content: str = Field(min_length=1)
     channel: ChannelContext | None = None
     images: list[ImageRef] | None = Field(default=None, min_length=1, max_length=4)
+
+
+class EditMessageRequest(_Input):
+    """Edit the LAST user message's content + immediately re-run (R9-025 leg C).
+
+    ``content`` is bounded the same way :class:`PostMessageRequest`'s is
+    (non-blank; ``min_length=1`` is the whole bound — the API has never capped a
+    message's max length beyond that). v1 is text-only: no ``images`` /
+    ``channel`` fields — editing only ever changes the wording, never the
+    attachments (see ``chat_service.edit_and_rerun_turn``'s module docstring for
+    the supersede+new-row representation decision).
+    """
+
+    content: str = Field(min_length=1)
 
 
 class StartRunRequest(_Input):

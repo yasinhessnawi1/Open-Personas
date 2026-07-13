@@ -70,9 +70,11 @@ if TYPE_CHECKING:
 __all__ = [
     "create_conversation",
     "delete_conversation",
+    "edit_and_rerun_turn",
     "get_conversation",
     "list_conversations",
     "get_active_turn",
+    "regenerate_turn",
     "set_title",
     "start_chat_turn",
     "stream_turn",
@@ -262,16 +264,31 @@ def list_conversations(*, rls_engine: Engine, limit: int, offset: int) -> list[d
     # The "latest message per conversation" subquery: rank messages newest-first
     # within each conversation and keep only rank 1. ``created_at`` ties are
     # broken by ``id`` so the pick is deterministic.
-    ranked = select(
-        messages_t.c.conversation_id.label("conversation_id"),
-        messages_t.c.content.label("content"),
-        messages_t.c.role.label("role"),
-        over(
-            func.row_number(),
-            partition_by=messages_t.c.conversation_id,
-            order_by=(messages_t.c.created_at.desc(), messages_t.c.id.desc()),
-        ).label("rn"),
-    ).subquery("ranked_messages")
+    #
+    # R9-025 leg C: excludes SUPERSEDED rows up front (``superseded_at IS NULL``)
+    # — belt-and-braces defensive correctness. A regenerate/edit's replacement row
+    # always carries a LATER ``created_at`` than the row it superseded, so rank-1
+    # naturally lands on the replacement even without this filter in the steady
+    # state; the filter only matters for the narrow transient window between the
+    # supersede UPDATE committing and the replacement INSERT committing (they are
+    # two separate statements, not one transaction, in ``regenerate_turn`` /
+    # ``edit_and_rerun_turn``) — without it, a preview fetched in that exact
+    # instant would show the now-hidden old reply instead of falling back to the
+    # still-visible preceding message.
+    ranked = (
+        select(
+            messages_t.c.conversation_id.label("conversation_id"),
+            messages_t.c.content.label("content"),
+            messages_t.c.role.label("role"),
+            over(
+                func.row_number(),
+                partition_by=messages_t.c.conversation_id,
+                order_by=(messages_t.c.created_at.desc(), messages_t.c.id.desc()),
+            ).label("rn"),
+        )
+        .where(messages_t.c.superseded_at.is_(None))
+        .subquery("ranked_messages")
+    )
     latest = select(ranked).where(ranked.c.rn == 1).subquery("latest_message")
 
     with rls_engine.begin() as conn:
@@ -353,7 +370,14 @@ def get_active_turn(*, rls_engine: Engine, conversation_id: str) -> dict[str, ob
 
 
 def get_conversation(*, rls_engine: Engine, conversation_id: str) -> dict[str, object]:
-    """Return a conversation + its full message history (RLS-scoped → 404)."""
+    """Return a conversation + its full message history (RLS-scoped → 404).
+
+    R9-025 leg C: excludes SUPERSEDED rows (``superseded_at IS NOT NULL``) — the
+    web listing half of the supersede contract (:func:`_load_conversation` is the
+    model-context half). A regenerated-away reply or an edited-away user message
+    is never returned here, so the client renders the replacement in the SAME
+    position rather than showing both (VISUALLY replaced, not duplicated).
+    """
     with rls_engine.begin() as conn:
         conv = (
             conn.execute(select(conversations_t).where(conversations_t.c.id == conversation_id))
@@ -367,7 +391,10 @@ def get_conversation(*, rls_engine: Engine, conversation_id: str) -> dict[str, o
         msgs = (
             conn.execute(
                 select(messages_t)
-                .where(messages_t.c.conversation_id == conversation_id)
+                .where(
+                    messages_t.c.conversation_id == conversation_id,
+                    messages_t.c.superseded_at.is_(None),
+                )
                 .order_by(messages_t.c.created_at.asc())
             )
             .mappings()
@@ -379,7 +406,13 @@ def get_conversation(*, rls_engine: Engine, conversation_id: str) -> dict[str, o
 
 
 def _load_conversation(conn: Connection, conversation_id: str) -> Conversation:
-    """Materialise a runtime Conversation from the DB rows (RLS-scoped)."""
+    """Materialise a runtime Conversation from the DB rows (RLS-scoped).
+
+    R9-025 leg C: excludes SUPERSEDED rows (``superseded_at IS NOT NULL``) — a
+    regenerated-away assistant reply or an edited-away user message must never
+    re-enter a future model prompt. This is the context-rebuild half of the
+    supersede contract; :func:`get_conversation` is the matching web-listing half.
+    """
     conv = (
         conn.execute(select(conversations_t).where(conversations_t.c.id == conversation_id))
         .mappings()
@@ -390,7 +423,10 @@ def _load_conversation(conn: Connection, conversation_id: str) -> Conversation:
     msgs = (
         conn.execute(
             select(messages_t)
-            .where(messages_t.c.conversation_id == conversation_id)
+            .where(
+                messages_t.c.conversation_id == conversation_id,
+                messages_t.c.superseded_at.is_(None),
+            )
             .order_by(messages_t.c.created_at.asc())
         )
         .mappings()
@@ -459,8 +495,8 @@ async def start_chat_turn(
     loop_builder: LoopBuilder,
     owner_id: str,
     conversation_id: str,
-    user_message: str,
-    channel: ChannelContext | None,
+    user_message: str | None = None,
+    channel: ChannelContext | None = None,
     title_builder: Callable[[str], Awaitable[str]] | None = None,
     images: list[ImageRefSchema] | None = None,
     turn_has_image: bool = False,
@@ -469,6 +505,8 @@ async def start_chat_turn(
     max_concurrent_long_ops: int = 0,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
+    persist_user_message: bool = True,
+    edited_from: str | None = None,
 ) -> ChatTurnHandle:
     """Persist the turn at START + launch it detached; return the live handle (P1, T2b).
 
@@ -501,6 +539,24 @@ async def start_chat_turn(
     already-active check in step 1 OR the residual-race remap in step 3),
     :class:`~persona_api.errors.ConversationNotFoundError` (→ 404), etc. cleanly
     BEFORE the SSE response starts — never mid-stream.
+
+    R9-025 leg C — ``persist_user_message`` / ``edited_from`` (both default to the
+    byte-identical normal-send shape; every existing caller is unaffected):
+
+    ``persist_user_message=False`` is :func:`regenerate_turn`'s mode: the caller has
+    already superseded the target assistant reply, so the freshly-loaded history's
+    LAST message is the preceding user turn being re-answered, not new content to
+    persist a second time. This pops that trailing user message off the loaded
+    history (so it is not double-counted as both "history" and "the new turn") and
+    feeds its content as ``user_message`` — mirroring exactly what a normal send's
+    load-before-persist ordering already produces, so the loop/billing/telemetry/
+    title-refresh math downstream is untouched. ``user_message`` MUST be ``None`` in
+    this mode (it is derived, never passed) — a defensive ``ValueError`` otherwise.
+
+    ``edited_from`` is :func:`edit_and_rerun_turn`'s marker: when set, the NEW user
+    row's ``channel`` carries ``{"edited_from": <old_message_id>}`` instead of
+    ``channel``'s value (always ``None`` on the edit path — v1 edit is text-only).
+    Threaded straight through to :meth:`MessagesTurnSink.open_turn`.
     """
     if registry.get(conversation_id) is not None:
         from persona_api.errors import TurnAlreadyActiveError  # noqa: PLC0415
@@ -560,6 +616,45 @@ async def start_chat_turn(
             conversation = _load_conversation(conn, conversation_id)
             prior_msg_count = len(conversation.messages)
         persona_id = conversation.persona_id
+        # R9-025 leg C (regenerate): the "current" turn's user content already
+        # exists as a persisted row — the caller (regenerate_turn) has already
+        # superseded its old reply, so it is the LAST message
+        # ``_load_conversation`` just loaded. Pop it off so it is fed as THIS
+        # turn's ``user_message`` (context ends exactly at it) instead of being
+        # double-counted as both history AND the new turn.
+        if not persist_user_message:
+            if not conversation.messages or conversation.messages[-1].role != "user":
+                # Defensive only — regenerate_turn's own tail-eligibility check
+                # (_tail_target) already guarantees this before it ever calls in.
+                raise PersonaError(
+                    "start_chat_turn: persist_user_message=False requires a "
+                    "preceding user message in the loaded history",
+                    context={"conversation_id": conversation_id},
+                )
+            tail = conversation.messages.pop()
+            tail_content = tail.content
+            if not isinstance(tail_content, str):
+                # Defensive only — ``_load_conversation``'s ``_to_message`` always
+                # builds ``ConversationMessage.content`` as a plain ``str`` from the
+                # DB's TEXT column (``str(row["content"])``), never the
+                # list-of-typed-parts multimodal shape a FRESH send can carry
+                # in-memory. This can only trip if that contract ever changes.
+                raise PersonaError(
+                    "start_chat_turn: persist_user_message=False requires plain-text "
+                    "preceding user content",
+                    context={"conversation_id": conversation_id},
+                )
+            user_message = tail_content
+            prior_msg_count -= 1
+        elif user_message is None:
+            raise ValueError(
+                "start_chat_turn: user_message is required when persist_user_message=True"
+            )
+        # A plain local (not just an `assert`) so the narrowing survives into the
+        # `on_complete` closure below — mypy does not carry `assert`-narrowing of an
+        # outer-scope variable into a nested function's body.
+        assert user_message is not None  # narrowed by the branches above
+        resolved_message: str = user_message
         is_first_turn = prior_msg_count == 0
 
         # Resolve images/documents + stage docs for the host file tools (request
@@ -605,9 +700,11 @@ async def start_chat_turn(
         try:
             assistant_message_id = sink.open_turn(
                 conversation_id=conversation_id,
-                user_message=user_message,
+                user_message=resolved_message,
                 channel=channel,
                 images=images,
+                persist_user_message=persist_user_message,
+                edited_from=edited_from,
             )
         except IntegrityError as exc:
             # R9-022: a true concurrent race — another request's turn opened for
@@ -637,7 +734,7 @@ async def start_chat_turn(
                 await _maybe_set_title(
                     rls_engine,
                     conversation_id,
-                    user_message,
+                    resolved_message,
                     _title_builder,
                     owner_id=owner_id,
                     event_channel=event_channel,
@@ -649,7 +746,7 @@ async def start_chat_turn(
             assistant_message_id=assistant_message_id,
             loop=loop,
             conversation=conversation,
-            user_message=user_message,
+            user_message=resolved_message,
             on_complete=on_complete,
             op_token=op_token,
             turn_has_image=turn_has_image,
@@ -665,6 +762,338 @@ async def start_chat_turn(
         release_long_op(rls_engine=rls_engine, user_id=owner_id, op_id=op_token)
         raise
     return handle
+
+
+# -- R9-025 leg C: regenerate + edit-and-rerun (real retry, not an echo-resend) ----
+#
+# **V1 scope (deliberate):** regenerate and edit apply to the CONVERSATION TAIL
+# only — the last assistant message (regenerate) and the last user message (edit).
+# No branching of older history; that is a future feature with tree semantics.
+# ``_tail_target`` is the ONE place the eligibility rule lives, shared by both.
+
+
+def _tail_target(
+    messages: list[dict[str, object]], *, message_id: str, role: str
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    """Resolve a regenerate/edit target against the v1 conversation-TAIL rule.
+
+    ``messages`` is the conversation's FULL history (oldest-first, every role,
+    every ``superseded_at`` state — unlike :func:`_load_conversation` /
+    :func:`get_conversation`, which already filter superseded rows out; this
+    needs to see everything to tell "doesn't exist" apart from "already
+    superseded"). Returns ``(target, trailing_reply, reason)``:
+
+    - On success, ``target`` is the row to supersede. ``trailing_reply`` is its
+      immediate assistant reply (also to be superseded) when ``role == "user"``
+      and the LAST visible message is that reply — the normal completed-turn
+      shape; ``None`` otherwise (a lone tail user message with no reply yet —
+      e.g. an A6 chat-twin decision reply — or the ``role == "assistant"`` case,
+      which never has "a reply to its reply"). ``reason`` is ``None``.
+    - On failure, ``target`` is ``None`` and ``reason`` names why:
+      ``"not_found"`` (no message with this id in the conversation at all),
+      ``"already_superseded"`` (a duplicate click or a race with a concurrent
+      regenerate/edit), or ``"not_last_assistant_message"`` /
+      ``"not_last_user_message"`` (exists, right role, but an OLDER turn —
+      outside v1's tail-only scope). The caller (``regenerate_turn`` /
+      ``edit_and_rerun_turn``) maps EVERY failure reason to the SAME 422
+      (``TurnTargetInvalidError``) — a blanket "not currently a valid
+      regenerate/edit target," never a separate 404 for the not-found case
+      (deliberately simpler than ``turn_into_file``'s split; nothing here reads
+      ``context.reason`` to branch UI behaviour differently for "doesn't exist"
+      vs "exists but stale").
+    """
+    exists = any(m["id"] == message_id for m in messages)
+    if not exists:
+        return None, None, "not_found"
+    visible = [m for m in messages if m.get("superseded_at") is None]
+    still_visible = next((m for m in visible if m["id"] == message_id), None)
+    if role == "assistant":
+        if visible and visible[-1]["id"] == message_id and visible[-1]["role"] == "assistant":
+            return visible[-1], None, None
+        reason = "already_superseded" if still_visible is None else "not_last_assistant_message"
+        return None, None, reason
+    if role == "user":
+        if visible and visible[-1]["id"] == message_id and visible[-1]["role"] == "user":
+            return visible[-1], None, None
+        if (
+            len(visible) >= 2
+            and visible[-1]["role"] == "assistant"
+            and visible[-2]["id"] == message_id
+            and visible[-2]["role"] == "user"
+        ):
+            return visible[-2], visible[-1], None
+        reason = "already_superseded" if still_visible is None else "not_last_user_message"
+        return None, None, reason
+    return None, None, "not_found"
+
+
+def _all_messages_including_superseded(
+    *, rls_engine: Engine, conversation_id: str
+) -> list[dict[str, object]]:
+    """Full message history (oldest-first, EVERY ``superseded_at`` state) — the
+    tail-eligibility read for :func:`regenerate_turn` / :func:`edit_and_rerun_turn`
+    (see :func:`_tail_target`'s docstring for why superseded rows must stay visible
+    to this one read)."""
+    with rls_engine.begin() as conn:
+        rows = (
+            conn.execute(
+                select(messages_t)
+                .where(messages_t.c.conversation_id == conversation_id)
+                .order_by(messages_t.c.created_at.asc(), messages_t.c.id.asc())
+            )
+            .mappings()
+            .all()
+        )
+    return [dict(r) for r in rows]
+
+
+async def regenerate_turn(
+    *,
+    rls_engine: Engine,
+    sink: MessagesTurnSink,
+    registry: ChatTurnRegistry,
+    loop_builder: LoopBuilder,
+    owner_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    title_builder: Callable[[str], Awaitable[str]] | None = None,
+    workspace_root: Path | None = None,
+    max_concurrent_long_ops: int = 0,
+    file_storage: FileStorage | None = None,
+    event_channel: UserEventChannel | None = None,
+) -> ChatTurnHandle:
+    """Regenerate the LAST assistant reply — R9-025 leg C ("a REAL retry", not an
+    echo-resend of the preceding user message as a brand-new turn).
+
+    The shipped wave-2a "retry" client-side re-sent the preceding user message as a
+    NEW turn — the model then saw its OWN just-superseded reply still sitting in
+    context (nothing was ever excluded) and produced a confused answer (the owner's
+    operator-pass verdict). This fixes it at the root:
+
+    1. **409** (:class:`~persona_api.errors.TurnAlreadyActiveError`) if a turn is
+       already streaming for this conversation — the SAME registry check
+       :func:`start_chat_turn` opens with, checked here FIRST, before any write, so
+       a blocked regenerate never supersedes a reply with nothing queued to
+       replace it.
+    2. **422** (:class:`~persona_api.errors.TurnTargetInvalidError`) unless
+       ``assistant_message_id`` is the conversation's CURRENT last assistant
+       message (see :func:`_tail_target` — v1 tail-only scope).
+    3. **Supersede** the target (``MessagesTurnSink.supersede_message`` —
+       migration 047's ``superseded_at``): excluded from every future model
+       prompt (:func:`_load_conversation`'s filter) AND the web message listing
+       (:func:`get_conversation`'s filter) from this instant on. The row is
+       NEVER deleted or content-mutated (the additive invariant) — a future
+       tree/branch-history feature can still read it.
+    4. **Start a REAL turn** via :func:`start_chat_turn` with
+       ``persist_user_message=False`` — the preceding user message is NOT
+       re-inserted (it already exists); its content is popped off the
+       freshly-(re)loaded history and fed as the turn's ``user_message``, so
+       the model's context ends EXACTLY at that user turn — the superseded
+       reply is provably absent from the prompt, not just visually hidden.
+       Billing / telemetry / title-refresh ride the exact same worker path a
+       normal send does (M2 bills the new turn — normal; a regenerate never
+       grows the VISIBLE message count, so title-refresh's threshold-crossing
+       math is unaffected, matching a normal send at the same history depth
+       — see the inline note in :func:`start_chat_turn`).
+
+    Composes with the R9-022 self-heal for free: if the current tail happens to be
+    an orphaned ``running`` row (a crashed process's leftover — the registry has NO
+    entry for it, so step 1 passes), step 4's :func:`start_chat_turn` heals it to
+    ``interrupted`` (its existing, proven lazy-heal step) before launching the new
+    turn — regenerate never needs its own special case for that.
+
+    V1 scope (deliberate — see the module-level note above): the target must be
+    the CURRENT tail. No regenerating an older turn (a future tree/branch feature).
+
+    Documents / images are NOT re-attached this turn (``document_context=None``,
+    ``images=None``) — a deliberate v1 scope trim (matches the pre-existing
+    system-wide behaviour that historical image attachments are never re-fed to
+    later turns either — ``_to_message`` never carries ``images`` into the runtime
+    ``Conversation``). A follow-up can wire document-context reconstruction if a
+    regenerated reply on a document-attached conversation is found to need it.
+    """
+    from persona_api.errors import TurnAlreadyActiveError, TurnTargetInvalidError  # noqa: PLC0415
+
+    if registry.get(conversation_id) is not None:
+        raise TurnAlreadyActiveError(
+            "a turn is already running for this conversation",
+            context={"conversation_id": conversation_id},
+        )
+
+    messages = _all_messages_including_superseded(
+        rls_engine=rls_engine, conversation_id=conversation_id
+    )
+    target, _trailing, reason = _tail_target(
+        messages, message_id=assistant_message_id, role="assistant"
+    )
+    if target is None:
+        raise TurnTargetInvalidError(
+            "message is not the conversation's current last assistant reply",
+            context={
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "reason": reason or "not_found",
+            },
+        )
+
+    if not sink.supersede_message(message_id=assistant_message_id):
+        # A concurrent request superseded it in the narrow gap between the read
+        # above and here — the same residual-race class start_chat_turn's own
+        # docstring documents for the one-active-turn index. Treat identically:
+        # "no longer a valid target," never a raw failure.
+        raise TurnTargetInvalidError(
+            "message was already superseded by a concurrent request",
+            context={
+                "conversation_id": conversation_id,
+                "message_id": assistant_message_id,
+                "reason": "already_superseded",
+            },
+        )
+
+    return await start_chat_turn(
+        rls_engine=rls_engine,
+        sink=sink,
+        registry=registry,
+        loop_builder=loop_builder,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        persist_user_message=False,
+        title_builder=title_builder,
+        workspace_root=workspace_root,
+        max_concurrent_long_ops=max_concurrent_long_ops,
+        file_storage=file_storage,
+        event_channel=event_channel,
+    )
+
+
+async def edit_and_rerun_turn(
+    *,
+    rls_engine: Engine,
+    sink: MessagesTurnSink,
+    registry: ChatTurnRegistry,
+    loop_builder: LoopBuilder,
+    owner_id: str,
+    conversation_id: str,
+    user_message_id: str,
+    new_content: str,
+    title_builder: Callable[[str], Awaitable[str]] | None = None,
+    workspace_root: Path | None = None,
+    max_concurrent_long_ops: int = 0,
+    file_storage: FileStorage | None = None,
+    event_channel: UserEventChannel | None = None,
+) -> ChatTurnHandle:
+    """Edit the LAST user message's content and immediately re-run — R9-025 leg C.
+
+    **Representation decision: supersede + a brand-new row — NOT an in-place
+    content UPDATE.** Argued here (the kickoff left this open):
+
+    - Symmetric with :func:`regenerate_turn`, whose new reply is ALWAYS a new row
+      — one mental model for "the tail changed" across both actions, and one
+      shared :func:`_tail_target` eligibility rule.
+    - Honours the additive invariant this whole feature is built on: existing
+      rows are untouched. An in-place UPDATE would DESTROY the original wording
+      the instant the edit lands — with supersede+new-row it merely stops being
+      *read*, so a future tree/branch-history feature (explicitly out of v1
+      scope) could still recover it. "Keeps history honest."
+    - Keeps the UI simple the SAME way the assistant side already does: the web
+      listing (:func:`get_conversation`) just stops returning the old pair and
+      starts returning the new one — no separate "this row was mutated,
+      re-render its content" case to handle, no diff/history UI to build for v1.
+    - The new row's ``channel`` carries ``{"edited_from": <old_message_id>}`` — a
+      durable, queryable marker distinguishing an edited turn from an ordinary
+      send (see :meth:`MessagesTurnSink.open_turn`'s ``edited_from`` param).
+      Harmless to every existing ``channel`` reader (they only look for their OWN
+      namespaced key and ignore the rest — see
+      ``message_metadata.metadata_from_channel``).
+
+    Mechanics, mirroring :func:`regenerate_turn`:
+
+    1. **409** / **422** exactly as :func:`regenerate_turn` (see its docstring) —
+       except the v1 tail rule here is "the LAST user message," which
+       :func:`_tail_target` resolves as either the true last message, or the
+       second-to-last when the last is that user message's OWN assistant reply
+       (the normal completed-turn shape — that reply is superseded too).
+    2. **Supersede** the old user row, and its trailing reply when one exists.
+    3. **Re-run via :func:`start_chat_turn` completely UNMODIFIED**
+       (``persist_user_message`` stays at its default ``True``) — once the old
+       pair is superseded, the freshly-loaded history naturally ends right
+       before them, so sending ``new_content`` is BYTE-FOR-BYTE the same code
+       path a normal :func:`start_chat_turn` call takes: a new user row + a new
+       assistant row, billing/telemetry/title-refresh unchanged. Editing the
+       conversation's FIRST user message correctly re-triggers the turn-1
+       auto-title hook (``is_first_turn`` is keyed off the post-supersede
+       history depth) — the old title was generated from the now-superseded
+       wording, so refreshing it is exactly right, not a side effect to guard
+       against.
+
+    V1 scope: text-only (no ``images``/``document_context`` re-attachment — see
+    :func:`regenerate_turn`'s matching note; the same trim, for the same reason).
+    """
+    from persona_api.errors import TurnAlreadyActiveError, TurnTargetInvalidError  # noqa: PLC0415
+
+    if registry.get(conversation_id) is not None:
+        raise TurnAlreadyActiveError(
+            "a turn is already running for this conversation",
+            context={"conversation_id": conversation_id},
+        )
+
+    messages = _all_messages_including_superseded(
+        rls_engine=rls_engine, conversation_id=conversation_id
+    )
+    target, trailing_reply, reason = _tail_target(messages, message_id=user_message_id, role="user")
+    if target is None:
+        raise TurnTargetInvalidError(
+            "message is not the conversation's current last user message",
+            context={
+                "conversation_id": conversation_id,
+                "message_id": user_message_id,
+                "reason": reason or "not_found",
+            },
+        )
+
+    if not sink.supersede_message(message_id=user_message_id):
+        raise TurnTargetInvalidError(
+            "message was already superseded by a concurrent request",
+            context={
+                "conversation_id": conversation_id,
+                "message_id": user_message_id,
+                "reason": "already_superseded",
+            },
+        )
+    if trailing_reply is not None:
+        trailing_id = str(trailing_reply["id"])
+        if not sink.supersede_message(message_id=trailing_id):
+            # The reply was superseded by a concurrent regenerate/edit in the same
+            # narrow gap — abort rather than leave a dangling old reply that would
+            # otherwise sit BEFORE the freshly-inserted edited user row in
+            # created_at order (a broken turn shape). The user row supersede above
+            # already committed; the caller can simply retry the edit (its content
+            # was never lost — it lives in the client's draft, not the DB).
+            raise TurnTargetInvalidError(
+                "the reply to this message was already superseded by a concurrent request",
+                context={
+                    "conversation_id": conversation_id,
+                    "message_id": trailing_id,
+                    "reason": "already_superseded",
+                },
+            )
+
+    return await start_chat_turn(
+        rls_engine=rls_engine,
+        sink=sink,
+        registry=registry,
+        loop_builder=loop_builder,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        user_message=new_content,
+        channel=None,
+        edited_from=user_message_id,
+        title_builder=title_builder,
+        workspace_root=workspace_root,
+        max_concurrent_long_ops=max_concurrent_long_ops,
+        file_storage=file_storage,
+        event_channel=event_channel,
+    )
 
 
 async def stream_turn(handle: ChatTurnHandle) -> AsyncIterator[bytes]:
