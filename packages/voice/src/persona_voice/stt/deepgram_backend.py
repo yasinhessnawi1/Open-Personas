@@ -77,9 +77,16 @@ the "only place the workspace touches deepgram-sdk" invariant above stays
 true of the whole STT surface, not just the streaming half. Unlike
 ``LiveOptions`` above, ``PrerecordedOptions`` supports ``detect_language`` —
 :func:`transcribe_prerecorded` uses it whenever ``config.language_hint`` is
-unset (R9-025 reopen), since this persona-agnostic route has no per-call
-language routing to fall back on (see its own docstring for the full
-rationale).
+unset (R9-025 reopen), since this function itself has no persona/call
+context of its own to route from (see its own docstring for the full
+rationale). Its caller — the HTTP route, ``persona_voice.http.app`` — MAY
+override ``config.language_hint`` with a per-request context hint (R9-025
+reopen "context pin": the chat composer's persona language, or the
+authoring surface's UI locale) before this function ever runs; from this
+function's point of view that is indistinguishable from an operator's
+env-level ``PERSONA_STT_LANGUAGE_HINT`` pin — both are just "the config's
+``language_hint`` happened to be set" — which is exactly why the route can
+add per-request context without touching this function at all.
 """
 
 # ruff: noqa: ANN401, ARG002
@@ -565,23 +572,29 @@ async def transcribe_prerecorded(
     ``POST /v1/stt`` route (in-chat dictation + persona-authoring dictation,
     proxied through persona-api).
 
-    **Language handling (R9-025 reopen).** This route is persona-agnostic —
-    no call, no persona, no language signal from the caller (the web client
-    uploads only the audio blob; see ``packages/web/src/lib/voice/stt.ts``) —
-    unlike the live WebSocket path, which pins a concrete
-    ``config.language_hint`` per call via
-    :func:`persona_voice.agent.language.apply_stt_route` (Spec 32) before the
-    socket opens, resolved from the persona's declared
-    ``identity.language_default``. ``PrerecordedOptions`` (unlike
-    ``LiveOptions``, which has no such field) supports real automatic
-    detection, so this function mirrors the call pipeline's effective
-    behavior of always landing on the language actually spoken: a configured
-    ``config.language_hint`` is treated as a deliberate whole-service pin and
-    is sent verbatim; when unset (the normal case for this route),
-    ``detect_language=True`` is sent instead of silently forcing English —
-    the docstring contract :attr:`StreamingSTTConfig.language_hint` has
-    always made (``None`` ⇒ provider auto-detect) but this path did not
-    honor before this fix.
+    **Language handling (R9-025 reopen, updated by the "context pin"
+    follow-up).** This function itself is persona/call-agnostic — it only
+    ever sees ``config.language_hint``, never a persona or a call — unlike
+    the live WebSocket path, which pins a concrete ``config.language_hint``
+    per call via :func:`persona_voice.agent.language.apply_stt_route`
+    (Spec 32) before the socket opens, resolved from the persona's declared
+    ``identity.language_default``. Its caller, the HTTP route
+    (``persona_voice.http.app.transcribe_audio``), MAY now thread an
+    equivalent per-request hint into ``config.language_hint`` before calling
+    this function — resolved through the SAME capability matrix
+    ``apply_stt_route`` uses, from the chat composer's persona language or
+    the authoring surface's UI locale — so a one-shot dictation clip can be
+    context-pinned exactly like a call, without this function knowing the
+    difference. ``PrerecordedOptions`` (unlike ``LiveOptions``, which has no
+    such field) ALSO supports real automatic detection for the case neither
+    the caller nor the operator supplied anything: a configured
+    ``config.language_hint`` — whether from the route's per-request pin or
+    an operator's env-level ``PERSONA_STT_LANGUAGE_HINT`` — is sent verbatim;
+    when unset, ``detect_language=True`` is sent instead of silently forcing
+    English — the docstring contract :attr:`StreamingSTTConfig.language_hint`
+    has always made (``None`` ⇒ provider auto-detect), and Deepgram's
+    auto-detect coverage/accuracy is materially weaker than a pinned
+    language (the reason the "context pin" follow-up exists at all).
 
     Args:
         audio: Raw audio bytes in whatever container the caller captured

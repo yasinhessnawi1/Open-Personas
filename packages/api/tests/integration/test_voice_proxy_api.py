@@ -277,3 +277,44 @@ def test_stt_proxy_works_without_any_persona(
     )
     assert resp.status_code == 200
     assert resp.json() == {"transcript": "a fresh persona idea"}
+
+
+def test_stt_proxy_forwards_language_hint(
+    client: tuple[TestClient, str, str, Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-025 reopen — context-pinned dictation: the language hint survives
+    the real RLS-authed proxy round trip and reaches persona-voice verbatim
+    (resolution against the capability matrix is persona-voice's job, unit
+    -tested there — this integration leg proves the api layer's plumbing,
+    not the resolution)."""
+    c, uid_a, _uid_b, _su = client
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"transcript": "hallo der"})
+
+    _install_mock_httpx(monkeypatch, handler)
+    resp = c.post(
+        "/v1/stt",
+        files={"audio": ("clip.webm", b"fake-dictation-audio", "audio/webm")},
+        data={"language": "no"},
+        headers=_auth(uid_a),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transcript": "hallo der"}
+    assert b'name="language"' in captured["body"]
+    assert b"\r\n\r\nno\r\n" in captured["body"]
+
+
+def test_stt_proxy_422_on_shape_invalid_language_hint(
+    client: tuple[TestClient, str, str, Engine],
+) -> None:
+    c, uid_a, _uid_b, _su = client
+    resp = c.post(
+        "/v1/stt",
+        files={"audio": ("clip.webm", b"fake-dictation-audio", "audio/webm")},
+        data={"language": "123"},
+        headers=_auth(uid_a),
+    )
+    assert resp.status_code == 422

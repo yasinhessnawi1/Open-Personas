@@ -24,7 +24,9 @@ proxy, the two existing "call out to a sibling HTTP service" precedents):
   merely because THIS persona hasn't picked a voice yet.
 * ``POST /v1/stt`` — owner-scoped only (no persona; dictation has no
   persona context during authoring), audio passthrough to persona-voice's
-  ``POST /v1/stt``. Returns ``{transcript}``.
+  ``POST /v1/stt``. Returns ``{transcript}``. An optional ``language`` form
+  field (R9-025 reopen — context-pinned dictation) rides along verbatim —
+  shape-validated here, resolved server-side by persona-voice.
 
 Both routes forward the caller's OWN verified bearer to persona-voice (which
 authorises any signed-in user for these routes, the SAME posture as
@@ -50,7 +52,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import yaml
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from persona.schema.persona import Persona
 from pydantic import BaseModel, ConfigDict, Field
@@ -71,6 +73,17 @@ router = APIRouter(prefix="/v1", tags=["voice"])
 # own request_timeout_s default (60.0) so the proxy hop never times out
 # before the voice service's own provider call would.
 _PROXY_TIMEOUT = httpx.Timeout(60.0)
+
+# R9-025 reopen — context-pinned dictation language: same shape gate as
+# persona-voice's own field (persona_voice.http.app._LANGUAGE_HINT_PATTERN)
+# — mirrored, not imported, so this proxy never grows a Python dependency on
+# the sibling service. Rejecting a malformed hint HERE (before any upstream
+# call) is the cheapest possible gate, matching this module's existing
+# "fail fast before any network/DB hop" discipline. The actual language
+# RESOLUTION (vocabulary/fail-soft matching) stays server-side at
+# persona-voice, which owns the Deepgram-facing capability matrix — this
+# proxy only validates shape and forwards the raw value verbatim.
+_LANGUAGE_HINT_PATTERN = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?$"
 
 
 class PersonaTTSRequest(BaseModel):
@@ -214,6 +227,12 @@ async def post_persona_tts(
 async def post_stt(
     request: Request,
     audio: UploadFile = File(...),
+    language: str | None = Form(
+        default=None,
+        min_length=2,
+        max_length=16,
+        pattern=_LANGUAGE_HINT_PATTERN,
+    ),
     user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — auth wall; owner-scoped, no persona
 ) -> STTProxyResponse:
     """In-chat + authoring dictation: transcribe an uploaded audio clip.
@@ -223,6 +242,19 @@ async def post_stt(
     exists, e.g. the author wizard's description field). Fails soft to 503
     when the voice service is unconfigured/unreachable; 413 passes through
     when the audio is too large.
+
+    ``language`` (R9-025 reopen — context-pinned dictation): an optional
+    ISO-639-1-ish hint, forwarded verbatim to persona-voice's
+    ``POST /v1/stt``, which resolves it through
+    ``persona.language_capability`` (the SAME matrix the live call pipeline
+    pins per call) instead of leaning on Deepgram's own limited-coverage
+    ``detect_language``. Shape-invalid → 422 here, before any upstream call
+    (same validation posture as persona-voice's own field — belt-and-
+    suspenders, cheapest-gate-first). The web client supplies this from
+    already-loaded context: the chat composer's persona
+    ``identity.language_default``, or the authoring surface's active UI
+    locale — never a persona lookup here (this route stays persona-agnostic,
+    per the docstring above). Omitted → unchanged detect-fallback (7647699).
     """
     base = _voice_service_base(request)
     data = await audio.read()
@@ -239,6 +271,7 @@ async def post_stt(
                         audio.content_type or "application/octet-stream",
                     )
                 },
+                data={"language": language} if language else None,
             )
     except httpx.HTTPError as exc:
         raise VoiceServiceUnavailableError("the voice service is unreachable", context={}) from exc

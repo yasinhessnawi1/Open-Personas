@@ -31,7 +31,11 @@ header for direct ``<audio>`` playback); an omitted/``null`` ``voice_id``
 proxy's voiceless-persona contract, see :class:`TTSRequest`. ``POST
 /v1/stt`` transcribes an uploaded audio clip via Deepgram's prerecorded REST
 endpoint (:func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded`
-— a distinct SDK surface from the live WebSocket backend). Both routes share
+— a distinct SDK surface from the live WebSocket backend); an optional
+``language`` field (R9-025 reopen — context-pinned dictation) pins the
+request through the same capability matrix the live call pipeline uses,
+instead of leaning on Deepgram's own limited-coverage ``detect_language``.
+Both routes share
 ``GET /v1/voices``'s auth posture (any signed-in user via
 :func:`get_current_user`; no persona scoping here — persona-api's proxy
 resolves persona → voice_id / ownership before calling through,
@@ -60,7 +64,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from persona.auth.jwt_verifier import AuthenticatedUser, make_jwt_verifier
@@ -105,6 +109,14 @@ _logger = get_logger("voice.http")
 #: chat reply; ~10MB covers several minutes of compressed dictation audio.
 _TTS_TEXT_MAX_CHARS = 4000
 _STT_AUDIO_MAX_BYTES = 10 * 1024 * 1024
+
+#: R9-025 reopen — context-pinned dictation language shape gate: a base
+#: 2-3 letter ISO-639-1/639-2-ish code with an optional BCP-47 region/script
+#: subtag (``"en"``, ``"no"``, ``"en-US"``, ``"nb-NO"``). A shape-invalid
+#: value 422s before it ever reaches the capability registry or Deepgram; a
+#: well-formed but UNRECOGNIZED code still resolves (fail-soft to English,
+#: same as every other :mod:`persona.language_capability` consumer).
+_LANGUAGE_HINT_PATTERN = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?$"
 
 # Sentinel distinguishing "catalogue not yet built" from "built, but None
 # (TTS unconfigured)" on app.state.
@@ -790,6 +802,12 @@ def build_app(config: VoiceConfig) -> FastAPI:
     async def transcribe_audio(
         request: Request,
         audio: UploadFile = File(...),
+        language: str | None = Form(
+            default=None,
+            min_length=2,
+            max_length=16,
+            pattern=_LANGUAGE_HINT_PATTERN,
+        ),
         _user: AuthenticatedUser = Depends(get_current_user),
     ) -> STTResponse:
         """One-shot prerecorded transcription (R9-025a): record-stop → text.
@@ -798,6 +816,23 @@ def build_app(config: VoiceConfig) -> FastAPI:
         :data:`_STT_AUDIO_MAX_BYTES` → 413. Missing/rejected provider
         credentials → 503; any other provider failure → 502 with a
         fixed-vocabulary reason (never the provider payload verbatim).
+
+        ``language`` (R9-025 reopen — context-pinned dictation): an optional
+        caller-supplied hint — the chat composer sends the conversation
+        persona's ``identity.language_default``; the persona-authoring mic
+        sends the active UI locale. Shape-invalid → 422
+        (:data:`_LANGUAGE_HINT_PATTERN`), before any provider/config work.
+        A shape-valid hint is resolved through the SAME
+        :class:`persona.language_capability.CapabilityRegistry` matrix the
+        live call pipeline's ``apply_stt_route`` (Spec 32) pins per call —
+        so ``"nb"``/``"nn"``/region-tagged variants collapse onto the
+        identical provider-served codes a persona's declared language
+        resolves to on a call (never a raw, unmapped code reaching
+        Deepgram), fail-soft to English for anything unrecognized (never a
+        422 for a well-formed-but-unknown code). Overrides any env-level
+        ``PERSONA_STT_LANGUAGE_HINT`` default for this one request. Omitted
+        → unchanged 7647699 behavior (``config.language_hint`` from env,
+        auto-``detect_language`` when falsy).
         """
         data = await audio.read()
         if len(data) > _STT_AUDIO_MAX_BYTES:
@@ -809,6 +844,9 @@ def build_app(config: VoiceConfig) -> FastAPI:
                 },
             )
         config = _get_stt_config(request)
+        if language:
+            route = default_capability_registry().resolve_stt(language)
+            config = config.model_copy(update={"language_hint": route.code, "model": route.model})
         transcriber = _get_stt_transcriber(request)
         try:
             transcript = await transcriber(data, config=config, content_type=audio.content_type)

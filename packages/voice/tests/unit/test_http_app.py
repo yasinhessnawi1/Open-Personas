@@ -729,3 +729,134 @@ def test_stt_endpoint_502_on_provider_stream_failure_with_fixed_reason() -> None
     assert body["detail"]["error"] == "stt_provider_error"
     assert body["detail"]["reason"] == "provider_stream_failed"
     assert "dg-abc123" not in resp.text
+
+
+# ---------- POST /v1/stt `language` (R9-025 reopen — context-pinned dictation) ----
+
+
+def test_stt_endpoint_language_hint_pins_via_the_capability_registry() -> None:
+    """A provided hint overrides the config's language_hint AND model —
+    exactly `apply_stt_route`'s update shape (Spec 32 B3) — before the
+    transcriber is ever called. No `language` in the response body; this
+    asserts on what the transcriber actually received."""
+    client = _build_test_client()
+    transcriber = _FakeTranscriber(transcript="hallo der")
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "no"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transcript": "hallo der"}
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "no"
+    assert sent_config.model == "nova-3"
+
+
+def test_stt_endpoint_language_hint_normalizes_bcp47_variants_like_a_call() -> None:
+    """`"nb"` (Norwegian Bokmål) collapses to the provider-served `"no"` —
+    the SAME D-32-X-norwegian-collapse-to-no mapping the live call pipeline
+    applies to a persona's declared `identity.language_default` — proving
+    this route reuses the Spec 32 vocabulary rather than piping a raw code
+    straight to Deepgram."""
+    client = _build_test_client()
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "nb"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "no"
+
+
+def test_stt_endpoint_language_hint_fails_soft_to_english_when_unrecognized() -> None:
+    """A shape-VALID but unrecognized code (e.g. not in the capability
+    matrix) fails soft to English — same fail-soft contract as every other
+    `persona.language_capability` consumer — never a 422 for this case
+    (422 is reserved for shape-invalid input, tested separately below)."""
+    client = _build_test_client()
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "zz"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "en"
+
+
+def test_stt_endpoint_language_hint_overrides_a_stale_env_level_default() -> None:
+    """The exact real-world bug this fix targets: an operator's env-level
+    `PERSONA_STT_LANGUAGE_HINT` (here simulated via `app.state.stt_config`,
+    the existing override seam) pins a stale language service-wide; a
+    request-level hint must still win for THIS request."""
+    client = _build_test_client()
+    client.app.state.stt_config = StreamingSTTConfig(language_hint="no", model="nova-3")
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "en"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "en"
+
+
+def test_stt_endpoint_omitted_language_leaves_config_untouched() -> None:
+    """Absent `language` → the route never touches `config.language_hint` —
+    the exact 7647699 behavior (env default / auto-detect) is preserved
+    byte-for-byte. Proven here by installing a config the fake transcriber
+    can inspect verbatim; `transcribe_prerecorded`'s own
+    hint-vs-detect_language branch is covered by
+    ``stt/test_deepgram_backend.py`` and is untouched by this fix."""
+    client = _build_test_client()
+    sentinel_config = StreamingSTTConfig(language_hint=None, model="nova-3")
+    client.app.state.stt_config = sentinel_config
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert transcriber.calls[0]["config"] is sentinel_config
+
+
+@pytest.mark.parametrize(
+    "bad_language",
+    [
+        "1",  # too short / not letters
+        "english",  # way over the 2-3 letter base-code shape
+        "en_US",  # underscore, not the BCP-47 hyphen
+        "12",  # digits only
+        "e",  # below min_length
+        "en-" + "x" * 20,  # region subtag over the bound
+    ],
+)
+def test_stt_endpoint_422_on_shape_invalid_language(bad_language: str) -> None:
+    client = _build_test_client()
+    client.app.state.transcribe_audio = _FakeTranscriber()
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": bad_language},
+    )
+    assert resp.status_code == 422, resp.text

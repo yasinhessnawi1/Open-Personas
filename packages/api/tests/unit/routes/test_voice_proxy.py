@@ -354,3 +354,67 @@ def test_stt_proxy_503_on_connection_error(
     _install_mock_httpx(monkeypatch, handler)
     resp = client.post("/v1/stt", headers=_auth(), files={"audio": ("clip.wav", b"x", "audio/wav")})
     assert resp.status_code == 503
+
+
+# ---------- POST /v1/stt `language` (R9-025 reopen — context-pinned dictation) ----
+
+
+def test_stt_proxy_forwards_language_field_verbatim(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"transcript": "hallo der"})
+
+    _install_mock_httpx(monkeypatch, handler)
+    resp = client.post(
+        "/v1/stt",
+        headers=_auth(),
+        files={"audio": ("clip.webm", b"fake-audio-bytes", "audio/webm")},
+        data={"language": "no"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transcript": "hallo der"}
+    # A raw substring check on the multipart body (mirrors this file's own
+    # `test_stt_proxy_forwards_audio_and_bearer_returns_transcript` house
+    # style) — the proxy forwards the hint VERBATIM (no resolution at this
+    # layer; persona-voice owns the capability-matrix resolution).
+    assert b'name="language"' in captured["body"]
+    assert b"\r\n\r\nno\r\n" in captured["body"]
+
+
+def test_stt_proxy_omits_language_field_when_not_supplied(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"transcript": "hello"})
+
+    _install_mock_httpx(monkeypatch, handler)
+    resp = client.post(
+        "/v1/stt",
+        headers=_auth(),
+        files={"audio": ("clip.webm", b"fake-audio-bytes", "audio/webm")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert b'name="language"' not in captured["body"]
+
+
+@pytest.mark.parametrize(
+    "bad_language",
+    ["1", "english", "en_US", "12", "e"],
+)
+def test_stt_proxy_422_on_shape_invalid_language(client: TestClient, bad_language: str) -> None:
+    """Rejected here, before any upstream call — same validation posture as
+    persona-voice's own field (belt-and-suspenders, cheapest-gate-first)."""
+    resp = client.post(
+        "/v1/stt",
+        headers=_auth(),
+        files={"audio": ("clip.webm", b"x", "audio/webm")},
+        data={"language": bad_language},
+    )
+    assert resp.status_code == 422
