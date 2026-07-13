@@ -82,12 +82,23 @@ export function ChatWindow({
   persona,
   initialMessages,
   capabilities,
+  personaLanguage,
 }: {
   conversationId: string;
   persona: AvatarPersona;
   initialMessages: ChatMessageView[];
   /** Deployment capabilities surfaced by Spec 08 PersonaDetail (T02). */
   capabilities?: PersonaCapabilities | null;
+  /**
+   * The conversation persona's declared `identity.language_default`
+   * (R9-025 reopen — context-pinned dictation), already parsed server-side
+   * by the page from the SAME persona YAML `capabilities` comes from — no
+   * extra fetch. Threaded to `<MicDictation>` so in-chat dictation pins to
+   * the persona's language instead of Deepgram's `detect_language`, which
+   * mishandles Norwegian (mirrors the live call pipeline's per-persona
+   * pin, Spec 32). `null`/omitted → the mic falls back to auto-detect.
+   */
+  personaLanguage?: string | null;
 }) {
   const t = useTranslations("chat");
   // Every chat notification routes through useNotify (the single façade, D-35-10):
@@ -490,12 +501,15 @@ export function ChatWindow({
               />
               {/* R9-025a — in-chat mic dictation: record -> transcribe ->
                   insert the editable transcript at the caret. Hidden when
-                  the voice feature is absent (fail-soft). */}
+                  the voice feature is absent (fail-soft). R9-025 reopen:
+                  pinned to the persona's declared language so Deepgram's
+                  detect_language isn't relied on for non-English speech. */}
               <MicDictation
                 value={input}
                 onChange={setInput}
                 textareaRef={textareaRef}
                 disabled={streaming}
+                language={personaLanguage ?? undefined}
               />
               <Textarea
                 ref={textareaRef}

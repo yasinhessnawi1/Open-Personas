@@ -99,6 +99,14 @@ export interface MicDictationProps {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   disabled?: boolean;
   className?: string;
+  /**
+   * Optional context language hint (R9-025 reopen — context-pinned
+   * dictation): the chat composer passes the conversation persona's
+   * declared language; the persona-authoring mic passes the active UI
+   * locale. Threaded straight through to {@link transcribeAudio} — see its
+   * own doc for the shape/omission contract. Omitted → auto-detect.
+   */
+  language?: string;
 }
 
 export function MicDictation({
@@ -107,6 +115,7 @@ export function MicDictation({
   textareaRef,
   disabled = false,
   className,
+  language,
 }: MicDictationProps) {
   const t = useTranslations("mic");
   const { getToken } = useAuth();
@@ -170,6 +179,7 @@ export function MicDictation({
     try {
       const transcript = await transcribeAudio(blob, {
         getToken: () => getToken(TEMPLATE ? { template: TEMPLATE } : undefined),
+        language,
       });
       insertTranscript(transcript);
       setState("idle");
@@ -180,7 +190,7 @@ export function MicDictation({
       }
       setState("idle");
     }
-  }, [stopStream, insertTranscript, getToken]);
+  }, [stopStream, insertTranscript, getToken, language]);
 
   const startRecording = useCallback(async () => {
     if (

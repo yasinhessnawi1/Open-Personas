@@ -51,6 +51,19 @@ const createPersona = vi.fn(
 // Capture the props the wizard hands the editor + expose a save trigger.
 const captured: { props: Record<string, unknown> | null } = { props: null };
 
+// R9-025 reopen — context-pinned dictation: capture the props the wizard
+// hands MicDictation to assert the locale->language wiring without needing
+// a real MediaRecorder/getUserMedia harness (that machinery is covered in
+// full by mic-dictation.test.tsx; this file only proves AuthorWizard picks
+// the right `language` value).
+const capturedMic: { props: Record<string, unknown> | null } = { props: null };
+vi.mock("@/components/chat/mic-dictation", () => ({
+  MicDictation: (props: Record<string, unknown>) => {
+    capturedMic.props = props;
+    return <button type="button" data-slot="mock-mic-dictation" />;
+  },
+}));
+
 vi.mock("@/lib/hooks/use-author", () => ({
   useAuthor: () => ({ author, refine: vi.fn() }),
 }));
@@ -83,11 +96,12 @@ beforeEach(() => {
   author.mockClear();
   createPersona.mockClear();
   captured.props = null;
+  capturedMic.props = null;
 });
 
-function renderWizard(defaultModel?: string | null) {
+function renderWizard(defaultModel?: string | null, locale = "en") {
   return render(
-    <NextIntlClientProvider locale="en" messages={messages}>
+    <NextIntlClientProvider locale={locale} messages={messages}>
       <AuthorWizard tools={[]} skills={[]} defaultModel={defaultModel} />
     </NextIntlClientProvider>,
   );
@@ -122,6 +136,21 @@ describe("AuthorWizard — describe-phase layout", () => {
   it("offers a start-from-scratch path", () => {
     const { container } = renderWizard();
     expect(bySlot(container, "author-wizard-scratch")).toBeTruthy();
+  });
+});
+
+// R9-025 reopen — context-pinned dictation: the authoring mic has no
+// persona to pin to (the persona doesn't exist yet), so it pins to the
+// active UI locale instead — driven by `useLocale()`, not a literal.
+describe("AuthorWizard — mic dictation language pin", () => {
+  it("passes the active UI locale as the dictation language hint", () => {
+    renderWizard(undefined, "en");
+    expect(capturedMic.props?.language).toBe("en");
+  });
+
+  it("omits the hint for the 'xx' i18n pseudo-locale (not a real language)", () => {
+    renderWizard(undefined, "xx");
+    expect(capturedMic.props?.language).toBeUndefined();
   });
 });
 

@@ -159,6 +159,13 @@ export default async function ChatPage({
         // default (server stays authoritative — Spec 13 fail-loud refuses
         // image turns on text-only deployments per T15's (c) safety net).
         capabilities={personaRes.data?.capabilities ?? null}
+        // R9-025 reopen — context-pinned dictation: `persona` above is
+        // already the FULL parsed YAML (parsePersonaYaml), which already
+        // extracts `identity.language_default` as `languageDefault`
+        // (default "en") — reuse it rather than a second persona lookup.
+        // `null` when there's no persona data at all (mic falls back to
+        // auto-detect, same as today).
+        personaLanguage={persona?.languageDefault ?? null}
       />
     </div>
   );

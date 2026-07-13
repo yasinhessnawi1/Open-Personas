@@ -1,7 +1,7 @@
 "use client";
 
 import { Sparkles, Wand2 } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
 import { MicDictation } from "@/components/chat/mic-dictation";
 import { Stack } from "@/components/layout";
@@ -9,6 +9,7 @@ import { SkeletonLine } from "@/components/patterns/loading";
 import { buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { DICTATION_LOCALES } from "@/i18n/config";
 import type { AuthoringDraft } from "@/lib/api";
 import { ApiError } from "@/lib/api/client";
 import { useAuthor } from "@/lib/hooks/use-author";
@@ -99,6 +100,18 @@ export function AuthorWizard({
   // persona by speaking gives the author full control over how detailed the
   // description is, without typing it all out.
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  // R9-025 reopen — context-pinned dictation: pin the mic to the app's
+  // active UI locale (there is no persona yet during authoring, so this is
+  // the only context signal available) rather than leaning on Deepgram's
+  // detect_language. Driven by the i18n runtime (`useLocale`), NOT a
+  // literal — v1 ships only "en" as a real locale, but this picks up any
+  // future one automatically. "xx" (the i18n-coverage pseudo-locale) is
+  // deliberately excluded via `DICTATION_LOCALES` — it is not a real
+  // spoken language and must never reach the STT provider as a hint.
+  const locale = useLocale();
+  const dictationLanguage = DICTATION_LOCALES.includes(locale)
+    ? locale
+    : undefined;
   const [phase, setPhase] = useState<Phase>("describe");
   // `draft` is the DRAFTER output (carries clarifying questions); it is null for
   // the prebuilt-starter and start-from-scratch paths, which need no refinement.
@@ -389,6 +402,7 @@ export function AuthorWizard({
             value={description}
             onChange={setDescription}
             textareaRef={descriptionRef}
+            language={dictationLanguage}
             className="absolute right-2 bottom-2"
           />
         </div>

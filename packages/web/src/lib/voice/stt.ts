@@ -20,6 +20,17 @@ const API_BASE_URL =
 export interface TranscribeAudioOptions {
   getToken: TokenGetter;
   signal?: AbortSignal;
+  /**
+   * Optional ISO-639-1-ish context hint (R9-025 reopen — context-pinned
+   * dictation language): the conversation persona's declared
+   * `identity.language_default` (chat composer), or the active UI locale
+   * (persona-authoring mic). Forwarded verbatim as a `language` form field
+   * when non-empty; omitted entirely otherwise, which keeps the api
+   * proxy/voice service on the 7647699 auto-detect fallback. Deepgram's
+   * `detect_language` has limited/uneven coverage, so a caller that KNOWS
+   * the language should always pin it rather than rely on detection.
+   */
+  language?: string;
 }
 
 /**
@@ -36,6 +47,7 @@ export async function transcribeAudio(
   const jwt = await options.getToken();
   const form = new FormData();
   form.append("audio", audio, "dictation.webm");
+  if (options.language) form.append("language", options.language);
   const response = await fetch(`${API_BASE_URL}/v1/stt`, {
     method: "POST",
     // NOTE: no Content-Type header — the browser sets the multipart

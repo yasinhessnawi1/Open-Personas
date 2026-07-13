@@ -42,6 +42,40 @@ describe("transcribeAudio", () => {
     expect(transcript).toBe("buy milk tomorrow");
   });
 
+  // R9-025 reopen — context-pinned dictation language.
+  it("appends the language field when supplied", async () => {
+    let receivedForm: FormData | undefined;
+    global.fetch = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      receivedForm = init?.body as FormData;
+      return new Response(JSON.stringify({ transcript: "hallo der" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    const audio = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" });
+    await transcribeAudio(audio, {
+      getToken: async () => "jwt-y",
+      language: "no",
+    });
+
+    expect(receivedForm?.get("language")).toBe("no");
+  });
+
+  it("omits the language field entirely when not supplied", async () => {
+    let receivedForm: FormData | undefined;
+    global.fetch = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      receivedForm = init?.body as FormData;
+      return new Response(JSON.stringify({ transcript: "hello" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    const audio = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" });
+    await transcribeAudio(audio, { getToken: async () => "jwt-y" });
+
+    expect(receivedForm?.has("language")).toBe(false);
+  });
+
   it("returns an empty string when the server omits transcript (defensive)", async () => {
     global.fetch = vi.fn(
       async () => new Response(JSON.stringify({}), { status: 200 }),

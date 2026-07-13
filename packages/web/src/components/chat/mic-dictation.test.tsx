@@ -66,7 +66,13 @@ const fakeStream = {
   getTracks: () => [fakeTrack],
 } as unknown as MediaStream;
 
-function Harness({ initial = "" }: { initial?: string }) {
+function Harness({
+  initial = "",
+  language,
+}: {
+  initial?: string;
+  language?: string;
+}) {
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLTextAreaElement>(null);
   return (
@@ -77,15 +83,20 @@ function Harness({ initial = "" }: { initial?: string }) {
         onChange={(e) => setValue(e.target.value)}
         data-testid="host-textarea"
       />
-      <MicDictation value={value} onChange={setValue} textareaRef={ref} />
+      <MicDictation
+        value={value}
+        onChange={setValue}
+        textareaRef={ref}
+        language={language}
+      />
     </div>
   );
 }
 
-function renderHarness(initial?: string) {
+function renderHarness(initial?: string, language?: string) {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
-      <Harness initial={initial} />
+      <Harness initial={initial} language={language} />
     </NextIntlClientProvider>,
   );
 }
@@ -139,6 +150,41 @@ describe("MicDictation", () => {
         screen.getByRole("button", { name: "Dictate with your voice" }),
       ).toBeTruthy(),
     );
+  });
+
+  // R9-025 reopen — context-pinned dictation language.
+  it("forwards the language prop to transcribeAudio when supplied", async () => {
+    transcribeAudioMock.mockResolvedValue("hallo der");
+    renderHarness("", "no");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dictate with your voice" }),
+    );
+    await waitFor(() => screen.getByRole("button", { name: "Stop recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+
+    await waitFor(() => expect(transcribeAudioMock).toHaveBeenCalled());
+    const options = transcribeAudioMock.mock.calls[0][1] as {
+      language?: string;
+    };
+    expect(options.language).toBe("no");
+  });
+
+  it("omits the language option when no language prop is given", async () => {
+    transcribeAudioMock.mockResolvedValue("hello there");
+    renderHarness();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dictate with your voice" }),
+    );
+    await waitFor(() => screen.getByRole("button", { name: "Stop recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+
+    await waitFor(() => expect(transcribeAudioMock).toHaveBeenCalled());
+    const options = transcribeAudioMock.mock.calls[0][1] as {
+      language?: string;
+    };
+    expect(options.language).toBeUndefined();
   });
 
   it("appends after existing text with a separating space (caret at end)", async () => {
