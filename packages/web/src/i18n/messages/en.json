@@ -809,6 +809,9 @@
     "ended": "Call ended",
     "retry": "Try again",
     "back": "Back to chat",
+    "transcript": "Transcript",
+    "autoChip": "Auto",
+    "autoFollow": "Follow the live transcript",
     "mini": {
       "region": "Ongoing call with {name}",
       "returnToCall": "Return to full call view",

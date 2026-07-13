@@ -36,6 +36,8 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { IdentityOrb } from "@/components/voice/identity-orb";
 import { InputModeToggle, MicControl } from "@/components/voice/mic-control";
 import { VoiceCaptions } from "@/components/voice/voice-captions";
+import { VoiceTranscriptPanel } from "@/components/voice/voice-transcript-panel";
+import { formatCallDuration } from "@/lib/calls";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import type { CallTarget } from "@/lib/voice/call-session-context";
 import { useCallSession } from "@/lib/voice/call-session-context";
@@ -64,6 +66,7 @@ export function VoiceCallSurface({
     artifacts,
     activities,
     isActive,
+    startedAt,
     start,
     end,
     enableAudio,
@@ -71,6 +74,20 @@ export function VoiceCallSurface({
     getPersonaLevel,
   } = useCallSession();
   const [captionsOn, setCaptionsOn] = useState(true);
+
+  // R9-029: the call-stage duration display — the mini-bar's own tick pattern
+  // (a 1s interval while active), reusing its SAME `formatCallDuration` (m:ss).
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isActive) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isActive]);
+  const elapsed =
+    startedAt !== null && now !== null
+      ? formatCallDuration(Math.floor((now - startedAt) / 1000))
+      : null;
 
   // Resolve the persona's avatar (a Spec-29 Bearer-auth workspace ref, or a
   // direct URL) to a loadable src so it can be the orb's core (D-V6-3).
@@ -176,107 +193,150 @@ export function VoiceCallSurface({
     <FileRendererProvider>
       <ArtifactAutoOpener artifacts={artifacts} />
       <FileRendererPanel personaId={persona.id} />
-      <div className="v-voice" style={personaIdentityStyle(persona)}>
-        {/* Identity-tinted backdrop — a soft radial wash in the persona's hue. */}
+      {/* R9-029 — desktop (the SAME md boundary the chat right panel / R9-026's
+          height fix use): the call stage stays exactly as it was (mobile is
+          byte-identical — the aside is `hidden` below md, so it never joins the
+          flex layout there); a full-height transcript panel sits to its right. */}
+      <div className="flex h-full min-h-0 flex-col md:flex-row">
         <div
-          className="v-voice__bg"
-          style={{
-            background:
-              "radial-gradient(50% 50% at 50% 42%, oklch(0.62 0.13 var(--identity-h) / 0.14), transparent 70%)",
-          }}
-        />
-        {header}
-
-        {terminal ? (
-          <EmptyState
-            className="relative z-[1] w-full max-w-md"
-            icon={<Phone className="size-6" aria-hidden />}
-            title={terminal.title}
-            description={terminal.body}
-            action={terminal.action}
+          className="v-voice min-h-0 flex-1"
+          style={personaIdentityStyle(persona)}
+        >
+          {/* Identity-tinted backdrop — a soft radial wash in the persona's hue. */}
+          <div
+            className="v-voice__bg"
+            style={{
+              background:
+                "radial-gradient(50% 50% at 50% 42%, oklch(0.62 0.13 var(--identity-h) / 0.14), transparent 70%)",
+            }}
           />
-        ) : (
-          <>
-            <div className="v-orb-wrap">
-              <IdentityOrb
-                persona={{ id: persona.id, name: persona.name }}
-                agentState={state.agentState}
-                bargeInSignal={state.bargeInSignal}
-                getMicLevel={getMicLevel}
-                getPersonaLevel={getPersonaLevel}
-                avatarUrl={avatarSrc}
-                label={stateLabel}
-              />
-            </div>
+          {header}
 
-            <div className="v-voice__status" aria-live="polite">
-              {statusLine}
-            </div>
+          {terminal ? (
+            <EmptyState
+              className="relative z-[1] w-full max-w-md"
+              icon={<Phone className="size-6" aria-hidden />}
+              title={terminal.title}
+              description={terminal.body}
+              action={terminal.action}
+            />
+          ) : (
+            <>
+              <div className="v-orb-wrap">
+                <IdentityOrb
+                  persona={{ id: persona.id, name: persona.name }}
+                  agentState={state.agentState}
+                  bargeInSignal={state.bargeInSignal}
+                  getMicLevel={getMicLevel}
+                  getPersonaLevel={getPersonaLevel}
+                  avatarUrl={avatarSrc}
+                  label={stateLabel}
+                />
+              </div>
 
-            {/* V10-D-6 — the live "using <X>…" capability badge; hidden when no
+              <div className="v-voice__status" aria-live="polite">
+                {statusLine}
+              </div>
+
+              {/* R9-029 — the call-stage duration (kept alongside the state
+                chips/controls per the mockup); mirrors the mini-bar's own
+                elapsed-timer display, hidden until the first tick lands. */}
+              {elapsed ? (
+                <div
+                  className="relative z-[1] font-mono text-muted-foreground type-caption normal-case tracking-normal"
+                  aria-live="off"
+                  data-slot="voice-call-duration"
+                >
+                  {elapsed}
+                </div>
+              ) : null}
+
+              {/* V10-D-6 — the live "using <X>…" capability badge; hidden when no
               capability is in flight. Distinct from the status line (which is
               the conversational phase) and the captions (which are speech). */}
-            {activityLabel ? (
-              <div
-                className="relative z-[1] flex items-center gap-2 font-mono text-muted-foreground type-caption normal-case tracking-normal"
-                aria-live="polite"
-              >
+              {activityLabel ? (
+                <div
+                  className="relative z-[1] flex items-center gap-2 font-mono text-muted-foreground type-caption normal-case tracking-normal"
+                  aria-live="polite"
+                >
+                  <span className="v-id-dot" />
+                  {t("using", { label: activityLabel })}
+                </div>
+              ) : null}
+
+              {captionsOn ? (
+                <div className="v-voice__caption">
+                  <VoiceCaptions
+                    captions={captions}
+                    personaName={persona.name}
+                  />
+                </div>
+              ) : null}
+
+              {state.needsAudioGesture ? (
+                <Button
+                  variant="secondary"
+                  className="relative z-[1]"
+                  onClick={() => void enableAudio()}
+                >
+                  {t("enableAudio")}
+                </Button>
+              ) : null}
+
+              {live ? (
+                <div className="v-voice__controls">
+                  {/* D-V7-6: mute toggle, or a hold-to-talk button in push-to-talk. */}
+                  <MicControl className="v-voice-ctl" />
+                  <button
+                    type="button"
+                    className="v-voice-ctl v-voice-ctl--end"
+                    onClick={() => void handleEnd()}
+                    aria-label={t("end")}
+                    title={t("end")}
+                  >
+                    <PhoneOff aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="v-voice-ctl"
+                    onClick={() => setCaptionsOn((c) => !c)}
+                    aria-label={t("captionsLabel")}
+                    title={t("captionsLabel")}
+                    aria-pressed={captionsOn}
+                  >
+                    <Captions aria-hidden />
+                  </button>
+                  {/* D-V7-6: switch always-listening ↔ push-to-talk (persisted). */}
+                  <InputModeToggle className="v-voice-ctl" />
+                </div>
+              ) : null}
+
+              {/* The shared-memory note — voice + text are one thread (D-V6-4). */}
+              <div className="relative z-[1] flex items-center gap-2 font-mono text-muted-foreground type-caption normal-case tracking-normal">
                 <span className="v-id-dot" />
-                {t("using", { label: activityLabel })}
+                {t("memoryNote")}
               </div>
-            ) : null}
-
-            {captionsOn ? (
-              <div className="v-voice__caption">
-                <VoiceCaptions captions={captions} personaName={persona.name} />
-              </div>
-            ) : null}
-
-            {state.needsAudioGesture ? (
-              <Button
-                variant="secondary"
-                className="relative z-[1]"
-                onClick={() => void enableAudio()}
-              >
-                {t("enableAudio")}
-              </Button>
-            ) : null}
-
-            {live ? (
-              <div className="v-voice__controls">
-                {/* D-V7-6: mute toggle, or a hold-to-talk button in push-to-talk. */}
-                <MicControl className="v-voice-ctl" />
-                <button
-                  type="button"
-                  className="v-voice-ctl v-voice-ctl--end"
-                  onClick={() => void handleEnd()}
-                  aria-label={t("end")}
-                  title={t("end")}
-                >
-                  <PhoneOff aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  className="v-voice-ctl"
-                  onClick={() => setCaptionsOn((c) => !c)}
-                  aria-label={t("captionsLabel")}
-                  title={t("captionsLabel")}
-                  aria-pressed={captionsOn}
-                >
-                  <Captions aria-hidden />
-                </button>
-                {/* D-V7-6: switch always-listening ↔ push-to-talk (persisted). */}
-                <InputModeToggle className="v-voice-ctl" />
-              </div>
-            ) : null}
-
-            {/* The shared-memory note — voice + text are one thread (D-V6-4). */}
-            <div className="relative z-[1] flex items-center gap-2 font-mono text-muted-foreground type-caption normal-case tracking-normal">
-              <span className="v-id-dot" />
-              {t("memoryNote")}
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
+        {/* R9-029: desktop-only transcript right panel — hidden (never joins
+            the flex layout) below md, so mobile keeps VoiceCaptions inline
+            above, byte-identical to before this redesign. */}
+        {!terminal && captionsOn ? (
+          <aside
+            className="hidden min-h-0 shrink-0 border-border border-l md:flex md:w-80 lg:w-96"
+            aria-label={t("transcript")}
+          >
+            <VoiceTranscriptPanel
+              captions={captions}
+              persona={{
+                id: persona.id,
+                name: persona.name,
+                avatar_url: avatarSrc,
+              }}
+            />
+          </aside>
+        ) : null}
       </div>
     </FileRendererProvider>
   );

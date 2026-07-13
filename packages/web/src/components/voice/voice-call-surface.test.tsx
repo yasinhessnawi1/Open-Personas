@@ -38,6 +38,12 @@ vi.mock("@/components/voice/identity-orb", () => ({
 vi.mock("@/components/chat/file-renderer-panel", () => ({
   FileRendererPanel: () => <div data-testid="file-renderer-panel" />,
 }));
+// R9-029: the transcript right panel has its own dedicated test coverage
+// (voice-transcript-panel.test.tsx — avatars, markdown, the AUTO chip); stub
+// it here so THIS suite stays focused on the surface's wiring/layout.
+vi.mock("@/components/voice/voice-transcript-panel", () => ({
+  VoiceTranscriptPanel: () => <div data-testid="transcript-panel" />,
+}));
 vi.mock("next/link", () => ({
   default: ({
     href,
@@ -171,5 +177,64 @@ describe("VoiceCallSurface (V7 — binds the session)", () => {
     renderSurface();
     expect(screen.getByText("Call dropped")).toBeInTheDocument();
     expect(screen.getByText("Try again")).toBeInTheDocument();
+  });
+});
+
+describe("VoiceCallSurface — R9-029 desktop transcript panel", () => {
+  it("renders the transcript panel (desktop-only aside) while live and captions are on", () => {
+    h.session = makeSession(withPhase("connected"), { isActive: true });
+    renderSurface();
+    const aside = screen.getByLabelText("Transcript");
+    expect(aside.tagName).toBe("ASIDE");
+    expect(screen.getByTestId("transcript-panel")).toBeInTheDocument();
+  });
+
+  it("hides the transcript panel when captions are toggled off (parity with the mobile treatment)", () => {
+    h.session = makeSession(withPhase("connected"), { isActive: true });
+    renderSurface();
+    fireEvent.click(screen.getByRole("button", { name: "Captions" }));
+    expect(screen.queryByTestId("transcript-panel")).not.toBeInTheDocument();
+  });
+
+  it("hides the transcript panel on a terminal (error) phase — no orb, no transcript", () => {
+    h.session = makeSession(
+      withPhase("error", { kind: "mic_denied", message: "blocked" }),
+      { isActive: true },
+    );
+    renderSurface();
+    expect(screen.queryByTestId("transcript-panel")).not.toBeInTheDocument();
+  });
+
+  it("does not render the transcript panel before a call is active", () => {
+    h.session = makeSession(withPhase("idle"), { isActive: false });
+    renderSurface();
+    expect(screen.queryByTestId("transcript-panel")).not.toBeInTheDocument();
+  });
+});
+
+describe("VoiceCallSurface — R9-029 call-stage duration", () => {
+  it("shows the elapsed call duration once the session has a startedAt", () => {
+    const startedAt = Date.now() - 65_000; // 1:05 ago
+    h.session = makeSession(withPhase("connected"), {
+      isActive: true,
+      startedAt,
+    });
+    renderSurface();
+    const duration = document.querySelector(
+      '[data-slot="voice-call-duration"]',
+    );
+    expect(duration).not.toBeNull();
+    expect(duration?.textContent).toMatch(/^\d+:\d{2}$/);
+  });
+
+  it("shows no duration before the first tick lands (startedAt null)", () => {
+    h.session = makeSession(withPhase("connected"), {
+      isActive: true,
+      startedAt: null,
+    });
+    renderSurface();
+    expect(
+      document.querySelector('[data-slot="voice-call-duration"]'),
+    ).toBeNull();
   });
 });
