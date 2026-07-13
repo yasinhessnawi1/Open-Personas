@@ -32,3 +32,18 @@ def test_task_contract_keeps_the_goal_verbatim() -> None:
 def test_reminder_contract_unchanged() -> None:
     contract = _reminder_contract("stretch for 5 minutes")
     assert contract.goal == "Remind and update the user about: stretch for 5 minutes"
+
+
+def test_occurrence_subject_sheds_the_reminder_frame() -> None:
+    """R11-B3: a stored reminder goal renders as its bare subject on the calendar."""
+    from persona_api.services.occurrences_service import _subject
+    from persona_api.services.schedule_create_service import REMINDER_GOAL_PREFIX
+
+    class _S:  # duck-typed Schedule: only payload_template is read
+        payload_template: dict = {}
+
+    task = ("t1", "p1", f"{REMINDER_GOAL_PREFIX}stretch for 5 minutes")
+    assert _subject(_S(), task) == "stretch for 5 minutes"
+
+    plain = ("t1", "p1", "Draft the Q3 positioning rewrite")
+    assert _subject(_S(), plain) == "Draft the Q3 positioning rewrite"

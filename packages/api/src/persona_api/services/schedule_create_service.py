@@ -223,10 +223,15 @@ def _require_owned_persona(engine: Engine, *, owner_id: str, persona_id: str) ->
         raise PersonaNotFoundError("executor persona not found", context={"persona_id": persona_id})
 
 
+#: The reminder goal template's prefix — shared so read surfaces can recover the
+#: bare subject from a stored goal (R11-B3: the calendar shows WHAT, not the frame).
+REMINDER_GOAL_PREFIX = "Remind and update the user about: "
+
+
 def _reminder_contract(subject: str) -> Contract:
     """The reminder-shaped contract: the subject IS the goal; defaults bound the rest."""
     return Contract(
-        goal=f"Remind and update the user about: {subject}",
+        goal=f"{REMINDER_GOAL_PREFIX}{subject}",
         scope="Deliver a short, useful update on this subject at each scheduled fire.",
     )
 

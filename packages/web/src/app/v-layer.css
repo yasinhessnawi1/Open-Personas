@@ -1737,6 +1737,11 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    /* width:100% is load-bearing: the shell's <main> is a FLEX COLUMN, and a
+       flex item with auto inline margins shrinks to fit-content instead of
+       stretching to max-width — agenda/month rendered as a ~460px sliver
+       (owner catch, R11-B3). */
+    width: 100%;
     max-width: var(--v-page-max);
     margin-inline: auto;
     padding: var(--v-gap);

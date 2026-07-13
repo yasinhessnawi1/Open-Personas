@@ -23,6 +23,7 @@ from sqlalchemy import bindparam, text
 
 from persona_api.db.engine import rls_connection
 from persona_api.schedules.store import ScheduleStore
+from persona_api.services.schedule_create_service import REMINDER_GOAL_PREFIX
 from persona_api.textline import one_line
 
 if TYPE_CHECKING:
@@ -182,12 +183,17 @@ def _resolved_persona_id(
 
 def _subject(schedule: Schedule, task: tuple[str, str, str | None] | None) -> str | None:
     """WHAT the occurrence does, one calm line (R11-B3): the A10 user subject when
-    present, else the backing task's goal — never the cadence clause again."""
+    present, else the backing task's goal — never the cadence clause again. A
+    reminder-template goal sheds its frame ("Remind and update the user about: X"
+    → "X"): the calendar shows the thing, not the plumbing."""
     raw = schedule.payload_template.get("subject")
     if isinstance(raw, str) and raw.strip():
         return one_line(raw)
     if task is not None and task[2]:
-        return one_line(task[2])
+        goal = task[2]
+        if goal.startswith(REMINDER_GOAL_PREFIX):
+            goal = goal[len(REMINDER_GOAL_PREFIX) :]
+        return one_line(goal)
     return None
 
 
