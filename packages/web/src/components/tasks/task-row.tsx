@@ -14,10 +14,11 @@ import { cn } from "@/lib/utils";
 /** The derived statuses that render loud (A6-D-5) — the one red-rail card, cause + options. */
 const STUCK_STATUSES = new Set(["waiting_on_user", "failed"]);
 
-/** Badge variant per status — semantic red (destructive) held distinct from the terracotta accent. */
+/** Badge variant per status — semantic red (destructive) held distinct from the terracotta accent.
+ * R11-B2: completed goes outline + emerald (kit `badge--green`); running stays the quiet secondary. */
 function badgeVariant(status: string): "outline" | "secondary" | "destructive" {
   if (status === "failed") return "destructive";
-  if (status === "waiting_on_user") return "outline";
+  if (status === "waiting_on_user" || status === "completed") return "outline";
   return "secondary";
 }
 
@@ -46,7 +47,8 @@ export function TaskRow({ task, personaName, busy, onCancel }: TaskRowProps) {
     <Card
       style={personaIdentityStyle({ id: task.persona_id })}
       className={cn(
-        "overflow-hidden",
+        // R11-B2: the kit's task-card register — xl radius, quiet ring.
+        "overflow-hidden rounded-xl",
         // the ONE loud card: a red rail only when stuck (loud-only-where-it-informs).
         stuck && "border-l-2 border-l-destructive",
       )}
@@ -54,24 +56,30 @@ export function TaskRow({ task, personaName, busy, onCancel }: TaskRowProps) {
       data-stuck={stuck}
     >
       <CardContent className="flex flex-col gap-3 p-4">
-        {/* header — persona + state + last-touched (always visible) */}
+        {/* header — persona + state + spend fraction (always visible) */}
         <div className="flex items-center gap-2">
           <span
             aria-hidden="true"
             className="size-2.5 rounded-[3px]"
-            style={{ background: "var(--v-id)" }}
+            style={{
+              background: "var(--v-id)",
+              boxShadow:
+                "0 0 0 3px color-mix(in oklch, var(--v-id) 18%, transparent)",
+            }}
           />
           <span className="text-sm font-medium">{personaName}</span>
           <Badge
             variant={badgeVariant(task.status)}
             className={cn(
               task.status === "waiting_on_user" &&
-                "text-amber-600 dark:text-amber-500",
+                "border-amber-500/45 text-amber-600 dark:text-amber-500",
+              task.status === "completed" &&
+                "border-emerald-500/40 bg-transparent text-emerald-700 dark:text-emerald-400",
             )}
           >
             {t(`status.${task.status}`)}
           </Badge>
-          <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+          <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
             {t("spend", { spent: kr(task.spent_micros), cap: kr(cap) })}
           </span>
         </div>
