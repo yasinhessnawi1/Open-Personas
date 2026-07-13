@@ -37,8 +37,10 @@ from persona.schema.persona import (
     PersonaIdentity,
     RoutingConfig,
 )
+from persona.schema.tools import ToolResult
 from persona.skills import SkillInjector, SkillScanner
 from persona.tools import Toolbox
+from persona.tools.protocol import tool
 from persona_runtime.logging import MemoryTurnLogWriter
 from persona_runtime.loop import ConversationLoop
 from persona_runtime.prompt import PromptBuilder
@@ -122,6 +124,11 @@ class _RaisingBackend:
         yield  # pragma: no cover — unreached; present only so this is an async generator
 
 
+@tool(name="echo", description="Echo a message back.")
+async def _echo_tool(message: str) -> ToolResult:
+    return ToolResult(tool_name="echo", content=f"echoed: {message}", is_error=False)
+
+
 def _md(*, tools_supported: bool = True, quality: float = 0.9) -> ModelMetadata:
     return ModelMetadata(
         cost_input_per_1k_tokens=0.1,
@@ -183,12 +190,13 @@ def _build_loop(
     registry: TierRegistry,
     preferred_backend_provider: Callable[[str], ChatBackend | None] | None = None,
     intelligent_router: IntelligentRouter | None = None,
+    tools: list[object] | None = None,
 ) -> tuple[ConversationLoop, MemoryTurnLogWriter]:
     writer = MemoryTurnLogWriter()
     loop = ConversationLoop(
         persona=persona,
         stores={k: FakeStore() for k in ("identity", "self_facts", "worldview", "episodic")},  # type: ignore[arg-type, misc]
-        toolbox=Toolbox([], allow_list=None),  # type: ignore[arg-type]
+        toolbox=Toolbox(tools or [], allow_list=None),  # type: ignore[arg-type]
         skill_scanner=SkillScanner([]),
         skill_injector=SkillInjector(),
         scanned_skills=[],
@@ -277,6 +285,61 @@ async def test_preferred_model_preempts_scorer_and_fronts_backend() -> None:
     assert d.model == _PREFERRED_ID
     assert d.model_fallback_reason == "preferred_model"
     assert d.model_candidates == ()
+
+
+@pytest.mark.asyncio
+async def test_preferred_openrouter_model_completes_a_real_tool_dispatch_turn() -> None:
+    # R9-030: the exact shape M2-I2's tests deliberately avoided (its multi-round
+    # usage tests drove OpenRouter rounds via refusal-retry instead of tools "to
+    # avoid the crash" — see test_m2_multiround_usage.py's module comment).
+    # ``format_tool_result`` had no "openrouter" case, so ANY OpenRouter-served
+    # persona (M1 preferred_model routes there) that dispatched a tool crashed the
+    # turn mid-stream with ``ValueError("Unknown provider_name: 'openrouter'")``.
+    # Driven here through the REAL ConversationLoop, a REAL Toolbox dispatch, and
+    # the REAL preferred-model fronting path (``_front_preferred_backend``) — not
+    # a direct ``format_tool_result()`` call.
+    #
+    # This also documents the issue's "capability gate is dormant" fact:
+    # ``_build_routing_context`` pins ``requires_strong_tools=False``
+    # unconditionally (the documented v0.1 default — see
+    # ``test_capability_gate_tools_turn_skips_incapable_preferred``'s NB), so a
+    # tools-dispatching turn is never gated away from an OpenRouter preferred
+    # model in production. Both the tool round AND the final round below are
+    # served by the SAME fronted preferred backend — the tier chain is never
+    # touched — matching that dormant-gate shape exactly.
+    registry, subs = _frontier_registry_with_subs()
+    passthrough = ScriptedBackend(
+        [
+            ScriptedRound(tool_name="echo", tool_args={"message": "ping"}, call_id="c0"),
+            ScriptedRound(text="The tool said: echoed: ping"),
+        ],
+        provider_name="openrouter",
+        model_name=_PREFERRED_ID,
+    )
+    loop, writer = _build_loop(
+        persona=_persona(preferred_model=_PREFERRED_ID),
+        registry=registry,
+        preferred_backend_provider=_provider_returning(passthrough),
+        tools=[_echo_tool],
+    )
+
+    # Pre-fix: this list comprehension raised ValueError mid-generator. It must
+    # now complete cleanly, with the tool result incorporated into the reply.
+    chunks = [c async for c in loop.turn(_conversation(), "use the echo tool")]
+    text = "".join(c.delta for c in chunks)
+
+    assert chunks[-1].is_final is True
+    assert "The tool said: echoed: ping" in text
+    # Two chat_stream calls on the PREFERRED backend: the tool round + the final
+    # round — the tier's own subs were never reached (preferred fronted both).
+    assert passthrough.chat_stream_calls == 2
+    assert subs[0].chat_stream_calls == 0
+    assert subs[1].chat_stream_calls == 0
+    assert writer.logs[0].tool_calls == 1
+    d = writer.logs[0].routing_decision
+    assert d is not None
+    assert d.model == _PREFERRED_ID
+    assert d.model_fallback_reason == "preferred_model"
 
 
 @pytest.mark.asyncio

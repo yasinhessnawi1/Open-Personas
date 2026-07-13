@@ -13,18 +13,34 @@ Provider shapes (research.md §7):
   ``role="tool"`` with the raw result text and let ``_message_to_anthropic``
   build the structured block from ``metadata`` — same shape as the OpenAI
   branch (spec 11 launch fix).
-- **OpenAI / DeepSeek / Groq / Together / NVIDIA** (Spec 20): a separate
-  message with ``role="tool"``, ``tool_call_id``, ``name``, ``content``. The
-  error flag is conveyed by prefixing ``content`` with ``"Error: "``. NVIDIA
-  uses the same OpenAI-compat tool-result shape as the rest of the openai-SDK
-  providers per D-20-X-nvidia-allow-set-extend (the atomic invariant is a
-  SIX-touch including this formatter).
+- **OpenAI / DeepSeek / Groq / Together / NVIDIA / OpenRouter / Cloudflare**:
+  a separate message with ``role="tool"``, ``tool_call_id``, ``name``,
+  ``content``. The error flag is conveyed by prefixing ``content`` with
+  ``"Error: "``. Every provider in this family dispatches through
+  :class:`persona.backends.openai_compat.OpenAICompatibleBackend` (an
+  OpenAI-SDK wire shape) per D-20-X-nvidia-allow-set-extend — the atomic
+  invariant is a multi-touch across ``Provider`` (config.py),
+  ``DEFAULT_BASE_URLS``, the capability matrices, ``_factory.py``'s
+  allow-set, AND this formatter's case tuple. **OpenRouter (Spec 22) shipped
+  without touching this file** — any OpenRouter-served persona that
+  dispatched a tool crashed the turn on the unknown-provider ``ValueError``
+  below until R9-030 closed the gap (found by M2-I2's test work).
 - **Ollama / local (HF) shim**: plain-text message with ``role="user"``
   formatted as ``"<tool_name> returned: <content>"``. The shim's bookkeeping
   picks tool-call ids from ``metadata``.
 
 Unknown ``provider_name`` raises :class:`ValueError` — a programmer-error
-boundary, NOT a domain exception (D-03-6).
+boundary, NOT a domain exception (D-03-6): providers are a spec-02-controlled
+vocabulary (:data:`persona.backends.config.Provider`), so an unrecognised
+name means the CALLER is wrong, not that the domain hit a legitimate unknown
+case. R9-030 considered degrading a future unknown provider to the
+OpenAI-family default with a warn-once instead of raising, but D-03-6 is an
+explicit, still-current decision against that: silently reformatting for a
+provider whose real wire shape was never verified risks a confusing
+downstream 400 at the vendor API instead of a clear error at this boundary.
+Fail-fast stays; R9-030's actual fix was restoring 1:1 case coverage of the
+``Provider`` vocabulary (the bug was an incomplete case list, not the
+fail-fast posture) — see the case arms below.
 """
 
 from __future__ import annotations
@@ -52,7 +68,9 @@ def format_tool_result(
         tool_call: The originating :class:`ToolCall` (carries ``call_id``).
         result: The :class:`ToolResult` returned by the tool dispatch.
         provider_name: One of ``anthropic``, ``openai``, ``deepseek``,
-            ``groq``, ``together``, ``nvidia`` (Spec 20), ``ollama``, ``local``.
+            ``groq``, ``together``, ``nvidia`` (Spec 20), ``openrouter``
+            (Spec 22, R9-030), ``cloudflare``, ``ollama``, ``local`` — the
+            full :data:`persona.backends.config.Provider` vocabulary.
 
     Returns:
         A :class:`ConversationMessage` with the correct ``role`` and
@@ -61,9 +79,10 @@ def format_tool_result(
         ``is_error``, ``provider_format``).
 
     Raises:
-        ValueError: If ``provider_name`` is not one of the eight supported
+        ValueError: If ``provider_name`` is not one of the ten supported
             providers. This is a programmer-error boundary (D-03-6), not a
-            domain exception.
+            domain exception — deliberately fail-fast (see the module
+            docstring for why R9-030 kept this posture).
     """
     now = datetime.now(UTC)
 
@@ -87,7 +106,7 @@ def format_tool_result(
                 },
             )
 
-        case "openai" | "deepseek" | "groq" | "together" | "nvidia" | "cloudflare":
+        case "openai" | "deepseek" | "groq" | "together" | "nvidia" | "openrouter" | "cloudflare":
             content = result.content
             if result.is_error and not content.startswith("Error:"):
                 content = f"Error: {content}"
@@ -117,5 +136,15 @@ def format_tool_result(
             )
 
         case _:
-            msg = f"Unknown provider_name: {provider_name!r}"
+            # D-03-6 fail-fast, kept deliberately (R9-030): providers are a
+            # spec-02-controlled vocabulary, so a name outside it means the
+            # CALLER (or a provider added to Provider without touching this
+            # match) is wrong — never silently reformat for an unverified
+            # wire shape. The message enumerates the full vocabulary so the
+            # gap is diagnosable from the exception alone (no source dive).
+            msg = (
+                f"Unknown provider_name: {provider_name!r}; expected one of "
+                "anthropic, openai, deepseek, groq, together, nvidia, openrouter, "
+                "cloudflare, ollama, local"
+            )
             raise ValueError(msg)

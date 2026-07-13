@@ -65,7 +65,17 @@ class TestAnthropicShape:
 # CAPABILITY + _VISION_CAPABILITY + _factory.py's _OPENAI_COMPAT_PROVIDERS +
 # this provider_name switch). NVIDIA uses the same OpenAI-compat tool-result
 # shape as the other openai-SDK providers.
-@pytest.mark.parametrize("provider", ["openai", "deepseek", "groq", "together", "nvidia"])
+#
+# R9-030 (2026-07-13): openrouter hit the identical gap — Spec 22 shipped it
+# without touching this switch, so any OpenRouter-served persona (M1
+# preferred_model routes there) that dispatched a tool crashed the turn with
+# the unknown-provider ValueError below (found by M2-I2's test work, whose
+# OR rounds had to avoid tools entirely). cloudflare's case already existed
+# in source pre-R9-030 but had no test pin here — closed in the same pass so
+# the parametrize list matches the full openai-family case tuple 1:1.
+@pytest.mark.parametrize(
+    "provider", ["openai", "deepseek", "groq", "together", "nvidia", "openrouter", "cloudflare"]
+)
 class TestOpenAIFamilyShape:
     """OpenAI-compat providers use role=tool with tool_call_id + content."""
 
@@ -140,7 +150,15 @@ class TestShimShape:
 
 
 class TestUnknownProvider:
-    """Unknown provider_name raises ValueError (D-03-6 — programmer error)."""
+    """Unknown provider_name raises ValueError (D-03-6 — programmer error).
+
+    R9-030 considered degrading an unrecognised future provider to the
+    OpenAI-family default with a warn-once instead of raising, but D-03-6 is
+    an explicit, still-current decision to fail fast at this boundary
+    (providers are a spec-02-controlled vocabulary — an unknown name means
+    the caller, or a provider added without touching this file, is wrong).
+    These tests pin that posture stays exactly as it was — no fallback.
+    """
 
     def test_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="Unknown provider_name"):
@@ -149,6 +167,34 @@ class TestUnknownProvider:
     def test_empty_string_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown provider_name"):
             format_tool_result(_call(), _result(), provider_name="")
+
+    def test_openrouter_no_longer_raises(self) -> None:
+        # R9-030 pin: openrouter used to fall into this exact case (the bug)
+        # — it must now resolve through the openai-family branch, never here.
+        msg = format_tool_result(_call(), _result(), provider_name="openrouter")
+        assert msg.role == "tool"
+        assert msg.metadata["provider_format"] == "openai"
+
+    def test_message_enumerates_full_vocabulary(self) -> None:
+        # R9-030: the error message names every valid provider so the gap is
+        # diagnosable from the exception alone (no source dive needed) —
+        # this is the improvement, NOT a change to the fail-fast semantic.
+        with pytest.raises(ValueError, match="Unknown provider_name") as exc_info:
+            format_tool_result(_call(), _result(), provider_name="bogus")
+        text = str(exc_info.value)
+        for provider in (
+            "anthropic",
+            "openai",
+            "deepseek",
+            "groq",
+            "together",
+            "nvidia",
+            "openrouter",
+            "cloudflare",
+            "ollama",
+            "local",
+        ):
+            assert provider in text, f"{provider!r} missing from the unknown-provider message"
 
 
 # ---------------------------------------------------------------------------
