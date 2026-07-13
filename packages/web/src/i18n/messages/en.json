@@ -195,7 +195,13 @@
     "subtitle": "Every voice call you've had with your personas.",
     "empty": "No calls yet",
     "emptyHint": "Start a voice call with a persona to see it here.",
-    "unknownPersona": "Unknown persona"
+    "unknownPersona": "Unknown persona",
+    "untitled": "Untitled call",
+    "newCall": "New call",
+    "allPersonas": "All personas",
+    "searchPlaceholder": "Search calls",
+    "clearSearch": "Clear search",
+    "noMatches": "No calls match the current filters."
   },
   "taskList": {
     "title": "Tasks",

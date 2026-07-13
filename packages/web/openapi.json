@@ -4693,6 +4693,11 @@
             "type": "string",
             "title": "Persona Id"
           },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
           "started_at": {
             "type": "string",
             "format": "date-time",
@@ -4738,7 +4743,7 @@
         "type": "object",
         "required": ["call_id", "conversation_id", "persona_id", "started_at"],
         "title": "CallSummary",
-        "description": "A finished (or in-progress) voice call in the Calls history (Spec V9, V9-D-5).\n\nThe durable call envelope read from the ``calls`` table (V9-D-3: the\ncall-record is the Calls-membership key, NOT ``origin``). ``conversation_id``\nwires each call to its saved transcript \u2014 the spoken turns now persist as\n``messages`` (V9-D-1/D-2), so ``GET /v1/conversations/{conversation_id}``\nrenders them under the same thread UI as a text chat.\n\nAttributes:\n    call_id: The call-record id.\n    conversation_id: The conversation this call ran on \u2014 the transcript link.\n    persona_id: The persona on the call (the web resolves the display name /\n        avatar, as it does for ``ConversationSummary``).\n    started_at: When the call went active (UTC-aware); list order is by this\n        field descending.\n    ended_at: When the call ended; ``None`` while live / on a crash.\n    duration_s: Stored whole-second duration; ``None`` until the call ends.\n    end_reason: Why the call ended; ``None`` while live."
+        "description": "A finished (or in-progress) voice call in the Calls history (Spec V9, V9-D-5).\n\nThe durable call envelope read from the ``calls`` table (V9-D-3: the\ncall-record is the Calls-membership key, NOT ``origin``). ``conversation_id``\nwires each call to its saved transcript \u2014 the spoken turns now persist as\n``messages`` (V9-D-1/D-2), so ``GET /v1/conversations/{conversation_id}``\nrenders them under the same thread UI as a text chat.\n\nAttributes:\n    call_id: The call-record id.\n    conversation_id: The conversation this call ran on \u2014 the transcript link.\n    persona_id: The persona on the call (the web resolves the display name /\n        avatar, as it does for ``ConversationSummary``).\n    title: The call's transcript-derived title (R9-028) \u2014 the SAME\n        ``conversations.title`` column ``ConversationSummary`` carries\n        (joined in, the ``calls`` table has no title column of its own).\n        ``''`` until R9-020's title machinery (turn-end threshold or the\n        R9-028 voice session-end leg) has run at least once.\n    started_at: When the call went active (UTC-aware); list order is by this\n        field descending.\n    ended_at: When the call ended; ``None`` while live / on a crash.\n    duration_s: Stored whole-second duration; ``None`` until the call ends.\n    end_reason: Why the call ended; ``None`` while live."
       },
       "ChannelContext": {
         "properties": {

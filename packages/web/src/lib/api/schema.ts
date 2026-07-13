@@ -2480,6 +2480,11 @@ export interface components {
      *         conversation_id: The conversation this call ran on — the transcript link.
      *         persona_id: The persona on the call (the web resolves the display name /
      *             avatar, as it does for ``ConversationSummary``).
+     *         title: The call's transcript-derived title (R9-028) — the SAME
+     *             ``conversations.title`` column ``ConversationSummary`` carries
+     *             (joined in, the ``calls`` table has no title column of its own).
+     *             ``''`` until R9-020's title machinery (turn-end threshold or the
+     *             R9-028 voice session-end leg) has run at least once.
      *         started_at: When the call went active (UTC-aware); list order is by this
      *             field descending.
      *         ended_at: When the call ended; ``None`` while live / on a crash.
@@ -2493,6 +2498,11 @@ export interface components {
       conversation_id: string;
       /** Persona Id */
       persona_id: string;
+      /**
+       * Title
+       * @default
+       */
+      title: string;
       /**
        * Started At
        * Format: date-time
