@@ -252,8 +252,11 @@ export function Sidebar({ data }: { data: SidebarData }) {
               (R4 T2: the CALLS recent-list preview was removed from the sidebar
               — the Calls *nav item* stays and the full history lives at /calls.)
               R9-009: the Conversations nav row folded in here — "All chats (N)"
-              is the section's link to /conversations (header link when expanded;
-              an icon link above the list in rail mode). */}
+              is the section's link to /conversations (header link when expanded).
+              R9-032 (owner ruling): collapsed (icon rail), the avatar preview
+              list is scroll-hostile in the narrow rail, so the WHOLE section
+              folds into the single "All chats" icon button (chat icon + live
+              count badge) instead — the preview list only ever renders expanded. */}
           <SidebarSection
             heading={t("sidebar.messages")}
             collapsed={collapsed}
@@ -262,11 +265,12 @@ export function Sidebar({ data }: { data: SidebarData }) {
           >
             {collapsed ? (
               <AllChatsLink count={data.counts.conversations} collapsed />
-            ) : null}
-            <MessagesList
-              conversations={data.conversations}
-              collapsed={collapsed}
-            />
+            ) : (
+              <MessagesList
+                conversations={data.conversations}
+                collapsed={collapsed}
+              />
+            )}
           </SidebarSection>
 
           {/* (7) Account footer — the custom account menu (Spec 35 D-35-16:

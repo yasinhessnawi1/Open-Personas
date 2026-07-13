@@ -13,7 +13,12 @@ import type {
   SidebarConversation,
   SidebarPersona,
 } from "./sidebar-data";
-import { CallsList, MessagesList, PersonasRail } from "./sidebar-sections";
+import {
+  AllChatsLink,
+  CallsList,
+  MessagesList,
+  PersonasRail,
+} from "./sidebar-sections";
 
 vi.mock("@clerk/nextjs", () => ({
   useAuth: () => ({ getToken: async () => null }),
@@ -28,6 +33,7 @@ const messages = {
   nav: {
     sidebar: {
       messagesEmpty: "No conversations yet",
+      allChats: "{count, plural, =0 {All chats} other {All chats (#)}}",
       untitled: "Untitled conversation",
       unknownPersona: "Unknown persona",
       callsEmpty: "No calls yet",
@@ -51,6 +57,69 @@ function wrap(ui: React.ReactNode) {
     </NextIntlClientProvider>,
   );
 }
+
+describe("AllChatsLink", () => {
+  it("collapsed: renders one icon button with a visible count badge and the i18n label", () => {
+    wrap(<AllChatsLink count={7} collapsed />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/conversations");
+    expect(link).toHaveAttribute("aria-label", "All chats (7)");
+    expect(
+      link.querySelector('[data-slot="sidebar-all-chats-count"]'),
+    ).toHaveTextContent("7");
+  });
+
+  it("collapsed: hides the count badge at zero (zero-hidden convention)", () => {
+    wrap(<AllChatsLink count={0} collapsed />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("aria-label", "All chats");
+    expect(
+      link.querySelector('[data-slot="sidebar-all-chats-count"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it("collapsed: is exactly one chats affordance in the rail (R9-032)", () => {
+    const { container } = wrap(<AllChatsLink count={12} collapsed />);
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(
+      container.querySelectorAll('[data-slot="sidebar-all-chats-collapsed"]'),
+    ).toHaveLength(1);
+    expect(
+      container.querySelectorAll('[data-slot="sidebar-all-chats-count"]'),
+    ).toHaveLength(1);
+  });
+
+  it("collapsed: the badge updates when the count prop changes (live nav-counts refresh, R9-012)", () => {
+    const { rerender } = wrap(<AllChatsLink count={3} collapsed />);
+    expect(screen.getByRole("link")).toHaveAttribute(
+      "aria-label",
+      "All chats (3)",
+    );
+    rerender(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <AllChatsLink count={9} collapsed />
+      </NextIntlClientProvider>,
+    );
+    expect(screen.getByRole("link")).toHaveAttribute(
+      "aria-label",
+      "All chats (9)",
+    );
+    expect(
+      screen
+        .getByRole("link")
+        .querySelector('[data-slot="sidebar-all-chats-count"]'),
+    ).toHaveTextContent("9");
+  });
+
+  it("expanded: renders the plain caption link (byte-identical, no badge markup)", () => {
+    wrap(<AllChatsLink count={34} />);
+    const link = screen.getByRole("link", { name: "All chats (34)" });
+    expect(link).toHaveAttribute("href", "/conversations");
+    expect(
+      link.querySelector('[data-slot="sidebar-all-chats-count"]'),
+    ).not.toBeInTheDocument();
+  });
+});
 
 describe("MessagesList", () => {
   it("renders persona name as the title line and conversation title as the brief", () => {

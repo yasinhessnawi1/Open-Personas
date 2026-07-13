@@ -87,8 +87,11 @@ export function PersonasRail({
  * hidden (the badge zero-hidden convention).
  *
  * Expanded: a caption link in the section-header row. Collapsed (icon rail):
- * the section heading is hidden, so this renders as a tooltip-labelled icon
- * link above the avatar list — /conversations stays reachable in rail mode.
+ * R9-032 — this is the SOLE occupant of the MESSAGES section (the avatar
+ * preview list is scroll-hostile in the narrow rail, per owner ruling, so it
+ * no longer renders there — see sidebar.tsx). Renders as a tooltip-labelled
+ * icon button carrying a visible live count badge (same honest total, same
+ * nav-counts feed, zero-hidden) — /conversations stays reachable in rail mode.
  */
 export function AllChatsLink({
   count,
@@ -112,11 +115,24 @@ export function AllChatsLink({
                 href="/conversations"
                 onClick={onNavigate}
                 aria-label={label}
-                className="grid size-9 place-items-center rounded-md text-muted-foreground outline-none transition-colors duration-[var(--motion-duration-fast)] hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+                data-slot="sidebar-all-chats-collapsed"
+                className="relative grid size-9 place-items-center rounded-md text-muted-foreground outline-none transition-colors duration-[var(--motion-duration-fast)] hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
               />
             }
           >
             <MessagesSquare className="size-4" />
+            {/* R9-032: a visible live count badge (mirrors NotificationBell's
+                unread-dot pattern) — aria-hidden because the Link's aria-label
+                above already carries the full count via the same i18n string. */}
+            {count > 0 ? (
+              <span
+                aria-hidden
+                data-slot="sidebar-all-chats-count"
+                className="type-caption -top-0.5 -right-0.5 absolute flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 font-medium text-primary-foreground"
+              >
+                {count}
+              </span>
+            ) : null}
           </TooltipTrigger>
           <TooltipContent side="right">{label}</TooltipContent>
         </Tooltip>

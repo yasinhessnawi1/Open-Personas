@@ -195,6 +195,54 @@ describe("Sidebar layout contract", () => {
     }
   });
 
+  it("collapsed: MESSAGES folds into ONE chats button carrying the live count — no avatar preview items render (R9-032)", () => {
+    localStorage.setItem("persona:sidebar-collapsed", "true");
+    try {
+      const withCounts: SidebarData = {
+        ...data,
+        counts: { ...data.counts, conversations: 34 },
+      };
+      const { container } = wrap(<Sidebar data={withCounts} />);
+      // Exactly one chats affordance in the rail, carrying the visible count badge.
+      expect(
+        container.querySelectorAll('[data-slot="sidebar-all-chats-collapsed"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector('[data-slot="sidebar-all-chats-count"]'),
+      ).toHaveTextContent("34");
+      const chatsButton = screen.getByRole("link", { name: "All chats (34)" });
+      expect(chatsButton.getAttribute("href")).toBe("/conversations");
+      // The scroll-hostile avatar preview list (50 conversations in `data`) is
+      // gone entirely — not merely visually hidden.
+      expect(
+        container.querySelector('[data-slot="sidebar-messages-list"]'),
+      ).toBeNull();
+      expect(container.querySelector('a[href="/chat/c0"]')).toBeNull();
+    } finally {
+      localStorage.removeItem("persona:sidebar-collapsed");
+    }
+  });
+
+  it("expanded: MESSAGES still renders the full preview list unchanged (R9-032 is collapsed-only)", () => {
+    const withCounts: SidebarData = {
+      ...data,
+      counts: { ...data.counts, conversations: 34 },
+    };
+    const { container } = wrap(<Sidebar data={withCounts} />);
+    expect(
+      container.querySelector('[data-slot="sidebar-messages-list"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('a[href="/chat/c0"]')).not.toBeNull();
+    // The collapsed-only chats button is absent when expanded; the header
+    // link is the sole /conversations affordance.
+    expect(
+      container.querySelectorAll('[data-slot="sidebar-all-chats-collapsed"]'),
+    ).toHaveLength(0);
+    expect(
+      screen.getByRole("link", { name: "All chats (34)" }).getAttribute("href"),
+    ).toBe("/conversations");
+  });
+
   it("pins the account footer (non-shrinking) so it stays present with a long list", () => {
     // Spec 35 D-35-16: the footer is now the custom account menu, not a bare
     // Settings link (settings moved inside the account menu).
