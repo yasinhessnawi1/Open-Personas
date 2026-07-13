@@ -6,6 +6,7 @@
  */
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReschedulePreview } from "@/lib/api/schedule-client";
@@ -35,15 +36,26 @@ const _PREVIEW: ReschedulePreview = {
 function makeDialog(onCreated = vi.fn().mockResolvedValue(undefined)) {
   const onClose = vi.fn();
   render(
-    <CreateReminderDialog
-      personas={[
-        { id: "p1", name: "Astrid" },
-        { id: "p2", name: "Iris" },
-      ]}
-      defaultTimezone="Europe/Oslo"
-      onClose={onClose}
-      onCreated={onCreated}
-    />,
+    // R11-B3: the shared PersonaPicker inside needs the intl provider.
+    <NextIntlClientProvider
+      locale="en"
+      messages={{
+        personaPicker: {
+          choosePersona: "Choose a persona",
+          empty: "No personas yet. Create one to start a chat.",
+        },
+      }}
+    >
+      <CreateReminderDialog
+        personas={[
+          { id: "p1", name: "Astrid" },
+          { id: "p2", name: "Iris" },
+        ]}
+        defaultTimezone="Europe/Oslo"
+        onClose={onClose}
+        onCreated={onCreated}
+      />
+    </NextIntlClientProvider>,
   );
   return { onClose, onCreated };
 }
@@ -54,13 +66,13 @@ function timeInput(): HTMLInputElement {
   return document.querySelector("#recur-time") as HTMLInputElement;
 }
 
-function fillRequired() {
+async function fillRequired() {
   fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
     target: { value: "stretch for five minutes" },
   });
-  fireEvent.change(screen.getByLabelText(/who should run it/i), {
-    target: { value: "p1" },
-  });
+  // R11-B3: the shared persona picker replaced the select — open + pick.
+  fireEvent.click(screen.getByLabelText(/who should run it/i));
+  fireEvent.click(await screen.findByRole("menuitem", { name: /Astrid/ }));
   // Touch the reused A8 builder (the time input) so it emits a cadence.
   fireEvent.change(timeInput(), { target: { value: "08:30" } });
 }
@@ -77,32 +89,31 @@ beforeEach(() => {
 });
 
 describe("CreateReminderDialog", () => {
-  it("emits the default cadence on mount so Preview enables with an untouched picker (R4-C1-24)", () => {
+  it("emits the default cadence on mount so Preview enables with an untouched picker (R4-C1-24)", async () => {
     makeDialog();
     // subject + persona ONLY — do NOT touch the recurrence builder.
     fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
       target: { value: "stretch for five minutes" },
     });
-    fireEvent.change(screen.getByLabelText(/who should run it/i), {
-      target: { value: "p1" },
-    });
+    fireEvent.click(screen.getByLabelText(/who should run it/i));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Astrid/ }));
     // The builder announced "Every day at 09:00" on mount, so the cadence gate passes
     // without the user touching the picker (R4-C1-24: Preview/Create was dead otherwise).
     expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
   });
 
-  it("reuses A8's builder and gates Preview on subject + persona + cadence", () => {
+  it("reuses A8's builder and gates Preview on subject + persona + cadence", async () => {
     makeDialog();
     expect(screen.getByTestId("recurrence-builder")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Preview" })).toBeDisabled();
-    fillRequired();
+    await fillRequired();
     expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
   });
 
   it("previews the engine echo, then confirms through the create door", async () => {
     const onCreated = vi.fn().mockResolvedValue(undefined);
     makeDialog(onCreated);
-    fillRequired();
+    await fillRequired();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
     await waitFor(() =>
@@ -125,7 +136,7 @@ describe("CreateReminderDialog", () => {
   it("threads notify_on_fire=true by default (the bell checkbox is checked)", async () => {
     const onCreated = vi.fn().mockResolvedValue(undefined);
     makeDialog(onCreated);
-    fillRequired();
+    await fillRequired();
     // Default ON — it's a reminder; you want reminding.
     expect(
       screen.getByRole("checkbox", { name: /notify me in the bell/i }),
@@ -143,7 +154,7 @@ describe("CreateReminderDialog", () => {
   it("sends notify_on_fire=false when the bell checkbox is unchecked", async () => {
     const onCreated = vi.fn().mockResolvedValue(undefined);
     makeDialog(onCreated);
-    fillRequired();
+    await fillRequired();
     fireEvent.click(
       screen.getByRole("checkbox", { name: /notify me in the bell/i }),
     );
@@ -166,7 +177,7 @@ describe("CreateReminderDialog", () => {
       quiet_hours_offer: "06:00",
     });
     makeDialog();
-    fillRequired();
+    await fillRequired();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
     await waitFor(() =>
@@ -186,7 +197,7 @@ describe("CreateReminderDialog", () => {
 
   it("invalidates the preview when the cadence changes (confirm only a fresh echo)", async () => {
     makeDialog();
-    fillRequired();
+    await fillRequired();
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
     await waitFor(() =>
       expect(screen.getByTestId("create-preview")).toBeInTheDocument(),
@@ -199,7 +210,7 @@ describe("CreateReminderDialog", () => {
 });
 
 describe("applyQuietEdge", () => {
-  it("re-times a recurring pattern to the edge", () => {
+  it("re-times a recurring pattern to the edge", async () => {
     const cadence: CadenceInput = {
       pattern: { kind: "daily", hour: 9, minute: 0 },
       one_time_at: null,
@@ -208,7 +219,7 @@ describe("applyQuietEdge", () => {
     expect(out.pattern).toMatchObject({ hour: 6, minute: 30 });
   });
 
-  it("re-times a one-time instant to the edge on the same day", () => {
+  it("re-times a one-time instant to the edge on the same day", async () => {
     const at = new Date();
     at.setHours(9, 0, 0, 0);
     const out = applyQuietEdge(

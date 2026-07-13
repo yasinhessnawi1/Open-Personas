@@ -28,7 +28,11 @@ export default async function TasksPage() {
   const personaNames: PersonaNames = Object.fromEntries(
     personas.map((p) => [p.id, p.name]),
   );
-  const personaOptions = personas.map((p) => ({ id: p.id, name: p.name }));
+  const personaOptions = personas.map((p) => ({
+    id: p.id,
+    name: p.name,
+    avatar_url: p.avatar_url,
+  }));
   return (
     <PageBody width="narrow">
       <ActivityTabs />

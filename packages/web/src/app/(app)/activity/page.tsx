@@ -59,7 +59,11 @@ export default async function ActivityPage() {
       </PageBody>
     );
   }
-  const personaList = personas.map((p) => ({ id: p.id, name: p.name }));
+  const personaList = personas.map((p) => ({
+    id: p.id,
+    name: p.name,
+    avatar_url: p.avatar_url,
+  }));
 
   const personaById = new Map(personas.map((p) => [p.id, p]));
   const quickPersonas = rankPersonasByRecentUse(

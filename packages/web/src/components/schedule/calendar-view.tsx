@@ -61,8 +61,15 @@ type View = "agenda" | "week" | "month";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
-const _cellStyle = (occ: Occurrence) =>
-  occ.persona_id ? personaIdentityStyle({ id: occ.persona_id }) : undefined;
+/** Identity style per occurrence; a persona-less schedule reads NEUTRAL — the
+ * root identity default is the terracotta primary, and a page of accent-orange
+ * rails is noise, not information (R11-B3). */
+const _cellStyle = (occ: Occurrence): React.CSSProperties =>
+  occ.persona_id
+    ? personaIdentityStyle({ id: occ.persona_id })
+    : ({
+        "--v-id": "color-mix(in oklch, var(--foreground) 30%, transparent)",
+      } as React.CSSProperties);
 
 export interface CalendarViewProps {
   /** The owner's personas — the create dialog's executor picker (Spec A10, A10-D-3)
@@ -237,6 +244,9 @@ function DayStatus({ statuses }: { statuses: FireStatus[] | undefined }) {
   );
 }
 
+/** The display line: WHAT fires (subject), falling back to the cadence clause. */
+const occLabel = (occ: Occurrence) => occ.subject?.trim() || occ.human_terms;
+
 /** One agenda row — the WHOLE row opens the reschedule twin (kit `.occ`). */
 function OccurrenceRow({
   occ,
@@ -253,13 +263,14 @@ function OccurrenceRow({
       className="v-occurrence-card"
       style={_cellStyle(occ)}
       onClick={() => onEdit(occ)}
-      aria-label={`Reschedule: ${occ.human_terms}`}
+      aria-label={`Reschedule: ${occLabel(occ)}`}
+      title={occ.human_terms}
     >
       <span className="v-occurrence-time">
         {occurrenceTime(occ, DISPLAY_TZ)}
       </span>
       <span className="v-occurrence-body">
-        <span className="v-occurrence-terms">{occ.human_terms}</span>
+        <span className="v-occurrence-terms">{occLabel(occ)}</span>
         {name ? (
           <span className="v-occurrence-who">
             <span className="v-iddot" aria-hidden="true" />
@@ -371,7 +382,7 @@ function GridView({
                   title={occ.human_terms}
                 >
                   {occurrenceTime(occ, DISPLAY_TZ)}
-                  {variant === "week" ? ` ${occ.human_terms}` : null}
+                  {variant === "week" ? ` ${occLabel(occ)}` : null}
                 </button>
               ))}
               {more > 0 ? (
@@ -499,7 +510,7 @@ function RescheduleDialog({
           <span className="v-iddot" aria-hidden="true" />
         ) : null}
         {personaName ? `${personaName} · ` : null}
-        {occurrence.human_terms}
+        {occLabel(occurrence)}
       </p>
       <RecurrenceBuilder timezone={tz} onChange={setCadence} />
       {/* The confirm echo — the SAME full clause chat re-echoes, from the engine preview. */}

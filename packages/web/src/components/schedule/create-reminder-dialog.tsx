@@ -15,6 +15,7 @@
 import { useMemo, useState } from "react";
 
 import { useAuth } from "@/auth";
+import { ExecutorPicker } from "@/components/persona/executor-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -27,6 +28,8 @@ import { type CadenceInput, RecurrenceBuilder } from "./recurrence-builder";
 export interface ReminderPersona {
   id: string;
   name: string;
+  /** Real avatar for the shared executor picker (R11-B3). */
+  avatar_url?: string | null;
 }
 
 export interface CreateReminderDialogProps {
@@ -152,25 +155,18 @@ export function CreateReminderDialog({
         />
       </label>
 
-      <label htmlFor="reminder-persona">
-        Who should run it?
-        <select
-          id="reminder-persona"
+      {/* R11-B3 (owner-ruled): the SHARED persona picker — same control as new
+          chat / new call — never a bare select of name strings. */}
+      <div className="flex flex-col gap-2">
+        <span className="text-sm font-medium">Who should run it?</span>
+        <ExecutorPicker
+          personas={personas}
           value={personaId}
-          onChange={(e) => {
-            setPersonaId(e.target.value);
-          }}
-        >
-          <option value="" disabled>
-            Choose a persona…
-          </option>
-          {personas.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
+          onSelect={setPersonaId}
+          label="Who should run it?"
+          placeholder="Choose a persona…"
+        />
+      </div>
 
       <RecurrenceBuilder
         timezone={defaultTimezone}

@@ -1846,8 +1846,11 @@
     border: 0;
     border-radius: 11px;
     background: var(--card, var(--background));
-    box-shadow: 0 0 0 1px var(--v-card-ring);
-    border-inline-start: 2px solid var(--v-id);
+    /* the identity rail as an INSET shadow — a border would bend around the
+       card radius into a parenthesis (owner catch, R11-B3) */
+    box-shadow:
+      0 0 0 1px var(--v-card-ring),
+      inset 3px 0 0 var(--v-id);
     cursor: pointer;
     color: inherit;
     font: inherit;

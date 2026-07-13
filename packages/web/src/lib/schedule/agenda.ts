@@ -20,6 +20,9 @@ export interface Occurrence {
   timezone: string;
   /** The cadence in human terms — never a raw RRULE. */
   human_terms: string;
+  /** R11-B3: WHAT fires (the A10 subject, else the backing task's goal) — the
+   * calendar's display line; null falls back to human_terms. */
+  subject?: string | null;
 }
 
 export interface FireEvent {

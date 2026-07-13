@@ -8,6 +8,7 @@ import { useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { useAuth } from "@/auth";
+import { ExecutorPicker } from "@/components/persona/executor-picker";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { createSchedule } from "@/lib/api/schedule-client";
@@ -35,6 +36,8 @@ import { cn } from "@/lib/utils";
 export interface NewTaskPersona {
   readonly id: string;
   readonly name: string;
+  /** Real avatar for the shared executor picker (R11-B3). */
+  readonly avatar_url?: string | null;
 }
 
 /** The dispatch server action (the /runs `startTask` door), passed down from a
@@ -121,25 +124,17 @@ function DialogBody({
         />
       </div>
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="nt-persona" className="text-sm font-medium">
-          {t("whoLabel")}
-        </label>
-        <select
-          id="nt-persona"
-          name="persona_id"
+        <span className="text-sm font-medium">{t("whoLabel")}</span>
+        {/* R11-B3 (owner-ruled): the SHARED persona picker; the hidden input
+            keeps the server-action form contract (name="persona_id"). */}
+        <ExecutorPicker
+          personas={personas}
           value={personaId}
-          onChange={(e) => setPersonaId(e.target.value)}
-          className="h-10 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <option value="" disabled>
-            {t("personaPlaceholder")}
-          </option>
-          {personas.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
+          onSelect={setPersonaId}
+          label={t("whoLabel")}
+          placeholder={t("personaPlaceholder")}
+        />
+        <input type="hidden" name="persona_id" value={personaId} />
       </div>
       <div className="flex flex-col gap-1.5">
         <label htmlFor="nt-when" className="text-sm font-medium">

@@ -26,7 +26,11 @@ export default async function SchedulePage() {
   ]);
   return (
     <CalendarView
-      personas={personas.map((p) => ({ id: p.id, name: p.name }))}
+      personas={personas.map((p) => ({
+        id: p.id,
+        name: p.name,
+        avatar_url: p.avatar_url,
+      }))}
       defaultTimezone={profile?.timezone ?? null}
     />
   );

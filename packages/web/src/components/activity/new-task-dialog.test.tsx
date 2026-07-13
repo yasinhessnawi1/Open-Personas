@@ -36,13 +36,15 @@ function renderDialog(action = vi.fn()) {
   return action;
 }
 
-function fillGoalAndPersona(personaId = "kai") {
+async function fillGoalAndPersona(personaName = "Kai") {
   fireEvent.change(screen.getByLabelText("What should get done?"), {
     target: { value: "Summarise the papers" },
   });
-  fireEvent.change(screen.getByLabelText("Who runs it?"), {
-    target: { value: personaId },
-  });
+  // R11-B3: the shared persona picker replaced the select — open + pick.
+  fireEvent.click(screen.getByLabelText("Who runs it?"));
+  fireEvent.click(
+    await screen.findByRole("menuitem", { name: new RegExp(personaName) }),
+  );
 }
 
 beforeEach(() => {
@@ -51,7 +53,7 @@ beforeEach(() => {
 });
 
 describe("NewTaskDialog (R11-B2)", () => {
-  it("opens from the trigger and gates Start now until goal + persona are set", () => {
+  it("opens from the trigger and gates Start now until goal + persona are set", async () => {
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: /new task/i }));
     expect(
@@ -66,16 +68,15 @@ describe("NewTaskDialog (R11-B2)", () => {
     });
     expect(start).toBeDisabled(); // still no executor
 
-    fireEvent.change(screen.getByLabelText("Who runs it?"), {
-      target: { value: "kai" },
-    });
+    fireEvent.click(screen.getByLabelText("Who runs it?"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Kai/ }));
     expect(start).toBeEnabled();
   });
 
-  it("previews the hand-off in plain words once ready (kit preview line)", () => {
+  it("previews the hand-off in plain words once ready (kit preview line)", async () => {
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: /new task/i }));
-    fillGoalAndPersona("iris");
+    await fillGoalAndPersona("Iris");
     const preview = screen.getByText(
       (_, el) =>
         el?.tagName === "P" &&
@@ -87,7 +88,7 @@ describe("NewTaskDialog (R11-B2)", () => {
   it("schedules for later through the A10 door with intent:'task' (kit footer leg)", async () => {
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: /new task/i }));
-    fillGoalAndPersona("kai");
+    await fillGoalAndPersona("Kai");
 
     // a future instant flips the action to Schedule for later
     fireEvent.change(screen.getByLabelText("When (optional)"), {
@@ -112,10 +113,10 @@ describe("NewTaskDialog (R11-B2)", () => {
     );
   });
 
-  it("refuses a past instant honestly — no silent no-op", () => {
+  it("refuses a past instant honestly — no silent no-op", async () => {
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: /new task/i }));
-    fillGoalAndPersona();
+    await fillGoalAndPersona();
     fireEvent.change(screen.getByLabelText("When (optional)"), {
       target: { value: "2020-01-05T09:30" },
     });

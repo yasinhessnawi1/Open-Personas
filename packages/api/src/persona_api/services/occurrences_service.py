@@ -23,6 +23,7 @@ from sqlalchemy import bindparam, text
 
 from persona_api.db.engine import rls_connection
 from persona_api.schedules.store import ScheduleStore
+from persona_api.textline import one_line
 
 if TYPE_CHECKING:
     from persona.schedules import Schedule
@@ -52,6 +53,11 @@ class Occurrence(BaseModel):
     fire_at: datetime  # the absolute UTC instant (the client formats it in the display tz)
     timezone: str  # the schedule's captured IANA zone (the human_terms frame, D-A1-4)
     human_terms: str  # the cadence in human terms (no raw RRULE, ever)
+    #: R11-B3: WHAT fires — the A10 subject when the user named one, else the backing
+    #: task's goal (one calm line) — so the calendar reads "Resume the battery survey",
+    #: never the cadence clause twice. ``None`` when neither exists (client falls back
+    #: to ``human_terms``).
+    subject: str | None = None
 
 
 class FireEvent(BaseModel):
@@ -125,7 +131,10 @@ def list_occurrences(
                 Occurrence(
                     schedule_id=schedule.id,
                     task_id=task[0] if task else None,
-                    persona_id=task[1] if task else None,
+                    # R11-B3: the DISPLAY persona uses the same two-step resolution the
+                    # R9-024 filter uses (task join, else the initiative payload) — the
+                    # identity spine needs a persona wherever one truthfully exists.
+                    persona_id=_resolved_persona_id(schedule, task_by_schedule),
                     fire_at=fire_at,
                     timezone=schedule.timezone,
                     human_terms=render_human_terms(
@@ -133,6 +142,7 @@ def list_occurrences(
                         one_time_at=schedule.one_time_at,
                         timezone=schedule.timezone,
                     ),
+                    subject=_subject(schedule, task),
                 )
             )
 
@@ -152,16 +162,16 @@ def list_occurrences(
 
 
 def _resolved_persona_id(
-    schedule: Schedule, task_by_schedule: dict[str, tuple[str, str]]
+    schedule: Schedule, task_by_schedule: dict[str, tuple[str, str, str | None]]
 ) -> str | None:
-    """The schedule's owning persona for filtering (R9-024) — never exposed on the wire.
+    """The schedule's owning persona — the R9-024 filter signal AND (R11-B3) the
+    occurrence's display persona (the calendar's identity spine).
 
     Two linkage kinds, resolved in priority order: a task-backed schedule
     (``task_scheduled_fire``) is owned by its task's ``persona_id`` (the ``_task_by_schedule``
     join); a schedule with no backing task (``initiative_scan``) carries ``persona_id`` directly
-    in its ``payload_template``. Neither present → ``None`` (never matches a filter). This is
-    STRICTLY an internal filter signal — the ``Occurrence.persona_id`` field keeps its existing
-    task-only derivation (unchanged) so the absent-filter response stays byte-identical.
+    in its ``payload_template``. Neither present → ``None`` (never matches a filter; the
+    client renders a neutral row).
     """
     task = task_by_schedule.get(schedule.id)
     if task is not None:
@@ -170,12 +180,27 @@ def _resolved_persona_id(
     return raw if isinstance(raw, str) else None
 
 
-def _task_by_schedule(engine: Engine, owner_id: str) -> dict[str, tuple[str, str]]:
-    """Map ``schedule_id → (task_id, persona_id)`` for the owner's schedule-backed tasks (RLS)."""
-    stmt = text("SELECT id, persona_id, schedule_id FROM tasks WHERE schedule_id IS NOT NULL")
+def _subject(schedule: Schedule, task: tuple[str, str, str | None] | None) -> str | None:
+    """WHAT the occurrence does, one calm line (R11-B3): the A10 user subject when
+    present, else the backing task's goal — never the cadence clause again."""
+    raw = schedule.payload_template.get("subject")
+    if isinstance(raw, str) and raw.strip():
+        return one_line(raw)
+    if task is not None and task[2]:
+        return one_line(task[2])
+    return None
+
+
+def _task_by_schedule(engine: Engine, owner_id: str) -> dict[str, tuple[str, str, str | None]]:
+    """Map ``schedule_id → (task_id, persona_id, goal)`` for the owner's schedule-backed
+    tasks (RLS). The goal feeds the occurrence subject fallback (R11-B3)."""
+    stmt = text(
+        "SELECT id, persona_id, schedule_id, contract_json->>'goal' AS goal "
+        "FROM tasks WHERE schedule_id IS NOT NULL"
+    )
     with rls_connection(engine, owner_id) as conn:
         rows = conn.execute(stmt).mappings().all()
-    return {r["schedule_id"]: (r["id"], r["persona_id"]) for r in rows}
+    return {r["schedule_id"]: (r["id"], r["persona_id"], r["goal"]) for r in rows}
 
 
 def _fire_history(
