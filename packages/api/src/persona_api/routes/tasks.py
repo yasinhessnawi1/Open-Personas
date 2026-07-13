@@ -49,8 +49,11 @@ from persona_api.schemas.responses import (
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
+from persona_api.textline import DETAIL_BUDGET, one_line
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from persona.tasks import Task, TaskCheckpoint
     from sqlalchemy import Engine
 
@@ -91,6 +94,22 @@ def _command_result(
 _STUCK_STATUSES = frozenset({IntrospectionStatus.WAITING_ON_USER, IntrospectionStatus.FAILED})
 
 
+def _clean(text: str) -> str:
+    """A6-D-4: progress / next-step / causes are SUMMARY lines, never raw
+    transcripts — but executors sometimes store the full delivery message
+    (voice-markup, markdown, paragraphs). Flatten at the read seam so stored
+    rows stay verbose while every surface reads one calm line (R11-B2 rider)."""
+    return one_line(text, DETAIL_BUDGET)
+
+
+def _clean_opt(text: str | None) -> str | None:
+    return None if text is None else _clean(text)
+
+
+def _clean_list(values: Iterable[str]) -> list[str]:
+    return [_clean(v) for v in values]
+
+
 def _summary(
     task: Task, budget: BudgetEnforcer, owner_id: str, *, stuck_cause: str | None = None
 ) -> TaskSummaryOut:
@@ -103,7 +122,8 @@ def _summary(
         spent_micros=task.ledger.total_micros,
         budget_cap_micros=budget.effective_cap(owner_id, task),
         updated_at=task.updated_at,
-        stuck_cause=stuck_cause,
+        # A6-D-5's loud card shows a CAUSE line, not a transcript (R11-B2 rider).
+        stuck_cause=_clean_opt(stuck_cause),
     )
 
 
@@ -132,22 +152,22 @@ def _report(task: Task, checkpoint: TaskCheckpoint | None, now: datetime) -> Tas
     """The terminal outcome as its distinct projection (a failure never renders as success)."""
     if task.state is TaskState.COMPLETED:
         completion = build_completion_report(task, checkpoint, now=now)
-        return TaskReportOut(kind="completed", conclusions=list(completion.conclusions))
+        return TaskReportOut(kind="completed", conclusions=_clean_list(completion.conclusions))
     if task.state is TaskState.FAILED:
         cause = (checkpoint.blocked_on if checkpoint is not None else None) or ""
         stuck = build_stuck_report(task, checkpoint, cause=cause, now=now)
         return TaskReportOut(
             kind="stuck",
-            cause=stuck.cause,
-            where_it_stood=list(stuck.where_it_stood),
-            next_step=stuck.next_step,
+            cause=_clean(stuck.cause),
+            where_it_stood=_clean_list(stuck.where_it_stood),
+            next_step=_clean(stuck.next_step),
         )
     if task.state is TaskState.CANCELLED:
         cancelled = build_cancellation_summary(task, checkpoint, now=now)
         return TaskReportOut(
             kind="cancelled",
-            where_it_stood=list(cancelled.where_it_stood),
-            next_step=cancelled.next_step,
+            where_it_stood=_clean_list(cancelled.where_it_stood),
+            next_step=_clean(cancelled.next_step),
         )
     return None
 
@@ -218,18 +238,18 @@ async def get_task(
             external_micros=task.ledger.external_micros,
             total_micros=task.ledger.total_micros,
         ),
-        progress=list(view.progress),
-        next_step=view.next_step,
-        open_questions=list(view.open_questions),
-        wait_reason=view.wait_reason,
+        progress=_clean_list(view.progress),
+        next_step=_clean(view.next_step),
+        open_questions=_clean_list(view.open_questions),
+        wait_reason=_clean_opt(view.wait_reason),
         report=_report(task, checkpoint, now),
         checkpoints=[
             TaskCheckpointOut(
                 seq=c.checkpoint_seq,
-                progress_conclusions=list(c.progress_conclusions),
-                next_step=c.next_step,
-                open_questions=list(c.open_questions),
-                blocked_on=c.blocked_on,
+                progress_conclusions=_clean_list(c.progress_conclusions),
+                next_step=_clean(c.next_step),
+                open_questions=_clean_list(c.open_questions),
+                blocked_on=_clean_opt(c.blocked_on),
                 updated_at=c.updated_at,
             )
             for c in recent

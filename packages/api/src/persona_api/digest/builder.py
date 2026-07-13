@@ -15,7 +15,6 @@ event carries its ``human`` string; a task that never fired from an event leaves
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta  # noqa: TC003 — runtime Pydantic field types
 from typing import TYPE_CHECKING
 
@@ -33,6 +32,7 @@ from persona_api.initiative.store import InitiativeLedger
 from persona_api.services import occurrences_service
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
+from persona_api.textline import LINE_BUDGET, one_line
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -134,30 +134,10 @@ def _first(values: Sequence[str]) -> str:
     return values[0] if values else ""
 
 
-#: One-line budget for any digest line (title/detail) — the under-a-minute read
-#: means ~a sentence per item, never a dumped report (A6-R-1).
-_LINE_BUDGET = 160
-_VOICE_MARKUP_RE = re.compile(r"\{\{[^{}]*\}\}")
-_MD_EMPHASIS_RE = re.compile(r"\*\*|__|`")
-_WS_RE = re.compile(r"\s+")
-
-
-def _line(text: str, budget: int = _LINE_BUDGET) -> str:
-    """Collapse arbitrary persona/report text into ONE calm digest line.
-
-    Executors and personas write rich text — ``{{#warm}}`` voice-markup,
-    ``**markdown**`` emphasis, multi-paragraph delivery messages, trailing
-    internal ids. The digest contract (A6-R-1/A6-D-2) is a one-liner per item,
-    and these lines feed BOTH the Review surface and C0's morning message, so
-    the flattening happens here at the single seam: strip markup markers (keep
-    the words), collapse all whitespace, and truncate at a word boundary with
-    an honest ellipsis.
-    """
-    cleaned = _WS_RE.sub(" ", _MD_EMPHASIS_RE.sub("", _VOICE_MARKUP_RE.sub(" ", text))).strip()
-    if len(cleaned) <= budget:
-        return cleaned
-    cut = cleaned[:budget].rsplit(" ", 1)[0].rstrip(" ,;:—–-")
-    return f"{cut}…"
+# One calm line per digest item (A6-R-1) — the shared read-seam sanitizer;
+# the task-detail projections flatten through the same module (R11-B2 rider).
+_LINE_BUDGET = LINE_BUDGET
+_line = one_line
 
 
 def _section(kind: str, items: list[DigestItem]) -> DigestSection | None:
