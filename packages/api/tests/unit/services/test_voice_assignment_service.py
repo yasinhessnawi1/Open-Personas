@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from loguru import logger as _loguru_logger
 from persona.schema.conversation import ConversationMessage
 from persona.schema.persona import Persona, PersonaIdentity
 from persona_api.services import voice_assignment_service as vas
@@ -270,3 +271,83 @@ class TestMaybeAssignVoice:
         )
         asyncio.run(vas.maybe_assign_voice(request, owner_id="o", persona_id="p", yaml_str=_YAML))
         assert called == {}
+
+
+# ----- catalogue-fetch failure logging (R9-025 reopen leg A) ---------------
+
+
+@pytest.fixture
+def loguru_capture() -> Iterator[list[str]]:
+    """Loguru sink capturing every emitted message string (>= WARNING).
+
+    ``persona.logging.get_logger`` wraps loguru, so pytest's stdlib-only
+    ``caplog`` does not see records — mirrors
+    ``test_chat_turn_worker_proportional.py``'s own fixture.
+    """
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    try:
+        yield captured
+    finally:
+        _loguru_logger.remove(sink_id)
+
+
+def _araise_http_status_error(response: httpx.Response) -> Callable[..., Awaitable[object]]:
+    async def _f(*_: object, **__: object) -> object:
+        raise httpx.HTTPStatusError(
+            "upstream rejected", request=response.request, response=response
+        )
+
+    return _f
+
+
+class TestCatalogueFetchFailureLogging:
+    """R9-025 reopen leg A — the months-silent-failure lesson: this exact
+    fail-soft catch swallowed the SAME auth misconfiguration the tts/stt
+    proxies hit (a 401 on the forwarded bearer) at INFO, so personas kept
+    coming out voiceless with nobody noticing. Now WARNING, with the upstream
+    status pulled out explicitly (grep/alert-able, not buried in a repr)."""
+
+    def test_logs_at_warning_not_info(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_capture: list[str]
+    ) -> None:
+        request = httpx.Request("GET", "http://voice/v1/voices")
+        response = httpx.Response(401, request=request, text="authentication_error")
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise_http_status_error(response))
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        req = _request(
+            config=SimpleNamespace(voice_service_url="http://voice", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+            rls_engine=object(),
+            bearer="Bearer t",
+        )
+
+        asyncio.run(vas.maybe_assign_voice(req, owner_id="o", persona_id="p", yaml_str=_YAML))
+
+        # Fail-soft is unchanged: create still succeeds, persona stays voiceless.
+        assert called == {}
+        warnings = [m for m in loguru_capture if "catalogue unavailable" in m]
+        assert len(warnings) == 1
+        assert "status=401" in warnings[0]
+        assert "persona_id=p" in warnings[0]
+
+    def test_upstream_status_surfaces_for_a_different_code_too(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_capture: list[str]
+    ) -> None:
+        request = httpx.Request("GET", "http://voice/v1/voices")
+        response = httpx.Response(503, request=request, text="voice_unavailable")
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise_http_status_error(response))
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **_k: None)
+        req = _request(
+            config=SimpleNamespace(voice_service_url="http://voice", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+            rls_engine=object(),
+            bearer="Bearer t",
+        )
+
+        asyncio.run(vas.maybe_assign_voice(req, owner_id="o", persona_id="p", yaml_str=_YAML))
+
+        warnings = [m for m in loguru_capture if "catalogue unavailable" in m]
+        assert len(warnings) == 1
+        assert "status=503" in warnings[0]

@@ -20,6 +20,7 @@ from persona_voice.http.app import build_app
 from persona_voice.loop.streaming import AudioChunk
 from persona_voice.stt.config import StreamingSTTConfig
 from persona_voice.stt.errors import STTAuthenticationError, STTStreamFailureError
+from persona_voice.tts.config import StreamingTTSConfig
 from persona_voice.tts.errors import TTSAuthenticationError, TTSStreamFailureError
 from persona_voice.tts.types import ResolvedVoice, VoiceCatalogueEntry
 from pydantic import SecretStr
@@ -206,6 +207,92 @@ def test_voice_config_reads_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.jwt_secret.get_secret_value() == "env_secret"
     # Comma-separated list parsed by the computed property.
     assert cfg.jwt_algorithms_list == ["HS256", "RS256"]
+
+
+# ---- dev auth posture, real (non-overridden) verify path (R9-025 reopen leg A) ---
+#
+# Every other test in this file sets ``app.state.verify_token`` to a fake, which
+# ALWAYS wins over the real ``get_verify_token``/``make_jwt_verifier`` path (see
+# that function's docstring) — so none of them ever exercise the actual
+# cfg-driven cloud-edition verifier. These tests build the app with NO override,
+# so the real path runs: proving both documented dev postures (RS256 against a
+# PEM — the run-local.sh / prod posture; HS256 against a shared secret — the
+# lighter dev alternative) actually verify a real signed token end-to-end, and
+# that a misconfigured cloud edition fails CLOSED with a clean 401 rather than
+# an unhandled construction-time crash.
+
+
+def _build_cloud_app(
+    *,
+    jwt_secret: SecretStr | None = None,
+    jwt_public_key: SecretStr | None = None,
+    jwt_algorithms: str = "HS256",
+) -> TestClient:
+    cfg = VoiceConfig(
+        edition="cloud",
+        livekit_url="ws://localhost:7880",
+        livekit_api_key=SecretStr("lk_key_test"),
+        livekit_api_secret=SecretStr("very-very-long-test-secret-for-hs256-signing"),
+        jwt_secret=jwt_secret,
+        jwt_public_key=jwt_public_key,
+        jwt_algorithms=jwt_algorithms,
+    )
+    app = build_app(cfg)
+    # No app.state.verify_token override — the REAL get_verify_token path runs.
+    return TestClient(app)
+
+
+def _rsa_keypair() -> tuple[str, str]:
+    """A throwaway RSA keypair — mirrors ``test_jwt_verifier.py``'s own helper."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    priv = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    pub = (
+        key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+    return priv, pub
+
+
+def test_cloud_edition_rs256_dev_posture_verifies_a_real_token() -> None:
+    """The documented dev/prod posture: RS256 against a Clerk-dashboard-shaped
+    PEM in ``PERSONA_VOICE_JWT_PUBLIC_KEY`` — the SAME mechanism
+    ``packages/api/run-local.sh`` already wires for local dev (reading
+    ``.secrets/clerk-jwt-public.pem``) and Fly sets as a secret in prod."""
+    priv, pub = _rsa_keypair()
+    client = _build_cloud_app(jwt_public_key=SecretStr(pub), jwt_algorithms="RS256")
+    token = jwt.encode({"sub": "user_rs256"}, priv, algorithm="RS256")
+    resp = client.get("/v1/voices", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+
+
+def test_cloud_edition_hs256_dev_posture_verifies_a_real_token() -> None:
+    """The documented lighter-weight dev alternative: a shared secret in
+    ``PERSONA_VOICE_JWT_SECRET`` (no PEM to source)."""
+    client = _build_cloud_app(jwt_secret=SecretStr("dev-shared-secret"), jwt_algorithms="HS256")
+    token = jwt.encode({"sub": "user_hs256"}, "dev-shared-secret", algorithm="HS256")
+    resp = client.get("/v1/voices", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+
+
+def test_cloud_edition_unconfigured_jwt_401s_cleanly_instead_of_crashing() -> None:
+    """R9-025 reopen: before this fix, cloud edition with NEITHER
+    ``PERSONA_VOICE_JWT_PUBLIC_KEY`` nor ``PERSONA_VOICE_JWT_SECRET`` set made
+    ``make_jwt_verifier`` raise an unhandled ``ValueError`` at
+    dependency-construction time — every request 500'd, with no signal telling
+    an operator what to fix. It must still fail CLOSED (no caller gets
+    through), but now as the same diagnosable 401 shape a bad bearer gets."""
+    client = _build_cloud_app()  # no jwt_secret, no jwt_public_key configured
+    resp = client.get("/v1/voices", headers={"Authorization": "Bearer whatever"})
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "authentication_error"
 
 
 # ---------- GET /v1/voices (spec V6 C2) -------------------------------------
@@ -425,6 +512,71 @@ def test_tts_endpoint_rejects_body_with_extra_fields() -> None:
         json={"text": "hi", "voice_id": "v1", "owner_id": "spoofed"},
     )
     assert resp.status_code == 422
+
+
+# ---- voiceless-caller fallback (R9-025 reopen leg A) ------------------------
+
+
+def test_tts_endpoint_uses_the_configured_default_when_voice_id_is_omitted() -> None:
+    """The proxy's voiceless-persona contract: no ``voice_id`` key at all."""
+    client = _build_test_client()
+    backend = _FakeTTSBackend()
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default="v_default")
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.seen_voice_refs == ["v_default"]
+
+
+def test_tts_endpoint_uses_the_configured_default_when_voice_id_is_explicit_null() -> None:
+    """The EXACT shape the api proxy sends for a voiceless persona: ``voice_id: null``."""
+    client = _build_test_client()
+    backend = _FakeTTSBackend()
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default="v_default")
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": None},
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.seen_voice_refs == ["v_default"]
+
+
+def test_tts_endpoint_explicit_voice_id_wins_over_the_default() -> None:
+    client = _build_test_client()
+    backend = _FakeTTSBackend()
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default="v_default")
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v_explicit"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.seen_voice_refs == ["v_explicit"]
+
+
+def test_tts_endpoint_503_no_voice_configured_when_no_id_and_no_default() -> None:
+    client = _build_test_client()
+    backend = _FakeTTSBackend()
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default=None)
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi"},
+    )
+    assert resp.status_code == 503
+    body = resp.json()["detail"]
+    assert body["error"] == "tts_unavailable"
+    assert body["reason"] == "no_voice_configured"
+    # The backend was never called — nothing to synthesize without a voice.
+    assert backend.seen_voice_refs == []
 
 
 def test_tts_endpoint_503_on_authentication_error_never_leaks_provider_payload() -> None:

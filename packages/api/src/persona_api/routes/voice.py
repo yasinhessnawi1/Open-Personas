@@ -11,6 +11,17 @@ proxy, the two existing "call out to a sibling HTTP service" precedents):
   ownership-checked (RLS via :func:`persona_service.get_persona`, 404 on
   cross-tenant), then proxies ``{text}`` + the resolved ``voice_id`` to
   persona-voice's ``POST /v1/tts``. Returns the WAV bytes verbatim.
+
+  **Voiceless-persona fallback (R9-025 reopen leg A).** A persona with no
+  ``identity.voice`` (never auto-picked, or auto-picked before TTS was
+  configured — see ``voice_assignment_service``) is no longer an immediate
+  local 503: ``voice_id`` rides through as ``null``, and persona-voice
+  resolves it against its own ``PERSONA_TTS_VOICE_DEFAULT`` (the SAME D-V3-4
+  fallback the realtime call stack already applies to a voice-less persona —
+  see ``persona_voice.tts.voice_resolution.resolve_voice``). The 503
+  ``no_voice_configured`` shape still fires, but now only when persona-voice
+  itself has nothing to fall back to (or is unreachable/unconfigured) — never
+  merely because THIS persona hasn't picked a voice yet.
 * ``POST /v1/stt`` — owner-scoped only (no persona; dictation has no
   persona context during authoring), audio passthrough to persona-voice's
   ``POST /v1/stt``. Returns ``{transcript}``.
@@ -166,26 +177,28 @@ async def post_persona_tts(
     Ownership: :func:`persona_service.get_persona` is RLS-scoped — a
     cross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`
     (→ 404 via the existing handler), never a leak. Fails soft to 503 when
-    the voice service is unconfigured/unreachable OR the persona has no
-    configured voice; 413 passes through when the text is too long.
+    the voice service is unconfigured/unreachable; 413 passes through when
+    the text is too long.
+
+    R9-025 reopen leg A: a persona with no configured voice is no longer an
+    immediate local 503 — ``voice_id`` rides through as ``null`` and
+    persona-voice resolves its own default (see the module docstring's
+    "Voiceless-persona fallback" section). 503 ``no_voice_configured`` is
+    still reachable, but only when persona-voice itself has no default.
     """
     base = _voice_service_base(request)
     persona_row = persona_service.get_persona(
         rls_engine=request.app.state.rls_engine, persona_id=persona_id
     )
     voice = _extract_persona_voice(persona_row)
-    if voice is None:
-        raise VoiceServiceUnavailableError(
-            "this persona has no configured voice",
-            context={"persona_id": persona_id, "reason": "no_voice_configured"},
-        )
+    voice_id = voice.voice_id if voice is not None else None
 
     try:
         async with httpx.AsyncClient(timeout=_PROXY_TIMEOUT) as client:
             resp = await client.post(
                 f"{base}/v1/tts",
                 headers=_forwarded_auth_headers(request),
-                json={"text": body.text, "voice_id": voice.voice_id},
+                json={"text": body.text, "voice_id": voice_id},
             )
     except httpx.HTTPError as exc:
         raise VoiceServiceUnavailableError(

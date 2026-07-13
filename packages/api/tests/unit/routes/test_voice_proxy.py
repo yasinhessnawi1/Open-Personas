@@ -140,15 +140,54 @@ def test_tts_proxy_404_on_cross_tenant_persona(
     assert resp.status_code == 404
 
 
-def test_tts_proxy_503_when_persona_has_no_configured_voice(
+def test_tts_proxy_voiceless_persona_forwards_null_voice_id(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R9-025 reopen leg A: a persona with no configured voice is no longer an
+    immediate local 503 — ``voice_id: null`` rides through and persona-voice
+    resolves its own ``PERSONA_TTS_VOICE_DEFAULT`` fallback."""
     _stub_persona(monkeypatch, yaml_str=_PERSONA_YAML_NO_VOICE)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, content=b"RIFF....WAVEfmt ", headers={"content-type": "audio/wav"}
+        )
+
+    _install_mock_httpx(monkeypatch, handler)
+    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"RIFF....WAVEfmt "
+    # No persona-supplied voice — the proxy sends an explicit null, never a
+    # locally-invented id (persona-voice is the one that owns the default).
+    assert captured["body"] == {"text": "hi", "voice_id": None}
+
+
+def test_tts_proxy_503_when_voice_service_has_no_default_either(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A voiceless persona AND an upstream with no configured default: the
+    proxy still fails soft to the uniform 503 (persona-voice's own
+    ``no_voice_configured`` collapses into the standard envelope — D-C6-0-mirror,
+    never a leaked upstream status/payload)."""
+    _stub_persona(monkeypatch, yaml_str=_PERSONA_YAML_NO_VOICE)
+    _install_mock_httpx(
+        monkeypatch,
+        lambda _r: httpx.Response(
+            503,
+            json={
+                "detail": {
+                    "error": "tts_unavailable",
+                    "detail": "no voice specified and no default voice is configured",
+                    "reason": "no_voice_configured",
+                }
+            },
+        ),
+    )
     resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 503
-    body = resp.json()
-    assert body["error"] == "voice_unavailable"
-    assert body["context"]["reason"] == "no_voice_configured"
+    assert resp.json()["error"] == "voice_unavailable"
 
 
 def test_tts_proxy_resolves_voice_and_forwards_bearer(

@@ -359,12 +359,16 @@ class VoiceServiceUnavailableError(PersonaError):
     soft on an unset ``PERSONA_VOICE_SERVICE_URL``, an unreachable service, a
     timeout, or a non-2xx upstream (other than a client-input-shaped 413,
     which passes through as its own 413 — see ``routes/voice.py``) — never a
-    dead spinner or a leaked 500. The SAME shape also covers a persona with
-    no configured voice (``context["reason"] = "no_voice_configured"``): from
-    the caller's perspective this is indistinguishable from the feature
-    being absent (read-aloud/dictation hide), even though it is diagnosable
-    server-side via ``context``. ``context`` never carries the caller's
+    dead spinner or a leaked 500. ``context`` never carries the caller's
     bearer or any provider secret.
+
+    R9-025 reopen leg A: a persona with no configured voice no longer raises
+    THIS error directly — ``routes/voice.py`` proxies ``voice_id=null``
+    through and lets persona-voice apply its own ``PERSONA_TTS_VOICE_DEFAULT``
+    fallback. This error (with persona-voice's own ``no_voice_configured``
+    503 collapsed into the uniform envelope here, per the fail-soft opacity
+    above) is reachable only when persona-voice ALSO has nothing to fall back
+    to, or is itself unreachable/unconfigured.
     """
 
 

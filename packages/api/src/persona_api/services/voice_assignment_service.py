@@ -241,13 +241,20 @@ async def maybe_assign_voice(
             base_url, bearer=bearer, language=persona.identity.language_default
         )
     except Exception as exc:  # noqa: BLE001 — network/provider error → keep default
-        # Surface WHY at a visible level: a fail-soft skip should be diagnosable.
-        # For an HTTP error the response body carries the real reason (e.g. an
-        # expired/invalid token).
+        # Surface WHY at WARNING (R9-025 reopen leg A — the months-silent-failure
+        # lesson): this exact catch swallowed the SAME auth misconfiguration the
+        # tts/stt proxies hit (a 401 from the voice service's forwarded bearer) at
+        # INFO for months, with nobody noticing personas kept coming out voiceless.
+        # An HTTP error's response carries the real reason (e.g. an expired/invalid
+        # token); the upstream status is pulled out explicitly so it is
+        # grep/alert-able without parsing the exception's free-form repr.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
         body = getattr(getattr(exc, "response", None), "text", "")
-        _LOG.info(
-            "voice auto-pick skipped: catalogue unavailable (persona_id={pid}): {err} {body}",
+        _LOG.warning(
+            "voice auto-pick skipped: catalogue unavailable "
+            "(persona_id={pid}, status={status}): {err} {body}",
             pid=persona_id,
+            status=status,
             err=repr(exc)[:300],  # repr carries the exception type (empty for timeouts)
             body=str(body)[:200],
         )

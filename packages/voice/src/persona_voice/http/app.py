@@ -23,13 +23,15 @@ two patterns may consolidate.
 **R9-025a — one-shot ``POST /v1/tts`` + ``POST /v1/stt``.** Two REST
 primitives sitting beside the realtime call stack, NOT inside it: no LiveKit
 Room, no session, no turn-taking. ``POST /v1/tts`` synthesises ``{text,
-voice_id}`` into a playable WAV clip by feeding the SAME cached
+voice_id?}`` into a playable WAV clip by feeding the SAME cached
 ``CartesiaStreamingTTS`` instance ``GET /v1/voices`` warms a single-chunk
 text stream and collecting the PCM16 output (D-V1-6 rail, wrapped in a WAV
-header for direct ``<audio>`` playback). ``POST /v1/stt`` transcribes an
-uploaded audio clip via Deepgram's prerecorded REST endpoint
-(:func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded` — a
-distinct SDK surface from the live WebSocket backend). Both routes share
+header for direct ``<audio>`` playback); an omitted/``null`` ``voice_id``
+(R9-025 reopen leg A) falls back to ``PERSONA_TTS_VOICE_DEFAULT`` — the
+proxy's voiceless-persona contract, see :class:`TTSRequest`. ``POST
+/v1/stt`` transcribes an uploaded audio clip via Deepgram's prerecorded REST
+endpoint (:func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded`
+— a distinct SDK surface from the live WebSocket backend). Both routes share
 ``GET /v1/voices``'s auth posture (any signed-in user via
 :func:`get_current_user`; no persona scoping here — persona-api's proxy
 resolves persona → voice_id / ownership before calling through,
@@ -91,6 +93,7 @@ from persona_voice.tts.types import ResolvedVoice, VoiceCatalogueEntry
 if TYPE_CHECKING:
     from persona_voice.stt.config import StreamingSTTConfig
     from persona_voice.tts.catalogue import VoiceCatalogue
+    from persona_voice.tts.config import StreamingTTSConfig
     from persona_voice.tts.protocol import StreamingTTS
 
 __all__ = ["build_app", "create_app", "get_voice_config"]
@@ -208,12 +211,22 @@ class TTSRequest(BaseModel):
     :class:`persona.schema.persona.CatalogueVoice.voice_id`) — the voice
     service is persona-agnostic, so the caller (persona-api's proxy) resolves
     a persona to a voice_id server-side before calling here.
+
+    ``voice_id`` is OPTIONAL (R9-025 reopen leg A): omit it (or send ``null``)
+    to synthesize with this service's configured default voice
+    (``PERSONA_TTS_VOICE_DEFAULT`` — the SAME D-V3-4 fallback the realtime call
+    stack's :func:`persona_voice.tts.voice_resolution.resolve_voice` already
+    applies to a voice-less persona). This is the explicit contract the proxy's
+    voiceless-persona fallback relies on — a persona with no configured voice is
+    no longer a local 503, it rides through to this default. ``503
+    no_voice_configured`` still fires when there is truly no voice to use
+    (neither an explicit id nor a configured default).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str = Field(min_length=1)
-    voice_id: str = Field(min_length=1)
+    voice_id: str | None = Field(default=None, min_length=1)
 
 
 class STTResponse(BaseModel):
@@ -260,6 +273,23 @@ def get_verify_token(request: Request) -> Callable[[str], Awaitable[Authenticate
     Spec 33 (D-33-X-voice-edition): the community edition is no-auth, so we return
     a disabled stand-in rather than building a JWT verifier that would demand a
     secret (``get_current_user`` returns a fixed local owner instead).
+
+    Cloud edition verifies the same way persona-api does (shared
+    ``make_jwt_verifier`` — D-V1-X-jwt-verifier-extraction): RS256 against a
+    Clerk-dashboard PEM in ``PERSONA_VOICE_JWT_PUBLIC_KEY`` (production; the SAME
+    posture ``packages/api/run-local.sh`` already wires for local dev — see that
+    script's "Spec V6: persona-voice service" section), or HS256 against a shared
+    secret in ``PERSONA_VOICE_JWT_SECRET`` for a lighter dev/test setup. Both are
+    documented in ``.env.example``.
+
+    R9-025 reopen (leg A): a cloud-edition deployment with NEITHER key configured
+    used to crash ``make_jwt_verifier`` with an unhandled ``ValueError`` at
+    dependency-construction time — every request 500'd with no diagnosable signal
+    (the months-silent failure this reopen exists to fix). That is a server
+    misconfiguration, not a caller-specific problem, but it still must fail
+    *closed* (no request should ever get through unverified) — so it is now
+    surfaced as the SAME 401 ``authentication_error`` shape any bad bearer gets,
+    logged at WARNING with the construction failure's reason.
     """
     verifier = getattr(request.app.state, "verify_token", None)
     if verifier is not None:
@@ -267,7 +297,15 @@ def get_verify_token(request: Request) -> Callable[[str], Awaitable[Authenticate
     cfg = get_voice_config(request)
     if not cfg.is_cloud:
         return _disabled_verify
-    return make_jwt_verifier(cfg)
+    try:
+        return make_jwt_verifier(cfg)
+    except ValueError as exc:
+        _logger.warning(
+            "voice auth misconfigured — verification unavailable: {err}", err=str(exc)[:200]
+        )
+        raise AuthenticationError(
+            "voice service authentication is not configured", context={"reason": str(exc)[:160]}
+        ) from exc
 
 
 async def get_current_user(
@@ -393,6 +431,23 @@ def _get_tts_backend(request: Request) -> StreamingTTS | None:
     if catalogue is None:
         return None
     return cast("StreamingTTS", catalogue)
+
+
+def _get_tts_stream_config(request: Request) -> StreamingTTSConfig:
+    """The active :class:`StreamingTTSConfig` — overridable via ``app.state.tts_stream_config``.
+
+    Mirrors :func:`_get_stt_config`'s override convention (tests inject a
+    config directly; production reads fresh from ``PERSONA_TTS_*`` env vars —
+    cheap, no I/O). ``POST /v1/tts`` reads only ``voice_default`` from it (the
+    R9-025 reopen leg A voiceless-caller fallback, D-V3-4) — catalogue/backend
+    construction stays on its own cached path (:func:`_get_voice_catalogue`).
+    """
+    cfg = getattr(request.app.state, "tts_stream_config", None)
+    if cfg is not None:
+        return cast("StreamingTTSConfig", cfg)
+    from persona_voice.tts.config import StreamingTTSConfig
+
+    return StreamingTTSConfig()
 
 
 async def _synthesize_once(backend: StreamingTTS, *, text: str, voice_id: str) -> bytes:
@@ -656,7 +711,7 @@ def build_app(config: VoiceConfig) -> FastAPI:
         request: Request,
         _user: AuthenticatedUser = Depends(get_current_user),
     ) -> Response:
-        """One-shot synthesis (R9-025a): ``{text, voice_id}`` → a playable WAV clip.
+        """One-shot synthesis (R9-025a): ``{text, voice_id?}`` → a playable WAV clip.
 
         Auth matches ``GET /v1/voices`` (any signed-in user; persona-agnostic
         — persona-api's proxy resolves persona → voice_id before calling
@@ -666,6 +721,11 @@ def build_app(config: VoiceConfig) -> FastAPI:
         credentials → 503 (mirrors persona-api's ``ImageGenUnavailableError``
         precedent: a deployment/config problem, not a transient one);
         any other provider failure → 502 with a fixed-vocabulary reason.
+
+        ``voice_id`` omitted/``null`` (R9-025 reopen leg A): falls back to
+        ``PERSONA_TTS_VOICE_DEFAULT`` — the proxy's voiceless-persona contract
+        (see :class:`TTSRequest`). ``503 no_voice_configured`` when there is
+        no id AND no configured default.
         """
         if len(body.text) > _TTS_TEXT_MAX_CHARS:
             raise HTTPException(
@@ -684,8 +744,20 @@ def build_app(config: VoiceConfig) -> FastAPI:
                     "detail": "text-to-speech is not configured",
                 },
             )
+        voice_id = body.voice_id
+        if voice_id is None:
+            voice_id = _get_tts_stream_config(request).voice_default
+            if not voice_id:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "tts_unavailable",
+                        "detail": "no voice specified and no default voice is configured",
+                        "reason": "no_voice_configured",
+                    },
+                )
         try:
-            pcm = await _synthesize_once(backend, text=body.text, voice_id=body.voice_id)
+            pcm = await _synthesize_once(backend, text=body.text, voice_id=voice_id)
         except TTSAuthenticationError as exc:
             _logger.warning("tts one-shot synthesis unavailable: {err}", err=repr(exc)[:200])
             raise HTTPException(
