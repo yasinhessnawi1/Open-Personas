@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from persona.audit import AuditAction
 from persona.autonomy import policy_for, resolve_autonomy
+from persona.backends.errors import EmptyCompletionError
 from persona.backends.multi_model import MultiModelChatBackend
 from persona.backends.types import reasoning_as_text
 from persona.errors import SkillCompositionDepthError, SkillCycleError
@@ -1699,8 +1700,30 @@ class ConversationLoop:
         # (a turn that produced no text at all — only tool calls), persist a short
         # honest marker rather than a blank bubble. Normal turns are unaffected:
         # ``assistant_text`` is the final synthesized answer and wins.
+        #
+        # R9-033: the marker is reserved for turns that did REAL work (tool
+        # calls). A turn with no text AND no tool calls means the provider
+        # returned nothing at all — that is a provider failure, not a reply.
+        # Raise it (the same error class the multi-model wrapper's own
+        # empty-stream fallback records) so the API worker finalizes the
+        # message as an error the UI can retry, instead of persisting a
+        # silent empty assistant bubble. Wrapper-composed backends normally
+        # never reach this: the wrapper retries/falls back on empty streams
+        # and exhausts to AllModelsFailedError — this guard covers bare
+        # single backends and any future stream shape that slips through.
         if not assistant_text.strip():
-            assistant_text = visible_text.strip() or _NO_VISIBLE_TEXT_MARKER
+            fallback_text = visible_text.strip()
+            if not fallback_text and tool_call_count == 0:
+                raise EmptyCompletionError(
+                    "the model produced no content and no tool calls this turn",
+                    context={
+                        "provider": backend.provider_name,
+                        "model": backend.model_name,
+                        "persona_id": persona_id,
+                        "conversation_id": conversation.conversation_id,
+                    },
+                )
+            assistant_text = fallback_text or _NO_VISIBLE_TEXT_MARKER
         # N5-A7 (N5-D-4): history stores what the user SAW — convert feeling-tags to
         # emojis in the persisted text. The display stream already converted per
         # delta; this whole-string pass converts ``assistant_text`` (the last round's

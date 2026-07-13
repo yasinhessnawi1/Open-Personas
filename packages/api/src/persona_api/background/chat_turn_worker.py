@@ -372,6 +372,36 @@ class ChatTurnRegistry:
                 status = "error"
                 error_message = str(exc)
 
+            # R9-033 defense-in-depth: a "complete" turn whose accumulated
+            # content is empty must NEVER persist as a silent empty assistant
+            # bubble. The runtime's own guards (the wrapper's empty-stream
+            # fallback + the loop's EmptyCompletionError) normally error such
+            # turns before this point; if one still slips through:
+            #
+            # - a turn that did real TOOL work and whose runtime write-back
+            #   left honest text on the conversation (the no-visible-text
+            #   marker) persists THAT text — the transcript shows what the
+            #   loop recorded, not an empty row;
+            # - otherwise the turn is finalized as an ``error`` (the SAME
+            #   terminal shape a loop exception produces — the R9-022-aligned
+            #   state the UI already renders as a retryable failure) with a
+            #   WARNING naming the persona/conversation.
+            if status == "complete" and not handle.content.strip():
+                fallback_text = self._runtime_final_text(conversation)
+                if fallback_text and self._had_tool_activity(handle):
+                    handle._content.append(fallback_text)
+                else:
+                    _log.warning(
+                        "empty assistant reply reached persistence — finalizing the "
+                        "turn as an error instead of a silent empty message; "
+                        "persona={pid} conversation={cid} message={mid}",
+                        pid=conversation.persona_id,
+                        cid=handle.conversation_id,
+                        mid=handle.assistant_message_id,
+                    )
+                    status = "error"
+                    error_message = "the model returned an empty reply"
+
             self._sink.finalize(
                 conversation_id=handle.conversation_id,
                 assistant_message_id=handle.assistant_message_id,
@@ -407,6 +437,27 @@ class ChatTurnRegistry:
             current_user_id.reset(token)
             self._handles.pop(handle.conversation_id, None)
             await handle.events.put(None)  # end-of-stream sentinel for the SSE tail
+
+    @staticmethod
+    def _runtime_final_text(conversation: Conversation) -> str:
+        """The loop's own write-back text for this turn, if any (R9-033).
+
+        On a clean completion the runtime loop appends the turn's assistant
+        message (including its no-visible-text marker for tool-only turns) to
+        ``conversation.messages``. Returns that text stripped, or ``""`` when
+        the tail is not a plain-text assistant message.
+        """
+        if not conversation.messages:
+            return ""
+        final = conversation.messages[-1]
+        if final.role != "assistant" or not isinstance(final.content, str):
+            return ""
+        return final.content.strip()
+
+    @staticmethod
+    def _had_tool_activity(handle: ChatTurnHandle) -> bool:
+        """``True`` iff the turn's event log records at least one tool dispatch (R9-033)."""
+        return any(ev.get("type") in {"tool_calling", "tool_result"} for ev in handle.event_log)
 
     def _release_op_slot(self, handle: ChatTurnHandle) -> None:
         if self._engine is None or handle.op_token is None:

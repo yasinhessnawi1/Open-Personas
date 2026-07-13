@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.backends.types import StreamChunk, TokenUsage
-from persona.schema.conversation import Conversation
+from persona.schema.conversation import Conversation, ConversationMessage
 from persona_api.background.chat_turn_worker import ChatTurnHandle, ChatTurnRegistry
 from persona_api.errors import TurnAlreadyActiveError
 from persona_api.middleware.rls_context import current_user_id
@@ -482,3 +482,106 @@ async def test_aclose_cancels_inflight_without_finalizing() -> None:
     assert handle.task is not None
     assert handle.task.cancelled()
     assert get_sandbox_request_context() is None
+
+
+# --------------------------------------------------------------------------- #
+# R9-033 — an empty assistant reply must never persist as a silent empty bubble
+# --------------------------------------------------------------------------- #
+
+
+class _EmptyLoop:
+    """A fake loop whose model produced NOTHING — zero deltas, no tool events.
+
+    The runtime's own guard (EmptyCompletionError) normally prevents this
+    shape from completing cleanly; this double simulates the defense-in-depth
+    scenario where an empty reply still reaches the persistence path.
+    """
+
+    async def turn(
+        self,
+        conversation: Conversation,
+        user_message: str,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
+        **_kwargs: object,
+    ) -> AsyncIterator[StreamChunk]:
+        if on_event is not None:
+            await on_event(RunEvent.tier("frontier"))
+        yield StreamChunk(delta="", is_final=True)
+
+
+class _ToolOnlyMarkerLoop:
+    """A fake loop for the legitimate textless shape: tool work happened and the
+    runtime persisted its honest no-visible-text marker to the conversation."""
+
+    marker = "(No response was generated for this turn.)"
+
+    async def turn(
+        self,
+        conversation: Conversation,
+        user_message: str,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
+        **_kwargs: object,
+    ) -> AsyncIterator[StreamChunk]:
+        from datetime import UTC, datetime
+
+        from persona.schema.tools import ToolResult
+
+        if on_event is not None:
+            await on_event(RunEvent.tier("frontier"))
+            await on_event(
+                RunEvent.tool_result(
+                    -1, "echo", ToolResult(tool_name="echo", content="ok", is_error=False)
+                )
+            )
+        conversation.messages.append(
+            ConversationMessage(role="user", content=user_message, created_at=datetime.now(UTC))
+        )
+        conversation.messages.append(
+            ConversationMessage(role="assistant", content=self.marker, created_at=datetime.now(UTC))
+        )
+        yield StreamChunk(delta="", is_final=True)
+
+
+@pytest.mark.asyncio
+async def test_empty_reply_finalizes_error_not_silent_empty_complete() -> None:
+    """R9-033: an empty reply reaching persistence must NOT finalize 'complete'
+    with empty content — it finalizes 'error' (the retryable failed state the
+    UI already renders) and emits the error frame, never a done frame."""
+    from loguru import logger as _loguru_logger
+
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    recording_credits = _RecordingCredits()
+    try:
+        sink = _RecordingSink()
+        reg = _registry(sink, recording_credits=recording_credits)
+        handle = _start(reg, _EmptyLoop())
+        await handle.task
+    finally:
+        _loguru_logger.remove(sink_id)
+    assert sink.finalize_calls[0]["status"] == "error"
+    kinds = _kinds(_drain(handle))
+    assert "error" in kinds
+    assert "done" not in kinds
+    # An empty turn is never billed.
+    assert recording_credits.deducts == []
+    # The WARNING names the conversation + persona so operators can trace it.
+    joined = "".join(captured)
+    assert "empty" in joined.lower()
+    assert _CONV in joined
+    assert _PERSONA in joined
+
+
+@pytest.mark.asyncio
+async def test_tool_only_turn_persists_runtime_marker_not_empty_content() -> None:
+    """The legitimate textless shape (tool work + runtime marker) stays a clean
+    completion — the marker the runtime persisted becomes the row content, so
+    the transcript never shows an empty assistant bubble."""
+    sink = _RecordingSink()
+    reg = _registry(sink)
+    handle = _start(reg, _ToolOnlyMarkerLoop())
+    await handle.task
+    assert sink.finalize_calls[0]["status"] == "complete"
+    assert sink.finalize_calls[0]["content"] == _ToolOnlyMarkerLoop.marker
+    kinds = _kinds(_drain(handle))
+    assert "done" in kinds

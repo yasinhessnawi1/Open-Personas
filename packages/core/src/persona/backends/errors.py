@@ -62,6 +62,7 @@ __all__ = [
     "BackendTimeoutError",
     "BackendVisionNotSupportedError",
     "BudgetExceededError",
+    "EmptyCompletionError",
     "IncompleteTierConfigError",
     "IntelligentRoutingError",
     "LocalProviderInModelsListError",
@@ -124,6 +125,23 @@ class BackendTimeoutError(ProviderError):
     ``openai.APITimeoutError``. Distinct from :class:`ProviderError` because
     timeouts are the most common transient failure callers retry on
     (D-02-1).
+    """
+
+
+class EmptyCompletionError(ProviderError):
+    """Raised when a backend's completion carried no reply at all (R9-033).
+
+    An "empty completion" is a response with **no non-whitespace text AND no
+    tool calls** — a provider flake (observed live 2026-07-13: a frontier
+    stream ended after zero content chunks). Nothing-at-all is never a valid
+    reply, so the condition is a provider failure: raising it lets
+    :class:`persona.backends.multi_model.MultiModelChatBackend` engage the
+    same retry-then-fallback walk any transient ``ProviderError`` triggers,
+    and lets the runtime loop fail a bare-backend turn loudly instead of
+    persisting a silent empty assistant message.
+
+    ``context`` carries ``provider`` and ``model`` (the standard
+    :class:`ProviderError` fields) so fallback logs stay structured.
     """
 
 

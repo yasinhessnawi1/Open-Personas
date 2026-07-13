@@ -165,6 +165,61 @@ class TestPlainTurn:
         assert chunks[-1].is_final is True
 
 
+class TestEmptyCompletionTurn:
+    """R9-033 — the loop must never return a provider's empty completion as success.
+
+    Observed live 2026-07-13: a frontier turn streamed zero content chunks and
+    the turn "succeeded", persisting an empty assistant message silently. A
+    turn whose model produced NO non-whitespace text AND NO tool calls is a
+    provider failure — it must raise (so the API worker finalizes the message
+    as an error), not flow onward as a reply.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_raises_instead_of_empty_success(self) -> None:
+        from persona.backends.errors import EmptyCompletionError
+
+        backend = ScriptedBackend([ScriptedRound(text="")])
+        loop, stores, writer = _make_loop(backend)
+        conv = _conv(0)
+
+        with pytest.raises(EmptyCompletionError):
+            async for _ in loop.turn(conv, "hi"):
+                pass
+
+        # Nothing persisted from the failed turn — no episodic write, no
+        # turn log, no conversation growth (the failed turn never happened).
+        assert stores["episodic"].writes == []
+        assert writer.logs == []
+        assert conv.turn_count == 0
+
+    @pytest.mark.asyncio
+    async def test_tool_only_turn_still_persists_honest_marker(self) -> None:
+        """A turn that did real tool work but ended textless keeps the marker path.
+
+        This is NOT an empty completion — the model called a tool (real work
+        happened); the pre-existing no-visible-text marker write-back must be
+        unchanged.
+        """
+        backend = ScriptedBackend(
+            [
+                ScriptedRound(tool_name="echo", tool_args={"message": "ping"}),
+                ScriptedRound(text=""),
+            ]
+        )
+        loop, stores, _writer = _make_loop(backend)
+        conv = _conv(0)
+
+        chunks = [c async for c in loop.turn(conv, "use the echo tool")]
+
+        assert chunks[-1].is_final is True
+        assert conv.turn_count == 2
+        persisted = conv.messages[-1].content
+        assert isinstance(persisted, str)
+        assert persisted.strip()  # never an empty assistant message
+        assert len(stores["episodic"].writes) == 1
+
+
 class TestToolCallLoop:
     @pytest.mark.asyncio
     async def test_dispatches_tool_then_incorporates_result(self) -> None:

@@ -36,6 +36,7 @@ from persona.backends.errors import (
     AuthenticationError,
     BackendTimeoutError,
     BackendVisionNotSupportedError,
+    EmptyCompletionError,
     ModelNotFoundError,
     NoVisionCapableModelError,
     ProviderCredentialMissingError,
@@ -294,11 +295,15 @@ class MultiModelChatBackend:
 
         ``top_p`` / ``top_k`` are forwarded verbatim to each wrapped backend.
 
-        Two-phase semantics: once a backend's stream emits its FIRST chunk
-        the wrapper is committed to that backend — partial output cannot
-        be unstreamed. Errors raised AFTER the first chunk surface directly
-        to the caller (no fallback). Errors raised BEFORE the first chunk
-        follow the D-20-9 classifier (retry/fallback/surface).
+        Two-phase semantics (R9-033 refinement): once a backend's stream
+        emits its first PAYLOAD chunk (non-whitespace ``delta`` or a
+        ``tool_call_delta``) the wrapper is committed to that backend —
+        partial output cannot be unstreamed. Errors raised AFTER that
+        commit surface directly to the caller (no fallback). Errors raised
+        BEFORE it follow the D-20-9 classifier (retry/fallback/surface),
+        and a stream that completes cleanly WITHOUT ever emitting a payload
+        chunk is an empty completion — a provider failure that engages the
+        same retry-then-fallback walk (never a silent empty reply).
         """
         return self._chat_stream_walk(
             messages,
@@ -331,7 +336,17 @@ class MultiModelChatBackend:
             retries_left = self._max_retries
             retried = False
             while True:
-                first_chunk_seen = False
+                # R9-033: commitment is now keyed on the first PAYLOAD chunk
+                # (non-whitespace delta or a tool-call delta), not on the first
+                # chunk of any kind. Payload-less chunks (usage-only finals,
+                # reasoning-only deltas, whitespace) are held back until a
+                # payload chunk commits the stream; a stream that completes
+                # cleanly WITHOUT ever committing is an empty completion — a
+                # provider failure that walks the same retry-then-fallback
+                # path as any other transient ProviderError (the held-back
+                # chunks are discarded: they carried no user-visible reply).
+                committed = False
+                pending: list[StreamChunk] = []
                 try:
                     async for chunk in backend.chat_stream(
                         messages,
@@ -342,12 +357,27 @@ class MultiModelChatBackend:
                         top_p=top_p,
                         top_k=top_k,
                     ):
-                        first_chunk_seen = True
+                        if not committed:
+                            if not self._chunk_has_payload(chunk):
+                                pending.append(chunk)
+                                continue
+                            committed = True
+                            for held in pending:
+                                yield held
+                            pending.clear()
                         yield chunk
-                    # Stream completed cleanly — done with the whole wrapper.
-                    return
+                    if committed:
+                        # Stream completed cleanly — done with the whole wrapper.
+                        return
+                    raise EmptyCompletionError(
+                        "backend stream completed with no content and no tool calls",
+                        context={
+                            "provider": backend.provider_name,
+                            "model": backend.model_name,
+                        },
+                    )
                 except Exception as exc:  # noqa: BLE001 — classifier branches below
-                    if first_chunk_seen:
+                    if committed:
                         # Past the point of no return — surface verbatim.
                         self._record_attempt(backend, exc, retried, attempts)
                         raise
@@ -364,6 +394,16 @@ class MultiModelChatBackend:
                     self._record_attempt(backend, exc, retried, attempts)
                     break  # advance to next backend
         raise self._build_exhausted_error(attempts)
+
+    @staticmethod
+    def _chunk_has_payload(chunk: StreamChunk) -> bool:
+        """``True`` iff the chunk carries part of an actual reply (R9-033).
+
+        Payload = non-whitespace text delta OR a tool-call delta. Usage-only
+        finals, reasoning-only deltas, and whitespace do NOT commit the
+        stream — a completion made solely of those is an empty completion.
+        """
+        return bool(chunk.delta.strip()) or chunk.tool_call_delta is not None
 
     # ------------------------------------------------------------------ #
     # Single-backend attempt loop (non-streaming).
@@ -396,7 +436,7 @@ class MultiModelChatBackend:
         retried = False
         while True:
             try:
-                return await backend.chat(
+                response = await backend.chat(
                     messages,
                     tools=tools,
                     temperature=temperature,
@@ -405,6 +445,19 @@ class MultiModelChatBackend:
                     top_p=top_p,
                     top_k=top_k,
                 )
+                # R9-033: nothing-at-all is not a reply. A completion with no
+                # non-whitespace text AND no tool calls is a provider failure —
+                # raise into the classifier below so it walks the same
+                # retry-then-fallback path as any other transient ProviderError.
+                if not response.content.strip() and not response.tool_calls:
+                    raise EmptyCompletionError(
+                        "backend returned a completion with no content and no tool calls",
+                        context={
+                            "provider": backend.provider_name,
+                            "model": backend.model_name,
+                        },
+                    )
+                return response
             except Exception as exc:  # noqa: BLE001 — classifier branches below
                 action = self._classify(exc)
                 if action == _SURFACE:
@@ -491,6 +544,12 @@ class MultiModelChatBackend:
         """
         # Transient timeouts always retry-then-fallback.
         if isinstance(exc, BackendTimeoutError):
+            return _RETRY_THEN_FALLBACK
+
+        # R9-033: an empty completion (no non-whitespace text, no tool calls)
+        # is a provider flake — retry the same model once, then fall through.
+        # Never SURFACE: nothing-at-all must not flow onward as a reply.
+        if isinstance(exc, EmptyCompletionError):
             return _RETRY_THEN_FALLBACK
 
         # Rate limits split by Retry-After cutoff + monetary-reason context.

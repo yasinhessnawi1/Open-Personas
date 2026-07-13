@@ -661,6 +661,149 @@ class TestStreaming:
         assert chunks[-1].is_final is True
 
 
+class TestEmptyCompletion:
+    """R9-033 — an empty completion is a provider failure, not a reply.
+
+    Observed live 2026-07-13 (twice): a frontier-tier turn streamed zero
+    ``chunk`` events, the wrapper treated the clean-but-empty stream as
+    success, and an empty assistant message persisted silently. An empty
+    final completion (no non-whitespace text AND no tool calls) must engage
+    the SAME retry-then-fallback walk any transient ``ProviderError`` does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_empty_completion_falls_back(self) -> None:
+        """A zero-content stream → retry the primary once, then fall back."""
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [[_chunk("", is_final=True)], [_chunk("", is_final=True)]],
+        )
+        secondary = _ScriptedBackend(
+            "anthropic",
+            "claude",
+            [[_chunk("hello"), _chunk("", is_final=True)]],
+        )
+        wrapper = MultiModelChatBackend([primary, secondary])
+        chunks: list[StreamChunk] = []
+        async for c in wrapper.chat_stream([_user_msg()]):
+            chunks.append(c)
+        # Only the SECONDARY's chunks reach the caller — the primary's empty
+        # stream (usage-only final chunk) is discarded, never surfaced.
+        assert "".join(c.delta for c in chunks) == "hello"
+        assert primary.stream_call_count == 2  # D-20-10: one same-model retry
+        assert secondary.stream_call_count == 1
+        # The attempt ledger records the empty completion as a provider failure.
+        assert len(wrapper.last_attempts) == 1
+        assert wrapper.last_attempts[0].last_error_class == "EmptyCompletionError"
+        assert wrapper.last_attempts[0].retried_same_model is True
+
+    @pytest.mark.asyncio
+    async def test_stream_whitespace_only_completion_falls_back(self) -> None:
+        """Whitespace-only deltas carry no reply — same failure as zero chunks."""
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [
+                [_chunk("  \n"), _chunk("", is_final=True)],
+                [_chunk("  \n"), _chunk("", is_final=True)],
+            ],
+        )
+        secondary = _ScriptedBackend(
+            "anthropic",
+            "claude",
+            [[_chunk("real answer"), _chunk("", is_final=True)]],
+        )
+        wrapper = MultiModelChatBackend([primary, secondary])
+        chunks: list[StreamChunk] = []
+        async for c in wrapper.chat_stream([_user_msg()]):
+            chunks.append(c)
+        assert "".join(c.delta for c in chunks) == "real answer"
+        assert secondary.stream_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call_only_completion_is_success(self) -> None:
+        """A tool-call-only stream is a VALID reply — no fallback engaged."""
+        from persona.backends.types import ToolCallDelta
+
+        tool_chunk = StreamChunk(
+            delta="",
+            tool_call_delta=ToolCallDelta(call_id="c1", name_delta="echo", arguments_delta="{}"),
+        )
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [[tool_chunk, _chunk("", is_final=True)]],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [])
+        wrapper = MultiModelChatBackend([primary, secondary])
+        chunks: list[StreamChunk] = []
+        async for c in wrapper.chat_stream([_user_msg()]):
+            chunks.append(c)
+        assert any(c.tool_call_delta is not None for c in chunks)
+        assert secondary.stream_call_count == 0
+        assert wrapper.last_attempts == []
+
+    @pytest.mark.asyncio
+    async def test_stream_all_backends_empty_exhausts_to_all_models_failed(self) -> None:
+        """Every backend empty → AllModelsFailedError, never a silent empty reply."""
+        primary = _ScriptedBackend("openai", "gpt-4o", [[_chunk("", is_final=True)]] * 2)
+        secondary = _ScriptedBackend("anthropic", "claude", [[_chunk("", is_final=True)]] * 2)
+        wrapper = MultiModelChatBackend([primary, secondary], tier_name="frontier")
+
+        async def _consume() -> None:
+            async for _ in wrapper.chat_stream([_user_msg()]):
+                pass
+
+        with pytest.raises(AllModelsFailedError) as excinfo:
+            await _consume()
+        assert excinfo.value.context["final_error_class"] == "EmptyCompletionError"
+
+    @pytest.mark.asyncio
+    async def test_chat_empty_completion_falls_back(self) -> None:
+        """Non-streaming: an empty ChatResponse engages the same walk."""
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [_ok_response("openai", "gpt-4o", ""), _ok_response("openai", "gpt-4o", "")],
+        )
+        secondary = _ScriptedBackend(
+            "anthropic", "claude", [_ok_response("anthropic", "claude", "real")]
+        )
+        wrapper = MultiModelChatBackend([primary, secondary])
+        response = await wrapper.chat([_user_msg()])
+        assert response.content == "real"
+        assert primary.call_count == 2  # one same-model retry consumed
+        assert wrapper.last_attempts[0].last_error_class == "EmptyCompletionError"
+
+    @pytest.mark.asyncio
+    async def test_chat_tool_only_response_is_success(self) -> None:
+        """content='' with tool_calls is the documented tool-only reply — success."""
+        from persona.schema.tools import ToolCall
+
+        tool_response = ChatResponse(
+            content="",
+            tool_calls=[ToolCall(name="echo", args={}, call_id="c1")],
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            model="gpt-4o",
+            provider="openai",
+            latency_ms=1.0,
+        )
+        primary = _ScriptedBackend("openai", "gpt-4o", [tool_response])
+        secondary = _ScriptedBackend("anthropic", "claude", [])
+        wrapper = MultiModelChatBackend([primary, secondary])
+        response = await wrapper.chat([_user_msg()])
+        assert response.tool_calls
+        assert secondary.call_count == 0
+        assert wrapper.last_attempts == []
+
+    def test_empty_completion_error_is_provider_error(self) -> None:
+        """The class slots under ProviderError so every existing handler catches it."""
+        from persona.backends.errors import EmptyCompletionError
+
+        assert issubclass(EmptyCompletionError, ProviderError)
+
+
 class TestSamplingPassThrough:
     """The wrapper forwards top_p / top_k verbatim to the active backend."""
 
