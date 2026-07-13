@@ -289,9 +289,9 @@ function DoneCard({
   return (
     <RailCard tone="good" className="py-2">
       <ul className="divide-y divide-border/60">
-        {items.map((item) => (
+        {items.map((item, i) => (
           <li
-            key={`${item.persona_id}-${item.title}`}
+            key={`${i}-${item.persona_id}`}
             className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 py-2.5"
             style={personaIdentityStyle({ id: item.persona_id })}
           >
@@ -436,9 +436,9 @@ export function Review({
             ↑ {t("upcoming")}
           </h3>
           <div className="flex gap-2 overflow-x-auto pb-1">
-            {digest.upcoming.map((u) => (
+            {digest.upcoming.map((u, i) => (
               <div
-                key={`${u.fire_at}-${u.label}`}
+                key={`${i}-${u.fire_at}`}
                 className="min-w-36 shrink-0 rounded-md border border-border bg-card px-3 py-2"
                 style={
                   u.persona_id
@@ -488,18 +488,18 @@ function Section({
       />
 
       {section.kind === "waiting" ? (
-        section.items.map((item) => (
+        section.items.map((item, i) => (
           <WaitingCard
-            key={`${item.persona_id}-${item.title}`}
+            key={`${i}-${item.persona_id}`}
             item={item}
             name={name(item.persona_id)}
             t={t}
           />
         ))
       ) : section.kind === "stuck" ? (
-        section.items.map((item) => (
+        section.items.map((item, i) => (
           <StuckCard
-            key={`${item.persona_id}-${item.title}`}
+            key={`${i}-${item.persona_id}`}
             item={item}
             name={name(item.persona_id)}
             t={t}
@@ -508,9 +508,9 @@ function Section({
       ) : section.kind === "done" ? (
         <DoneCard items={section.items} name={name} />
       ) : (
-        section.items.map((item) => (
+        section.items.map((item, i) => (
           <IdeaCard
-            key={`${item.persona_id}-${item.title}`}
+            key={`${i}-${item.persona_id}`}
             item={item}
             name={name(item.persona_id)}
             t={t}
