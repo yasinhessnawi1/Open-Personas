@@ -8,7 +8,7 @@
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CommandPalette,
   CommandTrigger,
@@ -20,22 +20,46 @@ const push = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
 }));
+const actions = vi.hoisted(() => ({
+  startChat: vi.fn().mockResolvedValue(undefined),
+  startVoice: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/app/actions", () => actions);
 
 const messages = {
   nav: {
-    home: "Home",
     personas: "Personas",
     conversations: "Conversations",
+    activity: "Activity",
+    tasks: "Tasks",
+    calls: "Calls",
+    memory: "Memory",
+    schedule: "Schedule",
+    connectors: "Connected platforms",
+    settings: "Settings",
     command: {
       open: "Search and commands",
       search: "Search",
       placeholder: "Search personas, conversations, or jump to…",
       empty: "No matches",
+      groupRecent: "Recent",
       groupActions: "Actions",
       groupNavigate: "Go to",
       groupPersonas: "Personas",
       groupConversations: "Conversations",
+      groupPersona: "Persona",
       newPersona: "New persona",
+      newRoutine: "New routine",
+      scopePlaceholder: "Do something with {name}…",
+      clearScope: "Clear persona",
+      actionChat: "Open chat with {name}",
+      actionCall: "Call {name}",
+      actionOpen: "Open {name}",
+      actionEdit: "Edit {name}",
+      actionFiles: "{name}'s files",
+      footerNavigate: "navigate",
+      footerOpen: "open",
+      footerPersona: "persona actions",
       hint: "to open",
     },
   },
@@ -72,6 +96,12 @@ function renderWith(node: React.ReactNode) {
   );
 }
 
+beforeEach(() => {
+  window.localStorage.clear(); // recents persist per jsdom instance — isolate tests
+  push.mockClear();
+  actions.startChat.mockClear();
+});
+
 describe("CommandPalette", () => {
   it("opens on the event and lists personas + conversations", async () => {
     renderWith(<CommandPalette data={DATA} />);
@@ -91,11 +121,49 @@ describe("CommandPalette", () => {
     const input = await screen.findByPlaceholderText(/search personas/i);
 
     fireEvent.change(input, { target: { value: "lease" } });
-    expect(screen.getByText("Lease question")).toBeTruthy();
-    expect(screen.queryByText("Home")).toBeNull();
+    expect(screen.getByText(/question/)).toBeTruthy();
+    expect(screen.queryByText("Activity")).toBeNull();
 
-    fireEvent.click(screen.getByText("Lease question"));
+    fireEvent.click(screen.getByRole("option", { name: /question/ }));
     expect(push).toHaveBeenCalledWith("/chat/conv_1");
+  });
+
+  it("drills into a persona (R11-B5): scope chip + real chat door", async () => {
+    renderWith(<CommandPalette data={DATA} />);
+    fireEvent(window, new Event(OPEN_COMMAND_PALETTE_EVENT));
+    await screen.findByPlaceholderText(/search personas/i);
+
+    // Enter the persona scope from the Personas group row (data-drill: the
+    // accessible name concatenates avatar+label+sublabel without spaces).
+    fireEvent.click(
+      document.querySelector(
+        '[data-drill="astrid_tenancy_law"]',
+      ) as HTMLElement,
+    );
+    expect(
+      screen.getByPlaceholderText("Do something with Astrid…"),
+    ).toBeTruthy();
+
+    // The scoped actions ride the REAL doors.
+    fireEvent.click(
+      screen.getByRole("option", { name: /Open chat with Astrid/ }),
+    );
+    expect(actions.startChat).toHaveBeenCalledWith("astrid_tenancy_law");
+  });
+
+  it("pops the scope with Backspace on an empty query", async () => {
+    renderWith(<CommandPalette data={DATA} />);
+    fireEvent(window, new Event(OPEN_COMMAND_PALETTE_EVENT));
+    const input = await screen.findByPlaceholderText(/search personas/i);
+    fireEvent.click(
+      document.querySelector(
+        '[data-drill="astrid_tenancy_law"]',
+      ) as HTMLElement,
+    );
+    fireEvent.keyDown(screen.getByPlaceholderText(/do something/i), {
+      key: "Backspace",
+    });
+    expect(input.getAttribute("placeholder")).toMatch(/search personas/i);
   });
 });
 

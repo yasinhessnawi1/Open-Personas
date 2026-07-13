@@ -110,7 +110,20 @@
       "groupPersonas": "Personas",
       "groupConversations": "Conversations",
       "newPersona": "New persona",
-      "hint": "to open"
+      "hint": "to open",
+      "groupRecent": "Recent",
+      "groupPersona": "Persona",
+      "scopePlaceholder": "Do something with {name}…",
+      "clearScope": "Clear persona",
+      "actionChat": "Open chat with {name}",
+      "actionCall": "Call {name}",
+      "actionOpen": "Open {name}",
+      "actionEdit": "Edit {name}",
+      "actionFiles": "{name}'s files",
+      "newRoutine": "New routine",
+      "footerNavigate": "navigate",
+      "footerOpen": "open",
+      "footerPersona": "persona actions"
     },
     "account": {
       "menu": "Account",
