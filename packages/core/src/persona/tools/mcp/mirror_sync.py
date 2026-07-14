@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess  # noqa: S404 — git clone of a fixed repo; offline path
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -183,7 +184,19 @@ def write_mirror_atomic(entries: Sequence[MCPServerCatalogEntry], path: Path) ->
 
 
 def _clone_registry(repo: str, dest: Path) -> None:
-    """Shallow-clone the registry repo (offline-only path)."""
+    """Shallow-clone the registry repo (offline-only path).
+
+    R9-041: a runtime image missing ``git`` previously failed here with a bare
+    ``FileNotFoundError`` from ``subprocess`` — accurate but opaque. One honest
+    WARNING names the real cause before the (unchanged) attempt, so whoever
+    reads the eventual sync failure (the caller's existing fail-soft catch —
+    e.g. :class:`~persona_api.jobs.catalog_sync.CatalogSyncTask.run_once`)
+    sees why, instead of decoding a raw ``[Errno 2]``.
+    """
+    if shutil.which("git") is None:
+        _log.warning(
+            "git not on PATH — MCP catalog mirror sync cannot clone; keeping the last-good mirror"
+        )
     subprocess.run(  # noqa: S603 — fixed argv, no shell; repo is a constant/operator arg
         ["git", "clone", "--depth", "1", repo, str(dest)],  # noqa: S607 — git on PATH by design
         check=True,

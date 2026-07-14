@@ -175,9 +175,18 @@ def clone_at_ref(repo_url: str, ref: str | None, dest: Path) -> SourceCheckout:
     so the adapter can verify the coordinate (S2-D-4). Reuses N1's fixed-argv, no-shell git
     invocation shape. ``ref`` pins the fetch to an immutable commit (S2-D-5) when supplied.
 
+    R9-041: a runtime image missing ``git`` previously failed here with a bare
+    ``FileNotFoundError`` from ``subprocess`` — accurate but opaque. One honest
+    WARNING names the real cause before the (unchanged) attempt, so whoever reads
+    the eventual sync failure sees why, instead of decoding a raw ``[Errno 2]``.
+
     Raises:
         subprocess.CalledProcessError: the clone or rev-parse failed.
     """
+    if shutil.which("git") is None:
+        _log.warning(
+            "git not on PATH — skill source sync cannot clone; keeping the last-good skill mirror"
+        )
     subprocess.run(  # noqa: S603 — fixed argv, no shell; repo is a constant/operator arg
         ["git", "clone", "--depth", "1", repo_url, str(dest)],  # noqa: S607 — git on PATH by design
         check=True,

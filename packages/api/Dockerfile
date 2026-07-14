@@ -32,8 +32,13 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}"
+# R9-041: `git` — the MCP catalog mirror sync (mirror_sync.py) and the skill
+# sources sync (skill_sources_sync.py) both shell out to `git clone --depth 1`
+# to refresh from their upstream registries; without it on PATH they degrade
+# fail-soft (WARN + keep the existing mirror) rather than crash, but that
+# degrade was previously guaranteed on every deploy of this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 ca-certificates curl \
+        libpq5 ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home --shell /bin/bash persona
 

@@ -616,6 +616,47 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await mcp_runtime.start()  # spawns the cross-tenant idle-reaper
     app.state.mcp_runtime = mcp_runtime
 
+    # Spec N7 (D-N7-5): ONE structured startup summary of which MCP mechanisms
+    # THIS DEPLOYMENT can actually exercise — an honest, operator-visible
+    # complement to the per-request `/v1/mcp-catalog` capabilities block (T2),
+    # readable at boot without querying an endpoint. Structured fields only,
+    # no secrets: the gateway URL and mirror path are operator deployment
+    # config (same trust tier as DATABASE_URL) and fine to log; a gateway
+    # bearer token never rides this line.
+    from persona.config import PersonaCoreConfig
+
+    from persona_api.mcp.oauth.providers import provider_registry
+
+    _core_config = PersonaCoreConfig()
+    if mcp_runtime is not None:
+        _runtime_summary = "on"
+    elif not fly_runtime_cfg.configured:
+        _runtime_summary = "off (reason: unconfigured)"
+    elif config.edition is not Edition.cloud:
+        _runtime_summary = "off (reason: edition)"
+    elif not config.allow_per_tenant_mcp:
+        _runtime_summary = "off (reason: ack)"
+    else:
+        # Configured + cloud + acked but still off (e.g. no RLS engine) — no
+        # single-word reason in the D-N7-5 vocabulary (edition|ack|unconfigured)
+        # fits; fold into "unconfigured" rather than invent a fourth reason.
+        _runtime_summary = "off (reason: unconfigured)"
+    _oauth_provider_names = sorted(provider_registry(config))
+    _LOG.info(
+        "MCP mechanisms: builtin-launcher={builtin}, gateway={gateway}, "
+        "per-tenant-runtime={runtime}, byo=on, oauth-providers={oauth}, "
+        "mirror={mirror}",
+        builtin=",".join(_core_config.mcp_builtin_enabled_parsed) or "none",
+        gateway="on" if _core_config.docker_mcp_gateway_url else "off",
+        runtime=_runtime_summary,
+        oauth=",".join(_oauth_provider_names) or "none",
+        mirror=(
+            "bundled"
+            if _core_config.mcp_mirror_path is None
+            else f"volume:{_core_config.mcp_mirror_path}"
+        ),
+    )
+
     # Image-generation backend (spec 15 T16). Composed at startup so the
     # route layer can dispatch through ``app.state.image_backend`` without
     # re-reading env vars per request. ``None`` when no provider is
