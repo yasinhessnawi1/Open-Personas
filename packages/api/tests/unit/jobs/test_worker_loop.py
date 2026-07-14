@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from persona.jobs import JobRegistry
 from persona_api.background.worker_root import InProcessWorker
 from persona_api.jobs import Worker
+from sqlalchemy.exc import OperationalError
 
 
 def _worker(**kw: object) -> Worker:
@@ -123,3 +124,104 @@ def test_in_process_worker_hosting_installs_no_signals_and_still_drains() -> Non
     assert calls == [], "InProcessWorker must leave signal ownership to uvicorn (R9-004)"
     assert worker._draining.is_set(), "aclose must still request + await the drain"
     assert queue.claim.called, "sanity: the loop actually polled before the drain"
+
+
+# --- R9-043: claim() DB failures must not crash the worker loop --------------
+# Unlike the scheduler-tick/catalog-sync calls in the same loop (already
+# `except Exception … must not crash the worker loop`), `claim()` at the top
+# of `Worker.run`'s loop body was UNGUARDED — a transient DB drop (e.g. mid
+# Ctrl-C drain) propagated an OperationalError straight out of `run()`, through
+# `InProcessWorker.aclose`'s `await self._task`, into the lifespan shutdown
+# ("Application shutdown failed. Exiting."). These pin BOTH halves of the fix:
+# a transient failure during normal operation must retry (never crash), and a
+# failure WHILE draining must end the drain cleanly (never retry-loop against
+# a DB that just fell out from under the shutdown) — R9-004's clean-shutdown
+# behavior is unaffected either way (in-flight jobs still drain normally).
+
+
+def _mock_queue() -> MagicMock:
+    queue = MagicMock()
+    queue.reclaim_expired.return_value = 0
+    queue.archive_terminal.return_value = 0
+    queue.purge_archive.return_value = 0
+    return queue
+
+
+def test_claim_error_during_normal_run_logs_and_retries() -> None:
+    worker = _worker(poll_interval_seconds=0.01, poll_jitter_seconds=0.0)
+    queue = _mock_queue()
+    calls = {"n": 0}
+
+    def _claim_transient(**_kw: object) -> list[object]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OperationalError("claim", {}, Exception("conn dropped"))
+        # Proven the retry happened — stop the loop cleanly (not the thing
+        # under test, just a deterministic way to end the scenario).
+        worker.request_drain()
+        return []
+
+    queue.claim.side_effect = _claim_transient
+    worker._queue = queue
+
+    asyncio.run(worker.run(install_signal_handlers=False))  # must not raise
+
+    assert calls["n"] >= 2, "a transient claim() failure must be retried, not crash the loop"
+    assert worker._draining.is_set()
+
+
+def test_claim_error_during_drain_ends_drain_cleanly() -> None:
+    worker = _worker(poll_interval_seconds=0.01, poll_jitter_seconds=0.0)
+    queue = _mock_queue()
+
+    def _claim_then_die(**_kw: object) -> list[object]:
+        # The exact R9-043 race: the drain signal (Ctrl-C) lands WHILE this
+        # claim() call is in flight against a DB that just dropped.
+        worker.request_drain()
+        raise OperationalError("claim", {}, Exception("conn dropped"))
+
+    queue.claim.side_effect = _claim_then_die
+    worker._queue = queue
+
+    asyncio.run(worker.run(install_signal_handlers=False))  # must not raise or hang
+
+    assert worker._draining.is_set()
+    assert queue.claim.call_count == 1, (
+        "a claim() failure discovered mid-drain must end the drain on the spot, "
+        "not retry against the dead DB"
+    )
+
+
+def test_drain_still_awaits_in_flight_jobs_after_a_claim_error() -> None:
+    """R9-004 non-regression: a claim() failure that ends the drain must still
+    let already-claimed in-flight work finish, not abandon it."""
+    worker = _worker(poll_interval_seconds=0.01, poll_jitter_seconds=0.0, drain_seconds=5.0)
+    queue = _mock_queue()
+
+    def _claim_then_die(**_kw: object) -> list[object]:
+        # Same race as test_claim_error_during_drain_ends_drain_cleanly: the
+        # drain signal lands while this claim() call is in flight.
+        worker.request_drain()
+        raise OperationalError("claim", {}, Exception("conn dropped"))
+
+    queue.claim.side_effect = _claim_then_die
+    worker._queue = queue
+
+    finished = asyncio.Event()
+
+    async def _slow_job() -> None:
+        await asyncio.sleep(0.05)
+        finished.set()
+
+    async def scenario() -> None:
+        # Seed an in-flight task directly (the executor internals aren't the
+        # concern here — only that _drain() still awaits whatever is tracked),
+        # BEFORE the drain is requested — the claim() side effect above is what
+        # requests it, on the loop's first iteration.
+        task: asyncio.Task[object] = asyncio.create_task(_slow_job())
+        worker._in_flight.add(task)
+        task.add_done_callback(worker._settle_job_task)
+        await worker.run(install_signal_handlers=False)
+
+    asyncio.run(scenario())
+    assert finished.is_set(), "in-flight work must still complete during a claim-error drain"

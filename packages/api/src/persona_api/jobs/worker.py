@@ -257,17 +257,34 @@ class Worker:
             # candidates pass the per-user check at once and over-grab a single
             # user. One-at-a-time re-evaluates the cap per claim — exact, no
             # starvation — and the loop still fills to ``concurrency`` by iterating.
-            records = (
-                self._queue.claim(
-                    worker_id=self._worker_id,
-                    lease_seconds=self._claim_lease_seconds,
-                    limit=1,
-                    max_per_user=self._max_jobs_per_user,
-                    max_global=self._max_jobs_global,
+            try:
+                records = (
+                    self._queue.claim(
+                        worker_id=self._worker_id,
+                        lease_seconds=self._claim_lease_seconds,
+                        limit=1,
+                        max_per_user=self._max_jobs_per_user,
+                        max_global=self._max_jobs_global,
+                    )
+                    if free > 0
+                    else []
                 )
-                if free > 0
-                else []
-            )
+            except Exception:  # noqa: BLE001 — a claim failure must not crash the worker loop
+                _log.exception("job claim failed", worker_id=self._worker_id)
+                if self._draining.is_set():
+                    # R9-043: a DB error during drain (e.g. a transient blip mid
+                    # Ctrl-C shutdown) trivially satisfies "stop claiming new
+                    # work" — end the drain loop cleanly instead of retrying
+                    # against a DB that just dropped the shutdown out from under
+                    # it. In-flight jobs still drain normally below (R9-004);
+                    # only NEW claims are affected.
+                    break
+                # Not draining: a transient DB error must not spin the loop hot
+                # either — back off one poll interval (same jittered cadence as
+                # the empty-claim wait below), then retry.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._draining.wait(), timeout=self._next_poll_delay())
+                continue
             for record in records:
                 task: asyncio.Task[object] = asyncio.create_task(self._executor.execute(record))
                 self._in_flight.add(task)
