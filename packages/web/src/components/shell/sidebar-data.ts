@@ -213,3 +213,95 @@ export function resolveCalls(
     persona: byId.get(c.persona_id) ?? null,
   }));
 }
+
+/**
+ * R9-038 — the rail's route-derived live-presence state.
+ *
+ * `conversationId → personaId`, built from the SAME resolved lists the
+ * sidebar already renders (`MessagesList`'s `conversations`, `CallsList`'s
+ * `calls`) — no extra fetch. Both are consulted because a call-origin
+ * conversation never appears in `conversations` (R4 T4 excludes it from the
+ * Messages list), so `/chat/{id}/voice` would otherwise be unresolvable.
+ */
+export function buildConversationPersonaMap(
+  conversations: readonly SidebarConversation[],
+  calls: readonly SidebarCall[],
+): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const c of conversations) if (c.persona) map.set(c.id, c.persona.id);
+  for (const c of calls) if (c.persona) map.set(c.conversationId, c.persona.id);
+  return map;
+}
+
+/** Route-derived presence: which persona (if any) the caller is on-call with / in-chat with. */
+export interface PersonaRoutePresence {
+  readonly activePersonaId: string | null;
+  readonly onCallPersonaId: string | null;
+}
+
+const CHAT_OR_VOICE_ROUTE = /^\/chat\/([^/]+)(\/voice)?\/?$/;
+const PERSONA_PAGE_ROUTE = /^\/personas\/([^/]+)/;
+
+/**
+ * Derive `{activePersonaId, onCallPersonaId}` from the current pathname.
+ *
+ * `/chat/{id}/voice` → on-call with the conversation's persona (a real V4
+ * call session isn't consulted — the route IS the contract, matching how
+ * `MessagesList`/`CallsList` already derive their own `active` highlight
+ * from `pathname` alone). `/chat/{id}` (any other/no subpath) → in-chat.
+ * `/personas/{id}` (and any nested subpath — edit/files) → in-chat via the
+ * persona page, EXCEPT `/personas/new` (no persona yet). A conversation id
+ * absent from `conversationPersonaMap` (outside the sidebar's fetched
+ * preview) resolves to no presence — the same bounded-data limitation the
+ * rest of the sidebar already accepts.
+ */
+export function derivePersonaRoutePresence(
+  pathname: string,
+  conversationPersonaMap: ReadonlyMap<string, string>,
+): PersonaRoutePresence {
+  const chatMatch = pathname.match(CHAT_OR_VOICE_ROUTE);
+  if (chatMatch) {
+    const personaId = conversationPersonaMap.get(chatMatch[1]);
+    if (personaId) {
+      return chatMatch[2]
+        ? { activePersonaId: null, onCallPersonaId: personaId }
+        : { activePersonaId: personaId, onCallPersonaId: null };
+    }
+  }
+  const personaMatch = pathname.match(PERSONA_PAGE_ROUTE);
+  if (personaMatch && personaMatch[1] !== "new") {
+    return { activePersonaId: personaMatch[1], onCallPersonaId: null };
+  }
+  return { activePersonaId: null, onCallPersonaId: null };
+}
+
+/** The rail's ONE ring state, plus whether a working signal is demoted to a secondary dot. */
+export type PersonaPresence = "call" | "chat" | "working" | "none";
+
+export interface PersonaPresenceResult {
+  readonly presence: PersonaPresence;
+  readonly secondaryWorking: boolean;
+}
+
+/**
+ * Merge the three raw signals into the ONE ring + optional dot (owner
+ * priority: call > in-chat > working). A working signal that loses to a
+ * higher-priority state never disappears — it demotes to `secondaryWorking`
+ * (rendered as a small dot, never a second ring).
+ */
+export function resolvePersonaPresence(input: {
+  readonly isOnCall: boolean;
+  readonly isActiveChat: boolean;
+  readonly isWorking: boolean;
+}): PersonaPresenceResult {
+  if (input.isOnCall) {
+    return { presence: "call", secondaryWorking: input.isWorking };
+  }
+  if (input.isActiveChat) {
+    return { presence: "chat", secondaryWorking: input.isWorking };
+  }
+  if (input.isWorking) {
+    return { presence: "working", secondaryWorking: false };
+  }
+  return { presence: "none", secondaryWorking: false };
+}

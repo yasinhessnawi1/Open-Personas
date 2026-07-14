@@ -737,6 +737,102 @@
     background: var(--v-id);
   }
 
+  /* R9-038 — the sidebar PERSONAS-rail avatar's live-presence ring
+     (PersonaRailItem, sidebar-sections.tsx). Reuses the established identity-
+     ring language: .v-presence's own idle-breathe rhythm for "in-chat", the
+     v-pulse rhythm .v-activity-dot already uses elsewhere for "persona is
+     using a capability" as the distinct "working" ring, and a rail-scale
+     echo of the call stage's (IdentityOrb) orbiting "thinking" sweep — a
+     conic-gradient masked into a thin ring band, the SAME masking technique
+     identity-orb.tsx uses for its own sweep — for "on-call". ONE ring per
+     avatar: the component picks exactly one `data-presence` value
+     (call > chat > working > none, PersonasRail's resolvePersonaPresence);
+     this stylesheet only renders whichever one it's given. A working signal
+     that loses to a higher-priority ring surfaces as the ::before secondary
+     dot (data-working) instead of a second ring. -2px (vs. .v-presence's
+     -3px) is a deliberate scale-down for the 64px collapsed rail's tighter
+     geometry — full-size neighbouring rings still clear each other inside
+     the rail's existing gap-1.5 (6px) spacing. */
+  .v-rail-presence {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 9999px;
+  }
+  .v-rail-presence::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: 9999px;
+    pointer-events: none;
+    opacity: 0;
+  }
+  /* in-chat — .v-presence's own idle breathing ring, unchanged rhythm. */
+  .v-rail-presence[data-presence="chat"]::after {
+    border: 1.5px solid var(--v-id);
+    opacity: 0.35;
+    animation: v-presence-idle 3s ease-in-out infinite;
+  }
+  /* on-call — a rail-scale echo of the call stage's orbiting sweep:
+     deterministic and audio-decoupled (the rail has no live mic/TTS level to
+     bind to, matching identity-orb.tsx's own reasoning for its audio-
+     decoupled thinking sweep) — a continuous orbit is the honest, generic
+     "you are on a call" cue. */
+  .v-rail-presence[data-presence="call"]::after {
+    opacity: 0.95;
+    background: conic-gradient(
+      from 0deg,
+      var(--v-id) 0deg,
+      color-mix(in oklch, var(--v-id) 45%, transparent) 70deg,
+      transparent 130deg,
+      transparent 360deg
+    );
+    mask: radial-gradient(
+      circle,
+      transparent calc(50% - 2.5px),
+      black calc(50% - 2.5px)
+    );
+    -webkit-mask: radial-gradient(
+      circle,
+      transparent calc(50% - 2.5px),
+      black calc(50% - 2.5px)
+    );
+    animation: v-rail-orbit 1.6s linear infinite;
+  }
+  @keyframes v-rail-orbit {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  /* working (sole state — no higher-priority ring active) — the SAME v-pulse
+     rhythm .v-activity-dot already uses elsewhere for "persona is using X",
+     now on the ring itself. */
+  .v-rail-presence[data-presence="working"]::after {
+    border: 1.5px solid var(--v-id);
+    opacity: 0.55;
+    animation: v-pulse 1.4s ease-in-out infinite;
+  }
+  /* the secondary working dot — rendered INSTEAD of a second ring when a
+     higher-priority state already owns data-presence. */
+  .v-rail-presence::before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    right: -1px;
+    bottom: -1px;
+    width: 9px;
+    height: 9px;
+    border-radius: 9999px;
+    background: var(--v-id);
+    box-shadow: 0 0 0 2px var(--v-rail);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .v-rail-presence[data-working="true"]::before {
+    opacity: 1;
+    animation: v-pulse 1.4s ease-in-out infinite;
+  }
+
   /* tier chip (mono, cool→hot) — the routing made tangible */
   .v-tier {
     display: inline-flex;
@@ -1717,7 +1813,9 @@
   .v-dots i,
   .v-caret,
   .v-run-dot,
-  .v-presence::after {
+  .v-presence::after,
+  .v-rail-presence::after,
+  .v-rail-presence::before {
     /* biome-ignore lint/complexity/noImportantStyles: reduced-motion override
        must out-specificity the component-local animation rules (same idiom as
        the F1 universal override in globals.css T15). */

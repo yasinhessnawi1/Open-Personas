@@ -5,6 +5,8 @@
  * conversation title, untitled/unknown fallbacks, active row, empty state,
  * collapsed-mode label suppression) and the PERSONAS rail links.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +36,11 @@ const h = vi.hoisted(() => ({
   requestCall: vi.fn(() => "started" as "started" | "current" | "switch"),
   post: vi.fn(async () => ({ data: { id: "new-conv" } })),
   startChat: vi.fn(),
+  // R9-038: the rail's working-signal hook is unit-tested on its own
+  // (use-persona-working-ids.test.ts) — here it's a plain settable Set so
+  // PersonaRailItem's presence WIRING can be exercised without a live
+  // ActiveWorkProvider/fetchTasks stack.
+  workingIds: new Set<string>(),
 }));
 
 let pathname = "/";
@@ -50,6 +57,9 @@ vi.mock("@/lib/api/use-api", () => ({
 vi.mock("@/lib/voice/call-session-context", () => ({
   useCallSession: () => ({ requestCall: h.requestCall }),
 }));
+vi.mock("@/lib/hooks/use-persona-working-ids", () => ({
+  usePersonaWorkingIds: () => h.workingIds,
+}));
 
 beforeEach(() => {
   h.push.mockClear();
@@ -57,6 +67,7 @@ beforeEach(() => {
   h.requestCall.mockReturnValue("started");
   h.post.mockClear();
   h.startChat.mockClear();
+  h.workingIds = new Set();
 });
 
 const messages = {
@@ -70,6 +81,13 @@ const messages = {
       callOngoing: "Call",
       callPersona: "Call {name}",
       newChat: "New chat",
+      presence: {
+        onCall: "On a call with {name}",
+        onCallWorking: "On a call with {name} — also working",
+        inChat: "In chat with {name}",
+        inChatWorking: "In chat with {name} — also working",
+        working: "{name} is working",
+      },
     },
   },
 };
@@ -435,6 +453,190 @@ describe("PersonasRail", () => {
       await swipe(screen.getByRole("link"), -40);
       expect(h.requestCall).toHaveBeenCalled();
       expect(h.push).not.toHaveBeenCalled();
+    });
+  });
+
+  // R9-038 — the rail avatar's live-presence ring. `usePersonaWorkingIds` is
+  // mocked (h.workingIds, above) so these are pure WIRING tests: route →
+  // {activePersonaId, onCallPersonaId} (derivePersonaRoutePresence) and
+  // {workingIds, route} → {presence, secondaryWorking} (resolvePersonaPresence)
+  // are separately unit-tested in sidebar-data.test.ts — these prove
+  // PersonasRail/PersonaRailItem actually WIRE them onto the rendered
+  // data-presence/data-working attributes + the i18n aria-label, in both
+  // collapsed and expanded rails.
+  describe("R9-038 live presence", () => {
+    const chatConvo: SidebarConversation = {
+      id: "c1",
+      title: "Rent dispute",
+      updated_at: "2026-06-10T00:00:00Z",
+      persona: astrid,
+    };
+    const callRow: SidebarCall = {
+      callId: "call_1",
+      conversationId: "call-c1",
+      startedAt: "2026-06-10T00:00:00Z",
+      durationS: null,
+      persona: astrid,
+    };
+
+    afterEach(() => {
+      pathname = "/";
+    });
+
+    function presenceEl() {
+      return screen
+        .getByRole("link")
+        .querySelector('[data-slot="persona-rail-presence"]');
+    }
+
+    it.each([[false], [true]])(
+      "collapsed=%s: no route/working match renders presence 'none' and the byte-identical plain-name aria-label",
+      (collapsed) => {
+        wrap(<PersonasRail personas={[astrid]} collapsed={collapsed} />);
+        expect(presenceEl()).toHaveAttribute("data-presence", "none");
+        expect(presenceEl()).toHaveAttribute("data-working", "false");
+        expect(screen.getByRole("link")).toHaveAttribute(
+          "aria-label",
+          "Astrid",
+        );
+      },
+    );
+
+    it.each([[false], [true]])(
+      "collapsed=%s: /chat/{id}/voice renders the on-call ring",
+      (collapsed) => {
+        pathname = "/chat/call-c1/voice";
+        wrap(
+          <PersonasRail
+            personas={[astrid]}
+            collapsed={collapsed}
+            calls={[callRow]}
+          />,
+        );
+        expect(presenceEl()).toHaveAttribute("data-presence", "call");
+        expect(screen.getByRole("link")).toHaveAttribute(
+          "aria-label",
+          "On a call with Astrid",
+        );
+      },
+    );
+
+    it.each([[false], [true]])(
+      "collapsed=%s: /chat/{id} renders the in-chat ring",
+      (collapsed) => {
+        pathname = "/chat/c1";
+        wrap(
+          <PersonasRail
+            personas={[astrid]}
+            collapsed={collapsed}
+            conversations={[chatConvo]}
+          />,
+        );
+        expect(presenceEl()).toHaveAttribute("data-presence", "chat");
+        expect(screen.getByRole("link")).toHaveAttribute(
+          "aria-label",
+          "In chat with Astrid",
+        );
+      },
+    );
+
+    it("the persona PAGE route also counts as in-chat", () => {
+      pathname = "/personas/astrid";
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      expect(presenceEl()).toHaveAttribute("data-presence", "chat");
+    });
+
+    it("/personas/new never lights up a ring (no persona id yet)", () => {
+      pathname = "/personas/new";
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      expect(presenceEl()).toHaveAttribute("data-presence", "none");
+    });
+
+    it("a conversation id absent from the sidebar's own lists resolves to no presence", () => {
+      pathname = "/chat/unknown-id";
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      expect(presenceEl()).toHaveAttribute("data-presence", "none");
+    });
+
+    it("working-only (no call/chat route) renders the working ring, no secondary dot", () => {
+      h.workingIds = new Set(["astrid"]);
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      expect(presenceEl()).toHaveAttribute("data-presence", "working");
+      expect(presenceEl()).toHaveAttribute("data-working", "false");
+      expect(screen.getByRole("link")).toHaveAttribute(
+        "aria-label",
+        "Astrid is working",
+      );
+    });
+
+    it("priority: on-call + working renders the call ring PLUS the secondary working dot (never a second ring)", () => {
+      pathname = "/chat/call-c1/voice";
+      h.workingIds = new Set(["astrid"]);
+      wrap(
+        <PersonasRail
+          personas={[astrid]}
+          collapsed={false}
+          calls={[callRow]}
+        />,
+      );
+      expect(presenceEl()).toHaveAttribute("data-presence", "call");
+      expect(presenceEl()).toHaveAttribute("data-working", "true");
+      expect(screen.getByRole("link")).toHaveAttribute(
+        "aria-label",
+        "On a call with Astrid — also working",
+      );
+    });
+
+    it("priority: in-chat + working renders the chat ring PLUS the secondary working dot", () => {
+      pathname = "/chat/c1";
+      h.workingIds = new Set(["astrid"]);
+      wrap(
+        <PersonasRail
+          personas={[astrid]}
+          collapsed={false}
+          conversations={[chatConvo]}
+        />,
+      );
+      expect(presenceEl()).toHaveAttribute("data-presence", "chat");
+      expect(presenceEl()).toHaveAttribute("data-working", "true");
+      expect(screen.getByRole("link")).toHaveAttribute(
+        "aria-label",
+        "In chat with Astrid — also working",
+      );
+    });
+
+    it("does not regress the swipe gesture: the ring wrapper doesn't change the Link's own measured rect (same fallback-radius commit as the unwrapped avatar)", async () => {
+      wrap(<PersonasRail personas={[astrid]} collapsed={false} />);
+      const link = screen.getByRole("link");
+      fireEvent.pointerDown(link, {
+        clientX: 0,
+        clientY: 0,
+        pointerId: 1,
+        pointerType: "touch",
+        button: 0,
+      });
+      fireEvent.pointerMove(document, {
+        clientX: 0,
+        clientY: -40,
+        pointerId: 1,
+      });
+      fireEvent.pointerUp(document, { clientX: 0, clientY: -40, pointerId: 1 });
+      await vi.waitFor(() => expect(h.requestCall).toHaveBeenCalled());
+    });
+
+    it("prefers-reduced-motion: v-layer.css freezes both the ring and the secondary dot with animation:none (no jsdom media-query emulation — the reduced-motion.test.ts precedent: a static CSS text check)", () => {
+      const css = readFileSync(
+        resolve(__dirname, "../../app/v-layer.css"),
+        "utf-8",
+      );
+      const block = css.match(
+        /@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{([\s\S]*?)\n\}/,
+      );
+      expect(block).not.toBeNull();
+      const body = block?.[1] ?? "";
+      expect(body).toContain(".v-rail-presence::after");
+      expect(body).toContain(".v-rail-presence::before");
+      expect(body).toMatch(/animation:\s*none\s*!important/);
     });
   });
 });

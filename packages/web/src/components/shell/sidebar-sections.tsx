@@ -15,7 +15,7 @@ import { MessageSquare, MessagesSquare, Phone } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useFormatter, useTranslations } from "next-intl";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { startChat } from "@/app/actions";
 import { PressSwipePreview } from "@/components/patterns/press-swipe-preview";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
@@ -27,6 +27,7 @@ import {
 import { ActiveChatIndicator } from "@/components/work/active-chat-indicator";
 import { useApi } from "@/lib/api/use-api";
 import { formatCallDuration } from "@/lib/calls";
+import { usePersonaWorkingIds } from "@/lib/hooks/use-persona-working-ids";
 import { usePressSwipeGesture } from "@/lib/hooks/use-press-swipe-gesture";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { cn } from "@/lib/utils";
@@ -34,10 +35,14 @@ import {
   type CallTarget,
   useCallSession,
 } from "@/lib/voice/call-session-context";
-import type {
-  SidebarCall,
-  SidebarConversation,
-  SidebarPersona,
+import {
+  buildConversationPersonaMap,
+  derivePersonaRoutePresence,
+  type PersonaPresence,
+  resolvePersonaPresence,
+  type SidebarCall,
+  type SidebarConversation,
+  type SidebarPersona,
 } from "./sidebar-data";
 
 /**
@@ -50,16 +55,43 @@ import type {
  * vertical drag past a small tap-slop shows a call/chat live preview) — see
  * `PersonaRailItem` below. Both collapsed and expanded modes share this ONE
  * component/hook pairing (no forked logic).
+ *
+ * R9-038: each avatar is now ALSO a live-presence surface — an identity ring
+ * (call / in-chat / working; priority call > in-chat > working, a lower
+ * working signal demoting to a secondary dot rather than a second ring). The
+ * route-derived half (`activePersonaId`/`onCallPersonaId`) needs a
+ * `conversationId → personaId` map, built ONCE here from the SAME
+ * `conversations`/`calls` the sidebar already fetches (optional + defaulted
+ * so every pre-existing call site/test that doesn't pass them still renders
+ * byte-identical, presence-less rings).
  */
+const EMPTY_CONVERSATIONS: readonly SidebarConversation[] = [];
+const EMPTY_CALLS: readonly SidebarCall[] = [];
+
 export function PersonasRail({
   personas,
   collapsed,
+  conversations = EMPTY_CONVERSATIONS,
+  calls = EMPTY_CALLS,
   onNavigate,
 }: {
   personas: readonly SidebarPersona[];
   collapsed: boolean;
+  conversations?: readonly SidebarConversation[];
+  calls?: readonly SidebarCall[];
   onNavigate?: () => void;
 }) {
+  const pathname = usePathname();
+  const workingIds = usePersonaWorkingIds();
+  const conversationPersonaMap = useMemo(
+    () => buildConversationPersonaMap(conversations, calls),
+    [conversations, calls],
+  );
+  const { activePersonaId, onCallPersonaId } = useMemo(
+    () => derivePersonaRoutePresence(pathname, conversationPersonaMap),
+    [pathname, conversationPersonaMap],
+  );
+
   if (personas.length === 0) return null;
   return (
     <ul
@@ -69,14 +101,23 @@ export function PersonasRail({
       )}
       data-slot="sidebar-personas-rail"
     >
-      {personas.map((p) => (
-        <PersonaRailItem
-          key={p.id}
-          persona={p}
-          collapsed={collapsed}
-          onNavigate={onNavigate}
-        />
-      ))}
+      {personas.map((p) => {
+        const { presence, secondaryWorking } = resolvePersonaPresence({
+          isOnCall: p.id === onCallPersonaId,
+          isActiveChat: p.id === activePersonaId,
+          isWorking: workingIds.has(p.id),
+        });
+        return (
+          <PersonaRailItem
+            key={p.id}
+            persona={p}
+            collapsed={collapsed}
+            presence={presence}
+            secondaryWorking={secondaryWorking}
+            onNavigate={onNavigate}
+          />
+        );
+      })}
     </ul>
   );
 }
@@ -108,14 +149,27 @@ export function PersonasRail({
  *     in `requestCall` itself, so this can't bypass it).
  *   - chat: the `startChat` server action (app/actions.ts) — the identical
  *     call R9-014's `new-conversation-button.tsx` picker flow already makes.
+ *
+ * R9-038: the avatar is wrapped in `.v-rail-presence` (v-layer.css) — the
+ * rail-scale echo of the chat-header `.v-presence` ring + the call stage's
+ * (IdentityOrb) orbiting motion identity, PLUS a distinct working pulse.
+ * `presence`/`secondaryWorking` are computed ONCE by `PersonasRail`
+ * (`resolvePersonaPresence`) so N rail items don't each re-derive the same
+ * route/working state. Pure CSS (`data-presence`/`data-working`) — no extra
+ * DOM node, and `prefers-reduced-motion` is handled entirely by v-layer.css's
+ * existing universal ring/dot animation-off block (no JS branch needed).
  */
 function PersonaRailItem({
   persona,
   collapsed,
+  presence,
+  secondaryWorking,
   onNavigate,
 }: {
   persona: SidebarPersona;
   collapsed: boolean;
+  presence: PersonaPresence;
+  secondaryWorking: boolean;
   onNavigate?: () => void;
 }) {
   const t = useTranslations("nav.sidebar");
@@ -154,6 +208,22 @@ function PersonaRailItem({
     onCommitDown: handleChat,
   });
 
+  // R9-038: the presence-aware accessible name — announces the SAME state
+  // the ring shows. `presence === "none"` (the overwhelmingly common case)
+  // is byte-identical to the pre-R9-038 plain name.
+  const presenceLabel =
+    presence === "call"
+      ? secondaryWorking
+        ? t("presence.onCallWorking", { name: persona.name })
+        : t("presence.onCall", { name: persona.name })
+      : presence === "chat"
+        ? secondaryWorking
+          ? t("presence.inChatWorking", { name: persona.name })
+          : t("presence.inChat", { name: persona.name })
+        : presence === "working"
+          ? t("presence.working", { name: persona.name })
+          : persona.name;
+
   return (
     <li>
       <Tooltip>
@@ -189,7 +259,7 @@ function PersonaRailItem({
                 // the fix's evidence note.)
                 if (gesture.armed) event.preventDefault();
               }}
-              aria-label={persona.name}
+              aria-label={presenceLabel}
               className={cn(
                 "block touch-none select-none rounded-full ring-offset-background transition-[transform,box-shadow] duration-[var(--motion-duration-fast)] ease-[var(--motion-ease-standard)] outline-none hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0",
                 // -webkit-touch-callout: no iOS long-press "peek" preview.
@@ -201,7 +271,20 @@ function PersonaRailItem({
             />
           }
         >
-          <PersonaAvatar persona={persona} size="md" />
+          {/* R9-038 — ONE ring (v-layer.css .v-rail-presence), state via
+              data-presence; a working signal under a higher-priority ring
+              demotes to the ::before secondary dot (data-working). Both
+              collapsed and expanded rails share this exact markup — the
+              -2px inset (vs. .v-presence's -3px) is a deliberate scale-down
+              so it doesn't crowd neighbours in the 64px collapsed rail. */}
+          <span
+            data-slot="persona-rail-presence"
+            className="v-rail-presence"
+            data-presence={presence}
+            data-working={secondaryWorking ? "true" : "false"}
+          >
+            <PersonaAvatar persona={persona} size="md" />
+          </span>
         </TooltipTrigger>
         <TooltipContent side="right">{persona.name}</TooltipContent>
       </Tooltip>

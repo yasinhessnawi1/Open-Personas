@@ -64,6 +64,8 @@ export function SidebarBody({
           <PersonasRail
             personas={data.personas}
             collapsed={false}
+            conversations={data.conversations}
+            calls={data.calls}
             onNavigate={onNavigate}
           />
         </section>

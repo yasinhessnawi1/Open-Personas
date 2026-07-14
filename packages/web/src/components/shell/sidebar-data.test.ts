@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildConversationPersonaMap,
+  derivePersonaRoutePresence,
   rankPersonasByRecency,
   resolveCalls,
   resolveConversations,
+  resolvePersonaPresence,
+  type SidebarCall,
   type SidebarCallInput,
+  type SidebarConversation,
   type SidebarConversationInput,
   type SidebarPersona,
 } from "./sidebar-data";
@@ -143,5 +148,196 @@ describe("resolveCalls", () => {
   it("normalises an absent duration (a live call) to null", () => {
     const rows = resolveCalls([call("c1", "a", undefined)], []);
     expect(rows[0].durationS).toBeNull();
+  });
+});
+
+const astrid = persona("astrid", "2026-01-01");
+
+const convoRow = (
+  id: string,
+  p: SidebarPersona | null,
+): SidebarConversation => ({
+  id,
+  title: `t-${id}`,
+  updated_at: "2026-06-10T00:00:00Z",
+  persona: p,
+});
+
+const callRow = (
+  callId: string,
+  conversationId: string,
+  p: SidebarPersona | null,
+): SidebarCall => ({
+  callId,
+  conversationId,
+  startedAt: "2026-06-10T00:00:00Z",
+  durationS: null,
+  persona: p,
+});
+
+describe("buildConversationPersonaMap (R9-038)", () => {
+  it("maps chat conversation ids AND call conversation ids to their persona id", () => {
+    const map = buildConversationPersonaMap(
+      [convoRow("chat-1", astrid)],
+      [callRow("call_1", "call-conv-1", astrid)],
+    );
+    expect(map.get("chat-1")).toBe("astrid");
+    expect(map.get("call-conv-1")).toBe("astrid");
+    expect(map.size).toBe(2);
+  });
+
+  it("skips rows with no resolved persona (never crashes, never maps to a ghost id)", () => {
+    const map = buildConversationPersonaMap(
+      [convoRow("orphan", null)],
+      [callRow("call_1", "orphan-call", null)],
+    );
+    expect(map.size).toBe(0);
+  });
+});
+
+describe("derivePersonaRoutePresence (R9-038)", () => {
+  const map = buildConversationPersonaMap(
+    [convoRow("c1", astrid)],
+    [callRow("call_1", "call-c1", astrid)],
+  );
+
+  it("/chat/{id} resolves to in-chat (activePersonaId), not on-call", () => {
+    expect(derivePersonaRoutePresence("/chat/c1", map)).toEqual({
+      activePersonaId: "astrid",
+      onCallPersonaId: null,
+    });
+  });
+
+  it("/chat/{id}/voice resolves to on-call, not in-chat", () => {
+    expect(derivePersonaRoutePresence("/chat/call-c1/voice", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: "astrid",
+    });
+  });
+
+  it("tolerates a trailing slash on both forms", () => {
+    expect(derivePersonaRoutePresence("/chat/c1/", map)).toEqual({
+      activePersonaId: "astrid",
+      onCallPersonaId: null,
+    });
+    expect(derivePersonaRoutePresence("/chat/call-c1/voice/", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: "astrid",
+    });
+  });
+
+  it("/personas/{id} resolves to in-chat (the persona page counts as 'using' it)", () => {
+    expect(derivePersonaRoutePresence("/personas/astrid", map)).toEqual({
+      activePersonaId: "astrid",
+      onCallPersonaId: null,
+    });
+  });
+
+  it("nested persona subpaths (edit/files) still resolve to in-chat", () => {
+    expect(derivePersonaRoutePresence("/personas/astrid/edit", map)).toEqual({
+      activePersonaId: "astrid",
+      onCallPersonaId: null,
+    });
+    expect(derivePersonaRoutePresence("/personas/astrid/files", map)).toEqual({
+      activePersonaId: "astrid",
+      onCallPersonaId: null,
+    });
+  });
+
+  it("/personas/new is excluded (no persona id yet)", () => {
+    expect(derivePersonaRoutePresence("/personas/new", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: null,
+    });
+  });
+
+  it("a conversation id outside the sidebar's own map resolves to no presence", () => {
+    expect(derivePersonaRoutePresence("/chat/never-fetched", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: null,
+    });
+  });
+
+  it("unrelated routes resolve to no presence", () => {
+    expect(derivePersonaRoutePresence("/", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: null,
+    });
+    expect(derivePersonaRoutePresence("/calls", map)).toEqual({
+      activePersonaId: null,
+      onCallPersonaId: null,
+    });
+  });
+});
+
+describe("resolvePersonaPresence (R9-038)", () => {
+  it("no signal → 'none', no secondary dot", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: false,
+        isActiveChat: false,
+        isWorking: false,
+      }),
+    ).toEqual({ presence: "none", secondaryWorking: false });
+  });
+
+  it("working alone → 'working' ring, no secondary dot (nothing to be secondary to)", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: false,
+        isActiveChat: false,
+        isWorking: true,
+      }),
+    ).toEqual({ presence: "working", secondaryWorking: false });
+  });
+
+  it("in-chat alone → 'chat' ring, no secondary dot", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: false,
+        isActiveChat: true,
+        isWorking: false,
+      }),
+    ).toEqual({ presence: "chat", secondaryWorking: false });
+  });
+
+  it("in-chat + working → 'chat' ring PLUS the secondary dot (never a second ring)", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: false,
+        isActiveChat: true,
+        isWorking: true,
+      }),
+    ).toEqual({ presence: "chat", secondaryWorking: true });
+  });
+
+  it("on-call alone → 'call' ring, no secondary dot", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: true,
+        isActiveChat: false,
+        isWorking: false,
+      }),
+    ).toEqual({ presence: "call", secondaryWorking: false });
+  });
+
+  it("on-call + working → 'call' ring PLUS the secondary dot", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: true,
+        isActiveChat: false,
+        isWorking: true,
+      }),
+    ).toEqual({ presence: "call", secondaryWorking: true });
+  });
+
+  it("priority: on-call beats in-chat even if both are somehow true", () => {
+    expect(
+      resolvePersonaPresence({
+        isOnCall: true,
+        isActiveChat: true,
+        isWorking: false,
+      }),
+    ).toEqual({ presence: "call", secondaryWorking: false });
   });
 });

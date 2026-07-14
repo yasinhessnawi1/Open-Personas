@@ -243,9 +243,17 @@ export function Sidebar({ data }: { data: SidebarData }) {
 
           <Separator className="bg-sidebar-border" />
 
-          {/* (4) PERSONAS — fixed compact rail. */}
+          {/* (4) PERSONAS — fixed compact rail. R9-038: conversations/calls
+              feed the rail's route-derived live-presence ring (in-chat/
+              on-call detection needs the SAME conversationId→personaId
+              linkage MessagesList/CallsList already resolve). */}
           <SidebarSection heading={t("sidebar.personas")} collapsed={collapsed}>
-            <PersonasRail personas={data.personas} collapsed={collapsed} />
+            <PersonasRail
+              personas={data.personas}
+              collapsed={collapsed}
+              conversations={data.conversations}
+              calls={data.calls}
+            />
           </SidebarSection>
 
           {/* (5) MESSAGES — the flexible, growing, scrolling region.
