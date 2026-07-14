@@ -1,6 +1,6 @@
 # persona-connectors
 
-> The messaging trunk for Open Persona — DM your persona by name on Telegram, Discord, or Slack, with WhatsApp, SMS, and email adapters staged.
+> The messaging trunk for Open Persona — message your persona by name on Telegram, WhatsApp, SMS, or email, with Discord and Slack next.
 
 **License:** [PolyForm Noncommercial 1.0.0](LICENSE) — the application layer, not the MIT engine.
 
@@ -29,12 +29,12 @@ only its platform's glue:
 
 | Platform | Status |
 | --- | --- |
-| Telegram | Shipped (link via deep link from the web app) |
-| Discord | Shipped (OAuth link) |
-| Slack | Shipped (OAuth link) |
-| WhatsApp | Staged — in the tree behind provider credentials |
-| SMS (Twilio) | Staged — in the tree behind provider credentials |
-| Email (Postmark) | Staged — in the tree behind provider credentials |
+| Telegram | Connectable (deep link from the web app) |
+| WhatsApp | Connectable (verification code) |
+| SMS (Twilio) | Connectable (verification code) |
+| Email (Postmark) | Connectable (verification code) |
+| Discord | Coming soon — adapter built, OAuth mounting in progress |
+| Slack | Coming soon — adapter built, OAuth mounting in progress |
 
 Turn platforms on from the web app under **Settings → Connectors** — each shows
 what it is and what it can do before you connect it.

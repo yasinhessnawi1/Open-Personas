@@ -41,6 +41,8 @@ Clone it, set one model key, and run the whole product locally. No Docker, no si
 
 A persona is a typed YAML document with four separate, versioned memory stores — **identity** (immutable at runtime), **self-facts**, **worldview** (with epistemic tags), and **episodic**. The mutable stores are append-only with full history and one-call rollback; every write carries its source (`system` / `user` / `persona_self`) and lands in an audit log. Episodic memory runs a multi-resolution pyramid — raw turns compact into gists, gists into summaries — so a persona recalls last week's details without dragging last week's transcripts into context.
 
+![The persona page — identity, constraints, self-facts, autosaving](assets/readme/persona-page.png)
+
 ### 🕸️ One brain, many personas — and it's yours to edit
 
 Beyond each persona's own memory, a user-scoped **knowledge graph** lets every persona draw on what you told the others: the tutor adapts to a struggle you mentioned to your coach; the planner budgets for the move it was never told about directly. Knowledge is applied where relevant (never recited), held tentatively when old, and honestly attributable when you ask *"how do you know that?"* — with wellbeing-sensitive topics handled with explicit care. The **Memory** page draws it all as a living, force-directed map with typed links (semantic, entity, temporal, causal): correct a node and every persona retrieves the fix; delete it and it's gone from what they all recall.
@@ -81,7 +83,9 @@ A built-in toolbox (web search, sandboxed code execution, image generation, diag
 
 ### 🔌 Reach them where you actually talk
 
-Link your account once and DM your persona by name on **Telegram, Discord, or Slack** — persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web. WhatsApp, SMS (Twilio) and email (Postmark) adapters are in the tree behind provider credentials.
+Connect the apps you already live in and message a persona by name — **Telegram, WhatsApp, SMS, or email** connect today with a guided flow (deep link or a verification code); **Discord and Slack are next** (adapters built, OAuth mounting in progress — the UI says "coming soon" because it's honest). Persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web.
+
+![Connectors — reach your personas anywhere](assets/readme/connectors.png)
 
 ### 🎛️ Pick the brain, see the price
 
@@ -280,14 +284,14 @@ Shipped and load-bearing:
 - [x] Episodic multi-resolution memory (the pyramid)
 - [x] Real-time voice with emotion, barge-in and shared call memory
 - [x] Autonomy: schedules + calendar, initiative, event triggers, approvals spine, activity inbox
-- [x] Telegram, Discord & Slack connectors with a guided connect flow
+- [x] Telegram, WhatsApp, SMS & email connectors with a guided connect flow
 - [x] Per-persona model selection with live price tags + honest per-turn cost accounting
 - [x] Specialities, MCP catalog, bring-your-own MCP, sandboxed execution
 - [x] 60 hand-authored starter personas
 
 Coming:
 
-- [ ] WhatsApp, SMS and email connectors go live (adapters staged, provider verification in progress)
+- [ ] Discord & Slack connectors go live (adapters built, OAuth mounting in progress)
 - [ ] Managed embedded Postgres becomes the community default (zero-touch auto-import from SQLite)
 - [ ] Unified forget — one deletion that reaches every memory layer, graph and episodic alike
 - [ ] Autonomy defaults maturing from opt-in feature gates toward safe-by-default
