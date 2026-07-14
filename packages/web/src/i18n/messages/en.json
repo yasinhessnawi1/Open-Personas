@@ -1142,10 +1142,9 @@
     },
     "needsSetup": {
       "heading": "Needs a credential",
-      "summary": "This app declares it needs a credential to run.",
-      "managedNote": "Configured at the deployment level — set by your operator, not here.",
-      "credentialLabel": "Needs {env}",
-      "credentialNeedsLabel": "Needs {env} — configured at the deployment level."
+      "branchA": "Needs {env}. You'll provide it when you set this app up on a persona — it's stored encrypted and the persona never sees it.",
+      "branchB": "This app isn't run per-user here. If your operator has enabled it on the deployment's MCP gateway, its {env} key is managed there — not in this app.",
+      "branchD": "Set up by your operator in the deployment environment — not something you add here."
     },
     "setupForm": {
       "intro": "Set this app up for this persona. You provide the credential directly — it is stored securely and the persona never sees it.",

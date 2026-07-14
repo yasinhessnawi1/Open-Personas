@@ -294,18 +294,76 @@ describe("AppsChooser", () => {
     expect(state("gone")).toBe("unavailable");
   });
 
-  it("N3-D-10: needs-setup detail is read-honest — declares + deployment-level, no toggle-as-form", () => {
-    const { container } = renderChooser({
-      apps: [app({ name: "github", secrets: [secret] })],
+  // N7-T4a (D-N7-4): the needs-setup note is now BRANCHED per real mechanism
+  // (serverType-selected) instead of one dishonest "deployment level" line.
+  describe("N7-T4a: honest credential note, per real mechanism", () => {
+    it("branch A (remote, no personaId — author/new flow): names the per-persona mechanism", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "notion", serverType: "remote", secrets: [secret] }),
+        ],
+        // no personaId ⇒ not adoptable via the form ⇒ the note renders.
+      });
+      const card = cardFor(container, "notion");
+      expand(card);
+      const note = card.querySelector('[data-slot="app-needs-setup"]');
+      expect(note).toBeTruthy();
+      expect(note?.getAttribute("data-branch")).toBe("branchA");
+      expect(note?.textContent).toContain(secret.env);
+      expect(note?.textContent?.toLowerCase()).toContain("persona");
+      expect(note?.textContent?.toLowerCase()).not.toContain(
+        "deployment level",
+      );
+      // It is informational text, NOT an input/form field.
+      expect(note?.querySelector("input")).toBeNull();
     });
-    const card = cardFor(container, "github");
-    expand(card);
-    const note = card.querySelector('[data-slot="app-needs-setup"]');
-    expect(note).toBeTruthy();
-    expect(note?.textContent?.toLowerCase()).toContain("deployment level");
-    expect(note?.textContent).toContain(secret.env);
-    // It is informational text, NOT an input/form field.
-    expect(note?.querySelector("input")).toBeNull();
+
+    it("branch B (image app, gateway-only deployment): names the operator's gateway", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "gw-app", serverType: "server", secrets: [secret] }),
+        ],
+        personaId: "p1",
+        capabilities: {
+          perTenantRuntime: false,
+          gateway: true,
+          oauthProviders: [],
+        },
+      });
+      const card = cardFor(container, "gw-app");
+      expand(card);
+      const note = card.querySelector('[data-slot="app-needs-setup"]');
+      expect(note).toBeTruthy();
+      expect(note?.getAttribute("data-branch")).toBe("branchB");
+      expect(note?.textContent).toContain(secret.env);
+      expect(note?.textContent?.toLowerCase()).toContain("gateway");
+      expect(note?.textContent?.toLowerCase()).not.toContain(
+        "deployment level",
+      );
+      expect(note?.querySelector("input")).toBeNull();
+    });
+
+    it("branch D (builtin/external, requiredEnv only): the one genuinely deployment-env case", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({
+            name: "env-only",
+            serverType: "builtin",
+            requiredEnv: ["SOME_TOKEN"],
+          }),
+        ],
+      });
+      const card = cardFor(container, "env-only");
+      expand(card);
+      const note = card.querySelector('[data-slot="app-needs-setup"]');
+      expect(note).toBeTruthy();
+      expect(note?.getAttribute("data-branch")).toBe("branchD");
+      expect(note?.textContent?.toLowerCase()).toContain("operator");
+      expect(note?.textContent?.toLowerCase()).toContain(
+        "deployment environment",
+      );
+      expect(note?.querySelector("input")).toBeNull();
+    });
   });
 
   it("enabling an app writes mcp:<name>; disabling removes it (preserving other tools)", () => {

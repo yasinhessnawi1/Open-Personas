@@ -514,25 +514,53 @@ function TrustDisclosure({ app }: { app: McpCatalogEntry }) {
 }
 
 /**
- * N3-D-10: read-honest needs-setup disclosure — informational, NOT a form, NOT
- * a disabled field. Names WHO sets it ("deployment level"); the app DECLARES a
- * requirement (N3 has no read-back of whether the operator set it).
+ * N7-T4a (D-N7-4, owner copy FINAL) — read-honest needs-setup disclosure,
+ * informational, NOT a form, NOT a disabled field (N3-D-10 still holds).
+ *
+ * Replaces the pre-N7 one-size "deployment level" line: it named a mechanism
+ * (an operator-set deployment env var) that is true for exactly ONE catalog
+ * shape and false for the other two — dishonest for most of what actually
+ * reaches this note. By the time this renders, the caller has already ruled
+ * out the oauth-Connect affordance and the adopt/setup form, so the remaining
+ * shape is decided purely by `serverType`:
+ *   - "remote" — a credentialed remote app with no `personaId` yet (the
+ *     author/new flow; WITH a `personaId` this is always adoptable via the
+ *     form instead, never reaches this note) → branch A: the credential is
+ *     supplied per-persona later, not here.
+ *   - "server" — an image app this deployment cannot spawn per-tenant (no
+ *     `perTenantRuntime`) → branch B: the only mechanism that could ever run
+ *     it is the operator's Docker gateway, if they've enabled it there.
+ *   - anything else (builtin/external, `requiredEnv`-only) → branch D: the
+ *     ONE case that genuinely IS a deployment-environment variable
+ *     (`PERSONA_MCP_SERVERS`).
+ * (Branch C from the design notes is dead as copy — an unrunnable image app
+ * is excluded from the catalog list server-side, T2's route-level filter.)
  */
 function NeedsSetupNote({ app }: { app: McpCatalogEntry }) {
   const t = useTranslations("apps");
   // Prefer the richer secrets[] env names; fall back to required_env.
   const envs =
     app.secrets.length > 0 ? app.secrets.map((s) => s.env) : app.requiredEnv;
+  const branchKey =
+    app.serverType === "remote"
+      ? "branchA"
+      : app.serverType === "server"
+        ? "branchB"
+        : "branchD";
   return (
     <div
       className="flex flex-col gap-1 rounded-md border border-border bg-muted/40 p-2 text-xs text-muted-foreground"
       data-slot="app-needs-setup"
+      data-branch={branchKey}
     >
       <p className="font-medium text-foreground">{t("needsSetup.heading")}</p>
-      <p>{t("needsSetup.summary")}</p>
-      {envs.map((env) => (
-        <p key={env}>{t("needsSetup.credentialNeedsLabel", { env })}</p>
-      ))}
+      {branchKey === "branchD" ? (
+        <p>{t("needsSetup.branchD")}</p>
+      ) : (
+        envs.map((env) => (
+          <p key={env}>{t(`needsSetup.${branchKey}`, { env })}</p>
+        ))
+      )}
     </div>
   );
 }

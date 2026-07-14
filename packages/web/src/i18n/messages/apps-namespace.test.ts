@@ -86,18 +86,35 @@ describe("apps.* i18n namespace", () => {
     expect(apps.capability).not.toMatch(/\d/);
   });
 
-  it("N3-D-10: needs-setup is an honest disclosure — declares + deployment-level, no user verb", () => {
+  it("N7-T4a (D-N7-4): needs-setup is honest PER REAL MECHANISM — no one-size 'deployment level' line", () => {
     const ns = apps.needsSetup;
-    // names WHO sets it
-    expect(ns.managedNote.toLowerCase()).toContain("deployment level");
-    expect(ns.credentialNeedsLabel.toLowerCase()).toContain("deployment level");
-    expect(ns.credentialNeedsLabel).toContain("{env}");
-    // the app DECLARES a requirement — NOT "your credential is missing"
-    expect(ns.summary.toLowerCase()).toContain("declares");
+    // The three branches bound to real mechanisms (serverType-selected by the
+    // caller): remote (no personaId yet), image/server (operator gateway
+    // only), builtin/external (genuinely a deployment env var). The dead
+    // "deployment level" catch-all is retired.
+    expect(ns.branchA).toBeTruthy();
+    expect(ns.branchB).toBeTruthy();
+    expect(ns.branchD).toBeTruthy();
+    // branch A: a remote app's credential is supplied per-persona later, not
+    // a deployment-wide setting — names the real per-persona mechanism.
+    expect(ns.branchA).toContain("{env}");
+    expect(ns.branchA.toLowerCase()).toContain("persona");
+    expect(ns.branchA.toLowerCase()).toContain("encrypted");
+    // branch B: names the ONE real mechanism (the operator's MCP gateway) —
+    // never claims this app runs per-user here.
+    expect(ns.branchB).toContain("{env}");
+    expect(ns.branchB.toLowerCase()).toContain("gateway");
+    expect(ns.branchB.toLowerCase()).toContain("operator");
+    // branch D: the one case that genuinely IS a deployment-environment
+    // variable — still names WHO acts (the operator).
+    expect(ns.branchD.toLowerCase()).toContain("operator");
+    expect(ns.branchD.toLowerCase()).toContain("deployment environment");
     const nsBlob = allStrings(ns).join(" ").toLowerCase();
     expect(nsBlob).not.toContain("your credential is missing");
     expect(nsBlob).not.toContain("missing credential");
-    // no user verb that implies an action N3 can't fulfil (no save/connect/add)
+    // the retired one-size catch-all must not resurface under any branch
+    expect(nsBlob).not.toContain("deployment level");
+    // no user verb that implies an action N7 can't fulfil on this surface
     expect(nsBlob).not.toMatch(
       /\b(connect|add token|set up your|enter your)\b/,
     );
