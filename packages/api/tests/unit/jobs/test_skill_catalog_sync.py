@@ -120,3 +120,64 @@ def test_build_skill_catalog_sync_without_mirror_path_skips(
     monkeypatch.delenv("PERSONA_SKILL_MIRROR_PATH", raising=False)
     config = APIConfig(skill_catalog_sync_enabled=True)
     assert build_skill_catalog_sync(config, dispatch_engine=MagicMock()) is None
+
+
+# --------------------------------------------------------------------------- #
+# R9-040 — PERSONA_SKILL_GITHUB_REPOS threads config -> the sync task         #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_skill_catalog_sync_threads_github_repos_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from persona.skills.sources.github import GithubRepoSpec
+    from persona_api.config import APIConfig
+    from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
+
+    monkeypatch.setenv("PERSONA_SKILL_MIRROR_PATH", str(tmp_path / "skill_mirror.json"))
+    config = APIConfig(
+        skill_catalog_sync_enabled=True,
+        skill_github_repos="acme/skills@main,other/repo2",
+    )
+    task = build_skill_catalog_sync(config, dispatch_engine=MagicMock())
+    assert isinstance(task, SkillCatalogSyncTask)
+    assert task._github_repos == [  # noqa: SLF001 — proving the wiring, not just "it builds"
+        GithubRepoSpec(owner="acme", repo="skills", ref="main"),
+        GithubRepoSpec(owner="other", repo="repo2", ref=None),
+    ]
+
+
+def test_build_skill_catalog_sync_defaults_to_no_github_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from persona_api.config import APIConfig
+    from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
+
+    monkeypatch.setenv("PERSONA_SKILL_MIRROR_PATH", str(tmp_path / "skill_mirror.json"))
+    config = APIConfig(skill_catalog_sync_enabled=True)
+    task = build_skill_catalog_sync(config, dispatch_engine=MagicMock())
+    assert isinstance(task, SkillCatalogSyncTask)
+    assert task._github_repos == []  # noqa: SLF001
+
+
+def test_skill_github_repos_parsed_good_bad_and_empty() -> None:
+    from persona.skills.sources.github import GithubRepoSpec
+    from persona_api.config import APIConfig
+
+    assert APIConfig(skill_github_repos="").skill_github_repos_parsed == []
+    assert APIConfig(skill_github_repos="acme/skills").skill_github_repos_parsed == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None)
+    ]
+    # A malformed entry warns-and-skips; config load itself never raises (R9-040).
+    cfg = APIConfig(skill_github_repos="acme/skills,not-valid,other/repo2@v1")
+    assert cfg.skill_github_repos_parsed == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None),
+        GithubRepoSpec(owner="other", repo="repo2", ref="v1"),
+    ]
+
+
+def test_skill_github_repos_env_var_drives_the_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    from persona_api.config import APIConfig
+
+    monkeypatch.setenv("PERSONA_SKILL_GITHUB_REPOS", "acme/skills")
+    assert APIConfig().skill_github_repos == "acme/skills"

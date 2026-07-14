@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 from persona.skills.skill_mirror_reconcile import SkillMirrorSyncResult, reconcile_skill_mirror
 from persona.skills.sources.anthropic import ingest_anthropic_skills
+from persona.skills.sources.github import ingest_github_skills
 from persona.skills.sources.normalize import normalize_skill_into_mirror
 from persona.skills.sources.openclaw import ingest_openclaw_skills
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from persona.schema.skills import SkillSpec
 
 __all__ = [
+    "GithubSourceCheckout",
     "SourceCheckout",
     "build_curated_source_specs",
     "clone_at_ref",
@@ -58,17 +60,43 @@ class SourceCheckout:
     commit: str
 
 
+@dataclass(frozen=True)
+class GithubSourceCheckout:
+    """A fetched arbitrary-GitHub repo checkout + its owner/repo coordinate (D1, R9-040).
+
+    Pairs a :class:`SourceCheckout` (the generic fetched-checkout shape Anthropic/OpenClaw
+    also use) with the ``owner``/``repo`` :func:`~persona.skills.sources.github.
+    ingest_github_skills` needs for provenance (``source = "github:<owner>/<repo>"``) — unlike
+    Anthropic/OpenClaw (one fixed curated URL each), arbitrary GitHub is N operator-configured
+    repos (:data:`~persona.skills.sources.github.GithubRepoSpec`), so each checkout must carry
+    its own coordinate alongside the fetch result.
+
+    Attributes:
+        owner: The repo owner (user or org).
+        repo: The repo name.
+        checkout: The fetched checkout (root/repo_url/commit).
+    """
+
+    owner: str
+    repo: str
+    checkout: SourceCheckout
+
+
 def build_curated_source_specs(
     *,
     anthropic: SourceCheckout | None,
     openclaw: SourceCheckout | None,
+    github: Sequence[GithubSourceCheckout] = (),
 ) -> list[SkillSpec]:
-    """Aggregate the enabled curated source adapters into one ``SkillSpec`` list.
+    """Aggregate the enabled curated + BYO source adapters into one ``SkillSpec`` list.
 
-    Each source contributes its skills at its assigned tier; a ``None`` source contributes
-    nothing. The Anthropic ingest verifies the pinned canonical coordinate before stamping
-    ``vetted`` (S2-D-4) and raises on mismatch (fail-closed) — that propagates here, so a
-    vetted-source authenticity failure aborts the build before any write.
+    Each source contributes its skills at its assigned tier; a ``None``/empty source
+    contributes nothing. The Anthropic ingest verifies the pinned canonical coordinate before
+    stamping ``vetted`` (S2-D-4) and raises on mismatch (fail-closed) — that propagates here, so
+    a vetted-source authenticity failure aborts the build before any write. Each ``github``
+    entry ingests via the existing hardened D1 adapter (:func:`~persona.skills.sources.github.
+    ingest_github_skills` — the symlink-escape/resource-bound/ephemeral-clone walk, S2-D-8a),
+    landing at ``third_party`` (S2-D-3), consent-gated downstream by S3 automatically.
     """
     out: list[SkillSpec] = []
     if anthropic is not None:
@@ -85,6 +113,15 @@ def build_curated_source_specs(
                 openclaw.root,
                 source_uri=openclaw.repo_url,
                 source_ref=openclaw.commit,
+            )
+        )
+    for gh in github:
+        out.extend(
+            ingest_github_skills(
+                gh.checkout.root,
+                owner=gh.owner,
+                repo=gh.repo,
+                commit=gh.checkout.commit,
             )
         )
     return out
@@ -116,15 +153,17 @@ def sync_skill_mirror(
     mirror_path: Path,
     anthropic: SourceCheckout | None,
     openclaw: SourceCheckout | None,
+    github: Sequence[GithubSourceCheckout] = (),
 ) -> SkillMirrorSyncResult:
     """Build the aggregated specs, materialize their trees, and reconcile the snapshot.
 
     The build runs first (and raises on a vetted-authenticity / parse failure BEFORE any
     write), so a failure leaves the last-good mirror intact (D-N1-4). Materialization writes the
     normalized skill trees (D2) while the fetched checkout is still intact, then the reconcile
-    writes the snapshot atomically.
+    writes the snapshot atomically. ``github`` (R9-040) fans in the operator-configured BYO
+    repos alongside the curated sources — additive composition, same as Anthropic/OpenClaw.
     """
-    new_specs = build_curated_source_specs(anthropic=anthropic, openclaw=openclaw)
+    new_specs = build_curated_source_specs(anthropic=anthropic, openclaw=openclaw, github=github)
     materialize_skill_mirror(new_specs, mirror_path.parent)
     return reconcile_skill_mirror(new_specs, mirror_path=mirror_path)
 

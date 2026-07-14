@@ -16,9 +16,13 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from persona.skills.sources.github import GithubRepoSpec
 
 __all__ = ["APIConfig", "Edition"]
 
@@ -315,6 +319,15 @@ class APIConfig(BaseSettings):
         default="", validation_alias="PERSONA_SKILL_OPENCLAW_REPO_URL"
     )
     skill_openclaw_ref: str = Field(default="", validation_alias="PERSONA_SKILL_OPENCLAW_REF")
+    # R9-040 — the arbitrary-GitHub bring-your-own-repo skill source (S2 promised it; it had
+    # zero production callers until this wiring). A comma list of `owner/repo[@ref]` entries
+    # the sync clones + ingests via the EXISTING hardened D1 adapter
+    # (persona.skills.sources.github) — each lands in the mirror at `third_party` (S2-D-3),
+    # consent-gated downstream by S3 automatically, same as any other external skill. Stored
+    # raw; parsed defensively (malformed entries WARN + skip, never fail config load — see
+    # `skill_github_repos_parsed` / persona.skills.sources.github.parse_github_repo_specs).
+    # Empty (default) -> no GitHub repos synced.
+    skill_github_repos: str = Field(default="", validation_alias="PERSONA_SKILL_GITHUB_REPOS")
     # A0 T9 enqueue→worker cutover flag. OFF (default) → avatar generation runs the
     # legacy in-process BackgroundTasks path (contract unchanged). ON → the create
     # path ENQUEUES a durable avatar job for the worker (survives an api restart).
@@ -617,3 +630,15 @@ class APIConfig(BaseSettings):
     def mcp_run_vetted_list(self) -> list[str]:
         """The cloud operator-vetted catalog names permitted to RUN per-tenant (N6-D-4)."""
         return [n.strip() for n in self.mcp_run_vetted.split(",") if n.strip()]
+
+    @property
+    def skill_github_repos_parsed(self) -> list[GithubRepoSpec]:
+        """The configured arbitrary-GitHub BYO skill repos, parsed defensively (R9-040).
+
+        Malformed entries are warned-and-skipped by the parser itself
+        (:func:`~persona.skills.sources.github.parse_github_repo_specs`) — this property
+        never raises on a bad entry (config load must not fail on an operator typo).
+        """
+        from persona.skills.sources.github import parse_github_repo_specs
+
+        return parse_github_repo_specs(self.skill_github_repos)

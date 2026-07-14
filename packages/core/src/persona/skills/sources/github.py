@@ -18,9 +18,12 @@ each layer independent.
 
 from __future__ import annotations
 
+import re
 import tempfile
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from persona.logging import get_logger
 from persona.schema.skills import SkillTrust
 from persona.skills.sources.discovery import discover_skill_mds_hardened
 from persona.skills.sources.ingest import ingest_external_skills
@@ -32,7 +35,93 @@ if TYPE_CHECKING:
     from persona.schema.skills import SkillSpec
     from persona.skills.skill_sources_sync import SourceCheckout
 
-__all__ = ["fetch_github_skills", "ingest_github_skills"]
+__all__ = [
+    "GithubRepoSpec",
+    "fetch_github_skills",
+    "ingest_github_skills",
+    "parse_github_repo_specs",
+]
+
+_log = get_logger("skills.sources.github")
+
+#: A conservative, filesystem/URL-safe charset for a GitHub owner or repo segment.
+#: Real GitHub slugs are a subset of this; anything else in ``PERSONA_SKILL_GITHUB_REPOS``
+#: is almost certainly a typo (or, in principle, an attempt to smuggle a path/URL fragment
+#: into a value that flows straight into a clone URL) — reject it defensively (R9-040).
+_COORD_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+@dataclass(frozen=True)
+class GithubRepoSpec:
+    """One parsed ``owner/repo[@ref]`` bring-your-own GitHub skill-source entry (R9-040).
+
+    Attributes:
+        owner: The repo owner (user or org).
+        repo: The repo name.
+        ref: The pinned ref (branch/tag/commit) to fetch, or ``None`` for the default
+            branch HEAD (mirrors :func:`fetch_github_skills`'s ``ref`` parameter).
+    """
+
+    owner: str
+    repo: str
+    ref: str | None = None
+
+
+def parse_github_repo_specs(value: str) -> list[GithubRepoSpec]:
+    """Parse ``PERSONA_SKILL_GITHUB_REPOS`` — a comma list of ``owner/repo[@ref]`` (R9-040).
+
+    Defensive, not fail-fast: this is an operator-typed free-form list (unlike the short,
+    curated ``PERSONA_MCP_SERVERS``), so a malformed entry logs a WARNING and is SKIPPED
+    rather than raising — one typo must not crash config load or take the whole sync down
+    (the D-04-4 warn-and-skip discipline, applied here to config parsing). A blank entry
+    (a stray comma / whitespace) is silently ignored — it's empty, not malformed.
+
+    Args:
+        value: The raw comma-separated env value (``""`` when unset).
+
+    Returns:
+        The valid entries, in encounter order. Not de-duplicated — a repeated
+        ``owner/repo`` just re-clones and re-ingests; the mirror reconcile keys on
+        skill name, so it is harmless, not an error worth flagging.
+    """
+    out: list[GithubRepoSpec] = []
+    for raw in value.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if entry.count("@") > 1:
+            _log.warning(
+                "skipping malformed PERSONA_SKILL_GITHUB_REPOS entry (more than one '@')",
+                entry=entry,
+            )
+            continue
+        if "@" in entry:
+            coord, ref = entry.split("@", 1)
+            ref = ref.strip()
+            if not ref:
+                _log.warning(
+                    "skipping malformed PERSONA_SKILL_GITHUB_REPOS entry (empty ref after '@')",
+                    entry=entry,
+                )
+                continue
+        else:
+            coord, ref = entry, None
+        coord = coord.strip()
+        if coord.count("/") != 1:
+            _log.warning(
+                "skipping malformed PERSONA_SKILL_GITHUB_REPOS entry (expected owner/repo)",
+                entry=entry,
+            )
+            continue
+        owner, repo = (part.strip() for part in coord.split("/", 1))
+        if not (owner and repo and _COORD_RE.fullmatch(owner) and _COORD_RE.fullmatch(repo)):
+            _log.warning(
+                "skipping malformed PERSONA_SKILL_GITHUB_REPOS entry (invalid owner/repo)",
+                entry=entry,
+            )
+            continue
+        out.append(GithubRepoSpec(owner=owner, repo=repo, ref=ref))
+    return out
 
 
 def ingest_github_skills(

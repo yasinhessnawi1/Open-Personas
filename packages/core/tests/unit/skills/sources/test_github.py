@@ -26,7 +26,12 @@ from pathlib import Path  # noqa: TC003 — used in fixture helpers at runtime
 from loguru import logger
 from persona.schema.skills import SkillTrust
 from persona.skills.sources.discovery import discover_skill_mds_hardened
-from persona.skills.sources.github import fetch_github_skills, ingest_github_skills
+from persona.skills.sources.github import (
+    GithubRepoSpec,
+    fetch_github_skills,
+    ingest_github_skills,
+    parse_github_repo_specs,
+)
 
 _SKILL = """\
 ---
@@ -162,3 +167,104 @@ def test_a_skipped_manifest_warns_with_a_reason(tmp_path: Path) -> None:
 
     blob = "".join(captured)
     assert "symlink" in blob.lower()
+
+
+# --- parse_github_repo_specs — PERSONA_SKILL_GITHUB_REPOS config parsing (R9-040) -----
+
+
+def test_empty_string_yields_no_repos() -> None:
+    assert parse_github_repo_specs("") == []
+
+
+def test_whitespace_only_yields_no_repos() -> None:
+    assert parse_github_repo_specs("   ") == []
+
+
+def test_a_single_owner_repo_with_no_ref() -> None:
+    assert parse_github_repo_specs("acme/skills") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None)
+    ]
+
+
+def test_a_single_owner_repo_with_a_ref() -> None:
+    assert parse_github_repo_specs("acme/skills@v1.2.3") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref="v1.2.3")
+    ]
+
+
+def test_multiple_entries_all_parse_in_order() -> None:
+    assert parse_github_repo_specs("acme/skills,other-org/repo2@main") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None),
+        GithubRepoSpec(owner="other-org", repo="repo2", ref="main"),
+    ]
+
+
+def test_surrounding_and_internal_whitespace_is_tolerated() -> None:
+    assert parse_github_repo_specs(" acme/skills , other/repo2 @ main ") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None),
+        GithubRepoSpec(owner="other", repo="repo2", ref="main"),
+    ]
+
+
+def test_blank_entries_from_stray_commas_are_ignored_not_malformed() -> None:
+    assert parse_github_repo_specs(",,acme/skills,,") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None)
+    ]
+
+
+def test_a_ref_may_itself_contain_slashes() -> None:
+    # git refs like "release/1.0" are legitimate; only the owner/repo coordinate is
+    # restricted to exactly one '/'.
+    assert parse_github_repo_specs("acme/skills@release/1.0") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref="release/1.0")
+    ]
+
+
+def test_missing_slash_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("ownerrepo") == []
+
+
+def test_too_many_slashes_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("a/b/c") == []
+
+
+def test_empty_owner_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("/repo") == []
+
+
+def test_empty_repo_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("owner/") == []
+
+
+def test_empty_ref_after_at_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("owner/repo@") == []
+
+
+def test_multiple_at_signs_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("owner/repo@ref@extra") == []
+
+
+def test_a_space_inside_owner_or_repo_is_malformed_and_skipped() -> None:
+    assert parse_github_repo_specs("own er/repo") == []
+
+
+def test_one_bad_entry_does_not_drop_the_good_ones_around_it() -> None:
+    # Defensive parsing: a single typo must not take down the whole configured list.
+    assert parse_github_repo_specs("acme/skills,not-valid,other/repo2@v1") == [
+        GithubRepoSpec(owner="acme", repo="skills", ref=None),
+        GithubRepoSpec(owner="other", repo="repo2", ref="v1"),
+    ]
+
+
+def test_malformed_entries_warn_with_a_reason_never_raise() -> None:
+    captured: list[str] = []
+    sink_id = logger.add(captured.append, level="WARNING", format="{message} | {extra}")
+    try:
+        result = parse_github_repo_specs("ownerrepo")
+    finally:
+        logger.remove(sink_id)
+
+    assert result == []
+    blob = "".join(captured)
+    assert "PERSONA_SKILL_GITHUB_REPOS" in blob
+    assert "ownerrepo" in blob

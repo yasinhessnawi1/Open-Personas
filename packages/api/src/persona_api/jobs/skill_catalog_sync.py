@@ -38,14 +38,15 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from persona.logging import get_logger
 from persona.skills.skill_mirror import resolve_skill_mirror_write_path
 from persona.skills.skill_mirror_reconcile import SkillMirrorSyncResult
-from persona.skills.skill_sources_sync import clone_at_ref, sync_skill_mirror
+from persona.skills.skill_sources_sync import GithubSourceCheckout, clone_at_ref, sync_skill_mirror
 from persona.skills.sources.anthropic import ANTHROPIC_PINNED_COMMIT, ANTHROPIC_REPO_URL
 
 from persona_api.schedules.leadership import SchedulerLeader
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
+    from persona.skills.sources.github import GithubRepoSpec
     from sqlalchemy import Engine
 
     from persona_api.config import APIConfig
@@ -84,6 +85,8 @@ class SkillCatalogSyncTask:
         mirror_path: The writable snapshot path the reconcile writes.
         openclaw_repo_url: The curated OpenClaw source repo URL (``None`` ⇒ OpenClaw disabled).
         openclaw_ref: The OpenClaw source ref to pin (``None`` ⇒ default branch HEAD).
+        github_repos: The operator-configured arbitrary-GitHub BYO repos (R9-040; empty ⇒ none
+            synced), already parsed+validated (``APIConfig.skill_github_repos_parsed``).
         lock_key: The skill-catalog-sync advisory-lock key (defaults to the module key).
         leader_factory: Test seam — builds the per-run leader (default ``SchedulerLeader``).
         sync_runner: Test seam — runs the clone+sync (default clones the curated sources).
@@ -96,6 +99,7 @@ class SkillCatalogSyncTask:
         mirror_path: Path = Path("/var/lib/persona/skill_mirror/skill_mirror.json"),
         openclaw_repo_url: str | None = None,
         openclaw_ref: str | None = None,
+        github_repos: Sequence[GithubRepoSpec] = (),
         lock_key: int = SKILL_CATALOG_SYNC_LEADER_LOCK_KEY,
         leader_factory: Callable[[], LeaderGate] | None = None,
         sync_runner: Callable[[], SkillMirrorSyncResult] | None = None,
@@ -104,6 +108,7 @@ class SkillCatalogSyncTask:
         self._mirror_path = mirror_path
         self._openclaw_repo_url = openclaw_repo_url
         self._openclaw_ref = openclaw_ref
+        self._github_repos = github_repos
         self._lock_key = lock_key
         self._leader_factory: Callable[[], LeaderGate] = leader_factory or (
             lambda: SchedulerLeader(dispatch_engine, lock_key=lock_key)
@@ -143,7 +148,13 @@ class SkillCatalogSyncTask:
         return result
 
     def _clone_and_sync(self) -> SkillMirrorSyncResult:
-        """Clone the enabled curated sources into temp dirs, ingest+tier, reconcile (OFFLINE)."""
+        """Clone the enabled curated + BYO sources into temp dirs, ingest+tier, reconcile.
+
+        OFFLINE. Every clone shares the one ``TemporaryDirectory`` for this run (curated
+        sources + each configured GitHub repo alike), so a single ``finally``-backed context
+        cleans up all of them together — the same shape the curated pair already used, just
+        fanned out over N github repos (R9-040) via the existing hardened D1 adapter.
+        """
         with tempfile.TemporaryDirectory(prefix="persona-skill-sync-") as tmp:
             tmp_root = Path(tmp)
             anthropic = clone_at_ref(
@@ -154,8 +165,23 @@ class SkillCatalogSyncTask:
                 if self._openclaw_repo_url is not None
                 else None
             )
+            github = [
+                GithubSourceCheckout(
+                    owner=spec.owner,
+                    repo=spec.repo,
+                    checkout=clone_at_ref(
+                        f"https://github.com/{spec.owner}/{spec.repo}",
+                        spec.ref,
+                        tmp_root / f"github-{i}",
+                    ),
+                )
+                for i, spec in enumerate(self._github_repos)
+            ]
             return sync_skill_mirror(
-                mirror_path=self._mirror_path, anthropic=anthropic, openclaw=openclaw
+                mirror_path=self._mirror_path,
+                anthropic=anthropic,
+                openclaw=openclaw,
+                github=github,
             )
 
 
@@ -188,4 +214,5 @@ def build_skill_catalog_sync(
         mirror_path=mirror_path,
         openclaw_repo_url=config.skill_openclaw_repo_url or None,
         openclaw_ref=config.skill_openclaw_ref or None,
+        github_repos=config.skill_github_repos_parsed,
     )
