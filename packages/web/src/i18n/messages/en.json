@@ -669,7 +669,13 @@
     "byoAuth": "Auth",
     "byoAuthNone": "None",
     "byoAuthBearer": "Bearer token",
+    "byoAuthOauth": "OAuth (Connect)",
+    "byoOauthProvider": "OAuth provider",
+    "byoOauthNative": "Auto-discover (mcp-native)",
     "byoCredential": "Token",
+    "byoConnect": "Connect",
+    "byoReconnect": "Reconnect",
+    "byoConnecting": "Connecting…",
     "byoAdd": "Add server",
     "byoAdding": "Adding…",
     "byoEmpty": "You have no MCP servers yet.",
@@ -1152,6 +1158,12 @@
       "errorAlready": "This app is already set up for this persona.",
       "errorNotVetted": "This app is not available to add on this deployment."
     },
+    "connect": {
+      "intro": "Connect this app for this persona. You authenticate with the provider — no token handling here, and the persona never sees your credentials.",
+      "connect": "Connect",
+      "connecting": "Connecting…",
+      "error": "Could not start the connection. Please try again."
+    },
     "unavailable": {
       "heading": "No longer available",
       "summary": "This app was enabled for the persona but has been removed from the catalog.",
@@ -1187,6 +1199,13 @@
       "allowHosts": "Talks to: {hosts}",
       "allowHostsNone": "No outbound hosts declared."
     }
+  },
+  "mcpOauth": {
+    "connecting": "Connecting your account…",
+    "errorHeading": "Couldn't complete the connection",
+    "errorBody": "Something went wrong finishing this connection. You can head back and try again.",
+    "errorSignIn": "Your session expired during the connection. Sign in again, then retry Connect.",
+    "back": "Back to personas"
   },
   "memory": {
     "title": "Memory",

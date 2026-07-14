@@ -140,6 +140,9 @@ describe("ByoMcpManager (spec 30 T12)", () => {
         url: "https://prod.example/mcp",
         auth_method: "bearer",
         credential: "secret-123",
+        // N7-T3b: the create body now always carries oauth_provider (null for
+        // non-oauth); the store ignores it unless auth_method === "oauth".
+        oauth_provider: null,
       });
     });
   });
@@ -233,6 +236,142 @@ describe("ByoMcpManager (spec 30 T12)", () => {
       ).toBe(0);
     } finally {
       process.off("unhandledRejection", unhandled);
+    }
+  });
+});
+
+// N7-T3b — the OAuth (Connect) additions to the BYO manager.
+
+function installOauthFetch(): {
+  captured: Captured[];
+  restore: () => void;
+} {
+  const captured: Captured[] = [];
+  const original = globalThis.fetch;
+  const oauthServer = {
+    id: "srv_oauth",
+    name: "my-gh",
+    url: "https://api.githubcopilot.com/mcp/",
+    auth_method: "oauth",
+    oauth_provider: "github",
+    enabled: true,
+    has_credential: false, // not connected yet → "Connect"
+    discovered_tools: null,
+    catalog_source: null,
+    created_at: "2026-07-14T00:00:00Z",
+    updated_at: "2026-07-14T00:00:00Z",
+  };
+  globalThis.fetch = vi.fn(
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const isReq = typeof input === "object" && "method" in input;
+      const req = isReq ? (input as Request) : null;
+      const url = req ? req.url : input.toString();
+      const method = init?.method ?? req?.method ?? "GET";
+      let body = typeof init?.body === "string" ? init.body : "";
+      if (!body && req) body = await req.clone().text();
+      captured.push({ url, method, body });
+      if (method === "GET" && url.endsWith("/v1/mcp-servers")) {
+        return jsonResponse([oauthServer]);
+      }
+      if (method === "GET" && url.includes("/personas/p1/mcp-servers")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && url.includes("/oauth/authorize")) {
+        return jsonResponse({
+          authorize_url: "https://github.com/login/oauth",
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+  ) as unknown as typeof fetch;
+  return {
+    captured,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+describe("ByoMcpManager — OAuth (N7-T3b)", () => {
+  let restore: () => void;
+  afterEach(() => restore?.());
+
+  it("offers the oauth auth method with a fail-closed provider select (configured + native)", async () => {
+    const { restore: r } = installFetch();
+    restore = r;
+    const { container } = render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <ByoMcpManager personaId="p1" oauthProviders={["github"]} />
+      </NextIntlClientProvider>,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-slot="byo-server-list"]'),
+      ).toBeTruthy(),
+    );
+    const authSelect = container.querySelector("select") as HTMLSelectElement;
+    const nativeSet = Object.getOwnPropertyDescriptor(
+      window.HTMLSelectElement.prototype,
+      "value",
+    )?.set;
+    nativeSet?.call(authSelect, "oauth");
+    authSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-slot="byo-oauth-provider"]'),
+      ).toBeTruthy(),
+    );
+    const provider = container.querySelector(
+      '[data-slot="byo-oauth-provider"]',
+    ) as HTMLSelectElement;
+    const values = Array.from(provider.options).map((o) => o.value);
+    // fail-closed: only the configured "github" + the always-available native path.
+    expect(values).toEqual(["github", "mcp-native"]);
+  });
+
+  it("renders Connect (not Reconnect) for an unconnected oauth server and POSTs authorize", async () => {
+    const { captured, restore: r } = installOauthFetch();
+    restore = r;
+    const assign = vi.fn();
+    const original = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...original, assign, pathname: "/personas/p1/edit", search: "" },
+    });
+    try {
+      const { container } = render(
+        <NextIntlClientProvider locale="en" messages={messages}>
+          <ByoMcpManager personaId="p1" />
+        </NextIntlClientProvider>,
+      );
+      const connect = (await waitFor(() => {
+        const el = container.querySelector('[data-slot="byo-connect"]');
+        expect(el).toBeTruthy();
+        return el;
+      })) as HTMLButtonElement;
+      expect(connect.textContent).toContain("Connect");
+      expect(connect.textContent).not.toContain("Reconnect");
+      expect(connect.dataset.connected).toBe("false");
+      connect.click();
+      await waitFor(() => {
+        const post = captured.find(
+          (c) =>
+            c.method === "POST" &&
+            c.url.includes("/v1/mcp-servers/srv_oauth/oauth/authorize"),
+        );
+        expect(post).toBeTruthy();
+        expect(JSON.parse(post?.body ?? "{}")).toEqual({
+          redirect_after: "/personas/p1/edit",
+        });
+      });
+      await waitFor(() =>
+        expect(assign).toHaveBeenCalledWith("https://github.com/login/oauth"),
+      );
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: original,
+      });
     }
   });
 });

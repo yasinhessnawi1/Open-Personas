@@ -3,13 +3,16 @@
 import {
   Boxes,
   Check,
+  LinkIcon,
   ShieldCheck,
   ShieldQuestion,
   Wrench,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useAuth } from "@/auth";
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   Collapsible,
@@ -17,6 +20,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { ApiError, createApiClient, unwrap } from "@/lib/api/client";
 import { type AppPresentation, presentApp } from "@/lib/apps/app-labels";
 import { cn } from "@/lib/utils";
 import { AppSetupForm } from "./app-setup-form";
@@ -31,6 +35,7 @@ import {
 } from "./persona-form";
 
 const MCP_PREFIX = "mcp:";
+const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
 /**
  * N3 (MCP-as-apps) Task 4 + R4 T5 correction — the unified "Apps & Tools" menu.
@@ -350,6 +355,11 @@ function AppCard({
               >
                 {t("unavailable.summary")}
               </p>
+            ) : app.authMethod === "oauth" && personaId ? (
+              // N7-T3b (D-N7-3): an oauth catalog app (e.g. github) is granted by
+              // Connect, not a credential form or a bare toggle — adopt(no secret)
+              // then hand off to the provider's authorize flow.
+              <AppOauthConnect app={app} personaId={personaId} />
             ) : adoptable && personaId ? (
               // N4: the credential-isolated setup form IS the grant for an adoptable
               // remote app — the user supplies the secret, it posts straight to the
@@ -523,6 +533,97 @@ function NeedsSetupNote({ app }: { app: McpCatalogEntry }) {
       {envs.map((env) => (
         <p key={env}>{t("needsSetup.credentialNeedsLabel", { env })}</p>
       ))}
+    </div>
+  );
+}
+
+/**
+ * N7-T3b (D-N7-3) — the catalog-card Connect affordance for an OAuth app.
+ *
+ * Replaces the setup form / toggle for an `authMethod === "oauth"` catalog entry.
+ * On click: adopt the app with NO credential (the oauth token arrives via the
+ * dance, never here), tolerating a 409 if it was already adopted; resolve the
+ * adopted server's id by its `catalog_source`; then POST authorize and hand the
+ * browser to the provider. After the callback page completes the exchange the user
+ * lands back here (redirect_after = the current edit path) and the connection badge
+ * + `has_credential` reflect the connected state.
+ *
+ * see-then-grant: rendered INSIDE the expanded detail, after the trust disclosure.
+ */
+function AppOauthConnect({
+  app,
+  personaId,
+}: {
+  app: McpCatalogEntry;
+  personaId: string;
+}) {
+  const t = useTranslations("apps");
+  const { getToken } = useAuth();
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const connect = useCallback(async () => {
+    if (connecting) return;
+    setConnecting(true);
+    setError(null);
+    try {
+      const jwt = await getToken(TEMPLATE ? { template: TEMPLATE } : undefined);
+      const api = createApiClient(() => Promise.resolve(jwt));
+      // 1. Adopt with no secret. 409 = already adopted → fall through to Connect.
+      try {
+        await unwrap(
+          await api.POST("/v1/personas/{persona_id}/adopted-apps", {
+            params: { path: { persona_id: personaId } },
+            body: { catalog_name: app.name, credential: null },
+          }),
+        );
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 409)) throw e;
+      }
+      // 2. Resolve the adopted server's id by its catalog provenance.
+      const servers = await unwrap(await api.GET("/v1/mcp-servers"));
+      const server = servers.find((s) => s.catalog_source === app.name);
+      if (!server) throw new Error("adopted server not found");
+      // 3. Begin the OAuth dance; hand the browser to the provider.
+      const res = await unwrap(
+        await api.POST("/v1/mcp-servers/{server_id}/oauth/authorize", {
+          params: { path: { server_id: server.id } },
+          body: {
+            redirect_after:
+              typeof window !== "undefined"
+                ? window.location.pathname + window.location.search
+                : null,
+          },
+        }),
+      );
+      window.location.assign(res.authorize_url);
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 0;
+      setError(
+        status === 403 ? t("setupForm.errorNotVetted") : t("connect.error"),
+      );
+      setConnecting(false);
+    }
+  }, [connecting, getToken, personaId, app.name, t]);
+
+  return (
+    <div className="flex flex-col gap-2" data-slot="app-oauth-connect">
+      <p className="text-xs text-muted-foreground">{t("connect.intro")}</p>
+      <button
+        type="button"
+        onClick={() => void connect()}
+        disabled={connecting}
+        className={cn(buttonVariants({ size: "sm" }), "w-fit gap-1.5")}
+        data-slot="app-connect"
+      >
+        <LinkIcon className="size-3.5" aria-hidden="true" />
+        {connecting ? t("connect.connecting") : t("connect.connect")}
+      </button>
+      {error ? (
+        <p className="text-xs text-destructive" data-slot="app-connect-error">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

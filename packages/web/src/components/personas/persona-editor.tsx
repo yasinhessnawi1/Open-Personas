@@ -486,7 +486,11 @@ export function PersonaEditor({
             </div>
             {personaId ? (
               <div className="border-border border-t pt-4">
-                <ByoMcpManager personaId={personaId} bare />
+                <ByoMcpManager
+                  personaId={personaId}
+                  bare
+                  oauthProviders={mcpCapabilities.oauthProviders}
+                />
               </div>
             ) : null}
           </CollapsibleSection>

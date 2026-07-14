@@ -1,6 +1,6 @@
 "use client";
 
-import { Plug, Trash2 } from "lucide-react";
+import { LinkIcon, Plug, Trash2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/auth";
@@ -13,8 +13,14 @@ import { CollapsibleSection } from "./collapsible-section";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
+// Spec N7-T3b: the generic `mcp-native` OAuth path needs NO operator config — it
+// discovers the server's authorization server (RFC 9728/8414) + DCR-registers on
+// the fly — so it is ALWAYS offered as a provider choice, alongside any operator-
+// configured named providers (fail-closed mirror of the API provider registry).
+const MCP_NATIVE_PROVIDER = "mcp-native";
+
 type Server = components["schemas"]["MCPServerDetail"];
-type AuthMethod = "none" | "bearer";
+type AuthMethod = "none" | "bearer" | "oauth";
 
 /**
  * Spec 30 T12 — bring-your-own MCP management + per-persona assignment.
@@ -28,6 +34,7 @@ type AuthMethod = "none" | "bearer";
 export function ByoMcpManager({
   personaId,
   bare = false,
+  oauthProviders = [],
 }: {
   personaId: string;
   /**
@@ -35,6 +42,13 @@ export function ByoMcpManager({
    * nested inside the editor's "Advanced options" section (no card-in-card).
    */
   bare?: boolean;
+  /**
+   * Spec N7-T3b: the operator-configured OAuth providers (from the deployment
+   * capabilities block, `capabilities.oauth_providers`). Fail-closed — a named
+   * provider only appears when its client is configured server-side. The generic
+   * `mcp-native` auto-discover option is offered regardless (it needs no config).
+   */
+  oauthProviders?: string[];
 }) {
   const t = useTranslations("author");
   const { getToken } = useAuth();
@@ -44,11 +58,17 @@ export function ByoMcpManager({
   const [url, setUrl] = useState("");
   const [auth, setAuth] = useState<AuthMethod>("none");
   const [credential, setCredential] = useState("");
+  const [oauthProvider, setOauthProvider] = useState(MCP_NATIVE_PROVIDER);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState(false);
+  const [connecting, setConnecting] = useState<string | null>(null);
   const [tests, setTests] = useState<
     Record<string, components["schemas"]["MCPServerTestResult"] | "pending">
   >({});
+
+  // The provider select: every operator-configured named provider (fail-closed —
+  // absent when unconfigured) PLUS the always-available generic auto-discover path.
+  const providerOptions = [...oauthProviders, MCP_NATIVE_PROVIDER];
 
   const client = useCallback(async () => {
     const jwt = await getToken(TEMPLATE ? { template: TEMPLATE } : undefined);
@@ -88,7 +108,10 @@ export function ByoMcpManager({
             name,
             url,
             auth_method: auth,
+            // oauth carries NO credential at create — the per-user token is
+            // obtained later via Connect (POST oauth/authorize → callback).
             credential: auth === "bearer" ? credential : null,
+            oauth_provider: auth === "oauth" ? oauthProvider : null,
           },
         }),
       );
@@ -96,13 +119,43 @@ export function ByoMcpManager({
       setUrl("");
       setCredential("");
       setAuth("none");
+      setOauthProvider(MCP_NATIVE_PROVIDER);
       await reload();
     } catch {
       setAddError(true);
     } finally {
       setAdding(false);
     }
-  }, [adding, name, url, auth, credential, client, reload]);
+  }, [adding, name, url, auth, credential, oauthProvider, client, reload]);
+
+  // Spec N7-T3b (R8-D-8): begin (or renew) the OAuth dance for an oauth server.
+  // POST authorize → the API mints server-side state + PKCE and returns the
+  // provider authorize URL; we hand the browser off to it. `redirect_after` brings
+  // the user back to the editor after the callback page completes the exchange.
+  const connect = useCallback(
+    async (id: string) => {
+      if (connecting) return;
+      setConnecting(id);
+      try {
+        const api = await client();
+        const res = await unwrap(
+          await api.POST("/v1/mcp-servers/{server_id}/oauth/authorize", {
+            params: { path: { server_id: id } },
+            body: {
+              redirect_after:
+                typeof window !== "undefined"
+                  ? window.location.pathname + window.location.search
+                  : null,
+            },
+          }),
+        );
+        window.location.assign(res.authorize_url);
+      } catch {
+        setConnecting(null);
+      }
+    },
+    [connecting, client],
+  );
 
   const test = useCallback(
     async (id: string) => {
@@ -189,6 +242,7 @@ export function ByoMcpManager({
           >
             <option value="none">{t("byoAuthNone")}</option>
             <option value="bearer">{t("byoAuthBearer")}</option>
+            <option value="oauth">{t("byoAuthOauth")}</option>
           </select>
           {auth === "bearer" ? (
             <Input
@@ -199,6 +253,21 @@ export function ByoMcpManager({
               className="w-44"
               aria-label={t("byoCredential")}
             />
+          ) : null}
+          {auth === "oauth" ? (
+            <select
+              value={oauthProvider}
+              onChange={(e) => setOauthProvider(e.target.value)}
+              className="h-9 rounded-md border border-input bg-transparent px-2 text-sm shadow-xs"
+              aria-label={t("byoOauthProvider")}
+              data-slot="byo-oauth-provider"
+            >
+              {providerOptions.map((p) => (
+                <option key={p} value={p}>
+                  {p === MCP_NATIVE_PROVIDER ? t("byoOauthNative") : p}
+                </option>
+              ))}
+            </select>
           ) : null}
           <button
             type="button"
@@ -241,6 +310,32 @@ export function ByoMcpManager({
                     </span>
                   ) : null}
                   <div className="ml-auto flex items-center gap-1.5">
+                    {/* N7-T3b (R8-D-8): an oauth server needs a per-user token —
+                        Connect starts the dance; once connected the row shows
+                        Reconnect (re-auth), driven by has_credential. */}
+                    {s.auth_method === "oauth" ? (
+                      <button
+                        type="button"
+                        onClick={() => void connect(s.id)}
+                        disabled={connecting === s.id}
+                        className={cn(
+                          buttonVariants({
+                            variant: s.has_credential ? "outline" : "default",
+                            size: "sm",
+                          }),
+                          "gap-1.5",
+                        )}
+                        data-slot="byo-connect"
+                        data-connected={s.has_credential}
+                      >
+                        <LinkIcon className="size-3.5" aria-hidden="true" />
+                        {connecting === s.id
+                          ? t("byoConnecting")
+                          : s.has_credential
+                            ? t("byoReconnect")
+                            : t("byoConnect")}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void test(s.id)}

@@ -545,4 +545,125 @@ describe("AppsChooser", () => {
       expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
     });
   });
+
+  // N7-T3b — the catalog-card Connect affordance for an OAuth app.
+  describe("N7-T3b oauth Connect", () => {
+    it("renders Connect (not a setup form or toggle) for an oauth catalog app", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({
+            name: "github",
+            displayName: "GitHub",
+            serverType: "remote",
+            authMethod: "oauth",
+            oauthProvider: "github",
+          }),
+        ],
+        personaId: "p1",
+      });
+      const card = cardFor(container, "GitHub");
+      expand(card);
+      expect(
+        card.querySelector('[data-slot="app-oauth-connect"]'),
+      ).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-connect"]')).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("Connect adopts (tolerating 409), resolves the server, authorizes, and redirects", async () => {
+      const posts: { url: string; method: string; body: string }[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const isReq = typeof input === "object" && "method" in input;
+          const req = isReq ? (input as Request) : null;
+          const url = req ? req.url : input.toString();
+          const method = init?.method ?? req?.method ?? "GET";
+          let body = typeof init?.body === "string" ? init.body : "";
+          if (!body && req) body = await req.clone().text();
+          posts.push({ url, method, body });
+          const j = (d: unknown, s = 200) =>
+            new Response(JSON.stringify(d), {
+              status: s,
+              headers: { "Content-Type": "application/json" },
+            });
+          // Already adopted → 409, the Connect flow falls through.
+          if (method === "POST" && url.includes("/adopted-apps"))
+            return j({ error: "already" }, 409);
+          if (method === "GET" && url.endsWith("/v1/mcp-servers"))
+            return j([
+              {
+                id: "srv_gh",
+                name: "github",
+                url: "https://api.githubcopilot.com/mcp/",
+                auth_method: "oauth",
+                oauth_provider: "github",
+                enabled: true,
+                has_credential: false,
+                catalog_source: "github",
+                created_at: "2026-07-14T00:00:00Z",
+                updated_at: "2026-07-14T00:00:00Z",
+              },
+            ]);
+          if (method === "POST" && url.includes("/oauth/authorize"))
+            return j({ authorize_url: "https://github.com/login/oauth" });
+          return new Response(null, { status: 204 });
+        },
+      ) as unknown as typeof fetch;
+      const assign = vi.fn();
+      const originalLoc = window.location;
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: {
+          ...originalLoc,
+          assign,
+          pathname: "/personas/p1/edit",
+          search: "",
+        },
+      });
+      try {
+        const { container } = renderChooser({
+          apps: [
+            app({
+              name: "github",
+              displayName: "GitHub",
+              serverType: "remote",
+              authMethod: "oauth",
+              oauthProvider: "github",
+            }),
+          ],
+          personaId: "p1",
+        });
+        const card = cardFor(container, "GitHub");
+        expand(card);
+        (
+          card.querySelector('[data-slot="app-connect"]') as HTMLButtonElement
+        ).click();
+        const { waitFor } = await import("@testing-library/react");
+        await waitFor(() =>
+          expect(assign).toHaveBeenCalledWith("https://github.com/login/oauth"),
+        );
+        // The adopt was attempted (409-tolerant), then authorize fired.
+        expect(
+          posts.some(
+            (p) => p.method === "POST" && p.url.includes("/adopted-apps"),
+          ),
+        ).toBe(true);
+        const authorize = posts.find((p) =>
+          p.url.includes("/v1/mcp-servers/srv_gh/oauth/authorize"),
+        );
+        expect(authorize).toBeTruthy();
+        expect(JSON.parse(authorize?.body ?? "{}")).toEqual({
+          redirect_after: "/personas/p1/edit",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        Object.defineProperty(window, "location", {
+          configurable: true,
+          value: originalLoc,
+        });
+      }
+    });
+  });
 });
