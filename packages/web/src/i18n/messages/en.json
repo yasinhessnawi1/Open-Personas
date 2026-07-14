@@ -98,7 +98,14 @@
       "untitled": "Untitled conversation",
       "unknownPersona": "Unknown persona",
       "callPersona": "Call {name}",
-      "newChat": "New chat"
+      "newChat": "New chat",
+      "presence": {
+        "onCall": "On a call with {name}",
+        "onCallWorking": "On a call with {name} — also working",
+        "inChat": "In chat with {name}",
+        "inChatWorking": "In chat with {name} — also working",
+        "working": "{name} is working"
+      }
     },
     "command": {
       "open": "Search and commands",
@@ -520,7 +527,13 @@
       "chart": "Charts",
       "doc": "Documents",
       "data": "Data"
-    }
+    },
+    "close": "Close",
+    "downloadFailed": "Couldn't download that file. Try again.",
+    "previewLabel": "Preview {name}",
+    "metaSize": "Size",
+    "metaType": "Type",
+    "metaCreated": "Created"
   },
   "runs": {
     "backToPersona": "Back to persona",

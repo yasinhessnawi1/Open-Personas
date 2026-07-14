@@ -1,12 +1,21 @@
 "use client";
 
-import { Download, FileText, ImageIcon, Trash2 } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { Dialog } from "@base-ui/react/dialog";
+import {
+  Download,
+  File,
+  FileText,
+  LineChart,
+  Table2,
+  Trash2,
+} from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useMemo, useState } from "react";
+import { useAuth } from "@/auth";
 import { useConfirm } from "@/components/providers/confirm-provider";
 import { useNotify } from "@/components/providers/notification-provider";
-import { Card } from "@/components/ui/card";
+import { AuthedImage } from "@/components/ui/authed-image";
+import { Button } from "@/components/ui/button";
 import { useApi } from "@/lib/api/use-api";
 import { cn } from "@/lib/utils";
 
@@ -41,21 +50,51 @@ export interface ArtifactGalleryProps {
 const SOURCE_CHIPS = ["all", "upload", "generated"] as const;
 const TYPE_CHIPS = ["all", "image", "chart", "doc", "data"] as const;
 
+const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+/** Friendly display name: the original filename, else the ref's basename. */
+function displayName(item: ArtifactItem): string {
+  return item.metadata?.original_name ?? item.ref.split("/").pop() ?? item.ref;
+}
+
+/** The uppercase extension badge (from the name, else the media subtype). */
+function extBadge(item: ArtifactItem): string {
+  const name = displayName(item);
+  const dot = name.lastIndexOf(".");
+  if (dot > 0 && dot < name.length - 1)
+    return name.slice(dot + 1).toUpperCase();
+  return (item.media_type.split("/")[1] ?? "FILE").toUpperCase().slice(0, 5);
+}
+
+function isImageLike(item: ArtifactItem): boolean {
+  return item.media_type.startsWith("image/");
+}
+
+const TYPE_ICON = {
+  doc: FileText,
+  data: Table2,
+  chart: LineChart,
+} as const;
+
+function typeIcon(item: ArtifactItem) {
+  const t = item.metadata?.type;
+  return t && t in TYPE_ICON ? TYPE_ICON[t as keyof typeof TYPE_ICON] : File;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /**
- * Spec F5 T14 + T15 — Artifact gallery with filter chips + per-item renderer
- * dispatch + delete action.
- *
- * Reads URL search params for filter state per D-F5-X-artifact-filter-shape
- * (?source=&type=&conversation_id=&q=). Filter chips write to URL. Items
- * dispatch by ref prefix + media_type:
- *   charts/ + image/* → chart tile
- *   uploads/ + image/* → image tile (lightbox v0.2 candidate)
- *   uploads/ + doc media → download chip row
- *   else → result-block fallback
- *
- * Delete action goes through DELETE /v1/personas/{id}/artifacts/{ref} per
- * D-F5-X-artifact-delete-shape (atomic bytes + sidecar; WorkspaceConsistencyError
- * on partial failure surfaced as 500 with structured detail).
+ * Spec F5 T14/T15 → R11-B6 rider (owner-ruled redesign) — the persona files
+ * gallery, no longer a scaffold: REAL previews (image/chart tiles render the
+ * actual picture through the authed blob pipe; docs/data get an elegant type
+ * tile with an extension badge), hover-revealed actions, and a PREVIEW dialog
+ * (images large; documents as a meta card). Download does the authed
+ * fetch→blob dance — the old `/api/...` href pointed at a route that never
+ * existed. Delete stays the atomic bytes+sidecar door.
  */
 export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
   const t = useTranslations("artifacts");
@@ -63,55 +102,64 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
   const tn = useTranslations("notifications");
   const confirm = useConfirm();
   const { notify } = useNotify();
-  const router = useRouter();
-  const search = useSearchParams();
+  const { getToken } = useAuth();
   const api = useApi();
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [preview, setPreview] = useState<ArtifactItem | null>(null);
 
-  const sourceFilter = search.get("source") ?? "all";
-  const typeFilter = search.get("type") ?? "all";
-
-  // Client-side filter on top of the server-fetched initial page. T14 v0.1
-  // ships the URL-state surface; the actual server-side refetch on filter
-  // change is wired by router.refresh (the page boundary re-renders with
-  // server-derived query params on next navigation cycle).
   const items = useMemo(() => {
     return initial.items.filter((item) => {
-      if (sourceFilter !== "all") {
-        if (!item.metadata || item.metadata.source !== sourceFilter)
-          return false;
-      }
-      if (typeFilter !== "all") {
-        if (!item.metadata || item.metadata.type !== typeFilter) return false;
-      }
+      if (removed.has(item.ref)) return false;
+      if (sourceFilter !== "all" && item.metadata?.source !== sourceFilter)
+        return false;
+      if (typeFilter !== "all" && item.metadata?.type !== typeFilter)
+        return false;
       return true;
     });
-  }, [initial.items, sourceFilter, typeFilter]);
+  }, [initial.items, sourceFilter, typeFilter, removed]);
 
-  function setParam(key: string, value: string | null) {
-    const next = new URLSearchParams(search.toString());
-    if (value && value !== "all") next.set(key, value);
-    else next.delete(key);
-    const href = next.toString();
-    router.replace(href ? `?${href}` : "?", { scroll: false });
+  async function download(item: ArtifactItem) {
+    try {
+      const token = await getToken();
+      const res = await fetch(
+        `${API}/v1/personas/${encodeURIComponent(personaId)}/uploads/${item.ref}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : undefined },
+      );
+      if (!res.ok) throw new Error(`${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = displayName(item);
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      notify({ level: "error", title: t("downloadFailed") });
+    }
   }
 
-  async function handleDelete(ref: string) {
+  async function handleDelete(item: ArtifactItem) {
     if (deleting) return;
+    const name = displayName(item);
     const ok = await confirm({
-      title: tc("deleteTitle", { name: ref }),
-      description: t("deleteConfirm", { ref }),
+      title: tc("deleteTitle", { name }),
+      description: t("deleteConfirm", { ref: name }),
       confirmLabel: tc("delete"),
       tone: "danger",
     });
     if (!ok) return;
-    setDeleting(ref);
+    setDeleting(item.ref);
     try {
       await api.DELETE("/v1/personas/{persona_id}/artifacts/{ref}", {
-        params: { path: { persona_id: personaId, ref } },
+        params: { path: { persona_id: personaId, ref: item.ref } },
       });
-      notify({ level: "success", title: tn("deleted", { name: ref }) });
-      router.refresh();
+      notify({ level: "success", title: tn("deleted", { name }) });
+      // Reflect immediately (the sheet has no server re-render cycle).
+      setRemoved((prev) => new Set(prev).add(item.ref));
+      setPreview((p) => (p?.ref === item.ref ? null : p));
     } finally {
       setDeleting(null);
     }
@@ -119,24 +167,28 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
 
   return (
     <div data-slot="artifact-gallery" className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <FilterGroup
-          label={t("sourceLabel")}
-          chips={SOURCE_CHIPS}
-          active={sourceFilter}
-          onSelect={(v) => setParam("source", v)}
-          t={t}
-          group="source"
-        />
-        <FilterGroup
-          label={t("typeLabel")}
-          chips={TYPE_CHIPS}
-          active={typeFilter}
-          onSelect={(v) => setParam("type", v)}
-          t={t}
-          group="type"
-        />
-        <span className="ml-auto type-caption text-muted-foreground">
+      {/* compact filter row — the v3 chip register */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {SOURCE_CHIPS.map((c) => (
+          <Chip
+            key={c}
+            active={sourceFilter === c}
+            onClick={() => setSourceFilter(c)}
+          >
+            {t(`source.${c}`)}
+          </Chip>
+        ))}
+        <span aria-hidden="true" className="mx-1 h-4 w-px bg-border" />
+        {TYPE_CHIPS.map((c) => (
+          <Chip
+            key={c}
+            active={typeFilter === c}
+            onClick={() => setTypeFilter(c)}
+          >
+            {t(`type.${c}`)}
+          </Chip>
+        ))}
+        <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
           {t("countOf", { shown: items.length, total: initial.total })}
         </span>
       </div>
@@ -146,55 +198,148 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
           {t("noMatches")}
         </p>
       ) : (
-        <ul
-          className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
-          data-slot="artifact-grid"
-        >
+        <ul className="grid grid-cols-2 gap-3" data-slot="artifact-grid">
           {items.map((item) => (
             <li key={item.ref}>
               <ArtifactTile
                 personaId={personaId}
                 item={item}
-                onDelete={() => handleDelete(item.ref)}
+                onOpen={() => setPreview(item)}
+                onDownload={() => void download(item)}
+                onDelete={() => void handleDelete(item)}
                 disabled={deleting === item.ref}
               />
             </li>
           ))}
         </ul>
       )}
+
+      {/* preview dialog — images large; documents as an honest meta card */}
+      <Dialog.Root
+        open={preview !== null}
+        onOpenChange={(open) => {
+          if (!open) setPreview(null);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[var(--motion-duration-fast)] data-ending-style:opacity-0 data-starting-style:opacity-0 supports-backdrop-filter:backdrop-blur-sm" />
+          <Dialog.Popup className="-translate-x-1/2 -translate-y-1/2 fixed top-1/2 left-1/2 z-50 flex max-h-[85vh] w-[min(44rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-xl outline-none">
+            {preview ? (
+              <>
+                <div className="flex items-center gap-2 border-border border-b px-5 py-3.5">
+                  <Dialog.Title className="min-w-0 flex-1 truncate font-heading text-base font-semibold">
+                    {displayName(preview)}
+                  </Dialog.Title>
+                  <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                    {extBadge(preview)}
+                  </span>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto">
+                  {isImageLike(preview) ? (
+                    <div className="grid place-items-center bg-muted/30 p-4">
+                      <AuthedImage
+                        personaId={personaId}
+                        workspacePath={preview.ref}
+                        mediaType={preview.media_type}
+                        alt={displayName(preview)}
+                        className="max-h-[62vh] w-auto rounded-lg object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <DocMeta item={preview} />
+                  )}
+                </div>
+                <div className="flex items-center gap-2 border-border border-t px-5 py-3">
+                  <Button
+                    type="button"
+                    className="gap-1.5"
+                    onClick={() => void download(preview)}
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                    {t("download")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="gap-1.5 text-destructive hover:bg-destructive/10"
+                    disabled={deleting === preview.ref}
+                    onClick={() => void handleDelete(preview)}
+                  >
+                    <Trash2 className="size-4" aria-hidden="true" />
+                    {tc("delete")}
+                  </Button>
+                  <div className="flex-1" />
+                  <Dialog.Close
+                    render={
+                      <Button type="button" variant="outline">
+                        {t("close")}
+                      </Button>
+                    }
+                  />
+                </div>
+              </>
+            ) : null}
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }
 
-function FilterGroup({
-  label,
-  chips,
+function Chip({
   active,
-  onSelect,
-  t,
-  group,
+  onClick,
+  children,
 }: {
-  label: string;
-  chips: readonly string[];
-  active: string;
-  onSelect: (value: string) => void;
-  t: ReturnType<typeof useTranslations>;
-  group: string;
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2" data-slot={`filter-${group}`}>
-      <span className="type-caption text-muted-foreground">{label}</span>
-      {chips.map((c) => (
-        <button
-          key={c}
-          type="button"
-          onClick={() => onSelect(c)}
-          data-state={c === active ? "active" : "inactive"}
-          className="glass-chip"
-        >
-          {t(`${group}.${c}`)}
-        </button>
-      ))}
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground",
+        active && "border-primary/50 bg-primary/10 font-medium text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DocMeta({ item }: { item: ArtifactItem }) {
+  const t = useTranslations("artifacts");
+  const Icon = typeIcon(item);
+  const rows: [string, string][] = [
+    [t("metaSize"), formatBytes(item.size_bytes)],
+    [t("metaType"), item.media_type],
+  ];
+  if (item.metadata?.source)
+    rows.push([t("sourceLabel"), t(`source.${item.metadata.source}`)]);
+  if (item.metadata?.created_at)
+    rows.push([
+      t("metaCreated"),
+      new Date(item.metadata.created_at).toLocaleString(),
+    ]);
+  return (
+    <div className="flex flex-col items-center gap-4 px-6 py-10">
+      <span className="grid size-20 place-items-center rounded-2xl bg-muted">
+        <Icon className="size-9 text-muted-foreground" aria-hidden="true" />
+      </span>
+      <dl className="w-full max-w-xs text-sm">
+        {rows.map(([k, v]) => (
+          <div
+            key={k}
+            className="flex justify-between gap-4 border-border/60 border-b py-2 last:border-0"
+          >
+            <dt className="text-muted-foreground">{k}</dt>
+            <dd className="truncate text-right">{v}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -202,76 +347,87 @@ function FilterGroup({
 function ArtifactTile({
   personaId,
   item,
+  onOpen,
+  onDownload,
   onDelete,
   disabled,
 }: {
   personaId: string;
   item: ArtifactItem;
+  onOpen: () => void;
+  onDownload: () => void;
   onDelete: () => void;
   disabled: boolean;
 }) {
   const t = useTranslations("artifacts");
-  const isImage =
-    item.media_type.startsWith("image/") &&
-    (item.ref.startsWith("uploads/") || item.ref.startsWith("charts/"));
-  const downloadHref = `/api/personas/${personaId}/uploads/${item.ref}`;
+  const name = displayName(item);
+  const Icon = typeIcon(item);
 
   return (
-    <Card
-      className={cn("glass-card flex flex-col gap-3 overflow-hidden p-3")}
+    <div
+      className="group relative overflow-hidden rounded-xl border border-border bg-card transition-shadow hover:shadow-md"
       data-slot="artifact-tile"
     >
-      {isImage ? (
-        <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded bg-muted">
-          <ImageIcon
-            className="size-10 text-muted-foreground"
-            aria-hidden="true"
-          />
+      <button
+        type="button"
+        onClick={onOpen}
+        className="block w-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={t("previewLabel", { name })}
+      >
+        <div className="aspect-square w-full overflow-hidden bg-muted/50">
+          {isImageLike(item) ? (
+            <AuthedImage
+              personaId={personaId}
+              workspacePath={item.ref}
+              mediaType={item.media_type}
+              alt=""
+              className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+            />
+          ) : (
+            <div className="grid h-full w-full place-items-center">
+              <span className="flex flex-col items-center gap-2">
+                <Icon
+                  className="size-9 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  {extBadge(item)}
+                </span>
+              </span>
+            </div>
+          )}
         </div>
-      ) : (
-        <div className="flex aspect-[4/3] items-center justify-center rounded bg-muted">
-          <FileText
-            className="size-10 text-muted-foreground"
-            aria-hidden="true"
-          />
+        <div className="flex flex-col gap-0.5 px-3 py-2.5 text-left">
+          <span className="truncate text-sm font-medium">{name}</span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-muted-foreground">
+            {formatBytes(item.size_bytes)}
+            {item.metadata?.source
+              ? ` · ${t(`source.${item.metadata.source}`)}`
+              : ""}
+          </span>
         </div>
-      )}
-      <div className="flex flex-col gap-1">
-        <span className="type-ui truncate font-medium">
-          {item.metadata?.original_name ?? item.ref}
-        </span>
-        <span className="type-caption text-muted-foreground">
-          {formatBytes(item.size_bytes)}
-          {item.metadata?.source
-            ? ` · ${t(`source.${item.metadata.source}`)}`
-            : ""}
-        </span>
-      </div>
-      <div className="flex items-center gap-2">
-        <a
-          href={downloadHref}
-          className="type-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
-          data-slot="artifact-download"
+      </button>
+
+      {/* hover-revealed actions (always visible to keyboard/touch via focus-within) */}
+      <div className="absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={onDownload}
+          aria-label={t("download")}
+          className="grid size-7 place-items-center rounded-md border border-border bg-background/90 text-muted-foreground backdrop-blur hover:text-foreground"
         >
           <Download className="size-3.5" aria-hidden="true" />
-          {t("download")}
-        </a>
+        </button>
         <button
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="ml-auto inline-flex items-center gap-1 text-destructive hover:bg-destructive/10 rounded p-1 disabled:opacity-50 type-caption"
-          aria-label={t("deleteLabel", { ref: item.ref })}
+          aria-label={t("deleteLabel", { ref: name })}
+          className="grid size-7 place-items-center rounded-md border border-border bg-background/90 text-destructive backdrop-blur hover:bg-destructive/10 disabled:opacity-50"
         >
           <Trash2 className="size-3.5" aria-hidden="true" />
         </button>
       </div>
-    </Card>
+    </div>
   );
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
