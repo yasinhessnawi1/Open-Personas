@@ -69,6 +69,39 @@ def test_create_bearer_without_credential_is_rejected(monkeypatch: pytest.Monkey
     engine.begin.assert_not_called()
 
 
+def test_create_oauth_without_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # N7-T3a: a catalog entry claiming auth_method="oauth" but no oauth_provider is a
+    # malformed adoption — reject before any write (422 via MCPServerValidationError),
+    # never a half-authed row.
+    _noop_url_check(monkeypatch)
+    engine = MagicMock()
+    with pytest.raises(MCPServerValidationError):
+        mcp_store.create_server(
+            rls_engine=engine,
+            config=APIConfig(mcp_credential_key=Fernet.generate_key().decode()),
+            owner_id="u1",
+            name="s",
+            url="https://example.com/mcp",
+            auth_method="oauth",
+            credential=None,
+            oauth_provider=None,
+        )
+    engine.begin.assert_not_called()
+
+
+def test_create_oauth_ignores_any_caller_supplied_credential() -> None:
+    # oauth's token arrives later via the Connect flow (T3b) — _encrypt_credential must
+    # ignore a credential even if one is (incorrectly) passed at create time.
+    assert (
+        mcp_store._encrypt_credential(
+            APIConfig(mcp_credential_key=Fernet.generate_key().decode()),
+            "oauth",
+            "should-be-ignored",  # noqa: S106 — test fixture
+        )
+        is None
+    )
+
+
 def test_create_bearer_without_key_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     # A credential supplied but MCP_CREDENTIAL_KEY unset → never store plaintext.
     _noop_url_check(monkeypatch)

@@ -59,6 +59,17 @@ def test_github_rebound_onto_per_user_oauth() -> None:
     assert github.oauth_provider == "github"
 
 
+def test_github_is_a_remote_adoptable_entry() -> None:
+    # N7-T3a: server_type="remote" + a non-empty remote_url is adoption_policy's
+    # v1-adoptable predicate — the prerequisite for the catalog Connect affordance
+    # (T3b). Endpoint is GitHub's own hosted remote MCP server base URL (verified
+    # against github/github-mcp-server docs/remote-server.md at implementation time).
+    github = mcp_server_entry("github")
+    assert github is not None
+    assert github.server_type == "remote"
+    assert github.remote_url == "https://api.githubcopilot.com/mcp/"
+
+
 def test_no_catalog_entry_keeps_a_github_token_bypass() -> None:
     # The rebind removes the ONLY env-var-token path in the bundled catalog.
     for entry in BUILTIN_MCP_CATALOG.servers.values():
@@ -137,6 +148,12 @@ def test_actual_builtin_catalog_loads_through_the_extended_model() -> None:
         assert entry.signed is False
         assert entry.allow_hosts == ()
         assert entry.secrets == ()
+        if entry.name == "github":
+            # N7-T3a: github is the one bundled row that DOES declare server_type +
+            # remote_url (the adoption prerequisite) — pinned precisely by
+            # test_github_is_a_remote_adoptable_entry above; every other row still
+            # defaults to server_type="builtin".
+            continue
         assert entry.server_type == "builtin"
 
 

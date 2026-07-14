@@ -15,7 +15,10 @@ Order is security-load-bearing — every check runs BEFORE any write (fail-close
 4. **derive + write** — ``url`` = the entry's ``remote_url`` and ``auth_method`` = bearer iff
    the entry declares a secret (both from the CATALOG, N4-D-10 — never the caller); the
    ``credential`` (from the caller) is encrypted by ``create_server`` and the row is tagged
-   ``catalog_source``; then assigned to the persona.
+   ``catalog_source``; then assigned to the persona. An ``auth_method == "oauth"`` entry
+   (e.g. github, R8/N7-T3a) takes a fourth branch instead: written with NO credential at
+   all (``credential=None``, ``oauth_provider`` from the catalog) — the per-user token
+   arrives later via the Connect flow (T3b), never at adopt time.
 
 The credential never reaches model context, logs, audit, or the response — it rides a
 ``repr=False`` request field, is encrypted at rest, and ``create_server`` returns only the
@@ -131,16 +134,37 @@ def _adopt_remote_app(
         raise MCPAppNotAdoptableError(
             "app is not adoptable", context={"app": entry.name, "reason": reason}
         )
-    detail = mcp_store.create_server(
-        rls_engine=rls_engine,
-        config=config,
-        owner_id=owner_id,
-        name=entry.name,
-        url=entry.remote_url,
-        auth_method="bearer" if entry.secrets else "none",
-        credential=credential,
-        catalog_source=entry.name,
-    )
+    if entry.auth_method == "oauth":
+        # N7-T3a: an oauth-bound catalog entry (e.g. github, R8) adopts with NO
+        # credential — the per-user access token is obtained later, via the web
+        # Connect flow (T3b), through the oauth authorize-then-callback service.
+        # store.create_server validates oauth_provider presence (422 if the catalog
+        # entry is malformed) and its credential encryption step ignores any
+        # credential for auth_method="oauth"; passing None explicitly keeps the
+        # caller's ``credential`` argument from ever reaching this branch (defense
+        # in depth — the oauth path has no user-supplied secret at all).
+        detail = mcp_store.create_server(
+            rls_engine=rls_engine,
+            config=config,
+            owner_id=owner_id,
+            name=entry.name,
+            url=entry.remote_url,
+            auth_method="oauth",
+            credential=None,
+            catalog_source=entry.name,
+            oauth_provider=entry.oauth_provider,
+        )
+    else:
+        detail = mcp_store.create_server(
+            rls_engine=rls_engine,
+            config=config,
+            owner_id=owner_id,
+            name=entry.name,
+            url=entry.remote_url,
+            auth_method="bearer" if entry.secrets else "none",
+            credential=credential,
+            catalog_source=entry.name,
+        )
     mcp_store.assign_to_persona(
         rls_engine=rls_engine, persona_id=persona_id, server_id=detail["id"]
     )

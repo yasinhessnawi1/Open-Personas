@@ -88,6 +88,15 @@ risk = "medium"
 required_env = []
 auth_method = "oauth"
 oauth_provider = "github"
+# N7-T3a: makes the entry adoptable (adoption_policy.is_adoptable requires
+# server_type="remote" + a non-empty remote_url) — the prerequisite for the catalog
+# Connect affordance (T3b). Endpoint re-verified against GitHub's own MCP docs at
+# implementation time (github/github-mcp-server docs/remote-server.md +
+# docs.github.com "Setting up the GitHub MCP Server"): the hosted remote server base
+# URL. Community: immediately adoptable. Cloud: still gated by the (deny-all-default)
+# PERSONA_MCP_ADOPT_VETTED allowlist — unchanged.
+server_type = "remote"
+remote_url = "https://api.githubcopilot.com/mcp/"
 keywords = ["github", "pull request", "open an issue", "the repository", "code review on github"]
 capability = "work with GitHub repositories, issues, and pull requests"
-notes = "Per-user OAuth (R8): the user clicks Connect → authenticates at GitHub → back and connected, no token handling. Point PERSONA_MCP_SERVERS at the official remote server https://api.githubcopilot.com/mcp/. Operator one-time setup (T9.5): register the Open Persona OAuth app at GitHub (no RFC 7591 DCR) and set PERSONA_MCP_OAUTH_GITHUB_CLIENT_ID/SECRET — recorded in R4 alongside the real-provider round-trip."
+notes = "Per-user OAuth (R8): the user clicks Connect → authenticates at GitHub → back and connected, no token handling. The catalog's own remote_url (above, N7-T3a) IS the connection target — no PERSONA_MCP_SERVERS entry needed for this one. Operator one-time setup (T9.5): register the Open Persona OAuth app at GitHub (no RFC 7591 DCR) and set PERSONA_MCP_OAUTH_GITHUB_CLIENT_ID/SECRET — recorded in R4 alongside the real-provider round-trip."
