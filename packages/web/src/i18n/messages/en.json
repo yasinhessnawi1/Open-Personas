@@ -769,6 +769,7 @@
         "openConversationFirst": "Open a conversation to attach documents.",
         "feedback": {
           "imageAttached": "Image attached to this message",
+          "documentUploading": "Uploading {filename}…",
           "documentAttached": "{filename} added to this conversation"
         },
         "remove": "Remove attachment",

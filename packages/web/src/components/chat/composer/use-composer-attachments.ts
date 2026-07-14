@@ -1,7 +1,9 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/auth";
+import { useNotify } from "@/components/providers/notification-provider";
 import { ApiError, type TokenGetter } from "@/lib/api/client";
 import { notifyConversationFilesChanged } from "@/lib/hooks/use-conversation-artifacts";
 import { type DocumentRef, uploadDocument, uploadImage } from "@/lib/upload";
@@ -68,6 +70,8 @@ export function useComposerAttachments(
   const { conversationId, personaId, onDocumentAttached, onDocumentError } =
     options;
   const { getToken } = useAuth();
+  const { notify, notifyLoading } = useNotify();
+  const t = useTranslations("chat.composer");
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
 
   // SOLE dependency = conversationId (D-F3-X-cap-attached-state-on-conversation-switch).
@@ -180,9 +184,26 @@ export function useComposerAttachments(
 
   const uploadDocumentFile = useCallback(
     async (file: File) => {
+      // R9-051 — a document upload is a direct request (unlike images, which
+      // already show an inline spinner + progress chip via `attachedImages`,
+      // documents have NO composer-local state at all: nothing renders until
+      // the promise settles, which reads as dead during the upload). Reuse
+      // R9-050's id-addressable toast primitive: start a persistent loading
+      // toast now, swap the SAME toast to success/error once the POST
+      // resolves — no polling needed, this isn't a durable background job.
+      const toastId = notifyLoading(
+        t("attach.feedback.documentUploading", { filename: file.name }),
+      );
       try {
         const ref = await uploadDocument(personaId, conversationId, file, {
           getToken: token,
+        });
+        notify({
+          level: "success",
+          title: t("attach.feedback.documentAttached", {
+            filename: ref.filename,
+          }),
+          id: toastId,
         });
         onDocumentAttached(ref);
       } catch (e) {
@@ -192,10 +213,20 @@ export function useComposerAttachments(
             : e instanceof Error
               ? e.message
               : String(e);
+        notify({ level: "error", title: detail, id: toastId });
         onDocumentError(detail);
       }
     },
-    [personaId, conversationId, token, onDocumentAttached, onDocumentError],
+    [
+      personaId,
+      conversationId,
+      token,
+      onDocumentAttached,
+      onDocumentError,
+      notify,
+      notifyLoading,
+      t,
+    ],
   );
 
   return {

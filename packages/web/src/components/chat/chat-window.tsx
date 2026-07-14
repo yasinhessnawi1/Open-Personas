@@ -182,11 +182,14 @@ export function ChatWindow({
   const documents = useConversationDocuments(conversationId);
 
   // Image-attachment state + upload orchestration (T13 hook).
-  // F3 follow-up — surface a success toast on document attach so the user
-  // sees confirmation of "{filename} added to this conversation" (the chip
-  // appearing in the panel is the persistent signal, but the toast makes
-  // the per-message action visible — addresses the "did it do anything?"
-  // ambiguity surfaced during Phase 6 operator testing).
+  // R9-051 — the success/error toast (confirming "{filename} added to this
+  // conversation", or an honest failure) now lives INSIDE
+  // `useComposerAttachments.uploadDocumentFile` itself: it swaps the SAME
+  // persistent loading toast the hook opens at upload-start in place (the
+  // id-addressable notify/notifyLoading pair from R9-050), rather than
+  // firing a brand-new one here. These callbacks only handle the
+  // conversation-local side effects — optimistic panel state + the
+  // pending-docs-for-next-message list + the Files viewer refresh signal.
   const attach = useComposerAttachments({
     conversationId,
     personaId: persona.id,
@@ -197,14 +200,10 @@ export function ChatWindow({
         prev.some((d) => d.doc_ref === ref.doc_ref) ? prev : [...prev, ref],
       );
       notifyConversationFilesChanged();
-      notify({
-        level: "success",
-        title: t("composer.attach.feedback.documentAttached", {
-          filename: ref.filename,
-        }),
-      });
     },
-    onDocumentError: (detail) => notify({ level: "error", title: detail }),
+    onDocumentError: () => {
+      // Error toast already surfaced by the hook (in-place toast swap).
+    },
   });
 
   // D-F3-X-no-vision-surface-shape (a): attach disabled when the

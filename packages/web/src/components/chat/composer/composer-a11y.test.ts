@@ -89,6 +89,7 @@ describe("F3 T20 — every composer i18n key resolves in en.json", () => {
     "chat.composer.attach.retry",
     "chat.composer.attach.sendBlocked",
     "chat.composer.attach.feedback.imageAttached",
+    "chat.composer.attach.feedback.documentUploading",
     "chat.composer.attach.feedback.documentAttached",
     "chat.composer.validation.empty_file",
     "chat.composer.validation.oversize",

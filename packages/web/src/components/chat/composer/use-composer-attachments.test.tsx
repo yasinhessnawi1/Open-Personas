@@ -1,10 +1,47 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useComposerAttachments } from "./use-composer-attachments";
 
 vi.mock("@clerk/nextjs", () => ({
   useAuth: () => ({ getToken: () => Promise.resolve("jwt-token") }),
 }));
+
+// R9-051 — mock the sonner-backed toast primitive the same way
+// use-turn-into-file.test.tsx (R9-050) does, so the loading-toast-start /
+// in-place-swap-on-resolve contract can be asserted directly.
+const toastFns = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  loading: vi.fn(() => "toast-id-1"),
+}));
+vi.mock("@/components/patterns/toast", () => ({ toast: toastFns }));
+
+import { NotificationProvider } from "@/components/providers/notification-provider";
+import { useComposerAttachments } from "./use-composer-attachments";
+
+const messages = {
+  chat: {
+    composer: {
+      attach: {
+        feedback: {
+          documentUploading: "Uploading {filename}…",
+          documentAttached: "{filename} added to this conversation",
+        },
+      },
+    },
+  },
+};
+
+function wrapper({ children }: { children: ReactNode }) {
+  return (
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <NotificationProvider>{children}</NotificationProvider>
+    </NextIntlClientProvider>
+  );
+}
 
 function file(name: string, type: string, size = 100): File {
   return new File([new Uint8Array(size)], name, { type });
@@ -69,6 +106,9 @@ describe("useComposerAttachments", () => {
   beforeEach(() => {
     onDocumentAttached.mockReset();
     onDocumentError.mockReset();
+    toastFns.loading.mockClear();
+    toastFns.success.mockClear();
+    toastFns.error.mockClear();
   });
   afterEach(() => restore?.());
 
@@ -85,8 +125,9 @@ describe("useComposerAttachments", () => {
       });
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     let id = "";
     act(() => {
@@ -122,8 +163,9 @@ describe("useComposerAttachments", () => {
       });
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     act(() => {
       result.current.attachImage(file("bad.png", "image/png"));
@@ -150,8 +192,9 @@ describe("useComposerAttachments", () => {
       };
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     let id = "";
     act(() => {
@@ -175,8 +218,9 @@ describe("useComposerAttachments", () => {
       };
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     act(() => {
       result.current.attachImage(file("a.png", "image/png"));
@@ -201,8 +245,9 @@ describe("useComposerAttachments", () => {
     });
 
     let convId = "conv_1";
-    const { rerender, result } = renderHook(() =>
-      useComposerAttachments(defaultOptions({ conversationId: convId })),
+    const { rerender, result } = renderHook(
+      () => useComposerAttachments(defaultOptions({ conversationId: convId })),
+      { wrapper },
     );
     act(() => {
       result.current.attachImage(file("a.png", "image/png"));
@@ -242,8 +287,9 @@ describe("useComposerAttachments", () => {
       };
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     await act(async () => {
       await result.current.uploadDocumentFile(
@@ -253,9 +299,24 @@ describe("useComposerAttachments", () => {
     expect(onDocumentAttached).toHaveBeenCalledTimes(1);
     expect(onDocumentAttached.mock.calls[0][0].doc_ref).toBe("report-1");
     expect(onDocumentError).not.toHaveBeenCalled();
+
+    // R9-051 — a loading toast opens BEFORE the request resolves (never a
+    // dead composer while the POST is in flight), then the SAME toast id
+    // is swapped to success in place (R9-050's id-addressable pattern) —
+    // never a second, stacked toast.
+    expect(toastFns.loading).toHaveBeenCalledTimes(1);
+    expect(toastFns.loading).toHaveBeenCalledWith(
+      "Uploading report.pdf…",
+      undefined,
+    );
+    expect(toastFns.success).toHaveBeenCalledTimes(1);
+    expect(toastFns.success).toHaveBeenCalledWith(
+      "report.pdf added to this conversation",
+      { id: "toast-id-1" },
+    );
   });
 
-  it("uploadDocumentFile calls onDocumentError on server failure", async () => {
+  it("uploadDocumentFile calls onDocumentError on server failure and swaps the SAME loading toast to an error", async () => {
     restore = installFakeXhr((xhr) => {
       xhr.send = () => {
         xhr.status = 422;
@@ -267,8 +328,9 @@ describe("useComposerAttachments", () => {
       };
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     await act(async () => {
       await result.current.uploadDocumentFile(file("r.pdf", "application/pdf"));
@@ -276,6 +338,17 @@ describe("useComposerAttachments", () => {
     expect(onDocumentAttached).not.toHaveBeenCalled();
     expect(onDocumentError).toHaveBeenCalledTimes(1);
     expect(onDocumentError.mock.calls[0][0]).toContain("corrupt_document");
+
+    // R9-051 — failure resolves the SAME toast id to an honest error, never
+    // leaves the loading toast hanging and never stacks a second toast.
+    expect(toastFns.loading).toHaveBeenCalledTimes(1);
+    expect(toastFns.success).not.toHaveBeenCalled();
+    expect(toastFns.error).toHaveBeenCalledTimes(1);
+    const [, errorOpts] = toastFns.error.mock.calls[0] as [
+      string,
+      { id?: string } | undefined,
+    ];
+    expect(errorOpts?.id).toBe("toast-id-1");
   });
 
   it("retryImage re-runs the upload with the original file", async () => {
@@ -298,8 +371,9 @@ describe("useComposerAttachments", () => {
       };
     });
 
-    const { result } = renderHook(() =>
-      useComposerAttachments(defaultOptions()),
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
     );
     let id = "";
     act(() => {
