@@ -367,7 +367,15 @@ function AppCard({
               <AppSetupForm app={app} personaId={personaId} />
             ) : (
               <>
-                {app.requiredEnv.length > 0 || app.secrets.length > 0 ? (
+                {/* R9-047: a secretless image app on a gateway-only deployment
+                    has nothing to declare (requiredEnv/secrets both empty) —
+                    without the imageAppUnservable+gateway clause the toggle is
+                    suppressed AND this note stays silent, leaving a blank
+                    action area. The B1 note must render whenever the toggle is
+                    suppressed for the gateway reason, even with zero secrets. */}
+                {app.requiredEnv.length > 0 ||
+                app.secrets.length > 0 ||
+                (imageAppUnservable && capabilities.gateway) ? (
                   <NeedsSetupNote app={app} />
                 ) : null}
                 {/* N7 (D-N7-2): an image app with no mechanism to run it on THIS
@@ -556,6 +564,11 @@ function NeedsSetupNote({ app }: { app: McpCatalogEntry }) {
       <p className="font-medium text-foreground">{t("needsSetup.heading")}</p>
       {branchKey === "branchD" ? (
         <p>{t("needsSetup.branchD")}</p>
+      ) : branchKey === "branchB" && envs.length === 0 ? (
+        // R9-047: a secretless image app has nothing to interpolate {env}
+        // with — the generic gateway copy (no key name) still gives the
+        // honest "managed on the operator's gateway" disclosure.
+        <p>{t("needsSetup.branchBSecretless")}</p>
       ) : (
         envs.map((env) => (
           <p key={env}>{t(`needsSetup.${branchKey}`, { env })}</p>

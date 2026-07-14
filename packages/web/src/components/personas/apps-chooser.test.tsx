@@ -547,6 +547,30 @@ describe("AppsChooser", () => {
       expect(card.querySelector('[data-slot="app-needs-setup"]')).toBeTruthy();
     });
 
+    // R9-047: a SECRETLESS image app on a gateway-only deployment — the toggle
+    // is suppressed (imageAppUnservable) AND there is nothing to declare
+    // (requiredEnv/secrets both empty), so the pre-fix render condition left
+    // the action area completely blank. The B1 note must still render.
+    it("image app + NO secrets + gateway-only (no runtime) + personaId ⇒ NO form, NO toggle, but the B1 note renders (not a blank action area)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "secretless-gw-app", serverType: "server", secrets: [] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_GATEWAY_ONLY,
+      });
+      const card = cardFor(container, "secretless-gw-app");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+      const note = card.querySelector('[data-slot="app-needs-setup"]');
+      expect(note).toBeTruthy();
+      expect(note?.getAttribute("data-branch")).toBe("branchB");
+      expect(note?.textContent?.toLowerCase()).toContain("gateway");
+      // No {env} placeholder leaking through unsubstituted.
+      expect(note?.textContent).not.toContain("{env}");
+    });
+
     it("image app + no capabilities at all + personaId ⇒ NO form, NO toggle (defense in depth — the C-filter normally excludes this shape server-side)", () => {
       const { container } = renderChooser({
         apps: [
