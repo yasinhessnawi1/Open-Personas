@@ -1,0 +1,351 @@
+"use client";
+
+import { Copy, MessageSquare, Mic, Phone, Play, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
+import { useCallback, useState } from "react";
+import { startChat, startVoice } from "@/app/actions";
+import {
+  NewTaskDialog,
+  type NewTaskPersona,
+} from "@/components/activity/new-task-dialog";
+import { AvatarEditor } from "@/components/personas/avatar-editor";
+import type { McpConnectionStatus } from "@/components/personas/mcp-connection-label";
+import { PersonaEditor } from "@/components/personas/persona-editor";
+import type { McpCatalogEntry } from "@/components/personas/persona-form";
+import { useConfirm } from "@/components/providers/confirm-provider";
+import { useNotify } from "@/components/providers/notification-provider";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { useApi } from "@/lib/api/use-api";
+import { renameInIdentity } from "@/lib/persona";
+import {
+  savePersonaInline,
+  setConsent as setConsentAction,
+} from "@/lib/persona-actions";
+import { type PersonaDoc, readIdentity } from "@/lib/persona-draft";
+import { personaIdentityStyle } from "@/lib/persona-identity";
+import { cn } from "@/lib/utils";
+
+type SaveStatus = "saved" | "saving" | "error";
+
+/**
+ * R11-B6 (owner-ruled consolidation) — THE persona page: detail + edit + the
+ * post-authoring preview are ONE inline-editable surface (the kit's
+ * `persona-detail.html`, copied whole). Everything edits in place and saves on
+ * its own (debounced PATCH through the same door the old Save button used);
+ * the sticky bar reads Saving… ⇄ All changes saved ⇄ the honest error. The
+ * old `/personas/[id]/edit` route redirects here; every "Edit" button died
+ * with it.
+ *
+ * Layout = the kit: hero (avatar + live name/role + Message/Call/Run-a-task),
+ * the editor column (typed-memory stores, constraints, voice, capabilities,
+ * model, autonomy+consent, advanced incl. raw YAML + BYO-MCP), and the right
+ * rail (at-a-glance, quick actions, danger zone).
+ */
+export function PersonaPage({
+  personaId,
+  initialDoc,
+  tools,
+  skills,
+  mcpServers,
+  mcpConnections,
+  initialConsent,
+  initialAvatarUrl,
+  conversationCount,
+  createdAt,
+  newTaskAction,
+}: {
+  personaId: string;
+  initialDoc: PersonaDoc;
+  tools: string[];
+  skills: string[];
+  mcpServers: McpCatalogEntry[];
+  mcpConnections: McpConnectionStatus[];
+  initialConsent: boolean | null;
+  initialAvatarUrl: string | null;
+  conversationCount: number;
+  createdAt: string | null;
+  newTaskAction: (formData: FormData) => void | Promise<void>;
+}) {
+  const t = useTranslations("personaPage");
+  const router = useRouter();
+  const api = useApi();
+  const confirm = useConfirm();
+  const { notify } = useNotify();
+
+  const [identity, setIdentity] = useState(() => readIdentity(initialDoc));
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(initialAvatarUrl);
+  const [status, setStatus] = useState<SaveStatus>("saved");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const onDocChange = useCallback((doc: PersonaDoc) => {
+    setIdentity(readIdentity(doc));
+  }, []);
+
+  const onSaveStatus = useCallback((s: SaveStatus, error?: string) => {
+    setStatus(s);
+    setSaveError(error ?? null);
+  }, []);
+
+  const dialogPersona: NewTaskPersona = {
+    id: personaId,
+    name: identity.name,
+    avatar_url: avatarUrl,
+  };
+
+  async function duplicate() {
+    const ok = await confirm({
+      title: t("duplicateTitle", { name: identity.name }),
+      description: t("duplicateBody"),
+      confirmLabel: t("duplicate"),
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const detail = await api.GET("/v1/personas/{persona_id}", {
+        params: { path: { persona_id: personaId } },
+      });
+      const yaml = detail.data?.yaml;
+      if (!yaml) throw new Error("no yaml");
+      const created = await api.POST("/v1/personas", {
+        body: {
+          yaml: renameInIdentity(yaml, `${identity.name} (copy)`),
+          avatar_url: null,
+        },
+      });
+      const newId = created.data?.id;
+      if (newId) {
+        notify({
+          level: "info",
+          title: t("duplicated", { name: identity.name }),
+        });
+        router.push(`/personas/${newId}`);
+      } else throw new Error("create failed");
+    } catch {
+      notify({ level: "error", title: t("duplicateFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function destroy() {
+    const ok = await confirm({
+      title: t("deleteTitle", { name: identity.name }),
+      description: t("deleteBody", { name: identity.name }),
+      confirmLabel: t("delete"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.DELETE("/v1/personas/{persona_id}", {
+        params: { path: { persona_id: personaId } },
+      });
+      router.push("/personas");
+    } catch {
+      notify({ level: "error", title: t("deleteFailed") });
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="mx-auto w-full max-w-6xl px-4 pb-16 sm:px-6"
+      style={personaIdentityStyle({ id: personaId })}
+      data-slot="persona-page"
+    >
+      {/* sticky bar: back + the always-visible autosave status (kit) */}
+      <div className="sticky top-0 z-10 -mx-4 flex items-center gap-3 border-border border-b bg-background/90 px-4 py-2.5 backdrop-blur sm:-mx-6 sm:px-6">
+        <Link
+          href="/personas"
+          className="text-sm text-muted-foreground hover:text-foreground"
+        >
+          ‹ {t("back")}
+        </Link>
+        <span
+          className={cn(
+            "ml-auto flex items-center gap-1.5 font-mono text-[11px]",
+            status === "error" ? "text-destructive" : "text-muted-foreground",
+          )}
+          data-slot="save-status"
+          data-status={status}
+        >
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 rounded-full",
+              status === "saved" && "bg-emerald-500",
+              status === "saving" && "bg-amber-500",
+              status === "error" && "bg-destructive",
+            )}
+          />
+          {status === "saving"
+            ? t("saving")
+            : status === "error"
+              ? (saveError ?? t("saveFailed"))
+              : t("saved")}
+        </span>
+      </div>
+
+      {/* hero: avatar + live name/role + the three doors (kit) */}
+      <header className="flex flex-wrap items-start gap-5 py-6">
+        <AvatarEditor
+          personaId={personaId}
+          name={identity.name}
+          avatarUrl={avatarUrl}
+          onChange={setAvatarUrl}
+        />
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate font-heading text-3xl font-semibold tracking-tight">
+            {identity.name || t("unnamed")}
+          </h1>
+          <p className="mt-0.5 truncate text-muted-foreground">
+            {identity.role}
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <form action={startChat.bind(null, personaId)}>
+              <Button type="submit" size="sm" className="gap-1.5">
+                <MessageSquare className="size-4" aria-hidden="true" />
+                {t("message")}
+              </Button>
+            </form>
+            <form action={startVoice.bind(null, personaId)}>
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+              >
+                <Phone className="size-4" aria-hidden="true" />
+                {t("call")}
+              </Button>
+            </form>
+            <NewTaskDialog
+              personas={[dialogPersona]}
+              action={newTaskAction}
+              trigger={
+                <button
+                  type="button"
+                  className={cn(
+                    buttonVariants({ variant: "outline", size: "sm" }),
+                    "gap-1.5",
+                  )}
+                >
+                  <Play className="size-4" aria-hidden="true" />
+                  {t("runTask")}
+                </button>
+              }
+            />
+          </div>
+        </div>
+      </header>
+
+      <div className="gap-6 lg:grid lg:grid-cols-[minmax(0,1fr)_280px]">
+        {/* main column: the full editor, autosaving in place */}
+        <PersonaEditor
+          initialDoc={initialDoc}
+          tools={tools}
+          skills={skills}
+          mcpServers={mcpServers}
+          mcpConnections={mcpConnections}
+          personaId={personaId}
+          onSave={(yaml, avatar) => savePersonaInline(personaId, yaml, avatar)}
+          saveLabel=""
+          autosave
+          nav={false}
+          hideAvatar
+          avatarUrlOverride={avatarUrl}
+          onDocChange={onDocChange}
+          onSaveStatus={onSaveStatus}
+          initialConsent={initialConsent}
+          onConsentChange={(granted) => setConsentAction(personaId, granted)}
+        />
+
+        {/* right rail (kit): at-a-glance · quick actions · danger zone */}
+        <aside className="mt-6 flex flex-col gap-4 lg:mt-0">
+          <section className="rounded-xl border border-border bg-card p-4">
+            <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+              {t("glance")}
+            </h3>
+            <dl className="flex flex-col gap-2 text-sm">
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">{t("conversations")}</dt>
+                <dd className="tabular-nums">{conversationCount}</dd>
+              </div>
+              {createdAt ? (
+                <div className="flex justify-between">
+                  <dt className="text-muted-foreground">{t("created")}</dt>
+                  <dd>{new Date(createdAt).toLocaleDateString()}</dd>
+                </div>
+              ) : null}
+            </dl>
+          </section>
+
+          <section className="rounded-xl border border-border bg-card p-4">
+            <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+              {t("quickActions")}
+            </h3>
+            <div className="flex flex-col gap-2">
+              <form action={startChat.bind(null, personaId)}>
+                <Button type="submit" className="w-full gap-1.5">
+                  <MessageSquare className="size-4" aria-hidden="true" />
+                  {t("messageName", { name: identity.name })}
+                </Button>
+              </form>
+              <form action={startVoice.bind(null, personaId)}>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  className="w-full gap-1.5"
+                >
+                  <Mic className="size-4" aria-hidden="true" />
+                  {t("voiceCall")}
+                </Button>
+              </form>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full gap-1.5"
+                disabled={busy}
+                onClick={() => void duplicate()}
+              >
+                <Copy className="size-4" aria-hidden="true" />
+                {t("duplicate")}
+              </Button>
+              <Link
+                href={`/personas/${personaId}/files`}
+                className={cn(
+                  buttonVariants({ variant: "ghost" }),
+                  "w-full gap-1.5",
+                )}
+              >
+                {t("files")}
+              </Link>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+            <h3 className="mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-destructive">
+              {t("dangerZone")}
+            </h3>
+            <p className="mb-3 text-sm text-muted-foreground">
+              {t("deleteHint", { name: identity.name })}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
+              disabled={busy}
+              onClick={() => void destroy()}
+            >
+              <Trash2 className="size-4" aria-hidden="true" />
+              {t("deletePersona")}
+            </Button>
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}

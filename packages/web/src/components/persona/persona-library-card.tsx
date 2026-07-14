@@ -287,11 +287,6 @@ export function PersonaLibraryCard({ persona }: PersonaLibraryCardProps) {
             >
               {t("library.view")}
             </DropdownMenuItem>
-            <DropdownMenuItem
-              render={<Link href={`/personas/${persona.id}/edit`} />}
-            >
-              {t("library.edit")}
-            </DropdownMenuItem>
             <DropdownMenuItem disabled={busy} onClick={handleDuplicate}>
               {t("library.duplicate")}
             </DropdownMenuItem>

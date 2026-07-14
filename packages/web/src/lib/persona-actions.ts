@@ -46,6 +46,31 @@ export async function savePersona(
 }
 
 /**
+ * R11-B6 — the consolidated persona page's AUTOSAVE door: the same PATCH as
+ * `savePersona`, WITHOUT the redirect (the user is already on the page; a
+ * debounced field edit must never navigate). Returns the structured error for
+ * the status bar.
+ */
+export async function savePersonaInline(
+  personaId: string,
+  yaml: string,
+  avatarUrl?: string | null,
+): Promise<{ error: string } | undefined> {
+  const api = await serverApi();
+  const res = await api.PATCH("/v1/personas/{persona_id}", {
+    params: { path: { persona_id: personaId } },
+    body: { yaml, avatar_url: avatarUrl ?? null },
+  });
+  if (res.error !== undefined) {
+    const body = res.error as { error?: string; detail?: unknown };
+    return {
+      error: formatDetail(body.detail, body.error ?? "save_failed"),
+    };
+  }
+  return undefined;
+}
+
+/**
  * Set a persona's auto-dispatch consent (Spec 21 T09 / Spec 31 T6). Tri-state:
  * ``true`` = grant, ``false`` = decline, ``null`` = revoke back to "ask". An
  * inline settings toggle (no redirect); returns a structured error on failure so

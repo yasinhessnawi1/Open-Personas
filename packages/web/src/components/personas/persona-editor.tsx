@@ -111,6 +111,12 @@ export function PersonaEditor({
   initialConsent,
   initialAvatarUrl,
   onConsentChange,
+  autosave = false,
+  onSaveStatus,
+  onDocChange,
+  hideAvatar = false,
+  avatarUrlOverride,
+  nav = true,
 }: {
   initialDoc: PersonaDoc;
   tools: string[];
@@ -137,6 +143,18 @@ export function PersonaEditor({
   initialConsent?: boolean | null;
   initialAvatarUrl?: string | null;
   onConsentChange?: (granted: boolean | null) => Promise<SaveResult>;
+  /** R11-B6 — the consolidated persona page: debounced save-on-change replaces
+   * the Save button; status streams to the page's sticky bar. */
+  autosave?: boolean;
+  onSaveStatus?: (status: "saving" | "saved" | "error", error?: string) => void;
+  /** Live doc echo for the page hero (name/role follow edits instantly). */
+  onDocChange?: (doc: PersonaDoc) => void;
+  /** The page hosts the avatar in its hero — suppress the inline block. */
+  hideAvatar?: boolean;
+  /** Controlled avatar (page-hosted AvatarEditor); rides the save unchanged. */
+  avatarUrlOverride?: string | null;
+  /** The kit page is a single column with a right rail — no timeline nav. */
+  nav?: boolean;
 }) {
   const t = useTranslations("author");
   const [doc, setDoc] = useState<PersonaDoc>(initialDoc);
@@ -189,11 +207,15 @@ export function PersonaEditor({
     };
   }, []);
 
-  const onFormChange = useCallback((next: PersonaDoc) => {
-    setDoc(next);
-    setYamlText(docToYaml(next));
-    setYamlError(null);
-  }, []);
+  const onFormChange = useCallback(
+    (next: PersonaDoc) => {
+      setDoc(next);
+      setYamlText(docToYaml(next));
+      setYamlError(null);
+      onDocChange?.(next);
+    },
+    [onDocChange],
+  );
 
   const handleConsentChange = useCallback(
     async (granted: boolean | null) => {
@@ -218,15 +240,20 @@ export function PersonaEditor({
     [consent, onConsentChange, t],
   );
 
-  const onYamlChange = useCallback((text: string) => {
-    setYamlText(text);
-    try {
-      setDoc(yamlToDoc(text));
-      setYamlError(null);
-    } catch (e) {
-      setYamlError((e as Error).message);
-    }
-  }, []);
+  const onYamlChange = useCallback(
+    (text: string) => {
+      setYamlText(text);
+      try {
+        const parsed = yamlToDoc(text);
+        setDoc(parsed);
+        setYamlError(null);
+        onDocChange?.(parsed);
+      } catch (e) {
+        setYamlError((e as Error).message);
+      }
+    },
+    [onDocChange],
+  );
 
   // Spec 30 T11 — apply a recommender pick to the persona (skill → skills list;
   // MCP → mcp:<name> in tools; else tools), keeping the YAML buffer in sync.
@@ -256,12 +283,15 @@ export function PersonaEditor({
     .join(". ")
     .trim();
 
+  const effectiveAvatar =
+    avatarUrlOverride !== undefined ? avatarUrlOverride : avatarUrl;
+
   async function save() {
     if (saving || yamlError) return;
     setSaving(true);
     setSaveError(null);
     try {
-      const result = await onSave(yamlText, avatarUrl);
+      const result = await onSave(yamlText, effectiveAvatar);
       if (result?.error) setSaveError(result.error);
     } catch {
       setSaveError(t("saveFailed"));
@@ -270,13 +300,52 @@ export function PersonaEditor({
     }
   }
 
+  // R11-B6 — autosave: any change to the (valid) YAML or the avatar debounces
+  // into the SAME onSave door the Save button used; the page's sticky bar shows
+  // Saving… ⇄ All changes saved ⇄ the honest error. First render never saves.
+  const saveSeq = useRef(0);
+  const firstRender = useRef(true);
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const onSaveStatusRef = useRef(onSaveStatus);
+  onSaveStatusRef.current = onSaveStatus;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: yamlText + avatar ARE the save inputs; refs carry the callbacks.
+  useEffect(() => {
+    if (!autosave) return;
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    if (yamlError) return; // never persist a doc that doesn't parse
+    const seq = ++saveSeq.current;
+    onSaveStatusRef.current?.("saving");
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await onSaveRef.current(yamlText, effectiveAvatar);
+          if (saveSeq.current !== seq) return; // a newer edit superseded this save
+          if (result?.error) onSaveStatusRef.current?.("error", result.error);
+          else onSaveStatusRef.current?.("saved");
+        } catch {
+          if (saveSeq.current === seq)
+            onSaveStatusRef.current?.("error", t("saveFailed"));
+        }
+      })();
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [autosave, yamlText, effectiveAvatar, yamlError]);
+
   return (
     <SectionGroup>
-      <div className="lg:grid lg:grid-cols-[14rem_1fr] lg:gap-6">
-        <SectionTimelineNav />
+      <div
+        className={
+          nav ? "lg:grid lg:grid-cols-[14rem_1fr] lg:gap-6" : undefined
+        }
+      >
+        {nav ? <SectionTimelineNav /> : null}
         <div className="flex min-w-0 flex-col gap-5">
           {/* Avatar — existing-persona edit only (upload needs a persisted id). */}
-          {personaId ? (
+          {personaId && !hideAvatar ? (
             <AvatarEditor
               personaId={personaId}
               name={identity.name}
@@ -400,22 +469,24 @@ export function PersonaEditor({
             ) : null}
           </CollapsibleSection>
 
-          <div className="flex items-center justify-end gap-3">
-            {saveError ? (
-              <p className="flex-1 text-sm text-destructive">
-                {t("saveError", { error: saveError })}
-              </p>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => void save()}
-              disabled={saving || yamlError !== null}
-              className={cn(buttonVariants(), "gap-2")}
-            >
-              <Save className="size-4" />
-              {saving ? t("saving") : saveLabel}
-            </button>
-          </div>
+          {autosave ? null : (
+            <div className="flex items-center justify-end gap-3">
+              {saveError ? (
+                <p className="flex-1 text-sm text-destructive">
+                  {t("saveError", { error: saveError })}
+                </p>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void save()}
+                disabled={saving || yamlError !== null}
+                className={cn(buttonVariants(), "gap-2")}
+              >
+                <Save className="size-4" />
+                {saving ? t("saving") : saveLabel}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </SectionGroup>

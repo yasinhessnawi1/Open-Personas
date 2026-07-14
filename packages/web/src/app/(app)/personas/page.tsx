@@ -1,9 +1,9 @@
 import { Sparkles } from "lucide-react";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
-import { Grid, PageBody, PageHeader } from "@/components/layout";
+import { PageBody, PageHeader } from "@/components/layout";
 import { EmptyState } from "@/components/patterns/empty-state";
-import { PersonaLibraryCard } from "@/components/persona/persona-library-card";
+import { PersonaLibrary } from "@/components/persona/persona-library";
 import { buttonVariants } from "@/components/ui/button";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
@@ -68,11 +68,8 @@ export default async function PersonasPage() {
           }
         />
       ) : (
-        <Grid cols={{ base: 1, sm: 2, lg: 3 }} gap={4}>
-          {personas.map((p) => (
-            <PersonaLibraryCard key={p.id} persona={p} />
-          ))}
-        </Grid>
+        // R11-B6: search + count + create-tile grid (kit personas.html).
+        <PersonaLibrary personas={personas} />
       )}
     </PageBody>
   );

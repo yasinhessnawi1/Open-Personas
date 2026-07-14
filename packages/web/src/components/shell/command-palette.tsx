@@ -31,7 +31,6 @@ import {
   MessageSquare,
   MessagesSquare,
   Mic,
-  Pencil,
   Phone,
   Plus,
   Search,
@@ -235,13 +234,6 @@ export function CommandPalette({ data }: { data: SidebarData }) {
           label: t("actionOpen", { name: p.name }),
           icon: Sparkles,
           run: () => go(`/personas/${p.id}`),
-        },
-        {
-          id: "p-edit",
-          group: "groupPersona",
-          label: t("actionEdit", { name: p.name }),
-          icon: Pencil,
-          run: () => go(`/personas/${p.id}/edit`),
         },
         {
           id: "p-files",

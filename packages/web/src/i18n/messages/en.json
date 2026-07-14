@@ -491,7 +491,11 @@
       "episodicMeta": "pgvector · per-turn recall",
       "episodicDesc": "Recalled and compacted from past conversations each turn.",
       "episodicConversations": "{count, plural, =0 {No conversations yet} one {# conversation} other {# conversations}}"
-    }
+    },
+    "searchPlaceholder": "Search personas…",
+    "count": "{count, plural, =1 {1 persona} other {# personas}}",
+    "createTileHint": "Describe one in a sentence — we'll draft the rest.",
+    "noMatches": "No personas match."
   },
   "artifacts": {
     "titleFor": "{name}'s files",
@@ -1404,5 +1408,34 @@
     "stop": "Stop recording",
     "transcribing": "Transcribing…",
     "permissionDenied": "Microphone access denied — allow it in your browser settings to dictate"
+  },
+  "personaPage": {
+    "back": "Personas",
+    "saving": "Saving…",
+    "saved": "All changes saved",
+    "saveFailed": "Couldn't save — check the fields.",
+    "unnamed": "Unnamed persona",
+    "message": "Message",
+    "call": "Call",
+    "runTask": "Run a task",
+    "glance": "At a glance",
+    "conversations": "Conversations",
+    "created": "Created",
+    "quickActions": "Quick actions",
+    "messageName": "Message {name}",
+    "voiceCall": "Voice call",
+    "duplicate": "Duplicate",
+    "duplicateTitle": "Duplicate {name}?",
+    "duplicateBody": "Copies the definition — identity, worldview, constraints, capabilities. Memory and conversations start fresh.",
+    "duplicated": "Duplicated {name}",
+    "duplicateFailed": "Couldn't duplicate. Try again.",
+    "files": "Files",
+    "dangerZone": "Danger zone",
+    "deleteHint": "Deleting removes {name} and all their typed memory — everywhere, by voice and text. This can't be undone.",
+    "deletePersona": "Delete persona",
+    "deleteTitle": "Delete {name}?",
+    "deleteBody": "{name} and all their typed memory will be removed — everywhere, by voice and text. This can't be undone.",
+    "delete": "Delete",
+    "deleteFailed": "Couldn't delete. Try again."
   }
 }
