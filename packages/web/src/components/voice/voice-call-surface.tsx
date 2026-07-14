@@ -289,8 +289,12 @@ export function VoiceCallSurface({
                 </div>
               ) : null}
 
+              {/* R9-029: the inline caption is the MOBILE transcript surface.
+                  At md+ the full transcript right panel takes over (same
+                  breakpoint the aside below appears at), so hide this one
+                  there — otherwise both render on desktop (the duplicate). */}
               {captionsOn ? (
-                <div className="v-voice__caption">
+                <div className="v-voice__caption md:hidden">
                   <VoiceCaptions
                     captions={captions}
                     personaName={persona.name}
