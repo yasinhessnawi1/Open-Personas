@@ -11,7 +11,7 @@ from datetime import datetime  # noqa: TC003 — a runtime Pydantic field type
 from typing import Literal
 
 from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 __all__ = [
     "ApprovalDecisionRequest",
@@ -281,9 +281,41 @@ class MCPOAuthAuthorizeRequest(_Input):
     ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
     user to once connected — it is stored SERVER-SIDE against the state (never encoded
     in the OAuth ``state`` value) and is never an external redirect target.
+
+    R9-048 (defense-in-depth): every current caller derives this from
+    ``window.location.pathname + search`` at click time, never attacker input,
+    so there is no live exploit today. But nothing here PREVENTS a future or
+    crafted caller from setting an absolute/external URL, which would open a
+    redirect once the OAuth dance completes — so it is validated as a bare
+    relative in-app path at the request boundary, not trusted verbatim.
     """
 
     redirect_after: str | None = Field(default=None, max_length=512)
+
+    @field_validator("redirect_after")
+    @classmethod
+    def _redirect_after_must_be_relative(cls, v: str | None) -> str | None:
+        """Reject anything but a single-leading-slash, same-origin path.
+
+        - must start with exactly one ``/`` (not zero, not ``//`` — the
+          protocol-relative form browsers treat as an absolute URL);
+        - no scheme (``http://``, ``https://``, ``javascript:``, …) — implied
+          by the leading-``/`` rule above, since a scheme never starts with ``/``;
+        - no backslash — browsers normalize ``\\`` to ``/``, so ``/\\evil.com``
+          would otherwise become the protocol-relative form after normalization;
+        - no control characters (e.g. embedded newlines/tabs).
+        """
+        if v is None:
+            return v
+        if not v.startswith("/") or v.startswith("//"):
+            raise ValueError(
+                "redirect_after must be a relative in-app path starting with a single '/'"
+            )
+        if "\\" in v:
+            raise ValueError("redirect_after must not contain a backslash")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in v):
+            raise ValueError("redirect_after must not contain control characters")
+        return v
 
 
 class MCPOAuthCallbackRequest(_Input):

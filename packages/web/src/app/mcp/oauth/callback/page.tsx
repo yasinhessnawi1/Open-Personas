@@ -12,6 +12,29 @@ import { cn } from "@/lib/utils";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
+/** The safe fallback when `redirect_after` is missing or fails the guard below. */
+const SAFE_DEFAULT_REDIRECT = "/personas";
+
+/**
+ * R9-048 (defense-in-depth): the API validates `redirect_after` is a relative
+ * in-app path at the request boundary, but this page still hands whatever the
+ * callback response returns straight to `router.replace()` — a belt-and-
+ * suspenders client guard so a future/compromised API response, or a stale
+ * client talking to an older server without the server-side check, can never
+ * plant an external redirect here. Mirrors the server validator: a single
+ * leading `/` (never `//`, never a scheme, never a backslash — browsers
+ * normalize `\` to `/`, turning `/\evil.com` into the protocol-relative form).
+ */
+function isSafeRedirectPath(path: string): boolean {
+  if (!path.startsWith("/") || path.startsWith("//")) return false;
+  if (path.includes("\\")) return false;
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
 /**
  * Spec N7-T3b — the MCP OAuth callback page (closes R8-D-8's orphaned web half).
  *
@@ -68,7 +91,12 @@ function OAuthCallback() {
           }),
         );
         // Back to where the Connect started (or personas as a safe default).
-        router.replace(res.redirect_after || "/personas");
+        // R9-048: never trust redirect_after verbatim — the client guard is
+        // the belt to the server's suspenders (see isSafeRedirectPath above).
+        const target = res.redirect_after;
+        router.replace(
+          target && isSafeRedirectPath(target) ? target : SAFE_DEFAULT_REDIRECT,
+        );
       } catch (e) {
         // A 401 means no signed-in cloud session carried into the callback —
         // give the user the honest "sign in and retry" hint.

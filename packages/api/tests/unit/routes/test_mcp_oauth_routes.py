@@ -104,5 +104,17 @@ def test_authorize_requires_auth(client: TestClient) -> None:
     assert client.post(_AUTHORIZE, json={}).status_code == 401
 
 
+# R9-048 — redirect_after must be a relative in-app path; a request-boundary
+# 422 stops a bad value before it ever reaches the service/state store.
+def test_authorize_rejects_external_redirect_after(client: TestClient) -> None:
+    resp = client.post(_AUTHORIZE, headers=_auth(), json={"redirect_after": "https://evil.com"})
+    assert resp.status_code == 422
+
+
+def test_authorize_rejects_protocol_relative_redirect_after(client: TestClient) -> None:
+    resp = client.post(_AUTHORIZE, headers=_auth(), json={"redirect_after": "//evil.com"})
+    assert resp.status_code == 422
+
+
 def test_callback_requires_auth(client: TestClient) -> None:
     assert client.post(_CALLBACK, json={"state": "a", "code": "c"}).status_code == 401

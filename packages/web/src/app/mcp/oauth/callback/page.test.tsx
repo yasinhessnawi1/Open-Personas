@@ -118,6 +118,31 @@ describe("McpOauthCallbackPage (N7-T3b)", () => {
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/personas"));
   });
 
+  // R9-048: a belt-and-suspenders client guard — even if a malicious/stale
+  // redirect_after somehow reached the browser, router.replace() must never
+  // be handed an external target. Falls back to the safe default instead.
+  it.each([
+    "https://evil.com",
+    "http://evil.com",
+    "//evil.com",
+    "javascript:alert(1)",
+    "/\\evil.com",
+  ])(
+    "falls back to /personas for a malicious redirect_after: %s",
+    async (maliciousRedirect) => {
+      const { restore: r } = installFetch(() =>
+        jsonResponse({
+          server: { id: "srv_1" },
+          redirect_after: maliciousRedirect,
+        }),
+      );
+      restore = r;
+      renderPage();
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/personas"));
+      expect(replace).not.toHaveBeenCalledWith(maliciousRedirect);
+    },
+  );
+
   it("shows the error card on failure and never routes", async () => {
     const { restore: r } = installFetch(() =>
       jsonResponse({ error: "bad_state" }, 400),
