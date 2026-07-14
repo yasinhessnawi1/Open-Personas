@@ -36,13 +36,11 @@ from pathlib import Path
 from persona.logging import get_logger
 from persona.tools.mcp.builtin import DEFAULT_BIND_HOST
 from persona.tools.mcp.catalog import authored_server_names
+from persona.tools.mcp.naming import referenced_server_name
 
 __all__ = ["BuiltinMCPSupervisor"]
 
 _logger = get_logger("api.mcp.builtin_launcher")
-
-#: The persona allow-list prefix a built-in server tool carries: ``mcp:<name>:``.
-_MCP_PREFIX = "mcp:"
 
 #: The one built-in that holds per-(owner, persona) state and so is spawned
 #: scope-keyed rather than as a process-wide singleton (Spec P4-D-5). The
@@ -146,17 +144,17 @@ class BuiltinMCPSupervisor:
     def needed_builtins(self, declared_tools: list[str] | tuple[str, ...]) -> set[str]:
         """Built-in servers a persona's allow-list actually references.
 
-        Maps each ``mcp:<name>:<tool>`` entry to ``<name>`` and keeps only the
-        names this supervisor has enabled — so a persona that uses no built-in
-        MCP spawns nothing.
+        Maps each ``mcp:<name>:<tool>`` entry — and the bare server-grant form
+        ``mcp:<name>`` (Spec N7, D-N7-1) — to ``<name>`` and keeps only the names
+        this supervisor has enabled, so a persona that uses no built-in MCP spawns
+        nothing. The parse is the shared :func:`referenced_server_name` (one home
+        for the ``mcp:`` naming seams; deliberately WIDER than the server-grant
+        parse — tool-level declarations still need their server running).
         """
         needed: set[str] = set()
         for entry in declared_tools:
-            if not entry.startswith(_MCP_PREFIX):
-                continue
-            rest = entry[len(_MCP_PREFIX) :]
-            name = rest.split(":", 1)[0]
-            if name in self._states:
+            name = referenced_server_name(entry)
+            if name is not None and name in self._states:
                 needed.add(name)
         return needed
 

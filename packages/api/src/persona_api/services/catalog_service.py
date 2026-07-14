@@ -25,6 +25,7 @@ from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_
 from persona.tools import TOOL_CATALOG
 from persona.tools.mcp.catalog import BUILTIN_MCP_CATALOG, MCPServerCatalogEntry
 from persona.tools.mcp.mirror import load_mirror_catalog
+from persona.tools.mcp.naming import server_grant_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -146,8 +147,11 @@ def _is_mcp_server_enablement(entry: str) -> bool:
     Deeper-prefixed entries are tool-level, not server-enablement: the Docker-gateway tools
     ``mcp:docker:<tool>`` (D-N1-6) and any ``mcp:<server>:<tool>`` refinement are excluded
     (a removed *tool* on a live server is the adapter's §7.3 graceful path, not this signal).
+
+    Spec N7 (D-N7-1): the parse itself lives in ``persona.tools.mcp.naming`` — the ONE
+    home shared with the toolbox-build grant expansion, so the two seams cannot drift.
     """
-    return entry.startswith("mcp:") and entry.count(":") == 1 and len(entry) > len("mcp:")
+    return server_grant_name(entry) is not None
 
 
 def unavailable_enabled_mcp_servers(
