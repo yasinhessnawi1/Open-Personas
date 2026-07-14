@@ -27,13 +27,17 @@ if TYPE_CHECKING:
 __all__ = ["VoiceCatalogue", "normalize_gender"]
 
 # Provider gender tags → the normalised :data:`VoiceGender` set. Cartesia
-# uses ``masculine``/``feminine``/``gender_neutral``; anything else (incl.
-# ``None``) becomes ``"unspecified"``.
+# uses ``masculine``/``feminine``/``gender_neutral``; ElevenLabs (Spec V14)
+# uses ``male``/``female`` (+ ``non-binary``) in its ``labels.gender``; anything
+# else (incl. ``None``) becomes ``"unspecified"``.
 _GENDER_MAP: dict[str, VoiceGender] = {
     "masculine": "masculine",
     "feminine": "feminine",
+    "male": "masculine",
+    "female": "feminine",
     "gender_neutral": "neutral",
     "neutral": "neutral",
+    "non-binary": "neutral",
 }
 
 

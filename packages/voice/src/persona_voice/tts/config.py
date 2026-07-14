@@ -11,11 +11,14 @@ knob so misconfigured operators fail fast at construction (the Spec 02
 D-02-10 + V3 D-V3-X-cost precedent).
 
 **Provider Literal.** ``cartesia`` is the D-V3-1 LOCK launch provider
-(Sonic 3.5). ``elevenlabs`` is documented as the alternative-provider
-story behind the same :class:`persona_voice.tts.protocol.StreamingTTS`
-Protocol seam (D-V3-1 paragraph 2). The Literal pins both even though T04
-ships only Cartesia — keeping the enumeration honest about what shape the
-Protocol covers (the V2 ``Provider`` Literal precedent).
+(Sonic 3.5). ``elevenlabs`` (Spec V14, D-V14-9) is the utterance-level
+text-language-auto-follow provider: one voice identity speaks the language
+the reply TEXT is written in, per reply, with NO language told to the API
+(the T0 POC proved same-voice naturalness across en/no/ar/es/fr/vi at
+flash-class latency). Its backend slots behind the SAME
+:class:`persona_voice.tts.protocol.StreamingTTS` seam and is selected by
+``PERSONA_TTS_PROVIDER=elevenlabs`` (rollback = flip the selector back, the
+ElevenLabs knobs park). The Literal pins both.
 
 **Chunking knobs (D-V3-2).** The hybrid sentence-level + first-chunk-shorter
 parameters the T05 chunker reads. Defaults are the locked D-V3-2 values
@@ -35,7 +38,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["Provider", "StreamingTTSConfig"]
@@ -96,11 +99,31 @@ class StreamingTTSConfig(BaseSettings):
             stable ``speed``/``volume``; ``False`` drops ``emotion`` and keeps
             speed/volume — an operator's no-deploy mid-tier degradation if the
             Beta layer misbehaves in production.
+        elevenlabs_api_key: ElevenLabs API key (Spec V14). Reads the
+            spec-named, un-prefixed ``PERSONA_ELEVENLABS_API_KEY`` (NOT
+            ``PERSONA_TTS_*``) via a ``validation_alias`` so it matches the var
+            the owner provisions. :class:`~pydantic.SecretStr` — never leaks in
+            ``repr``. The concrete ElevenLabs backend fails fast at
+            construction when this is missing while ``provider="elevenlabs"``.
+        elevenlabs_model: ElevenLabs model id (default ``eleven_flash_v2_5`` —
+            the flash-class, ~75ms, 32-language model the T0 POC measured at
+            158ms warm first-audio). Reads ``PERSONA_TTS_ELEVENLABS_MODEL``.
+        elevenlabs_voice_default: ElevenLabs catalogue voice id used as the
+            provider-scoped fallback for a voice-less persona under
+            ``provider="elevenlabs"`` (the D-V3-4 default, parallel to
+            ``voice_default`` which stays the Cartesia default). Reads
+            ``PERSONA_TTS_ELEVENLABS_VOICE_DEFAULT``. The composition wiring
+            that selects the provider-appropriate default is T4's concern.
     """
 
     model_config = SettingsConfigDict(
         env_prefix="PERSONA_TTS_",
         extra="ignore",
+        # Let the aliased ``elevenlabs_api_key`` (which reads the spec-named,
+        # un-prefixed ``PERSONA_ELEVENLABS_API_KEY`` — D-V14-9) still be
+        # constructible by its Python name, e.g. in tests. A no-op for every
+        # non-aliased field.
+        populate_by_name=True,
     )
 
     provider: Provider = "cartesia"
@@ -129,3 +152,17 @@ class StreamingTTSConfig(BaseSettings):
 
     cartesia_version: str = "2026-03-01"
     cartesia_max_buffer_delay_ms: int = Field(default=0, ge=0, le=5000)
+
+    # --- ElevenLabs (Spec V14 D-V14-9) — provider-scoped knobs, parked unless
+    # ``provider="elevenlabs"``. ``elevenlabs_api_key`` escapes the
+    # ``PERSONA_TTS_`` prefix to read the spec-named ``PERSONA_ELEVENLABS_API_KEY``
+    # the owner provisions (the same var the T0 POC used); ``elevenlabs_model``
+    # + ``elevenlabs_voice_default`` ride the prefix like the ``cartesia_*``
+    # knobs. SecretStr so ``repr`` never leaks the key.
+    elevenlabs_api_key: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        validation_alias=AliasChoices("PERSONA_ELEVENLABS_API_KEY"),
+    )
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    elevenlabs_voice_default: str | None = None

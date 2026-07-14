@@ -20,6 +20,51 @@ def _strip_persona_tts_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("PERSONA_TTS_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("PERSONA_ELEVENLABS_API_KEY", raising=False)
+
+
+# ---------- ElevenLabs (Spec V14 D-V14-9) ----------------------------------
+
+
+def test_provider_literal_accepts_elevenlabs() -> None:
+    assert StreamingTTSConfig(provider="elevenlabs").provider == "elevenlabs"
+
+
+def test_elevenlabs_api_key_reads_unprefixed_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-V14-9: ``elevenlabs_api_key`` escapes the ``PERSONA_TTS_`` prefix and
+    reads the spec-named ``PERSONA_ELEVENLABS_API_KEY`` the owner provisions."""
+    monkeypatch.setenv("PERSONA_ELEVENLABS_API_KEY", "el-live-key")
+    config = StreamingTTSConfig()
+    assert config.elevenlabs_api_key is not None
+    assert config.elevenlabs_api_key.get_secret_value() == "el-live-key"
+
+
+def test_elevenlabs_api_key_does_not_leak_in_repr() -> None:
+    config = StreamingTTSConfig(elevenlabs_api_key=SecretStr("el-very-secret"))
+    assert "el-very-secret" not in repr(config)
+
+
+def test_elevenlabs_defaults() -> None:
+    config = StreamingTTSConfig()
+    assert config.elevenlabs_api_key is None
+    assert config.elevenlabs_model == "eleven_flash_v2_5"
+    assert config.elevenlabs_voice_default is None
+
+
+def test_elevenlabs_model_and_voice_default_read_prefixed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PERSONA_TTS_ELEVENLABS_MODEL", "eleven_multilingual_v2")
+    monkeypatch.setenv("PERSONA_TTS_ELEVENLABS_VOICE_DEFAULT", "voice-abc")
+    config = StreamingTTSConfig()
+    assert config.elevenlabs_model == "eleven_multilingual_v2"
+    assert config.elevenlabs_voice_default == "voice-abc"
+
+
+def test_elevenlabs_api_key_constructible_by_name() -> None:
+    config = StreamingTTSConfig(elevenlabs_api_key="by-name")
+    assert config.elevenlabs_api_key is not None
+    assert config.elevenlabs_api_key.get_secret_value() == "by-name"
 
 
 # ---------- defaults (D-V3-1 / D-V3-2 LOCKs) -------------------------------

@@ -11,9 +11,11 @@ Mirrors the Spec 02 :func:`persona.backends._factory.load_backend` / V2
   stays importable in environments without the ``cartesia`` SDK extras
   resolved at workspace install time — matches the Spec 02
   ``HFLocalBackend`` + V2 ``deepgram_backend`` lazy-import discipline).
-* ``elevenlabs`` is the documented alternative behind the same Protocol
-  seam (D-V3-1 paragraph 2); it lands as a v0.2 backend implementation if
-  a D-V3-1 falsification trigger fires.
+* Spec V14 (D-V14-9) wires the ``elevenlabs`` branch through to
+  :class:`persona_voice.tts.elevenlabs_backend.ElevenLabsStreamingTTS` — the
+  utterance-level text-language-auto-follow provider, selected by
+  ``PERSONA_TTS_PROVIDER=elevenlabs``. Same lazy-import discipline (its
+  ``websockets`` / ``httpx`` transports load only when a stream opens).
 """
 
 from __future__ import annotations
@@ -52,8 +54,9 @@ def load_streaming_tts(
 
     Raises:
         TTSAuthenticationError: ``provider="cartesia"`` with missing
-            ``PERSONA_TTS_API_KEY`` (the concrete Cartesia backend fails
-            fast at construction per Spec 02 D-02-10).
+            ``PERSONA_TTS_API_KEY``, or ``provider="elevenlabs"`` with missing
+            ``PERSONA_ELEVENLABS_API_KEY`` (the concrete backend fails fast at
+            construction per Spec 02 D-02-10).
         TTSError: Unknown / unsupported provider — message lists the
             Literal values for operator clarity; ``context`` carries
             ``provider`` so structured log filters can match.
@@ -67,6 +70,13 @@ def load_streaming_tts(
         from persona_voice.tts.cartesia_backend import CartesiaStreamingTTS
 
         return CartesiaStreamingTTS(config, expressivity_channel=expressivity_channel)
+    if provider == "elevenlabs":
+        # Spec V14 (D-V14-9). Same lazy-import discipline — the ElevenLabs
+        # backend's websockets/httpx transports load only when a stream opens.
+        # The expressivity channel is accepted for symmetry + ignored (D-V14-16).
+        from persona_voice.tts.elevenlabs_backend import ElevenLabsStreamingTTS
+
+        return ElevenLabsStreamingTTS(config, expressivity_channel=expressivity_channel)
     raise TTSError(
         f"unknown or unwired TTS provider {provider!r}; expected one of cartesia, elevenlabs",
         context={"provider": provider},

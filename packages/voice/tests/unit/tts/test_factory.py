@@ -28,6 +28,7 @@ def _strip_persona_tts_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("PERSONA_TTS_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("PERSONA_ELEVENLABS_API_KEY", raising=False)
 
 
 def test_unknown_provider_raises_tts_error() -> None:
@@ -63,12 +64,26 @@ def test_cartesia_branch_fails_fast_without_api_key() -> None:
     assert exc_info.value.context["provider"] == "cartesia"
 
 
-def test_elevenlabs_alternative_not_yet_wired() -> None:
-    # D-V3-1 paragraph 2: ElevenLabs is documented behind the same Protocol
-    # seam but T04 ships only the Cartesia launch. The factory raises until
-    # the alternative backend lands.
+def test_elevenlabs_branch_returns_concrete_backend() -> None:
+    # Spec V14 (D-V14-9): the ElevenLabs backend is now wired behind the same
+    # Protocol seam. A valid PERSONA_ELEVENLABS_API_KEY yields the concrete
+    # backend (supersedes the pre-V14 not-yet-wired assertion).
+    from persona_voice.tts.elevenlabs_backend import ElevenLabsStreamingTTS
+
+    config = StreamingTTSConfig(provider="elevenlabs", elevenlabs_api_key="el-test-key")
+    backend = load_streaming_tts(config)
+    assert isinstance(backend, ElevenLabsStreamingTTS)
+    assert backend.provider_name == "elevenlabs"
+    assert backend.model_name == "eleven_flash_v2_5"
+
+
+def test_elevenlabs_branch_fails_fast_without_api_key() -> None:
+    # Spec 02 D-02-10 fail-fast: missing PERSONA_ELEVENLABS_API_KEY surfaces as
+    # TTSAuthenticationError at construction.
+    from persona_voice.tts import TTSAuthenticationError
+
     config = StreamingTTSConfig(provider="elevenlabs")
-    with pytest.raises(TTSError) as exc_info:
+    with pytest.raises(TTSAuthenticationError) as exc_info:
         load_streaming_tts(config)
     assert exc_info.value.context["provider"] == "elevenlabs"
 
