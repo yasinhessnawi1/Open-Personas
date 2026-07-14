@@ -533,7 +533,9 @@
     "previewLabel": "Preview {name}",
     "metaSize": "Size",
     "metaType": "Type",
-    "metaCreated": "Created"
+    "metaCreated": "Created",
+    "noInlinePreview": "No inline preview for this file type — download it to open.",
+    "previewFailed": "Couldn't load a preview. Try downloading the file."
   },
   "runs": {
     "backToPersona": "Back to persona",

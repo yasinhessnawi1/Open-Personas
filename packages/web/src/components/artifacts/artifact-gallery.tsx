@@ -5,13 +5,19 @@ import {
   Download,
   File,
   FileText,
+  ImageIcon,
+  Layers,
   LineChart,
+  type LucideIcon,
+  Sparkles,
   Table2,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/auth";
+import { SkeletonBlock } from "@/components/patterns/loading";
 import { useConfirm } from "@/components/providers/confirm-provider";
 import { useNotify } from "@/components/providers/notification-provider";
 import { AuthedImage } from "@/components/ui/authed-image";
@@ -47,10 +53,75 @@ export interface ArtifactGalleryProps {
   initial: ArtifactListResponse;
 }
 
-const SOURCE_CHIPS = ["all", "upload", "generated"] as const;
-const TYPE_CHIPS = ["all", "image", "chart", "doc", "data"] as const;
+type SourceKey = "all" | "upload" | "generated";
+type TypeKey = "all" | "image" | "doc" | "data" | "chart";
+
+const SOURCE_OPTS: { value: SourceKey; icon: LucideIcon }[] = [
+  { value: "all", icon: Layers },
+  { value: "upload", icon: Upload },
+  { value: "generated", icon: Sparkles },
+];
+const TYPE_OPTS: { value: TypeKey; icon: LucideIcon }[] = [
+  { value: "all", icon: Layers },
+  { value: "image", icon: ImageIcon },
+  { value: "doc", icon: FileText },
+  { value: "data", icon: Table2 },
+  { value: "chart", icon: LineChart },
+];
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+/** Text-ish files whose bytes are worth showing inline (beyond `text/*`). */
+const TEXT_EXTS = new Set([
+  "txt",
+  "md",
+  "markdown",
+  "json",
+  "csv",
+  "tsv",
+  "log",
+  "yaml",
+  "yml",
+  "xml",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "py",
+  "sh",
+  "bash",
+  "css",
+  "scss",
+  "html",
+  "htm",
+  "sql",
+  "toml",
+  "ini",
+  "env",
+  "rs",
+  "go",
+  "java",
+  "rb",
+  "c",
+  "cpp",
+  "h",
+]);
+
+function fileExt(item: ArtifactItem): string {
+  const name = displayName(item);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function isTextLike(item: ArtifactItem): boolean {
+  if (item.media_type.startsWith("text/")) return true;
+  if (item.media_type === "application/json") return true;
+  return TEXT_EXTS.has(fileExt(item));
+}
+
+function isPdf(item: ArtifactItem): boolean {
+  return item.media_type === "application/pdf" || fileExt(item) === "pdf";
+}
 
 /** Friendly display name: the original filename, else the ref's basename. */
 function displayName(item: ArtifactItem): string {
@@ -106,8 +177,8 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
   const api = useApi();
   const [deleting, setDeleting] = useState<string | null>(null);
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceKey>("all");
+  const [typeFilter, setTypeFilter] = useState<TypeKey>("all");
   const [preview, setPreview] = useState<ArtifactItem | null>(null);
 
   const items = useMemo(() => {
@@ -167,30 +238,36 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
 
   return (
     <div data-slot="artifact-gallery" className="flex flex-col gap-4">
-      {/* compact filter row — the v3 chip register */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {SOURCE_CHIPS.map((c) => (
-          <Chip
-            key={c}
-            active={sourceFilter === c}
-            onClick={() => setSourceFilter(c)}
-          >
-            {t(`source.${c}`)}
-          </Chip>
-        ))}
-        <span aria-hidden="true" className="mx-1 h-4 w-px bg-border" />
-        {TYPE_CHIPS.map((c) => (
-          <Chip
-            key={c}
-            active={typeFilter === c}
-            onClick={() => setTypeFilter(c)}
-          >
-            {t(`type.${c}`)}
-          </Chip>
-        ))}
-        <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
-          {t("countOf", { shown: items.length, total: initial.total })}
-        </span>
+      {/* R11-B6 rider — a clean segmented toolbar (owner: the loose chips were
+          not a good design): the primary TYPE control with icons, an honest
+          count, and a quieter SOURCE segmented below. */}
+      <div className="flex flex-col gap-2.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <Segmented
+            options={TYPE_OPTS.map((o) => ({
+              value: o.value,
+              label: t(`type.${o.value}`),
+              icon: o.icon,
+            }))}
+            value={typeFilter}
+            onChange={setTypeFilter}
+            ariaLabel={t("typeLabel")}
+          />
+          <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+            {t("countOf", { shown: items.length, total: initial.total })}
+          </span>
+        </div>
+        <Segmented
+          size="sm"
+          options={SOURCE_OPTS.map((o) => ({
+            value: o.value,
+            label: t(`source.${o.value}`),
+            icon: o.icon,
+          }))}
+          value={sourceFilter}
+          onChange={setSourceFilter}
+          ariaLabel={t("sourceLabel")}
+        />
       </div>
 
       {items.length === 0 ? (
@@ -235,19 +312,7 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
                   </span>
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">
-                  {isImageLike(preview) ? (
-                    <div className="grid place-items-center bg-muted/30 p-4">
-                      <AuthedImage
-                        personaId={personaId}
-                        workspacePath={preview.ref}
-                        mediaType={preview.media_type}
-                        alt={displayName(preview)}
-                        className="max-h-[62vh] w-auto rounded-lg object-contain"
-                      />
-                    </div>
-                  ) : (
-                    <DocMeta item={preview} />
-                  )}
+                  <FilePreview personaId={personaId} item={preview} />
                 </div>
                 <div className="flex items-center gap-2 border-border border-t px-5 py-3">
                   <Button
@@ -286,31 +351,181 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
   );
 }
 
-function Chip({
-  active,
-  onClick,
-  children,
+/** A modern segmented control (connected pills, an elevated active segment) —
+ * the R11-B6 replacement for the loose filter chips. */
+function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+  size = "md",
 }: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
+  options: { value: T; label: string; icon?: LucideIcon }[];
+  value: T;
+  onChange: (v: T) => void;
+  ariaLabel: string;
+  size?: "sm" | "md";
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground",
-        active && "border-primary/50 bg-primary/10 font-medium text-foreground",
-      )}
+    <fieldset
+      aria-label={ariaLabel}
+      className="inline-flex flex-wrap rounded-lg border border-border bg-muted/40 p-0.5"
     >
-      {children}
-    </button>
+      {options.map((o) => {
+        const active = o.value === value;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(o.value)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-md font-medium transition-colors",
+              size === "sm" ? "px-2 py-1 text-xs" : "px-2.5 py-1.5 text-[13px]",
+              active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {Icon ? (
+              <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+            ) : null}
+            {o.label}
+          </button>
+        );
+      })}
+    </fieldset>
   );
 }
 
-function DocMeta({ item }: { item: ArtifactItem }) {
+type PreviewState =
+  | { kind: "loading" }
+  | { kind: "text"; text: string; truncated: boolean }
+  | { kind: "pdf"; url: string }
+  | { kind: "meta" }
+  | { kind: "error" };
+
+const TEXT_PREVIEW_CAP = 200_000; // ~200 KB of text is plenty for a preview
+
+/**
+ * R11-B6 rider (owner-ruled) — real file-content preview inside the dialog:
+ * images render large (authed blob pipe), text-ish files show their actual
+ * bytes in a mono reader, PDFs embed inline, and anything binary falls back to
+ * the honest meta card. Fetched through the authed uploads route on open;
+ * blob URLs are revoked on close.
+ */
+function FilePreview({
+  personaId,
+  item,
+}: {
+  personaId: string;
+  item: ArtifactItem;
+}) {
+  const { getToken } = useAuth();
+  const [state, setState] = useState<PreviewState>({ kind: "loading" });
+
+  const image = isImageLike(item);
+
+  useEffect(() => {
+    if (image) return; // AuthedImage owns its own fetch
+    let revoke: string | null = null;
+    let cancelled = false;
+    setState({ kind: "loading" });
+    void (async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch(
+          `${API}/v1/personas/${encodeURIComponent(personaId)}/uploads/${item.ref}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : undefined },
+        );
+        if (!res.ok) throw new Error(`${res.status}`);
+        if (isPdf(item)) {
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          revoke = url;
+          if (!cancelled) setState({ kind: "pdf", url });
+        } else if (isTextLike(item)) {
+          const full = await res.text();
+          if (!cancelled)
+            setState({
+              kind: "text",
+              text: full.slice(0, TEXT_PREVIEW_CAP),
+              truncated: full.length > TEXT_PREVIEW_CAP,
+            });
+        } else if (!cancelled) {
+          setState({ kind: "meta" });
+        }
+      } catch {
+        if (!cancelled) setState({ kind: "error" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [image, item, personaId, getToken]);
+
+  if (image) {
+    return (
+      <div className="grid place-items-center bg-muted/30 p-4">
+        <AuthedImage
+          personaId={personaId}
+          workspacePath={item.ref}
+          mediaType={item.media_type}
+          alt={displayName(item)}
+          className="max-h-[62vh] w-auto rounded-lg object-contain"
+        />
+      </div>
+    );
+  }
+  if (state.kind === "loading") {
+    return (
+      <div className="flex flex-col gap-2 p-4">
+        <SkeletonBlock className="h-4 w-3/4" />
+        <SkeletonBlock className="h-4 w-full" />
+        <SkeletonBlock className="h-4 w-5/6" />
+      </div>
+    );
+  }
+  if (state.kind === "pdf") {
+    return (
+      <object
+        data={state.url}
+        type="application/pdf"
+        className="h-[68vh] w-full bg-muted/20"
+        aria-label={displayName(item)}
+      >
+        <DocMeta item={item} />
+      </object>
+    );
+  }
+  if (state.kind === "text") {
+    const t = displayName(item);
+    return (
+      <div className="max-h-[68vh] overflow-auto bg-muted/20">
+        <pre className="whitespace-pre-wrap px-5 py-4 font-mono text-xs leading-relaxed text-foreground">
+          {state.text}
+        </pre>
+        {state.truncated ? (
+          <p className="border-border border-t px-5 py-2 text-center font-mono text-[10px] text-muted-foreground">
+            {`preview truncated · download ${t} for the full file`}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  // meta / error → the honest card
+  return <DocMeta item={item} error={state.kind === "error"} />;
+}
+
+function DocMeta({
+  item,
+  error = false,
+}: {
+  item: ArtifactItem;
+  error?: boolean;
+}) {
   const t = useTranslations("artifacts");
   const Icon = typeIcon(item);
   const rows: [string, string][] = [
@@ -329,6 +544,9 @@ function DocMeta({ item }: { item: ArtifactItem }) {
       <span className="grid size-20 place-items-center rounded-2xl bg-muted">
         <Icon className="size-9 text-muted-foreground" aria-hidden="true" />
       </span>
+      <p className="text-center text-sm text-muted-foreground">
+        {error ? t("previewFailed") : t("noInlinePreview")}
+      </p>
       <dl className="w-full max-w-xs text-sm">
         {rows.map(([k, v]) => (
           <div
