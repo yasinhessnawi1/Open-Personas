@@ -63,9 +63,9 @@ A schedule made in conversation ("remind me Fridays at 15:00") and a schedule ma
 
 ### 🎙️ Voice that is the same persona, not a phone tree
 
-Real-time calls over WebRTC (LiveKit): streaming speech-to-text, streaming speech synthesis, natural turn-taking with barge-in, and a spoken register that's genuinely different from its chat prose. The persona **remembers the call** — voice turns land in the same episodic store as text, in both directions — and its voice carries the emotion of what it's saying. Ask for something heavy mid-call and it delegates to the same audited task machinery chat uses, then hands you the result.
+Real-time calls over WebRTC (LiveKit): streaming speech-to-text, streaming speech synthesis, natural turn-taking with barge-in, and a spoken register that's genuinely different from its chat prose. Voice and text are **one shared memory** — in the call below, the persona opens by picking up the lighthouse campaign from its *text* thread, unprompted. Ask for something heavy mid-call and it delegates to the same audited task machinery chat uses, then hands you the result.
 
-![Voice call](assets/readme/voice.png)
+![A real community voice call — the greeting recalls the text conversation](assets/readme/voice.png)
 
 ### 💬 Chat built for real work
 
