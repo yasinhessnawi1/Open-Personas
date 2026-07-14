@@ -170,7 +170,14 @@ def test_tts_proxy_happy_path_resolves_persona_voice(
     assert captured["url"] == f"{_VOICE_URL}/v1/tts"
     assert captured["auth"] == f"Bearer {uid_a}"
     # The voice_id came from the PERSONA's own stored YAML, not the caller.
-    assert captured["body"] == {"text": "hello there", "voice_id": "v_astrid_integration"}
+    # Spec V14 (D-V14-13, T4b): the proxy now ALSO forwards the stored voice's
+    # provider — additive — so persona-voice can fail-soft to the ACTIVE
+    # backend's default on a provider mismatch instead of 4xx-ing.
+    assert captured["body"] == {
+        "text": "hello there",
+        "voice_id": "v_astrid_integration",
+        "provider": "cartesia",
+    }
 
 
 def test_tts_proxy_cross_tenant_persona_is_404_never_reaches_voice_service(
@@ -210,7 +217,9 @@ def test_tts_proxy_persona_without_configured_voice_falls_back_to_default(
     assert resp.status_code == 200, resp.text
     assert resp.content == b"RIFFdefaultvoiceWAVE"
     # No persona voice -> the pin rides through as null; the default is voice-side.
-    assert captured["body"] == {"text": "hello", "voice_id": None}
+    # Spec V14 (D-V14-13, T4b): provider is additive too — null alongside voice_id
+    # for a voiceless persona (nothing to compare against on the active backend).
+    assert captured["body"] == {"text": "hello", "voice_id": None, "provider": None}
 
 
 def test_tts_proxy_fails_soft_when_voice_service_unconfigured(

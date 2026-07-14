@@ -40,14 +40,18 @@ Like the rest of the stack, it carries an **edition** stance (`PERSONA_EDITION`)
   `pg_try_advisory_xact_lock`.
 - **V2 — Streaming STT.** A provider-independent `StreamingSTT` protocol
   (mirroring the core `ChatBackend` adapter boundary), a Deepgram Nova-3
-  backend, and a Silero VAD (ONNX-only) endpointing adapter.
+  backend, and a Silero VAD (ONNX-only) endpointing adapter. **Gladia (V14)**
+  is the utterance-level alternative behind the same protocol
+  (`PERSONA_STT_PROVIDER=gladia`) — see V14 below.
 - **V3 — Streaming TTS.** A provider-independent `StreamingTTS` protocol, a
   Cartesia Sonic backend, per-persona voice as a first-class identity
   attribute, and mid-utterance `cancel()` (the barge-in foundation).
   **Emotion-aware delivery (V12):** the persona's emotional stance (its N5
   feeling-tags) drives Cartesia `generation_config` expressivity so the voice
   *sounds* its feeling — bounded by character and restrained, fail-soft to a
-  flat read, with a `PERSONA_TTS_EMOTION_ENABLED` Beta kill-switch.
+  flat read, with a `PERSONA_TTS_EMOTION_ENABLED` Beta kill-switch. **ElevenLabs
+  (V14)** is the utterance-level alternative behind the same protocol
+  (`PERSONA_TTS_PROVIDER=elevenlabs`) — see V14 below.
 - **V4 — Turn-taking + barge-in.** A four-state conversational machine
   (Listening / UserSpeaking / Processing / PersonaSpeaking), automatic
   endpointing, fast-and-discriminating interruption, a cancel watchdog, and
@@ -80,6 +84,18 @@ Like the rest of the stack, it carries an **edition** stance (`PERSONA_EDITION`)
   calls enqueue post-call graph synthesis through the existing K2 background seam
   (`source: voice` provenance, idempotent) and write episodic chunks at chat parity —
   so what you say on a call becomes memory the persona knows in chat, and vice versa.
+- **V14 — Utterance-level multilingual voice.** The incumbent providers are
+  language-PINNED per call (Deepgram silently drops a mid-utterance second
+  language; Cartesia's voice is statically scoped to one language regardless
+  of the reply text). Strategy A swaps in **Gladia** STT
+  (`PERSONA_STT_PROVIDER=gladia`, no per-call language pin, code-switches
+  within a single utterance) and **ElevenLabs** TTS
+  (`PERSONA_TTS_PROVIDER=elevenlabs`, one voice speaks whatever language the
+  reply text is in — no `language_code` ever sent on the wire), behind the
+  SAME `StreamingSTT`/`StreamingTTS` protocols — one env flip each way, and
+  the same flip back restores the incumbents' original per-persona voices
+  untouched. A boot-time AUTO-REMAP keeps existing personas voiced on the
+  active provider. See `.env.example`'s "Spec V14" blocks for every knob.
 - **V8 — STT cost gating.** Bill Deepgram for the user's speech, not the whole
   call. The seam adapter's tee is *split* — the Silero VAD is always fed (so
   barge-in is never starved) while the billed backend leg is gated by
@@ -108,8 +124,11 @@ uv run uvicorn persona_voice.http.app:create_app --factory --port 8001
 
 You also need a running **LiveKit OSS Server** (`docker compose up -d livekit`)
 and, for real STT/TTS, a Deepgram key (`PERSONA_STT_API_KEY`) and a Cartesia
-key (`PERSONA_TTS_API_KEY`). For local web development, `packages/api/run-local.sh`
-boots the api (`:8000`) **and** persona-voice (`:8001`) together.
+key (`PERSONA_TTS_API_KEY`) — or, under the V14 utterance-level providers, a
+Gladia key (`PERSONA_GLADIA_API_KEY`) and an ElevenLabs key
+(`PERSONA_ELEVENLABS_API_KEY`). For local web development,
+`packages/api/run-local.sh` boots the api (`:8000`) **and** persona-voice
+(`:8001`) together.
 
 ### Test
 

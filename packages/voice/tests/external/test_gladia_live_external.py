@@ -165,3 +165,131 @@ async def test_gladia_batch_oneshot_transcribes_the_clip() -> None:
     assert any(word in transcript for word in ("schedule", "tomorrow", "checking")), (
         f"leading english segment not recognized in batch transcript: {transcript!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE HARD real-speech dictation fidelity gate (Spec V14 T5, owner ruling).
+# ---------------------------------------------------------------------------
+#
+# T0's "batch anglicizes/collapses the 2nd language" finding (see
+# ``test_gladia_batch_oneshot_transcribes_the_clip`` above) was measured on
+# SYNTHETIC (macOS ``say``) clips ONLY. The batch one-shot path is what
+# ``/v1/stt`` dispatches dictation to under ``provider=gladia`` (D-V14-14) —
+# shipping it for real bilingual DICTATION on the strength of a synthetic-clip
+# measurement alone would be unproven. This is that proof's skeleton.
+#
+# **PASS/FAIL criterion (explicit, per the coordinator's ruling):** a real
+# bilingual clip through the batch one-shot path must preserve markers from
+# BOTH declared languages in the returned transcript. If the second language
+# is anglicized/dropped, this is a FAIL, and the escalation is:
+#
+#   (A) decoder + WS-fast-drive: decode the container to raw PCM server-side
+#       and drive Gladia's LIVE streaming WS (T0 found streaming preserved
+#       code-switching cleanly; T1 already ships the streaming backend) —
+#       trades one dependency (an audio decoder) for restored fidelity.
+#   (B) web-side raw-PCM AudioWorklet capture: capture already-PCM audio in
+#       the browser (bypassing MediaRecorder's compressed webm/opus container
+#       entirely), so the SAME streaming backend can be driven directly from
+#       the client — a web-side dep-gated change, no server decoder needed.
+#
+# Both are separate, dep-gated decisions — NOT made by this test. This test
+# only proves (or disproves) the trigger.
+#
+# **Why this cannot run in CI**: no synthetic TTS clip is legitimate evidence
+# here (that is exactly the T0 caveat this gate exists to close) — it needs a
+# REAL bilingual human speaker recording, which is an owner-provided artifact,
+# not a repo fixture. Skips cleanly without one; CI never runs it regardless
+# (the ``external`` marker + ``PERSONA_GLADIA_API_KEY`` skip already excludes
+# it from every automated run).
+_REAL_CLIP_ENV = "PERSONA_V14_REAL_BILINGUAL_CLIP"
+_REAL_CLIP_LANG1_MARKERS_ENV = "PERSONA_V14_REAL_BILINGUAL_LANG1_MARKERS"
+_REAL_CLIP_LANG2_MARKERS_ENV = "PERSONA_V14_REAL_BILINGUAL_LANG2_MARKERS"
+
+# Sensible defaults for the documented default pairing (en -> no, matching
+# family1 / the project's own default persona-language pair) — override via
+# the env vars above (comma-separated words) for a different real recording.
+_DEFAULT_LANG1_MARKERS = ("schedule", "tomorrow", "checking", "meeting", "hello")
+_DEFAULT_LANG2_MARKERS = ("møte", "møtet", "klokken", "flytte", "hei", "takk")
+
+
+@pytest.mark.asyncio
+async def test_gladia_batch_oneshot_real_bilingual_speech_fidelity() -> None:
+    """THE HARD gate: does the SHIPPED batch one-shot path preserve BOTH
+    languages on a REAL bilingual speaker's recording (not a synthetic clip)?
+
+    Owner-run:
+
+        # Record ~5-10s of real bilingual speech (a clean language switch
+        # mid-clip, e.g. "Let me check the schedule tomorrow. <switch to
+        # Norwegian>") as 16kHz mono PCM16 WAV (or webm/opus — batch accepts
+        # both containers), then:
+        PERSONA_GLADIA_API_KEY=... \\
+        PERSONA_V14_REAL_BILINGUAL_CLIP=/path/to/real_bilingual.wav \\
+        uv run --package persona-voice pytest \\
+            packages/voice/tests/external/test_gladia_live_external.py \\
+            -k real_bilingual_speech_fidelity -m external -o addopts=""
+
+    A different language pair? Override the marker word lists:
+        PERSONA_V14_REAL_BILINGUAL_LANG1_MARKERS="hello,thanks"
+        PERSONA_V14_REAL_BILINGUAL_LANG2_MARKERS="hola,gracias"
+    """
+    clip_path_str = os.environ.get(_REAL_CLIP_ENV)
+    if not clip_path_str:
+        pytest.skip(
+            f"{_REAL_CLIP_ENV} not set — this is the HARD real-speech dictation "
+            "fidelity gate (Spec V14 T5). A synthetic TTS clip cannot substitute for "
+            "it (that is exactly the T0 caveat this gate closes). Record a short "
+            "real bilingual clip and set the env var to its path; see this test's "
+            "docstring for the exact command."
+        )
+    clip_path = Path(clip_path_str)
+    if not clip_path.exists():
+        pytest.fail(f"{_REAL_CLIP_ENV}={clip_path_str!r} does not exist")
+
+    from persona_voice.stt.config import StreamingSTTConfig
+    from persona_voice.stt.gladia_backend import transcribe_oneshot_batch
+
+    audio_bytes = clip_path.read_bytes()
+    content_type = "audio/wav" if clip_path.suffix.lower() == ".wav" else "audio/webm"
+    config = StreamingSTTConfig(
+        provider="gladia",
+        gladia_api_key=os.environ["PERSONA_GLADIA_API_KEY"],  # type: ignore[arg-type]
+    )
+    transcript = (
+        await transcribe_oneshot_batch(audio_bytes, config=config, content_type=content_type)
+    ).lower()
+
+    lang1_markers = (
+        tuple(
+            w.strip().lower()
+            for w in os.environ.get(_REAL_CLIP_LANG1_MARKERS_ENV, "").split(",")
+            if w.strip()
+        )
+        or _DEFAULT_LANG1_MARKERS
+    )
+    lang2_markers = (
+        tuple(
+            w.strip().lower()
+            for w in os.environ.get(_REAL_CLIP_LANG2_MARKERS_ENV, "").split(",")
+            if w.strip()
+        )
+        or _DEFAULT_LANG2_MARKERS
+    )
+
+    print(f"\n[V14 T5 real-speech fidelity] transcript: {transcript!r}")  # owner-visible (-s)
+
+    if not transcript:
+        pytest.fail("FAIL — gladia BATCH returned an EMPTY transcript for real bilingual speech")
+
+    has_lang1 = any(w in transcript for w in lang1_markers)
+    has_lang2 = any(w in transcript for w in lang2_markers)
+    if has_lang1 and has_lang2:
+        return  # PASS — both languages survived the batch one-shot path.
+    pytest.fail(
+        "FAIL — the batch one-shot path did not preserve both languages on REAL "
+        f"speech (lang1 markers found={has_lang1}, lang2 markers found={has_lang2}, "
+        f"transcript={transcript!r}). This CONFIRMS the T0 synthetic-clip finding on "
+        "real speech: escalate to (A) decoder + WS-fast-drive streaming one-shot, or "
+        "(B) web-side raw-PCM AudioWorklet capture — see this file's module-level "
+        "comment above for the full tradeoff. Do not ship batch dictation as-is."
+    )

@@ -11,6 +11,52 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Utterance-level multilingual voice — code-switching STT + text-follow TTS (Spec V14, 2026-07-15)
+
+> A persona's voice pipeline was language-PINNED per call: Deepgram silently
+> dropped a mid-utterance second language (R9-025), and Cartesia's voice was
+> statically scoped to one language regardless of what the reply text said.
+> Strategy A (Gladia STT + ElevenLabs TTS) makes both directions utterance-level
+> — behind the same provider Protocol seam, one env flip each way.
+
+#### Added
+- **Gladia streaming + batch STT** (`PERSONA_STT_PROVIDER=gladia`) — no
+  per-call language pin; code-switches within a single utterance (the measured
+  fix for R9-025's "Deepgram drops the second language"). Streaming rides the
+  live call pipeline; the one-shot dictation upload (`/v1/stt`) dispatches to
+  the BATCH API (`transcribe_oneshot_batch`), guided (never locked) by an
+  optional per-request language hint.
+- **ElevenLabs streaming TTS** (`PERSONA_TTS_PROVIDER=elevenlabs`) — ONE voice
+  speaks whatever language the reply TEXT is in; no `language_code` is ever
+  sent on the wire (text-language auto-follow). Per-utterance WebSocket
+  lifecycle, rail-native `pcm_24000` audio, expressivity accepted-and-ignored.
+- **Dialect-aware auto-pick** — the create-time voice picker (and the
+  auto-remap below) prefer a voice whose ElevenLabs `verified_languages`
+  accent/locale suits the persona's declared language (e.g. an Egyptian-accent
+  voice for an Arabic persona), grounded in the real `/v1/voices` metadata.
+- **Boot-time voice AUTO-REMAP** — on API startup, a non-blocking background
+  pass re-picks every persona whose stored voice no longer matches the active
+  TTS provider (a Cartesia → ElevenLabs switch), so existing personas keep a
+  distinct, provider-correct voice instead of falling to a shared default.
+  Cheap-skips entirely on the default `cartesia` provider (zero DB reads).
+- **Fail-soft voice-identity resolution** — a provider-mismatched persona voice
+  (and the `/v1/tts` proxy's forwarded `provider` field) now fall back to the
+  active backend's default instead of 4xx-ing; flipping the provider back
+  restores every original voice untouched (nothing is mutated).
+- **Reply-language mirroring for voice** — under an utterance-level TTS
+  provider, the voice reply-language directive switches from a hard per-call
+  pin to "default to the persona's language, mirror the user's when they
+  write/speak in another one" (text chat is unaffected — byte-identical).
+- `PERSONA_STT_LANGUAGE_HINT` is now deprecated (warns once on set); superseded
+  by per-request language plumbing and Gladia's own code-switch guidance.
+
+#### Known-open (owner leg)
+- The Gladia BATCH one-shot dictation path was proven on synthetic clips only;
+  a real bilingual-speech fidelity check
+  (`test_gladia_batch_oneshot_real_bilingual_speech_fidelity`) is an
+  owner-run `@external` gate — see the Spec V14 close-out evidence for the
+  exact pass/fail criterion and escalation options if it fails.
+
 ## [1.1.0] - 2026-07-11
 
 ### Per-persona model selection — pick the brain, see the price (Spec M1, 2026-07-10)
