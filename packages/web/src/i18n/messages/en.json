@@ -1436,6 +1436,33 @@
     "deleteTitle": "Delete {name}?",
     "deleteBody": "{name} and all their typed memory will be removed — everywhere, by voice and text. This can't be undone.",
     "delete": "Delete",
-    "deleteFailed": "Couldn't delete. Try again."
+    "deleteFailed": "Couldn't delete. Try again.",
+    "memories": "Memories",
+    "tasksRun": "Tasks run",
+    "filesTitle": "{name}'s files",
+    "filesEmpty": "Nothing here yet — files this persona produces or you share with it will show up here.",
+    "avatar": {
+      "edit": "Edit avatar",
+      "title": "Avatar",
+      "replace": "Replace image",
+      "uploading": "Uploading…",
+      "regenerate": "Regenerate",
+      "regenerating": "Regenerating…",
+      "regenHint": "Regenerating drafts a new portrait from the persona's identity. It takes a moment — the new image appears when it's ready.",
+      "regenTimeout": "Still working — check back in a moment.",
+      "regenFailed": "Couldn't start regeneration. Try again.",
+      "uploadFailed": "Couldn't upload that image. Try another file.",
+      "done": "Done"
+    },
+    "memoriesModal": {
+      "title": "Memories",
+      "openGraph": "Open the graph",
+      "loadFailed": "Couldn't load memories. Try again.",
+      "unavailable": "Memory isn't available in this deployment.",
+      "empty": "No memories yet — they grow from conversations.",
+      "openConversation": "Open the conversation",
+      "more": "+{count} more in the graph",
+      "close": "Close"
+    }
   }
 }

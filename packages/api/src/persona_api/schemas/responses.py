@@ -126,6 +126,37 @@ class PersonaCapabilities(_Output):
     configured_tiers: tuple[str, ...]
 
 
+class PersonaMemoryItem(BaseModel):
+    """One graph memory attributed to a persona (the page's memories modal)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    content: str
+    created_at: datetime
+    #: The originating conversation when the provenance carries one (deep link).
+    conversation_id: str | None = None
+
+
+class PersonaMemoriesResponse(BaseModel):
+    """R11-B6 — a persona's graph memories, newest first (capped; honest total)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    available: bool
+    total: int
+    items: list[PersonaMemoryItem]
+
+
+class AvatarRegenerateResult(BaseModel):
+    """R11-B6 — the avatar-regeneration acknowledgement (async either way)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    queued: bool
+
+
 class PersonaDetail(_Output):
     """A persona's full detail (YAML + metadata).
 
@@ -167,6 +198,11 @@ class PersonaDetail(_Output):
     # memory (retrieved + compacted per turn at runtime). One cheap COUNT; lets
     # the detail's episodic-store card show a real figure instead of a guess.
     conversation_count: int = 0
+    # R11-B6 riders — the persona page's at-a-glance, honest counts: tasks ever
+    # created for this persona, and graph memories attributed to it (0 when the
+    # deployment has no graph store). Additive with defaults.
+    tasks_run_count: int = 0
+    memory_count: int = 0
 
 
 # -- LLM-assisted authoring (spec 10, §3 / D-10-6) --------------------------

@@ -34,12 +34,22 @@ export default async function PersonaDetailPage({
   if (personaRes.response.status === 404) notFound();
   const detail = await unwrap(personaRes);
 
-  const [tools, skills, mcpCatalog, mcpConnections] = await Promise.all([
-    api.GET("/v1/tools").then(unwrap),
-    api.GET("/v1/skills").then(unwrap),
-    api.GET("/v1/mcp-catalog").then(unwrap),
-    fetchMcpConnections(api, id),
-  ]);
+  const [tools, skills, mcpCatalog, mcpConnections, artifactsRes] =
+    await Promise.all([
+      api.GET("/v1/tools").then(unwrap),
+      api.GET("/v1/skills").then(unwrap),
+      api.GET("/v1/mcp-catalog").then(unwrap),
+      fetchMcpConnections(api, id),
+      // Files ride the page as an overlay (R11-B6 rider) — first page here,
+      // fail-soft to empty (the artifact route is a later-phase addition).
+      api.GET("/v1/personas/{persona_id}/artifacts", {
+        params: { path: { persona_id: id } },
+      }),
+    ]);
+  const initialArtifacts =
+    artifactsRes.response.ok && artifactsRes.data
+      ? artifactsRes.data
+      : { total: 0, limit: 50, offset: 0, items: [] };
 
   return (
     <PersonaPage
@@ -54,7 +64,10 @@ export default async function PersonaDetailPage({
       initialConsent={detail.consent_to_auto_dispatch ?? null}
       initialAvatarUrl={detail.avatar_url ?? null}
       conversationCount={detail.conversation_count ?? 0}
+      tasksRunCount={detail.tasks_run_count ?? 0}
+      memoryCount={detail.memory_count ?? 0}
       createdAt={detail.created_at ?? null}
+      initialArtifacts={initialArtifacts}
       newTaskAction={startTask}
     />
   );

@@ -435,6 +435,88 @@
         }
       }
     },
+    "/v1/personas/{persona_id}/memories": {
+      "get": {
+        "tags": ["personas"],
+        "summary": "List Persona Memories",
+        "description": "R11-B6 \u2014 the persona page's memories modal: this persona's graph memories,\nnewest first (capped at 100; ``total`` stays honest). ``available=False``\nmirrors the memory area's no-graph gate (never \"no memories yet\" when the\nstore simply isn't wired).",
+        "operationId": "list_persona_memories_v1_personas__persona_id__memories_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaMemoriesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/personas/{persona_id}/avatar/regenerate": {
+      "post": {
+        "tags": ["personas"],
+        "summary": "Regenerate Avatar",
+        "description": "R11-B6 \u2014 user-requested avatar regeneration: the SAME two doors the\ncreate path uses (the queue when the worker carries the handler, else the\ninline fail-soft generator). Always async \u2014 the client polls the persona\nfor the new ``avatar_url``. 404 for a missing/foreign persona.",
+        "operationId": "regenerate_avatar_v1_personas__persona_id__avatar_regenerate_post",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvatarRegenerateResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/personas/{persona_id}/consent": {
       "patch": {
         "tags": ["personas"],
@@ -794,6 +876,112 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PostMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/conversations/{conversation_id}/messages/{assistant_message_id}/regenerate": {
+      "post": {
+        "tags": ["conversations"],
+        "summary": "Regenerate Message",
+        "description": "Regenerate the LAST assistant reply \u2014 a REAL retry (R9-025 leg C).\n\nSupersedes ``assistant_message_id`` (excluded from every future model prompt\nAND the message listing from this instant on \u2014 never deleted) and streams a\nbrand-new reply to the SAME preceding user turn, exactly like\n``POST \u2026/messages`` streams a normal turn \u2014 reuses the identical detached\nturn machinery (billing, telemetry, one-active-turn, the R9-022 self-heal).\n\n422 (``chat_service.TurnTargetInvalidError``) unless ``assistant_message_id``\nIS the conversation's CURRENT last assistant message \u2014 v1 is conversation-\nTAIL-only (see ``chat_service.regenerate_turn``'s module docstring). Covers\nthree cases uniformly via ``context.reason``: ``not_found`` (no such message\nin this conversation at all), ``not_last_assistant_message`` (exists but is\nan older turn), or ``already_superseded`` (a duplicate click / a race). 409\n(``TurnAlreadyActiveError``) if a turn is already streaming for this\nconversation \u2014 checked BEFORE any write, so a blocked regenerate never\nsupersedes a reply with nothing queued to replace it.",
+        "operationId": "regenerate_message_v1_conversations__conversation_id__messages__assistant_message_id__regenerate_post",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "assistant_message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assistant Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/conversations/{conversation_id}/messages/{message_id}/edit": {
+      "patch": {
+        "tags": ["conversations"],
+        "summary": "Edit Message",
+        "description": "Edit the LAST user message's content and immediately re-run \u2014 R9-025 leg C.\n\nSupersedes ``message_id`` (and its assistant reply, when one already exists)\nand starts a brand-new turn on the edited ``body.content`` \u2014 streams exactly\nlike ``POST \u2026/messages`` (same detached turn machinery). See\n``chat_service.edit_and_rerun_turn``'s docstring for the supersede+new-row\nrepresentation decision and the ``{\"edited_from\": ...}`` marker.\n\n422 / 409 mirror ``regenerate_message`` exactly, except the v1 tail rule is\n\"the LAST user message\" (allowing for its own trailing assistant reply \u2014 the\nnormal completed-turn shape; see ``chat_service._tail_target``).",
+        "operationId": "edit_message_v1_conversations__conversation_id__messages__message_id__edit_patch",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditMessageRequest"
               }
             }
           }
@@ -1709,7 +1897,7 @@
       "delete": {
         "tags": ["me"],
         "summary": "Delete Schedule",
-        "description": "Delete a schedule (R9-024 \u2014 the calendar's delete affordance, chat + ``/schedule``).\n\nRLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant\nid is indistinguishable from a missing one (both 404 \u2014 no existence oracle). The backing task\n(if any \u2014 a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops\nfuture fires, matching the store's existing compensating-delete semantics used elsewhere\n(``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.",
+        "description": "Delete a schedule (R9-024 \u2014 the calendar's delete affordance, chat + ``/schedule``).\n\nRLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant\nid is indistinguishable from a missing one (both 404 \u2014 no existence oracle). Audits\n``schedule.delete``.\n\n**R9-037.** The delete now writes a durable tombstone (the user's DELETE is\npersona-scoped, durable, intent) every autonomous origination seam consults before\n(re-)creating \u2014 the owner-reported bug where a deleted schedule silently came back.\nThe backing task (if any \u2014 a ``task_scheduled_fire`` schedule), if still live, is\nPAUSED (design point 3: deleting the schedule stops the task's recurrence; the task\nmust not silently re-arm, but it is also not silently forgotten \u2014 a P6 notification\ntells the user why). This supersedes the pre-R9-037 \"backing task untouched\" note.",
         "operationId": "delete_schedule_v1_me_schedule__schedule_id__delete",
         "parameters": [
           {
@@ -4075,7 +4263,7 @@
       "post": {
         "tags": ["voice"],
         "summary": "Post Persona Tts",
-        "description": "Read-aloud: synthesise ``text`` in THE PERSONA's configured voice.\n\nOwnership: :func:`persona_service.get_persona` is RLS-scoped \u2014 a\ncross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`\n(\u2192 404 via the existing handler), never a leak. Fails soft to 503 when\nthe voice service is unconfigured/unreachable OR the persona has no\nconfigured voice; 413 passes through when the text is too long.",
+        "description": "Read-aloud: synthesise ``text`` in THE PERSONA's configured voice.\n\nOwnership: :func:`persona_service.get_persona` is RLS-scoped \u2014 a\ncross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`\n(\u2192 404 via the existing handler), never a leak. Fails soft to 503 when\nthe voice service is unconfigured/unreachable; 413 passes through when\nthe text is too long.\n\nR9-025 reopen leg A: a persona with no configured voice is no longer an\nimmediate local 503 \u2014 ``voice_id`` rides through as ``null`` and\npersona-voice resolves its own default (see the module docstring's\n\"Voiceless-persona fallback\" section). 503 ``no_voice_configured`` is\nstill reachable, but only when persona-voice itself has no default.",
         "operationId": "post_persona_tts_v1_personas__persona_id__tts_post",
         "parameters": [
           {
@@ -4124,7 +4312,7 @@
       "post": {
         "tags": ["voice"],
         "summary": "Post Stt",
-        "description": "In-chat + authoring dictation: transcribe an uploaded audio clip.\n\nOwner-scoped only (``get_current_user`` sets the RLS contextvar; no\npersona is involved \u2014 dictation runs before a persona necessarily\nexists, e.g. the author wizard's description field). Fails soft to 503\nwhen the voice service is unconfigured/unreachable; 413 passes through\nwhen the audio is too large.",
+        "description": "In-chat + authoring dictation: transcribe an uploaded audio clip.\n\nOwner-scoped only (``get_current_user`` sets the RLS contextvar; no\npersona is involved \u2014 dictation runs before a persona necessarily\nexists, e.g. the author wizard's description field). Fails soft to 503\nwhen the voice service is unconfigured/unreachable; 413 passes through\nwhen the audio is too large.\n\n``language`` (R9-025 reopen \u2014 context-pinned dictation): an optional\nISO-639-1-ish hint, forwarded verbatim to persona-voice's\n``POST /v1/stt``, which resolves it through\n``persona.language_capability`` (the SAME matrix the live call pipeline\npins per call) instead of leaning on Deepgram's own limited-coverage\n``detect_language``. Shape-invalid \u2192 422 here, before any upstream call\n(same validation posture as persona-voice's own field \u2014 belt-and-\nsuspenders, cheapest-gate-first). The web client supplies this from\nalready-loaded context: the chat composer's persona\n``identity.language_default``, or the authoring surface's active UI\nlocale \u2014 never a persona lookup here (this route stays persona-agnostic,\nper the docstring above). Omitted \u2192 unchanged detect-fallback (7647699).",
         "operationId": "post_stt_v1_stt_post",
         "requestBody": {
           "content": {
@@ -4569,6 +4757,18 @@
         "title": "AutonomyStateOut",
         "description": "The owner's autonomy-pause state \u2014 the durable presence read, reflect never error (B4).\n\n``paused`` is read from the ``owner_autonomy_pause`` row (RLS-scoped). ``changed`` is false on\nan idempotent no-op \u2014 pausing an already-paused owner, or resuming one who isn't paused."
       },
+      "AvatarRegenerateResult": {
+        "properties": {
+          "queued": {
+            "type": "boolean",
+            "title": "Queued"
+          }
+        },
+        "type": "object",
+        "required": ["queued"],
+        "title": "AvatarRegenerateResult",
+        "description": "R11-B6 \u2014 the avatar-regeneration acknowledgement (async either way)."
+      },
       "Body_create_upload_v1_personas__persona_id__uploads_post": {
         "properties": {
           "file": {
@@ -4598,6 +4798,20 @@
             "type": "string",
             "contentMediaType": "application/octet-stream",
             "title": "Audio"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16,
+                "minLength": 2,
+                "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
           }
         },
         "type": "object",
@@ -5296,6 +5510,20 @@
         ],
         "title": "DocumentRef",
         "description": "Reference to an attached document \u2014 the API-boundary type.\n\nPersisted alongside the original file as a ``{doc_ref}.meta.json``\nsidecar in the workspace. Returned by :func:`upload`,\n:func:`list_for_conversation`, and (via JSON) the API GET endpoint\n(T18). Carries the metadata T14/T15/T16 need to render the prompt\nsections + the synopsis."
+      },
+      "EditMessageRequest": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Content"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["content"],
+        "title": "EditMessageRequest",
+        "description": "Edit the LAST user message's content + immediately re-run (R9-025 leg C).\n\n``content`` is bounded the same way :class:`PostMessageRequest`'s is\n(non-blank; ``min_length=1`` is the whole bound \u2014 the API has never capped a\nmessage's max length beyond that). v1 is text-only: no ``images`` /\n``channel`` fields \u2014 editing only ever changes the wording, never the\nattachments (see ``chat_service.edit_and_rerun_turn``'s module docstring for\nthe supersede+new-row representation decision)."
       },
       "FireEvent": {
         "properties": {
@@ -6660,6 +6888,17 @@
           "human_terms": {
             "type": "string",
             "title": "Human Terms"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
           }
         },
         "additionalProperties": false,
@@ -6839,6 +7078,16 @@
             "type": "integer",
             "title": "Conversation Count",
             "default": 0
+          },
+          "tasks_run_count": {
+            "type": "integer",
+            "title": "Tasks Run Count",
+            "default": 0
+          },
+          "memory_count": {
+            "type": "integer",
+            "title": "Memory Count",
+            "default": 0
           }
         },
         "additionalProperties": false,
@@ -6852,6 +7101,65 @@
         ],
         "title": "PersonaDetail",
         "description": "A persona's full detail (YAML + metadata).\n\nThe optional :attr:`capabilities` field (D-F3-X-capability-endpoint) is\nadditive on top of the Spec 08 / Spec 09 surface: tests + composition\nroots that do not wire a :class:`TierRegistry` (e.g. unit fixtures\nwithout the runtime) omit the field and the API returns ``None`` so the\npersona-detail surface stays usable without runtime composition."
+      },
+      "PersonaMemoriesResponse": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PersonaMemoryItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": ["available", "total", "items"],
+        "title": "PersonaMemoriesResponse",
+        "description": "R11-B6 \u2014 a persona's graph memories, newest first (capped; honest total)."
+      },
+      "PersonaMemoryItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          }
+        },
+        "type": "object",
+        "required": ["id", "name", "content", "created_at"],
+        "title": "PersonaMemoryItem",
+        "description": "One graph memory attributed to a persona (the page's memories modal)."
       },
       "PersonaSpecialitySummary": {
         "properties": {
@@ -7494,6 +7802,12 @@
             "type": "boolean",
             "title": "Notify On Fire",
             "default": true
+          },
+          "intent": {
+            "type": "string",
+            "enum": ["reminder", "task"],
+            "title": "Intent",
+            "default": "reminder"
           }
         },
         "additionalProperties": false,

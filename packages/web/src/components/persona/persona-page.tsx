@@ -10,13 +10,17 @@ import {
   NewTaskDialog,
   type NewTaskPersona,
 } from "@/components/activity/new-task-dialog";
-import { AvatarEditor } from "@/components/personas/avatar-editor";
+import type { ArtifactListResponse } from "@/components/artifacts/artifact-gallery";
+import { ArtifactGallery } from "@/components/artifacts/artifact-gallery";
+import { AvatarModal } from "@/components/persona/avatar-modal";
+import { PersonaMemoriesModal } from "@/components/persona/persona-memories-modal";
 import type { McpConnectionStatus } from "@/components/personas/mcp-connection-label";
 import { PersonaEditor } from "@/components/personas/persona-editor";
 import type { McpCatalogEntry } from "@/components/personas/persona-form";
 import { useConfirm } from "@/components/providers/confirm-provider";
 import { useNotify } from "@/components/providers/notification-provider";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { useApi } from "@/lib/api/use-api";
 import { renameInIdentity } from "@/lib/persona";
 import {
@@ -53,7 +57,10 @@ export function PersonaPage({
   initialConsent,
   initialAvatarUrl,
   conversationCount,
+  tasksRunCount,
+  memoryCount,
   createdAt,
+  initialArtifacts,
   newTaskAction,
 }: {
   personaId: string;
@@ -65,7 +72,10 @@ export function PersonaPage({
   initialConsent: boolean | null;
   initialAvatarUrl: string | null;
   conversationCount: number;
+  tasksRunCount: number;
+  memoryCount: number;
   createdAt: string | null;
+  initialArtifacts: ArtifactListResponse;
   newTaskAction: (formData: FormData) => void | Promise<void>;
 }) {
   const t = useTranslations("personaPage");
@@ -79,6 +89,7 @@ export function PersonaPage({
   const [status, setStatus] = useState<SaveStatus>("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
 
   const onDocChange = useCallback((doc: PersonaDoc) => {
     setIdentity(readIdentity(doc));
@@ -191,7 +202,7 @@ export function PersonaPage({
 
       {/* hero: avatar + live name/role + the three doors (kit) */}
       <header className="flex flex-wrap items-start gap-5 py-6">
-        <AvatarEditor
+        <AvatarModal
           personaId={personaId}
           name={identity.name}
           avatarUrl={avatarUrl}
@@ -255,6 +266,7 @@ export function PersonaPage({
           saveLabel=""
           autosave
           nav={false}
+          sectionsOpen
           hideAvatar
           avatarUrlOverride={avatarUrl}
           onDocChange={onDocChange}
@@ -264,7 +276,7 @@ export function PersonaPage({
         />
 
         {/* right rail (kit): at-a-glance · quick actions · danger zone */}
-        <aside className="mt-6 flex flex-col gap-4 lg:mt-0">
+        <aside className="mt-6 flex flex-col gap-4 lg:sticky lg:top-14 lg:mt-0 lg:max-h-[calc(100vh-4.5rem)] lg:self-start lg:overflow-y-auto">
           <section className="rounded-xl border border-border bg-card p-4">
             <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
               {t("glance")}
@@ -273,6 +285,27 @@ export function PersonaPage({
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">{t("conversations")}</dt>
                 <dd className="tabular-nums">{conversationCount}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">{t("memories")}</dt>
+                <dd>
+                  <PersonaMemoriesModal
+                    personaId={personaId}
+                    count={memoryCount}
+                    trigger={
+                      <button
+                        type="button"
+                        className="tabular-nums underline decoration-dotted underline-offset-2 hover:text-foreground"
+                      >
+                        {memoryCount}
+                      </button>
+                    }
+                  />
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-muted-foreground">{t("tasksRun")}</dt>
+                <dd className="tabular-nums">{tasksRunCount}</dd>
               </div>
               {createdAt ? (
                 <div className="flex justify-between">
@@ -314,15 +347,14 @@ export function PersonaPage({
                 <Copy className="size-4" aria-hidden="true" />
                 {t("duplicate")}
               </Button>
-              <Link
-                href={`/personas/${personaId}/files`}
-                className={cn(
-                  buttonVariants({ variant: "ghost" }),
-                  "w-full gap-1.5",
-                )}
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full gap-1.5"
+                onClick={() => setFilesOpen(true)}
               >
                 {t("files")}
-              </Link>
+              </Button>
             </div>
           </section>
 
@@ -346,6 +378,34 @@ export function PersonaPage({
           </section>
         </aside>
       </div>
+
+      {/* R11-B6 rider (owner-ruled): files are an OVERLAY, not a route. */}
+      <Sheet open={filesOpen} onOpenChange={setFilesOpen}>
+        <SheetContent
+          side="right"
+          showCloseButton
+          className="w-full gap-0 overflow-y-auto p-0 sm:w-[560px] sm:max-w-xl"
+          data-slot="persona-files-panel"
+        >
+          <header className="border-border border-b px-4 py-3">
+            <SheetTitle className="font-heading text-base font-semibold tracking-tight">
+              {t("filesTitle", { name: identity.name })}
+            </SheetTitle>
+          </header>
+          <div className="min-h-0 flex-1 px-4 py-3">
+            {initialArtifacts.total === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                {t("filesEmpty")}
+              </p>
+            ) : (
+              <ArtifactGallery
+                personaId={personaId}
+                initial={initialArtifacts}
+              />
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

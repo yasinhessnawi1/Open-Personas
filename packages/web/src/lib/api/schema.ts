@@ -198,6 +198,52 @@ export interface paths {
     patch: operations["update_persona_v1_personas__persona_id__patch"];
     trace?: never;
   };
+  "/v1/personas/{persona_id}/memories": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Persona Memories
+     * @description R11-B6 — the persona page's memories modal: this persona's graph memories,
+     *     newest first (capped at 100; ``total`` stays honest). ``available=False``
+     *     mirrors the memory area's no-graph gate (never "no memories yet" when the
+     *     store simply isn't wired).
+     */
+    get: operations["list_persona_memories_v1_personas__persona_id__memories_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/personas/{persona_id}/avatar/regenerate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Regenerate Avatar
+     * @description R11-B6 — user-requested avatar regeneration: the SAME two doors the
+     *     create path uses (the queue when the worker carries the handler, else the
+     *     inline fail-soft generator). Always async — the client polls the persona
+     *     for the new ``avatar_url``. 404 for a missing/foreign persona.
+     */
+    post: operations["regenerate_avatar_v1_personas__persona_id__avatar_regenerate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/personas/{persona_id}/consent": {
     parameters: {
       query?: never;
@@ -379,6 +425,72 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/v1/conversations/{conversation_id}/messages/{assistant_message_id}/regenerate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Regenerate Message
+     * @description Regenerate the LAST assistant reply — a REAL retry (R9-025 leg C).
+     *
+     *     Supersedes ``assistant_message_id`` (excluded from every future model prompt
+     *     AND the message listing from this instant on — never deleted) and streams a
+     *     brand-new reply to the SAME preceding user turn, exactly like
+     *     ``POST …/messages`` streams a normal turn — reuses the identical detached
+     *     turn machinery (billing, telemetry, one-active-turn, the R9-022 self-heal).
+     *
+     *     422 (``chat_service.TurnTargetInvalidError``) unless ``assistant_message_id``
+     *     IS the conversation's CURRENT last assistant message — v1 is conversation-
+     *     TAIL-only (see ``chat_service.regenerate_turn``'s module docstring). Covers
+     *     three cases uniformly via ``context.reason``: ``not_found`` (no such message
+     *     in this conversation at all), ``not_last_assistant_message`` (exists but is
+     *     an older turn), or ``already_superseded`` (a duplicate click / a race). 409
+     *     (``TurnAlreadyActiveError``) if a turn is already streaming for this
+     *     conversation — checked BEFORE any write, so a blocked regenerate never
+     *     supersedes a reply with nothing queued to replace it.
+     */
+    post: operations["regenerate_message_v1_conversations__conversation_id__messages__assistant_message_id__regenerate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/conversations/{conversation_id}/messages/{message_id}/edit": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Edit Message
+     * @description Edit the LAST user message's content and immediately re-run — R9-025 leg C.
+     *
+     *     Supersedes ``message_id`` (and its assistant reply, when one already exists)
+     *     and starts a brand-new turn on the edited ``body.content`` — streams exactly
+     *     like ``POST …/messages`` (same detached turn machinery). See
+     *     ``chat_service.edit_and_rerun_turn``'s docstring for the supersede+new-row
+     *     representation decision and the ``{"edited_from": ...}`` marker.
+     *
+     *     422 / 409 mirror ``regenerate_message`` exactly, except the v1 tail rule is
+     *     "the LAST user message" (allowing for its own trailing assistant reply — the
+     *     normal completed-turn shape; see ``chat_service._tail_target``).
+     */
+    patch: operations["edit_message_v1_conversations__conversation_id__messages__message_id__edit_patch"];
     trace?: never;
   };
   "/v1/conversations/{conversation_id}/active-turn": {
@@ -886,10 +998,16 @@ export interface paths {
      * @description Delete a schedule (R9-024 — the calendar's delete affordance, chat + ``/schedule``).
      *
      *     RLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant
-     *     id is indistinguishable from a missing one (both 404 — no existence oracle). The backing task
-     *     (if any — a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops
-     *     future fires, matching the store's existing compensating-delete semantics used elsewhere
-     *     (``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.
+     *     id is indistinguishable from a missing one (both 404 — no existence oracle). Audits
+     *     ``schedule.delete``.
+     *
+     *     **R9-037.** The delete now writes a durable tombstone (the user's DELETE is
+     *     persona-scoped, durable, intent) every autonomous origination seam consults before
+     *     (re-)creating — the owner-reported bug where a deleted schedule silently came back.
+     *     The backing task (if any — a ``task_scheduled_fire`` schedule), if still live, is
+     *     PAUSED (design point 3: deleting the schedule stops the task's recurrence; the task
+     *     must not silently re-arm, but it is also not silently forgotten — a P6 notification
+     *     tells the user why). This supersedes the pre-R9-037 "backing task untouched" note.
      */
     delete: operations["delete_schedule_v1_me_schedule__schedule_id__delete"];
     options?: never;
@@ -2133,8 +2251,14 @@ export interface paths {
      *     Ownership: :func:`persona_service.get_persona` is RLS-scoped — a
      *     cross-tenant ``persona_id`` surfaces as :class:`PersonaNotFoundError`
      *     (→ 404 via the existing handler), never a leak. Fails soft to 503 when
-     *     the voice service is unconfigured/unreachable OR the persona has no
-     *     configured voice; 413 passes through when the text is too long.
+     *     the voice service is unconfigured/unreachable; 413 passes through when
+     *     the text is too long.
+     *
+     *     R9-025 reopen leg A: a persona with no configured voice is no longer an
+     *     immediate local 503 — ``voice_id`` rides through as ``null`` and
+     *     persona-voice resolves its own default (see the module docstring's
+     *     "Voiceless-persona fallback" section). 503 ``no_voice_configured`` is
+     *     still reachable, but only when persona-voice itself has no default.
      */
     post: operations["post_persona_tts_v1_personas__persona_id__tts_post"];
     delete?: never;
@@ -2161,6 +2285,19 @@ export interface paths {
      *     exists, e.g. the author wizard's description field). Fails soft to 503
      *     when the voice service is unconfigured/unreachable; 413 passes through
      *     when the audio is too large.
+     *
+     *     ``language`` (R9-025 reopen — context-pinned dictation): an optional
+     *     ISO-639-1-ish hint, forwarded verbatim to persona-voice's
+     *     ``POST /v1/stt``, which resolves it through
+     *     ``persona.language_capability`` (the SAME matrix the live call pipeline
+     *     pins per call) instead of leaning on Deepgram's own limited-coverage
+     *     ``detect_language``. Shape-invalid → 422 here, before any upstream call
+     *     (same validation posture as persona-voice's own field — belt-and-
+     *     suspenders, cheapest-gate-first). The web client supplies this from
+     *     already-loaded context: the chat composer's persona
+     *     ``identity.language_default``, or the authoring surface's active UI
+     *     locale — never a persona lookup here (this route stays persona-agnostic,
+     *     per the docstring above). Omitted → unchanged detect-fallback (7647699).
      */
     post: operations["post_stt_v1_stt_post"];
     delete?: never;
@@ -2412,6 +2549,14 @@ export interface components {
        */
       note: string;
     };
+    /**
+     * AvatarRegenerateResult
+     * @description R11-B6 — the avatar-regeneration acknowledgement (async either way).
+     */
+    AvatarRegenerateResult: {
+      /** Queued */
+      queued: boolean;
+    };
     /** Body_create_upload_v1_personas__persona_id__uploads_post */
     Body_create_upload_v1_personas__persona_id__uploads_post: {
       /** File */
@@ -2423,6 +2568,8 @@ export interface components {
     Body_post_stt_v1_stt_post: {
       /** Audio */
       audio: string;
+      /** Language */
+      language?: string | null;
     };
     /**
      * BudgetExtendRequest
@@ -2874,6 +3021,21 @@ export interface components {
        * @default []
        */
       images: components["schemas"]["ImageContent"][];
+    };
+    /**
+     * EditMessageRequest
+     * @description Edit the LAST user message's content + immediately re-run (R9-025 leg C).
+     *
+     *     ``content`` is bounded the same way :class:`PostMessageRequest`'s is
+     *     (non-blank; ``min_length=1`` is the whole bound — the API has never capped a
+     *     message's max length beyond that). v1 is text-only: no ``images`` /
+     *     ``channel`` fields — editing only ever changes the wording, never the
+     *     attachments (see ``chat_service.edit_and_rerun_turn``'s module docstring for
+     *     the supersede+new-row representation decision).
+     */
+    EditMessageRequest: {
+      /** Content */
+      content: string;
     };
     /**
      * FireEvent
@@ -3753,6 +3915,8 @@ export interface components {
       timezone: string;
       /** Human Terms */
       human_terms: string;
+      /** Subject */
+      subject?: string | null;
     };
     /**
      * OccurrencesResult
@@ -3852,6 +4016,47 @@ export interface components {
        * @default 0
        */
       conversation_count: number;
+      /**
+       * Tasks Run Count
+       * @default 0
+       */
+      tasks_run_count: number;
+      /**
+       * Memory Count
+       * @default 0
+       */
+      memory_count: number;
+    };
+    /**
+     * PersonaMemoriesResponse
+     * @description R11-B6 — a persona's graph memories, newest first (capped; honest total).
+     */
+    PersonaMemoriesResponse: {
+      /** Available */
+      available: boolean;
+      /** Total */
+      total: number;
+      /** Items */
+      items: components["schemas"]["PersonaMemoryItem"][];
+    };
+    /**
+     * PersonaMemoryItem
+     * @description One graph memory attributed to a persona (the page's memories modal).
+     */
+    PersonaMemoryItem: {
+      /** Id */
+      id: string;
+      /** Name */
+      name: string;
+      /** Content */
+      content: string;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /** Conversation Id */
+      conversation_id?: string | null;
     };
     /**
      * PersonaSpecialitySummary
@@ -4205,6 +4410,12 @@ export interface components {
        * @default true
        */
       notify_on_fire: boolean;
+      /**
+       * Intent
+       * @default reminder
+       * @enum {string}
+       */
+      intent: "reminder" | "task";
     };
     /**
      * ScheduleCreateResult
@@ -5077,6 +5288,68 @@ export interface operations {
       };
     };
   };
+  list_persona_memories_v1_personas__persona_id__memories_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PersonaMemoriesResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  regenerate_avatar_v1_personas__persona_id__avatar_regenerate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        persona_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AvatarRegenerateResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   set_consent_v1_personas__persona_id__consent_patch: {
     parameters: {
       query?: never;
@@ -5318,6 +5591,74 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PostMessageRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  regenerate_message_v1_conversations__conversation_id__messages__assistant_message_id__regenerate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+        assistant_message_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  edit_message_v1_conversations__conversation_id__messages__message_id__edit_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+        message_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["EditMessageRequest"];
       };
     };
     responses: {

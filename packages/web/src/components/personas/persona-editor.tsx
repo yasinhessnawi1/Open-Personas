@@ -117,6 +117,7 @@ export function PersonaEditor({
   hideAvatar = false,
   avatarUrlOverride,
   nav = true,
+  sectionsOpen = false,
 }: {
   initialDoc: PersonaDoc;
   tools: string[];
@@ -155,6 +156,9 @@ export function PersonaEditor({
   avatarUrlOverride?: string | null;
   /** The kit page is a single column with a right rail — no timeline nav. */
   nav?: boolean;
+  /** R11-B6 (owner-ruled): open every section card by default (Advanced stays
+   * folded). The consolidated page sets this; the wizard keeps staged reveal. */
+  sectionsOpen?: boolean;
 }) {
   const t = useTranslations("author");
   const [doc, setDoc] = useState<PersonaDoc>(initialDoc);
@@ -362,6 +366,7 @@ export function PersonaEditor({
             mcpServers={mcpServers}
             mcpConnections={mcpConnections}
             personaId={personaId}
+            openAll={sectionsOpen}
           />
 
           {/* Model — Spec M1 (M1-T7): pick a specific priced model for this
@@ -371,7 +376,12 @@ export function PersonaEditor({
               tier/weights/budget dial. Renders in BOTH the create wizard and
               the edit flow (no personaId gate — the choice rides the YAML
               itself; no separate PATCH needed here). */}
-          <CollapsibleSection id="model" title={t("modelTitle")} icon={Cpu}>
+          <CollapsibleSection
+            id="model"
+            title={t("modelTitle")}
+            icon={Cpu}
+            defaultOpen={sectionsOpen}
+          >
             <p className="type-caption text-muted-foreground">
               {t("modelHint")}
             </p>
@@ -388,6 +398,7 @@ export function PersonaEditor({
               id="autonomy"
               title={t("autonomyTitle")}
               icon={SlidersHorizontal}
+              defaultOpen={sectionsOpen}
             >
               <AutonomyConsentSection
                 autonomy={readAutonomy(doc)}

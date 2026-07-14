@@ -22,6 +22,7 @@ from persona_runtime.routing import tier_for
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.config import Edition
+from persona_api.db.engine import rls_connection
 from persona_api.errors import RefinementLimitError
 from persona_api.imagegen import service as imagegen_service
 from persona_api.jobs.handlers.avatar import avatar_queue_ready, enqueue_avatar_generation
@@ -31,10 +32,13 @@ from persona_api.routes._runtime_guard import require_model_backend
 from persona_api.schemas import (
     AuthoringDraft,
     AuthorPersonaRequest,
+    AvatarRegenerateResult,
     CreatePersonaRequest,
     GrantToolRequest,
     PersonaCapabilities,
     PersonaDetail,
+    PersonaMemoriesResponse,
+    PersonaMemoryItem,
     PersonaSpecialitySummary,
     PersonaSummary,
     RefinePersonaRequest,
@@ -148,6 +152,8 @@ def _persona_detail(
     *,
     tier_registry: TierRegistry | None,
     conversation_count: int = 0,
+    tasks_run_count: int = 0,
+    memory_count: int = 0,
 ) -> PersonaDetail:
     avatar = row.get("avatar_url")
     consent = row.get("consent_to_auto_dispatch")
@@ -171,6 +177,8 @@ def _persona_detail(
         created_at=row["created_at"],  # type: ignore[arg-type]
         updated_at=row["updated_at"],  # type: ignore[arg-type]
         conversation_count=conversation_count,
+        tasks_run_count=tasks_run_count,
+        memory_count=memory_count,
         # N2-D-4 surface c: flag enabled MCP servers no longer in the available catalog.
         unavailable_mcp_servers=catalog_service.unavailable_enabled_mcp_servers(
             _tools_from_yaml(yaml_str)
@@ -757,17 +765,151 @@ async def list_personas(
     ]
 
 
+def _tasks_run_count(rls_engine: object, owner_id: str, persona_id: str) -> int:
+    """Tasks ever created for this persona — one RLS-scoped COUNT (R11-B6 glance)."""
+    from sqlalchemy import text as _text
+
+    with rls_connection(rls_engine, owner_id) as conn:  # type: ignore[arg-type]
+        row = conn.execute(
+            _text("SELECT count(*) AS n FROM tasks WHERE persona_id = :pid"),
+            {"pid": persona_id},
+        ).first()
+    return int(row.n) if row is not None else 0
+
+
+#: Provenance is an ARRAY of contribution records; jsonb containment matches any
+#: element carrying this persona's attribution (R11-B6 glance + memories modal).
+_MEMORY_MATCH_SQL = (
+    "FROM graph_nodes WHERE merged_into IS NULL AND provenance @> CAST(:prov AS jsonb)"
+)
+
+
+def _memory_count(request: Request, owner_id: str, persona_id: str) -> int:
+    """Graph memories attributed to this persona; 0 when no graph store is wired."""
+    from sqlalchemy import text as _text
+
+    if getattr(request.app.state, "graph_store", None) is None:
+        return 0
+    with rls_connection(request.app.state.rls_engine, owner_id) as conn:
+        row = conn.execute(
+            _text(f"SELECT count(*) AS n {_MEMORY_MATCH_SQL}"),
+            {"prov": json.dumps([{"persona_id": persona_id}])},
+        ).first()
+    return int(row.n) if row is not None else 0
+
+
 @router.get("/{persona_id}", response_model=PersonaDetail)
 async def get_persona(
     persona_id: str,
     request: Request,
-    user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — RLS via contextvar
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaDetail:
     """Get a persona's YAML + metadata (404 if not the caller's)."""
     rls_engine = request.app.state.rls_engine
     row = persona_service.get_persona(rls_engine=rls_engine, persona_id=persona_id)
     count = persona_service.conversation_count_for(rls_engine=rls_engine, persona_id=persona_id)
-    return _persona_detail(row, tier_registry=_tier_registry(request), conversation_count=count)
+    return _persona_detail(
+        row,
+        tier_registry=_tier_registry(request),
+        conversation_count=count,
+        tasks_run_count=_tasks_run_count(rls_engine, user.id, persona_id),
+        memory_count=_memory_count(request, user.id, persona_id),
+    )
+
+
+@router.get("/{persona_id}/memories", response_model=PersonaMemoriesResponse)
+async def list_persona_memories(
+    persona_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> PersonaMemoriesResponse:
+    """R11-B6 — the persona page's memories modal: this persona's graph memories,
+    newest first (capped at 100; ``total`` stays honest). ``available=False``
+    mirrors the memory area's no-graph gate (never "no memories yet" when the
+    store simply isn't wired)."""
+    from sqlalchemy import text as _text
+
+    # 404 for a missing/foreign persona (same oracle as the detail read).
+    persona_service.get_persona(rls_engine=request.app.state.rls_engine, persona_id=persona_id)
+    if getattr(request.app.state, "graph_store", None) is None:
+        return PersonaMemoriesResponse(available=False, total=0, items=[])
+    prov = json.dumps([{"persona_id": persona_id}])
+    with rls_connection(request.app.state.rls_engine, user.id) as conn:
+        total_row = conn.execute(
+            _text(f"SELECT count(*) AS n {_MEMORY_MATCH_SQL}"), {"prov": prov}
+        ).first()
+        rows = (
+            conn.execute(
+                _text(
+                    "SELECT id, concept_name, content, created_at, provenance "
+                    f"{_MEMORY_MATCH_SQL} ORDER BY created_at DESC LIMIT 100"
+                ),
+                {"prov": prov},
+            )
+            .mappings()
+            .all()
+        )
+    items: list[PersonaMemoryItem] = []
+    for r in rows:
+        conversation_id: str | None = None
+        prov_list = r["provenance"] if isinstance(r["provenance"], list) else []
+        for entry in prov_list:
+            iid = entry.get("interaction_id") if isinstance(entry, dict) else None
+            if isinstance(iid, str) and iid.startswith("conv"):
+                conversation_id = iid
+                break
+        items.append(
+            PersonaMemoryItem(
+                id=str(r["id"]),
+                name=str(r["concept_name"]),
+                content=str(r["content"]),
+                created_at=r["created_at"],
+                conversation_id=conversation_id,
+            )
+        )
+    return PersonaMemoriesResponse(
+        available=True,
+        total=int(total_row.n) if total_row is not None else len(items),
+        items=items,
+    )
+
+
+@router.post(
+    "/{persona_id}/avatar/regenerate",
+    response_model=AvatarRegenerateResult,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def regenerate_avatar(
+    persona_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AvatarRegenerateResult:
+    """R11-B6 — user-requested avatar regeneration: the SAME two doors the
+    create path uses (the queue when the worker carries the handler, else the
+    inline fail-soft generator). Always async — the client polls the persona
+    for the new ``avatar_url``. 404 for a missing/foreign persona."""
+    row = persona_service.get_persona(
+        rls_engine=request.app.state.rls_engine, persona_id=persona_id
+    )
+    yaml_str = str(row["yaml"])
+    job_queue = getattr(request.app.state, "job_queue", None)
+    config = request.app.state.config
+    if job_queue is not None and avatar_queue_ready(
+        avatar_via_queue=getattr(config, "avatar_via_queue", False),
+        image_backend=getattr(request.app.state, "image_backend", None),
+        file_storage=getattr(request.app.state, "file_storage", None),
+    ):
+        enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+        return AvatarRegenerateResult(queued=True)
+    background_tasks.add_task(
+        _maybe_generate_avatar,
+        request,
+        owner_id=user.id,
+        persona_id=persona_id,
+        yaml_str=yaml_str,
+    )
+    return AvatarRegenerateResult(queued=False)
 
 
 @router.patch("/{persona_id}", response_model=PersonaDetail)

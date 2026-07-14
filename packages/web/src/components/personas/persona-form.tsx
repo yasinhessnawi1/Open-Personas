@@ -76,6 +76,7 @@ export function PersonaForm({
   mcpServers = [],
   mcpConnections = [],
   personaId,
+  openAll = false,
 }: {
   doc: PersonaDoc;
   onChange: (doc: PersonaDoc) => void;
@@ -95,6 +96,9 @@ export function PersonaForm({
   // remote app that declares a credential can render the setup form. Absent in the
   // author/new flow (no id yet) → the read-honest needs-setup disclosure.
   personaId?: string;
+  /** R11-B6 (owner-ruled): the consolidated page opens EVERY card by default
+   * (only Advanced stays folded); the authoring wizard keeps the staged flow. */
+  openAll?: boolean;
 }) {
   const t = useTranslations("author");
   const tApps = useTranslations("apps");
@@ -187,6 +191,7 @@ export function PersonaForm({
 
       {/* Self-facts */}
       <Section
+        defaultOpen={openAll}
         id="self-facts"
         title={t("selfFactsTitle")}
         badge="SF"
@@ -248,6 +253,7 @@ export function PersonaForm({
 
       {/* Worldview */}
       <Section
+        defaultOpen={openAll}
         id="worldview"
         title={t("worldviewTitle")}
         badge="WV"
@@ -337,7 +343,12 @@ export function PersonaForm({
       {/* Voice — its own card (a persona's audible identity, V6 C2). Sits after
           the typed-memory stores so identity → self-facts → worldview group
           first, then voice (consistency). */}
-      <Section id="voice" title={t("voiceTitle")} icon={Mic}>
+      <Section
+        defaultOpen={openAll}
+        id="voice"
+        title={t("voiceTitle")}
+        icon={Mic}
+      >
         <Field label={t("voice")} hint={t("voiceDescription")}>
           <VoiceSelector
             value={currentVoiceId}
@@ -356,7 +367,12 @@ export function PersonaForm({
       </Section>
 
       {/* Capabilities: tools + skills + MCP as one set (spec 30 T11) */}
-      <Section id="capabilities" title={t("capabilitiesTitle")} icon={Wrench}>
+      <Section
+        defaultOpen={openAll}
+        id="capabilities"
+        title={t("capabilitiesTitle")}
+        icon={Wrench}
+      >
         <p
           className={cn(
             "text-xs",
