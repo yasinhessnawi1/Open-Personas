@@ -454,3 +454,183 @@ class TestCatalogueFetchFailureLogging:
         warnings = [m for m in loguru_capture if "catalogue unavailable" in m]
         assert len(warnings) == 1
         assert "status=503" in warnings[0]
+
+
+# ----- reconcile_voice_assignments (Spec V14 T5a — the D-V14-13 boot trigger) ---
+
+
+_YAML_ELEVENLABS_VOICE = _YAML + "  voice: elevenlabs:existing-el-voice\n"
+
+
+class _FakeRow:
+    """Mimics a SQLAlchemy ``Row``'s attribute-access shape (``row.yaml`` etc.)."""
+
+    def __init__(self, *, id: str, owner_id: str, yaml: str) -> None:  # noqa: A002
+        self.id = id
+        self.owner_id = owner_id
+        self.yaml = yaml
+
+
+class _FakeConnCtx:
+    def __init__(self, rows: list[_FakeRow]) -> None:
+        self._rows = rows
+
+    def __enter__(self) -> _FakeConnCtx:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def execute(self, _stmt: object) -> SimpleNamespace:
+        return SimpleNamespace(all=lambda: self._rows)
+
+
+class _FakeSweepEngine:
+    """A stand-in ``sweep_engine`` — records whether ``.begin()`` was ever called."""
+
+    def __init__(self, rows: list[_FakeRow] | None = None) -> None:
+        self._rows = rows or []
+        self.begin_calls = 0
+
+    def begin(self) -> _FakeConnCtx:
+        self.begin_calls += 1
+        return _FakeConnCtx(self._rows)
+
+
+class _RaisingSweepEngine:
+    def begin(self) -> _FakeConnCtx:
+        raise RuntimeError("persona listing exploded")
+
+
+def _reconcile_config(
+    *, voice_tts_provider: str, voice_service_url: str = "http://voice"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        voice_service_url=voice_service_url,
+        voice_pick_tier="small",
+        voice_tts_provider=voice_tts_provider,
+    )
+
+
+class TestReconcileVoiceAssignments:
+    def test_mismatched_persona_is_remapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            vas,
+            "_fetch_catalogue",
+            _aret(("elevenlabs", [_option("el1", "feminine"), _option("el2", "masculine")])),
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id="p1", owner_id="owner-1", yaml=_YAML_WITH_VOICE)]  # cartesia-voiced
+        )
+        engine = object()
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                sweep_engine=sweep,
+                rls_engine=engine,
+            )
+        )
+        assert counts == {"scanned": 1, "remapped": 1, "skipped": 0, "failed": 0}
+        assert called == {
+            "rls_engine": engine,
+            "persona_id": "p1",
+            "provider": "elevenlabs",
+            "voice_id": "el1",
+        }
+
+    def test_already_matching_persona_is_skipped_without_a_catalogue_fetch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch_calls = 0
+
+        async def _counting_fetch(*_a: object, **_k: object) -> tuple[str, list[object]]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return "elevenlabs", []
+
+        monkeypatch.setattr(vas, "_fetch_catalogue", _counting_fetch)
+        monkeypatch.setattr(vas.persona_service, "set_voice", _araise())
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id="p1", owner_id="owner-1", yaml=_YAML_ELEVENLABS_VOICE)]
+        )
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 1, "remapped": 0, "skipped": 1, "failed": 0}
+        assert fetch_calls == 0  # the cheap YAML-provider check skipped the network call
+
+    def test_default_cartesia_provider_is_a_full_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())
+        sweep = _RaisingSweepEngine()  # would raise if .begin() were ever called
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="cartesia"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
+
+    def test_feature_unconfigured_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())
+        sweep = _RaisingSweepEngine()
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs", voice_service_url=""),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
+
+    def test_missing_composition_pieces_is_a_noop(self) -> None:
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=None, registry=None, sweep_engine=None, rls_engine=None
+            )
+        )
+        assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
+
+    def test_listing_failure_logs_once_and_never_crashes(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_capture: list[str]
+    ) -> None:
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                sweep_engine=_RaisingSweepEngine(),
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
+        warnings = [m for m in loguru_capture if "persona listing failed" in m]
+        assert len(warnings) == 1  # exactly once — never per-persona spam on a listing failure
+
+    def test_corrupt_persona_row_is_counted_failed_not_crashing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())  # never reached
+        bad_row = _FakeRow(id="p1", owner_id="owner-1", yaml="not: [valid persona")
+        sweep = _FakeSweepEngine([bad_row])
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 1, "remapped": 0, "skipped": 0, "failed": 1}

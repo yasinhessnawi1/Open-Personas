@@ -921,6 +921,38 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _sweep_engine is not None:
         reconcile_in_flight_on_startup(engine=_sweep_engine)
 
+    # Spec V14 (D-V14-13 trigger, T5a): the AUTO-REMAP reconciliation the T4b/T4c
+    # batch report flagged as unwired — an API-startup pass that re-picks every
+    # persona whose stored voice no longer matches the active TTS provider (a
+    # Cartesia → ElevenLabs switch). GUARDED like the crisis-encoder/catalog-
+    # freshness warm tasks above: a plain ``asyncio.create_task`` (NEVER awaited
+    # here) so it can never delay serving OR shutdown (the R9-027 lesson — no
+    # readiness/request path consults it), held on ``app.state`` so it is not
+    # GC'd, and cancelled at shutdown below. ``reconcile_voice_assignments``
+    # itself is the cheap-skip: on the default ``cartesia`` provider it returns
+    # instantly with zero DB reads and zero catalogue fetches — this task is
+    # created every boot, but does real work only when ElevenLabs is active AND
+    # a persona is actually stale.
+    voice_remap_task: asyncio.Task[None] | None = None
+    if _sweep_engine is not None and rls_engine is not None:
+        from persona_api.services.voice_assignment_service import reconcile_voice_assignments
+
+        async def _run_voice_remap_reconciliation() -> None:
+            try:
+                await reconcile_voice_assignments(
+                    config=config,
+                    registry=getattr(app.state, "tier_registry", None),
+                    sweep_engine=_sweep_engine,
+                    rls_engine=rls_engine,
+                )
+            except Exception:  # noqa: BLE001 — a boot task must never surface/crash
+                _LOG.warning("voice remap reconciliation task failed unexpectedly")
+
+        voice_remap_task = asyncio.create_task(
+            _run_voice_remap_reconciliation(), name="v14-voice-remap-reconcile"
+        )
+        app.state.voice_remap_task = voice_remap_task
+
     try:
         yield
     finally:
@@ -941,6 +973,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             catalog_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await catalog_refresh_task
+        # Spec V14 (T5a): cancel the (likely already-finished, one-shot) voice
+        # remap reconciliation pass — cleanly, before the engines it reads/writes
+        # through close.
+        if voice_remap_task is not None:
+            voice_remap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await voice_remap_task
         # Flush + stop telemetry FIRST so a final drain lands before engines close
         # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:

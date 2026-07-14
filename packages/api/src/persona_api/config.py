@@ -534,6 +534,16 @@ class APIConfig(BaseSettings):
     # Model tier for the voice-pick reasoning (gender + character match). Small
     # is ample — it reads the persona identity + the compact catalogue.
     voice_pick_tier: str = "small"
+    # Spec V14 (D-V14-9/D-V14-13): a plain, read-only MIRROR of the persona-voice
+    # service's own ``PERSONA_TTS_PROVIDER`` selector (not imported — same
+    # mirror-not-import posture as the api proxy's ``_LANGUAGE_HINT_PATTERN``,
+    # Spec V14 R9-025 integration matrix). Lets the boot-time voice-remap
+    # reconciliation (T5a, ``reconcile_voice_assignments``) cheap-skip with ZERO
+    # network calls when the deployment is still on the default ``cartesia``
+    # (the common case) — only ``elevenlabs`` can ever mismatch a stored
+    # Cartesia-addressed voice. Both processes read the SAME env var so the
+    # mirror never drifts from the voice service's actual active provider.
+    voice_tts_provider: str = Field(default="cartesia", validation_alias="PERSONA_TTS_PROVIDER")
 
     # Credits (D-08-6): per successful chat turn + per authoring call.
     # Spec M2 (D-M2-5): ``credits_per_turn`` is now the FLOOR of the
