@@ -167,6 +167,100 @@ describe("AppsChooser", () => {
     expect(trust?.textContent).toContain("docker/mcp-registry");
   });
 
+  it("R9-039: shows the catalog's full real description, not a truncated one-liner", () => {
+    const longDescription =
+      "The Rust MCP Filesystem is a high-performance, asynchronous, and " +
+      "lightweight Model Context Protocol server built in Rust for secure " +
+      "and efficient filesystem operations. Designed with security in mind, " +
+      "it operates in read-only mode by default and restricts clients from " +
+      "updating allowed directories via MCP Roots unless explicitly enabled.";
+    const { container } = renderChooser({
+      apps: [
+        app({ name: "rust-mcp-filesystem", description: longDescription }),
+      ],
+    });
+    const card = cardFor(container, "rust-mcp-filesystem");
+    // Not visible before expanding (the collapsed row keeps its truncated teaser).
+    expect(card.querySelector('[data-slot="app-full-description"]')).toBeNull();
+    expand(card);
+    const full = card.querySelector('[data-slot="app-full-description"]');
+    // The FULL text, byte for byte — never sliced/ellipsised.
+    expect(full?.textContent).toBe(longDescription);
+  });
+
+  it("R9-039: an empty catalog description degrades to an honest fallback, never blank", () => {
+    const { container } = renderChooser({
+      apps: [app({ name: "sparse-server", description: "" })],
+    });
+    const card = cardFor(container, "sparse-server");
+    expand(card);
+    const full = card.querySelector('[data-slot="app-full-description"]');
+    expect(full?.textContent).toBe(messages.apps.detail.noDescription);
+    expect(full?.textContent).toBeTruthy();
+  });
+
+  it("R9-039: the capability line carries a heading — a labeled section, not a bare sentence", () => {
+    const { container } = renderChooser({ apps: [app({ name: "github" })] });
+    const card = cardFor(container, "github");
+    expand(card);
+    const heading = card.querySelector('[data-slot="app-capability-heading"]');
+    expect(heading?.textContent).toBe(messages.apps.toolsHeading);
+  });
+
+  it("R9-039: structured trust rows carry labels + a real link; the boilerplate sentence is a footnote after the real content", () => {
+    const { container } = renderChooser({
+      apps: [
+        app({
+          name: "github",
+          description: "GitHub repository, issue, and PR operations.",
+          image: "ghcr.io/x/github:1",
+          sourceProject: "https://github.com/docker/mcp-registry",
+          sourceCommit: "0123456789abcdef0123456789abcdef01234567",
+          allowHosts: ["api.github.com"],
+        }),
+      ],
+    });
+    const card = cardFor(container, "github");
+    expand(card);
+
+    // A REAL <a> link to the source — not plain text.
+    const link = card.querySelector<HTMLAnchorElement>(
+      '[data-slot="app-trust"] a',
+    );
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute("href")).toBe(
+      "https://github.com/docker/mcp-registry",
+    );
+    expect(link?.getAttribute("rel")).toContain("noopener");
+
+    // Labeled rows, not sentence-style prose.
+    const rows = card.querySelectorAll('[data-slot="app-trust-row"]');
+    expect(rows.length).toBeGreaterThanOrEqual(3); // runs + source + hosts
+
+    // The generic "what an app is" sentence is present but demoted to a
+    // footnote — a DISTINCT element from the real content, and it renders
+    // strictly after the full description in document order.
+    const footnote = card.querySelector('[data-slot="app-trust-footnote"]');
+    expect(footnote?.textContent).toBe(messages.apps.trust.honest);
+    const fullDescription = card.querySelector(
+      '[data-slot="app-full-description"]',
+    );
+    expect(fullDescription?.textContent).toBeTruthy();
+    const html = card.innerHTML;
+    expect(html.indexOf('data-slot="app-full-description"')).toBeLessThan(
+      html.indexOf('data-slot="app-trust-footnote"'),
+    );
+  });
+
+  it("R9-039: the credential box only renders when the app declares a requirement", () => {
+    const { container } = renderChooser({
+      apps: [app({ name: "plain-no-secrets" })],
+    });
+    const card = cardFor(container, "plain-no-secrets");
+    expand(card);
+    expect(card.querySelector('[data-slot="app-needs-setup"]')).toBeNull();
+  });
+
   it("renders the four states via deriveAppState", () => {
     const { container } = renderChooser({
       apps: [

@@ -1028,6 +1028,9 @@
     "defaultBadge": "default",
     "capability": "Adds tools your persona can use — available once enabled.",
     "toolsHeading": "What this app adds",
+    "detail": {
+      "noDescription": "No description provided by the catalog."
+    },
     "catalog": {
       "web_search": {
         "label": "Web search",
@@ -1162,6 +1165,9 @@
       "riskLow": "Low",
       "riskMedium": "Medium",
       "riskHigh": "High",
+      "runsLabel": "Runs",
+      "sourceLabel": "Source",
+      "hostsLabel": "Talks to",
       "image": "Runs {image}",
       "source": "From {project}",
       "sourceCommit": "From {project} @ {commit}",

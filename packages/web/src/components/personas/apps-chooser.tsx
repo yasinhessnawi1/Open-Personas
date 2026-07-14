@@ -275,15 +275,37 @@ function AppCard({
 
         <CollapsibleContent>
           <div className="flex flex-col gap-3 px-3 pt-3" data-slot="app-detail">
-            {/* N3-D-7: ONE honest capability line — no enumerated tools/count. */}
+            {/* R9-039: the catalog's REAL per-server description leads the
+                detail, untruncated — this is the card's identity now, not the
+                generic boilerplate that used to open it. */}
             <p
-              className="text-sm text-muted-foreground"
-              data-slot="app-capability"
+              className="text-sm text-foreground"
+              data-slot="app-full-description"
             >
-              {t("capability")}
+              {app.description || t("detail.noDescription")}
             </p>
 
-            {/* N3-D-8: full trust disclosure, legible-not-opaque. */}
+            {/* N3-D-7: ONE honest capability line — no enumerated tools/count
+                (the catalog carries neither for any server — verified gap).
+                R9-039: labeled + demoted beneath the real description above,
+                not the card's lead line. */}
+            <div data-slot="app-capability-section">
+              <p
+                className="text-xs font-medium text-foreground/70"
+                data-slot="app-capability-heading"
+              >
+                {t("toolsHeading")}
+              </p>
+              <p
+                className="text-xs text-muted-foreground"
+                data-slot="app-capability"
+              >
+                {t("capability")}
+              </p>
+            </div>
+
+            {/* N3-D-8: full trust disclosure, legible-not-opaque. R9-039:
+                compact labeled rows + a real link, boilerplate as a footnote. */}
             <TrustDisclosure app={app} />
 
             {/* States / enablement. */}
@@ -378,30 +400,65 @@ function CardTrustSignal({ app }: { app: McpCatalogEntry }) {
   );
 }
 
-/** N3-D-8: full disclosure in the detail — what this app IS. */
+/**
+ * N3-D-8: full disclosure in the detail — what this app IS.
+ *
+ * R9-039: restructured from a stack of generic prose sentences (the same
+ * "An app is a real integration…" line opening every card) into compact
+ * labeled rows carrying the catalog's REAL per-server provenance — the image
+ * it runs, a REAL clickable link to its source, and its egress allow-list.
+ * The honest "what an app is" framing stays (N3 safety invariant), but as a
+ * short footnote at the end, not the section's identity.
+ */
 function TrustDisclosure({ app }: { app: McpCatalogEntry }) {
   const t = useTranslations("apps");
   return (
     <dl
-      className="flex flex-col gap-1 text-xs text-muted-foreground"
+      className="flex flex-col gap-1.5 text-xs text-muted-foreground"
       data-slot="app-trust"
     >
-      <p>{t("trust.honest")}</p>
-      {app.image ? <p>{t("trust.image", { image: app.image })}</p> : null}
-      {app.sourceProject ? (
-        <p>
-          {app.sourceCommit
-            ? t("trust.sourceCommit", {
-                project: app.sourceProject,
-                commit: app.sourceCommit.slice(0, 12),
-              })
-            : t("trust.source", { project: app.sourceProject })}
-        </p>
+      {app.image ? (
+        <div className="flex gap-1.5" data-slot="app-trust-row">
+          <dt className="shrink-0 font-medium text-foreground/70">
+            {t("trust.runsLabel")}
+          </dt>
+          <dd className="truncate font-mono">{app.image}</dd>
+        </div>
       ) : null}
-      <p>
-        {app.allowHosts.length > 0
-          ? t("trust.allowHosts", { hosts: app.allowHosts.join(", ") })
-          : t("trust.allowHostsNone")}
+      {app.sourceProject ? (
+        <div className="flex gap-1.5" data-slot="app-trust-row">
+          <dt className="shrink-0 font-medium text-foreground/70">
+            {t("trust.sourceLabel")}
+          </dt>
+          <dd className="truncate">
+            <a
+              href={app.sourceProject}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              {app.sourceProject}
+            </a>
+            {app.sourceCommit ? ` @ ${app.sourceCommit.slice(0, 12)}` : null}
+          </dd>
+        </div>
+      ) : null}
+      <div className="flex gap-1.5" data-slot="app-trust-row">
+        <dt className="shrink-0 font-medium text-foreground/70">
+          {t("trust.hostsLabel")}
+        </dt>
+        <dd className="truncate">
+          {app.allowHosts.length > 0
+            ? app.allowHosts.join(", ")
+            : t("trust.allowHostsNone")}
+        </dd>
+      </div>
+      {/* The generic safety framing — now a footnote, not the card's identity. */}
+      <p
+        className="pt-0.5 text-xs text-muted-foreground/70"
+        data-slot="app-trust-footnote"
+      >
+        {t("trust.honest")}
       </p>
     </dl>
   );

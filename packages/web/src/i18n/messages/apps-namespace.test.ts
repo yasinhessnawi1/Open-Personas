@@ -72,6 +72,13 @@ describe("apps.* i18n namespace", () => {
     expect(apps.trust.sourceCommit).toContain("{commit}");
   });
 
+  it("R9-039: exposes the structured trust-row labels + the honest-empty-description fallback", () => {
+    for (const key of ["runsLabel", "sourceLabel", "hostsLabel"] as const) {
+      expect(apps.trust[key]).toBeTruthy();
+    }
+    expect(apps.detail.noDescription).toBeTruthy();
+  });
+
   it("N3-D-7: the capability one-liner signals 'tools, once enabled' without faking a list", () => {
     const cap = apps.capability.toLowerCase();
     expect(cap).toContain("enabled");
