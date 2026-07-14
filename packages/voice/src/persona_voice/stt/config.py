@@ -16,8 +16,13 @@ V2 D-V2-X-cost-discipline precedent).
 the same :class:`persona_voice.stt.protocol.StreamingSTT` Protocol seam
 (D-V2-1 paragraph 2); ``whisper-streaming`` is the v0.2 self-hosted
 candidate flagged by the STT per-minute cost cadence review (D-V2-X-cost-discipline).
-The Literal pins all three even though T03 ships only Deepgram —
-keeping the enumeration honest about what shape the Protocol covers.
+``gladia`` (Spec V14 D-V14-9) is the architecture-level code-switching
+provider (Solaria — ~100 languages, no language list required); its
+streaming backend slots behind the SAME Protocol seam and is selected by
+``PERSONA_STT_PROVIDER=gladia`` (rollback = flip the selector back, the
+Gladia knobs park). The Literal pins all four even though only Deepgram +
+Gladia ship a concrete backend — keeping the enumeration honest about
+what shape the Protocol covers.
 
 **VAD library Literal.** ``silero`` is the D-V2-X-silero-implementation-shape
 LOCK primary path; ``webrtc`` is reserved for the v0.2 fallback per
@@ -43,7 +48,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["Provider", "StreamingSTTConfig", "VADLibrary"]
@@ -52,6 +57,7 @@ Provider = Literal[
     "deepgram",
     "speechmatics",
     "whisper-streaming",
+    "gladia",
 ]
 
 VADLibrary = Literal["silero", "webrtc"]
@@ -107,11 +113,25 @@ class StreamingSTTConfig(BaseSettings):
             classifies as offset (50–2000). Default 200.
         silero_activation_threshold: Silero VAD activation probability
             cutoff (0.0–1.0). Default 0.5 per the model card.
+        gladia_api_key: Gladia API key (Spec V14). Reads the spec-named,
+            un-prefixed ``PERSONA_GLADIA_API_KEY`` (NOT ``PERSONA_STT_*``)
+            via a ``validation_alias`` so it matches the var the owner
+            provisions. :class:`~pydantic.SecretStr` — never leaks in
+            ``repr``. The concrete Gladia backend fails fast at construction
+            with :class:`STTAuthenticationError` when this is missing while
+            ``provider="gladia"`` (D-02-10 discipline).
+        gladia_model: Gladia model id (default ``solaria-1`` — the
+            code-switching live model). Reads ``PERSONA_STT_GLADIA_MODEL``.
     """
 
     model_config = SettingsConfigDict(
         env_prefix="PERSONA_STT_",
         extra="ignore",
+        # Let the aliased fields (``gladia_api_key`` reads the spec-named,
+        # un-prefixed ``PERSONA_GLADIA_API_KEY`` — D-V14-9) still be
+        # constructible by their Python name, e.g. in tests. A no-op for every
+        # non-aliased field.
+        populate_by_name=True,
     )
 
     provider: Provider = "deepgram"
@@ -124,6 +144,23 @@ class StreamingSTTConfig(BaseSettings):
 
     deepgram_endpointing_ms: int = Field(default=300, ge=10, le=2000)
     deepgram_utterance_end_ms: int = Field(default=1000, ge=100, le=5000)
+
+    # --- Gladia (Spec V14 D-V14-9) — provider-scoped knobs, parked unless
+    # ``provider="gladia"``. ``gladia_api_key`` escapes the ``PERSONA_STT_``
+    # prefix to read the spec-named ``PERSONA_GLADIA_API_KEY`` the owner
+    # provisions (the same var the T0 POC used); ``gladia_model`` rides the
+    # prefix like the ``deepgram_*`` knobs. Kept as :class:`~pydantic.SecretStr`
+    # so ``repr(config)`` never leaks it (the ``api_key`` discipline).
+    gladia_api_key: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        validation_alias=AliasChoices("PERSONA_GLADIA_API_KEY"),
+    )
+    #: Gladia model id. ``solaria-1`` is the code-switching-capable live model
+    #: (the ONLY model Gladia's live/streaming endpoint supports at V14 T0);
+    #: the T0 POC proved it survives mid-utterance language switches without a
+    #: language list (D-V14-1). Reads ``PERSONA_STT_GLADIA_MODEL``.
+    gladia_model: str = "solaria-1"
 
     silero_min_speech_duration_ms: int = Field(default=50, ge=10, le=500)
     silero_min_silence_duration_ms: int = Field(default=200, ge=50, le=2000)

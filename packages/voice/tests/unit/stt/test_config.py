@@ -32,10 +32,12 @@ from pydantic import SecretStr, ValidationError
 
 @pytest.fixture(autouse=True)
 def _strip_persona_stt_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip every ``PERSONA_STT_*`` env var so tests start from defaults."""
+    """Strip every ``PERSONA_STT_*`` env var (+ the un-prefixed spec-named
+    ``PERSONA_GLADIA_API_KEY``, Spec V14) so tests start from defaults."""
     for key in list(os.environ):
         if key.startswith("PERSONA_STT_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("PERSONA_GLADIA_API_KEY", raising=False)
 
 
 # ---------- env_prefix="PERSONA_STT_" reads ------------------------------
@@ -185,3 +187,48 @@ def test_echo_mute_while_speaking_defaults_off() -> None:
     """D-V8-X-bargein-during-speech-fix: the TTS-mute-window is opt-in (default
     OFF) so a real barge-in onset reaches the orchestrator while the persona speaks."""
     assert StreamingSTTConfig().silero_echo_mute_while_speaking is False
+
+
+# ---------- Gladia (Spec V14 D-V14-9) --------------------------------------
+
+
+def test_provider_literal_accepts_gladia() -> None:
+    """``gladia`` is a wired Provider value (V14 code-switching backend)."""
+    assert StreamingSTTConfig(provider="gladia").provider == "gladia"
+
+
+def test_gladia_api_key_reads_unprefixed_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-V14-9: ``gladia_api_key`` escapes the ``PERSONA_STT_`` prefix and reads
+    the spec-named ``PERSONA_GLADIA_API_KEY`` the owner provisions."""
+    monkeypatch.setenv("PERSONA_GLADIA_API_KEY", "gl-live-key")
+    config = StreamingSTTConfig()
+    assert config.gladia_api_key is not None
+    assert config.gladia_api_key.get_secret_value() == "gl-live-key"
+
+
+def test_gladia_api_key_does_not_leak_in_repr() -> None:
+    config = StreamingSTTConfig(gladia_api_key=SecretStr("gl-very-secret"))
+    assert "gl-very-secret" not in repr(config)
+
+
+def test_gladia_api_key_defaults_none() -> None:
+    assert StreamingSTTConfig().gladia_api_key is None
+
+
+def test_gladia_model_default_is_solaria_1() -> None:
+    assert StreamingSTTConfig().gladia_model == "solaria-1"
+
+
+def test_gladia_model_reads_prefixed_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``gladia_model`` is a provider-scoped knob on the ``PERSONA_STT_`` prefix
+    (like the ``deepgram_*`` knobs)."""
+    monkeypatch.setenv("PERSONA_STT_GLADIA_MODEL", "solaria-2")
+    assert StreamingSTTConfig().gladia_model == "solaria-2"
+
+
+def test_gladia_api_key_constructible_by_name() -> None:
+    """``populate_by_name`` lets the aliased field be set by its Python name
+    (e.g. in tests) even though env reads go through the alias."""
+    config = StreamingSTTConfig(gladia_api_key="by-name")
+    assert config.gladia_api_key is not None
+    assert config.gladia_api_key.get_secret_value() == "by-name"

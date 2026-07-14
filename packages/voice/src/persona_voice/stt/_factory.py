@@ -16,6 +16,12 @@ shape verbatim (``_factory.py:28-60``):
   stays importable in environments without ``deepgram-sdk`` extras
   resolved at workspace install time — matches Spec 02 ``HFLocalBackend``
   lazy-import discipline at ``_factory.py:53-55``).
+* Spec V14 (D-V14-9) wires the ``gladia`` branch through to
+  :class:`persona_voice.stt.gladia_backend.GladiaStreamingSTT` — the
+  architecture-level code-switching provider (Solaria), selected by
+  ``PERSONA_STT_PROVIDER=gladia``. Same lazy-import discipline (its
+  ``httpx`` / ``websockets`` transports are imported only when a frame
+  flows, not at factory import).
 """
 
 from __future__ import annotations
@@ -45,10 +51,11 @@ def load_streaming_stt(config: StreamingSTTConfig) -> StreamingSTT:
 
     Raises:
         STTAuthenticationError: ``provider="deepgram"`` with missing
-            ``PERSONA_STT_API_KEY`` (the concrete Deepgram backend
-            fails fast at construction per Spec 02 D-02-10).
+            ``PERSONA_STT_API_KEY``, or ``provider="gladia"`` with missing
+            ``PERSONA_GLADIA_API_KEY`` (the concrete backend fails fast at
+            construction per Spec 02 D-02-10).
         STTError: Unknown / unsupported provider — message lists the
-            three Literal values for operator clarity; ``context``
+            wired Literal values for operator clarity; ``context``
             carries ``provider`` so structured log filters can match.
     """
     provider = config.provider
@@ -60,8 +67,14 @@ def load_streaming_stt(config: StreamingSTTConfig) -> StreamingSTT:
         from persona_voice.stt.deepgram_backend import DeepgramStreamingSTT
 
         return DeepgramStreamingSTT(config)
+    if provider == "gladia":
+        # Spec V14 (D-V14-9). Same lazy-import discipline — the Gladia
+        # backend's httpx/websockets transports load only when a frame flows.
+        from persona_voice.stt.gladia_backend import GladiaStreamingSTT
+
+        return GladiaStreamingSTT(config)
     raise STTError(
         f"unknown STT provider {provider!r}; expected one of "
-        "deepgram, speechmatics, whisper-streaming",
+        "deepgram, gladia, speechmatics, whisper-streaming",
         context={"provider": provider},
     )

@@ -32,6 +32,7 @@ def _strip_persona_stt_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("PERSONA_STT_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("PERSONA_GLADIA_API_KEY", raising=False)
 
 
 def test_load_streaming_stt_deepgram_branch_returns_concrete_backend() -> None:
@@ -94,11 +95,36 @@ def test_load_streaming_stt_whisper_streaming_not_yet_wired() -> None:
 
 def test_load_streaming_stt_unknown_provider_message_lists_alternatives() -> None:
     """Operator-clarity contract: the unknown-provider message must
-    enumerate all three Literal values."""
+    enumerate the wired Literal values (incl. the V14 ``gladia`` addition)."""
     config = StreamingSTTConfig.model_construct(provider="nonsense")
     with pytest.raises(STTError) as exc_info:
         load_streaming_stt(config)
     msg = str(exc_info.value)
     assert "deepgram" in msg
+    assert "gladia" in msg
     assert "speechmatics" in msg
     assert "whisper-streaming" in msg
+
+
+# ---------- Gladia branch (Spec V14 D-V14-9) -------------------------------
+
+
+def test_load_streaming_stt_gladia_branch_returns_concrete_backend() -> None:
+    """``gladia`` with a valid ``PERSONA_GLADIA_API_KEY`` yields a
+    :class:`GladiaStreamingSTT` instance (the V14 code-switching backend)."""
+    from persona_voice.stt.gladia_backend import GladiaStreamingSTT
+
+    config = StreamingSTTConfig(provider="gladia", gladia_api_key="gl-test-key")
+    backend = load_streaming_stt(config)
+    assert isinstance(backend, GladiaStreamingSTT)
+    assert backend.provider_name == "gladia"
+    assert backend.model_name == "solaria-1"
+
+
+def test_load_streaming_stt_gladia_branch_fails_fast_without_api_key() -> None:
+    """Spec 02 D-02-10 fail-fast: missing ``PERSONA_GLADIA_API_KEY`` surfaces as
+    :class:`STTAuthenticationError` at construction."""
+    config = StreamingSTTConfig(provider="gladia")
+    with pytest.raises(STTAuthenticationError) as exc_info:
+        load_streaming_stt(config)
+    assert exc_info.value.context["provider"] == "gladia"
