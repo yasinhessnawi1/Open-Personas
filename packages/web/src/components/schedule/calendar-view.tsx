@@ -83,12 +83,25 @@ export interface CalendarViewProps {
    * server-side filter is additive-optional — same component, no fork).
    */
   personaId?: string;
+  /**
+   * R11-B3 rider — the kit's `schedule-persona.html` PANEL register for the chat
+   * right-rail: agenda-only (no view toggle/grids — "open the full calendar" for
+   * those), a full-width New-routine button whose executor is LOCKED to the
+   * panel persona, panel-voiced window banner, and no who-line (one persona's
+   * panel doesn't need to name them per row). "full" (default) is the
+   * `/schedule` page, byte-identical to before.
+   */
+  variant?: "full" | "panel";
+  /** The panel's persona (locks the create executor; drives the banner voice). */
+  panelPersona?: ReminderPersona;
 }
 
 export function CalendarView({
   personas = [],
   defaultTimezone,
   personaId,
+  variant = "full",
+  panelPersona,
 }: CalendarViewProps) {
   const { getToken } = useAuth();
   const refreshSidebar = useSidebarRefresh();
@@ -128,8 +141,66 @@ export function CalendarView({
   const byDay = occurrencesByDay(data.occurrences, DISPLAY_TZ);
   const hist = historyByDay(data.history, DISPLAY_TZ);
   const today = dayKey(from.toISOString(), DISPLAY_TZ);
+  const panel = variant === "panel";
   const nameOf = (id: string | null) =>
-    id ? (personas.find((p) => p.id === id)?.name ?? null) : null;
+    !panel && id ? (personas.find((p) => p.id === id)?.name ?? null) : null;
+
+  if (panel) {
+    return (
+      <section className="v-schedule v-schedule--panel">
+        <Button
+          type="button"
+          className="w-full"
+          onClick={() => setCreating(true)}
+        >
+          New routine
+        </Button>
+        <output className="v-schedule-truncation">
+          <Info className="size-4 shrink-0" aria-hidden="true" />
+          <span>
+            {panelPersona
+              ? `${panelPersona.name}'s next ${WINDOW_DAYS} days · ${data.occurrences.length} runs. `
+              : `Next ${WINDOW_DAYS} days · ${data.occurrences.length} runs. `}
+            <a href="/schedule" className="underline underline-offset-2">
+              Open the full calendar
+            </a>{" "}
+            for week &amp; month views.
+          </span>
+        </output>
+        <AgendaView
+          data={data}
+          hist={hist}
+          nameOf={nameOf}
+          onEdit={setEditing}
+          onCreate={() => setCreating(true)}
+        />
+        {editing && (
+          <RescheduleDialog
+            occurrence={editing}
+            personaName={panelPersona?.name ?? null}
+            onClose={() => setEditing(null)}
+            onApplied={async () => {
+              setEditing(null);
+              await load();
+            }}
+          />
+        )}
+        {creating && (
+          <CreateReminderDialog
+            personas={panelPersona ? [panelPersona] : personas}
+            lockedPersona={panelPersona}
+            defaultTimezone={createTz}
+            onClose={() => setCreating(false)}
+            onCreated={async () => {
+              setCreating(false);
+              await load();
+              refreshSidebar();
+            }}
+          />
+        )}
+      </section>
+    );
+  }
 
   return (
     <section className="v-schedule">

@@ -16,6 +16,7 @@ import { useMemo, useState } from "react";
 
 import { useAuth } from "@/auth";
 import { ExecutorPicker } from "@/components/persona/executor-picker";
+import { PersonaAvatar } from "@/components/persona/persona-avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -23,6 +24,7 @@ import {
   previewCreate,
   type ReschedulePreview,
 } from "@/lib/api/schedule-client";
+import { personaIdentityStyle } from "@/lib/persona-identity";
 import { type CadenceInput, RecurrenceBuilder } from "./recurrence-builder";
 
 export interface ReminderPersona {
@@ -34,6 +36,9 @@ export interface ReminderPersona {
 
 export interface CreateReminderDialogProps {
   personas: ReminderPersona[];
+  /** R11-B3 rider (the chat panel): the executor is THIS persona — no picker,
+   * a fixed identity row instead (the kit's pre-locked executor). */
+  lockedPersona?: ReminderPersona;
   defaultTimezone: string;
   onClose: () => void;
   onCreated: () => Promise<void>;
@@ -61,13 +66,14 @@ export function applyQuietEdge(
 
 export function CreateReminderDialog({
   personas,
+  lockedPersona,
   defaultTimezone,
   onClose,
   onCreated,
 }: CreateReminderDialogProps) {
   const { getToken } = useAuth();
   const [subject, setSubject] = useState("");
-  const [personaId, setPersonaId] = useState("");
+  const [personaId, setPersonaId] = useState(lockedPersona?.id ?? "");
   // Default ON: it's a reminder — you want reminding. Unchecking keeps the schedule but
   // silences its bell (the fire still runs; it just doesn't ping).
   const [notifyOnFire, setNotifyOnFire] = useState(true);
@@ -156,16 +162,29 @@ export function CreateReminderDialog({
       </label>
 
       {/* R11-B3 (owner-ruled): the SHARED persona picker — same control as new
-          chat / new call — never a bare select of name strings. */}
+          chat / new call — never a bare select of name strings. In the chat
+          panel the executor is LOCKED to the panel persona (kit): a fixed
+          identity row, no picker. */}
       <div className="flex flex-col gap-2">
         <span className="text-sm font-medium">Who should run it?</span>
-        <ExecutorPicker
-          personas={personas}
-          value={personaId}
-          onSelect={setPersonaId}
-          label="Who should run it?"
-          placeholder="Choose a persona…"
-        />
+        {lockedPersona ? (
+          <div
+            className="flex h-10 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 text-sm"
+            data-slot="locked-executor"
+            style={personaIdentityStyle(lockedPersona)}
+          >
+            <PersonaAvatar persona={lockedPersona} size="sm" />
+            <span className="truncate font-medium">{lockedPersona.name}</span>
+          </div>
+        ) : (
+          <ExecutorPicker
+            personas={personas}
+            value={personaId}
+            onSelect={setPersonaId}
+            label="Who should run it?"
+            placeholder="Choose a persona…"
+          />
+        )}
       </div>
 
       <RecurrenceBuilder

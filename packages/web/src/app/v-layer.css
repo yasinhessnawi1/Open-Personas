@@ -1775,6 +1775,12 @@
     color: color-mix(in oklch, var(--foreground) 55%, transparent);
     margin-inline-start: auto;
   }
+  /* The chat-rail panel variant (R11-B3 rider): the Sheet provides the frame,
+     so the section sheds the page padding/max-width. */
+  .v-schedule--panel {
+    padding: 0;
+    max-width: none;
+  }
   .v-schedule-toolbar {
     display: flex;
     align-items: center;

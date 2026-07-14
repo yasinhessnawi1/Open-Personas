@@ -704,7 +704,8 @@
     },
     "calendar": {
       "button": "Calendar",
-      "title": "{name}'s schedule"
+      "title": "{name}'s schedule",
+      "thisChat": "This chat"
     },
     "toolRunning": "{name} is using {tool}…",
     "toolUsing": "Used {tool}",
@@ -1004,7 +1005,8 @@
     "schedule": {
       "fired": "{persona} ran your reminder: {subject}",
       "firedNoSubject": "{persona} ran your reminder.",
-      "executor_missing": "A reminder was paused — its persona is no longer available"
+      "executor_missing": "A reminder was paused — its persona is no longer available",
+      "taskPaused": "A reminder was paused — its schedule was removed"
     }
   },
   "apps": {
