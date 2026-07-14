@@ -496,6 +496,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             from persona_api.initiative.store import DeclineStore, InitiativeLedger
             from persona_api.initiative.verb_service import InitiativeVerbService
             from persona_api.schedules.store import ScheduleStore as _A5ScheduleStore
+            from persona_api.schedules.tombstones import ScheduleTombstoneStore as _A5TombstoneStore
             from persona_api.tasks.store import TaskStore as _A5TaskStore
 
             _a5_ledger = InitiativeLedger(rls_engine)
@@ -512,6 +513,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     rls_engine=rls_engine,
                 ),
                 settings=_initiative_settings,
+                # R9-037: the dial verb's own lazy ensure refuses a recently
+                # user-deleted scan schedule too (the same shared function the
+                # provisioner sweep gates).
+                tombstones=_A5TombstoneStore(rls_engine),
+                tombstone_window_days=config.schedule_tombstone_window_days,
             )
     chat_turn_registry = (
         ChatTurnRegistry(

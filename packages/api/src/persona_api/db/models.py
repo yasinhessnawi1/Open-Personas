@@ -1793,8 +1793,10 @@ notifications = Table(
         # 'schedule_executor_missing' = the A10-D-7 deleted-executor bell (migration 037).
         # 'schedule_fired' = the opt-in coalesced fire bell (migration 039).
         # 'event_trigger_dropped' = the A7-D-8 storm-drop bell (A7's migration, merged 042).
+        # 'schedule_deleted_task_paused' = the R9-037 task-bridge bell (migration 049) —
+        # a schedule-backed task's schedule was user-deleted; the task was paused.
         "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing', "
-        "'schedule_fired', 'event_trigger_dropped')",
+        "'schedule_fired', 'event_trigger_dropped', 'schedule_deleted_task_paused')",
         name="notifications_kind_check",
     ),
     CheckConstraint(
@@ -1932,4 +1934,48 @@ event_triggers = Table(
     Index("idx_event_triggers_owner_kind_enabled", "owner_id", "event_kind", "enabled"),
     # The unlink-hygiene scan (criterion 7): disable an owner's triggers on a platform.
     Index("idx_event_triggers_owner_platform", "owner_id", "platform"),
+)
+
+# R9-037: the durable user-intent record. A user DELETE or EDIT of a schedule writes one
+# row here; every autonomous schedule-ORIGINATION seam (today: the A5 per-persona scan-
+# schedule ensure, called by both the ``InitiativeProvisioner`` sweep and the initiative
+# dial chat-verb) must consult it before creating — a recent match refuses the silent
+# re-creation. Mirrors ``initiative_declines`` (migration 038): RLS ENABLE + FORCE +
+# user_isolation created ENTIRELY in migration 048 (the split-home template).
+#
+# Two independent match legs (Matching v1 — exact-ish, cheap, deterministic; semantic
+# similarity is explicitly OUT of v1):
+#   * ``schedule_id`` — exact identity, for seams with a deterministic id (e.g.
+#     ``initsched:{persona_id}`` — the SAME id is re-derived every ensure attempt);
+#   * ``target_job_type`` + ``title_key`` — normalized-content identity, for seams whose
+#     ids are freshly minted per attempt (an idempotency key alone would dodge an
+#     id-only check — the design's explicit "idempotency keys alone are insufficient").
+# ``persona_id``/``reason`` are additive context for audit display and future seams; they
+# are never part of the match predicate.
+schedule_tombstones = Table(
+    "schedule_tombstones",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("schedule_id", Text, nullable=False),
+    Column("persona_id", Text),
+    Column("target_job_type", Text, nullable=False),
+    # A normalized (lowercased, whitespace-collapsed) content identity, derived from the
+    # schedule's user-facing subject when one exists (NULL for subject-less system
+    # schedules, e.g. the initiative scan — those match by ``schedule_id`` alone).
+    Column("title_key", Text),
+    Column("action", Text, nullable=False),
+    Column("reason", _json(), nullable=False, server_default=text("'{}'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("action IN ('deleted', 'edited')", name="schedule_tombstones_action_check"),
+    # The exact-id match leg (the ``ensure_initiative_schedule`` gate's hot path).
+    Index("idx_schedule_tombstones_owner_schedule", "owner_id", "schedule_id", "created_at"),
+    # The normalized-content match leg (seams with freshly-derived ids).
+    Index(
+        "idx_schedule_tombstones_owner_title",
+        "owner_id",
+        "target_job_type",
+        "title_key",
+        "created_at",
+    ),
 )

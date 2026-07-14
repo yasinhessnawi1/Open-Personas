@@ -18,6 +18,7 @@ from persona.timezone import validate_timezone
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.realtime.stream import stream_user_events
 from persona_api.schedules.store import ScheduleStore
+from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.schemas import (
     CreditsResponse,
     NavCountsResponse,
@@ -35,11 +36,13 @@ from persona_api.services import (
     notifications_service,
     occurrences_service,
     schedule_create_service,
+    schedule_delete_service,
     user_service,
 )
 from persona_api.services.calendar_reschedule_service import ReschedulePreview
 from persona_api.services.occurrences_service import OccurrencesResult
 from persona_api.services.schedule_create_service import ScheduleCreateResult
+from persona_api.tasks.store import TaskStore
 
 router = APIRouter(prefix="/v1/me", tags=["me"])
 
@@ -402,13 +405,27 @@ async def delete_schedule(
     """Delete a schedule (R9-024 — the calendar's delete affordance, chat + ``/schedule``).
 
     RLS-scoped through :meth:`~persona_api.schedules.store.ScheduleStore.delete`: a cross-tenant
-    id is indistinguishable from a missing one (both 404 — no existence oracle). The backing task
-    (if any — a ``task_scheduled_fire`` schedule) is untouched; deleting the schedule only stops
-    future fires, matching the store's existing compensating-delete semantics used elsewhere
-    (``schedule_create_service`` / ``origination_service``). Audits ``schedule.delete``.
+    id is indistinguishable from a missing one (both 404 — no existence oracle). Audits
+    ``schedule.delete``.
+
+    **R9-037.** The delete now writes a durable tombstone (the user's DELETE is
+    persona-scoped, durable, intent) every autonomous origination seam consults before
+    (re-)creating — the owner-reported bug where a deleted schedule silently came back.
+    The backing task (if any — a ``task_scheduled_fire`` schedule), if still live, is
+    PAUSED (design point 3: deleting the schedule stops the task's recurrence; the task
+    must not silently re-arm, but it is also not silently forgotten — a P6 notification
+    tells the user why). This supersedes the pre-R9-037 "backing task untouched" note.
     """
     try:
-        ScheduleStore(request.app.state.rls_engine).delete(user.id, schedule_id)
+        schedule_delete_service.delete_schedule_with_intent(
+            schedule_store=ScheduleStore(request.app.state.rls_engine),
+            task_store=TaskStore(request.app.state.rls_engine),
+            tombstones=ScheduleTombstoneStore(request.app.state.rls_engine),
+            rls_engine=request.app.state.rls_engine,
+            owner_id=user.id,
+            schedule_id=schedule_id,
+            event_channel=getattr(request.app.state, "event_channel", None),
+        )
     except ScheduleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="schedule not found") from exc
     # R9-012: post-commit sidebar liveness ping — the Schedule badge on the owner's

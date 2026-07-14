@@ -92,6 +92,21 @@ class TaskStore:
             )
         return [row_to_task(r) for r in rows]
 
+    def get_by_schedule_id(self, owner_id: str, schedule_id: str) -> Task | None:
+        """The task backed by ``schedule_id``, or ``None`` (R9-037's delete-side linkage read).
+
+        Rides the existing partial ``idx_tasks_schedule`` index. Used to capture the
+        schedule→task linkage BEFORE a schedule delete — ``tasks.schedule_id`` has an
+        ``ON DELETE SET NULL`` FK, so the linkage is unrecoverable once the delete commits.
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            row = (
+                conn.execute(select(tasks_t).where(tasks_t.c.schedule_id == schedule_id))
+                .mappings()
+                .first()
+            )
+        return None if row is None else row_to_task(row)
+
     # --- mutations (CQS: return the post-mutation Task as confirmation) -----
 
     def create(self, task: Task) -> Task:

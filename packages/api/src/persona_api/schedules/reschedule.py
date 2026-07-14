@@ -27,6 +27,12 @@ from persona.schedules import (
     render_human_terms,
 )
 
+from persona_api.schedules.tombstones import (
+    ScheduleTombstoneStore,
+    TombstoneAction,
+    extract_subject,
+    normalize_title,
+)
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -119,6 +125,27 @@ def reschedule(
             "old": _describe(before),
             "new": _describe(after),
         },
+    )
+    # R9-037 design point 1: every edit that reaches here is, by the structural
+    # propose-first gate above, a genuine user action (USER_VIA_UI / USER_VIA_CHAT —
+    # PERSONA_PROPOSED already raised) — record the durable "what changed" intent fact.
+    # Not currently consulted by any gate (the reschedule door's own structural refusal
+    # of a direct persona-originated write already closes the "autonomous revert"
+    # risk — see the R9-037 evidence's proof), but future seams can consult it the same
+    # way the delete-tombstone gates ``ensure_initiative_schedule`` today.
+    subject = extract_subject(before.payload_template)
+    reason = {"old_cadence": _describe(before), "new_cadence": _describe(after)}
+    if subject is not None:
+        reason["subject"] = subject
+    ScheduleTombstoneStore(engine).record(
+        owner_id,
+        schedule_id=schedule_id,
+        persona_id=None,
+        target_job_type=before.target_job_type,
+        title_key=normalize_title(subject) if subject is not None else None,
+        action=TombstoneAction.EDITED,
+        reason=reason,
+        now=now,
     )
     return after
 

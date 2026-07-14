@@ -229,7 +229,7 @@ def test_scan_fires_through_the_real_chain_recurring_twice_then_dial_off(
     settings = InitiativeSettings()
 
     # The idempotent ensure: two calls, one schedule row (A5-D-1).
-    sid = ensure_initiative_schedule(
+    first = ensure_initiative_schedule(
         store,
         owner_id=owner,
         persona_id=persona_id,
@@ -237,18 +237,19 @@ def test_scan_fires_through_the_real_chain_recurring_twice_then_dial_off(
         settings=settings,
         now=_T0,
     )
+    sid = first.schedule_id
     assert sid == initiative_schedule_id(persona_id)
-    assert (
-        ensure_initiative_schedule(
-            store,
-            owner_id=owner,
-            persona_id=persona_id,
-            timezone="Europe/Oslo",
-            settings=settings,
-            now=_T0,
-        )
-        == sid
+    assert first.created is True
+    second = ensure_initiative_schedule(
+        store,
+        owner_id=owner,
+        persona_id=persona_id,
+        timezone="Europe/Oslo",
+        settings=settings,
+        now=_T0,
     )
+    assert second.schedule_id == sid
+    assert second.created is False
     schedule = store.get(owner, sid)
     assert schedule.target_job_type == INITIATIVE_SCAN_JOB_TYPE
     first_fire = schedule.next_fire_at

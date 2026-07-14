@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from persona_api.jobs.catalog_sync import LeaderGate
     from persona_api.schedules import ScheduleStore
+    from persona_api.schedules.tombstones import ScheduleTombstoneStore
 
 __all__ = ["INITIATIVE_PROVISIONER_LOCK_KEY", "InitiativeProvisioner"]
 
@@ -72,11 +73,18 @@ class InitiativeProvisioner:
         default_timezone: str,
         lock_key: int = INITIATIVE_PROVISIONER_LOCK_KEY,
         leader_factory: Callable[[], LeaderGate] | None = None,
+        tombstones: ScheduleTombstoneStore | None = None,
+        tombstone_window_days: int = 30,
     ) -> None:
         """Inject the cross-tenant read engine + the RLS schedule store + knobs.
 
         The candidate SELECT runs on the dispatch engine (cross-tenant, like the
         tick's due-claim); each ensure runs owner-scoped through the RLS store.
+
+        ``tombstones`` (R9-037) — when wired, a persona whose scan schedule the
+        user recently deleted is SKIPPED (refused, audited), not silently
+        re-provisioned; ``None`` preserves the pre-R9-037 unconditional-ensure
+        behaviour (tests that don't care).
         """
         self._dispatch_engine = dispatch_engine
         self._store = store
@@ -86,13 +94,18 @@ class InitiativeProvisioner:
         self._leader_factory = leader_factory or (
             lambda: SchedulerLeader(self._dispatch_engine, lock_key=self._lock_key)
         )
+        self._tombstones = tombstones
+        self._tombstone_window_days = tombstone_window_days
 
     def run_once(self, *, now: datetime) -> int:
-        """Provision missing scan schedules; returns how many were ensured.
+        """Provision missing scan schedules; returns how many were ACTUALLY created.
 
         A non-leader call is a clean no-op (another worker is sweeping). Any
         per-persona failure is logged and skipped — one bad row never blocks
-        the population (fail-soft; the next run retries it).
+        the population (fail-soft; the next run retries it). A tombstone-refused
+        persona (R9-037) is neither counted nor retried noisily — the refusal is
+        already audited by :func:`~persona_api.initiative.handler.ensure_initiative_schedule`
+        itself; it naturally retries every run until the tombstone window elapses.
         """
         leader = self._leader_factory()
         if not leader.try_become_leader():
@@ -101,17 +114,24 @@ class InitiativeProvisioner:
             with self._dispatch_engine.begin() as conn:
                 rows = conn.execute(_CANDIDATES_SQL, {"batch": self._BATCH}).all()
             provisioned = 0
+            refused = 0
             for persona_id, owner_id, stored_tz in rows:
                 try:
-                    ensure_initiative_schedule(
+                    result = ensure_initiative_schedule(
                         self._store,
                         owner_id=str(owner_id),
                         persona_id=str(persona_id),
                         timezone=resolve_timezone(stored_tz, default=self._default_timezone),
                         settings=self._settings,
                         now=now,
+                        tombstones=self._tombstones,
+                        tombstone_window_days=self._tombstone_window_days,
+                        seam="initiative_provisioner",
                     )
-                    provisioned += 1
+                    if result.created:
+                        provisioned += 1
+                    elif result.refused:
+                        refused += 1
                 except Exception:  # noqa: BLE001 — one bad row never blocks the sweep
                     _log.warning(
                         "provisioning failed for persona={pid}; will retry next run",
@@ -120,6 +140,11 @@ class InitiativeProvisioner:
             if provisioned:
                 _log.info(
                     "initiative provisioner ensured schedules count={count}", count=provisioned
+                )
+            if refused:
+                _log.info(
+                    "initiative provisioner refused count={count} (recently user-deleted)",
+                    count=refused,
                 )
             return provisioned
         finally:

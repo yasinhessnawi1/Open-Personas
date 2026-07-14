@@ -98,6 +98,7 @@ from persona_api.jobs.skill_catalog_sync import build_skill_catalog_sync
 from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
+from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.handler import RunnableGuard, register_task_leg_handler
@@ -1165,6 +1166,11 @@ def start_in_process_worker(
             store=ScheduleStore(worker_rls_engine),
             settings=settings,
             default_timezone=PersonaCoreConfig().default_timezone,
+            # R9-037: a persona whose scan schedule the user recently deleted is
+            # refused, not silently re-provisioned on this sweep's own cadence
+            # (default hourly) NOR immediately on the worker's next restart.
+            tombstones=ScheduleTombstoneStore(worker_rls_engine),
+            tombstone_window_days=config.schedule_tombstone_window_days,
         )
 
     worker = build_worker(

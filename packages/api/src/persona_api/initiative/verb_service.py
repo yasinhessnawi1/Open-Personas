@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from persona_api.initiative.delivery import InitiativeDeliveryExecutor
     from persona_api.initiative.store import DeclineStore, InitiativeLedger
     from persona_api.schedules import ScheduleStore
+    from persona_api.schedules.tombstones import ScheduleTombstoneStore
 
 __all__ = ["InitiativeVerbService"]
 
@@ -61,8 +62,18 @@ class InitiativeVerbService:
         executor: InitiativeDeliveryExecutor,
         settings: InitiativeSettings,
         timezone_resolver: object | None = None,
+        tombstones: ScheduleTombstoneStore | None = None,
+        tombstone_window_days: int = 30,
     ) -> None:
-        """Inject the stores + the executor; the tz resolver feeds the ensure."""
+        """Inject the stores + the executor; the tz resolver feeds the ensure.
+
+        ``tombstones`` (R9-037) — threaded into the dial verb's own
+        ``ensure_initiative_schedule`` call (the SAME shared function the
+        ``InitiativeProvisioner`` sweep calls): a persona whose scan schedule the
+        user recently deleted is not silently resurrected by a dial-verb turn
+        either — a chat command that changes an unrelated setting (the dial)
+        is not a fresh, explicit ask for THIS specific schedule back.
+        """
         self._engine = rls_engine
         self._schedules = schedules
         self._ledger = ledger
@@ -70,6 +81,8 @@ class InitiativeVerbService:
         self._executor = executor
         self._settings = settings
         self._timezone_resolver = timezone_resolver
+        self._tombstones = tombstones
+        self._tombstone_window_days = tombstone_window_days
 
     async def apply(
         self, *, owner_id: str, persona_id: str, verb: str, notice_id: str | None
@@ -110,6 +123,9 @@ class InitiativeVerbService:
                 timezone=timezone,
                 settings=self._settings,
                 now=now,
+                tombstones=self._tombstones,
+                tombstone_window_days=self._tombstone_window_days,
+                seam="initiative_dial_verb",
             )
 
     async def _apply_confirm(self, owner_id: str, notice_id: str) -> None:

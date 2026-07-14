@@ -261,6 +261,15 @@ class APIConfig(BaseSettings):
     schedule_occurrences_max_count: int = Field(
         default=500, ge=1, validation_alias="PERSONA_SCHEDULE_OCCURRENCES_MAX_COUNT"
     )
+    # R9-037 — the schedule-tombstone gate's lookback window: how long a user's
+    # delete/edit of a schedule keeps refusing an autonomous seam's re-creation attempt
+    # (e.g. the A5 initiative-scan-schedule ensure). A cool-down, not a permanent block —
+    # the persona-level ``initiative_dial`` stays the authoritative permanent off-switch;
+    # this only buys the user's just-expressed intent a month before the population-level
+    # self-heal resumes. ``0`` disables gating entirely (an explicit escape hatch).
+    schedule_tombstone_window_days: int = Field(
+        default=30, ge=0, validation_alias="PERSONA_SCHEDULE_TOMBSTONE_WINDOW_DAYS"
+    )
     # Spec A3 (T9/T13) — the two lifecycle sweeps hosted in the worker loop, each leader-gated
     # on its own advisory key. The approval sweep reminds a pending proposal at ~24h and
     # auto-expires (+ auto-pauses the task) at ~72h; the dead-leg sweep parks a retry-exhausted

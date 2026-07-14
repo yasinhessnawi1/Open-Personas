@@ -28,12 +28,14 @@ from persona.initiative import DEFAULT_INITIATIVE_DIAL, InitiativeDial
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.schedules import MissedFirePolicy, RecurrenceFreq, RecurrenceRule, Schedule
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.approvals import AutonomyPauseCheck, never_paused
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import personas as personas_t
+from persona_api.schedules.tombstones import TombstoneAction
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -45,10 +47,12 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.schedules import ScheduleStore
+    from persona_api.schedules.tombstones import ScheduleTombstoneStore
 
 __all__ = [
     "INITIATIVE_SCAN_JOB_TYPE",
     "CandidateSink",
+    "EnsureScheduleResult",
     "InitiativeScanHandler",
     "InitiativeScanPayload",
     "ensure_initiative_schedule",
@@ -230,6 +234,21 @@ def initiative_schedule_id(persona_id: str) -> str:
     return f"initsched:{persona_id}"
 
 
+class EnsureScheduleResult(BaseModel):
+    """The outcome of one :func:`ensure_initiative_schedule` call.
+
+    ``created`` is ``False`` for BOTH the ordinary already-exists no-op and a
+    tombstone-refused attempt — ``refused`` disambiguates the two for a caller
+    that cares (the provisioner's own counting; tests).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schedule_id: str
+    created: bool
+    refused: bool = False
+
+
 def ensure_initiative_schedule(
     store: ScheduleStore,
     *,
@@ -238,7 +257,10 @@ def ensure_initiative_schedule(
     timezone: str,
     settings: InitiativeSettings,
     now: datetime,
-) -> str:
+    tombstones: ScheduleTombstoneStore | None = None,
+    tombstone_window_days: int = 30,
+    seam: str = "initiative_ensure",
+) -> EnsureScheduleResult:
     """Idempotently ensure the persona's daily scan schedule exists (A5-D-1).
 
     Lazy provisioning: called when initiative is enabled for a persona (persona
@@ -247,6 +269,18 @@ def ensure_initiative_schedule(
     back (race-safe without a new mechanism). The schedule fires daily at the
     user's morning hour in THEIR zone (A8's resolved tz), targeting this job
     type with the persona in the template.
+
+    **R9-037.** Before creating a MISSING row, consult ``tombstones`` (when
+    wired — ``None`` is the pre-R9-037 behaviour, e.g. in tests that don't care):
+    a schedule with this exact id that the user deleted within
+    ``tombstone_window_days`` refuses the re-creation (audited
+    ``schedule.recreate_refused``) instead of silently resurrecting it. This is
+    the confirmed fix for the owner's report — this function is called both by
+    the hourly (and immediate-on-every-worker-restart) ``InitiativeProvisioner``
+    sweep AND by the initiative dial chat-verb
+    (``InitiativeVerbService._apply_dial``); neither call is a fresh, explicit
+    user ask for THIS schedule, so a tombstone match is a hard refusal, never a
+    silent re-creation. ``seam`` names the caller in the audit row (observability).
     """
     schedule_id = initiative_schedule_id(persona_id)
     try:
@@ -254,7 +288,24 @@ def ensure_initiative_schedule(
     except ScheduleNotFoundError:
         pass
     else:
-        return schedule_id
+        return EnsureScheduleResult(schedule_id=schedule_id, created=False)
+    if tombstones is not None:
+        match = tombstones.find_recent(
+            owner_id,
+            schedule_id=schedule_id,
+            window_days=tombstone_window_days,
+            now=now,
+            action=TombstoneAction.DELETED,
+        )
+        if match is not None:
+            _log.info(
+                "initiative schedule creation refused — recently user-deleted "
+                "schedule_id={sid} persona_id={pid}",
+                sid=schedule_id,
+                pid=persona_id,
+            )
+            tombstones.audit_refusal(owner_id, schedule_id=schedule_id, seam=seam, tombstone=match)
+            return EnsureScheduleResult(schedule_id=schedule_id, created=False, refused=True)
     schedule = Schedule(
         id=schedule_id,
         owner_id=owner_id,
@@ -275,4 +326,5 @@ def ensure_initiative_schedule(
     except IntegrityError:
         # A concurrent ensure won the PK race — the schedule exists; converge.
         _log.info("initiative schedule ensure raced; existing row wins")
-    return schedule_id
+        return EnsureScheduleResult(schedule_id=schedule_id, created=False)
+    return EnsureScheduleResult(schedule_id=schedule_id, created=True)
