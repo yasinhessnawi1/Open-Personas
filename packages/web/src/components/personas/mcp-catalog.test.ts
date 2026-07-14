@@ -10,9 +10,10 @@
 
 import { describe, expect, it } from "vitest";
 import type { components } from "@/lib/api/schema";
-import { mapMcpCatalog } from "./mcp-catalog";
+import { mapMcpCapabilities, mapMcpCatalog } from "./mcp-catalog";
 
 type Row = components["schemas"]["MCPCatalogServer"];
+type CapsRow = components["schemas"]["MCPDeploymentCapabilities"];
 
 describe("mapMcpCatalog", () => {
   it("maps the full N1 display/trust/secrets surface (snake_case → camelCase)", () => {
@@ -39,6 +40,8 @@ describe("mapMcpCatalog", () => {
           description: "A GitHub PAT with repo scope.",
         },
       ],
+      auth_method: "oauth",
+      oauth_provider: "github",
     };
 
     expect(mapMcpCatalog([row])).toEqual([
@@ -65,11 +68,13 @@ describe("mapMcpCatalog", () => {
             description: "A GitHub PAT with repo scope.",
           },
         ],
+        authMethod: "oauth",
+        oauthProvider: "github",
       },
     ]);
   });
 
-  it("defaults the additive N1 fields when a back-compat five-field row omits them", () => {
+  it("defaults the additive N1 + N7 fields when a back-compat five-field row omits them", () => {
     // The original spec-30 contract: the additive backend fields are absent on
     // the wire (optional-with-default), so they map to the documented empties.
     const legacyRow = {
@@ -96,6 +101,8 @@ describe("mapMcpCatalog", () => {
         signed: false,
         allowHosts: [],
         secrets: [],
+        authMethod: "",
+        oauthProvider: "",
       },
     ]);
   });
@@ -117,5 +124,29 @@ describe("mapMcpCatalog", () => {
 
   it("returns an empty list for an empty catalog", () => {
     expect(mapMcpCatalog([])).toEqual([]);
+  });
+});
+
+describe("mapMcpCapabilities", () => {
+  it("maps the wrapper's capabilities field (snake_case → camelCase)", () => {
+    const caps: CapsRow = {
+      per_tenant_runtime: true,
+      gateway: false,
+      oauth_providers: ["github"],
+    };
+    expect(mapMcpCapabilities(caps)).toEqual({
+      perTenantRuntime: true,
+      gateway: false,
+      oauthProviders: ["github"],
+    });
+  });
+
+  it("defaults oauth_providers to empty when omitted", () => {
+    const caps = { per_tenant_runtime: false, gateway: true } as CapsRow;
+    expect(mapMcpCapabilities(caps)).toEqual({
+      perTenantRuntime: false,
+      gateway: true,
+      oauthProviders: [],
+    });
   });
 });

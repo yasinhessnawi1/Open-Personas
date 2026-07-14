@@ -61,7 +61,40 @@ export interface McpCatalogEntry {
   signed: boolean;
   allowHosts: string[];
   secrets: McpCatalogSecret[];
+  // -- Spec R8/N7: per-user OAuth binding passthrough --
+  // `authMethod === "oauth"` marks a catalog entry whose connection is obtained
+  // per-user via Connect (N7-T3), never a credential form. Empty = the pre-N7
+  // env/credential/none path.
+  authMethod: string;
+  oauthProvider: string;
 }
+
+/**
+ * Spec N7 (D-N7-2) — which MCP mechanisms THIS DEPLOYMENT can actually run.
+ *
+ * Rides `GET /v1/mcp-catalog` as a sibling of the server list (the wrapper
+ * response). Threaded down to the apps chooser so it never guesses from
+ * indirect signals: `perTenantRuntime` gates whether an image-type
+ * (`serverType === "server"`) app can be adopted at all; `gateway` distinguishes
+ * "the operator may have exposed it on their gateway" from "nothing can serve
+ * this"; `oauthProviders` drives the BYO manager's fail-closed provider select
+ * (N7-T3b). All default OFF so every existing caller that doesn't pass this prop
+ * renders EXACTLY the pre-N7 behavior (no image-app adopt gate widening, no
+ * oauth option surfaced beyond the always-on mcp-native path).
+ */
+export interface McpDeploymentCapabilities {
+  perTenantRuntime: boolean;
+  gateway: boolean;
+  oauthProviders: string[];
+}
+
+/** The default, all-off capabilities — pre-N7 behavior for callers that don't
+ * (yet) thread the real deployment signal. */
+export const MCP_CAPABILITIES_OFF: McpDeploymentCapabilities = {
+  perTenantRuntime: false,
+  gateway: false,
+  oauthProviders: [],
+};
 
 // Spec 30 — the accuracy-preserving combined cap across tools + skills + MCP
 // (the tool-count-cliff, Spec 26 D-26): communicated, not hard-enforced.
@@ -75,6 +108,7 @@ export function PersonaForm({
   tools,
   mcpServers = [],
   mcpConnections = [],
+  mcpCapabilities = MCP_CAPABILITIES_OFF,
   personaId,
   openAll = false,
 }: {
@@ -92,6 +126,10 @@ export function PersonaForm({
   // chooser so each MCP app card shows its friendly connection badge. Optional so
   // existing callers/tests (and the author/new flow) render unchanged.
   mcpConnections?: McpConnectionStatus[];
+  // Spec N7 (D-N7-2) — which MCP mechanisms this deployment can run, threaded to
+  // the apps chooser's adopt gate + image-toggle suppression. Optional, defaults
+  // all-off (the pre-N7 behavior) so existing callers/tests render unchanged.
+  mcpCapabilities?: McpDeploymentCapabilities;
   // Spec N4 (Group D) — the persona being edited, threaded to the apps chooser so a
   // remote app that declares a credential can render the setup form. Absent in the
   // author/new flow (no id yet) → the read-honest needs-setup disclosure.
@@ -402,6 +440,7 @@ export function PersonaForm({
             tools={tools}
             declaredTools={declaredTools}
             connections={mcpConnections}
+            capabilities={mcpCapabilities}
             personaId={personaId}
             onChange={(list) => onChange(writeStringList(doc, "tools", list))}
           />

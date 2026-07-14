@@ -191,11 +191,14 @@ def test_mcp_catalog_legacy_contract_unchanged_and_fields_additive(client: TestC
 
     A client written against spec 30 (name/description/provider/default_enabled/
     required_env) sees no break — the new fields are additive-with-default, so the
-    builtin rows carry empty/neutral defaults.
+    builtin rows carry empty/neutral defaults. Spec N7 (D-N7-2) wraps the list under
+    ``servers`` (a sibling ``capabilities`` object rides alongside — see the
+    dedicated wrapper-shape tests below); the per-server contract itself is
+    otherwise unchanged.
     """
     resp = client.get("/v1/mcp-catalog", headers=_auth())
     assert resp.status_code == 200
-    rows = {r["name"]: r for r in resp.json()}
+    rows = {r["name"]: r for r in resp.json()["servers"]}
     assert set(rows) >= _BUILTINS  # builtin floor always present (no mirror needed)
 
     fs = rows["filesystem"]
@@ -210,6 +213,9 @@ def test_mcp_catalog_legacy_contract_unchanged_and_fields_additive(client: TestC
     assert fs["signed"] is False
     assert fs["allow_hosts"] == []
     assert fs["secrets"] == []
+    # additive N7 (R8 rebind) fields present, defaulted for a non-oauth builtin row
+    assert fs["auth_method"] == ""
+    assert fs["oauth_provider"] == ""
 
 
 def test_mcp_catalog_secret_schema_is_display_only(client: TestClient) -> None:
@@ -223,6 +229,124 @@ def test_mcp_catalog_secret_schema_is_display_only(client: TestClient) -> None:
 
 def test_mcp_catalog_requires_auth(client: TestClient) -> None:
     assert client.get("/v1/mcp-catalog").status_code == 401
+
+
+# -- N7 (D-N7-2): capabilities wrapper + oauth passthrough + the C-filter ----
+
+
+def test_mcp_catalog_wrapper_shape(client: TestClient) -> None:
+    """The response is a wrapper object ``{servers, capabilities}``, not a bare
+    array — an intentional, atomic breaking change (the ONE regen this ships with,
+    N7-T2): a bare list cannot carry the sibling ``capabilities`` field."""
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"servers", "capabilities"}
+    assert isinstance(body["servers"], list)
+    assert set(body["capabilities"]) == {"per_tenant_runtime", "gateway", "oauth_providers"}
+
+
+def test_mcp_catalog_capabilities_truth_table(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capabilities are computed truthfully from live deployment state, not guessed."""
+    # Baseline: no per-tenant runtime composed, no gateway configured, no oauth
+    # provider configured — the fixture's fully-off deployment.
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    assert resp.json()["capabilities"] == {
+        "per_tenant_runtime": False,
+        "gateway": False,
+        "oauth_providers": [],
+    }
+
+    # per_tenant_runtime flips true ONLY when app.state.mcp_runtime is non-None —
+    # exactly the condition (N6 composition guard passed) under which adopting an
+    # image app would spawn a real Machine.
+    client.app.state.mcp_runtime = object()  # type: ignore[attr-defined]
+    try:
+        resp = client.get("/v1/mcp-catalog", headers=_auth())
+        assert resp.json()["capabilities"]["per_tenant_runtime"] is True
+    finally:
+        client.app.state.mcp_runtime = None  # type: ignore[attr-defined]
+
+    # gateway flips true when the operator-configured gateway URL env var is set.
+    monkeypatch.setenv("PERSONA_DOCKER_MCP_GATEWAY_URL", "http://gw.internal:8811/mcp")
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    assert resp.json()["capabilities"]["gateway"] is True
+    monkeypatch.delenv("PERSONA_DOCKER_MCP_GATEWAY_URL")
+
+    # oauth_providers reflects the configured provider registry (github, once its
+    # client_id is set); an unconfigured provider stays absent (fail-closed).
+    original_config = client.app.state.config  # type: ignore[attr-defined]
+    client.app.state.config = APIConfig(  # type: ignore[attr-defined]
+        database_url=original_config.database_url,
+        app_database_url=original_config.app_database_url,
+        mcp_oauth_github_client_id="cid_test",
+    )
+    try:
+        resp = client.get("/v1/mcp-catalog", headers=_auth())
+        assert resp.json()["capabilities"]["oauth_providers"] == ["github"]
+    finally:
+        client.app.state.config = original_config  # type: ignore[attr-defined]
+
+
+def test_mcp_catalog_oauth_passthrough(client: TestClient) -> None:
+    """``auth_method``/``oauth_provider`` pass through for the bundled github entry
+    (Spec R8, rebound off the operator-global token; Spec N7 threads it to the web
+    so the catalog card can offer a Connect affordance instead of a credential
+    form)."""
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    rows = {r["name"]: r for r in resp.json()["servers"]}
+    github = rows["github"]
+    assert github["auth_method"] == "oauth"
+    assert github["oauth_provider"] == "github"
+
+
+def test_mcp_catalog_c_filter_excludes_unrunnable_image_entries(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner-ruled C-filter: an image-type (``server_type == "server"``) mirror
+    entry that neither the per-tenant runtime nor a gateway could ever run is
+    excluded from the LISTING outright — never merely shown-then-refused. A
+    gateway-configured deployment keeps it listed (the operator may have enabled it
+    there); a runtime-configured deployment keeps it listed too."""
+    from persona.tools.mcp.catalog import MCPCatalog, MCPServerCatalogEntry
+    from persona_api.services import catalog_service
+
+    image_entry = MCPServerCatalogEntry(
+        name="image-app",
+        description="An image-runtime app.",
+        kind="external",
+        risk="low",
+        server_type="server",
+    )
+    fake = MCPCatalog(servers={"image-app": image_entry})
+    monkeypatch.setattr(catalog_service, "load_mirror_catalog", lambda **_kw: fake)
+
+    # No runtime, no gateway → excluded entirely.
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    names = {r["name"] for r in resp.json()["servers"]}
+    assert "image-app" not in names
+
+    # Gateway configured → stays listed (operator-managed, unknown to the catalog).
+    monkeypatch.setenv("PERSONA_DOCKER_MCP_GATEWAY_URL", "http://gw.internal:8811/mcp")
+    resp = client.get("/v1/mcp-catalog", headers=_auth())
+    names = {r["name"] for r in resp.json()["servers"]}
+    assert "image-app" in names
+    monkeypatch.delenv("PERSONA_DOCKER_MCP_GATEWAY_URL")
+
+    # Per-tenant runtime composed → stays listed.
+    client.app.state.mcp_runtime = object()  # type: ignore[attr-defined]
+    try:
+        resp = client.get("/v1/mcp-catalog", headers=_auth())
+        names = {r["name"] for r in resp.json()["servers"]}
+        assert "image-app" in names
+    finally:
+        client.app.state.mcp_runtime = None  # type: ignore[attr-defined]
+
+    # merged_mcp_catalog() itself (the unfiltered source other consumers — adoption,
+    # run_policy, mcp_search — read from) still carries the full set regardless.
+    assert "image-app" in {e.name for e in catalog_service.merged_mcp_catalog()}
 
 
 def test_merged_catalog_no_override_is_builtin_floor_plus_bundled_mirror() -> None:

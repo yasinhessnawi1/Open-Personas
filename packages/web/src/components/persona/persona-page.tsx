@@ -16,7 +16,11 @@ import { AvatarModal } from "@/components/persona/avatar-modal";
 import { PersonaMemoriesModal } from "@/components/persona/persona-memories-modal";
 import type { McpConnectionStatus } from "@/components/personas/mcp-connection-label";
 import { PersonaEditor } from "@/components/personas/persona-editor";
-import type { McpCatalogEntry } from "@/components/personas/persona-form";
+import {
+  MCP_CAPABILITIES_OFF,
+  type McpCatalogEntry,
+  type McpDeploymentCapabilities,
+} from "@/components/personas/persona-form";
 import { useConfirm } from "@/components/providers/confirm-provider";
 import { useNotify } from "@/components/providers/notification-provider";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -54,6 +58,7 @@ export function PersonaPage({
   skills,
   mcpServers,
   mcpConnections,
+  mcpCapabilities = MCP_CAPABILITIES_OFF,
   initialConsent,
   initialAvatarUrl,
   conversationCount,
@@ -69,6 +74,9 @@ export function PersonaPage({
   skills: string[];
   mcpServers: McpCatalogEntry[];
   mcpConnections: McpConnectionStatus[];
+  // Spec N7 (D-N7-2) — which MCP mechanisms this deployment can run, threaded to
+  // the editor's apps chooser. Optional, defaults all-off (pre-N7 behavior).
+  mcpCapabilities?: McpDeploymentCapabilities;
   initialConsent: boolean | null;
   initialAvatarUrl: string | null;
   conversationCount: number;
@@ -261,6 +269,7 @@ export function PersonaPage({
           skills={skills}
           mcpServers={mcpServers}
           mcpConnections={mcpConnections}
+          mcpCapabilities={mcpCapabilities}
           personaId={personaId}
           onSave={(yaml, avatar) => savePersonaInline(personaId, yaml, avatar)}
           saveLabel=""

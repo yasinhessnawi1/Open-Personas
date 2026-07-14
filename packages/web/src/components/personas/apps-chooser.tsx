@@ -24,7 +24,11 @@ import { type AppState, deriveAppState, isAppEnabled } from "./app-state";
 import { CAPABILITY_SCROLL_LIST_CLASS } from "./capability-list";
 import { McpConnectionBadge } from "./mcp-connection-badge";
 import type { McpConnectionStatus } from "./mcp-connection-label";
-import type { McpCatalogEntry } from "./persona-form";
+import {
+  MCP_CAPABILITIES_OFF,
+  type McpCatalogEntry,
+  type McpDeploymentCapabilities,
+} from "./persona-form";
 
 const MCP_PREFIX = "mcp:";
 
@@ -60,6 +64,7 @@ export function AppsChooser({
   declaredTools,
   unavailableMcpServers = [],
   connections = [],
+  capabilities = MCP_CAPABILITIES_OFF,
   personaId,
   onChange,
 }: {
@@ -77,6 +82,13 @@ export function AppsChooser({
    * (R4-C1-21). Empty (author/new flow, older api, fetch failure) → no badges.
    */
   connections?: McpConnectionStatus[];
+  /**
+   * Spec N7 (D-N7-2) — which MCP mechanisms this deployment can run. Drives the
+   * adopt gate for image-type (`serverType === "server"`) apps + the honest
+   * toggle-suppression when nothing on this deployment could ever serve one.
+   * Defaults all-off (pre-N7 behavior) for callers that don't thread it.
+   */
+  capabilities?: McpDeploymentCapabilities;
   /**
    * Spec N4 (Group D) — the persona being edited. Present in the edit flow only;
    * absent in author/new (no id to adopt against). When present, a remote app that
@@ -189,6 +201,7 @@ export function AppsChooser({
                   unavailableMcpServers,
                 )}
                 connection={connectionByServer.get(app.name)}
+                capabilities={capabilities}
                 personaId={personaId}
                 onToggle={() => toggleApp(app)}
               />
@@ -214,6 +227,7 @@ function AppCard({
   app,
   state,
   connection,
+  capabilities = MCP_CAPABILITIES_OFF,
   personaId,
   onToggle,
 }: {
@@ -221,6 +235,8 @@ function AppCard({
   state: AppState;
   /** N6 merge-back — this server's connection status; absent → no badge. */
   connection?: McpConnectionStatus;
+  /** Spec N7 (D-N7-2) — deployment capabilities; defaults all-off. */
+  capabilities?: McpDeploymentCapabilities;
   personaId?: string;
   onToggle: () => void;
 }) {
@@ -228,12 +244,30 @@ function AppCard({
   const title = app.displayName || app.name;
   const enabled = state === "enabled";
   const unavailable = state === "unavailable";
-  // Spec N4 (Group D): a remote app that declares a credential is self-adoptable —
-  // the user supplies the secret via the setup form (N4-D-1/N4-D-10). Requires an
-  // existing persona to adopt against (edit flow only). Local-container / no-credential
-  // apps keep the read-honest disclosure + the allow-list toggle (the N3 behavior).
+  const isImageApp = app.serverType === "server";
+  // Spec N4 (Group D) + N7 (D-N7-2, the image-app adoption gate): a remote app
+  // that declares a credential is self-adoptable (unchanged from N4); an
+  // IMAGE-type app is ALSO self-adoptable once this deployment has a per-tenant
+  // runtime to actually spawn it on — regardless of whether it declares a secret
+  // (a secretless image app still needs the adopt→assign door, never the
+  // allow-list toggle, since T1's grant expansion deliberately excludes image
+  // servers; the credential form itself accommodates zero secrets, N7 owner
+  // ruling). Requires an existing persona to adopt against (edit flow only).
   const adoptable =
-    !!personaId && app.serverType === "remote" && app.secrets.length > 0;
+    !!personaId &&
+    ((app.serverType === "remote" && app.secrets.length > 0) ||
+      (isImageApp && capabilities.perTenantRuntime));
+  // Any image app that is NOT going through the adopt form — whether because
+  // there is no persona yet to adopt against (the author/new flow) or this
+  // deployment has no per-tenant runtime to spawn it on — suppresses the
+  // allow-list toggle rather than leaving it inert: it would write a
+  // `mcp:<name>` grant no mechanism can ever serve (image tools only ever
+  // arrive via adoption + assignment; T1's grant expansion deliberately
+  // excludes image servers). The server-side C-filter already excludes the
+  // no-mechanism-at-all case from the catalog entirely, so on an existing
+  // persona this is reached only when an operator gateway is configured (the
+  // app stays listed — the catalog can't see what's enabled there).
+  const imageAppUnservable = isImageApp && !adoptable;
 
   return (
     <Card size="sm" data-slot="app-card" data-state={state}>
@@ -326,23 +360,28 @@ function AppCard({
                 {app.requiredEnv.length > 0 || app.secrets.length > 0 ? (
                   <NeedsSetupNote app={app} />
                 ) : null}
-                <button
-                  type="button"
-                  onClick={onToggle}
-                  aria-pressed={enabled}
-                  data-slot="app-toggle"
-                  className={cn(
-                    "inline-flex w-fit items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors",
-                    enabled
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-primary/30",
-                  )}
-                >
-                  {enabled ? (
-                    <Check className="size-3.5" aria-hidden="true" />
-                  ) : null}
-                  {enabled ? t("enable.disable") : t("enable.enable")}
-                </button>
+                {/* N7 (D-N7-2): an image app with no mechanism to run it on THIS
+                    deployment suppresses the toggle — it can only ever write an
+                    inert grant (see `imageAppUnservable` above). */}
+                {imageAppUnservable ? null : (
+                  <button
+                    type="button"
+                    onClick={onToggle}
+                    aria-pressed={enabled}
+                    data-slot="app-toggle"
+                    className={cn(
+                      "inline-flex w-fit items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors",
+                      enabled
+                        ? "border-primary/40 bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:border-primary/30",
+                    )}
+                  >
+                    {enabled ? (
+                      <Check className="size-3.5" aria-hidden="true" />
+                    ) : null}
+                    {enabled ? t("enable.disable") : t("enable.enable")}
+                  </button>
+                )}
               </>
             )}
           </div>

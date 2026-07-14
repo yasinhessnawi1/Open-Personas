@@ -41,6 +41,8 @@ function entry(over: Partial<McpCatalogEntry> = {}): McpCatalogEntry {
     signed: false,
     allowHosts: [],
     secrets: [],
+    authMethod: "",
+    oauthProvider: "",
     ...over,
   };
 }

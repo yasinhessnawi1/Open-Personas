@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "available_mcp_server_names",
+    "is_listable",
     "list_skills",
     "list_specialities",
     "list_tools",
@@ -138,6 +139,29 @@ def available_mcp_server_names(*, mirror_path: Path | None = None) -> set[str]:
     already-enabled persona's flag (surface c).
     """
     return {e.name for e in merged_mcp_catalog(mirror_path=mirror_path)}
+
+
+def is_listable(entry: MCPServerCatalogEntry, *, per_tenant_runtime: bool, gateway: bool) -> bool:
+    """Whether ``GET /v1/mcp-catalog`` should list ``entry`` on THIS deployment (Spec N7).
+
+    The owner-ruled C-filter (Phase-3 gate, verbatim: "if the server has no way of
+    running this mcp then exclude it from the list, that's easier and better"): an
+    image-type app (``server_type == "server"``) that NEITHER the per-tenant runtime
+    NOR an operator-configured gateway could ever serve is excluded outright — the
+    catalog listing means "what this deployment can actually offer," not "what
+    exists that you'll be refused." A gateway-configured deployment keeps the entry
+    listed (an operator MAY have enabled it there; the catalog cannot see the
+    gateway's own enablement) with an honest gateway-managed note (T4); a
+    ``server_type == "remote"`` or ``"builtin"``/``"external"`` (non-image) entry is
+    ALWAYS listed — this predicate only ever excludes the unrunnable image case.
+
+    A pure function (no I/O) so the truth table is exhaustively unit-testable; called
+    ONLY at the route layer (``routes/tools.py``) — ``merged_mcp_catalog`` itself stays
+    unfiltered because adoption / run-policy / ``mcp_search`` / the N2-D-4
+    unavailable-servers signal all need the FULL catalog regardless of what this one
+    listing surface can currently run.
+    """
+    return not (entry.server_type == "server" and not per_tenant_runtime and not gateway)
 
 
 def _is_mcp_server_enablement(entry: str) -> bool:

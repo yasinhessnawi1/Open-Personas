@@ -1,5 +1,8 @@
 import type { components } from "@/lib/api/schema";
-import type { McpCatalogEntry } from "./persona-form";
+import type {
+  McpCatalogEntry,
+  McpDeploymentCapabilities,
+} from "./persona-form";
 
 /**
  * Spec 30 T11 / N3 — map the API `MCPCatalogServer` rows (GET /v1/mcp-catalog)
@@ -37,5 +40,23 @@ export function mapMcpCatalog(
       example: s.example ?? "",
       description: s.description ?? "",
     })),
+    // -- Spec R8/N7: per-user OAuth binding passthrough --
+    authMethod: r.auth_method ?? "",
+    oauthProvider: r.oauth_provider ?? "",
   }));
+}
+
+/**
+ * Spec N7 (D-N7-2) — map the API `MCPDeploymentCapabilities` wrapper field
+ * (snake_case → camelCase). Every field is required on the wire (the route always
+ * computes a truthful value), so no defaulting beyond the TS shape itself.
+ */
+export function mapMcpCapabilities(
+  caps: components["schemas"]["MCPDeploymentCapabilities"],
+): McpDeploymentCapabilities {
+  return {
+    perTenantRuntime: caps.per_tenant_runtime,
+    gateway: caps.gateway,
+    oauthProviders: caps.oauth_providers ?? [],
+  };
 }

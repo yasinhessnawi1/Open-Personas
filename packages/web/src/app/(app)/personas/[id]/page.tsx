@@ -1,7 +1,10 @@
 import { notFound } from "next/navigation";
 import { startTask } from "@/app/(app)/runs/actions";
 import { PersonaPage } from "@/components/persona/persona-page";
-import { mapMcpCatalog } from "@/components/personas/mcp-catalog";
+import {
+  mapMcpCapabilities,
+  mapMcpCatalog,
+} from "@/components/personas/mcp-catalog";
 import { fetchMcpConnections } from "@/components/personas/mcp-connections";
 import { type ToolSummary, unwrap } from "@/lib/api";
 import type { components } from "@/lib/api/schema";
@@ -38,7 +41,10 @@ export default async function PersonaDetailPage({
     await Promise.all([
       api.GET("/v1/tools").then(unwrap),
       api.GET("/v1/skills").then(unwrap),
-      api.GET("/v1/mcp-catalog").then(unwrap),
+      // Spec N7 (D-N7-2): the response is now a wrapper {servers, capabilities}.
+      api
+        .GET("/v1/mcp-catalog")
+        .then(unwrap),
       fetchMcpConnections(api, id),
       // Files ride the page as an overlay (R11-B6 rider) — first page here,
       // fail-soft to empty (the artifact route is a later-phase addition).
@@ -46,6 +52,7 @@ export default async function PersonaDetailPage({
         params: { path: { persona_id: id } },
       }),
     ]);
+  const catalog = mcpCatalog as components["schemas"]["MCPCatalogResponse"];
   const initialArtifacts =
     artifactsRes.response.ok && artifactsRes.data
       ? artifactsRes.data
@@ -57,9 +64,8 @@ export default async function PersonaDetailPage({
       initialDoc={yamlToDoc(detail.yaml)}
       tools={(tools as ToolSummary[]).map((x) => x.name)}
       skills={(skills as ToolSummary[]).map((x) => x.name)}
-      mcpServers={mapMcpCatalog(
-        mcpCatalog as components["schemas"]["MCPCatalogServer"][],
-      )}
+      mcpServers={mapMcpCatalog(catalog.servers)}
+      mcpCapabilities={mapMcpCapabilities(catalog.capabilities)}
       mcpConnections={mcpConnections}
       initialConsent={detail.consent_to_auto_dispatch ?? null}
       initialAvatarUrl={detail.avatar_url ?? null}

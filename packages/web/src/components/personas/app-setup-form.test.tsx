@@ -44,6 +44,8 @@ const _APP: McpCatalogEntry = {
       description: "Create an integration token at notion.so/my-integrations.",
     },
   ],
+  authMethod: "",
+  oauthProvider: "",
 };
 
 interface Captured {
@@ -107,6 +109,26 @@ function renderForm() {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
       <AppSetupForm app={_APP} personaId="p1" />
+    </NextIntlClientProvider>,
+  );
+}
+
+// Spec N7 (D-N7-2, owner-ratified) — a SECRETLESS image app (e.g. a runtime-only
+// app needing no credential): the accommodation renders no input and submits
+// immediately with `credential: null`.
+const _SECRETLESS_APP: McpCatalogEntry = {
+  ..._APP,
+  name: "secretless-image",
+  displayName: "Secretless Image App",
+  serverType: "server",
+  secrets: [],
+  requiredEnv: [],
+};
+
+function renderSecretlessForm() {
+  return render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <AppSetupForm app={_SECRETLESS_APP} personaId="p1" />
     </NextIntlClientProvider>,
   );
 }
@@ -185,5 +207,41 @@ describe("AppSetupForm (Spec N4 Group D)", () => {
 
     expect(await findByText(/already set up/i)).toBeTruthy();
     expect(container.querySelector('[data-slot="app-setup-done"]')).toBeNull();
+  });
+
+  // Spec N7 (D-N7-2) — the secretless AppSetupForm accommodation.
+  it("secretless app: no credential input, submit enabled immediately, posts credential: null", async () => {
+    const { captured, restore: r } = installFetch();
+    restore = r;
+    const { container } = renderSecretlessForm();
+
+    // No input rendered — there is nothing to type.
+    expect(
+      container.querySelector('[data-slot="app-setup-credential"]'),
+    ).toBeNull();
+
+    const submit = container.querySelector(
+      '[data-slot="app-setup-submit"]',
+    ) as HTMLButtonElement;
+    // Enabled immediately — never gated on a credential that will never exist.
+    expect(submit.disabled).toBe(false);
+    submit.click();
+
+    await waitFor(() => {
+      const post = captured.find(
+        (c) =>
+          c.method === "POST" && c.url.includes("/v1/personas/p1/adopted-apps"),
+      );
+      expect(post).toBeTruthy();
+      const parsed = JSON.parse(post?.body ?? "{}");
+      expect(parsed.catalog_name).toBe("secretless-image");
+      expect(parsed.credential).toBeNull();
+    });
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-slot="app-setup-done"]'),
+      ).toBeTruthy(),
+    );
   });
 });

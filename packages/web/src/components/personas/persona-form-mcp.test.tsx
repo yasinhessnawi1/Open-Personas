@@ -49,6 +49,8 @@ const mcpEntry = (e: Partial<McpCatalogEntry>): McpCatalogEntry => ({
   signed: false,
   allowHosts: [],
   secrets: [],
+  authMethod: "",
+  oauthProvider: "",
   ...e,
 });
 

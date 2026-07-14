@@ -2174,7 +2174,7 @@
       "get": {
         "tags": ["catalog"],
         "summary": "List Mcp Catalog",
-        "description": "List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1).\n\nThe mirror's display metadata + credential schema ride additive fields; the\nsecret schema is display-only (no value, D-N1-5).",
+        "description": "List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1 + N7).\n\nThe mirror's display metadata + credential schema ride additive fields; the\nsecret schema is display-only (no value, D-N1-5). Spec N7 (D-N7-2) wraps the\nlist with ``capabilities`` \u2014 what THIS deployment can actually run (per-tenant\nimage runtime / gateway / configured oauth providers) \u2014 and server-side excludes\n(\"the C-filter\") an image-type entry neither mechanism could ever serve, so the\nlisting means \"what this deployment can offer,\" never \"what you'll be refused.\"",
         "operationId": "list_mcp_catalog_v1_mcp_catalog_get",
         "responses": {
           "200": {
@@ -2182,11 +2182,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/MCPCatalogServer"
-                  },
-                  "type": "array",
-                  "title": "Response List Mcp Catalog V1 Mcp Catalog Get"
+                  "$ref": "#/components/schemas/MCPCatalogResponse"
                 }
               }
             }
@@ -5798,6 +5794,25 @@
         "title": "LedgerOut",
         "description": "The cost ledger, per kind + total (\u00b5-dollars)."
       },
+      "MCPCatalogResponse": {
+        "properties": {
+          "servers": {
+            "items": {
+              "$ref": "#/components/schemas/MCPCatalogServer"
+            },
+            "type": "array",
+            "title": "Servers"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/MCPDeploymentCapabilities"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["servers", "capabilities"],
+        "title": "MCPCatalogResponse",
+        "description": "The wrapped ``GET /v1/mcp-catalog`` response (Spec N7, D-N7-2).\n\nA bare array cannot carry a sibling field, so the deployment capabilities ride\nalongside the server list in one wrapper object (a breaking response-shape\nchange, landed atomically with the web's unwrap in the SAME commit, N7-T2).\n``servers`` is additionally filtered server-side to what THIS deployment can\nactually offer (the C-filter, N7 owner ruling: an image-type app with no\nruntime and no gateway is excluded outright rather than listed-then-refused \u2014\nsee ``catalog_service.is_listable``)."
+      },
       "MCPCatalogSecret": {
         "properties": {
           "name": {
@@ -5903,6 +5918,16 @@
             },
             "type": "array",
             "title": "Secrets"
+          },
+          "auth_method": {
+            "type": "string",
+            "title": "Auth Method",
+            "default": ""
+          },
+          "oauth_provider": {
+            "type": "string",
+            "title": "Oauth Provider",
+            "default": ""
           }
         },
         "additionalProperties": false,
@@ -5938,6 +5963,30 @@
         "required": ["server_name", "connected"],
         "title": "MCPConnectionStatus",
         "description": "One assigned MCP server's connection status (Spec N6, N6-D-6; R4-C1-21).\n\nMakes \"assigned\" visibly distinct from \"working\": ``connected`` \u21d2 the server's tools\nreach the model; otherwise ``reason`` names why (the T1 vocabulary \u2014 ``starting`` /\n``spawn_failed`` / ``stopped`` / ``fly_outage`` / ``no_key`` / ``unvetted`` /\n``runtime_capacity`` / ``not_enabled``). The web renders ``reason`` as a friendly badge \u2014\nnever the raw enum. No secret is ever included."
+      },
+      "MCPDeploymentCapabilities": {
+        "properties": {
+          "per_tenant_runtime": {
+            "type": "boolean",
+            "title": "Per Tenant Runtime"
+          },
+          "gateway": {
+            "type": "boolean",
+            "title": "Gateway"
+          },
+          "oauth_providers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Oauth Providers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["per_tenant_runtime", "gateway"],
+        "title": "MCPDeploymentCapabilities",
+        "description": "Which MCP mechanisms THIS deployment can actually run (Spec N7, D-N7-2).\n\nRides the ``/v1/mcp-catalog`` response so the web can render an honest,\ndeployment-truthful surface instead of guessing from indirect signals:\n\nAttributes:\n    per_tenant_runtime: ``True`` iff the N6 per-tenant image-MCP runtime is\n        composed on THIS deployment (cloud + operator ack + configured) \u2014 the\n        exact condition under which adopting a ``server_type == \"server\"``\n        (image) catalog app will actually spawn a Machine. ``False`` means an\n        image-app adopt would have nothing to run on.\n    gateway: ``True`` iff a Docker MCP Gateway URL is configured\n        (``PERSONA_DOCKER_MCP_GATEWAY_URL``) \u2014 an operator MAY have exposed an\n        image-type app there even though this deployment has no per-tenant\n        runtime; the web renders that as an operator-managed note rather than a\n        hard \"unavailable\" (the catalog can't see what the operator enabled on\n        the gateway).\n    oauth_providers: The configured pre-registered OAuth provider keys (Spec\n        R8's ``provider_registry`` \u2014 e.g. ``[\"github\"]``), for the BYO manager's\n        fail-closed provider select (N7-T3b). The generic ``mcp-native``\n        (auto-discovery, DCR) path needs no operator config and is always\n        offered client-side regardless of this list."
       },
       "MCPOAuthAuthorizeRequest": {
         "properties": {

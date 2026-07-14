@@ -7,13 +7,17 @@ the rest of the surface) but not RLS-scoped (no tenant data).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from persona.config import PersonaCoreConfig
 from persona.tools.mcp.catalog import recommender_provider_tag
 
 from persona_api.auth import AuthenticatedUser, get_current_user
+from persona_api.mcp.oauth.providers import provider_registry
 from persona_api.schemas import (
+    MCPCatalogResponse,
     MCPCatalogSecret,
     MCPCatalogServer,
+    MCPDeploymentCapabilities,
     SpecialitySummary,
     ToolSummary,
 )
@@ -68,16 +72,30 @@ async def list_specialities(
     ]
 
 
-@router.get("/mcp-catalog", response_model=list[MCPCatalogServer])
+@router.get("/mcp-catalog", response_model=MCPCatalogResponse)
 async def list_mcp_catalog(
+    request: Request,
     _user: AuthenticatedUser = Depends(get_current_user),
-) -> list[MCPCatalogServer]:
-    """List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1).
+) -> MCPCatalogResponse:
+    """List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1 + N7).
 
     The mirror's display metadata + credential schema ride additive fields; the
-    secret schema is display-only (no value, D-N1-5).
+    secret schema is display-only (no value, D-N1-5). Spec N7 (D-N7-2) wraps the
+    list with ``capabilities`` — what THIS deployment can actually run (per-tenant
+    image runtime / gateway / configured oauth providers) — and server-side excludes
+    ("the C-filter") an image-type entry neither mechanism could ever serve, so the
+    listing means "what this deployment can offer," never "what you'll be refused."
     """
-    return [
+    # Truthful per_tenant_runtime: app.state.mcp_runtime is non-None ONLY when N6's
+    # composition guard passed (cloud + operator ack + configured) — exactly the
+    # condition under which adopting an image app will spawn a real Machine.
+    # getattr (not direct access): mirrors the adopted-apps route's same-shaped
+    # defensive read — a test harness that never runs the app.py lifespan (no DB
+    # engine) leaves the attribute unset rather than None.
+    per_tenant_runtime = getattr(request.app.state, "mcp_runtime", None) is not None
+    gateway = bool(PersonaCoreConfig().docker_mcp_gateway_url)
+    oauth_providers = sorted(provider_registry(request.app.state.config))
+    servers = [
         MCPCatalogServer(
             name=e.name,
             description=e.description,
@@ -99,6 +117,17 @@ async def list_mcp_catalog(
                 )
                 for s in e.secrets
             ],
+            auth_method=e.auth_method,
+            oauth_provider=e.oauth_provider,
         )
         for e in catalog_service.merged_mcp_catalog()
+        if catalog_service.is_listable(e, per_tenant_runtime=per_tenant_runtime, gateway=gateway)
     ]
+    return MCPCatalogResponse(
+        servers=servers,
+        capabilities=MCPDeploymentCapabilities(
+            per_tenant_runtime=per_tenant_runtime,
+            gateway=gateway,
+            oauth_providers=oauth_providers,
+        ),
+    )

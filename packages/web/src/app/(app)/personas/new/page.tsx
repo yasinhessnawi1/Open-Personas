@@ -1,6 +1,9 @@
 import { PageBody } from "@/components/layout";
 import { AuthorWizard } from "@/components/personas/author-wizard";
-import { mapMcpCatalog } from "@/components/personas/mcp-catalog";
+import {
+  mapMcpCapabilities,
+  mapMcpCatalog,
+} from "@/components/personas/mcp-catalog";
 import { type ToolSummary, unwrap } from "@/lib/api";
 import type { components } from "@/lib/api/schema";
 import { serverApi } from "@/lib/api/server";
@@ -22,6 +25,7 @@ export default async function NewPersonaPage() {
     api.GET("/v1/tools").then(unwrap),
     api.GET("/v1/skills").then(unwrap),
     // Spec 30 T11 — built-in MCP servers for the unified capability section.
+    // Spec N7 (D-N7-2): the response is now a wrapper {servers, capabilities}.
     api
       .GET("/v1/mcp-catalog")
       .then(unwrap),
@@ -31,15 +35,15 @@ export default async function NewPersonaPage() {
       .GET("/v1/me/profile")
       .then(unwrap),
   ]);
+  const catalog = mcpCatalog as components["schemas"]["MCPCatalogResponse"];
 
   return (
     <PageBody>
       <AuthorWizard
         tools={(tools as ToolSummary[]).map((x) => x.name)}
         skills={(skills as ToolSummary[]).map((x) => x.name)}
-        mcpServers={mapMcpCatalog(
-          mcpCatalog as components["schemas"]["MCPCatalogServer"][],
-        )}
+        mcpServers={mapMcpCatalog(catalog.servers)}
+        mcpCapabilities={mapMcpCapabilities(catalog.capabilities)}
         defaultModel={profile.preferred_model ?? null}
       />
     </PageBody>

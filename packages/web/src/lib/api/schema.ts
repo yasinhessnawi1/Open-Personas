@@ -1218,10 +1218,14 @@ export interface paths {
     };
     /**
      * List Mcp Catalog
-     * @description List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1).
+     * @description List the MCP catalog (builtin floor + Docker mirror; spec 30 T11 + N1 + N7).
      *
      *     The mirror's display metadata + credential schema ride additive fields; the
-     *     secret schema is display-only (no value, D-N1-5).
+     *     secret schema is display-only (no value, D-N1-5). Spec N7 (D-N7-2) wraps the
+     *     list with ``capabilities`` — what THIS deployment can actually run (per-tenant
+     *     image runtime / gateway / configured oauth providers) — and server-side excludes
+     *     ("the C-filter") an image-type entry neither mechanism could ever serve, so the
+     *     listing means "what this deployment can offer," never "what you'll be refused."
      */
     get: operations["list_mcp_catalog_v1_mcp_catalog_get"];
     put?: never;
@@ -3306,6 +3310,23 @@ export interface components {
       total_micros: number;
     };
     /**
+     * MCPCatalogResponse
+     * @description The wrapped ``GET /v1/mcp-catalog`` response (Spec N7, D-N7-2).
+     *
+     *     A bare array cannot carry a sibling field, so the deployment capabilities ride
+     *     alongside the server list in one wrapper object (a breaking response-shape
+     *     change, landed atomically with the web's unwrap in the SAME commit, N7-T2).
+     *     ``servers`` is additionally filtered server-side to what THIS deployment can
+     *     actually offer (the C-filter, N7 owner ruling: an image-type app with no
+     *     runtime and no gateway is excluded outright rather than listed-then-refused —
+     *     see ``catalog_service.is_listable``).
+     */
+    MCPCatalogResponse: {
+      /** Servers */
+      servers: components["schemas"]["MCPCatalogServer"][];
+      capabilities: components["schemas"]["MCPDeploymentCapabilities"];
+    };
+    /**
      * MCPCatalogSecret
      * @description A credential an MCP server requires — DISPLAY-ONLY schema (Spec N1, D-N1-5).
      *
@@ -3397,6 +3418,16 @@ export interface components {
       allow_hosts?: string[];
       /** Secrets */
       secrets?: components["schemas"]["MCPCatalogSecret"][];
+      /**
+       * Auth Method
+       * @default
+       */
+      auth_method: string;
+      /**
+       * Oauth Provider
+       * @default
+       */
+      oauth_provider: string;
     };
     /**
      * MCPConnectionStatus
@@ -3415,6 +3446,39 @@ export interface components {
       connected: boolean;
       /** Reason */
       reason?: string | null;
+    };
+    /**
+     * MCPDeploymentCapabilities
+     * @description Which MCP mechanisms THIS deployment can actually run (Spec N7, D-N7-2).
+     *
+     *     Rides the ``/v1/mcp-catalog`` response so the web can render an honest,
+     *     deployment-truthful surface instead of guessing from indirect signals:
+     *
+     *     Attributes:
+     *         per_tenant_runtime: ``True`` iff the N6 per-tenant image-MCP runtime is
+     *             composed on THIS deployment (cloud + operator ack + configured) — the
+     *             exact condition under which adopting a ``server_type == "server"``
+     *             (image) catalog app will actually spawn a Machine. ``False`` means an
+     *             image-app adopt would have nothing to run on.
+     *         gateway: ``True`` iff a Docker MCP Gateway URL is configured
+     *             (``PERSONA_DOCKER_MCP_GATEWAY_URL``) — an operator MAY have exposed an
+     *             image-type app there even though this deployment has no per-tenant
+     *             runtime; the web renders that as an operator-managed note rather than a
+     *             hard "unavailable" (the catalog can't see what the operator enabled on
+     *             the gateway).
+     *         oauth_providers: The configured pre-registered OAuth provider keys (Spec
+     *             R8's ``provider_registry`` — e.g. ``["github"]``), for the BYO manager's
+     *             fail-closed provider select (N7-T3b). The generic ``mcp-native``
+     *             (auto-discovery, DCR) path needs no operator config and is always
+     *             offered client-side regardless of this list.
+     */
+    MCPDeploymentCapabilities: {
+      /** Per Tenant Runtime */
+      per_tenant_runtime: boolean;
+      /** Gateway */
+      gateway: boolean;
+      /** Oauth Providers */
+      oauth_providers?: string[];
     };
     /**
      * MCPOAuthAuthorizeRequest
@@ -6569,7 +6633,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["MCPCatalogServer"][];
+          "application/json": components["schemas"]["MCPCatalogResponse"];
         };
       };
     };

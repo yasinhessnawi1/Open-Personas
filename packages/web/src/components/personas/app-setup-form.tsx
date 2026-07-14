@@ -47,9 +47,15 @@ export function AppSetupForm({
   // Schema-driven: the declared secret drives the field label + how-to-obtain help.
   const secret = app.secrets[0];
   const env = secret?.env ?? app.requiredEnv[0] ?? "";
+  // Spec N7 (D-N7-2, owner-ratified): a SECRETLESS catalog app (e.g. an image app
+  // needing no credential) still adopts through this form — the backend already
+  // accepts `credential: null` (`create_image_server`) — so no input is shown and
+  // submit is enabled immediately rather than gated on a credential that will
+  // never exist.
+  const secretless = app.secrets.length === 0;
 
   async function submit() {
-    if (submitting || !credential.trim()) return;
+    if (submitting || (!secretless && !credential.trim())) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -58,7 +64,10 @@ export function AppSetupForm({
       await unwrap(
         await api.POST("/v1/personas/{persona_id}/adopted-apps", {
           params: { path: { persona_id: personaId } },
-          body: { catalog_name: app.name, credential },
+          body: {
+            catalog_name: app.name,
+            credential: secretless ? null : credential,
+          },
         }),
       );
       setCredential(""); // never persist the secret client-side
@@ -101,23 +110,25 @@ export function AppSetupForm({
           {secret.description}
         </p>
       ) : null}
-      <Input
-        type="password"
-        value={credential}
-        onChange={(e) => setCredential(e.target.value)}
-        placeholder={secret?.example || t("setupForm.credentialPlaceholder")}
-        aria-label={
-          env
-            ? t("setupForm.credentialLabel", { env })
-            : t("setupForm.credentialPlaceholder")
-        }
-        data-slot="app-setup-credential"
-        autoComplete="off"
-      />
+      {secretless ? null : (
+        <Input
+          type="password"
+          value={credential}
+          onChange={(e) => setCredential(e.target.value)}
+          placeholder={secret?.example || t("setupForm.credentialPlaceholder")}
+          aria-label={
+            env
+              ? t("setupForm.credentialLabel", { env })
+              : t("setupForm.credentialPlaceholder")
+          }
+          data-slot="app-setup-credential"
+          autoComplete="off"
+        />
+      )}
       <button
         type="button"
         onClick={() => void submit()}
-        disabled={submitting || !credential.trim()}
+        disabled={submitting || (!secretless && !credential.trim())}
         className={cn(buttonVariants({ size: "sm" }), "w-fit gap-1.5")}
         data-slot="app-setup-submit"
       >

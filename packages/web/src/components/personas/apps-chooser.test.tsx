@@ -16,7 +16,15 @@ import { describe, expect, it, vi } from "vitest";
 import messages from "@/i18n/messages/en.json";
 import { AppsChooser } from "./apps-chooser";
 import type { McpConnectionStatus } from "./mcp-connection-label";
-import type { McpCatalogEntry, McpCatalogSecret } from "./persona-form";
+import type {
+  McpCatalogEntry,
+  McpCatalogSecret,
+  McpDeploymentCapabilities,
+} from "./persona-form";
+
+vi.mock("@clerk/nextjs", () => ({
+  useAuth: () => ({ getToken: () => Promise.resolve("jwt") }),
+}));
 
 const secret: McpCatalogSecret = {
   name: "github.personal_access_token",
@@ -42,6 +50,8 @@ function app(over: Partial<McpCatalogEntry> = {}): McpCatalogEntry {
     signed: false,
     allowHosts: [],
     secrets: [],
+    authMethod: "",
+    oauthProvider: "",
     ...over,
   };
 }
@@ -51,6 +61,8 @@ function renderChooser(props: {
   declaredTools?: string[];
   unavailableMcpServers?: string[];
   connections?: McpConnectionStatus[];
+  capabilities?: McpDeploymentCapabilities;
+  personaId?: string;
   onChange?: (tools: string[]) => void;
 }) {
   const onChange = props.onChange ?? vi.fn();
@@ -61,6 +73,8 @@ function renderChooser(props: {
         declaredTools={props.declaredTools ?? []}
         unavailableMcpServers={props.unavailableMcpServers ?? []}
         connections={props.connections}
+        capabilities={props.capabilities}
+        personaId={props.personaId}
         onChange={onChange}
       />
     </NextIntlClientProvider>,
@@ -396,6 +410,139 @@ describe("AppsChooser", () => {
       ).toBeNull();
       // The card itself is untouched.
       expect(cardFor(container, "github")).toBeTruthy();
+    });
+  });
+
+  // N7 (D-N7-2) — the image-app adoption gate + honest toggle suppression.
+  describe("N7: image-app adoption gate + toggle suppression", () => {
+    const CAPS_RUNTIME_ON: McpDeploymentCapabilities = {
+      perTenantRuntime: true,
+      gateway: false,
+      oauthProviders: [],
+    };
+    const CAPS_GATEWAY_ONLY: McpDeploymentCapabilities = {
+      perTenantRuntime: false,
+      gateway: true,
+      oauthProviders: [],
+    };
+    const CAPS_OFF: McpDeploymentCapabilities = {
+      perTenantRuntime: false,
+      gateway: false,
+      oauthProviders: [],
+    };
+
+    it("remote + secrets + personaId ⇒ the setup form (unchanged N4 behavior)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "notion", serverType: "remote", secrets: [secret] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_RUNTIME_ON,
+      });
+      const card = cardFor(container, "notion");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("image app + secrets + runtime capability + personaId ⇒ the setup form", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "img-app", serverType: "server", secrets: [secret] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_RUNTIME_ON,
+      });
+      const card = cardFor(container, "img-app");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("image app + NO secrets + runtime capability + personaId ⇒ STILL the setup form (secretless accommodation)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "secretless-img", serverType: "server", secrets: [] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_RUNTIME_ON,
+      });
+      const card = cardFor(container, "secretless-img");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("image app + gateway-only (no runtime) + personaId ⇒ NO form, NO toggle (suppressed)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "gw-app", serverType: "server", secrets: [secret] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_GATEWAY_ONLY,
+      });
+      const card = cardFor(container, "gw-app");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+      // The honest declares-a-requirement note still renders — never silence.
+      expect(card.querySelector('[data-slot="app-needs-setup"]')).toBeTruthy();
+    });
+
+    it("image app + no capabilities at all + personaId ⇒ NO form, NO toggle (defense in depth — the C-filter normally excludes this shape server-side)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "orphan-img", serverType: "server", secrets: [secret] }),
+        ],
+        personaId: "p1",
+        capabilities: CAPS_OFF,
+      });
+      const card = cardFor(container, "orphan-img");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("image app + runtime capability but NO personaId (author/new flow) ⇒ toggle still suppressed (adoption needs a saved persona)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({ name: "new-flow-img", serverType: "server", secrets: [] }),
+        ],
+        capabilities: CAPS_RUNTIME_ON,
+        // personaId omitted — the author/new-persona flow.
+      });
+      const card = cardFor(container, "new-flow-img");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeNull();
+    });
+
+    it("remote app + secrets + NO personaId ⇒ the toggle still shows (suppression is image-app-only)", () => {
+      const { container } = renderChooser({
+        apps: [
+          app({
+            name: "remote-no-persona",
+            serverType: "remote",
+            secrets: [secret],
+          }),
+        ],
+        capabilities: CAPS_RUNTIME_ON,
+      });
+      const card = cardFor(container, "remote-no-persona");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeTruthy();
+    });
+
+    it("builtin app unaffected: personaId + full capabilities still uses the toggle, not the form", () => {
+      const { container } = renderChooser({
+        apps: [app({ name: "time", serverType: "builtin" })],
+        personaId: "p1",
+        capabilities: CAPS_RUNTIME_ON,
+      });
+      const card = cardFor(container, "time");
+      expand(card);
+      expect(card.querySelector('[data-slot="app-toggle"]')).toBeTruthy();
+      expect(card.querySelector('[data-slot="app-setup-form"]')).toBeNull();
     });
   });
 });

@@ -931,6 +931,59 @@ class MCPCatalogServer(_Output):
     signed: bool = False
     allow_hosts: list[str] = Field(default_factory=list)
     secrets: list[MCPCatalogSecret] = Field(default_factory=list)
+    # -- Spec R8/N7: per-user OAuth binding passthrough (additive-with-default) --
+    # Mirrors ``MCPServerCatalogEntry.auth_method``/``oauth_provider`` (Spec R8,
+    # R8-D-7) so the web catalog card can offer a Connect affordance (N7-T3) instead
+    # of a credential form for an ``auth_method == "oauth"`` entry. Empty = the
+    # pre-R8/N7 env/credential/none path (every entry before the github rebind).
+    auth_method: str = ""
+    oauth_provider: str = ""
+
+
+class MCPDeploymentCapabilities(_Output):
+    """Which MCP mechanisms THIS deployment can actually run (Spec N7, D-N7-2).
+
+    Rides the ``/v1/mcp-catalog`` response so the web can render an honest,
+    deployment-truthful surface instead of guessing from indirect signals:
+
+    Attributes:
+        per_tenant_runtime: ``True`` iff the N6 per-tenant image-MCP runtime is
+            composed on THIS deployment (cloud + operator ack + configured) — the
+            exact condition under which adopting a ``server_type == "server"``
+            (image) catalog app will actually spawn a Machine. ``False`` means an
+            image-app adopt would have nothing to run on.
+        gateway: ``True`` iff a Docker MCP Gateway URL is configured
+            (``PERSONA_DOCKER_MCP_GATEWAY_URL``) — an operator MAY have exposed an
+            image-type app there even though this deployment has no per-tenant
+            runtime; the web renders that as an operator-managed note rather than a
+            hard "unavailable" (the catalog can't see what the operator enabled on
+            the gateway).
+        oauth_providers: The configured pre-registered OAuth provider keys (Spec
+            R8's ``provider_registry`` — e.g. ``["github"]``), for the BYO manager's
+            fail-closed provider select (N7-T3b). The generic ``mcp-native``
+            (auto-discovery, DCR) path needs no operator config and is always
+            offered client-side regardless of this list.
+    """
+
+    per_tenant_runtime: bool
+    gateway: bool
+    oauth_providers: list[str] = Field(default_factory=list)
+
+
+class MCPCatalogResponse(_Output):
+    """The wrapped ``GET /v1/mcp-catalog`` response (Spec N7, D-N7-2).
+
+    A bare array cannot carry a sibling field, so the deployment capabilities ride
+    alongside the server list in one wrapper object (a breaking response-shape
+    change, landed atomically with the web's unwrap in the SAME commit, N7-T2).
+    ``servers`` is additionally filtered server-side to what THIS deployment can
+    actually offer (the C-filter, N7 owner ruling: an image-type app with no
+    runtime and no gateway is excluded outright rather than listed-then-refused —
+    see ``catalog_service.is_listable``).
+    """
+
+    servers: list[MCPCatalogServer]
+    capabilities: MCPDeploymentCapabilities
 
 
 # -- K5: Memory (the knowledge-graph UI) ------------------------------------

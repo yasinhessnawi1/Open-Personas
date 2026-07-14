@@ -28,7 +28,11 @@ import { validatePersonaDoc } from "@/lib/persona-schema";
 import { cn } from "@/lib/utils";
 import { ExampleGallery } from "./example-gallery";
 import { PersonaEditor } from "./persona-editor";
-import type { McpCatalogEntry } from "./persona-form";
+import {
+  MCP_CAPABILITIES_OFF,
+  type McpCatalogEntry,
+  type McpDeploymentCapabilities,
+} from "./persona-form";
 import { QuickEditCard } from "./quick-edit-card";
 
 type Phase = "describe" | "loading" | "creating" | "review";
@@ -80,11 +84,15 @@ export function AuthorWizard({
   tools,
   skills,
   mcpServers = [],
+  mcpCapabilities = MCP_CAPABILITIES_OFF,
   defaultModel = null,
 }: {
   tools: string[];
   skills: string[];
   mcpServers?: McpCatalogEntry[];
+  // Spec N7 (D-N7-2) — which MCP mechanisms this deployment can run, threaded to
+  // the editor's apps chooser. Optional, defaults all-off (pre-N7 behavior).
+  mcpCapabilities?: McpDeploymentCapabilities;
   /**
    * Spec M1 (M1-T7) — the caller's sticky per-user model default
    * (`profile.preferred_model`, already fetched app-side by the /personas/new
@@ -325,6 +333,7 @@ export function AuthorWizard({
           tools={tools}
           skills={skills}
           mcpServers={mcpServers}
+          mcpCapabilities={mcpCapabilities}
           onSave={handleCreate}
           saveLabel={t("save")}
           refinement={

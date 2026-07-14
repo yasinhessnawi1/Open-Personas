@@ -41,7 +41,12 @@ import {
   SectionTimelineNav,
 } from "./collapsible-section";
 import type { McpConnectionStatus } from "./mcp-connection-label";
-import { type McpCatalogEntry, PersonaForm } from "./persona-form";
+import {
+  MCP_CAPABILITIES_OFF,
+  type McpCatalogEntry,
+  type McpDeploymentCapabilities,
+  PersonaForm,
+} from "./persona-form";
 import {
   applyRecommendation,
   recommendationApplied,
@@ -104,6 +109,7 @@ export function PersonaEditor({
   skills,
   mcpServers = [],
   mcpConnections = [],
+  mcpCapabilities = MCP_CAPABILITIES_OFF,
   personaId,
   onSave,
   saveLabel,
@@ -129,6 +135,10 @@ export function PersonaEditor({
   // connection badge. Optional: the author/new flow (no persona yet) and any
   // fail-soft fetch (older api, community without the runtime) pass nothing.
   mcpConnections?: McpConnectionStatus[];
+  // Spec N7 (D-N7-2) — which MCP mechanisms this deployment can run, threaded to
+  // the form's apps chooser (adopt gate + image-toggle suppression). Optional,
+  // defaults all-off (the pre-N7 behavior) so existing callers/tests are unchanged.
+  mcpCapabilities?: McpDeploymentCapabilities;
   // Spec 30 T12 — the saved persona's id; enables the BYO-MCP manager (needs an
   // id to assign servers to). Absent in the author/new flow (no id yet). Spec 31
   // (D-31-X-autonomy-placement): also gates the autonomy + consent section —
@@ -365,6 +375,7 @@ export function PersonaEditor({
             skills={skills}
             mcpServers={mcpServers}
             mcpConnections={mcpConnections}
+            mcpCapabilities={mcpCapabilities}
             personaId={personaId}
             openAll={sectionsOpen}
           />
