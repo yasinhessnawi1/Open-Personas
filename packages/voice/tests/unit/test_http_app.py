@@ -473,6 +473,40 @@ def test_tts_endpoint_returns_playable_wav_audio() -> None:
     assert backend.seen_voice_refs == ["v_clara"]
 
 
+def test_tts_endpoint_matching_provider_uses_the_stored_voice_id() -> None:
+    """D-V14-13: a ``provider`` matching the active backend leaves the voice_id
+    intact (the persona's stored voice is used)."""
+    client = _build_test_client()
+    backend = _FakeTTSBackend()  # provider_name == "cartesia"
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default="v_default")
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "v_stored", "provider": "cartesia"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.seen_voice_refs == ["v_stored"]
+
+
+def test_tts_endpoint_mismatched_provider_falls_back_to_provider_default() -> None:
+    """D-V14-13: a ``provider`` that does NOT match the active backend (a Cartesia
+    voice under an ElevenLabs deployment, or vice-versa) DROPS the wrong-provider
+    voice_id and falls back to the active provider's default — never sends the
+    wrong-provider id to the backend."""
+    client = _build_test_client()
+    backend = _FakeTTSBackend()  # provider_name == "cartesia"
+    client.app.state.voice_catalogue = backend
+    client.app.state.tts_stream_config = StreamingTTSConfig(voice_default="cartesia_default")
+    resp = client.post(
+        "/v1/tts",
+        headers={"Authorization": "Bearer good"},
+        json={"text": "hi", "voice_id": "eleven_voice", "provider": "elevenlabs"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.seen_voice_refs == ["cartesia_default"]  # NOT "eleven_voice"
+
+
 def test_tts_endpoint_reuses_the_cached_catalogue_backend_instance() -> None:
     """R9-025a's "reuse the existing backend class": the SAME object GET
     /v1/voices warms is the one POST /v1/tts synthesizes through — no new

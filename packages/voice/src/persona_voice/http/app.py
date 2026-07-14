@@ -233,12 +233,22 @@ class TTSRequest(BaseModel):
     no longer a local 503, it rides through to this default. ``503
     no_voice_configured`` still fires when there is truly no voice to use
     (neither an explicit id nor a configured default).
+
+    ``provider`` is OPTIONAL (Spec V14 D-V14-13): the provider the ``voice_id``
+    is addressed to (the persona's stored ``identity.voice.provider``). When it
+    is present AND does not match the active TTS backend's provider (e.g. a
+    Cartesia voice under an ElevenLabs-active deployment before the auto-remap
+    re-picks it), the ``voice_id`` is DROPPED and synthesis falls back to the
+    active provider's default voice — sending the wrong-provider id to the
+    backend would 4xx. ``None`` ⇒ trust the id (today's behavior, backward
+    compatible).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str = Field(min_length=1)
     voice_id: str | None = Field(default=None, min_length=1)
+    provider: str | None = Field(default=None, min_length=1)
 
 
 class STTResponse(BaseModel):
@@ -756,9 +766,23 @@ def build_app(config: VoiceConfig) -> FastAPI:
                     "detail": "text-to-speech is not configured",
                 },
             )
+        active_provider = backend.provider_name
         voice_id = body.voice_id
+        # Spec V14 (D-V14-13): a stored voice addressed to a DIFFERENT provider
+        # than the active backend cannot be used — drop it and fall back to the
+        # active provider's default (sending a Cartesia id to ElevenLabs 4xxs).
+        if voice_id is not None and body.provider is not None and body.provider != active_provider:
+            _logger.warning(
+                "tts voice provider {vp!r} != active backend {ap!r}; using the "
+                "provider default until the voice is re-picked",
+                vp=body.provider,
+                ap=active_provider,
+            )
+            voice_id = None
         if voice_id is None:
-            voice_id = _get_tts_stream_config(request).voice_default
+            # D-V14-13: the provider-appropriate default (ElevenLabs default under
+            # ElevenLabs, Cartesia default otherwise), not the generic Cartesia one.
+            voice_id = _get_tts_stream_config(request).default_voice_for(active_provider)
             if not voice_id:
                 raise HTTPException(
                     status_code=503,

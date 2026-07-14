@@ -166,3 +166,16 @@ class StreamingTTSConfig(BaseSettings):
     )
     elevenlabs_model: str = "eleven_flash_v2_5"
     elevenlabs_voice_default: str | None = None
+
+    def default_voice_for(self, provider: str) -> str | None:
+        """The provider-appropriate default voice id (Spec V14 D-V14-13).
+
+        Each TTS provider parks its own default: ``elevenlabs_voice_default`` for
+        ElevenLabs, ``voice_default`` (the Cartesia default) otherwise. The
+        composition root + the one-shot route use this so the D-V3-4 voice-less /
+        D-V14-13 provider-mismatch fallback resolves to a voice the ACTIVE backend
+        can actually address — never a Cartesia id sent to ElevenLabs.
+        """
+        if provider == "elevenlabs":
+            return self.elevenlabs_voice_default
+        return self.voice_default

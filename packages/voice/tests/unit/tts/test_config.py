@@ -67,6 +67,20 @@ def test_elevenlabs_api_key_constructible_by_name() -> None:
     assert config.elevenlabs_api_key.get_secret_value() == "by-name"
 
 
+def test_default_voice_for_selects_provider_appropriate_default() -> None:
+    """D-V14-13: the provider-appropriate default — ElevenLabs default under
+    ElevenLabs, the Cartesia (generic) default otherwise."""
+    config = StreamingTTSConfig(voice_default="cartesia-def", elevenlabs_voice_default="eleven-def")
+    assert config.default_voice_for("elevenlabs") == "eleven-def"
+    assert config.default_voice_for("cartesia") == "cartesia-def"
+
+
+def test_default_voice_for_none_when_unset() -> None:
+    config = StreamingTTSConfig()
+    assert config.default_voice_for("elevenlabs") is None
+    assert config.default_voice_for("cartesia") is None
+
+
 # ---------- defaults (D-V3-1 / D-V3-2 LOCKs) -------------------------------
 
 

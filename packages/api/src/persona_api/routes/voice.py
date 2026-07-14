@@ -205,13 +205,20 @@ async def post_persona_tts(
     )
     voice = _extract_persona_voice(persona_row)
     voice_id = voice.voice_id if voice is not None else None
+    # Spec V14 (D-V14-13): forward the stored voice's PROVIDER so persona-voice
+    # can drop a voice addressed to a different provider than its active backend
+    # (a Cartesia voice under an ElevenLabs deployment) and fall back to the
+    # active provider's default — instead of 4xx-ing on the wrong-provider id.
+    # ``None`` when the persona has no configured voice (rides through to the
+    # service default, unchanged).
+    voice_provider = voice.provider if voice is not None else None
 
     try:
         async with httpx.AsyncClient(timeout=_PROXY_TIMEOUT) as client:
             resp = await client.post(
                 f"{base}/v1/tts",
                 headers=_forwarded_auth_headers(request),
-                json={"text": body.text, "voice_id": voice_id},
+                json={"text": body.text, "voice_id": voice_id, "provider": voice_provider},
             )
     except httpx.HTTPError as exc:
         raise VoiceServiceUnavailableError(

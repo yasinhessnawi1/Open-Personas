@@ -120,7 +120,10 @@ def build_seam_adapter(
     voice = resolve_voice(
         voice_spec,
         provider=backend.provider_name,
-        default_voice_id=config.voice_default,
+        # Spec V14 (D-V14-13): the provider-appropriate default so a voice-less /
+        # cross-provider persona falls back to a voice the ACTIVE backend can
+        # address (ElevenLabs default under ElevenLabs, Cartesia default otherwise).
+        default_voice_id=config.default_voice_for(backend.provider_name),
         allowed_voice_ids=allowed_voice_ids,
     )
     return V1TTSStreamSeamAdapter(backend=backend, voice=voice, config=config)

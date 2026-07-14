@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona.logging import get_logger
+
 from persona_voice.tts.errors import TTSVoiceNotFoundError
 from persona_voice.tts.types import ResolvedVoice
 
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
     from persona.schema.persona import VoiceSpec
 
 __all__ = ["resolve_voice"]
+
+_logger = get_logger("tts.voice_resolution")
 
 
 def resolve_voice(
@@ -76,10 +80,27 @@ def resolve_voice(
         return _build(provider, default_voice_id, allowed_voice_ids)
 
     if spec.provider != provider:
-        raise TTSVoiceNotFoundError(
-            "persona voice is addressed to a different provider than the configured TTS backend",
-            context={"provider": provider, "voice": spec.voice_id},
+        # Spec V14 (D-V14-13): the persona's stored voice is addressed to a
+        # DIFFERENT provider than the active backend (e.g. a Cartesia voice under
+        # an ElevenLabs-active deployment, before the auto-remap has re-picked it).
+        # FAIL SOFT to the active provider's default rather than crash the call —
+        # sending the wrong-provider id to the backend would 4xx. The auto-remap
+        # (D-V14-13) is the primary fix; this is the belt-and-suspenders backstop.
+        # Raise only when there is no default to fall back to either.
+        if not default_voice_id:
+            raise TTSVoiceNotFoundError(
+                "persona voice is addressed to a different provider than the "
+                "configured TTS backend, and no default voice is configured",
+                context={"provider": provider, "voice": spec.voice_id},
+            )
+        _logger.warning(
+            "persona voice provider {spec_provider!r} != active backend {provider!r}; "
+            "using the provider default until the voice is re-picked (voice={voice})",
+            spec_provider=spec.provider,
+            provider=provider,
+            voice=spec.voice_id,
         )
+        return _build(provider, default_voice_id, allowed_voice_ids)
     return _build(provider, spec.voice_id, allowed_voice_ids)
 
 

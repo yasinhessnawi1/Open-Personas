@@ -54,10 +54,24 @@ def test_no_spec_and_no_default_raises() -> None:
     assert exc.value.context["provider"] == "cartesia"
 
 
-def test_provider_mismatch_raises() -> None:
+def test_provider_mismatch_without_default_raises() -> None:
+    # D-V14-13: mismatch with NO default to fall back to still fails fast.
     with pytest.raises(TTSVoiceNotFoundError) as exc:
         resolve_voice(_spec(provider="elevenlabs"), provider="cartesia")
     assert exc.value.context["voice"] == "voice-1"
+
+
+def test_provider_mismatch_falls_back_to_default() -> None:
+    """Spec V14 (D-V14-13): a persona voice addressed to a DIFFERENT provider
+    than the active backend FAILS SOFT to the active provider's default (rather
+    than crashing the call) — the backstop for the auto-remap window."""
+    rv = resolve_voice(
+        _spec(provider="cartesia", voice_id="cartesia-voice"),
+        provider="elevenlabs",
+        default_voice_id="eleven-default",
+    )
+    assert rv.provider == "elevenlabs"
+    assert rv.voice_ref == "eleven-default"  # the active provider's default, NOT the stored id
 
 
 def test_voice_not_in_catalogue_raises() -> None:

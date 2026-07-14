@@ -159,9 +159,30 @@ def test_tts_proxy_voiceless_persona_forwards_null_voice_id(
     resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 200, resp.text
     assert resp.content == b"RIFF....WAVEfmt "
-    # No persona-supplied voice — the proxy sends an explicit null, never a
-    # locally-invented id (persona-voice is the one that owns the default).
-    assert captured["body"] == {"text": "hi", "voice_id": None}
+    # No persona-supplied voice — the proxy sends an explicit null id AND a null
+    # provider (Spec V14 D-V14-13), never a locally-invented id (persona-voice
+    # owns the default).
+    assert captured["body"] == {"text": "hi", "voice_id": None, "provider": None}
+
+
+def test_tts_proxy_voiced_persona_forwards_stored_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec V14 (D-V14-13): a voiced persona forwards BOTH its stored voice_id
+    and its stored provider, so persona-voice can drop a wrong-provider voice."""
+    _stub_persona(monkeypatch, yaml_str=_PERSONA_YAML_WITH_VOICE)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, content=b"RIFF....WAVEfmt ", headers={"content-type": "audio/wav"}
+        )
+
+    _install_mock_httpx(monkeypatch, handler)
+    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    assert resp.status_code == 200, resp.text
+    assert captured["body"] == {"text": "hi", "voice_id": "v_astrid", "provider": "cartesia"}
 
 
 def test_tts_proxy_503_when_voice_service_has_no_default_either(
@@ -211,8 +232,13 @@ def test_tts_proxy_resolves_voice_and_forwards_bearer(
     assert resp.content == b"RIFF....WAVEfmt "
     assert captured["url"] == f"{_VOICE_URL}/v1/tts"
     assert captured["auth"] == "Bearer user_x"
-    # The RESOLVED voice_id (from the persona's own YAML), never client-supplied.
-    assert captured["body"] == {"text": "hello there", "voice_id": "v_astrid"}
+    # The RESOLVED voice_id + provider (from the persona's own YAML, Spec V14
+    # D-V14-13), never client-supplied.
+    assert captured["body"] == {
+        "text": "hello there",
+        "voice_id": "v_astrid",
+        "provider": "cartesia",
+    }
 
 
 def test_tts_proxy_413_passes_through_the_clean_body(
