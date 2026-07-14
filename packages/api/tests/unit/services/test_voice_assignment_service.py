@@ -273,6 +273,109 @@ class TestMaybeAssignVoice:
         assert called == {}
 
 
+# ----- Spec V14 D-V14-13 AUTO-REMAP + D-V14-4 dialect-aware pick ------------
+
+
+class TestMaybeRemapVoice:
+    def _request(self, tier_backend: _FakeBackend, engine: object) -> SimpleNamespace:
+        return _request(
+            config=SimpleNamespace(voice_service_url="http://voice", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: tier_backend),
+            rls_engine=engine,
+            bearer="Bearer t",
+        )
+
+    def test_noop_when_already_on_active_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Active provider cartesia, persona voice cartesia:existing-voice → no remap.
+        monkeypatch.setattr(
+            vas, "_fetch_catalogue", _aret(("cartesia", [_option("v1", "feminine")]))
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        result = asyncio.run(
+            vas.maybe_remap_voice(
+                self._request(_FakeBackend("v1"), object()),
+                owner_id="o",
+                persona_id="p",
+                yaml_str=_YAML_WITH_VOICE,
+            )
+        )
+        assert result is False
+        assert called == {}
+
+    def test_remaps_when_provider_mismatches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Active provider elevenlabs, persona voice cartesia → re-pick on elevenlabs.
+        monkeypatch.setattr(
+            vas,
+            "_fetch_catalogue",
+            _aret(("elevenlabs", [_option("el1", "feminine"), _option("el2", "masculine")])),
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        engine = object()
+        result = asyncio.run(
+            vas.maybe_remap_voice(
+                self._request(_FakeBackend("el1"), engine),
+                owner_id="o",
+                persona_id="p",
+                yaml_str=_YAML_WITH_VOICE,
+            )
+        )
+        assert result is True
+        assert called == {
+            "rls_engine": engine,
+            "persona_id": "p",
+            "provider": "elevenlabs",
+            "voice_id": "el1",
+        }
+
+    def test_remaps_voiceless_persona(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A voiceless persona under an active provider is voiced too (covers both).
+        monkeypatch.setattr(
+            vas, "_fetch_catalogue", _aret(("elevenlabs", [_option("el1", "feminine")]))
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        result = asyncio.run(
+            vas.maybe_remap_voice(
+                self._request(_FakeBackend("el1"), object()),
+                owner_id="o",
+                persona_id="p",
+                yaml_str=_YAML,
+            )
+        )
+        assert result is True
+        assert called["provider"] == "elevenlabs"
+
+    def test_feature_off_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())
+        request = _request(
+            config=SimpleNamespace(voice_service_url="", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+            rls_engine=object(),
+            bearer="Bearer t",
+        )
+        result = asyncio.run(
+            vas.maybe_remap_voice(request, owner_id="o", persona_id="p", yaml_str=_YAML_WITH_VOICE)
+        )
+        assert result is False
+
+
+class TestDialectAwarePrompt:
+    def test_pick_prompt_instructs_dialect_preference(self) -> None:
+        """D-V14-4: the auto-pick prompt tells the model to prefer a voice whose
+        description notes a dialect/accent suiting the persona's language."""
+        msgs = vas._pick_messages(
+            _persona(language="ar"),
+            [_option("v1", "feminine", name="Layla", description="warm; egyptian accent")],
+        )
+        system = msgs[0].content
+        assert isinstance(system, str)
+        lowered = system.lower()
+        assert "accent" in lowered
+        assert "dialect" in lowered
+
+
 # ----- catalogue-fetch failure logging (R9-025 reopen leg A) ---------------
 
 

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from persona.schema.persona import Persona
     from starlette.requests import Request
 
-__all__ = ["choose_voice", "maybe_assign_voice"]
+__all__ = ["choose_voice", "maybe_assign_voice", "maybe_remap_voice"]
 
 _LOG = get_logger("api.voice_assignment")
 
@@ -85,8 +85,11 @@ def _pick_messages(persona: Persona, options: list[_VoiceOption]) -> list[Conver
         "persona's identity and a catalogue of voices, each line as "
         "'voice_id | gender | name: description'. FIRST decide the persona's most "
         "likely gender presentation, THEN choose the voice whose gender MATCHES "
-        "that and whose character best fits. Reply with EXACTLY two lines and "
-        "nothing else:\n"
+        "that and whose character best fits. When a voice's description notes an "
+        "accent or dialect (e.g. 'egyptian accent') that suits the persona's "
+        "language or region, PREFER it — a dialect-appropriate voice sounds more "
+        "natural (Spec V14 D-V14-4). Reply with EXACTLY two lines and nothing "
+        "else:\n"
         "GENDER: <one of: feminine | masculine | neutral | unknown>\n"
         "VOICE: <the chosen voice_id, exactly as written>"
     )
@@ -281,3 +284,91 @@ async def maybe_assign_voice(
         _LOG.debug("voice persist error", error=str(exc)[:200])
         return
     _LOG.info("voice auto-assigned", persona_id=persona_id, provider=provider, voice_id=choice)
+
+
+async def maybe_remap_voice(
+    request: Request, *, owner_id: str, persona_id: str, yaml_str: str
+) -> bool:
+    """Re-pick a persona's voice under the ACTIVE TTS provider (Spec V14 D-V14-13).
+
+    The AUTO-REMAP the owner ruled (supersedes default-until-re-picked): when the
+    active TTS provider differs from the provider a persona's stored voice is
+    addressed to (a provider switch — e.g. Cartesia → ElevenLabs), assign the
+    persona a fitting voice on the ACTIVE provider so it keeps a distinct,
+    provider-correct voice rather than falling to the shared default.
+
+    Unlike :func:`maybe_assign_voice` (create-time; skips already-voiced personas),
+    this re-picks a voiced persona when its provider is stale — AND covers the
+    voiceless case (re-picks from nothing). It is idempotent: a persona already on
+    the active provider is a no-op (returns ``False``). Fail-soft throughout —
+    never raises into the caller; returns ``True`` iff it actually re-picked.
+
+    The trigger (who calls this, and when) is deliberately left to the caller —
+    the active provider is only known after the catalogue fetch, so this function
+    learns it, compares, and acts. Fully self-contained + RLS-scoped to the
+    request's owner.
+    """
+    state = request.app.state
+    config = getattr(state, "config", None)
+    base_url = getattr(config, "voice_service_url", "") if config is not None else ""
+    registry = getattr(state, "tier_registry", None)
+    rls_engine = getattr(state, "rls_engine", None)
+    if not base_url or registry is None or rls_engine is None:
+        return False
+
+    try:
+        persona = persona_service.load_persona_from_yaml(
+            yaml_str, persona_id=persona_id, owner_id=owner_id
+        )
+    except Exception:  # noqa: BLE001 — defensive only
+        return False
+
+    bearer = request.headers.get("authorization")
+    try:
+        provider, options = await _fetch_catalogue(
+            base_url, bearer=bearer, language=persona.identity.language_default
+        )
+    except Exception as exc:  # noqa: BLE001 — network/provider error → keep current
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        _LOG.warning(
+            "voice auto-remap skipped: catalogue unavailable (persona_id={pid}, "
+            "status={status}): {err}",
+            pid=persona_id,
+            status=status,
+            err=repr(exc)[:200],
+        )
+        return False
+    if provider is None or not options:
+        return False
+
+    # Idempotent: a persona already voiced on the ACTIVE provider needs no remap.
+    current = persona.identity.voice
+    if current is not None and current.provider == provider:
+        return False
+
+    try:
+        backend = registry.get(getattr(config, "voice_pick_tier", "small"))
+        choice = await choose_voice(persona=persona, backend=backend, options=options)
+    except Exception as exc:  # noqa: BLE001 — model/routing error → keep current
+        _LOG.warning("voice auto-remap failed at model selection", persona_id=persona_id)
+        _LOG.debug("voice remap model error", error=str(exc)[:200])
+        return False
+    if choice is None:
+        return False
+
+    try:
+        persona_service.set_voice(
+            rls_engine=rls_engine, persona_id=persona_id, provider=provider, voice_id=choice
+        )
+    except Exception as exc:  # noqa: BLE001 — persist error → keep current
+        _LOG.warning("voice auto-remap failed to persist", persona_id=persona_id)
+        _LOG.debug("voice remap persist error", error=str(exc)[:200])
+        return False
+    _LOG.info(
+        "voice auto-remapped to active provider",
+        persona_id=persona_id,
+        provider=provider,
+        voice_id=choice,
+        from_provider=current.provider if current is not None else None,
+    )
+    return True
