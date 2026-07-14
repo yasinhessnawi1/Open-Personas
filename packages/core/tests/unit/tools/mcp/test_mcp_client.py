@@ -3,6 +3,7 @@
 # ruff: noqa: ANN401, ARG001, ARG002, ERA001, SLF001
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -211,6 +212,129 @@ class TestGracefulModeFailure:
         assert client.is_connected
         assert len(client.get_tools()) == 1
         await client.disconnect()
+
+
+# Section: R9-042 — a refused connection surfaces as CancelledError, not Exception
+#
+# These deliberately do NOT use `_patch_sdk` (which only ever raises a plain
+# `Exception` from the transport). The real bug is that `mcp.client.streamable_http`
+# opens its transport inside an `anyio.create_task_group()`: when the real TCP
+# connect is refused, anyio cancels the task group's host task too, so the
+# exception observed by `MCPClient._open_session` is a BARE
+# `asyncio.CancelledError` — invisible to `except Exception`. Reproducing that
+# shape needs the REAL SDK transport against a REAL closed/hanging socket.
+
+
+def _unused_tcp_port() -> int:
+    """A port nothing is listening on: bind ephemeral, read it back, close it.
+
+    Guarantees an immediate ECONNREFUSED on connect (no hang, no privileges
+    needed, portable) — unlike a fixed low port, which may be firewalled
+    (hangs) rather than refused in some sandboxes/CI.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestCancelledErrorDegrade:
+    """R9-042: a refused connection must degrade (strict=False) / fail cleanly
+    (strict=True) — never crash uncaught as a bare CancelledError."""
+
+    @pytest.mark.asyncio
+    async def test_nonstrict_degrades_on_refused_connection(self) -> None:
+        port = _unused_tcp_port()
+        audit = MemoryToolAuditLogger()
+        client = MCPClient(
+            server_name="down",
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            audit_logger=audit,
+        )
+        # No exception — this is exactly what crashed before the fix (a bare
+        # CancelledError propagated straight out of connect(strict=False)).
+        await client.connect(strict=False)
+        assert not client.is_connected
+        assert client.get_tools() == []
+        assert audit.events[0].action == "server_unavailable"
+        assert audit.events[0].is_error is True
+
+    @pytest.mark.asyncio
+    async def test_strict_raises_mcpserverunavailable_on_refused_connection(self) -> None:
+        port = _unused_tcp_port()
+        client = MCPClient(server_name="down", server_url=f"http://127.0.0.1:{port}/mcp")
+        # Previously this leaked a bare CancelledError instead of the documented
+        # MCPServerUnavailableError contract.
+        with pytest.raises(MCPServerUnavailableError):
+            await client.connect(strict=True)
+
+    @pytest.mark.asyncio
+    async def test_recovers_after_refused_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A graceful degrade must leave the client reusable, same as the
+        # existing mocked-Exception recovery case.
+        port = _unused_tcp_port()
+        client = MCPClient(server_name="x", server_url=f"http://127.0.0.1:{port}/mcp")
+        await client.connect(strict=False)
+        assert not client.is_connected
+
+        _patch_sdk(monkeypatch, tools=["search"])
+        await client.connect(strict=False)
+        assert client.is_connected
+        assert len(client.get_tools()) == 1
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_genuine_task_cancellation_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The invariant: a genuinely-cancelled OUTER task still raises
+        CancelledError — R9-042's fix must never swallow a real cancel.
+
+        Drives the REAL `connect()` code path (the `except asyncio.CancelledError`
+        branch + `_drain_after_cancelled_connect`) without a real socket: the
+        transport's `__aenter__` hangs on an ``asyncio.Event`` that's only ever
+        cleared by an external `task.cancel()` — mirroring a slow-to-connect
+        transport (TLS handshake still in flight) that the CALLER gives up on
+        (shutdown, or a caller's `wait_for` timeout on `connect()` itself).
+        Since the exit stack never entered anything, draining it on the caught
+        CancelledError comes back clean -> no real error underneath -> the fix
+        must re-raise, not degrade.
+
+        (Deliberately mocked rather than a real hung TCP listener: two
+        back-to-back tests each spinning up a real anyio task group against a
+        live socket reproducibly deadlocked this repo's pytest-asyncio
+        event-loop teardown — an environment/SDK cleanup interaction unrelated
+        to the fix. This mock exercises the identical `connect()` branch.)
+        """
+        import mcp
+        import mcp.client.streamable_http as shttp
+
+        never_connects = asyncio.Event()
+
+        @asynccontextmanager
+        async def fake_transport_hangs(_url: str, **_kwargs: Any) -> Any:
+            await never_connects.wait()
+            yield (MagicMock(), MagicMock(), MagicMock())  # pragma: no cover — unreachable
+
+        monkeypatch.setattr(shttp, "streamablehttp_client", fake_transport_hangs)
+        monkeypatch.setattr(mcp, "ClientSession", MagicMock())
+
+        client = MCPClient(server_name="hang", server_url="https://slow/mcp")
+        task = asyncio.create_task(client.connect(strict=False))
+        await asyncio.sleep(0.05)  # let it get stuck inside transport __aenter__
+        assert not task.done(), "expected the connect() task to still be hung"
+        task.cancel()
+        # NOTE: deliberately try/except, not `pytest.raises` — wrapping this
+        # particular `await task` in `pytest.raises(asyncio.CancelledError)`
+        # deadlocked under this repo's pytest-asyncio setup (reproduced
+        # standalone too; unrelated to the R9-042 fix under test).
+        raised = False
+        try:
+            await task
+        except asyncio.CancelledError:
+            raised = True
+        assert raised, "genuine external cancellation must still raise CancelledError"
 
 
 # Section: load_mcp_clients helper

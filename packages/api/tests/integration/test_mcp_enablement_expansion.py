@@ -35,23 +35,25 @@ never configured anywhere must admit NONE of that server's tools, and toolbox
 composition must not break; the persona's other declared tool still works. The expansion
 is fail-closed by construction, not fail-open.
 
-NOTE on the "unconnectable" alternative the task offered alongside "nonexistent": an
-earlier version of this file also pinned a grant for a server that WAS env-configured
-but pointed at a real refused loopback port. That surfaced a genuine, reproducible,
-pre-existing gap one layer down — ``MCPClient.connect(strict=False)``
-(``persona/tools/mcp/client.py``) wraps the connect attempt in ``except Exception``, but
-a real refused TCP connection through ``mcp.client.streamable_http`` propagates as
-``asyncio.CancelledError`` (raised from inside anyio's task-group teardown), which is a
-``BaseException`` subclass and so is NOT caught — graceful degradation (``strict=False``)
-does not actually degrade gracefully for this specific real-world failure shape; it
-crashes toolbox composition instead. That is a latent bug outside N7-T1c's scope (an
-integration PROOF, not a source fix), so this file pins the "nonexistent" flavor only;
-see the T1c close-out report for the finding.
+A third test restores the "unconnectable" flavor that an earlier version of this file
+had to drop: a grant for a server that IS env-configured (``PersonaCoreConfig.mcp_servers``,
+the ``PERSONA_MCP_SERVERS`` shape) but points at a real refused loopback port. That used to
+surface a genuine, reproducible, pre-existing gap one layer down —
+``MCPClient.connect(strict=False)`` (``persona/tools/mcp/client.py``) wrapped the connect
+attempt in ``except Exception``, but a real refused TCP connection through
+``mcp.client.streamable_http`` propagates as ``asyncio.CancelledError`` (raised from inside
+anyio's task-group teardown), a ``BaseException`` subclass NOT caught by that — graceful
+degradation (``strict=False``) did not actually degrade gracefully for this real-world
+failure shape; it crashed toolbox composition instead (R9-042, found by this file's T1c
+work, fixed separately — the client now classifies a genuine connection failure hiding
+behind the CancelledError shape and degrades on it, while still propagating a truly
+external task cancellation untouched). With that fixed, this file pins all three flavors.
 """
 
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -94,6 +96,31 @@ tools:
   - mcp:another-unconfigured-app
   - file_read
 """
+
+_UNCONNECTABLE_GRANTS_YAML = """\
+schema_version: "1.0"
+identity:
+  name: Ghost2
+  role: assistant
+  background: |
+    A helper whose one granted app is configured but unreachable.
+  language_default: en
+  constraints: []
+tools:
+  - mcp:deadserver
+  - file_read
+"""
+
+
+def _unused_tcp_port() -> int:
+    """A port nothing is listening on: bind ephemeral, read it back, close it.
+
+    Guarantees an immediate ECONNREFUSED on connect (no hang, no privileges
+    needed, portable) — a real refusal, not merely an unconfigured name.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _seed_persona_row(database_url: str, *, owner: str, persona_id: str, yaml_text: str) -> None:
@@ -227,6 +254,58 @@ async def test_grant_of_a_dead_server_admits_nothing_and_the_turn_still_composes
         names = toolbox.names()  # type: ignore[attr-defined]
         assert not any(n.startswith("mcp:") for n in names), (
             f"a dead grant must admit nothing; got {names!r}"
+        )
+        assert "file_read" in names, "the turn still composes cleanly for the persona's other tool"
+    finally:
+        current_user_id.reset(token)
+        await _teardown(factory, rls_engine, su_url, owner=owner)
+
+
+async def test_grant_of_a_refused_server_degrades_gracefully_r9_042(
+    migrated_engine: Engine,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """R9-042, closed — the "unconnectable" flavor this file used to have to drop.
+
+    The persona grants ``mcp:deadserver``, which IS configured (via
+    ``PersonaCoreConfig.mcp_servers`` — the real ``PERSONA_MCP_SERVERS`` shape) but
+    points at a real closed loopback port: the connect is genuinely REFUSED, not
+    merely absent (contrast with ``test_grant_of_a_dead_server_...`` above, which
+    never configures the name at all). Before the fix this line raised a bare
+    ``asyncio.CancelledError`` straight out of ``MCPClient.connect(strict=False)``
+    and crashed toolbox composition for the whole turn. Now it must degrade exactly
+    like the "nonexistent" flavor: admit none of that server's tools, and the
+    persona's other declared tool (``file_read``) still works.
+    """
+    app_url = os.environ.get("APP_DATABASE_URL")
+    if not app_url:
+        pytest.skip("APP_DATABASE_URL not set")
+    su_url = os.environ["DATABASE_URL"]
+    owner, persona_id = "user_n7_t1c", "persona_n7_t1c_unconnectable"
+    _seed_persona_row(
+        su_url, owner=owner, persona_id=persona_id, yaml_text=_UNCONNECTABLE_GRANTS_YAML
+    )
+
+    port = _unused_tcp_port()
+    rls_engine = make_rls_engine(app_url)
+    factory = _make_factory(
+        rls_engine,
+        core_config=PersonaCoreConfig(
+            tools_sandbox_root=tmp_path,
+            mcp_servers=f"deadserver=http://127.0.0.1:{port}/mcp",
+        ),
+    )
+    token = current_user_id.set(owner)
+    try:
+        persona = factory._load_persona(persona_id)  # noqa: SLF001
+        assert persona.tools == ["mcp:deadserver", "file_read"]
+
+        # Pre-fix, this raised a bare asyncio.CancelledError and crashed the turn.
+        toolbox = await factory._build_toolbox(persona, scanned_skills=[])  # noqa: SLF001
+
+        names = toolbox.names()  # type: ignore[attr-defined]
+        assert not any(n.startswith("mcp:deadserver") for n in names), (
+            f"a refused server must admit nothing; got {names!r}"
         )
         assert "file_read" in names, "the turn still composes cleanly for the persona's other tool"
     finally:
