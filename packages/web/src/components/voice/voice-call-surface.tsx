@@ -11,10 +11,13 @@
  * `Room`.** It reads the live state from {@link useCallSession} instead of
  * instantiating `useVoiceCall`, so the call lives in the app-level provider and
  * survives navigation; this surface is just its expanded projection (the mini-bar
- * is the collapsed one). **Auto-start-on-mount is removed:** arriving with no
- * active call shows an explicit "Talk to {persona}" affordance, and `start()` is
- * an explicit session action fired from that user gesture (which also unlocks
- * audio autoplay + the mic permission — better than V6's start-on-navigation).
+ * is the collapsed one). **R11-B7 (owner-ruled): auto-join on mount.** Arriving
+ * on this route IS the intent to call, so there is no dead "Talk to {persona}"
+ * start stop — the session starts on entry (fired once; never re-dialed after an
+ * end). The live view's autoplay recovery (`needsAudioGesture` → "Enable audio")
+ * covers the gesture the old explicit button provided, and `getUserMedia`'s own
+ * permission prompt covers the mic. On end, the surface redirects straight to the
+ * transcript (the chat thread) — no dead "call ended" screen either.
  * HARD GUARD: this surface holds NO `Room` and NO `<audio>` — those live in the
  * provider (and the audio sinks in `document.body`), never in this route — so the
  * route unmounting (or being hidden by a future Cache Components `<Activity>`)
@@ -25,7 +28,7 @@ import { ArrowLeft, Captions, Phone, PhoneOff } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FileRendererProvider,
   useFileRenderer,
@@ -103,6 +106,34 @@ export function VoiceCallSurface({
 
   const backHref = `/chat/${conversationId}`;
 
+  // R11-B7 (owner-ruled): auto-join on mount — no dead "start the call" stop.
+  // Fires exactly once; skips when we mounted into a live call (just project it)
+  // or a terminal phase (never re-dial an ended/dropped/errored call). start +
+  // target ride refs so a fresh identity per render can't re-run the effect.
+  const autoJoinedRef = useRef(false);
+  const startRef = useRef(start);
+  startRef.current = start;
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  useEffect(() => {
+    if (autoJoinedRef.current) return;
+    autoJoinedRef.current = true;
+    if (isActive || state.phase !== "idle") return;
+    startRef.current(targetRef.current);
+  }, [isActive, state.phase]);
+
+  // R11-B7 (owner-ruled): on end, go straight to the transcript — the chat
+  // thread, where the call persists and CallRecap renders — instead of a dead
+  // "call ended" screen. Covers a persona/system-initiated end; `handleEnd`
+  // covers the manual End button. Guarded so it fires once per mount.
+  const endRedirectedRef = useRef(false);
+  useEffect(() => {
+    if (state.phase === "ended" && !endRedirectedRef.current) {
+      endRedirectedRef.current = true;
+      router.replace(backHref);
+    }
+  }, [state.phase, router, backHref]);
+
   const header = (
     <>
       <Link
@@ -126,9 +157,11 @@ export function VoiceCallSurface({
     </>
   );
 
-  // No active call — an explicit "Talk to {persona}" affordance. The click is the
-  // user gesture that starts the session (and unlocks audio autoplay). NO
-  // auto-start on mount: this surface only ever projects an already-running call.
+  // R11-B7: no interactive "Talk to {persona}" stop — a call auto-joins on
+  // entry. This frame only shows for the instant before `start()` flips the
+  // phase to "connecting"; a calm placeholder, never a dead step. (A terminal
+  // phase — ended/dropped/error — is handled by the redirect / EmptyState paths
+  // below and never lands here as inactive.)
   if (!isActive) {
     return (
       <div className="v-voice" style={personaIdentityStyle(persona)}>
@@ -140,16 +173,8 @@ export function VoiceCallSurface({
           }}
         />
         {header}
-        <Button
-          size="lg"
-          className="relative z-[1]"
-          onClick={() => start(target)}
-        >
-          <Phone aria-hidden /> {t("talk", { name: persona.name })}
-        </Button>
-        <div className="relative z-[1] flex items-center gap-2 font-mono text-muted-foreground type-caption normal-case tracking-normal">
-          <span className="v-id-dot" />
-          {t("memoryNote")}
+        <div className="v-voice__status relative z-[1]" aria-live="polite">
+          {t("connecting")}
         </div>
       </div>
     );

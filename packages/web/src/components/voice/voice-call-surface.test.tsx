@@ -128,12 +128,14 @@ describe("VoiceCallSurface (V7 — binds the session)", () => {
     expect(h.useVoiceCallSpy).not.toHaveBeenCalled();
   });
 
-  it("idle → an explicit Talk affordance that starts the session (no auto-start)", () => {
+  it("R11-B7: idle → auto-joins the session on mount, no dead Talk stop", () => {
     const session = makeSession(withPhase("idle"), { isActive: false });
     h.session = session;
     renderSurface();
-    expect(screen.queryByTestId("orb")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Talk to Astrid/ }));
+    // No interactive start step — the call auto-joins on entry.
+    expect(
+      screen.queryByRole("button", { name: /Talk to Astrid/ }),
+    ).not.toBeInTheDocument();
     expect(session.start).toHaveBeenCalledWith(
       expect.objectContaining({
         personaId: "p1",
@@ -141,6 +143,15 @@ describe("VoiceCallSurface (V7 — binds the session)", () => {
         personaName: "Astrid",
       }),
     );
+  });
+
+  it("R11-B7: ended → redirects to the transcript (the chat thread), no dead stop", () => {
+    const session = makeSession(withPhase("ended"), { isActive: true });
+    h.session = session;
+    renderSurface();
+    // No auto-redial of an ended call; straight to the transcript.
+    expect(session.start).not.toHaveBeenCalled();
+    expect(h.replace).toHaveBeenCalledWith("/chat/c1");
   });
 
   it("end → ends the session and returns to the conversation", () => {
