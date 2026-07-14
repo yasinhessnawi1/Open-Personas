@@ -1,6 +1,6 @@
 "use client";
 
-import { Mic, Plus, ShieldCheck, Wrench, X } from "lucide-react";
+import { Lock, Mic, Plus, ShieldCheck, Wrench, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import type { ComponentType } from "react";
 import { Input } from "@/components/ui/input";
@@ -148,7 +148,7 @@ export function PersonaForm({
           />
         </Field>
         <Field label={t("background")}>
-          <Textarea
+          <GhostTextarea
             value={identity.background}
             rows={4}
             onChange={(e) =>
@@ -197,40 +197,13 @@ export function PersonaForm({
         badge="SF"
         accent="var(--store-self-facts)"
       >
-        {selfFacts.map((f, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
-          <div key={i} className="flex items-start gap-2">
-            <Input
-              value={f.fact}
-              placeholder={t("fact")}
-              className="flex-1"
-              onChange={(e) =>
-                onChange(
-                  writeSelfFacts(
-                    doc,
-                    selfFacts.map((x, j) =>
-                      j === i ? { ...x, fact: e.target.value } : x,
-                    ),
-                  ),
-                )
-              }
-            />
-            <Confidence
-              value={f.confidence}
-              onChange={(v) =>
-                onChange(
-                  writeSelfFacts(
-                    doc,
-                    selfFacts.map((x, j) =>
-                      j === i ? { ...x, confidence: v } : x,
-                    ),
-                  ),
-                )
-              }
-            />
-            <RemoveButton
-              label={t("remove")}
-              onClick={() =>
+        <StoreItems accent="var(--store-self-facts)">
+          {selfFacts.map((f, i) => (
+            <StoreRow
+              // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
+              key={i}
+              removeLabel={t("remove")}
+              onRemove={() =>
                 onChange(
                   writeSelfFacts(
                     doc,
@@ -238,17 +211,50 @@ export function PersonaForm({
                   ),
                 )
               }
-            />
-          </div>
-        ))}
-        <AddButton
-          label={t("addSelfFact")}
-          onClick={() =>
-            onChange(
-              writeSelfFacts(doc, [...selfFacts, { fact: "", confidence: 1 }]),
-            )
-          }
-        />
+              trailing={
+                <Confidence
+                  value={f.confidence}
+                  onChange={(v) =>
+                    onChange(
+                      writeSelfFacts(
+                        doc,
+                        selfFacts.map((x, j) =>
+                          j === i ? { ...x, confidence: v } : x,
+                        ),
+                      ),
+                    )
+                  }
+                />
+              }
+            >
+              <GhostInput
+                value={f.fact}
+                placeholder={t("fact")}
+                onChange={(e) =>
+                  onChange(
+                    writeSelfFacts(
+                      doc,
+                      selfFacts.map((x, j) =>
+                        j === i ? { ...x, fact: e.target.value } : x,
+                      ),
+                    ),
+                  )
+                }
+              />
+            </StoreRow>
+          ))}
+          <AddButton
+            label={t("addSelfFact")}
+            onClick={() =>
+              onChange(
+                writeSelfFacts(doc, [
+                  ...selfFacts,
+                  { fact: "", confidence: 1 },
+                ]),
+              )
+            }
+          />
+        </StoreItems>
       </Section>
 
       {/* Worldview */}
@@ -259,85 +265,84 @@ export function PersonaForm({
         badge="WV"
         accent="var(--store-worldview)"
       >
-        {worldview.map((w, i) => {
-          const set = (patch: Partial<typeof w>) =>
-            onChange(
-              writeWorldview(
-                doc,
-                worldview.map((x, j) => (j === i ? { ...x, ...patch } : x)),
-              ),
-            );
-          return (
-            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
-            <div key={i} className="flex flex-col gap-2 rounded-md border p-3">
-              <div className="flex items-start gap-2">
-                <Input
+        <StoreItems accent="var(--store-worldview)">
+          {worldview.map((w, i) => {
+            const set = (patch: Partial<typeof w>) =>
+              onChange(
+                writeWorldview(
+                  doc,
+                  worldview.map((x, j) => (j === i ? { ...x, ...patch } : x)),
+                ),
+              );
+            return (
+              <StoreRow
+                // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
+                key={i}
+                removeLabel={t("remove")}
+                onRemove={() =>
+                  onChange(
+                    writeWorldview(
+                      doc,
+                      worldview.filter((_, j) => j !== i),
+                    ),
+                  )
+                }
+                trailing={
+                  <EpistemicChip
+                    value={w.epistemic}
+                    onChange={(v) => set({ epistemic: v })}
+                  />
+                }
+              >
+                <GhostInput
                   value={w.claim}
                   placeholder={t("claim")}
-                  className="flex-1"
                   onChange={(e) => set({ claim: e.target.value })}
                 />
-                <RemoveButton
-                  label={t("remove")}
-                  onClick={() =>
-                    onChange(
-                      writeWorldview(
-                        doc,
-                        worldview.filter((_, j) => j !== i),
-                      ),
-                    )
-                  }
-                />
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Input
-                  value={w.domain}
-                  placeholder={t("domain")}
-                  className="w-32"
-                  onChange={(e) => set({ domain: e.target.value })}
-                />
-                <select
-                  value={w.epistemic}
-                  onChange={(e) => set({ epistemic: e.target.value })}
-                  className="h-9 rounded-md border border-input bg-transparent px-2 font-mono text-xs uppercase shadow-xs"
-                >
-                  {EPISTEMIC_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-                <Input
-                  value={w.valid_time}
-                  placeholder={t("validTime")}
-                  className="w-28"
-                  onChange={(e) => set({ valid_time: e.target.value })}
-                />
-                <Confidence
-                  value={w.confidence}
-                  onChange={(v) => set({ confidence: v })}
-                />
-              </div>
-            </div>
-          );
-        })}
-        <AddButton
-          label={t("addClaim")}
-          onClick={() =>
-            onChange(
-              writeWorldview(doc, [
-                ...worldview,
-                {
-                  claim: "",
-                  domain: "",
-                  epistemic: "belief",
-                  confidence: 0.8,
-                  valid_time: "always",
-                },
-              ]),
-            )
-          }
-        />
+                {/* the detail the kit tucks under the claim — a quiet mono meta row */}
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pl-1.5">
+                  <MetaField label={t("domain")}>
+                    <GhostInput
+                      value={w.domain}
+                      placeholder={t("domain")}
+                      className="w-28 text-xs"
+                      onChange={(e) => set({ domain: e.target.value })}
+                    />
+                  </MetaField>
+                  <MetaField label={t("validTime")}>
+                    <GhostInput
+                      value={w.valid_time}
+                      placeholder={t("validTime")}
+                      className="w-24 text-xs"
+                      onChange={(e) => set({ valid_time: e.target.value })}
+                    />
+                  </MetaField>
+                  <Confidence
+                    value={w.confidence}
+                    onChange={(v) => set({ confidence: v })}
+                  />
+                </div>
+              </StoreRow>
+            );
+          })}
+          <AddButton
+            label={t("addClaim")}
+            onClick={() =>
+              onChange(
+                writeWorldview(doc, [
+                  ...worldview,
+                  {
+                    claim: "",
+                    domain: "",
+                    epistemic: "belief",
+                    confidence: 0.8,
+                    valid_time: "always",
+                  },
+                ]),
+              )
+            }
+          />
+        </StoreItems>
       </Section>
 
       {/* Voice — its own card (a persona's audible identity, V6 C2). Sits after
@@ -484,7 +489,9 @@ function Field({
   return (
     // biome-ignore lint/a11y/noLabelWithoutControl: the form control is passed as children
     <label className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="font-mono text-[11px] text-muted-foreground">
+        {label}
+      </span>
       {hint ? (
         <span className="text-xs text-muted-foreground/80">{hint}</span>
       ) : null}
@@ -536,14 +543,23 @@ function ListEditor({
   /** Accessible label for the lock indicator on a locked row. */
   lockedLabel?: string;
 }) {
+  // R11-B6 pixel pass — the kit `.constraint`: a primary-tinted shield box per
+  // row (the safety spine, kept even across voice + text), editable in place.
   return (
     <div className="flex flex-col gap-2">
       {items.map((item, i) => {
         const locked = lockedItem !== undefined && item === lockedItem;
         return (
-          // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
-          <div key={i} className="flex items-center gap-2">
-            <Input
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
+            key={i}
+            className="group flex items-start gap-2.5 rounded-md border border-primary/20 bg-primary/[0.04] px-3 py-2"
+          >
+            <ShieldCheck
+              className="mt-1.5 size-4 shrink-0 text-primary"
+              aria-hidden="true"
+            />
+            <GhostInput
               value={item}
               placeholder={placeholder}
               className="flex-1"
@@ -562,17 +578,21 @@ function ListEditor({
             {locked ? (
               <span
                 role="img"
-                className="grid size-8 shrink-0 place-items-center text-muted-foreground"
+                className="mt-1 grid size-6 shrink-0 place-items-center font-mono text-[10px] text-muted-foreground"
                 title={lockedLabel}
                 aria-label={lockedLabel}
               >
-                <ShieldCheck className="size-4 text-primary" />
+                <Lock className="size-3.5" />
               </span>
             ) : (
-              <RemoveButton
-                label="remove"
+              <button
+                type="button"
+                aria-label="remove"
                 onClick={() => onChange(items.filter((_, j) => j !== i))}
-              />
+                className="mt-1 grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100"
+              >
+                <X className="size-3.5" aria-hidden="true" />
+              </button>
             )}
           </div>
         );
@@ -583,11 +603,13 @@ function ListEditor({
 }
 
 function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
+  // R11-B6 pixel pass — the kit `.additem`: a muted store-tinted add affordance
+  // (inherits `--sc` inside a StoreItems block; falls back to the accent off-store).
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
+      className="inline-flex w-fit items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-[color-mix(in_oklch,var(--sc,var(--primary))_8%,transparent)] hover:text-[color-mix(in_oklch,var(--sc,var(--primary))_72%,var(--foreground))]"
     >
       <Plus className="size-3.5" />
       {label}
@@ -595,21 +617,135 @@ function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
   );
 }
 
-function RemoveButton({
-  label,
-  onClick,
+// ---------------------------------------------------------------------------
+// R11-B6 pixel pass — the kit's typed-memory rows (persona-detail.html `.store`
+// / `.item`): a store-colour dot, borderless-until-focus editable text, an
+// optional trailing chip (epistemic), and a hover-revealed delete. The store
+// accent rides `--sc` (set by <StoreItems>), defaulting to --primary off-store.
+// ---------------------------------------------------------------------------
+
+const GHOST_FIELD =
+  "h-auto rounded border-transparent bg-transparent px-1.5 py-1 shadow-none focus-visible:border-transparent";
+
+/** The kit `.item__text` — a borderless editable input revealing only a focus ring. */
+function GhostInput({
+  className,
+  ...props
+}: React.ComponentProps<typeof Input>) {
+  return <Input className={cn(GHOST_FIELD, className)} {...props} />;
+}
+
+/** Ghost multiline field (identity background). */
+function GhostTextarea({
+  className,
+  ...props
+}: React.ComponentProps<typeof Textarea>) {
+  return (
+    <Textarea
+      className={cn(
+        GHOST_FIELD,
+        "min-h-16 resize-y leading-relaxed",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** The store block (kit `.store` inner tint): carries the accent as `--sc` for
+ * the rows' dots + hover + the "+ Add" affordance below. */
+function StoreItems({
+  accent,
+  children,
 }: {
-  label: string;
-  onClick: () => void;
+  accent: string;
+  children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      className="mt-1 shrink-0 text-muted-foreground hover:text-destructive"
+    <div
+      className="flex flex-col gap-0.5"
+      style={{ "--sc": accent } as React.CSSProperties}
     >
-      <X className="size-4" />
-    </button>
+      {children}
+    </div>
+  );
+}
+
+/** One typed-memory row (kit `.item`): dot + content + trailing + hover-delete. */
+function StoreRow({
+  children,
+  trailing,
+  onRemove,
+  removeLabel,
+}: {
+  children: React.ReactNode;
+  trailing?: React.ReactNode;
+  onRemove?: () => void;
+  removeLabel?: string;
+}) {
+  return (
+    <div className="group flex items-start gap-2.5 rounded-md px-1 py-1 transition-colors hover:bg-[color-mix(in_oklch,var(--sc,var(--primary))_8%,transparent)]">
+      <span
+        aria-hidden="true"
+        className="mt-[0.6rem] size-1.5 shrink-0 rounded-full"
+        style={{ background: "var(--sc, var(--primary))" }}
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">{children}</div>
+      {trailing}
+      {onRemove ? (
+        <button
+          type="button"
+          aria-label={removeLabel}
+          onClick={onRemove}
+          className="mt-1 grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <X className="size-3.5" aria-hidden="true" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** The kit `.item__epi` — the worldview epistemic marker as a mono chip. */
+function EpistemicChip({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="epistemic marker"
+      className="mt-0.5 h-6 shrink-0 rounded-full border border-border bg-background px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+    >
+      {EPISTEMIC_OPTIONS.map((opt) => (
+        <option key={opt} value={opt}>
+          {opt}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** A mono label + inline control for the worldview secondary meta (domain /
+ * valid-time / confidence — the detail the kit tucks under the claim). */
+function MetaField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: the control is passed as children
+    <label className="flex items-center gap-1.5">
+      <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }
