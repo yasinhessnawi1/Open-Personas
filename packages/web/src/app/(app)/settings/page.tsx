@@ -1,5 +1,5 @@
 import { Package } from "lucide-react";
-import { getTranslations } from "next-intl/server";
+import { getFormatter, getTranslations } from "next-intl/server";
 import { currentUser } from "@/auth/server";
 import { PageBody, PageHeader, Stack } from "@/components/layout";
 import { ErrorState } from "@/components/patterns/error-state";
@@ -37,6 +37,9 @@ import { serverApi } from "@/lib/api/server";
  */
 export default async function SettingsPage() {
   const t = await getTranslations("settings");
+  // Locale-pinned both sides (server variant — this is a Server Component) —
+  // see conversation-list.tsx / R9-044.
+  const format = await getFormatter();
   const api = await serverApi();
   const [user, credits, usage] = await Promise.all([
     currentUser(),
@@ -148,7 +151,7 @@ export default async function SettingsPage() {
                 className="type-display tabular-nums"
                 data-slot="settings-credits-balance"
               >
-                {credits.balance.toLocaleString()}
+                {format.number(credits.balance)}
               </p>
               <p className="type-caption text-muted-foreground">
                 {t("creditsHint")}
@@ -194,7 +197,10 @@ export default async function SettingsPage() {
                         className="border-b last:border-0"
                       >
                         <td className="py-2 pr-3 whitespace-nowrap text-muted-foreground">
-                          {new Date(row.created_at).toLocaleString()}
+                          {format.dateTime(new Date(row.created_at), {
+                            dateStyle: "medium",
+                            timeStyle: "short",
+                          })}
                         </td>
                         <td className="py-2 pr-3">
                           <span className="type-caption font-mono uppercase">
@@ -205,9 +211,9 @@ export default async function SettingsPage() {
                           {row.model_name}
                         </td>
                         <td className="py-2 pr-3 text-right tabular-nums">
-                          {(
-                            row.prompt_tokens + row.completion_tokens
-                          ).toLocaleString()}
+                          {format.number(
+                            row.prompt_tokens + row.completion_tokens,
+                          )}
                         </td>
                         <td className="py-2 text-right tabular-nums">
                           ${(row.cost_cents / 100).toFixed(4)}

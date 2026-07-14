@@ -3,7 +3,7 @@
 import { Copy, MessageSquare, Mic, Phone, Play, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useFormatter, useTranslations } from "next-intl";
 import { useCallback, useState } from "react";
 import { startChat, startVoice } from "@/app/actions";
 import {
@@ -87,6 +87,10 @@ export function PersonaPage({
   newTaskAction: (formData: FormData) => void | Promise<void>;
 }) {
   const t = useTranslations("personaPage");
+  // next-intl's formatter is pinned to the active locale on both server + client,
+  // so the rendered date matches (a bare `toLocaleDateString()` used the runtime
+  // default locale, which differs SSR↔browser → hydration mismatch, R9-044).
+  const format = useFormatter();
   const router = useRouter();
   const api = useApi();
   const confirm = useConfirm();
@@ -319,7 +323,11 @@ export function PersonaPage({
               {createdAt ? (
                 <div className="flex justify-between">
                   <dt className="text-muted-foreground">{t("created")}</dt>
-                  <dd>{new Date(createdAt).toLocaleDateString()}</dd>
+                  <dd>
+                    {format.dateTime(new Date(createdAt), {
+                      dateStyle: "medium",
+                    })}
+                  </dd>
                 </div>
               ) : null}
             </dl>

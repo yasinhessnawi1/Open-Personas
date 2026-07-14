@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Clock, KeyRound, Link2, MessageSquareCode } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { useFormatter, useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { ConnectorMeta } from "@/lib/connectors/catalogue";
@@ -46,6 +46,8 @@ export function ConnectorCard({
   onDisconnect,
 }: ConnectorCardProps) {
   const t = useTranslations("connectors");
+  // Locale-pinned both sides — see conversation-list.tsx / R9-044.
+  const format = useFormatter();
   const connected = connection !== null;
   const comingSoon = !meta.backendReady && !connected;
   const MechIcon = MECHANISM_ICON[meta.mechanism];
@@ -89,7 +91,9 @@ export function ConnectorCard({
             {formatIdentity(meta.identityKind, connection.platform_identity, t)}
             {" · "}
             {t("linkedOn", {
-              date: new Date(connection.linked_at).toLocaleDateString(),
+              date: format.dateTime(new Date(connection.linked_at), {
+                dateStyle: "medium",
+              }),
             })}
           </p>
         ) : (

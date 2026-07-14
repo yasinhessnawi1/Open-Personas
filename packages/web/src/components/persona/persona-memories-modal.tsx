@@ -3,7 +3,7 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { ArrowUpRight } from "lucide-react";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
+import { useFormatter, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 import { SkeletonBlock } from "@/components/patterns/loading";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,8 @@ export function PersonaMemoriesModal({
   trigger: React.ReactElement;
 }) {
   const t = useTranslations("personaPage.memoriesModal");
+  // Locale-pinned both sides — see conversation-list.tsx / R9-044.
+  const format = useFormatter();
   const api = useApi();
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<{
@@ -116,7 +118,9 @@ export function PersonaMemoriesModal({
                         {m.name}
                       </p>
                       <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                        {new Date(m.created_at).toLocaleDateString()}
+                        {format.dateTime(new Date(m.created_at), {
+                          dateStyle: "medium",
+                        })}
                       </span>
                     </div>
                     <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
