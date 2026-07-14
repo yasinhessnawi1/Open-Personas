@@ -26,6 +26,7 @@ from persona.tools.builtin.text_diff import make_text_diff_tool
 from persona.tools.builtin.web_fetch import make_web_fetch_tool
 from persona.tools.builtin.web_search import make_web_search_tool
 from persona.tools.mcp.client import MCPClient, load_mcp_clients
+from persona.tools.mcp.naming import referenced_server_name, server_grant_name
 from persona.tools.toolbox import Toolbox
 
 if TYPE_CHECKING:
@@ -54,7 +55,9 @@ def _build_gateway_client(
     """Build the Docker MCP Gateway client, or ``None`` (Spec N1, D-N1-1/2/5/6).
 
     Returns ``None`` when no gateway URL is configured (fail-soft) OR the persona's
-    explicit allow-list references no gateway tool — so a gateway a persona can't use
+    explicit allow-list references no gateway tool — neither a 3-segment
+    ``mcp:docker:<tool>`` entry nor the bare ``mcp:docker`` server grant (Spec N7,
+    D-N7-1: the form the apps toggle writes) — so a gateway a persona can't use
     is never connected (lazy, mirroring the D-27-3 built-in lazy-spawn discipline). A
     persona with NO declared tools is the all-allowed dev/CLI path, so it does connect.
 
@@ -71,7 +74,9 @@ def _build_gateway_client(
     if not url:
         return None
     prefix = f"mcp:{_GATEWAY_SERVER_NAME}:"
-    references_gateway = (not persona.tools) or any(t.startswith(prefix) for t in persona.tools)
+    references_gateway = (not persona.tools) or any(
+        t.startswith(prefix) or server_grant_name(t) == _GATEWAY_SERVER_NAME for t in persona.tools
+    )
     if not references_gateway:
         return None
     token = config.docker_mcp_gateway_token
@@ -220,6 +225,23 @@ async def build_default_toolbox(
         mcp_tools.extend(gateway_client.get_tools())
         mcp_clients.append(gateway_client)
 
+    # Spec N7 (D-N7-1) — server-level grant expansion. The apps UX toggle writes the
+    # bare server-grant form ``mcp:<name>`` (N3); expand each grant into that server's
+    # REAL discovered ``mcp:<name>:<tool>`` names so the literal allow-list admits
+    # them — the ``byo_allow`` mechanism below, generalized to all three shared-list
+    # MCP sources (built-in launcher via ``extra_mcp_servers``, env-configured
+    # ``PERSONA_MCP_SERVERS``, and the gateway). Fail-closed by construction: only
+    # tools whose server actually connected THIS build are in ``mcp_tools``, so a
+    # dead / unknown / unavailable server grants nothing — and ``is_allowed`` stays
+    # literal exact-match (no prefix magic in the hot path). Per-tool deny within an
+    # enabled server is v2 (D-N7-1).
+    server_grants = {g for t in persona.tools if (g := server_grant_name(t)) is not None}
+    grant_allow = [
+        t.name
+        for t in mcp_tools
+        if (ref := referenced_server_name(t.name)) is not None and ref in server_grants
+    ]
+
     # Spec 30 (D-30-4/6) — bring-your-own MCP clients (SSRF-pinned, pre-built by
     # the API factory). Connect gracefully; their tool names are auto-allowed
     # because the assignment is the authorization (the YAML allow-list never
@@ -256,10 +278,14 @@ async def build_default_toolbox(
     # injected, matching the BYO precedent below.
     skill_meta_allow = [t.name for t in (extra_tools or []) if t.name == "use_skill"]
 
-    # The allow-list: the persona's declared tools PLUS the assigned BYO tool
-    # names PLUS the composed use_skill meta-tool. When the persona declares
-    # nothing (dev-permissive None path) every tool is allowed anyway
-    # (all-allowed), preserving prior behaviour exactly.
-    allow_list = [*persona.tools, *byo_allow, *skill_meta_allow] if persona.tools else None
+    # The allow-list: the persona's declared tools PLUS the server-grant expansion
+    # (D-N7-1) PLUS the assigned BYO tool names PLUS the composed use_skill
+    # meta-tool. The bare ``mcp:<name>`` grant entries stay in the list — they are
+    # the documented grant form; no tool registers under a bare name, so they are
+    # never advertised. When the persona declares nothing (dev-permissive None
+    # path) every tool is allowed anyway (all-allowed), preserving prior behaviour.
+    allow_list = (
+        [*persona.tools, *grant_allow, *byo_allow, *skill_meta_allow] if persona.tools else None
+    )
     toolbox = Toolbox(all_tools, allow_list=allow_list)
     return toolbox, mcp_clients

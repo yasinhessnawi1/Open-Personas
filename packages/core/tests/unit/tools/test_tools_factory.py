@@ -511,3 +511,157 @@ class TestMcpSearchCatalogWiring:
         assert result.data is not None
         # mcp_search searched the INJECTED vetted catalog, not the default mirror.
         assert [r["name"] for r in result.data["results"]] == ["notion-remote"]
+
+
+# Section: Spec N7 (D-N7-1) — server-level grants expand to real tool names
+
+
+class TestServerGrantExpansion:
+    """The apps toggle writes the bare ``mcp:<name>`` server grant (N3); composition
+    expands it into that server's REAL ``mcp:<name>:<tool>`` names at toolbox build —
+    the ``byo_allow`` mechanism generalized to the builtin-launcher / env-configured /
+    gateway sources. ``is_allowed`` stays literal exact-match (no prefix magic in the
+    hot path); the expansion is fail-closed by construction (a server that did not
+    connect THIS build grants nothing)."""
+
+    @pytest.mark.asyncio
+    async def test_bare_grant_expands_extra_mcp_server_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The audit's exact bug (N7 §1.1): the builtin launcher hands its spawned
+        # servers over as ``extra_mcp_servers``; a persona enabled via the apps
+        # toggle (bare ``mcp:<name>``) must actually SEE that server's tools.
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:launcher"])
+        toolbox, _clients = await build_default_toolbox(
+            config, persona, extra_mcp_servers={"launcher": "http://127.0.0.1:9/mcp"}
+        )
+        names = toolbox.names()
+        assert "mcp:launcher:search" in names
+        assert toolbox.is_allowed("mcp:launcher:search")
+        assert "mcp:launcher:search" in [s.name for s in toolbox.get_specs()]
+
+    @pytest.mark.asyncio
+    async def test_bare_grant_expands_env_configured_server(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(
+            tools_sandbox_root=tmp_path,
+            mcp_servers="envsrv=https://envsrv.example/mcp",
+        )
+        persona = _persona(tools=["mcp:envsrv"])
+        toolbox, _clients = await build_default_toolbox(config, persona)
+        assert "mcp:envsrv:search" in toolbox.names()
+
+    @pytest.mark.asyncio
+    async def test_bare_gateway_grant_connects_and_expands(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Companion gate bug (N7 §1.3): a persona holding ONLY the bare
+        # ``mcp:docker`` grant never even connected the gateway —
+        # ``references_gateway`` matched the 3-segment prefix only.
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(
+            tools_sandbox_root=tmp_path,
+            docker_mcp_gateway_url="http://127.0.0.1:8811/mcp",
+        )
+        persona = _persona(tools=["mcp:docker"])
+        toolbox, clients = await build_default_toolbox(config, persona)
+        gw = _gateway(clients)
+        assert gw is not None, "a bare mcp:docker grant must connect the gateway"
+        assert gw.is_connected
+        assert "mcp:docker:search" in toolbox.names()
+
+    @pytest.mark.asyncio
+    async def test_grant_never_bleeds_across_servers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail-closed pin: granting server ``alpha`` admits NOTHING of ``beta``,
+        # even though both are connected and discovered in the same build.
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:alpha"])
+        toolbox, _clients = await build_default_toolbox(
+            config,
+            persona,
+            extra_mcp_servers={
+                "alpha": "http://127.0.0.1:9/mcp",
+                "beta": "http://127.0.0.1:10/mcp",
+            },
+        )
+        names = toolbox.names()
+        assert "mcp:alpha:search" in names
+        assert "mcp:beta:search" not in names
+        assert not toolbox.is_allowed("mcp:beta:search")
+
+    @pytest.mark.asyncio
+    async def test_unknown_grant_admits_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A grant for a server that is not configured anywhere admits nothing —
+        # and toolbox construction stays graceful (the N2-D-4 ghost shape).
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:nosuch", "file_read"])
+        toolbox, _clients = await build_default_toolbox(
+            config, persona, extra_mcp_servers={"alpha": "http://127.0.0.1:9/mcp"}
+        )
+        names = toolbox.names()
+        assert "file_read" in names
+        assert not any(n.startswith("mcp:") for n in names)
+
+    @pytest.mark.asyncio
+    async def test_failed_connect_grants_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail-closed: the grant is present but the server's transport dies at
+        # connect — strict=False degrades gracefully and the grant admits nothing.
+        import mcp
+        import mcp.client.streamable_http as shttp
+
+        @asynccontextmanager
+        async def broken_transport(_url: str, **_kw: Any) -> Any:  # noqa: ANN401
+            msg = "connection refused"
+            raise RuntimeError(msg)
+            yield  # pragma: no cover — unreachable; keeps the contextmanager shape
+
+        monkeypatch.setattr(shttp, "streamablehttp_client", broken_transport)
+        monkeypatch.setattr(mcp, "ClientSession", _fake_session)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:dead", "file_read"])
+        toolbox, _clients = await build_default_toolbox(
+            config, persona, extra_mcp_servers={"dead": "http://127.0.0.1:9/mcp"}
+        )
+        names = toolbox.names()
+        assert "file_read" in names
+        assert not any(n.startswith("mcp:dead") for n in names)
+
+    @pytest.mark.asyncio
+    async def test_grant_and_tool_form_coexist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A persona may carry both the bare grant AND an explicit 3-segment
+        # declaration for the same server — advertised once, no duplicate error.
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:launcher", "mcp:launcher:search"])
+        toolbox, _clients = await build_default_toolbox(
+            config, persona, extra_mcp_servers={"launcher": "http://127.0.0.1:9/mcp"}
+        )
+        assert toolbox.names().count("mcp:launcher:search") == 1
+
+    @pytest.mark.asyncio
+    async def test_bare_grant_entry_is_never_advertised_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The bare entry is the DOCUMENTED grant form in the allow-list — but no
+        # tool registers under it, so it is never advertised to the model.
+        _patch_mcp(monkeypatch)
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["mcp:launcher", "file_read"])
+        toolbox, _clients = await build_default_toolbox(
+            config, persona, extra_mcp_servers={"launcher": "http://127.0.0.1:9/mcp"}
+        )
+        assert "mcp:launcher" not in toolbox.names()
