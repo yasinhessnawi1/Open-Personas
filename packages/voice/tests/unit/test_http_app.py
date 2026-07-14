@@ -873,6 +873,67 @@ def test_stt_endpoint_omitted_language_leaves_config_untouched() -> None:
     assert transcriber.calls[0]["config"] is sentinel_config
 
 
+# ---------- Spec V14: Gladia one-shot dispatch + D-V14-15 language bias ------
+
+
+def test_get_stt_transcriber_dispatches_on_provider() -> None:
+    """D-V14-14: ``gladia`` selects the batch one-shot; every other provider
+    keeps the byte-identical Deepgram prerecorded transcriber."""
+    from types import SimpleNamespace
+
+    from persona_voice.http.app import _get_stt_transcriber
+    from persona_voice.stt.deepgram_backend import transcribe_prerecorded
+    from persona_voice.stt.gladia_backend import transcribe_oneshot_batch
+
+    def _req(cfg: StreamingSTTConfig) -> SimpleNamespace:
+        state = SimpleNamespace(stt_config=cfg, transcribe_audio=None)
+        return SimpleNamespace(app=SimpleNamespace(state=state))
+
+    gladia = _get_stt_transcriber(_req(StreamingSTTConfig(provider="gladia", gladia_api_key="k")))  # type: ignore[arg-type]
+    assert gladia is transcribe_oneshot_batch
+    deepgram = _get_stt_transcriber(_req(StreamingSTTConfig(provider="deepgram")))  # type: ignore[arg-type]
+    assert deepgram is transcribe_prerecorded
+
+
+def test_stt_gladia_language_is_base_code_guidance_not_english_collapse() -> None:
+    """D-V14-15: under Gladia a hint is GUIDANCE — a language OUTSIDE the Deepgram
+    capability matrix (``vi``) passes through as ``vi``, NOT collapsed to ``en``
+    (which the Deepgram fail-soft would do)."""
+    client = _build_test_client()
+    client.app.state.stt_config = StreamingSTTConfig(provider="gladia", gladia_api_key="k")
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "vi"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "vi"  # guidance, NOT "en"
+
+
+def test_stt_gladia_language_uses_base_code_not_deepgram_collapse() -> None:
+    """D-V14-15: Gladia gets the BASE code (``nb-NO`` → ``nb``), NOT the
+    Deepgram-specific ``no`` collapse (Gladia serves ~100 languages directly)."""
+    client = _build_test_client()
+    client.app.state.stt_config = StreamingSTTConfig(provider="gladia", gladia_api_key="k")
+    transcriber = _FakeTranscriber()
+    client.app.state.transcribe_audio = transcriber
+    resp = client.post(
+        "/v1/stt",
+        headers={"Authorization": "Bearer good"},
+        files={"audio": ("clip.webm", b"fake-bytes", "audio/webm")},
+        data={"language": "nb-NO"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent_config = transcriber.calls[0]["config"]
+    assert isinstance(sent_config, StreamingSTTConfig)
+    assert sent_config.language_hint == "nb"  # base code, NOT the Deepgram "no"
+
+
 @pytest.mark.parametrize(
     "bad_language",
     [

@@ -88,14 +88,20 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from types import TracebackType
 
+    import httpx
+
     from persona_voice.stt.config import StreamingSTTConfig
     from persona_voice.stt.types import SpeechEndedEvent, SpeechStartedEvent
 
-__all__ = ["GladiaStreamingSTT"]
+__all__ = ["GladiaStreamingSTT", "transcribe_oneshot_batch"]
 
 _logger = get_logger("stt.gladia")
 
 _GLADIA_LIVE_INIT_URL = "https://api.gladia.io/v2/live"
+_GLADIA_UPLOAD_URL = "https://api.gladia.io/v2/upload"
+_GLADIA_PRERECORDED_URL = "https://api.gladia.io/v2/pre-recorded"
+_BATCH_POLL_INTERVAL_S: float = 1.0
+_BATCH_POLL_TIMEOUT_S: float = 60.0
 _GLADIA_INBOUND_SAMPLE_RATE_HZ: int = 16_000
 """Sample rate the session is negotiated at — matches V1's D-V1-6 inbound rail
 (PCM16 mono 16 kHz); zero transcoding."""
@@ -543,3 +549,140 @@ def _raise_mapped_gladia_error(exc: BaseException, *, model: str) -> None:
         raise exc
     message = str(exc) or exc.__class__.__name__
     raise STTStreamFailureError(message, context={"provider": "gladia", "model": model}) from exc
+
+
+def _extract_batch_transcript(payload: dict[str, Any]) -> str:
+    """Pull ``result.transcription.full_transcript`` defensively (docs.gladia.io).
+
+    Returns ``""`` for a missing/empty transcription (a silent clip) rather than
+    raising — mirrors :func:`transcribe_prerecorded`'s tolerant extraction."""
+    transcription = payload.get("result", {}).get("transcription", {})
+    return str(transcription.get("full_transcript", "") or "")
+
+
+async def transcribe_oneshot_batch(
+    audio: bytes,
+    *,
+    config: StreamingSTTConfig,
+    content_type: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """One-shot Gladia transcription via the BATCH (pre-recorded) API (Spec V14 D-V14-14).
+
+    The one-shot dictation upload is a compressed container (webm/opus), which
+    Gladia's LIVE streaming WS cannot ingest (it needs raw PCM). The batch API
+    accepts the container directly — no server-side decoder, no new dependency —
+    so Gladia's one-shot path rides it: ``POST /v2/upload`` → ``POST
+    /v2/pre-recorded`` (``model=<gladia_model>``, ``code_switching: true``) →
+    poll ``GET /v2/pre-recorded/{id}`` until ``status == "done"``.
+
+    **Language (D-V14-15).** ``config.language_hint`` (a base code the HTTP route
+    normalized) is passed as ``language_config.languages`` GUIDANCE alongside
+    ``code_switching: true`` — a bias, never a lock; unset ⇒ empty list (fully
+    hands-off). NEVER the Deepgram capability-table fail-soft.
+
+    **Fidelity caveat (T0 + a T5 gate).** T0 measured batch code-switch fidelity
+    WORSE than streaming on SYNTHETIC clips (it collapsed the second language on
+    some pairs). That finding is unconfirmed on real bilingual speech; a
+    real-speech dictation fidelity check is a HARD T5 gate. If real speech
+    confirms the problem, the escalation (a decoder + WS-fast-drive, or web-side
+    raw-PCM capture) is a separate decision.
+
+    Args:
+        audio: Raw audio bytes in the caller's container (webm/opus/wav/…) — the
+            batch upload sniffs the container.
+        config: The active :class:`StreamingSTTConfig`. ``gladia_api_key``
+            missing/empty fails fast (D-02-10). ``language_hint`` drives the
+            guidance; ``gladia_model`` selects the model (``solaria-1``).
+        content_type: Optional MIME type from the caller's upload, forwarded on
+            the multipart part.
+        client: Test seam — an ``httpx.AsyncClient`` (typically over a
+            ``MockTransport``). Production passes ``None`` and a client is built
+            from ``config`` and closed at the end.
+
+    Returns:
+        The full transcript text — ``""`` for a silent/empty clip.
+
+    Raises:
+        STTAuthenticationError: missing/empty ``PERSONA_GLADIA_API_KEY``, or the
+            provider rejects the key (401/403).
+        STTRateLimitError: provider 429.
+        STTStreamFailureError: any other provider/transport failure, or the job
+            errored / did not finish within the poll timeout.
+    """
+    if config.gladia_api_key is None or not config.gladia_api_key.get_secret_value():
+        raise STTAuthenticationError(
+            "PERSONA_GLADIA_API_KEY required for gladia",
+            context={"provider": "gladia"},
+        )
+    import time
+
+    import httpx
+
+    key = config.gladia_api_key.get_secret_value()
+    model = config.gladia_model
+    headers = {"x-gladia-key": key}
+    languages = [config.language_hint] if config.language_hint else []
+
+    owns_client = client is None
+    active: httpx.AsyncClient = (
+        client if client is not None else httpx.AsyncClient(timeout=config.request_timeout_s)
+    )
+    try:
+        # 1. Upload the container.
+        up = await active.post(
+            _GLADIA_UPLOAD_URL,
+            headers=headers,
+            files={"audio": ("audio", audio, content_type or "application/octet-stream")},
+        )
+        _raise_for_gladia_status(up.status_code, model=model)
+        audio_url = up.json().get("audio_url")
+        if not audio_url:
+            raise STTStreamFailureError(
+                "gladia upload returned no audio_url",
+                context={"provider": "gladia", "model": model},
+            )
+        # 2. Start the (code-switching) transcription job.
+        job = await active.post(
+            _GLADIA_PRERECORDED_URL,
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "audio_url": audio_url,
+                "model": model,
+                "language_config": {"languages": languages, "code_switching": True},
+            },
+        )
+        _raise_for_gladia_status(job.status_code, model=model)
+        job_id = job.json().get("id")
+        if not job_id:
+            raise STTStreamFailureError(
+                "gladia pre-recorded returned no job id",
+                context={"provider": "gladia", "model": model},
+            )
+        # 3. Poll to completion.
+        deadline = time.monotonic() + _BATCH_POLL_TIMEOUT_S
+        while time.monotonic() < deadline:
+            result = await active.get(f"{_GLADIA_PRERECORDED_URL}/{job_id}", headers=headers)
+            _raise_for_gladia_status(result.status_code, model=model)
+            payload = result.json()
+            status = payload.get("status")
+            if status == "done":
+                return _extract_batch_transcript(payload)
+            if status == "error":
+                raise STTStreamFailureError(
+                    "gladia batch job errored",
+                    context={"provider": "gladia", "model": model},
+                )
+            await asyncio.sleep(_BATCH_POLL_INTERVAL_S)
+        raise STTStreamFailureError(
+            "gladia batch job did not finish within the timeout",
+            context={"provider": "gladia", "model": model},
+        )
+    except httpx.HTTPError as exc:
+        raise STTStreamFailureError(
+            "gladia batch transport error",
+            context={"provider": "gladia", "model": model},
+        ) from exc
+    finally:
+        if owns_client:
+            await active.aclose()

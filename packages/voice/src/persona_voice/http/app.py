@@ -543,14 +543,26 @@ def _get_stt_transcriber(request: Request) -> Callable[..., Awaitable[str]]:
     """The active one-shot transcriber — overridable via ``app.state.transcribe_audio``.
 
     Mirrors the ``owns_persona`` / ``require_credits`` test-seam convention
-    already used throughout this module. Defaults to
-    :func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded` — the
-    D-V2-1 LOCK launch provider's one-shot REST leg (no dispatch/factory: a
-    single provider implements the one-shot path today).
+    already used throughout this module. Dispatches on the active STT provider
+    (Spec V14 D-V14-14): ``gladia`` uses the code-switching batch one-shot;
+    every other provider (``deepgram``) uses
+    :func:`persona_voice.stt.deepgram_backend.transcribe_prerecorded` —
+    byte-identical to the pre-V14 path.
+
+    D-V14-14 (T0-resolved): the one-shot dictation upload is a compressed
+    container (webm/opus from MediaRecorder), which Gladia's LIVE streaming WS
+    cannot ingest (it needs raw PCM) — so Gladia's one-shot rides its BATCH API,
+    which accepts the container directly (no server-side decoder, no new dep).
+    The T0 finding that batch code-switch fidelity underperformed streaming was
+    on SYNTHETIC clips; a real-speech dictation fidelity check is a T5 gate.
     """
     override = getattr(request.app.state, "transcribe_audio", None)
     if override is not None:
         return cast("Callable[..., Awaitable[str]]", override)
+    if _get_stt_config(request).provider == "gladia":
+        from persona_voice.stt.gladia_backend import transcribe_oneshot_batch
+
+        return transcribe_oneshot_batch
     from persona_voice.stt.deepgram_backend import transcribe_prerecorded
 
     return transcribe_prerecorded
@@ -869,8 +881,26 @@ def build_app(config: VoiceConfig) -> FastAPI:
             )
         config = _get_stt_config(request)
         if language:
-            route = default_capability_registry().resolve_stt(language)
-            config = config.model_copy(update={"language_hint": route.code, "model": route.model})
+            # ``gladia`` is the utterance-level (code-switching) provider — the
+            # same set ``_get_stt_transcriber`` dispatches on (kept a direct check
+            # here so the HTTP app never imports the heavy ``persona_voice.agent``
+            # package for a one-string predicate).
+            if config.provider == "gladia":
+                # Spec V14 (D-V14-15): for a code-switching provider the hint is
+                # GUIDANCE, not a lock — normalize to a base code and pass it
+                # through as-is (Gladia serves ~100 languages), NEVER the Deepgram
+                # capability table's fail-soft-to-English (which would mis-bias
+                # e.g. "vi" → "en" over a Vietnamese clip). ``model`` is untouched
+                # (the provider's own model applies).
+                base_code = language.split("-", 1)[0].lower()
+                config = config.model_copy(update={"language_hint": base_code})
+            else:
+                # Incumbent (Deepgram): resolve through the capability matrix + pin
+                # model — byte-identical to the pre-V14 behavior (Spec 32).
+                route = default_capability_registry().resolve_stt(language)
+                config = config.model_copy(
+                    update={"language_hint": route.code, "model": route.model}
+                )
         transcriber = _get_stt_transcriber(request)
         try:
             transcript = await transcriber(data, config=config, content_type=audio.content_type)

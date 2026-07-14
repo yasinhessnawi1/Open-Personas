@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 from persona_voice.stt import (
     StreamingSTTConfig,
@@ -40,6 +41,7 @@ from persona_voice.stt.gladia_backend import (
     GladiaStreamingSTT,
     _raise_for_gladia_status,
     _raise_mapped_gladia_error,
+    transcribe_oneshot_batch,
 )
 
 
@@ -436,3 +438,106 @@ def test_raise_mapped_gladia_error_wraps_generic_as_stream_failure() -> None:
         _raise_mapped_gladia_error(ValueError("weird"), model="solaria-1")
     assert exc_info.value.context["provider"] == "gladia"
     assert isinstance(exc_info.value, STTError)
+
+
+# ---------- transcribe_oneshot_batch (Spec V14 D-V14-14 batch one-shot) -----
+
+
+def _batch_client(handler: object) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
+
+
+def _done_response(transcript: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"status": "done", "result": {"transcription": {"full_transcript": transcript}}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_happy_path_passes_language_guidance() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/upload":
+            return httpx.Response(200, json={"audio_url": "https://a/x"})
+        if path == "/v2/pre-recorded" and request.method == "POST":
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(201, json={"id": "job1"})
+        return _done_response("hei der")
+
+    client = _batch_client(handler)
+    result = await transcribe_oneshot_batch(
+        b"webm", config=_config(language_hint="no"), content_type="audio/webm", client=client
+    )
+    assert result == "hei der"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["model"] == "solaria-1"
+    # D-V14-15: language as GUIDANCE + code_switching on.
+    assert body["language_config"] == {"languages": ["no"], "code_switching": True}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_no_language_hint_is_empty_guidance() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/upload":
+            return httpx.Response(200, json={"audio_url": "u"})
+        if request.url.path == "/v2/pre-recorded":
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "j"})
+        return _done_response("x")
+
+    client = _batch_client(handler)
+    await transcribe_oneshot_batch(b"a", config=_config(), client=client)  # no hint
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["language_config"]["languages"] == []  # fully hands-off
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_fails_fast_without_key() -> None:
+    with pytest.raises(STTAuthenticationError):
+        await transcribe_oneshot_batch(b"a", config=StreamingSTTConfig(provider="gladia"))
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_upload_auth_error_maps() -> None:
+    client = _batch_client(lambda _r: httpx.Response(401))
+    with pytest.raises(STTAuthenticationError):
+        await transcribe_oneshot_batch(b"a", config=_config(), client=client)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_job_error_status_maps_to_stream_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/upload":
+            return httpx.Response(200, json={"audio_url": "u"})
+        if request.url.path == "/v2/pre-recorded":
+            return httpx.Response(200, json={"id": "j"})
+        return httpx.Response(200, json={"status": "error"})
+
+    client = _batch_client(handler)
+    with pytest.raises(STTStreamFailureError):
+        await transcribe_oneshot_batch(b"a", config=_config(), client=client)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_batch_oneshot_empty_transcription_returns_empty_string() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/upload":
+            return httpx.Response(200, json={"audio_url": "u"})
+        if request.url.path == "/v2/pre-recorded":
+            return httpx.Response(200, json={"id": "j"})
+        return httpx.Response(200, json={"status": "done", "result": {"transcription": {}}})
+
+    client = _batch_client(handler)
+    assert await transcribe_oneshot_batch(b"a", config=_config(), client=client) == ""
+    await client.aclose()

@@ -120,3 +120,48 @@ async def test_gladia_streaming_survives_en_to_no_code_switch() -> None:
         f"norwegian segment 2 not recognized in: {transcript!r} — the code-switch "
         "did not survive (this is exactly the R9-025 failure V14 fixes)"
     )
+
+
+@pytest.mark.asyncio
+async def test_gladia_batch_oneshot_transcribes_the_clip() -> None:
+    """Spec V14 T2 (D-V14-14): the shipped BATCH one-shot transcriber (the one
+    the dictation route dispatches to under ``provider=gladia``) transcribes the
+    same clip end-to-end against real Gladia — a code-path smoke.
+
+    NOTE (T5 real-speech gate): T0 found batch code-switch fidelity WORSE than
+    streaming on SYNTHETIC clips. This leg only asserts a NON-EMPTY transcript
+    with the (English) leading segment present — the HARD real-speech dictation
+    fidelity check (does the SECOND language survive batch on real bilingual
+    speech?) is owed at T5, per the coordinator's ruling. Do not treat a pass
+    here as clearing that gate."""
+    from persona_voice.stt.config import StreamingSTTConfig
+    from persona_voice.stt.gladia_backend import transcribe_oneshot_batch
+
+    with wave.open(str(_CLIP), "rb") as wf:
+        # A minimal WAV wrapper the batch upload can sniff (the real dictation
+        # path uploads webm/opus; the batch API accepts both).
+        import io
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(_SAMPLE_RATE_HZ)
+            out.writeframes(wf.readframes(wf.getnframes()))
+        wav_bytes = buf.getvalue()
+
+    config = StreamingSTTConfig(
+        provider="gladia",
+        gladia_api_key=os.environ["PERSONA_GLADIA_API_KEY"],  # type: ignore[arg-type]
+    )
+    transcript = (
+        await transcribe_oneshot_batch(wav_bytes, config=config, content_type="audio/wav")
+    ).lower()
+    if not transcript:
+        pytest.fail(
+            "gladia BATCH returned an EMPTY transcript — re-verify /v2/upload + "
+            "/v2/pre-recorded shapes at docs.gladia.io"
+        )
+    assert any(word in transcript for word in ("schedule", "tomorrow", "checking")), (
+        f"leading english segment not recognized in batch transcript: {transcript!r}"
+    )
