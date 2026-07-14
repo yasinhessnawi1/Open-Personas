@@ -183,3 +183,41 @@ class TestReinforceWiring:
         assembler = VoicePromptAssembler(ctx)
         context = assembler.retrieve("mould again?")
         assert recalls == [("astrid", [c.id for c in context.episodic])]
+
+
+def _norwegian_persona() -> Persona:
+    return Persona(
+        persona_id="astrid",
+        identity=PersonaIdentity(
+            name="Astrid",
+            role="Norwegian tenancy law assistant",
+            background="Knows husleieloven.",
+            language_default="nb",
+        ),
+    )
+
+
+class TestReplyLanguageMirror:
+    """Spec V14 (D-V14-12): the assembler selects the B5 mirror directive under an
+    utterance-level TTS provider (``ctx.reply_language_mirror``)."""
+
+    def test_mirror_flag_threads_into_the_mirror_directive(self) -> None:
+        import dataclasses
+
+        ctx, _ = _context()
+        ctx = dataclasses.replace(ctx, persona=_norwegian_persona(), reply_language_mirror=True)
+        system = VoicePromptAssembler(ctx).build("hei", history=[], max_tokens=8000)[0].content
+        assert isinstance(system, str)
+        lowered = system.lower()
+        assert "same language the user writes or speaks in" in lowered  # mirror
+        assert "always respond in" not in lowered  # NOT the pin
+
+    def test_default_is_the_pin_directive(self) -> None:
+        import dataclasses
+
+        ctx, _ = _context()
+        ctx = dataclasses.replace(ctx, persona=_norwegian_persona())  # mirror defaults False
+        system = VoicePromptAssembler(ctx).build("hei", history=[], max_tokens=8000)[0].content
+        lowered = system.lower()
+        assert "always respond in norwegian" in lowered  # the pin
+        assert "same language the user writes" not in lowered

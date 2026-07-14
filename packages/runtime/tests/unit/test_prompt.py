@@ -196,6 +196,56 @@ class TestReplyLanguageInjection:
         )[0].content
         assert "respond in" not in system.lower()
 
+    # ---------- Spec V14 D-V14-12: the reply-language MIRROR directive ----------
+
+    def test_pin_is_the_default_text_chat_byte_identical(self, builder: PromptBuilder) -> None:
+        """BINDING (D-V14-12): with ``reply_language_mirror`` UNSET (the default —
+        every text-chat + Cartesia-voice caller), the directive is the PIN,
+        byte-identical to the pre-V14 wording. The mirror wording never appears."""
+        system = builder.build(
+            _persona_lang("nb"), RetrievedContext(), [], "", "q", max_tokens=8000
+        )[0].content
+        assert (
+            "Always respond in Norwegian, regardless of the language the user "
+            "writes or speaks in. Every reply must be written in Norwegian." in system
+        )
+        assert "same language the user writes" not in system.lower()
+
+    def test_mirror_mode_produces_mirror_directive_for_non_english(
+        self, builder: PromptBuilder
+    ) -> None:
+        """mirror=True (utterance-level TTS): reply in the user's language,
+        default to the persona's declared language — NOT the pin."""
+        system = builder.build(
+            _persona_lang("nb"),
+            RetrievedContext(),
+            [],
+            "",
+            "q",
+            max_tokens=8000,
+            reply_language_mirror=True,
+        )[0].content
+        lowered = system.lower()
+        assert "same language the user writes or speaks in" in lowered
+        assert "reply in norwegian" in lowered  # the default/fallback language
+        assert "always respond in" not in lowered  # NOT the pin
+
+    def test_mirror_mode_english_persona_no_directive(self, builder: PromptBuilder) -> None:
+        """mirror=True + English default → no directive (mirroring + English are
+        both the model default; byte-identical to no-directive)."""
+        system = builder.build(
+            _persona_lang("en"),
+            RetrievedContext(),
+            [],
+            "",
+            "q",
+            max_tokens=8000,
+            reply_language_mirror=True,
+        )[0].content
+        lowered = system.lower()
+        assert "respond in" not in lowered
+        assert "same language" not in lowered
+
 
 class TestIdentityFloor:
     def test_identity_and_constraints_survive_budget_reduction(

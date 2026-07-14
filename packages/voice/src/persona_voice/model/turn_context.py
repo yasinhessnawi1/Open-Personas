@@ -111,6 +111,13 @@ class VoiceTurnContext:
     """The per-call language plan (Spec 32 B2). ``reply_language`` drives the
     prompt builder's reply-language injection (B5); ``None`` ⇒ the persona's
     declared default is resolved at prompt-build time (the text-path behaviour)."""
+    reply_language_mirror: bool = False
+    """Spec V14 (D-V14-12): select the B5 reply-language MIRROR directive instead
+    of the pin. ``True`` when the TTS provider auto-follows the reply TEXT's
+    language (ElevenLabs) — the persona replies in the USER's language, defaulting
+    to its own declared language when unclear (so a two-language conversation
+    speaks each reply in its own language on ONE voice). ``False`` (the default)
+    is the incumbent pin — byte-identical to the pre-V14 text + Cartesia paths."""
     user_name: str | None = None
     """The caller's display name (Spec K6, K6-D-6), resolved ONCE at session setup
     from our ``users`` table (off the per-utterance path). Drives the "You are

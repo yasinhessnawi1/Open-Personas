@@ -34,8 +34,45 @@ __all__ = [
     "CallLanguagePlan",
     "apply_stt_route",
     "apply_tts_route",
+    "maybe_apply_stt_route",
+    "maybe_apply_tts_route",
     "resolve_call_languages",
+    "stt_is_utterance_level",
+    "tts_is_utterance_level",
 ]
+
+# Spec V14 (D-V14-5): providers whose STT/TTS operate at the UTTERANCE level —
+# language derived from the utterance itself (Gladia code-switching STT;
+# ElevenLabs text-auto-follow TTS) — must NOT receive the per-persona language
+# route. ``apply_stt_route`` / ``apply_tts_route`` are the incumbent-only pinning
+# that would re-narrow such a provider to a single declared language, defeating
+# the whole spec (D-V14-1). The route functions stay OPERATIONAL for the
+# incumbent providers (kept for the fallback path — D-V14-5 "leaves the hot path,
+# kept operational"). Rollback = flip the provider selector back to the
+# incumbent, and the route applies again with no code change.
+_UTTERANCE_LEVEL_STT: frozenset[str] = frozenset({"gladia"})
+_UTTERANCE_LEVEL_TTS: frozenset[str] = frozenset({"elevenlabs"})
+
+
+def stt_is_utterance_level(provider: str) -> bool:
+    """Whether the STT provider derives language from the utterance itself.
+
+    ``True`` ⇒ the composition root SKIPS :func:`apply_stt_route` (the provider
+    code-switches across languages with no language list — Gladia, D-V14-1);
+    ``False`` ⇒ the incumbent path pins the persona's declared language (Spec 32).
+    """
+    return provider in _UTTERANCE_LEVEL_STT
+
+
+def tts_is_utterance_level(provider: str) -> bool:
+    """Whether the TTS provider auto-follows the reply TEXT's language.
+
+    ``True`` ⇒ the composition root SKIPS :func:`apply_tts_route` AND selects the
+    B5 reply-language MIRROR directive (the persona replies in the user's
+    language, defaulting to its own — ElevenLabs, D-V14-1/D-V14-12); ``False`` ⇒
+    the incumbent path pins the synthesis language (Spec 32).
+    """
+    return provider in _UTTERANCE_LEVEL_TTS
 
 
 class CallLanguagePlan(BaseModel):
@@ -78,6 +115,32 @@ def resolve_call_languages(
         stt=reg.resolve_stt(language_default),
         tts=reg.resolve_tts(language_default),
     )
+
+
+def maybe_apply_stt_route(config: StreamingSTTConfig, route: STTRoute) -> StreamingSTTConfig:
+    """Apply the STT route UNLESS the provider is utterance-level (Spec V14 D-V14-5).
+
+    The composition-root entry point: an incumbent STT provider (Deepgram) gets
+    the per-persona language pinned (:func:`apply_stt_route`, byte-identical to
+    Spec 32); an utterance-level provider (Gladia) is returned UNTOUCHED — it
+    code-switches from the audio itself and pinning would defeat D-V14-1. Rollback
+    = flip the provider back to the incumbent and the route applies again.
+    """
+    if stt_is_utterance_level(config.provider):
+        return config
+    return apply_stt_route(config, route)
+
+
+def maybe_apply_tts_route(config: StreamingTTSConfig, route: TTSRoute) -> StreamingTTSConfig:
+    """Apply the TTS route UNLESS the provider is utterance-level (Spec V14 D-V14-5).
+
+    Incumbent (Cartesia) gets the synthesis language pinned (:func:`apply_tts_route`,
+    byte-identical to Spec 32); an utterance-level provider (ElevenLabs) is returned
+    UNTOUCHED — it speaks the language the reply TEXT is written in (D-V14-1).
+    """
+    if tts_is_utterance_level(config.provider):
+        return config
+    return apply_tts_route(config, route)
 
 
 def apply_stt_route(config: StreamingSTTConfig, route: STTRoute) -> StreamingSTTConfig:

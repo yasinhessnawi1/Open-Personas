@@ -147,8 +147,20 @@ class VoicePromptAssembler:
         # TTS fall-back to English, so a persona whose declared language the
         # provider cannot speak gets an English reply, not English phonetics over
         # foreign words. ``None`` ⇒ the prompt builder resolves the persona default.
+        #
+        # Spec V14 (D-V14-12): under an utterance-level TTS provider (ElevenLabs),
+        # the reply is NOT pinned to the plan's (incumbent-registry-resolved,
+        # possibly-downgraded) language — pass ``None`` so the builder resolves the
+        # persona's DECLARED default fresh as the MIRROR fallback, and set
+        # ``reply_language_mirror`` so the directive lets the user's language win
+        # per reply.
+        mirror = self._ctx.reply_language_mirror
         reply_language = (
-            self._ctx.language.reply_language.value if self._ctx.language is not None else None
+            None
+            if mirror
+            else (
+                self._ctx.language.reply_language.value if self._ctx.language is not None else None
+            )
         )
         return self._ctx.prompt_builder.build(
             self._ctx.persona,
@@ -160,6 +172,8 @@ class VoicePromptAssembler:
             matched_skill_content=matched_skill_content,
             document_context=document_context,
             reply_language=reply_language,
+            # Spec V14 (D-V14-12): mirror directive under utterance-level TTS.
+            reply_language_mirror=mirror,
             graph_surfacing_guidance=self._ctx.graph_surfacing_guidance,
             # V11-D-1: the voice path builds in VOICE mode so the spoken-delivery
             # register (V11-D-2) is present — voice ≠ chat, no longer a mirror.

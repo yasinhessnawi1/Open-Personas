@@ -577,6 +577,7 @@ class PromptBuilder:
         matched_skill_content: str | None = None,
         document_context: DocumentContext | None = None,
         reply_language: str | None = None,
+        reply_language_mirror: bool = False,
         graph_surfacing_guidance: Callable[[str, GraphRecency], str | None] | None = None,
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
@@ -617,6 +618,15 @@ class PromptBuilder:
                 (the text-path default). The voice path passes the TTS-resolved
                 language so the reply matches what is spoken. English (the model
                 default) injects no directive.
+            reply_language_mirror: Spec V14 (D-V14-12). ``False`` (the default)
+                is the PIN directive — "always respond in {language}" —
+                byte-identical to every pre-V14 caller (text chat + Cartesia
+                voice). ``True`` selects the MIRROR directive: reply in the user's
+                language, defaulting to the persona's declared language when
+                unclear. Set only by the voice path under an utterance-level TTS
+                provider (ElevenLabs), where the reply TEXT drives the spoken
+                language, so a two-language conversation speaks each reply in its
+                own language on one voice.
             graph_surfacing_guidance: The K4 surfacing-guidance slot
                 (D-K3-X-k4-seam, widened by K4-D-X-surfacing-recency-seam) — a
                 ``(category, recency) -> care-text`` provider rendered alongside
@@ -653,6 +663,7 @@ class PromptBuilder:
             mode,
             safety_directive,
             user_name,
+            reply_language_mirror=reply_language_mirror,
         )
         if self._token_total(messages) <= max_tokens:
             return messages
@@ -676,6 +687,7 @@ class PromptBuilder:
                 mode,
                 safety_directive,
                 user_name,
+                reply_language_mirror=reply_language_mirror,
             )
             if self._token_total(messages) <= max_tokens:
                 return messages
@@ -697,6 +709,7 @@ class PromptBuilder:
                 mode,
                 safety_directive,
                 user_name,
+                reply_language_mirror=reply_language_mirror,
             )
         return messages
 
@@ -714,6 +727,8 @@ class PromptBuilder:
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
         user_name: str | None = None,
+        *,
+        reply_language_mirror: bool = False,
     ) -> list[ConversationMessage]:
         """Compose the message list in the spec §5.1 order."""
         system_text = self._render_system(
@@ -727,6 +742,7 @@ class PromptBuilder:
             mode,
             safety_directive,
             user_name,
+            reply_language_mirror=reply_language_mirror,
         )
         now = datetime.now(UTC)
         system = ConversationMessage(role="system", content=system_text, created_at=now)
@@ -745,6 +761,8 @@ class PromptBuilder:
         mode: PromptMode = PromptMode.CHAT,
         safety_directive: str | None = None,
         user_name: str | None = None,
+        *,
+        reply_language_mirror: bool = False,
     ) -> str:
         """Render the system block in the spec §5.1 ordering.
 
@@ -772,7 +790,9 @@ class PromptBuilder:
         # mirror. Sits right after identity so it is prominent and never dropped.
         # English (the model default) injects nothing, so existing prompts are
         # unchanged.
-        directive = self._reply_language_directive(persona, reply_language)
+        directive = self._reply_language_directive(
+            persona, reply_language, mirror=reply_language_mirror
+        )
         if directive is not None:
             parts.append(directive)
 
@@ -935,20 +955,39 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _reply_language_directive(persona: Persona, reply_language: str | None) -> str | None:
-        """The "respond in {language}" instruction, or ``None`` for English.
+    def _reply_language_directive(
+        persona: Persona, reply_language: str | None, *, mirror: bool = False
+    ) -> str | None:
+        """The reply-language instruction, or ``None`` for English.
 
         Resolves ``reply_language`` (the voice TTS-resolved language) when given,
         else the persona's declared ``language_default``, through the capability
         registry. English — the model's default — yields ``None`` so existing
         prompts are unchanged; an unrecognized language fails soft to English and
         likewise yields ``None`` (B5 / D-32-7).
+
+        ``mirror`` (Spec V14, D-V14-12) selects the directive shape:
+
+        * ``False`` (the default) — the PIN: "always respond in {language},
+          regardless of what the user writes." Byte-identical to every pre-V14
+          caller (text chat + Cartesia voice).
+        * ``True`` — the MIRROR: reply in the user's language, defaulting to
+          {language} when unclear. Used only under an utterance-level TTS
+          provider (ElevenLabs), where the reply TEXT drives the spoken language,
+          so a two-language conversation speaks each reply in its own language on
+          one voice. The resolved language is the DEFAULT/fallback, not a lock.
         """
         raw = reply_language if reply_language is not None else persona.identity.language_default
         canonical = _LANGUAGE_REGISTRY.normalize(raw)
         if canonical is None or canonical == CanonicalLanguage.EN:
             return None
         name = language_display_name(canonical)
+        if mirror:
+            return (
+                f"Reply in the same language the user writes or speaks in. When you "
+                f"have no clear signal about their language — including the opening "
+                f"greeting — reply in {name}."
+            )
         return (
             f"Always respond in {name}, regardless of the language the user "
             f"writes or speaks in. Every reply must be written in {name}."

@@ -58,7 +58,12 @@ from persona_runtime.routing import FirstTokenLatencyTracker, PolicyRouter
 from persona_runtime.tier import tier_registry_from_env
 from sqlalchemy import text
 
-from persona_voice.agent.language import apply_stt_route, apply_tts_route, resolve_call_languages
+from persona_voice.agent.language import (
+    maybe_apply_stt_route,
+    maybe_apply_tts_route,
+    resolve_call_languages,
+    tts_is_utterance_level,
+)
 from persona_voice.agent.warmup import start_embedder_warmup
 from persona_voice.model import (
     AsyncArtifactLane,
@@ -625,6 +630,12 @@ async def build_agent_session(
         latency_tracker=tracker,
         toolbox=toolbox,
         language=language_plan,
+        # Spec V14 (D-V14-12): under an utterance-level TTS provider (ElevenLabs),
+        # select the B5 MIRROR directive so the persona replies in the user's
+        # language (defaulting to its own) — each reply speaks its own language on
+        # one voice. The provider field is unaffected by apply_tts_route (applied
+        # later, only the language code), so reading it here is correct.
+        reply_language_mirror=tts_is_utterance_level(tts_config.provider),
         # R6 (T8): the process-shared crisis encoder (launcher-injected). ``None`` ⇒ the
         # voice safety gate is lexical-only (V11) — e.g. a standalone session without a
         # launcher. The reply producer runs the composed classify off the loop.
@@ -721,7 +732,12 @@ async def build_agent_session(
     # (Spec 32 B3) — nova-3 + ``no`` for Norwegian, overriding the global env
     # hint (D-32-X-deepgram-no-nova3). This is what stops the websocket 400 on
     # ``nb`` and the force-decode of Norwegian speech as English.
-    stt_config = apply_stt_route(stt_config, language_plan.stt)
+    # Spec V14 (D-V14-5): an utterance-level STT provider (Gladia code-switching)
+    # derives language from the audio itself — pinning would re-narrow it to one
+    # declared language and defeat D-V14-1. ``maybe_apply_stt_route`` skips the
+    # route for it; the incumbent (Deepgram) path is byte-identical. Rollback =
+    # flip the provider back.
+    stt_config = maybe_apply_stt_route(stt_config, language_plan.stt)
     stt_backend = load_streaming_stt(stt_config)
     # TTS-mute-window is opt-in (default OFF — D-V8-X-bargein-during-speech-fix,
     # operator-pass 2026-06-23). A hard mute blocks a *real* barge-in onset from
@@ -745,7 +761,11 @@ async def build_agent_session(
     # (Spec 32 B4) — the missing ``language`` param that fixes Norwegian text
     # being read with English phonetics. Voices are multilingual, so this is a
     # language code, not a voice constraint.
-    tts_config = apply_tts_route(tts_config, language_plan.tts)
+    # Spec V14 (D-V14-5): an utterance-level TTS provider (ElevenLabs) speaks the
+    # language the reply TEXT is written in — pinning a language would fight the
+    # per-reply auto-follow (D-V14-1). ``maybe_apply_tts_route`` skips the route
+    # for it; the incumbent (Cartesia) path is byte-identical.
+    tts_config = maybe_apply_tts_route(tts_config, language_plan.tts)
     # V12: bind the same per-session channel so the backend reads what the producer publishes.
     tts_backend = load_streaming_tts(tts_config, expressivity_channel=expressivity_channel)
     tts_seam = build_seam_adapter(
