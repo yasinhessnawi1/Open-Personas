@@ -837,7 +837,17 @@ function InterleavedContent({
           // matched result's (both carry it when the runtime resolved it).
           kind: ev.toolKind ?? result?.toolKind,
         };
-        out.push(<ToolCallCard key={`tool-${ev.callId || i}`} entry={entry} />);
+        // R9-045: append the loop index unconditionally — `ev.callId || i`
+        // only saved a falsy callId, not a truthy-but-duplicate synthetic
+        // `shim-N` id, so ≥2 tool events sharing the same shim id collided
+        // on one React key. This is a render-time useMemo interleave, so an
+        // index-inclusive key is safe.
+        out.push(
+          <ToolCallCard
+            key={`tool-${ev.callId ?? "noid"}-${i}`}
+            entry={entry}
+          />,
+        );
         // F4 T10: project the tool_call+tool_result pair onto OutputContent[]
         // and emit them inline alongside the tool card. Recognized capability
         // tools (image_gen / code_exec / doc_gen) get rich rendering — chart
