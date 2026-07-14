@@ -135,46 +135,62 @@ export function VoiceSelector({
   }
 
   const provider = load.provider;
+  // Spec V14 (D-V14-13): a saved voice_id that is NOT in the current provider's
+  // catalogue was picked under a DIFFERENT provider (a provider switch). Nudge
+  // the author to re-pick — the server-side auto-remap covers this automatically,
+  // but the nudge lets an author update it deliberately here too.
+  const savedVoiceFromOtherProvider =
+    !!value && !load.voices.some((voice) => voice.voice_id === value);
 
   return (
-    <ul className={cn("flex flex-col gap-1.5", CAPABILITY_SCROLL_LIST_CLASS)}>
-      {/* Default option — clears the persona's voice (global default). */}
-      <li>
-        <VoiceRow
-          selected={!value}
-          label={t("voiceDefault")}
-          onSelect={() => onChange(null)}
-          selectedLabel={t("voiceSelected")}
-        />
-      </li>
-      {load.voices.map((voice) => (
-        <li key={voice.voice_id}>
+    <div className="flex flex-col gap-2">
+      {savedVoiceFromOtherProvider ? (
+        <p
+          className="text-sm text-muted-foreground"
+          data-slot="voice-provider-mismatch"
+        >
+          {t("voiceProviderMismatch")}
+        </p>
+      ) : null}
+      <ul className={cn("flex flex-col gap-1.5", CAPABILITY_SCROLL_LIST_CLASS)}>
+        {/* Default option — clears the persona's voice (global default). */}
+        <li>
           <VoiceRow
-            selected={value === voice.voice_id}
-            label={voiceDisplayName(voice)}
-            description={voice.description ?? undefined}
-            gender={voice.gender}
-            language={voice.language}
-            onSelect={() => onChange({ provider, voice_id: voice.voice_id })}
+            selected={!value}
+            label={t("voiceDefault")}
+            onSelect={() => onChange(null)}
             selectedLabel={t("voiceSelected")}
-            preview={
-              voice.preview_url
-                ? {
-                    playing: playing === voice.voice_id,
-                    onToggle: () =>
-                      togglePreview(
-                        voice.voice_id,
-                        voice.preview_url as string,
-                      ),
-                    playLabel: t("voicePreview"),
-                    stopLabel: t("voiceStop"),
-                  }
-                : undefined
-            }
           />
         </li>
-      ))}
-    </ul>
+        {load.voices.map((voice) => (
+          <li key={voice.voice_id}>
+            <VoiceRow
+              selected={value === voice.voice_id}
+              label={voiceDisplayName(voice)}
+              description={voice.description ?? undefined}
+              gender={voice.gender}
+              language={voice.language}
+              onSelect={() => onChange({ provider, voice_id: voice.voice_id })}
+              selectedLabel={t("voiceSelected")}
+              preview={
+                voice.preview_url
+                  ? {
+                      playing: playing === voice.voice_id,
+                      onToggle: () =>
+                        togglePreview(
+                          voice.voice_id,
+                          voice.preview_url as string,
+                        ),
+                      playLabel: t("voicePreview"),
+                      stopLabel: t("voiceStop"),
+                    }
+                  : undefined
+              }
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

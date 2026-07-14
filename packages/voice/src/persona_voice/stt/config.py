@@ -46,12 +46,22 @@ regression).
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from persona.logging import get_logger
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["Provider", "StreamingSTTConfig", "VADLibrary"]
+
+_logger = get_logger("stt.config")
+
+# Warn at most ONCE per process that ``PERSONA_STT_LANGUAGE_HINT`` is set — a
+# deprecated pre-Spec-32 global stopgap (Spec V14 D-V14-5). Guarded by a
+# module-level flag so ``model_copy`` (which re-runs validators, e.g. every
+# ``apply_stt_route`` call) does not re-warn.
+_LANGUAGE_HINT_DEPRECATION_WARNED = False
 
 Provider = Literal[
     "deepgram",
@@ -161,6 +171,30 @@ class StreamingSTTConfig(BaseSettings):
     #: the T0 POC proved it survives mid-utterance language switches without a
     #: language list (D-V14-1). Reads ``PERSONA_STT_GLADIA_MODEL``.
     gladia_model: str = "solaria-1"
+
+    @model_validator(mode="after")
+    def _warn_deprecated_language_hint(self) -> StreamingSTTConfig:
+        """Warn once if the deprecated ``PERSONA_STT_LANGUAGE_HINT`` env is set.
+
+        Spec V14 (D-V14-5): the global single-language hint is a pre-Spec-32
+        stopgap. Live calls pin the persona's declared language per call
+        (``apply_stt_route``); one-shot dictation context-pins per request; and
+        an utterance-level provider (``gladia``) derives language from the audio
+        and ignores it entirely. Checked against the raw env var (not the field,
+        which ``apply_stt_route`` legitimately sets per call) and warned at most
+        once per process via a module flag.
+        """
+        global _LANGUAGE_HINT_DEPRECATION_WARNED  # noqa: PLW0603 — process-once guard
+        if not _LANGUAGE_HINT_DEPRECATION_WARNED and os.environ.get("PERSONA_STT_LANGUAGE_HINT"):
+            _LANGUAGE_HINT_DEPRECATION_WARNED = True
+            _logger.warning(
+                "PERSONA_STT_LANGUAGE_HINT is set but DEPRECATED (Spec V14 D-V14-5): "
+                "it is the pre-Spec-32 global single-language stopgap. Live calls pin "
+                "the persona's declared language per call, one-shot dictation "
+                "context-pins per request, and utterance-level providers (gladia) "
+                "ignore it. Unset it to avoid forcing every clip through one language."
+            )
+        return self
 
     silero_min_speech_duration_ms: int = Field(default=50, ge=10, le=500)
     silero_min_silence_duration_ms: int = Field(default=200, ge=50, le=2000)

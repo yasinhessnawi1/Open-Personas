@@ -973,7 +973,8 @@
     "voiceSelected": "Selected",
     "voicesLoading": "Loading voices…",
     "voicesUnavailable": "Voice selection is unavailable right now.",
-    "voicesError": "Couldn’t load voices."
+    "voicesError": "Couldn’t load voices.",
+    "voiceProviderMismatch": "This persona's saved voice isn't available from the current voice provider — choose one below to update it."
   },
   "work": {
     "indicator": {

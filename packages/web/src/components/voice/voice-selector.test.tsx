@@ -38,6 +38,8 @@ const messages = {
     voicesLoading: "Loading voices…",
     voicesUnavailable: "Voice selection is unavailable right now.",
     voicesError: "Couldn't load voices.",
+    voiceProviderMismatch:
+      "This persona's saved voice isn't available from the current voice provider — choose one below to update it.",
   },
 };
 
@@ -84,5 +86,29 @@ describe("VoiceSelector (C2)", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Preview")).toBeInTheDocument(),
     );
+  });
+
+  it("nudges to re-pick when the saved voice is from another provider (V14 D-V14-13)", async () => {
+    // The catalogue only has "v1"; a saved id not in it was picked under a
+    // different provider (a provider switch) → the mismatch nudge shows.
+    renderSelector({ value: "cartesia-legacy-voice", onChange: vi.fn() });
+    await waitFor(() =>
+      expect(screen.getByText("Warm Storyteller")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(
+        "This persona's saved voice isn't available from the current voice provider — choose one below to update it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows NO mismatch nudge when the saved voice is in the catalogue", async () => {
+    renderSelector({ value: "v1", onChange: vi.fn() });
+    await waitFor(() =>
+      expect(screen.getByText("Warm Storyteller")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/isn't available from the current voice provider/),
+    ).not.toBeInTheDocument();
   });
 });

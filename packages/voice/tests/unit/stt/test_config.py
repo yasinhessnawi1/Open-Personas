@@ -232,3 +232,39 @@ def test_gladia_api_key_constructible_by_name() -> None:
     config = StreamingSTTConfig(gladia_api_key="by-name")
     assert config.gladia_api_key is not None
     assert config.gladia_api_key.get_secret_value() == "by-name"
+
+
+# ---------- Spec V14 D-V14-5: PERSONA_STT_LANGUAGE_HINT deprecation ---------
+
+
+def test_language_hint_env_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting the deprecated global ``PERSONA_STT_LANGUAGE_HINT`` warns once
+    (the module flag flips) — the field itself still works (backward compat)."""
+    import persona_voice.stt.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "_LANGUAGE_HINT_DEPRECATION_WARNED", False)
+    monkeypatch.setenv("PERSONA_STT_LANGUAGE_HINT", "no")
+    config = StreamingSTTConfig()
+    assert config.language_hint == "no"  # still honored (not a hard removal)
+    assert cfg_mod._LANGUAGE_HINT_DEPRECATION_WARNED is True
+
+
+def test_no_deprecation_warning_when_hint_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    import persona_voice.stt.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "_LANGUAGE_HINT_DEPRECATION_WARNED", False)
+    StreamingSTTConfig()  # the autouse fixture stripped PERSONA_STT_*
+    assert cfg_mod._LANGUAGE_HINT_DEPRECATION_WARNED is False
+
+
+def test_apply_stt_route_language_pin_does_not_trip_deprecation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-call language pin (model_copy setting language_hint) must NOT be
+    read as the deprecated env stopgap — only the raw env var trips the warning."""
+    import persona_voice.stt.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "_LANGUAGE_HINT_DEPRECATION_WARNED", False)
+    base = StreamingSTTConfig()  # no env hint
+    base.model_copy(update={"language_hint": "no"})  # what apply_stt_route does
+    assert cfg_mod._LANGUAGE_HINT_DEPRECATION_WARNED is False
