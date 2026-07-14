@@ -750,8 +750,10 @@
       "turnIntoFile": {
         "label": "Turn into file",
         "formatMenu": "Choose file format",
-        "toast": "Creating file…",
+        "toast": "Creating your file…",
         "errorToast": "Couldn't start the file — try again",
+        "successToast": "File created — added to Files",
+        "timeoutToast": "Still working on your file — check Files in a moment",
         "format": {
           "pdf": "PDF",
           "md": "Markdown",

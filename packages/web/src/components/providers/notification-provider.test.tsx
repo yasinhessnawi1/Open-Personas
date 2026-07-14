@@ -17,6 +17,7 @@ const toastFns = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
   warning: vi.fn(),
+  loading: vi.fn(() => "auto-id-1"),
 }));
 vi.mock("@/components/patterns/toast", () => ({ toast: toastFns }));
 
@@ -138,6 +139,45 @@ describe("NotificationProvider / useNotify", () => {
     expect(result.current.entries.find((e) => e.title === "A")?.read).toBe(
       false,
     );
+  });
+
+  it("R9-050: notifyLoading surfaces a sonner loading toast + returns its id, without touching the bell", () => {
+    const { result } = renderHook(() => useNotify(), { wrapper });
+
+    let toastId: string | number = "";
+    act(() => {
+      toastId = result.current.notifyLoading("Creating your file…");
+    });
+
+    expect(toastFns.loading).toHaveBeenCalledWith(
+      "Creating your file…",
+      undefined,
+    );
+    expect(toastId).toBe("auto-id-1"); // the id sonner assigned
+    expect(result.current.entries).toHaveLength(0); // no outcome yet — nothing to persist
+  });
+
+  it("R9-050: notify({ id }) updates the SAME toast in place instead of stacking a new one", () => {
+    const { result } = renderHook(() => useNotify(), { wrapper });
+
+    let toastId: string | number = "";
+    act(() => {
+      toastId = result.current.notifyLoading("Creating your file…");
+    });
+    act(() =>
+      result.current.notify({
+        level: "success",
+        title: "File created",
+        id: toastId,
+      }),
+    );
+
+    expect(toastFns.success).toHaveBeenCalledWith("File created", {
+      id: toastId,
+    });
+    // The resolved outcome IS consequential — persists exactly once.
+    expect(result.current.entries).toHaveLength(1);
+    expect(result.current.entries[0].title).toBe("File created");
   });
 
   it("throws when used outside a NotificationProvider", () => {

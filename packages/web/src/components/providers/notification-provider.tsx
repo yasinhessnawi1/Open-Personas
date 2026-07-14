@@ -51,6 +51,16 @@ export interface NotifyOptions {
    * notifications. Must be an app-relative path.
    */
   href?: string;
+  /**
+   * R9-050 — pass the id returned by an earlier {@link notifyLoading} (or
+   * `notify`) call to UPDATE that SAME toast in place (sonner's documented
+   * id-keyed replace) instead of stacking a second one. Lets a durable
+   * background job (e.g. turn-into-file's `file_extract`) swap its
+   * persistent "in progress" toast for the eventual success/error outcome.
+   * Sonner auto-assigns a NUMERIC id when the caller doesn't pass one (e.g.
+   * a bare `notifyLoading` call) — hence the union, not just `string`.
+   */
+  id?: string | number;
 }
 
 export interface NotificationEntry {
@@ -66,13 +76,26 @@ export interface NotificationEntry {
 }
 
 interface NotificationContextValue {
-  notify: (options: NotifyOptions) => void;
+  /** Returns the underlying sonner toast id (see {@link NotifyOptions.id}). */
+  notify: (options: NotifyOptions) => string | number;
   entries: readonly NotificationEntry[];
   unreadCount: number;
   markAllRead: () => void;
   /** Mark a single entry read (P6-D-10 — a deep-linked row is read on click). */
   markRead: (id: string) => void;
   clear: () => void;
+  /**
+   * R9-050 — a persistent "in progress" toast for a durable background job
+   * (fire → the job runs out of band → the UI must not go quiet before the
+   * result lands). Never enters the bell feed (there is no outcome yet to be
+   * consequential about). Returns the toast id; hand it back to `notify` via
+   * `{ id }` once the job resolves to swap this SAME toast to success/error
+   * rather than leaving it hanging or stacking a second toast.
+   */
+  notifyLoading: (
+    title: string,
+    opts?: { id?: string | number },
+  ) => string | number;
 }
 
 /** Max persisted entries kept in the bell feed (D-35-11: ~20–50). */
@@ -136,9 +159,17 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const notify = useCallback(
-    ({ level, title, body, persist, href }: NotifyOptions) => {
-      // 1. Immediate toast through the existing sonner layer.
-      toast[level](title, body ? { description: body } : undefined);
+    ({ level, title, body, persist, href, id }: NotifyOptions) => {
+      // 1. Immediate toast through the existing sonner layer. `id` (R9-050)
+      // makes this an UPDATE of an existing toast (e.g. a loading → success
+      // swap) rather than a new one when one is passed.
+      const toastOpts: { description?: string; id?: string | number } = {};
+      if (body) toastOpts.description = body;
+      if (id) toastOpts.id = id;
+      const toastId = toast[level](
+        title,
+        Object.keys(toastOpts).length > 0 ? toastOpts : undefined,
+      );
 
       // 2. Persist into the bell feed when consequential.
       if (persist ?? persistsByDefault(level)) {
@@ -160,8 +191,18 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
           return next;
         });
       }
+      return toastId;
     },
     [persistFeed],
+  );
+
+  // R9-050 — a loading toast has no outcome yet, so it never touches the bell
+  // feed; it's the sonner-native `loading` variant, id-addressable so a later
+  // `notify({ id, level: "success" | "error" })` swaps it in place.
+  const notifyLoading = useCallback(
+    (title: string, opts?: { id?: string | number }): string | number =>
+      toast.loading(title, opts?.id ? { id: opts.id } : undefined),
+    [],
   );
 
   const markAllRead = useCallback(() => {
@@ -197,8 +238,16 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<NotificationContextValue>(
-    () => ({ notify, entries, unreadCount, markAllRead, markRead, clear }),
-    [notify, entries, unreadCount, markAllRead, markRead, clear],
+    () => ({
+      notify,
+      entries,
+      unreadCount,
+      markAllRead,
+      markRead,
+      clear,
+      notifyLoading,
+    }),
+    [notify, entries, unreadCount, markAllRead, markRead, clear, notifyLoading],
   );
 
   return (
