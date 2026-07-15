@@ -99,6 +99,18 @@ class PersonaIdentity(BaseModel):
             authored in YAML as a mapping (``{provider: cartesia,
             voice_id: ...}``) or the shorthand string ``"cartesia:<id>"``,
             normalised at load. The runtime prompt builder does not read it.
+        voice_by_provider: Optional per-provider voice memory (Spec V14-T5b,
+            review finding I1's fix): maps a TTS provider name (e.g.
+            ``"cartesia"``, ``"elevenlabs"``) to the ``voice_id`` this persona
+            last used under that provider. Populated additively whenever
+            ``voice`` is set — auto-pick, the provider-flip auto-remap, or a
+            manual re-pick in the editor — so a later flip BACK to a provider
+            this persona was already voiced under restores the exact same
+            voice instead of a shared default or a fresh pick (lossless,
+            bidirectional migration). Additive per D-01-12 — existing
+            personas without it are byte-for-byte unaffected; ``None`` and
+            ``{}`` are both "no memory yet". The runtime prompt builder does
+            not read it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -110,6 +122,7 @@ class PersonaIdentity(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     visual_style: str | None = None
     voice: VoiceSpec | None = None
+    voice_by_provider: dict[str, str] | None = None
 
     @field_validator("voice", mode="before")
     @classmethod

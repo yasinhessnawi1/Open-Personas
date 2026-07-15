@@ -109,3 +109,35 @@ def test_voice_round_trips_through_json() -> None:
     identity = _identity(voice="cartesia:abc")
     restored = PersonaIdentity.model_validate_json(identity.model_dump_json())
     assert restored.voice == identity.voice
+
+
+# ---------- voice_by_provider (Spec V14-T5b, review finding I1's fix) -------
+
+
+def test_voice_by_provider_defaults_to_none() -> None:
+    # Additive per D-01-12: an existing persona (authored before this field
+    # existed) loads with no memory at all, not an empty dict.
+    assert _identity().voice_by_provider is None
+
+
+def test_voice_by_provider_accepts_a_plain_mapping() -> None:
+    identity = _identity(
+        voice="elevenlabs:current",
+        voice_by_provider={"cartesia": "original", "elevenlabs": "current"},
+    )
+    assert identity.voice_by_provider == {"cartesia": "original", "elevenlabs": "current"}
+    # Independent of the live ``voice`` field — memory is not derived from it.
+    assert identity.voice is not None
+    assert identity.voice.voice_id == "current"
+
+
+def test_voice_by_provider_round_trips_through_json() -> None:
+    identity = _identity(voice_by_provider={"cartesia": "v1"})
+    restored = PersonaIdentity.model_validate_json(identity.model_dump_json())
+    assert restored.voice_by_provider == {"cartesia": "v1"}
+
+
+def test_identity_is_still_frozen_with_the_new_field() -> None:
+    identity = _identity(voice_by_provider={"cartesia": "v1"})
+    with pytest.raises(ValidationError):
+        identity.voice_by_provider = {"cartesia": "v2"}  # type: ignore[misc]

@@ -922,17 +922,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconcile_in_flight_on_startup(engine=_sweep_engine)
 
     # Spec V14 (D-V14-13 trigger, T5a): the AUTO-REMAP reconciliation the T4b/T4c
-    # batch report flagged as unwired — an API-startup pass that re-picks every
-    # persona whose stored voice no longer matches the active TTS provider (a
-    # Cartesia → ElevenLabs switch). GUARDED like the crisis-encoder/catalog-
-    # freshness warm tasks above: a plain ``asyncio.create_task`` (NEVER awaited
-    # here) so it can never delay serving OR shutdown (the R9-027 lesson — no
-    # readiness/request path consults it), held on ``app.state`` so it is not
-    # GC'd, and cancelled at shutdown below. ``reconcile_voice_assignments``
-    # itself is the cheap-skip: on the default ``cartesia`` provider it returns
-    # instantly with zero DB reads and zero catalogue fetches — this task is
-    # created every boot, but does real work only when ElevenLabs is active AND
-    # a persona is actually stale.
+    # batch report flagged as unwired — an API-startup pass that re-picks (or,
+    # since T5b, RESTORES from per-provider memory) every persona whose stored
+    # voice no longer matches the active TTS provider, in EITHER direction
+    # (Cartesia → ElevenLabs or the flip back). GUARDED like the
+    # crisis-encoder/catalog-freshness warm tasks above: a plain
+    # ``asyncio.create_task`` (NEVER awaited here) so it can never delay
+    # serving OR shutdown (the R9-027 lesson — no readiness/request path
+    # consults it), held on ``app.state`` so it is not GC'd, and cancelled at
+    # shutdown below. ``reconcile_voice_assignments`` does one cheap local
+    # persona listing every boot (no network) and pays the catalogue-fetch +
+    # (memory-restore or model-pick) cost ONLY for a persona actually stale
+    # against the active provider — a boot where every persona already
+    # matches does zero catalogue fetches, in either direction (see its
+    # docstring; the T5a-era provider-name-based skip was removed in T5b
+    # because it made rollback lossy — review finding I1).
     voice_remap_task: asyncio.Task[None] | None = None
     if _sweep_engine is not None and rls_engine is not None:
         from persona_api.services.voice_assignment_service import reconcile_voice_assignments

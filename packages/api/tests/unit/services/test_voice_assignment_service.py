@@ -360,6 +360,79 @@ class TestMaybeRemapVoice:
         )
         assert result is False
 
+    # ----- Spec V14-T5b — lossless restore-from-memory (review finding I1) ----
+
+    def test_restores_remembered_voice_instead_of_auto_picking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cartesia -> ElevenLabs -> Cartesia: the persona remembers BOTH voices
+        (having previously been remapped through elevenlabs); flipping to
+        elevenlabs restores the remembered elevenlabs voice_id verbatim rather
+        than asking the model to pick again."""
+        monkeypatch.setattr(
+            vas,
+            "_fetch_catalogue",
+            _aret(("elevenlabs", [_option("el-fresh-pick", "feminine")])),
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        # never-called backend proves the model pick path was NOT taken.
+        never_called_backend = SimpleNamespace(chat=_araise())
+        yaml_with_memory = (
+            _YAML
+            + "  voice: cartesia:existing-voice\n"
+            + "  voice_by_provider:\n"
+            + "    cartesia: existing-voice\n"
+            + "    elevenlabs: original-el-voice\n"
+        )
+        engine = object()
+        result = asyncio.run(
+            vas.maybe_remap_voice(
+                self._request(never_called_backend, engine),  # type: ignore[arg-type]
+                owner_id="o",
+                persona_id="p",
+                yaml_str=yaml_with_memory,
+            )
+        )
+        assert result is True
+        assert called == {
+            "rls_engine": engine,
+            "persona_id": "p",
+            "provider": "elevenlabs",
+            "voice_id": "original-el-voice",  # restored, NOT "el-fresh-pick"
+        }
+
+    def test_no_memory_for_active_provider_falls_through_to_auto_pick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persona with memory for a DIFFERENT provider only (no elevenlabs
+        entry) still auto-picks fresh under elevenlabs — memory narrows the
+        restore, it never blocks the existing auto-pick fallback."""
+        monkeypatch.setattr(
+            vas,
+            "_fetch_catalogue",
+            _aret(("elevenlabs", [_option("el1", "feminine")])),
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        yaml_with_only_cartesia_memory = (
+            _YAML
+            + "  voice: cartesia:existing-voice\n"
+            + "  voice_by_provider:\n"
+            + "    cartesia: existing-voice\n"
+        )
+        result = asyncio.run(
+            vas.maybe_remap_voice(
+                self._request(_FakeBackend("el1"), object()),
+                owner_id="o",
+                persona_id="p",
+                yaml_str=yaml_with_only_cartesia_memory,
+            )
+        )
+        assert result is True
+        assert called["provider"] == "elevenlabs"
+        assert called["voice_id"] == "el1"  # auto-picked, not restored (nothing to restore)
+
 
 class TestDialectAwarePrompt:
     def test_pick_prompt_instructs_dialect_preference(self) -> None:
@@ -567,11 +640,22 @@ class TestReconcileVoiceAssignments:
         assert counts == {"scanned": 1, "remapped": 0, "skipped": 1, "failed": 0}
         assert fetch_calls == 0  # the cheap YAML-provider check skipped the network call
 
-    def test_default_cartesia_provider_is_a_full_noop(
+    def test_cartesia_active_with_all_cartesia_personas_does_no_catalogue_fetch(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(vas, "_fetch_catalogue", _araise())
-        sweep = _RaisingSweepEngine()  # would raise if .begin() were ever called
+        """Symmetric reconcile (V14-T5b): cartesia is no longer a name-based
+        cheap-skip — it still does the (local, cheap) listing, but a boot where
+        every persona already matches cartesia pays zero catalogue fetches."""
+        fetch_calls = 0
+
+        async def _counting_fetch(*_a: object, **_k: object) -> tuple[str, list[object]]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return "cartesia", []
+
+        monkeypatch.setattr(vas, "_fetch_catalogue", _counting_fetch)
+        monkeypatch.setattr(vas.persona_service, "set_voice", _araise())
+        sweep = _FakeSweepEngine([_FakeRow(id="p1", owner_id="owner-1", yaml=_YAML_WITH_VOICE)])
         counts = asyncio.run(
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="cartesia"),
@@ -580,7 +664,73 @@ class TestReconcileVoiceAssignments:
                 rls_engine=object(),
             )
         )
-        assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
+        assert counts == {"scanned": 1, "remapped": 0, "skipped": 1, "failed": 0}
+        assert fetch_calls == 0  # the cheap YAML-provider check skipped the network call
+        assert sweep.begin_calls == 1  # the listing itself DOES run (no name-based skip)
+
+    def test_rollback_to_cartesia_restores_the_remembered_voice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The headline I1 fix: a persona previously remapped to elevenlabs (its
+        original cartesia voice remembered along the way) flips BACK to cartesia
+        and gets that EXACT original voice back — not a fresh pick, not the
+        shared default."""
+        monkeypatch.setattr(vas, "_fetch_catalogue", _aret(("cartesia", [])))
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        yaml_now_on_elevenlabs = (
+            _YAML
+            + "  voice: elevenlabs:remapped-voice\n"
+            + "  voice_by_provider:\n"
+            + "    cartesia: original-cartesia-voice\n"
+            + "    elevenlabs: remapped-voice\n"
+        )
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id="p1", owner_id="owner-1", yaml=yaml_now_on_elevenlabs)]
+        )
+        engine = object()
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="cartesia"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("should-not-be-picked")),
+                sweep_engine=sweep,
+                rls_engine=engine,
+            )
+        )
+        assert counts == {"scanned": 1, "remapped": 1, "skipped": 0, "failed": 0}
+        assert called == {
+            "rls_engine": engine,
+            "persona_id": "p1",
+            "provider": "cartesia",
+            "voice_id": "original-cartesia-voice",  # restored verbatim, not re-picked
+        }
+
+    def test_persona_with_no_provider_memory_auto_picks_and_is_scanned_bidirectionally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persona created entirely under elevenlabs (no cartesia original) that
+        flips to cartesia has no memory to restore, so it auto-picks a FRESH
+        cartesia voice (not a shared default) — proving the reconcile loop is
+        genuinely bidirectional, not just cartesia-tolerant."""
+        monkeypatch.setattr(
+            vas, "_fetch_catalogue", _aret(("cartesia", [_option("c1", "feminine")]))
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id="p1", owner_id="owner-1", yaml=_YAML_ELEVENLABS_VOICE)]
+        )
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="cartesia"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("c1")),
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+        assert counts == {"scanned": 1, "remapped": 1, "skipped": 0, "failed": 0}
+        assert called["provider"] == "cartesia"
+        assert called["voice_id"] == "c1"
 
     def test_feature_unconfigured_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(vas, "_fetch_catalogue", _araise())

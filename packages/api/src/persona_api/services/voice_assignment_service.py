@@ -307,7 +307,7 @@ async def _remap_voice_for(
     rls_engine: Engine | None,
     bearer: str | None,
 ) -> bool:
-    """The shared AUTO-REMAP core (Spec V14 D-V14-13) — ``persona`` already resolved.
+    """The shared AUTO-REMAP core (Spec V14 D-V14-13/T5b) — ``persona`` already resolved.
 
     Factored out of :func:`maybe_remap_voice` so both the per-request path (which
     forwards the caller's bearer token) and :func:`reconcile_voice_assignments`
@@ -315,6 +315,16 @@ async def _remap_voice_for(
     ``None``) share one fail-soft implementation. A community/no-auth voice
     service accepts the anonymous read; a cloud/auth-required voice service
     fail-softs the exact same way an unreachable catalogue does.
+
+    LOSSLESS + BIDIRECTIONAL (T5b, review finding I1's fix): when the persona
+    already has a voice REMEMBERED for the active provider
+    (``identity.voice_by_provider[provider]``), that exact ``voice_id`` is
+    RESTORED rather than auto-picked fresh — a provider flip away and back
+    returns the persona to precisely the voice it had before, never a shared
+    default and never a losing swap. Only a persona with no memory for the
+    active provider (voiced under it for the first time) falls through to the
+    model auto-pick, which then records the pick as new memory via
+    :func:`persona_service.set_voice`'s choke point.
     """
     base_url = getattr(config, "voice_service_url", "") if config is not None else ""
     if not base_url or registry is None or rls_engine is None:
@@ -334,12 +344,45 @@ async def _remap_voice_for(
             err=repr(exc)[:200],
         )
         return False
-    if provider is None or not options:
+    if provider is None:
         return False
 
     # Idempotent: a persona already voiced on the ACTIVE provider needs no remap.
     current = persona.identity.voice
     if current is not None and current.provider == provider:
+        return False
+
+    # Spec V14-T5b (review finding I1's fix — LOSSLESS + BIDIRECTIONAL): before
+    # picking a fresh voice, check whether this persona already has a REMEMBERED
+    # voice for the active provider (it was voiced under this provider before, at
+    # some earlier point — e.g. before a prior flip away from it). If so, restore
+    # that EXACT voice_id rather than auto-picking a new one — a Cartesia→
+    # ElevenLabs→Cartesia round-trip must return the persona's ORIGINAL Cartesia
+    # voice, not a fresh pick or the shared default. A persona with no memory for
+    # this provider (e.g. created entirely under a different one) falls through
+    # to the auto-pick below, exactly as before. Deliberately does NOT require
+    # ``options`` (the language-filtered catalogue) to be non-empty — restoring a
+    # known-good voice_id never needed catalogue membership before either
+    # (``resolve_voice`` at synthesis time trusts a configured id the same way).
+    remembered = (persona.identity.voice_by_provider or {}).get(provider)
+    if remembered is not None:
+        try:
+            persona_service.set_voice(
+                rls_engine=rls_engine, persona_id=persona_id, provider=provider, voice_id=remembered
+            )
+        except Exception as exc:  # noqa: BLE001 — persist error → keep current
+            _LOG.warning("voice auto-remap restore failed to persist", persona_id=persona_id)
+            _LOG.debug("voice remap restore persist error", error=str(exc)[:200])
+            return False
+        _LOG.info(
+            "voice restored from per-provider memory on remap",
+            persona_id=persona_id,
+            provider=provider,
+            voice_id=remembered,
+            from_provider=current.provider if current is not None else None,
+        )
+        return True
+    if not options:
         return False
 
     try:
@@ -431,20 +474,33 @@ async def reconcile_voice_assignments(
     R9-027 lesson), that walks every persona and re-picks the ones whose stored
     voice no longer matches the active TTS provider.
 
-    Guarded + cheap by construction:
+    **SYMMETRIC as of Spec V14-T5b** (review finding I1's fix): this pass runs
+    for whichever provider is active, ``cartesia`` included — a flip TO
+    ``elevenlabs`` and a flip BACK to ``cartesia`` are handled by the exact same
+    code path. The earlier version cheap-skipped the entire pass whenever the
+    active provider was ``cartesia`` (reasoning: the default can never mismatch
+    a Cartesia-addressed voice) — true only BEFORE any remap had ever happened;
+    once a persona had been auto-remapped to ElevenLabs, that same persona was
+    now ElevenLabs-addressed, so flipping back to Cartesia left it mismatched
+    and permanently un-reconciled — the exact rollback data-loss the review
+    flagged. There is no purely provider-name-based shortcut that stays correct
+    in both directions, so the shortcut is gone; efficiency instead comes from
+    two remaining cheap layers:
 
-    - The active provider is read from ``config.voice_tts_provider`` (a plain
-      env mirror of ``PERSONA_TTS_PROVIDER`` the persona-voice service itself
-      reads — no network call). ``cartesia`` (the default) can never mismatch a
-      Cartesia-addressed voice, so the WHOLE pass returns immediately — a normal
-      boot does no catalogue fetch, no DB read, nothing.
-    - Only when the active provider is ``elevenlabs`` does this list personas
-      (one cross-tenant read on ``sweep_engine`` — the RLS-bypassing engine,
-      mirroring :func:`persona_api.background.restart_sweep.reconcile_in_flight_on_startup`).
-      Each persona is then compared CHEAPLY (its stored ``identity.voice.provider``
-      parsed from its own YAML, no network) against the active provider — only a
-      mismatched (or voiceless) persona pays the catalogue-fetch + model-pick cost
-      that :func:`_remap_voice_for` performs.
+    - The active provider is still read from ``config.voice_tts_provider`` (a
+      plain env mirror of ``PERSONA_TTS_PROVIDER`` — no network call) and the
+      feature-unconfigured checks below still short-circuit with zero DB reads.
+    - The persona listing itself (below) is ONE cross-tenant read on
+      ``sweep_engine`` — the RLS-bypassing engine, mirroring
+      :func:`persona_api.background.restart_sweep.reconcile_in_flight_on_startup`
+      — local to the API's own Postgres, not a network hop. Each persona is
+      then compared CHEAPLY (its stored ``identity.voice.provider`` parsed from
+      its own YAML, no network) against the active provider — only a
+      mismatched (or voiceless) persona pays the catalogue-fetch + (memory
+      restore or model-pick) cost that :func:`_remap_voice_for` performs. A
+      normal boot where every persona already matches the active provider —
+      the common case in both directions — does exactly one local SQL read and
+      zero catalogue fetches.
     - RLS-scoped writes: the sweep loop carries no ambient tenant context, so the
       owner scope is set via the ``current_user_id`` contextvar per persona (the
       same pattern :class:`~persona_api.tasks.dead_leg_sweep.DeadLegSweeper` uses)
@@ -457,7 +513,8 @@ async def reconcile_voice_assignments(
 
     Returns:
         ``{"scanned", "remapped", "skipped", "failed"}`` counts (all zero when
-        the cheap-skip fires) — logged by the caller / assertable by tests.
+        the feature is unconfigured) — logged by the caller / assertable by
+        tests.
     """
     counts = {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
     if config is None or registry is None or sweep_engine is None or rls_engine is None:
@@ -465,8 +522,6 @@ async def reconcile_voice_assignments(
     if not getattr(config, "voice_service_url", ""):
         return counts
     active_provider = getattr(config, "voice_tts_provider", "cartesia")
-    if active_provider != "elevenlabs":
-        return counts  # the D-V14-9 default — cheap-skip, zero DB reads
 
     try:
         with sweep_engine.begin() as conn:

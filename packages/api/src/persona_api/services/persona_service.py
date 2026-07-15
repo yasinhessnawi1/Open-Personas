@@ -239,6 +239,42 @@ def _guard_default_capabilities(persona: Persona, yaml_str: str) -> tuple[Person
     return guarded, guarded_yaml
 
 
+def _remember_voice_by_provider(persona: Persona, yaml_str: str) -> tuple[Persona, str]:
+    """Record ``identity.voice`` into the persona's per-provider voice memory.
+
+    Spec V14-T5b (review finding I1's fix): the manual re-pick surface (the
+    persona editor's ``VoiceSelector``) PATCHes the persona's FULL YAML via
+    :func:`update_persona` — it never calls :func:`set_voice`, so that choke
+    point alone cannot see a manual pick. This guard is the create/update-path
+    twin: whenever the incoming/authored YAML declares a voice, it is merged
+    into ``identity.voice_by_provider[voice.provider]`` on BOTH the persona
+    object and the stored YAML — so every surface that can set a voice
+    (builder-authored, auto-pick, auto-remap, or a manual re-pick) keeps the
+    memory complete, and a later provider flip can restore whichever voice
+    this persona last used under that provider.
+
+    Idempotent + churn-free, mirroring :func:`_guard_safety`'s shape: a
+    voiceless persona, or one whose voice is already the remembered one for
+    its provider, is returned unchanged (same object, same YAML string) — only
+    an actual new pick triggers a re-dump.
+    """
+    voice = persona.identity.voice
+    if voice is None:
+        return persona, yaml_str
+    existing = persona.identity.voice_by_provider or {}
+    if existing.get(voice.provider) == voice.voice_id:
+        return persona, yaml_str
+    updated = {**existing, voice.provider: voice.voice_id}
+    remembered_identity = persona.identity.model_copy(update={"voice_by_provider": updated})
+    remembered = persona.model_copy(update={"identity": remembered_identity})
+
+    raw = yaml.safe_load(yaml_str)
+    identity = raw.setdefault("identity", {})
+    identity["voice_by_provider"] = updated
+    remembered_yaml = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    return remembered, remembered_yaml
+
+
 def _build_registry(
     engine: Engine,
     embedder: Embedder,
@@ -295,6 +331,7 @@ def create_persona(
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
     persona, yaml_str = _guard_safety(persona, yaml_str)
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
+    persona, yaml_str = _remember_voice_by_provider(persona, yaml_str)
     _warn_if_language_unserviceable(persona)
 
     # Synthetic-media provenance (Spec R3, R3-D-3): a user-supplied ``avatar_url`` at
@@ -344,6 +381,7 @@ def update_persona(
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
     persona, yaml_str = _guard_safety(persona, yaml_str)
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
+    persona, yaml_str = _remember_voice_by_provider(persona, yaml_str)
     _warn_if_language_unserviceable(persona)
     values: dict[str, object] = {"yaml": yaml_str, "schema_version": persona.schema_version}
     if avatar_url is not None:
@@ -401,8 +439,21 @@ def set_voice(*, rls_engine: Engine, persona_id: str, provider: str, voice_id: s
     from the persona definition at synthesis time, never retrieved semantically.
     Silent if the row is absent or the YAML has no ``identity`` mapping. Mirrors
     :func:`set_avatar_url`'s narrow-write shape; the build-time voice
-    auto-assignment hook is the only caller and runs only when ``identity.voice``
-    was unset (it never overwrites a builder's chosen voice).
+    auto-assignment hook and the provider-flip auto-remap (below) are the
+    programmatic callers, and both run without overwriting the OTHER provider's
+    remembered voice.
+
+    Spec V14-T5b (review finding I1's fix): this is the single choke point every
+    PROGRAMMATIC voice write flows through (auto-pick at create, auto-remap on a
+    provider flip), so it ALSO records the choice into
+    ``identity.voice_by_provider[provider]`` — merged, never replaced wholesale,
+    so a persona's memory of its OTHER providers' voices survives. A later flip
+    back to ``provider`` can then restore this exact ``voice_id`` (lossless
+    rollback) instead of losing it or falling to a shared default. The manual
+    re-pick path (the persona editor) does not call this function — it PATCHes
+    the full YAML via :func:`update_persona`, which records the same memory via
+    :func:`_remember_voice_by_provider` so the memory stays complete regardless
+    of which surface set the voice.
     """
     with rls_engine.begin() as conn:
         row = conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id)).first()
@@ -412,6 +463,11 @@ def set_voice(*, rls_engine: Engine, persona_id: str, provider: str, voice_id: s
         if not isinstance(raw, dict) or not isinstance(raw.get("identity"), dict):
             return
         raw["identity"]["voice"] = f"{provider}:{voice_id}"
+        by_provider = raw["identity"].get("voice_by_provider")
+        if not isinstance(by_provider, dict):
+            by_provider = {}
+        by_provider[provider] = voice_id
+        raw["identity"]["voice_by_provider"] = by_provider
         new_yaml = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
         conn.execute(update(personas_t).where(personas_t.c.id == persona_id).values(yaml=new_yaml))
 
