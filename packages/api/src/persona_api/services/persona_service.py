@@ -239,7 +239,41 @@ def _guard_default_capabilities(persona: Persona, yaml_str: str) -> tuple[Person
     return guarded, guarded_yaml
 
 
-def _remember_voice_by_provider(persona: Persona, yaml_str: str) -> tuple[Persona, str]:
+def _stored_voice_by_provider(yaml_str: str) -> dict[str, str]:
+    """Best-effort extract ``identity.voice_by_provider`` from a CURRENTLY
+    STORED persona YAML (read fresh from the row, before it is overwritten).
+
+    The merge base :func:`_remember_voice_by_provider` needs on the update
+    path: the incoming PATCH body (already validated into a ``Persona`` by
+    the caller) rarely carries this internal memory field forward — the
+    editor's ``VoiceSelector`` -> ``PersonaForm`` -> ``PersonaEditor`` autosave
+    PATCHes only the fields its form model knows about — so merging against
+    the incoming YAML's OWN (usually absent) map silently drops every
+    provider entry the PATCH didn't mention (V14-T5c: the bug this fixes).
+    Reading the row still in the database and folding it into the merge base
+    is what makes the manual re-pick lossless, matching :func:`set_voice`'s
+    proven approach of reading the current stored map before merging in the
+    new entry. Fails soft (malformed/missing YAML or field → ``{}``) since
+    this is a memory *enhancement*, never a reason to fail the write.
+    """
+    try:
+        raw = yaml.safe_load(yaml_str)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    identity = raw.get("identity")
+    if not isinstance(identity, dict):
+        return {}
+    by_provider = identity.get("voice_by_provider")
+    if not isinstance(by_provider, dict):
+        return {}
+    return {k: v for k, v in by_provider.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _remember_voice_by_provider(
+    persona: Persona, yaml_str: str, *, stored_by_provider: dict[str, str] | None = None
+) -> tuple[Persona, str]:
     """Record ``identity.voice`` into the persona's per-provider voice memory.
 
     Spec V14-T5b (review finding I1's fix): the manual re-pick surface (the
@@ -253,18 +287,31 @@ def _remember_voice_by_provider(persona: Persona, yaml_str: str) -> tuple[Person
     memory complete, and a later provider flip can restore whichever voice
     this persona last used under that provider.
 
+    V14-T5c fix: the merge base is the union of ``stored_by_provider`` (the
+    map still sitting in the database, passed by :func:`update_persona` — see
+    :func:`_stored_voice_by_provider`) AND whatever ``persona.identity`` itself
+    declares, mirroring :func:`set_voice`'s merge-never-replace guarantee.
+    Merging only against the incoming YAML's own (usually absent, on the
+    manual re-pick path) map silently dropped every OTHER provider's
+    remembered voice — exactly the bug this fixes. :func:`create_persona` has
+    no prior stored row, so it omits ``stored_by_provider`` (defaults to
+    ``None``), unaffected.
+
     Idempotent + churn-free, mirroring :func:`_guard_safety`'s shape: a
-    voiceless persona, or one whose voice is already the remembered one for
-    its provider, is returned unchanged (same object, same YAML string) — only
-    an actual new pick triggers a re-dump.
+    voiceless persona, or one whose merged memory already matches what the
+    incoming YAML itself declares, is returned unchanged (same object, same
+    YAML string) — only an actual new fact (a new pick, or memory recovered
+    from the stored row that the incoming YAML didn't carry) triggers a
+    re-dump.
     """
     voice = persona.identity.voice
     if voice is None:
         return persona, yaml_str
-    existing = persona.identity.voice_by_provider or {}
-    if existing.get(voice.provider) == voice.voice_id:
+    declared = persona.identity.voice_by_provider or {}
+    merged = {**(stored_by_provider or {}), **declared}
+    updated = {**merged, voice.provider: voice.voice_id}
+    if updated == declared:
         return persona, yaml_str
-    updated = {**existing, voice.provider: voice.voice_id}
     remembered_identity = persona.identity.model_copy(update={"voice_by_provider": updated})
     remembered = persona.model_copy(update={"identity": remembered_identity})
 
@@ -377,17 +424,32 @@ def update_persona(
     so ``avatar_source`` is co-written ``'uploaded'`` in the SAME ``UPDATE`` (Spec
     R3, R3-D-3) — unforgeable synthetic-media provenance, no NULL window. The Art.
     50 disclosure derives from this stored signal.
+
+    V14-T5c: the row's CURRENTLY STORED YAML is read first, in the SAME
+    transaction as the write, so :func:`_remember_voice_by_provider` can merge
+    the incoming voice into whatever ``voice_by_provider`` memory already sits
+    in the database — not just what the PATCH body happens to declare (the
+    manual re-pick path's PATCH usually declares none, which previously
+    clobbered the memory instead of merging into it).
     """
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
     persona, yaml_str = _guard_safety(persona, yaml_str)
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
-    persona, yaml_str = _remember_voice_by_provider(persona, yaml_str)
-    _warn_if_language_unserviceable(persona)
-    values: dict[str, object] = {"yaml": yaml_str, "schema_version": persona.schema_version}
-    if avatar_url is not None:
-        values["avatar_url"] = avatar_url
-        values["avatar_source"] = "uploaded"
     with rls_engine.begin() as conn:
+        current = conn.execute(
+            select(personas_t.c.yaml).where(personas_t.c.id == persona_id)
+        ).first()
+        if current is None:
+            raise PersonaNotFoundError("persona not found", context={"id": persona_id})
+        stored_by_provider = _stored_voice_by_provider(current[0])
+        persona, yaml_str = _remember_voice_by_provider(
+            persona, yaml_str, stored_by_provider=stored_by_provider
+        )
+        _warn_if_language_unserviceable(persona)
+        values: dict[str, object] = {"yaml": yaml_str, "schema_version": persona.schema_version}
+        if avatar_url is not None:
+            values["avatar_url"] = avatar_url
+            values["avatar_source"] = "uploaded"
         result = conn.execute(
             update(personas_t)
             .where(personas_t.c.id == persona_id)
