@@ -186,6 +186,11 @@ export function useVoiceCall(options: UseVoiceCallOptions): VoiceCall {
       await room.connect(token.livekitUrl, token.token);
       // Unlock autoplay inside the same gesture that started the call.
       await room.startAudio().catch(() => undefined);
+      // A Disconnected can race in during connect()/startAudio() (e.g. an
+      // immediate server-side room teardown) — bail before patching a phase
+      // that implies a live connection, and before the mic-sync effect gets
+      // any excuse to touch a dead Room (R9-053).
+      if (room.state !== ConnectionState.Connected) return;
       // Spec 32 C3 — greet-first: the persona answers first, so the call opens
       // RINGING with the mic gated. The mic is NOT enabled here; the mic-sync
       // effect publishes it the moment the greeting finishes (un-gate at
@@ -207,6 +212,13 @@ export function useVoiceCall(options: UseVoiceCallOptions): VoiceCall {
   useEffect(() => {
     const room = roomRef.current;
     if (!room || roomRef.current === null) return;
+    // Guard against publishing onto a closing/closed peer connection — a
+    // server-side teardown (e.g. the RING_BACKSTOP_MS timer landing right as
+    // the room is deleted) can leave the Room non-Connected while this effect
+    // is still queued; renegotiating against a closed PC is what produced the
+    // livekit-client "could not createOffer with closed peer connection"
+    // warning (R9-053).
+    if (room.state !== ConnectionState.Connected) return;
     let cancelled = false;
     void room.localParticipant
       .setMicrophoneEnabled(state.micActive)
@@ -260,6 +272,10 @@ export function useVoiceCall(options: UseVoiceCallOptions): VoiceCall {
       if (clientInitiated) {
         teardownAudio();
         patch({ phase: "ended", micActive: false });
+        // Release the torn-down Room — mirrors `end()` — so a stale instance
+        // can't be touched by another effect and so `start()`'s reentry guard
+        // doesn't wrongly treat a finished call as still in flight (R9-053).
+        roomRef.current = null;
         return;
       }
       // E3 — a hard drop: the SDK's own resume reuses the cached token (fine for
@@ -278,6 +294,11 @@ export function useVoiceCall(options: UseVoiceCallOptions): VoiceCall {
       }
       teardownAudio();
       patch({ phase: "dropped", micActive: false });
+      // Same release as the client-initiated path above: a non-client
+      // disconnect (e.g. a server-side delete_room) must not leave a stale
+      // Room in `roomRef`, or the Retry button on the "dropped" terminal card
+      // is dead — `start()`'s reentry guard would silently no-op (R9-053).
+      roomRef.current = null;
     },
     [connectMicAndAudio, fetchToken, patch, teardownAudio],
   );
