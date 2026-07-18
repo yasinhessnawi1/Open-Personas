@@ -24,7 +24,7 @@ vi.mock("@/components/memory/episodic-manager-modal", () => ({
     open,
   }: {
     personas: readonly AvatarPersona[];
-    trigger: React.ReactElement;
+    trigger?: React.ReactElement;
     open?: boolean;
     onOpenChange?: (open: boolean) => void;
   }) => (
@@ -33,6 +33,7 @@ vi.mock("@/components/memory/episodic-manager-modal", () => ({
         {personas.map((p) => p.name).join(", ")}
       </span>
       <span data-testid="modal-open">{String(open)}</span>
+      <span data-testid="modal-trigger-present">{String(trigger != null)}</span>
       {trigger}
     </div>
   ),
@@ -75,6 +76,25 @@ describe("ChatRemembersButton", () => {
     expect(trigger).toHaveAttribute("tabIndex", "0");
     fireEvent.click(trigger);
     expect(onAncestorClick).not.toHaveBeenCalled();
+  });
+
+  it("R9-054: does not feed a trigger element into EpisodicManagerModal (avoids the Dialog.Trigger nativeButton a11y warning)", () => {
+    render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <ChatRemembersButton persona={PERSONA} count={1} />
+      </NextIntlClientProvider>,
+    );
+    // The span is self-driven (click/keydown → controlled open/onOpenChange
+    // above); it must render as ChatRemembersButton's own markup, not get
+    // routed through EpisodicManagerModal's `trigger` prop into a
+    // Dialog.Trigger (which defaults nativeButton=true and warns on a
+    // non-<button> host).
+    expect(screen.getByTestId("modal-trigger-present")).toHaveTextContent(
+      "false",
+    );
+    expect(
+      screen.getByRole("button", { name: /remembers/ }),
+    ).toBeInTheDocument();
   });
 
   it("opens the modal on click via the controlled open/onOpenChange pair", () => {
