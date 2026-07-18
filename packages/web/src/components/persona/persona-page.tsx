@@ -12,6 +12,7 @@ import {
 } from "@/components/activity/new-task-dialog";
 import type { ArtifactListResponse } from "@/components/artifacts/artifact-gallery";
 import { ArtifactGallery } from "@/components/artifacts/artifact-gallery";
+import { EpisodicManagerModal } from "@/components/memory/episodic-manager-modal";
 import { AvatarModal } from "@/components/persona/avatar-modal";
 import { PersonaMemoriesModal } from "@/components/persona/persona-memories-modal";
 import type { McpConnectionStatus } from "@/components/personas/mcp-connection-label";
@@ -295,27 +296,41 @@ export function PersonaPage({
               {t("glance")}
             </h3>
             <dl className="flex flex-col gap-2 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">{t("conversations")}</dt>
-                <dd className="tabular-nums">{conversationCount}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">{t("memories")}</dt>
-                <dd>
-                  <PersonaMemoriesModal
-                    personaId={personaId}
-                    count={memoryCount}
-                    trigger={
-                      <button
-                        type="button"
-                        className="tabular-nums underline decoration-dotted underline-offset-2 hover:text-foreground"
-                      >
-                        {memoryCount}
-                      </button>
-                    }
-                  />
-                </dd>
-              </div>
+              {/* D-K11-7: the whole row is the trigger, not just the count —
+                  opens the persona-scoped episodic manager. */}
+              <EpisodicManagerModal
+                personas={[dialogPersona]}
+                trigger={
+                  <button
+                    type="button"
+                    className="-mx-1 flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-left hover:bg-muted/60"
+                  >
+                    <span className="text-muted-foreground">
+                      {t("conversations")}
+                    </span>
+                    <span className="tabular-nums">{conversationCount}</span>
+                  </button>
+                }
+              />
+              {/* D-K11-7 rider: whole-row-clickable (previously only the
+                  number opened the graph modal) — the modal itself unchanged. */}
+              <PersonaMemoriesModal
+                personaId={personaId}
+                count={memoryCount}
+                trigger={
+                  <button
+                    type="button"
+                    className="-mx-1 flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-left hover:bg-muted/60"
+                  >
+                    <span className="text-muted-foreground">
+                      {t("memories")}
+                    </span>
+                    <span className="tabular-nums underline decoration-dotted underline-offset-2">
+                      {memoryCount}
+                    </span>
+                  </button>
+                }
+              />
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">{t("tasksRun")}</dt>
                 <dd className="tabular-nums">{tasksRunCount}</dd>

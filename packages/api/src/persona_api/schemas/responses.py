@@ -37,6 +37,12 @@ __all__ = [
     "ConversationSummary",
     "CreditsResponse",
     "DoneEvent",
+    "EpisodicGistView",
+    "EpisodicMemberView",
+    "EpisodicMembersResponse",
+    "EpisodicWindowResponse",
+    "ForgetCandidate",
+    "ForgetPreviewResponse",
     "MemoryEvolutionEntry",
     "MemoryLinkEdge",
     "MemoryLinkView",
@@ -1105,6 +1111,74 @@ class MemorySearchResponse(_Output):
 
     query: str
     results: list[MemorySearchResult]
+
+
+class ForgetCandidate(_Output):
+    """One piece of episodic evidence a concept-node forget would also delete (Spec K11).
+
+    D-K11-1: candidates come from a cross-persona semantic match against the node's
+    content (``persona_id``/``persona_name`` label which of the owner's personas holds
+    it), shown to the owner before anything is deleted. ``kind`` is ``"raw"`` for T1
+    (the only evidence a forget-preview surfaces — deleting it cascades its covering
+    gist, K8-D-14); ``"gist"`` is reserved for the standalone episodic browser (T2).
+    ``score`` is the cosine similarity (``1 - distance``) that cleared the floor.
+    """
+
+    persona_id: str
+    persona_name: str | None = None
+    chunk_id: str
+    kind: Literal["raw", "gist"]
+    text: str
+    score: float
+
+
+class ForgetPreviewResponse(_Output):
+    """The candidate episodic evidence for a concept-node forget (Spec K11, D-K11-1)."""
+
+    candidates: list[ForgetCandidate]
+
+
+class EpisodicGistView(_Output):
+    """One gist cluster-node in the episodic browser's default (gist) layer (Spec K11, D-K11-5).
+
+    The episodic browser renders as its OWN graph, separate from the concept graph:
+    gist cluster-nodes by default (scale), drillable to raw members via
+    ``GET .../episodic/{id}/members``. ``member_ids`` are the raw chunk ids the gist
+    summarises (K8-D-2) — the drill-down pointers, not embedded content.
+    """
+
+    id: str
+    text: str
+    member_ids: list[str]
+    created_at: datetime
+
+
+class EpisodicWindowResponse(_Output):
+    """The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).
+
+    ``available`` mirrors :class:`MemoryWindowResponse` (Spec K5): distinguishes *no
+    usable episodic backend* (community/off edition) from *no memories yet*. Newest-
+    first when ``q`` is omitted; a ``q`` search runs ``episodic.query`` (the exact
+    recall method the chat/voice loop calls) and reports each hit's COVERING gist
+    (deduplicated, in hit order) — the browser stays gist-granular even under search.
+    """
+
+    available: bool = True
+    gists: list[EpisodicGistView]
+
+
+class EpisodicMemberView(_Output):
+    """One raw episodic chunk — a gist's drilled-down member (Spec K11, D-K11-5)."""
+
+    id: str
+    text: str
+    created_at: datetime
+
+
+class EpisodicMembersResponse(_Output):
+    """A gist's raw members, in gist order (drill-down; Spec K11, D-K11-5)."""
+
+    members: list[EpisodicMemberView]
 
 
 class ApprovalOut(_Output):

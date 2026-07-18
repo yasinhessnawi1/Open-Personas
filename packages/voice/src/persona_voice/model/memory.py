@@ -187,6 +187,12 @@ class VoiceTurnRecorder:
         A synthetic turn (R9-001) writes the ASSISTANT half only: the internal
         prompt must not be minted into memory as something the user said (it
         could otherwise resurface via retrieval or graph extraction).
+
+        Stamps ``metadata["conversation_id"]`` from the session's live
+        ``VoiceTurnContext.conversation`` (Spec K11, D-K11-9) — always in scope
+        here (the context's ``conversation`` field is required, never optional),
+        so a voice-born chunk cascades on ``DELETE .../conversations/{id}
+        ?forget_memory=true`` exactly like a text-turn chunk does.
         """
         persona_id = self._ctx.persona_id
         store = self._ctx.stores["episodic"]
@@ -203,7 +209,11 @@ class VoiceTurnRecorder:
                 PersonaChunk(
                     id=chunk_id,
                     text=text,
-                    metadata={"importance": "0.5", "modality": "voice"},
+                    metadata={
+                        "importance": "0.5",
+                        "modality": "voice",
+                        "conversation_id": self._ctx.conversation.conversation_id,
+                    },
                     created_at=now,
                     provenance=ChunkProvenance(
                         source=WriteSource.SYSTEM,

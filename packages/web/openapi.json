@@ -823,7 +823,7 @@
       "delete": {
         "tags": ["conversations"],
         "summary": "Delete Conversation",
-        "description": "Delete a conversation + all its messages + workspace artefacts.\n\nCascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):\n\n1. DB rows (existing): the ``conversations`` row + its ``messages`` /\n   ``turn_logs`` via FK cascade.\n2. **Document workspace + DocumentStore chunks** (T19): every doc\n   attached to the conversation, via\n   :func:`document_service.remove_all_for_conversation` \u2014 the\n   cascade-helper T13 introduced specifically for this reuse.\n3. **Image workspace files** (Spec 13 T12): each image referenced by\n   the conversation's messages. Spec 13 owns this branch; the two\n   cascade extensions coexist additively in this same handler per\n   the D-14-X-cascade-coordination locking decision.\n\n404 if not the caller's conversation (RLS-scoped).",
+        "description": "Delete a conversation + all its messages + workspace artefacts.\n\nCascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):\n\n1. DB rows (existing): the ``conversations`` row + its ``messages`` /\n   ``turn_logs`` via FK cascade.\n2. **Document workspace + DocumentStore chunks** (T19): every doc\n   attached to the conversation, via\n   :func:`document_service.remove_all_for_conversation` \u2014 the\n   cascade-helper T13 introduced specifically for this reuse.\n3. **Image workspace files** (Spec 13 T12): each image referenced by\n   the conversation's messages. Spec 13 owns this branch; the two\n   cascade extensions coexist additively in this same handler per\n   the D-14-X-cascade-coordination locking decision.\n4. **Episodic memory** (Spec K11, T3, D-K11-9) \u2014 opt-in via\n   ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s\n   docstring for the exact \u222a content-match cascade. A no-op when the\n   memory backend isn't composed (community/no-DB edition) \u2014 the\n   conversation delete itself is unaffected either way.\n\n404 if not the caller's conversation (RLS-scoped).",
         "operationId": "delete_conversation_v1_conversations__conversation_id__delete",
         "parameters": [
           {
@@ -834,6 +834,18 @@
               "type": "string",
               "title": "Conversation Id"
             }
+          },
+          {
+            "name": "forget_memory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) \u2014 exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact.",
+              "default": false,
+              "title": "Forget Memory"
+            },
+            "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) \u2014 exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact."
           }
         ],
         "responses": {
@@ -3320,6 +3332,91 @@
         }
       }
     },
+    "/v1/memory/nodes/{node_id}/forget-preview": {
+      "post": {
+        "tags": ["memory"],
+        "summary": "Forget Preview Node",
+        "description": "Cross-persona episodic evidence a forget would also delete (Spec K11, D-K11-1).\n\nA pure preview (CQS) \u2014 nothing is deleted. 404 when the node is not the caller's.",
+        "operationId": "forget_preview_node_v1_memory_nodes__node_id__forget_preview_post",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgetPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/nodes/{node_id}/forget": {
+      "post": {
+        "tags": ["memory"],
+        "summary": "Forget Node",
+        "description": "Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence\n(cascading its covering gists, K8-D-14) AND the concept node, one operation \u2014 the\nresurrection guard, since a sleep-time consolidation pass can only re-distill from\nevidence that still exists. 404 when the node is not the caller's.",
+        "operationId": "forget_node_v1_memory_nodes__node_id__forget_post",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/memory/search": {
       "get": {
         "tags": ["memory"],
@@ -3350,6 +3447,190 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/episodic": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Get Episodic Window",
+        "description": "The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).\n\nA standalone graph, separate from the concept graph \u2014 gist cluster-nodes,\ndrillable to raw members via ``GET .../episodic/{id}/members``. ``available=False``\nmirrors the K5 graph route when no episodic backend is composed (community/off\nedition). Ownership is enforced by the real per-request RLS engine the shared\n``memory_backend`` rides \u2014 a foreign ``persona_id`` reads as empty, never another\ntenant's rows (the K5-proven pattern; see ``memory_chunks``' RLS policy).",
+        "operationId": "get_episodic_window_v1_memory_episodic_get",
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Persona Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Semantic search, gist-scoped.",
+              "title": "Q"
+            },
+            "description": "Semantic search, gist-scoped."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reserved for pagination; not yet implemented.",
+              "title": "Cursor"
+            },
+            "description": "Reserved for pagination; not yet implemented."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodicWindowResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/episodic/{gist_id}/members": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Get Episodic Members",
+        "description": "A gist's raw members, in gist order \u2014 the browser's drill-down (Spec K11, D-K11-5).",
+        "operationId": "get_episodic_members_v1_memory_episodic__gist_id__members_get",
+        "parameters": [
+          {
+            "name": "gist_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Gist Id"
+            }
+          },
+          {
+            "name": "persona_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Persona Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodicMembersResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory/episodic/{chunk_id}": {
+      "delete": {
+        "tags": ["memory"],
+        "summary": "Delete Episodic Node",
+        "description": "Delete a raw chunk or a gist cluster in the episodic browser (Spec K11, D-K11-6).\n\nA raw chunk deletes itself (cascades its covering gist, K8-D-14); a gist deletes\nits cluster's raw members (the cascade then removes the gist too). Never reaches\nthe concept graph (D-K11-6 \u2014 facts stay managed in the concept view). 404 when the\nid is not found on the (RLS-scoped) persona's episodic store \u2014\nexistence-disclosure-safe, mirroring the K5 ``delete_node`` pattern.",
+        "operationId": "delete_episodic_node_v1_memory_episodic__chunk_id__delete",
+        "parameters": [
+          {
+            "name": "chunk_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chunk Id"
+            }
+          },
+          {
+            "name": "persona_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Persona Id"
+            }
+          },
+          {
+            "name": "is_gist",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Is Gist"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -5521,6 +5802,94 @@
         "title": "EditMessageRequest",
         "description": "Edit the LAST user message's content + immediately re-run (R9-025 leg C).\n\n``content`` is bounded the same way :class:`PostMessageRequest`'s is\n(non-blank; ``min_length=1`` is the whole bound \u2014 the API has never capped a\nmessage's max length beyond that). v1 is text-only: no ``images`` /\n``channel`` fields \u2014 editing only ever changes the wording, never the\nattachments (see ``chat_service.edit_and_rerun_turn``'s module docstring for\nthe supersede+new-row representation decision)."
       },
+      "EpisodicGistView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "member_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Member Ids"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "text", "member_ids", "created_at"],
+        "title": "EpisodicGistView",
+        "description": "One gist cluster-node in the episodic browser's default (gist) layer (Spec K11, D-K11-5).\n\nThe episodic browser renders as its OWN graph, separate from the concept graph:\ngist cluster-nodes by default (scale), drillable to raw members via\n``GET .../episodic/{id}/members``. ``member_ids`` are the raw chunk ids the gist\nsummarises (K8-D-2) \u2014 the drill-down pointers, not embedded content."
+      },
+      "EpisodicMemberView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["id", "text", "created_at"],
+        "title": "EpisodicMemberView",
+        "description": "One raw episodic chunk \u2014 a gist's drilled-down member (Spec K11, D-K11-5)."
+      },
+      "EpisodicMembersResponse": {
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/EpisodicMemberView"
+            },
+            "type": "array",
+            "title": "Members"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["members"],
+        "title": "EpisodicMembersResponse",
+        "description": "A gist's raw members, in gist order (drill-down; Spec K11, D-K11-5)."
+      },
+      "EpisodicWindowResponse": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": true
+          },
+          "gists": {
+            "items": {
+              "$ref": "#/components/schemas/EpisodicGistView"
+            },
+            "type": "array",
+            "title": "Gists"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["gists"],
+        "title": "EpisodicWindowResponse",
+        "description": "The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).\n\n``available`` mirrors :class:`MemoryWindowResponse` (Spec K5): distinguishes *no\nusable episodic backend* (community/off edition) from *no memories yet*. Newest-\nfirst when ``q`` is omitted; a ``q`` search runs ``episodic.query`` (the exact\nrecall method the chat/voice loop calls) and reports each hit's COVERING gist\n(deduplicated, in hit order) \u2014 the browser stays gist-granular even under search."
+      },
       "FireEvent": {
         "properties": {
           "schedule_id": {
@@ -5542,6 +5911,97 @@
         "required": ["schedule_id", "at", "status"],
         "title": "FireEvent",
         "description": "One past fire/miss from the audit trail (the calendar's ran/missed markers)."
+      },
+      "ForgetCandidate": {
+        "properties": {
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "persona_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Name"
+          },
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["raw", "gist"],
+            "title": "Kind"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["persona_id", "chunk_id", "kind", "text", "score"],
+        "title": "ForgetCandidate",
+        "description": "One piece of episodic evidence a concept-node forget would also delete (Spec K11).\n\nD-K11-1: candidates come from a cross-persona semantic match against the node's\ncontent (``persona_id``/``persona_name`` label which of the owner's personas holds\nit), shown to the owner before anything is deleted. ``kind`` is ``\"raw\"`` for T1\n(the only evidence a forget-preview surfaces \u2014 deleting it cascades its covering\ngist, K8-D-14); ``\"gist\"`` is reserved for the standalone episodic browser (T2).\n``score`` is the cosine similarity (``1 - distance``) that cleared the floor."
+      },
+      "ForgetEpisodicRef": {
+        "properties": {
+          "persona_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Persona Id"
+          },
+          "chunk_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Chunk Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["persona_id", "chunk_id"],
+        "title": "ForgetEpisodicRef",
+        "description": "One piece of confirmed episodic evidence to forget (Spec K11, D-K11-1).\n\nA raw chunk id the owner kept from a ``forget-preview`` response, labelled with\nthe persona whose episodic store it lives in (episodic is per-persona; D-K11-3)."
+      },
+      "ForgetPreviewResponse": {
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/ForgetCandidate"
+            },
+            "type": "array",
+            "title": "Candidates"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["candidates"],
+        "title": "ForgetPreviewResponse",
+        "description": "The candidate episodic evidence for a concept-node forget (Spec K11, D-K11-1)."
+      },
+      "ForgetRequest": {
+        "properties": {
+          "episodic": {
+            "items": {
+              "$ref": "#/components/schemas/ForgetEpisodicRef"
+            },
+            "type": "array",
+            "title": "Episodic"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ForgetRequest",
+        "description": "Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence.\n\nThe confirmed subset of a prior ``forget-preview`` response \u2014 deselectable, so\n``episodic`` may be a strict subset of (or empty relative to) what was shown.\nDeleting this evidence (cascading its covering gists, K8-D-14) is what starves\nthe sleep-time engine's re-distillation; the concept node is deleted alongside it."
       },
       "GrantOut": {
         "properties": {
@@ -6006,7 +6466,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "MCPOAuthAuthorizeRequest",
-        "description": "Start an OAuth flow for a BYO MCP server (Spec R8, T4).\n\n``redirect_after`` is an OPTIONAL app-relative path the web callback returns the\nuser to once connected \u2014 it is stored SERVER-SIDE against the state (never encoded\nin the OAuth ``state`` value) and is never an external redirect target."
+        "description": "Start an OAuth flow for a BYO MCP server (Spec R8, T4).\n\n``redirect_after`` is an OPTIONAL app-relative path the web callback returns the\nuser to once connected \u2014 it is stored SERVER-SIDE against the state (never encoded\nin the OAuth ``state`` value) and is never an external redirect target.\n\nR9-048 (defense-in-depth): every current caller derives this from\n``window.location.pathname + search`` at click time, never attacker input,\nso there is no live exploit today. But nothing here PREVENTS a future or\ncrafted caller from setting an absolute/external URL, which would open a\nredirect once the OAuth dance completes \u2014 so it is validated as a bare\nrelative in-app path at the request boundary, not trusted verbatim."
       },
       "MCPOAuthAuthorizeResponse": {
         "properties": {

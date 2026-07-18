@@ -135,6 +135,9 @@ def client(
         *,
         rls_engine: Any,  # noqa: ANN401, ARG001
         conversation_id: str,
+        **_kw: Any,  # noqa: ANN401 — K11-T3's forget_memory/persona_id/episodic_store/
+        # match_texts/match_floor kwargs; this fixture only exercises the T19 document
+        # cascade, not the K11 episodic cascade (covered by test_conversation_forget.py).
     ) -> None:
         # Existing chat_service contract — raise on unknown id; otherwise no-op
         # (DB row delete unobservable in unit test).

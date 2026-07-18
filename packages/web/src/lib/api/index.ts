@@ -42,3 +42,18 @@ export type MemoryEvolutionEntry = Schemas["MemoryEvolutionEntry"];
 export type MemorySearchResponse = Schemas["MemorySearchResponse"];
 export type MemorySearchResult = Schemas["MemorySearchResult"];
 export type MemoryCorrectionRequest = Schemas["MemoryCorrectionRequest"];
+
+// Spec K11 (D-K11-5) — the episodic browser, a standalone graph separate from
+// the K5 concept graph: gist cluster-nodes, drillable to raw member leaves.
+export type EpisodicWindowResponse = Schemas["EpisodicWindowResponse"];
+export type EpisodicGistView = Schemas["EpisodicGistView"];
+export type EpisodicMemberView = Schemas["EpisodicMemberView"];
+export type EpisodicMembersResponse = Schemas["EpisodicMembersResponse"];
+
+// Spec K11 (D-K11-1 / D-K11-2) — the cross-layer forget confirm: a concept-node
+// delete previews the episodic evidence it would also erase, persona-labelled
+// and deselectable, before anything is committed.
+export type ForgetCandidate = Schemas["ForgetCandidate"];
+export type ForgetEpisodicRef = Schemas["ForgetEpisodicRef"];
+export type ForgetPreviewResponse = Schemas["ForgetPreviewResponse"];
+export type ForgetRequest = Schemas["ForgetRequest"];

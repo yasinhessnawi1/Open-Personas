@@ -391,6 +391,11 @@ export interface paths {
      *        the conversation's messages. Spec 13 owns this branch; the two
      *        cascade extensions coexist additively in this same handler per
      *        the D-14-X-cascade-coordination locking decision.
+     *     4. **Episodic memory** (Spec K11, T3, D-K11-9) — opt-in via
+     *        ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s
+     *        docstring for the exact ∪ content-match cascade. A no-op when the
+     *        memory backend isn't composed (community/no-DB edition) — the
+     *        conversation delete itself is unaffected either way.
      *
      *     404 if not the caller's conversation (RLS-scoped).
      */
@@ -1711,6 +1716,51 @@ export interface paths {
     patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
     trace?: never;
   };
+  "/v1/memory/nodes/{node_id}/forget-preview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Forget Preview Node
+     * @description Cross-persona episodic evidence a forget would also delete (Spec K11, D-K11-1).
+     *
+     *     A pure preview (CQS) — nothing is deleted. 404 when the node is not the caller's.
+     */
+    post: operations["forget_preview_node_v1_memory_nodes__node_id__forget_preview_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/memory/nodes/{node_id}/forget": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Forget Node
+     * @description Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence
+     *     (cascading its covering gists, K8-D-14) AND the concept node, one operation — the
+     *     resurrection guard, since a sleep-time consolidation pass can only re-distill from
+     *     evidence that still exists. 404 when the node is not the caller's.
+     */
+    post: operations["forget_node_v1_memory_nodes__node_id__forget_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/memory/search": {
     parameters: {
       query?: never;
@@ -1726,6 +1776,79 @@ export interface paths {
     put?: never;
     post?: never;
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/memory/episodic": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Episodic Window
+     * @description The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).
+     *
+     *     A standalone graph, separate from the concept graph — gist cluster-nodes,
+     *     drillable to raw members via ``GET .../episodic/{id}/members``. ``available=False``
+     *     mirrors the K5 graph route when no episodic backend is composed (community/off
+     *     edition). Ownership is enforced by the real per-request RLS engine the shared
+     *     ``memory_backend`` rides — a foreign ``persona_id`` reads as empty, never another
+     *     tenant's rows (the K5-proven pattern; see ``memory_chunks``' RLS policy).
+     */
+    get: operations["get_episodic_window_v1_memory_episodic_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/memory/episodic/{gist_id}/members": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Episodic Members
+     * @description A gist's raw members, in gist order — the browser's drill-down (Spec K11, D-K11-5).
+     */
+    get: operations["get_episodic_members_v1_memory_episodic__gist_id__members_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/memory/episodic/{chunk_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Episodic Node
+     * @description Delete a raw chunk or a gist cluster in the episodic browser (Spec K11, D-K11-6).
+     *
+     *     A raw chunk deletes itself (cascades its covering gist, K8-D-14); a gist deletes
+     *     its cluster's raw members (the cascade then removes the gist too). Never reaches
+     *     the concept graph (D-K11-6 — facts stay managed in the concept view). 404 when the
+     *     id is not found on the (RLS-scoped) persona's episodic store —
+     *     existence-disclosure-safe, mirroring the K5 ``delete_node`` pattern.
+     */
+    delete: operations["delete_episodic_node_v1_memory_episodic__chunk_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -3042,6 +3165,70 @@ export interface components {
       content: string;
     };
     /**
+     * EpisodicGistView
+     * @description One gist cluster-node in the episodic browser's default (gist) layer (Spec K11, D-K11-5).
+     *
+     *     The episodic browser renders as its OWN graph, separate from the concept graph:
+     *     gist cluster-nodes by default (scale), drillable to raw members via
+     *     ``GET .../episodic/{id}/members``. ``member_ids`` are the raw chunk ids the gist
+     *     summarises (K8-D-2) — the drill-down pointers, not embedded content.
+     */
+    EpisodicGistView: {
+      /** Id */
+      id: string;
+      /** Text */
+      text: string;
+      /** Member Ids */
+      member_ids: string[];
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /**
+     * EpisodicMemberView
+     * @description One raw episodic chunk — a gist's drilled-down member (Spec K11, D-K11-5).
+     */
+    EpisodicMemberView: {
+      /** Id */
+      id: string;
+      /** Text */
+      text: string;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
+    /**
+     * EpisodicMembersResponse
+     * @description A gist's raw members, in gist order (drill-down; Spec K11, D-K11-5).
+     */
+    EpisodicMembersResponse: {
+      /** Members */
+      members: components["schemas"]["EpisodicMemberView"][];
+    };
+    /**
+     * EpisodicWindowResponse
+     * @description The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).
+     *
+     *     ``available`` mirrors :class:`MemoryWindowResponse` (Spec K5): distinguishes *no
+     *     usable episodic backend* (community/off edition) from *no memories yet*. Newest-
+     *     first when ``q`` is omitted; a ``q`` search runs ``episodic.query`` (the exact
+     *     recall method the chat/voice loop calls) and reports each hit's COVERING gist
+     *     (deduplicated, in hit order) — the browser stays gist-granular even under search.
+     */
+    EpisodicWindowResponse: {
+      /**
+       * Available
+       * @default true
+       */
+      available: boolean;
+      /** Gists */
+      gists: components["schemas"]["EpisodicGistView"][];
+    };
+    /**
      * FireEvent
      * @description One past fire/miss from the audit trail (the calendar's ran/missed markers).
      */
@@ -3055,6 +3242,68 @@ export interface components {
       at: string;
       /** Status */
       status: string;
+    };
+    /**
+     * ForgetCandidate
+     * @description One piece of episodic evidence a concept-node forget would also delete (Spec K11).
+     *
+     *     D-K11-1: candidates come from a cross-persona semantic match against the node's
+     *     content (``persona_id``/``persona_name`` label which of the owner's personas holds
+     *     it), shown to the owner before anything is deleted. ``kind`` is ``"raw"`` for T1
+     *     (the only evidence a forget-preview surfaces — deleting it cascades its covering
+     *     gist, K8-D-14); ``"gist"`` is reserved for the standalone episodic browser (T2).
+     *     ``score`` is the cosine similarity (``1 - distance``) that cleared the floor.
+     */
+    ForgetCandidate: {
+      /** Persona Id */
+      persona_id: string;
+      /** Persona Name */
+      persona_name?: string | null;
+      /** Chunk Id */
+      chunk_id: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "raw" | "gist";
+      /** Text */
+      text: string;
+      /** Score */
+      score: number;
+    };
+    /**
+     * ForgetEpisodicRef
+     * @description One piece of confirmed episodic evidence to forget (Spec K11, D-K11-1).
+     *
+     *     A raw chunk id the owner kept from a ``forget-preview`` response, labelled with
+     *     the persona whose episodic store it lives in (episodic is per-persona; D-K11-3).
+     */
+    ForgetEpisodicRef: {
+      /** Persona Id */
+      persona_id: string;
+      /** Chunk Id */
+      chunk_id: string;
+    };
+    /**
+     * ForgetPreviewResponse
+     * @description The candidate episodic evidence for a concept-node forget (Spec K11, D-K11-1).
+     */
+    ForgetPreviewResponse: {
+      /** Candidates */
+      candidates: components["schemas"]["ForgetCandidate"][];
+    };
+    /**
+     * ForgetRequest
+     * @description Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence.
+     *
+     *     The confirmed subset of a prior ``forget-preview`` response — deselectable, so
+     *     ``episodic`` may be a strict subset of (or empty relative to) what was shown.
+     *     Deleting this evidence (cascading its covering gists, K8-D-14) is what starves
+     *     the sleep-time engine's re-distillation; the concept node is deleted alongside it.
+     */
+    ForgetRequest: {
+      /** Episodic */
+      episodic?: components["schemas"]["ForgetEpisodicRef"][];
     };
     /**
      * GrantOut
@@ -3487,6 +3736,13 @@ export interface components {
      *     ``redirect_after`` is an OPTIONAL app-relative path the web callback returns the
      *     user to once connected — it is stored SERVER-SIDE against the state (never encoded
      *     in the OAuth ``state`` value) and is never an external redirect target.
+     *
+     *     R9-048 (defense-in-depth): every current caller derives this from
+     *     ``window.location.pathname + search`` at click time, never attacker input,
+     *     so there is no live exploit today. But nothing here PREVENTS a future or
+     *     crafted caller from setting an absolute/external URL, which would open a
+     *     redirect once the OAuth dance completes — so it is validated as a bare
+     *     relative in-app path at the request boundary, not trusted verbatim.
      */
     MCPOAuthAuthorizeRequest: {
       /** Redirect After */
@@ -5616,7 +5872,10 @@ export interface operations {
   };
   delete_conversation_v1_conversations__conversation_id__delete: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) — exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact. */
+        forget_memory?: boolean;
+      };
       header?: never;
       path: {
         conversation_id: string;
@@ -7404,6 +7663,70 @@ export interface operations {
       };
     };
   };
+  forget_preview_node_v1_memory_nodes__node_id__forget_preview_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        node_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ForgetPreviewResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  forget_node_v1_memory_nodes__node_id__forget_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        node_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ForgetRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   search_memory_v1_memory_search_get: {
     parameters: {
       query: {
@@ -7424,6 +7747,106 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["MemorySearchResponse"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_episodic_window_v1_memory_episodic_get: {
+    parameters: {
+      query: {
+        persona_id: string;
+        /** @description Semantic search, gist-scoped. */
+        q?: string | null;
+        /** @description Reserved for pagination; not yet implemented. */
+        cursor?: string | null;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EpisodicWindowResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_episodic_members_v1_memory_episodic__gist_id__members_get: {
+    parameters: {
+      query: {
+        persona_id: string;
+      };
+      header?: never;
+      path: {
+        gist_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EpisodicMembersResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_episodic_node_v1_memory_episodic__chunk_id__delete: {
+    parameters: {
+      query: {
+        persona_id: string;
+        is_gist?: boolean;
+      };
+      header?: never;
+      path: {
+        chunk_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {

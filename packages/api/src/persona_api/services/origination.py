@@ -91,7 +91,7 @@ class OriginationRecorder:
             conversation_id = self._persist_message(
                 message, owner_id=owner_id, persona_id=persona_id
             )
-            self._write_episodic(persona_id, message)
+            self._write_episodic(persona_id, message, conversation_id)
             return conversation_id
         finally:
             if reset_token is not None:
@@ -157,12 +157,20 @@ class OriginationRecorder:
             )
         return conversation_id
 
-    def _write_episodic(self, persona_id: str, message: OriginatedMessage) -> None:
+    def _write_episodic(
+        self, persona_id: str, message: OriginatedMessage, conversation_id: str
+    ) -> None:
         """Write the assistant-only originated episodic chunk (criterion 2, D-C0-3).
 
         No USER half (no preceding user turn) — the persona's memory honestly
         reflects that it reached out. Same store path a reply uses; RLS-scoped via
         ``rls_engine``.
+
+        ``conversation_id`` — the resolved id :meth:`_persist_message` returns (a
+        new or an existing conversation, always known by this point) — stamps
+        ``metadata["conversation_id"]`` (Spec K11, D-K11-9), so an originated
+        chunk cascades on ``DELETE .../conversations/{id}?forget_memory=true``
+        exactly like a reply's chunk does.
         """
         # Minted uuidv7 id (K8-D-6) — the former store-count index was an
         # O(N) read per write and raced under concurrent writers.
@@ -174,7 +182,11 @@ class OriginationRecorder:
                 PersonaChunk(
                     id=chunk_id,
                     text=f"ASSISTANT (originated): {message.content}",
-                    metadata={"importance": "0.5", ORIGINATED_METADATA_KEY: "true"},
+                    metadata={
+                        "importance": "0.5",
+                        ORIGINATED_METADATA_KEY: "true",
+                        "conversation_id": conversation_id,
+                    },
                     created_at=now,
                     provenance=ChunkProvenance(
                         source=WriteSource.SYSTEM,

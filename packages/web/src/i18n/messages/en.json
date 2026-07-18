@@ -197,7 +197,8 @@
     "loading": "Loading…",
     "endOfList": "End of conversations.",
     "shownOf": "Showing {shown} of {total}",
-    "newMessage": "New message"
+    "newMessage": "New message",
+    "forgetMemoryCheckbox": "Also forget what {name} learned here"
   },
   "personaPicker": {
     "choosePersona": "Choose a persona",
@@ -1292,7 +1293,42 @@
     "deleteConfirm": "Delete everywhere",
     "deleted": "Deleted everywhere",
     "deletedBody": "Gone from every persona.",
-    "deleteError": "Couldn't delete this memory. Please try again."
+    "deleteError": "Couldn't delete this memory. Please try again.",
+    "viewModeLabel": "View",
+    "viewMode": {
+      "concept": "Concept",
+      "episodic": "Episodic"
+    },
+    "episodicPersonaLabel": "Choose whose episodic memory to browse",
+    "episodicPersonaPlaceholder": "Select a persona",
+    "episodicGistsWord": "memories",
+    "episodicNoPersona": "Choose a persona",
+    "episodicNoPersonaHint": "Episodic memory is per-persona — pick one above to browse what they've recalled.",
+    "episodicUnavailable": "Episodic memory isn't available here",
+    "episodicUnavailableHint": "This deployment doesn't run an episodic memory backend, so there's nothing to browse yet.",
+    "episodicEmpty": "Nothing recalled yet",
+    "episodicEmptyHint": "As this persona talks with you, what it recalls turn-by-turn grows into a map here.",
+    "episodicDetailLabel": "Episodic memory detail",
+    "episodicKindGist": "Compressed memory",
+    "episodicKindMember": "Raw memory",
+    "episodicMemberCount": "{count, plural, =0 {no raw memories} one {# raw memory} other {# raw memories}}",
+    "episodicExpand": "Show raw memories",
+    "episodicExpanding": "Loading…",
+    "episodicExpandError": "Couldn't load the raw memories. Please try again.",
+    "episodicCollapse": "Hide raw memories",
+    "episodicForget": "Forget",
+    "episodicForgotten": "Forgotten",
+    "episodicForgetError": "Couldn't forget this memory. Please try again.",
+    "episodicForgetGistTitle": "Forget this compressed memory?",
+    "episodicForgetGistBody": "This removes every raw memory it summarises. This can't be undone.",
+    "episodicForgetMemberTitle": "Forget this raw memory?",
+    "episodicForgetMemberBody": "This also removes the compressed memory it belongs to (it can't summarise nothing). This can't be undone.",
+    "episodicForgetConfirm": "Forget",
+    "episodicManagerTitle": "What they've recalled",
+    "forgetDialogTitle": "Also forget these {count, plural, one {# memory} other {# memories}}?",
+    "forgetDialogBody": "Deleting this would leave behind conversation memory that could recreate it. Choose what to forget too — deselect anything you'd rather keep.",
+    "forgetDialogCancel": "Cancel",
+    "forgetDialogConfirm": "Forget everywhere"
   },
   "specialities": {
     "title": "Specialities",

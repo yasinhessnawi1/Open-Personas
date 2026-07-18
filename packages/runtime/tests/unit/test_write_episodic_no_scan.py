@@ -66,3 +66,23 @@ def test_two_writers_racing_produce_distinct_ids() -> None:
     ConversationLoop._write_episodic(ns, "p1", "c", "d")  # type: ignore[arg-type]  # noqa: SLF001
     ids = [c.id for c in store.chunks]
     assert len(set(ids)) == 2  # noqa: PLR2004
+
+
+def test_write_episodic_stamps_conversation_id() -> None:
+    """Spec K11, D-K11-9: a conversation-scoped write stamps ``metadata["conversation_id"]``
+    so ``DELETE /v1/conversations/{id}?forget_memory=true`` can find it by exact match."""
+    store = _SpyStore()
+    ns = SimpleNamespace(_stores={"episodic": store})
+    ConversationLoop._write_episodic(  # type: ignore[arg-type]  # noqa: SLF001
+        ns, "p1", "hi", "hello", conversation_id="conv_42"
+    )
+    chunk = store.chunks[-1]
+    assert chunk.metadata["conversation_id"] == "conv_42"
+
+
+def test_write_episodic_omits_the_stamp_when_no_conversation_id_is_given() -> None:
+    """No conversation in scope (e.g. a legacy/test call site) → no fabricated stamp."""
+    store = _SpyStore()
+    ns = SimpleNamespace(_stores={"episodic": store})
+    ConversationLoop._write_episodic(ns, "p1", "a", "b")  # type: ignore[arg-type]  # noqa: SLF001
+    assert "conversation_id" not in store.chunks[-1].metadata

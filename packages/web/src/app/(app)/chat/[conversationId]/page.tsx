@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { ChatPresenceOrb } from "@/components/chat/chat-presence-orb";
+import { ChatRemembersButton } from "@/components/chat/chat-remembers-button";
 import { ChatRightPanelGroup } from "@/components/chat/chat-right-panel-group";
 import { ChatWindow } from "@/components/chat/chat-window";
 import type { ChatMessageView } from "@/components/chat/message-element";
@@ -111,9 +112,12 @@ export default async function ChatPage({
               {remembers > 0 ? (
                 <>
                   {" · "}
-                  <span style={{ color: "var(--store-self-facts)" }}>
-                    {tc("remembers", { count: remembers })}
-                  </span>
+                  {/* K11-T5 (D-K11-7c): remembers N is a button now — opens the
+                      persona-scoped episodic manager. */}
+                  <ChatRemembersButton
+                    persona={personaForDisplay}
+                    count={remembers}
+                  />
                 </>
               ) : null}
             </div>

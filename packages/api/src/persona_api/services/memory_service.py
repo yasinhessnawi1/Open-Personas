@@ -17,8 +17,16 @@ from typing import TYPE_CHECKING, Literal
 from persona.extraction import InteractionKind
 from persona.graph.config import GraphSettings
 from persona.graph.retrieval import HybridRetriever
+from persona.stores.episodic import EpisodicStore
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from persona_api.schemas.responses import (
+    EpisodicGistView,
+    EpisodicMembersResponse,
+    EpisodicMemberView,
+    EpisodicWindowResponse,
+    ForgetCandidate,
     MemoryEvolutionEntry,
     MemoryLinkEdge,
     MemoryLinkView,
@@ -29,16 +37,51 @@ from persona_api.schemas.responses import (
     MemorySearchResult,
     MemoryWindowResponse,
 )
+from persona_api.services import persona_service
+from persona_api.services.persona_service import persona_name_from_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from persona.audit import AuditLogger
     from persona.graph.models import ConceptNode, NodeProvenance, TypedLink
     from persona.graph.protocol import GraphStore
+    from persona.schema.chunks import PersonaChunk
+    from persona.stores.backend import Backend
+    from sqlalchemy import Engine
 
 # Provisional window sizes (K5-D-2 — B1-tuned; config later).
 _SEED_LIMIT = 200
 _NEIGHBOR_LIMIT = 60
+
+# Spec K11: how many episodic candidates to pull per persona before floor-filtering.
+# Generous — the forget-preview is an off-turn action (D-K11-8: latency is a
+# non-constraint), so wide recall beats a tight budget that might miss evidence.
+_FORGET_QUERY_TOP_K = 20
+# Spec K11, T2: the episodic browser's ``q`` search budget — same generous, off-turn
+# recall as the forget-preview above (a browse/search click, not a chat turn).
+_EPISODIC_QUERY_TOP_K = 20
+# Page size for paging through the owner's personas (below) — NOT a cap: every page
+# is fetched, so an owner with more personas than this is still scanned exhaustively.
+_PERSONA_SCAN_PAGE_SIZE = 500
+
+
+class ForgetSettings(BaseSettings):
+    """Cross-layer forget tunables (Spec K11), read from ``PERSONA_FORGET_*`` env vars.
+
+    Mirrors the ``GraphSettings``/``EpisodicSettings`` precedent (env-driven, never
+    hardcoded thresholds).
+
+    Attributes:
+        similarity_floor: A forget-preview candidate's cosine similarity
+            (``1 - distance``) to the concept node's content must be at least this to
+            surface (D-K11-1). The hybrid semantic + confirm design: wide recall, a
+            confirmable floor, never a silent auto-delete.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="PERSONA_FORGET_", extra="ignore")
+
+    similarity_floor: float = Field(default=0.80, ge=0.0, le=1.0)
 
 
 def _conversation_id(origin: NodeProvenance) -> str | None:
@@ -295,4 +338,297 @@ def delete(store: GraphStore, owner_id: str, node_id: str) -> bool:
     return store.delete_node(owner_id, node_id)
 
 
-__all__ = ["build_window", "correct", "delete", "node_detail", "search"]
+def _list_all_owner_personas(rls_engine: Engine) -> list[dict[str, object]]:
+    """Every one of the owner's personas — paged, never truncated.
+
+    Spec K11: a forget is a privacy action, and a privacy action must never silently
+    skip data. ``persona_service.list_personas`` is itself paginated (``limit``/
+    ``offset``), so we loop pages of ``_PERSONA_SCAN_PAGE_SIZE`` until a short page
+    signals the end, accumulating every persona regardless of how many the owner has.
+    """
+    personas: list[dict[str, object]] = []
+    offset = 0
+    while True:
+        page = persona_service.list_personas(
+            rls_engine=rls_engine, limit=_PERSONA_SCAN_PAGE_SIZE, offset=offset
+        )
+        personas.extend(page)
+        if len(page) < _PERSONA_SCAN_PAGE_SIZE:
+            break
+        offset += _PERSONA_SCAN_PAGE_SIZE
+    return personas
+
+
+def forget_preview(
+    *,
+    graph_store: GraphStore,
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    rls_engine: Engine,
+    owner_id: str,
+    node_id: str,
+    floor: float,
+) -> list[ForgetCandidate]:
+    """Cross-persona episodic evidence for a concept node, ready for owner confirmation.
+
+    Spec K11, D-K11-1 (hybrid semantic + confirm): embeds the node's content — via
+    ``episodic.query``, so the SAME embedder the episodic store writes with does the
+    matching — then queries every one of the owner's personas' episodic stores
+    (D-K11-3: the concept graph is user-wide but episodic is per-persona, so a forget
+    must scan across all of them). Only **raw** evidence at/above ``floor`` similarity
+    is returned: deleting it is what starves re-distillation (D-K11-2) and it already
+    cascades the gists it covers on delete (K8-D-14), so no separate gist candidate is
+    needed here. Nothing is deleted — a pure preview (CQS). Returns ``[]`` when the
+    node is not the owner's (the route 404s via ``node_detail``, mirroring K5).
+
+    ``memory_backend``/``audit_logger``/``rls_engine`` are threaded in (not rebuilt
+    here) so the SAME process-shared embedder and audit routing the rest of the app
+    uses apply — construction, not a fresh env-config each call (D-K11-8 makes
+    latency a non-constraint for the request itself, not for reloading an ML model
+    from disk on every preview click).
+    """
+    node = graph_store.get_node(owner_id, node_id)
+    if node is None:
+        return []
+    episodic = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    personas = _list_all_owner_personas(rls_engine)
+    candidates: list[ForgetCandidate] = []
+    for row in personas:
+        persona_id = str(row["id"])
+        persona_name = persona_name_from_yaml(str(row.get("yaml") or "")) or persona_id
+        for chunk, similarity in _match_episodic_chunks(
+            episodic, persona_id, [node.content], floor, top_k=_FORGET_QUERY_TOP_K
+        ):
+            candidates.append(
+                ForgetCandidate(
+                    persona_id=persona_id,
+                    persona_name=persona_name,
+                    chunk_id=chunk.id,
+                    kind="raw",
+                    text=chunk.text,
+                    score=similarity,
+                )
+            )
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    return candidates
+
+
+def _match_episodic_chunks(
+    store: EpisodicStore,
+    persona_id: str,
+    texts: list[str],
+    floor: float,
+    *,
+    top_k: int,
+) -> list[tuple[PersonaChunk, float]]:
+    """Query ``texts`` against a persona's episodic store; keep hits at/above ``floor``.
+
+    The one similarity-matching primitive behind both :func:`forget_preview` (content-
+    match a concept node's content against every owned persona) and
+    :func:`match_episodic_by_text` (content-match a deleted conversation's message
+    texts against ONE persona, Spec K11 T3, D-K11-9) — factored out so the two forget
+    paths share the exact same matcher instead of two independently-drifting
+    implementations of "similarity = 1 - distance, at/above the floor."
+
+    Runs one ``store.query(persona_id, text, top_k)`` per text in ``texts`` and keeps
+    each hit whose similarity clears ``floor``, deduplicated by chunk id in first-hit
+    order across ``texts`` (a chunk matching two different candidate texts is reported
+    once, at its first — not necessarily highest — score).
+    """
+    seen: set[str] = set()
+    matched: list[tuple[PersonaChunk, float]] = []
+    for text in texts:
+        for chunk in store.query(persona_id, text, top_k):
+            if chunk.id in seen:
+                continue
+            similarity = 0.0 if chunk.distance is None else 1.0 - float(chunk.distance)
+            if similarity < floor:
+                continue
+            seen.add(chunk.id)
+            matched.append((chunk, similarity))
+    return matched
+
+
+def match_episodic_by_text(
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    persona_id: str,
+    texts: list[str],
+    floor: float,
+    *,
+    top_k: int = _FORGET_QUERY_TOP_K,
+) -> list[str]:
+    """Content-match one persona's episodic chunk ids against candidate texts.
+
+    Spec K11, T3 (D-K11-9): the LEGACY half of conversation-delete's forget cascade —
+    a pre-stamp chunk carries no ``metadata["conversation_id"]``, so
+    ``chat_service.delete_conversation`` falls back to this semantic match over the
+    deleted conversation's own message texts (the exact-match half is a plain metadata
+    filter, no store call needed). Reuses :func:`_match_episodic_chunks`, the SAME
+    matcher :func:`forget_preview` uses — one similarity formula for both forget paths.
+    Returns bare chunk ids (not full :class:`ForgetCandidate`\\ s): the caller only
+    needs ids to feed ``episodic.remove_documents``.
+    """
+    store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    return [
+        chunk.id
+        for chunk, _similarity in _match_episodic_chunks(
+            store, persona_id, texts, floor, top_k=top_k
+        )
+    ]
+
+
+def forget(
+    *,
+    graph_store: GraphStore,
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    rls_engine: Engine,
+    owner_id: str,
+    node_id: str,
+    episodic: list[tuple[str, str]],
+) -> None:
+    """Commit a cross-layer forget (Spec K11, D-K11-2): episodic evidence, then the node.
+
+    The confirmed ``episodic`` pairs (``(persona_id, chunk_id)``, grouped per persona)
+    are deleted FIRST via ``episodic.remove_documents`` — the primary act, since it
+    already cascades every gist the raw chunk covers (K8-D-14) and starves the
+    sleep-time engine's re-distillation (the resurrection guard). The concept node's
+    delete rides along in the same operation.
+
+    ``rls_engine`` re-derives the owner's persona-id set (``list_personas``) and any
+    pair naming a persona outside it is dropped before deletion — defense in depth
+    on top of RLS (which already fails a foreign ``persona_id`` closed at the
+    ``memory_backend`` connection, matching zero rows, never an error, never a leak —
+    the K5-proven pattern): a bad id is silently dropped here rather than issuing a
+    DELETE the database would no-op anyway.
+    """
+    owned_persona_ids = {str(row["id"]) for row in _list_all_owner_personas(rls_engine)}
+    store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    by_persona: dict[str, list[str]] = {}
+    for persona_id, chunk_id in episodic:
+        if persona_id not in owned_persona_ids:
+            continue
+        by_persona.setdefault(persona_id, []).append(chunk_id)
+    for persona_id, chunk_ids in by_persona.items():
+        store.remove_documents(persona_id, chunk_ids)
+    delete(graph_store, owner_id, node_id)
+
+
+def episodic_window(
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    persona_id: str,
+    *,
+    q: str | None = None,
+    top_k: int = _EPISODIC_QUERY_TOP_K,
+) -> EpisodicWindowResponse:
+    """The episodic browser's gist-layer window for one persona (Spec K11, D-K11-5).
+
+    No ``q``: every gist for the persona, newest-first. With ``q``: a semantic search
+    over the RAW layer (``episodic.query`` — the exact recall method the chat/voice
+    loop calls), reported at gist granularity by resolving each hit to its covering
+    gist (``pyramid.covering_gists``), deduplicated in hit order. A raw hit with no
+    covering gist yet (not consolidated) has no browser entry — the browser is
+    gist-layer by default (D-K11-5, for scale); the standalone raw layer is reached
+    via drill-down (``GET .../members``), not via this window.
+
+    ``memory_backend``/``audit_logger`` are threaded in (not rebuilt here) so the SAME
+    process-shared embedder applies (mirrors :func:`forget_preview`'s D-K11-8 rationale).
+    """
+    store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    gists: list[PersonaChunk]
+    if q:
+        hits = store.query(persona_id, q, top_k)
+        covering = store.pyramid.covering_gists(persona_id, [c.id for c in hits])
+        seen: set[str] = set()
+        gists = []
+        for chunk in hits:
+            gist = covering.get(chunk.id)
+            if gist is None or gist.id in seen:
+                continue
+            seen.add(gist.id)
+            gists.append(gist)
+    else:
+        gists = sorted(store.pyramid.gists(persona_id), key=lambda g: g.created_at, reverse=True)
+    return EpisodicWindowResponse(
+        available=True,
+        gists=[
+            EpisodicGistView(
+                id=g.id, text=g.text, member_ids=list(g.member_ids), created_at=g.created_at
+            )
+            for g in gists
+        ],
+    )
+
+
+def episodic_members(
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    persona_id: str,
+    gist_id: str,
+) -> EpisodicMembersResponse:
+    """A gist's raw members, in gist order (drill-down; Spec K11, D-K11-5).
+
+    Empty when the gist id is unknown/not the persona's (RLS already scopes
+    ``persona_id``) — the route never errors on a stale/foreign gist id, it just
+    shows nothing (mirrors :meth:`persona.stores.pyramid.EpisodicPyramid.drill`).
+    """
+    store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    members = store.pyramid.drill(persona_id, gist_id)
+    return EpisodicMembersResponse(
+        members=[EpisodicMemberView(id=m.id, text=m.text, created_at=m.created_at) for m in members]
+    )
+
+
+def episodic_delete(
+    memory_backend: Backend,
+    audit_logger: AuditLogger,
+    persona_id: str,
+    chunk_id: str,
+    *,
+    is_gist: bool,
+) -> bool:
+    """Delete one episodic node in the browser (Spec K11, D-K11-6).
+
+    A **raw chunk** deletes itself via ``remove_documents([id])`` (cascades its
+    covering gist, K8-D-14). A **gist** deletes its cluster's raw members via
+    ``remove_documents(gist.member_ids)`` — the cascade then removes the gist
+    itself, so the browser never leaves an orphaned gist pointing at nothing.
+    Concept-graph facts are untouched either way (D-K11-6: episodic-initiated
+    deletes do not reach the concept graph — facts are managed in the concept view).
+
+    Returns ``False`` (the route 404s) when the id is not found on the persona's
+    (RLS-scoped) episodic store — existence-disclosure-safe, mirroring
+    :func:`delete`'s ``bool`` return for the K5 ``delete_node`` route.
+    """
+    store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+    if is_gist:
+        gist = next((g for g in store.pyramid.gists(persona_id) if g.id == chunk_id), None)
+        if gist is None:
+            return False
+        store.remove_documents(persona_id, list(gist.member_ids))
+        return True
+    existing = memory_backend.get_by_logical_ids(
+        persona_id=persona_id, store_kind="episodic", logical_ids=[chunk_id]
+    )
+    if not existing:
+        return False
+    store.remove_documents(persona_id, [chunk_id])
+    return True
+
+
+__all__ = [
+    "ForgetSettings",
+    "build_window",
+    "correct",
+    "delete",
+    "episodic_delete",
+    "episodic_members",
+    "episodic_window",
+    "forget",
+    "forget_preview",
+    "match_episodic_by_text",
+    "node_detail",
+    "search",
+]

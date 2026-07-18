@@ -24,6 +24,8 @@ __all__ = [
     "CreateMCPServerRequest",
     "CreatePersonaRequest",
     "EditMessageRequest",
+    "ForgetEpisodicRef",
+    "ForgetRequest",
     "ImageRef",
     "MemoryCorrectionRequest",
     "PostMessageRequest",
@@ -72,6 +74,29 @@ class MemoryCorrectionRequest(_Input):
     """
 
     content: str = Field(min_length=1, max_length=8000)
+
+
+class ForgetEpisodicRef(_Input):
+    """One piece of confirmed episodic evidence to forget (Spec K11, D-K11-1).
+
+    A raw chunk id the owner kept from a ``forget-preview`` response, labelled with
+    the persona whose episodic store it lives in (episodic is per-persona; D-K11-3).
+    """
+
+    persona_id: str = Field(min_length=1)
+    chunk_id: str = Field(min_length=1)
+
+
+class ForgetRequest(_Input):
+    """Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence.
+
+    The confirmed subset of a prior ``forget-preview`` response — deselectable, so
+    ``episodic`` may be a strict subset of (or empty relative to) what was shown.
+    Deleting this evidence (cascading its covering gists, K8-D-14) is what starves
+    the sleep-time engine's re-distillation; the concept node is deleted alongside it.
+    """
+
+    episodic: list[ForgetEpisodicRef] = Field(default_factory=list)
 
 
 class CreatePersonaRequest(_Input):

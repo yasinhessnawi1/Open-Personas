@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from persona.backends import StreamChunk
     from persona.sandbox.result import SandboxFile
+    from persona.stores.episodic import EpisodicStore
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.images import TurnImage
     from persona_runtime.loop import ConversationLoop
@@ -206,12 +207,72 @@ def create_conversation(
     return conv_id
 
 
-def delete_conversation(*, rls_engine: Engine, conversation_id: str) -> None:
+def _conversation_message_texts(rls_engine: Engine, conversation_id: str) -> list[str]:
+    """Every message's raw text ever sent in this conversation (K11-T3 legacy match).
+
+    Deliberately wider than :func:`_load_conversation` / :func:`get_conversation`
+    (which filter to the LIVE, non-superseded view for model context / web listing):
+    an edited-away or regenerated-away message can still be exactly what a legacy
+    (pre-stamp) episodic chunk was distilled from, so every row — every
+    ``superseded_at`` state — feeds the content-match fallback. Read BEFORE the
+    conversation delete below (the messages cascade away with it via FK).
+    """
+    with rls_engine.begin() as conn:
+        rows = (
+            conn.execute(
+                select(messages_t.c.content).where(messages_t.c.conversation_id == conversation_id)
+            )
+            .scalars()
+            .all()
+        )
+    return [str(r) for r in rows if r]
+
+
+def delete_conversation(
+    *,
+    rls_engine: Engine,
+    conversation_id: str,
+    forget_memory: bool = False,
+    persona_id: str | None = None,
+    episodic_store: EpisodicStore | None = None,
+    match_texts: Callable[[str, list[str], float], list[str]] | None = None,
+    match_floor: float = 0.80,
+) -> None:
     """Delete a conversation (cascades to its messages + turn_logs via FK).
 
     RLS-scoped → a conversation that isn't the caller's is invisible and the
     delete matches no row → 404.
+
+    ``forget_memory`` (Spec K11, T3, D-K11-9): when ``True``, ALSO forgets the
+    episodic memory this conversation produced — opt-in, default ``False`` (a
+    plain delete leaves the persona's memory intact, matching prior behaviour
+    byte-for-byte). The cascade unions two matches, both scoped to
+    ``persona_id``'s episodic store:
+
+    - **Exact** — every raw chunk whose ``metadata["conversation_id"]`` equals
+      this conversation's id (stamped at write time by
+      ``ConversationLoop._write_episodic`` / the voice recorder / the
+      origination recorder — every live writer, T3).
+    - **Content-match** — ``match_texts(persona_id, texts, match_floor)`` run
+      over this conversation's own message texts, the fallback for LEGACY
+      chunks written before the stamp existed (the caller wires this to
+      :func:`persona_api.services.memory_service.match_episodic_by_text`,
+      Spec K11 T1's matcher factored out for reuse). ``match_texts`` matches
+      persona-wide, so its result is filtered here to LEGACY chunks only
+      (no ``conversation_id`` key at all) before joining the union — a
+      STAMPED chunk belonging to a *different* conversation must never be
+      swept in just because its text happens to be similar; a stamped chunk
+      for THIS conversation is already covered by the exact-match set above.
+
+    ``persona_id``/``episodic_store``/``match_texts`` are only needed when
+    ``forget_memory=True``; a missing collaborator (community/no-memory-backend
+    edition) makes the cascade a no-op rather than an error — the conversation
+    delete itself always proceeds.
     """
+    message_texts: list[str] = []
+    if forget_memory:
+        message_texts = _conversation_message_texts(rls_engine, conversation_id)
+
     with rls_engine.begin() as conn:
         result = conn.execute(
             delete(conversations_t)
@@ -222,6 +283,28 @@ def delete_conversation(*, rls_engine: Engine, conversation_id: str) -> None:
             raise ConversationNotFoundError(
                 "conversation not found", context={"id": conversation_id}
             )
+
+    if forget_memory and persona_id is not None and episodic_store is not None:
+        all_chunks = episodic_store.get_all(persona_id)
+        exact_ids = {
+            chunk.id
+            for chunk in all_chunks
+            if chunk.metadata.get("conversation_id") == conversation_id
+        }
+        content_ids: set[str] = set()
+        if message_texts and match_texts is not None:
+            # Legacy-only: a chunk carrying ANY conversation_id stamp — this
+            # conversation's (already in exact_ids) or another's — is excluded,
+            # so content-match can only ever catch pre-T3, unstamped chunks.
+            stamped_ids = {chunk.id for chunk in all_chunks if "conversation_id" in chunk.metadata}
+            content_ids = {
+                chunk_id
+                for chunk_id in match_texts(persona_id, message_texts, match_floor)
+                if chunk_id not in stamped_ids
+            }
+        forgotten = exact_ids | content_ids
+        if forgotten:
+            episodic_store.remove_documents(persona_id, list(forgotten))
 
 
 def set_title(*, rls_engine: Engine, conversation_id: str, title: str) -> None:

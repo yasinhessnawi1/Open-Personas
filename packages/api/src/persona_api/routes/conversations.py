@@ -7,13 +7,15 @@ RLS-scoped via ``get_current_user``. The per-request loop builder comes from
 
 from __future__ import annotations
 
+import functools
 import json
 from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from persona.approvals import is_decision_cue
+from persona.stores.episodic import EpisodicStore
 
 from persona_api.approvals import ApprovalStore
 from persona_api.auth import AuthenticatedUser, get_current_user
@@ -39,6 +41,7 @@ from persona_api.services import (
     audit_service,
     chat_service,
     document_service,
+    memory_service,
     notifications_service,
 )
 
@@ -148,6 +151,15 @@ async def delete_conversation(
     conversation_id: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
+    forget_memory: bool = Query(
+        default=False,
+        description=(
+            "Also forget the episodic memory this conversation produced (Spec K11, "
+            "D-K11-9) — exact match on chunks stamped with this conversation's id, "
+            "content-match fallback for legacy (pre-stamp) chunks. Off by default: "
+            "a plain delete leaves the persona's memory intact."
+        ),
+    ),
 ) -> None:
     """Delete a conversation + all its messages + workspace artefacts.
 
@@ -163,6 +175,11 @@ async def delete_conversation(
        the conversation's messages. Spec 13 owns this branch; the two
        cascade extensions coexist additively in this same handler per
        the D-14-X-cascade-coordination locking decision.
+    4. **Episodic memory** (Spec K11, T3, D-K11-9) — opt-in via
+       ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s
+       docstring for the exact ∪ content-match cascade. A no-op when the
+       memory backend isn't composed (community/no-DB edition) — the
+       conversation delete itself is unaffected either way.
 
     404 if not the caller's conversation (RLS-scoped).
     """
@@ -174,9 +191,29 @@ async def delete_conversation(
     )
     persona_id = str(conv["persona_id"])
 
-    # DB delete (existing cascade to messages + turn_logs).
+    # K11-T3: wire the forget cascade's collaborators only when actually asked for
+    # AND the memory backend is composed — a keyless/community boot without a
+    # memory backend leaves the cascade a no-op (delete_conversation's own guard),
+    # this just avoids building an EpisodicStore/partial for nothing.
+    memory_backend = getattr(request.app.state, "memory_backend", None)
+    audit_logger = getattr(request.app.state, "audit_logger", None)
+    episodic_store = None
+    match_texts = None
+    if forget_memory and memory_backend is not None and audit_logger is not None:
+        episodic_store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
+        match_texts = functools.partial(
+            memory_service.match_episodic_by_text, memory_backend, audit_logger
+        )
+
+    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
     chat_service.delete_conversation(
-        rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
+        rls_engine=request.app.state.rls_engine,
+        conversation_id=conversation_id,
+        forget_memory=forget_memory,
+        persona_id=persona_id,
+        episodic_store=episodic_store,
+        match_texts=match_texts,
+        match_floor=memory_service.ForgetSettings().similarity_floor,
     )
 
     # T19 — document workspace + DocumentStore chunks cascade (R5-D-4: via the

@@ -65,7 +65,13 @@ def _write_chat_episodic(store: _WriteStore, user: str, assistant: str) -> None:
 
 
 def _write_voice_episodic(store: _WriteStore, user: str, heard: str) -> None:
-    ctx = SimpleNamespace(persona_id=_PERSONA, stores={"episodic": store})
+    # A conversation_id must be present — VoiceTurnContext.conversation is a
+    # required field in production, never optional (K11-T3 stamp).
+    ctx = SimpleNamespace(
+        persona_id=_PERSONA,
+        stores={"episodic": store},
+        conversation=SimpleNamespace(conversation_id="conv_voice"),
+    )
     recorder = SimpleNamespace(_ctx=ctx, _clock=lambda: _NOW)
     VoiceTurnRecorder._write_episodic(recorder, user, heard)  # type: ignore[arg-type]
 

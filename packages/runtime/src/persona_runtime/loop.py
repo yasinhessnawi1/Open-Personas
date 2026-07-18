@@ -868,7 +868,9 @@ class ConversationLoop:
             )
             # Persist to episodic so history + recall reflect the exchange. No
             # TurnLog: no model ran, so there is no usage/tier telemetry to record.
-            self._write_episodic(persona_id, user_message, completion_text)
+            self._write_episodic(
+                persona_id, user_message, completion_text, conversation.conversation_id
+            )
             yield _final_chunk(None)
             return
 
@@ -1777,7 +1779,7 @@ class ConversationLoop:
         #    (D-05-12). An early consumer-exit mid-stream never reaches here
         #    because the generator stays suspended at an earlier yield.
         latency_ms = (time.perf_counter() - started) * 1000.0
-        self._write_episodic(persona_id, user_message, assistant_text)
+        self._write_episodic(persona_id, user_message, assistant_text, conversation.conversation_id)
         self._write_turn_log(
             conversation=conversation,
             tier=tier,
@@ -2528,23 +2530,38 @@ class ConversationLoop:
             truncated = True
         return ToolCall(name=name, args=args, call_id=call_id, truncated=truncated)
 
-    def _write_episodic(self, persona_id: str, user_text: str, assistant_text: str) -> None:
+    def _write_episodic(
+        self,
+        persona_id: str,
+        user_text: str,
+        assistant_text: str,
+        conversation_id: str | None = None,
+    ) -> None:
         """Write one combined episodic chunk per turn (D-05-12; mirrors the CLI).
 
         The id is minted (uuidv7, K8-D-6) — never derived from a store count:
         ``len(get_all(...))`` was an O(N) read per write and raced under
         concurrent writers (Spec K8 fast-track fix).
+
+        ``conversation_id``, when given, stamps ``metadata["conversation_id"]``
+        (Spec K11, D-K11-9): every live call site threads the current turn's
+        conversation id, so ``DELETE /v1/conversations/{id}?forget_memory=true``
+        can find this chunk by EXACT metadata match rather than falling back to
+        the content-match matcher legacy (pre-stamp) chunks need.
         """
         store = self._stores["episodic"]
         chunk_id = mint_chunk_id(persona_id, "episodic")
         now = datetime.now(UTC)
+        metadata = {"importance": "0.5"}
+        if conversation_id is not None:
+            metadata["conversation_id"] = conversation_id
         store.write(
             persona_id,
             [
                 PersonaChunk(
                     id=chunk_id,
                     text=f"USER: {user_text}\nASSISTANT: {assistant_text}",
-                    metadata={"importance": "0.5"},
+                    metadata=metadata,
                     created_at=now,
                     provenance=ChunkProvenance(
                         source=WriteSource.SYSTEM,
