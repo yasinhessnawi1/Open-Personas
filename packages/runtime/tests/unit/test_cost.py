@@ -137,6 +137,20 @@ class TestBasisMapping:
         assert basis == "estimate_static"
         assert cents == pytest.approx(0.30 + 1.50 * 0.5)
 
+    def test_groq_voice_tier_primary_is_priced_by_the_real_static_table(self) -> None:
+        # Finding 2: groq/llama-3.3-70b-versatile — the PERSONA_MID/SMALL primary
+        # and voice-served model — was missing from the groq static table, so voice
+        # LLM turns recorded ``unpriced``. Uses the REAL default source (no injected
+        # source) to prove the metadata row is wired through the resolver chain.
+        cents, basis = compute_turn_cost(
+            provider="groq",
+            model="llama-3.3-70b-versatile",
+            prompt_tokens=1000,
+            completion_tokens=1000,
+        )
+        assert basis == "estimate_static"
+        assert cents == pytest.approx(0.059 + 0.079)  # $0.59 / $0.79 per Mtok
+
     def test_catalog_hit_is_estimate_catalog(self) -> None:
         source = _RecordingSource({"z-ai/glm-4.6": (_META, "catalog")})
         _, basis = compute_turn_cost(

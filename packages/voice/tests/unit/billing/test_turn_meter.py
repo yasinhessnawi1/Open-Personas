@@ -206,6 +206,33 @@ class TestBillTurn:
         asyncio.run(meter.bill_turn(1))
         assert ledger.calls == []
 
+    def test_turn_without_llm_round_does_not_price_empty_attribution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Finding 3: a STT/TTS-only turn (no ``note_llm_usage``) must NOT reach
+        # ``compute_turn_cost`` with the accumulator's empty provider/model — that
+        # logs a spurious ``no pricing metadata; turn recorded unpriced provider=
+        # model=`` warning on every LLM-less turn (and prices 0 anyway).
+        from persona_voice.billing import turn_meter as tm
+
+        seen: list[dict[str, object]] = []
+        real = tm.compute_turn_cost
+
+        def _spy(**kw: object) -> tuple[float, str]:
+            seen.append(kw)
+            return real(**kw)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(tm, "compute_turn_cost", _spy)
+        ledger = _RecordingLedger()
+        meter = _meter(ledger, streamed_seconds=[30.0])
+        meter.note_tts_chars(1000)  # STT + TTS this turn, but NO LLM round
+        asyncio.run(meter.bill_turn(1))
+        # compute_turn_cost is never invoked for an LLM-less turn (so never with
+        # empty attribution) — no unpriced-warning spam.
+        assert seen == []
+        # …and the STT+TTS cost still bills.
+        assert ledger.calls, "an STT+TTS turn must still bill"
+
     def test_fail_soft_ledger_raise_does_not_escape(self) -> None:
         ledger = _RaisingLedger()
         meter = _meter(ledger, streamed_seconds=[60.0])

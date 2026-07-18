@@ -27,4 +27,27 @@ MODELS: dict[str, ModelMetadata] = {
         vision_supported=False,
         context_length=128_000,
     ),
+    # $0.59 / $0.79 per Mtok (groq.com/pricing, live-verified 2026-07-18). The
+    # PERSONA_MID_MODELS / PERSONA_SMALL_MODELS primary — voice's served model
+    # (M3 F2: was unpriced, so voice LLM turns recorded ``unpriced``). No vision.
+    "groq/llama-3.3-70b-versatile": ModelMetadata(
+        cost_input_per_1k_tokens=0.059,
+        cost_output_per_1k_tokens=0.079,
+        latency_p50_ms=250.0,
+        quality_benchmark=0.68,
+        tools_supported=True,
+        vision_supported=False,
+        context_length=128_000,
+    ),
+    # $0.11 / $0.34 per Mtok (groq.com/pricing, live-verified 2026-07-18). A
+    # PERSONA_MID_MODELS fallback; Llama 4 Scout is multimodal (vision).
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct": ModelMetadata(
+        cost_input_per_1k_tokens=0.011,
+        cost_output_per_1k_tokens=0.034,
+        latency_p50_ms=200.0,
+        quality_benchmark=0.56,
+        tools_supported=True,
+        vision_supported=True,
+        context_length=128_000,
+    ),
 }

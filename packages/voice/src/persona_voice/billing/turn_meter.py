@@ -227,14 +227,23 @@ class VoiceTurnBillingMeter:
         tts_cents, _ = voice_tts_cents(
             self._tts_provider, chars=usage.tts_chars, model=self._tts_model
         )
-        llm_cents, _ = compute_turn_cost(
-            provider=usage.llm_provider,
-            model=usage.llm_model,
-            prompt_tokens=usage.llm_prompt_tokens,
-            completion_tokens=usage.llm_completion_tokens,
-            actual_cost_usd=usage.llm_cost_usd,
-            source=self._cost_source,
-        )
+        # Finding 3: price the LLM arm ONLY when a real model round was recorded
+        # this turn. A turn with no LLM round (e.g. a TTS-only greeting, or an
+        # STT/TTS-only turn) leaves the accumulator's provider/model empty;
+        # calling ``compute_turn_cost(provider="", model="")`` logs a spurious
+        # ``no pricing metadata; turn recorded unpriced provider= model=`` warning
+        # (and returns 0.0 anyway). Guarding on the served model keeps the empty
+        # attribution out of the priced-turn path entirely.
+        llm_cents = 0.0
+        if usage.llm_model:
+            llm_cents, _ = compute_turn_cost(
+                provider=usage.llm_provider,
+                model=usage.llm_model,
+                prompt_tokens=usage.llm_prompt_tokens,
+                completion_tokens=usage.llm_completion_tokens,
+                actual_cost_usd=usage.llm_cost_usd,
+                source=self._cost_source,
+            )
         return stt_cents + tts_cents + llm_cents
 
     # ----- deducts (off the audio loop, fail-soft) ---------------------------
