@@ -983,3 +983,79 @@ class TestExpressivityCapture:
         spoken = await _drain(producer)
         assert "".join(spoken) == "Hi."
         assert "{{#" not in "".join(spoken)
+
+
+class _RecordingTurnMeter:
+    """A per-turn billing-meter double recording the producer's feeds (Spec M3, T6b-1)."""
+
+    def __init__(self) -> None:
+        self.chars = 0
+        self.llm: list[dict[str, Any]] = []
+
+    def note_tts_chars(self, count: int) -> None:
+        self.chars += count
+
+    def note_llm_usage(
+        self,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float | None,
+        provider: str,
+        model: str,
+    ) -> None:
+        self.llm.append(
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": cost_usd,
+                "provider": provider,
+                "model": model,
+            }
+        )
+
+
+class TestPerTurnMeteringFeeds:
+    """Spec M3 (T6b-1): the producer feeds the meter the chars sent to TTS + LLM usage."""
+
+    @pytest.mark.asyncio
+    async def test_counts_spoken_chars_sent_to_tts(self) -> None:
+        meter = _RecordingTurnMeter()
+        backend = _ScriptedBackend([StreamChunk(delta="Hel"), StreamChunk(delta="lo"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend), turn_meter=meter)  # type: ignore[arg-type]
+        spoken = await _drain(producer)
+        assert "".join(spoken) == "Hello"
+        assert meter.chars == 5  # exactly the characters yielded to TTS
+
+    @pytest.mark.asyncio
+    async def test_stripped_tag_chars_are_not_counted(self) -> None:
+        # The feeling tag is STRIPPED before TTS, so it is not a synthesized char.
+        meter = _RecordingTurnMeter()
+        backend = _ScriptedBackend([StreamChunk(delta="{{#happy}}Hi."), _final()])
+        producer = VoiceModelReplyProducer(_context(backend), turn_meter=meter)  # type: ignore[arg-type]
+        spoken = await _drain(producer)
+        assert "".join(spoken) == "Hi."
+        assert meter.chars == 3  # "Hi." only — the tag never reached TTS
+
+    @pytest.mark.asyncio
+    async def test_captures_llm_usage_from_the_final_chunk(self) -> None:
+        meter = _RecordingTurnMeter()
+        backend = _ScriptedBackend([StreamChunk(delta="Hi"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend), turn_meter=meter)  # type: ignore[arg-type]
+        await _drain(producer)
+        # The final chunk's usage is captured once, tagged with the SERVED backend.
+        assert meter.llm == [
+            {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cost_usd": None,
+                "provider": "anthropic",
+                "model": "test-model",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_meter_is_a_noop(self) -> None:
+        backend = _ScriptedBackend([StreamChunk(delta="Hi"), _final()])
+        producer = VoiceModelReplyProducer(_context(backend))  # unmetered
+        assert "".join(await _drain(producer)) == "Hi"  # byte-identical, no metering

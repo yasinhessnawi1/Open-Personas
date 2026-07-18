@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from persona.backends.errors import AuthenticationError
+from persona.billing import BillingConfig
 from persona.errors import PersonaError
 from persona.imagegen import (
     ImageBackend,
@@ -431,6 +432,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             origination=within_runtime_originator,
             # Spec A11: a completed run's run_terminal notification pings the bell live.
             event_channel=event_channel,
+            # Spec M3 (T4a): incremental caller-paid billing + exhaustion cutoff.
+            # ``credits_policy`` is set at factory time (create_app), available here;
+            # ``cost_source`` uses the static default (the shared resolver is wired
+            # later in the lifespan) — OpenRouter actuals still price exactly.
+            credits_policy=app.state.credits_policy,
+            billing_config=BillingConfig(),
+            agentic_floor=config.agentic_credit_floor,
         )
         if rls_engine is not None
         else None
@@ -531,6 +539,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Spec M2 review (reviewer defense-in-depth, TAKE): the per-turn
             # charge sanity ceiling (PERSONA_API_MAX_TURN_CREDITS).
             max_turn_credits=config.max_turn_credits,
+            # Spec M3 (T1b): the shared credit formula config (PERSONA_CREDIT_MARKUP,
+            # default 1.0 → byte-identical charge; chat carries no per-call infra).
+            billing_config=BillingConfig(),
             job_queue=app.state.job_queue,
             origination_service=origination_service,
             task_steering_service=task_steering_service,
@@ -774,6 +785,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # graph isn't composed (no-Postgres engine) ⇒ the Memory area reads as
             # empty + the nav row gates (the routes fall back gracefully).
             app.state.graph_store = runtime_factory.graph_store
+            # Spec M3 (T3a): the shared cost-pricing chain (static + OpenRouter
+            # catalog) — the image-gen path reads it as its ``cost_source`` to price
+            # the token-metered OpenRouter image model (estimate_catalog fallback
+            # when the response carries no usage.cost). Absent on an unwired runtime
+            # (community) → the image path uses compute_turn_cost's static default.
+            app.state.metadata_resolver = runtime_factory.metadata_resolver
             # Spec A6 (T-seam): the shared approval-resolution service — the ONE live path that
             # completes A3's loop (a parked proposal → floor → verbatim replay → resume). Both the
             # approvals inbox and the chat reply path consume it (one floor, one CAS, one durable

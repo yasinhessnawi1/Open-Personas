@@ -18,14 +18,15 @@ from pydantic import SecretStr, ValidationError
 
 
 class TestDefaults:
-    def test_default_provider_is_openai(self) -> None:
-        # D-15-X-demo-primary-provider: OpenAI is demo-primary at v0.1.
+    def test_default_provider_is_openrouter(self) -> None:
+        # Spec M3 (D-M3-10, T3a): the wired default is GPT Image 2 via OpenRouter.
         config = ImageBackendConfig()
-        assert config.provider == "openai"
+        assert config.provider == "openrouter"
 
-    def test_default_model_is_gpt_image_1(self) -> None:
+    def test_default_model_is_gpt_5_4_image_2(self) -> None:
+        # Spec M3 (D-M3-10): confirmed OpenRouter slug (env-overridable).
         config = ImageBackendConfig()
-        assert config.model == "gpt-image-1"
+        assert config.model == "openai/gpt-5.4-image-2"
 
     def test_default_api_key_is_none(self) -> None:
         # Missing-key behaviour at config-time: api_key returns None.

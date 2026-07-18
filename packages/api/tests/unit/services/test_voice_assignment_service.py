@@ -529,6 +529,75 @@ class TestCatalogueFetchFailureLogging:
         assert "status=503" in warnings[0]
 
 
+# ----- owner-billing (Spec M3, T5b) ----------------------------------------
+
+
+class _UsageBackend:
+    """A pick backend whose response carries real usage (for the billing path)."""
+
+    provider_name = "openrouter"
+    model_name = "m"
+    supports_native_tools = False
+    supports_vision = False
+
+    async def chat(self, messages: object, **_: object) -> SimpleNamespace:  # noqa: ARG002
+        return SimpleNamespace(
+            content="v1",
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=1000, cost_usd=0.03),
+        )
+
+
+class _RecordingPolicy:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def capture_up_to_idempotent(self, **kw: object) -> tuple[int, int]:
+        self.calls.append(kw)
+        return int(kw["amount"]), 0  # type: ignore[call-overload]
+
+
+class TestVoiceAutopickBilling:
+    """T5b: the auto-pick's real model cost is owner-billed, keyed once per persona."""
+
+    def test_owner_billed_with_persona_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            vas,
+            "_fetch_catalogue",
+            _aret(("cartesia", [_option("v1", "feminine"), _option("v2", "masculine")])),
+        )
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **_k: None)
+        policy = _RecordingPolicy()
+        request = _request(
+            config=SimpleNamespace(voice_service_url="http://voice", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: _UsageBackend()),
+            rls_engine=object(),
+            bearer="Bearer t",
+        )
+        request.app.state.credits_policy = policy
+        asyncio.run(vas.maybe_assign_voice(request, owner_id="o", persona_id="p", yaml_str=_YAML))
+        assert len(policy.calls) == 1
+        kw = policy.calls[0]
+        assert kw["amount"] == 3  # ceil(3.0¢) actual
+        assert kw["reason"] == "voice_pick:actual_openrouter"
+        assert kw["billing_key"] == "voice_pick:p"
+        assert kw["user_id"] == "o"
+
+    def test_unwired_policy_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            vas, "_fetch_catalogue", _aret(("cartesia", [_option("v1", "feminine")]))
+        )
+        called: dict[str, object] = {}
+        monkeypatch.setattr(vas.persona_service, "set_voice", lambda **k: called.update(k))
+        request = _request(  # no credits_policy on state → billing is inert
+            config=SimpleNamespace(voice_service_url="http://voice", voice_pick_tier="small"),
+            tier_registry=SimpleNamespace(get=lambda _t: _UsageBackend()),
+            rls_engine=object(),
+            bearer="Bearer t",
+        )
+        asyncio.run(vas.maybe_assign_voice(request, owner_id="o", persona_id="p", yaml_str=_YAML))
+        assert called["voice_id"] == "v1"  # pick still persists; billing just no-ops
+
+
 # ----- reconcile_voice_assignments (Spec V14 T5a — the D-V14-13 boot trigger) ---
 
 

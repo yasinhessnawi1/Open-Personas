@@ -25,7 +25,9 @@ from persona.backends.types import ChatResponse, StreamChunk, TokenUsage
 from persona_api.schemas.responses import AuthoringDraft
 from persona_api.services.authoring_prompt import AUTHORING_PROMPT_VERSION
 from persona_api.services.authoring_service import (
+    AuthoringCost,
     AuthoringSampling,
+    _price_usage,
     generate_authoring_draft,
     stream_authoring_draft,
     stream_refine_authoring_draft,
@@ -67,6 +69,15 @@ class _StreamingScriptedBackend:
         self.calls: list[list[object]] = []
         self.sampling: list[dict[str, object]] = []
         self._raises = raises
+
+    @property
+    def provider_name(self) -> str:
+        # Spec M3 (T2a): _price_usage reads provider/model to price the turn.
+        return "mock"
+
+    @property
+    def model_name(self) -> str:
+        return "mock"
 
     def chat_stream(self, messages: list[object], **kwargs: object) -> AsyncIterator[StreamChunk]:
         self.calls.append(list(messages))
@@ -259,3 +270,124 @@ async def test_stream_refine_threads_question_and_answer() -> None:
     sent = backend.calls[0]
     assert any("Which legal area?" in m.content for m in sent)  # type: ignore[attr-defined]
     assert any(m.content == "Tenancy law." for m in sent)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Spec M3 (T2a) — real usage/cost surfacing (the ("cost", AuthoringCost) event,
+# mirroring the chat loop's last_turn_cost_cents/last_turn_cost_basis).
+# ---------------------------------------------------------------------------
+
+
+class _PriceableBackend:
+    """Streams the given content and reports a priceable served model + real usage.
+
+    ``anthropic`` / ``claude-sonnet-5`` is in the static pricing table
+    (0.30 / 1.50 ¢ per 1k tok), so 2000 prompt + 800 completion tokens per attempt
+    cost ``2·0.30 + 0.8·1.50 = 1.8¢`` (basis ``estimate_static``).
+    """
+
+    def __init__(
+        self,
+        *contents: str,
+        provider: str = "anthropic",
+        model: str = "claude-sonnet-5",
+        prompt_tokens: int = 2000,
+        completion_tokens: int = 800,
+        cost_usd: float | None = None,
+    ) -> None:
+        self._contents = list(contents)
+        self.calls = 0
+        self._provider = provider
+        self._model = model
+        self._prompt = prompt_tokens
+        self._completion = completion_tokens
+        self._cost_usd = cost_usd
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def chat_stream(self, messages: list[object], **_kwargs: object) -> AsyncIterator[StreamChunk]:  # noqa: ARG002
+        content = self._contents[self.calls]
+        self.calls += 1
+        prompt, completion, cost_usd = self._prompt, self._completion, self._cost_usd
+
+        async def _gen() -> AsyncIterator[StreamChunk]:
+            yield StreamChunk(delta=content, is_final=False)
+            yield StreamChunk(
+                delta="",
+                is_final=True,
+                usage=TokenUsage(
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    total_tokens=prompt + completion,
+                    cost_usd=cost_usd,
+                ),
+            )
+
+        return _gen()
+
+
+def _costs(events: list[tuple[str, object]]) -> list[AuthoringCost]:
+    return [payload for kind, payload in events if kind == "cost"]  # type: ignore[misc]
+
+
+def test_price_usage_mirrors_compute_turn_cost_for_a_priceable_model() -> None:
+    backend = _PriceableBackend()
+    cents, basis, prompt, completion = _price_usage(
+        backend, TokenUsage(prompt_tokens=2000, completion_tokens=800, total_tokens=2800), None
+    )  # type: ignore[arg-type]
+    assert cents == pytest.approx(1.8)  # 2·0.30 + 0.8·1.50
+    assert basis == "estimate_static"
+    assert (prompt, completion) == (2000, 800)
+
+
+def test_price_usage_prefers_openrouter_actual() -> None:
+    backend = _PriceableBackend(provider="openrouter", model="z-ai/glm-4.6")
+    usage = TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.02)
+    cents, basis, _p, _c = _price_usage(backend, usage, None)
+    assert cents == pytest.approx(2.0)  # 0.02 USD → 2.0¢
+    assert basis == "actual_openrouter"
+
+
+def test_price_usage_none_usage_is_unpriced() -> None:
+    assert _price_usage(_PriceableBackend(), None, None) == (0.0, "unpriced", 0, 0)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_cost_event_carries_the_real_cost_before_the_draft() -> None:
+    backend = _PriceableBackend(GOOD_WITH_QUESTIONS)
+    events = await _drain(stream_authoring_draft(backend, "lawyer", [], []))  # type: ignore[arg-type]
+    kinds = _kinds(events)
+    # Exactly one cost event, emitted immediately before the terminal draft.
+    assert kinds.count("cost") == 1
+    assert kinds[-2:] == ["cost", "draft"]
+    cost = _costs(events)[0]
+    assert cost.cost_cents == pytest.approx(1.8)
+    assert cost.cost_basis == "estimate_static"
+    assert (cost.prompt_tokens, cost.completion_tokens) == (2000, 800)
+
+
+@pytest.mark.asyncio
+async def test_cost_event_sums_both_attempts_on_retry() -> None:
+    # Invalid then valid → two paid generations; the surfaced cost is the SUM.
+    backend = _PriceableBackend(BAD_YAML, GOOD_WITH_QUESTIONS)
+    events = await _drain(stream_authoring_draft(backend, "lawyer", [], []))  # type: ignore[arg-type]
+    assert _kinds(events).count("cost") == 1  # still ONE cost event (the total)
+    cost = _costs(events)[0]
+    assert cost.cost_cents == pytest.approx(3.6)  # 1.8 × 2 attempts
+    assert (cost.prompt_tokens, cost.completion_tokens) == (4000, 1600)
+    assert backend.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cost_event_unpriced_when_the_model_is_off_table() -> None:
+    backend = _PriceableBackend(GOOD_WITH_QUESTIONS, provider="mock", model="mock")
+    events = await _drain(stream_authoring_draft(backend, "lawyer", [], []))  # type: ignore[arg-type]
+    cost = _costs(events)[0]
+    assert cost.cost_cents == 0.0
+    assert cost.cost_basis == "unpriced"

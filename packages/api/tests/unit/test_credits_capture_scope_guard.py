@@ -1,11 +1,16 @@
-"""Default-lane always-on guard: ``capture_up_to`` stays an OPT-IN for ONE caller.
+"""Default-lane always-on guard: ``capture_up_to`` stays scoped to POST-SUCCESS billing.
 
-Spec M2 review, C1's CRITICAL CONSTRAINT: the existing all-or-nothing
-``deduct`` semantics must remain untouched for every other metered caller —
-authoring (``routes/personas.py``, 1000 credits), imagegen
-(``imagegen/service.py``, 100 credits/image), and sandbox code execution
-(``sandbox/runtime_tool.py``, 1 credit). ``capture_up_to`` exists ONLY for the
-chat-turn worker's post-success billing.
+Spec M2 review, C1's CRITICAL CONSTRAINT: the all-or-nothing ``deduct``
+semantics (the atomic conditional floor) must remain untouched for the PRE-flight
+/ guard metered callers. Spec M3 (T3a) AMENDS the C1 scope: partial-capture is
+the correct primitive for POST-SUCCESS billing of already-completed work — where
+an exhausted balance must neither crash nor overdraw. Approved ``capture_up_to``
+callers are therefore the chat-turn worker (post-success shortfall) AND the
+image-gen true-up (``imagegen/service.py`` — the ceiling pre-deduct's real-cost
+reconciliation; the delta arm floors at 0). The PRE-flight callers — authoring +
+avatar (``routes/personas.py``) and sandbox code execution
+(``sandbox/runtime_tool.py``) — must still use all-or-nothing ``deduct`` /
+``deduct_idempotent``, NEVER ``capture_up_to``.
 
 Mirrors ``test_credits_balance_floor_guard.py``'s style: cheap, no-DB,
 source-level assertions so a future refactor that widens the opt-in (or
@@ -17,10 +22,25 @@ from __future__ import annotations
 
 import inspect
 
-_OTHER_METERED_CALL_SITES = (
-    "persona_api.imagegen.service",
+#: The PRE-flight/guard metered callers that must stay all-or-nothing (never
+#: partial-capture). imagegen is NOT here — its post-success true-up legitimately
+#: uses ``capture_up_to`` (Spec M3, T3a).
+_DEDUCT_ONLY_CALL_SITES = (
     "persona_api.routes.personas",
     "persona_api.sandbox.runtime_tool",
+)
+
+#: The approved ``capture_up_to`` callers (post-success / incremental billing of
+#: completed work): the chat-turn worker (post-success shortfall), the image-gen
+#: true-up (T3a), and the agentic-run per-step watcher (T4a — passes the bound
+#: method to ``asyncio.to_thread``, so no trailing paren).
+_CAPTURE_UP_TO_CALLERS = (
+    "persona_api.background.chat_turn_worker",
+    "persona_api.imagegen.service",
+    "persona_api.background.run_worker",
+    # T4b: the task-leg handler uses ``capture_up_to_idempotent`` (post-success,
+    # CAS-ridden owner billing) — floored, so a completed leg is never hard-failed.
+    "persona_api.tasks.handler",
 )
 
 
@@ -48,37 +68,40 @@ def test_capture_up_to_is_additive_not_a_deduct_rewrite() -> None:
     assert "LEAST" in str(service._CAPTURE_UP_TO_SQL)  # noqa: SLF001
 
 
-def test_other_metered_callers_still_call_deduct_not_capture_up_to() -> None:
-    """Source-level pin (CRITICAL CONSTRAINT): authoring / imagegen / sandbox
-    each still reference ``.deduct`` on their injected ``CreditsPolicy`` and
-    NONE of them reference ``.capture_up_to`` — the opt-in stays scoped to the
-    chat-turn worker alone. Grepped at the source level so a future call site
-    that mistakenly reaches for the new method fails here. ``.deduct`` (no
-    trailing paren required) because ``sandbox/runtime_tool.py`` passes the
-    bound method to ``asyncio.to_thread(policy.deduct, ...)`` rather than
-    calling it directly."""
+def test_preflight_callers_still_call_deduct_not_capture_up_to() -> None:
+    """Source-level pin (CRITICAL CONSTRAINT): the PRE-flight metered callers —
+    authoring/avatar (``routes/personas.py``) and sandbox — each still reference
+    ``.deduct`` (or ``.deduct_idempotent``) on their injected ``CreditsPolicy``
+    and NONE reference ``.capture_up_to``. Grepped at the source level so a
+    future PRE-flight call site that mistakenly reaches for the partial-capture
+    method fails here. ``.deduct`` (no trailing paren) because
+    ``sandbox/runtime_tool.py`` passes the bound method to
+    ``asyncio.to_thread(policy.deduct, ...)`` rather than calling it directly."""
     import importlib
 
-    for module_name in _OTHER_METERED_CALL_SITES:
+    for module_name in _DEDUCT_ONLY_CALL_SITES:
         module = importlib.import_module(module_name)
         src = inspect.getsource(module)
         assert ".deduct" in src, f"{module_name} must still reference .deduct"
         assert ".capture_up_to" not in src, (
-            f"{module_name} must NOT reference .capture_up_to — that opt-in is "
-            f"reserved for the chat-turn worker's post-success billing only"
+            f"{module_name} must NOT reference .capture_up_to — partial-capture is "
+            f"reserved for POST-SUCCESS billing (chat turn / image true-up) only"
         )
 
 
-def test_chat_turn_worker_is_the_only_capture_up_to_call_site() -> None:
-    """The flip side of the pin above: exactly one production module
-    references ``.capture_up_to`` — the chat-turn worker."""
+def test_capture_up_to_stays_scoped_to_the_approved_post_success_callers() -> None:
+    """The flip side of the pin: ``.capture_up_to`` appears ONLY in the approved
+    post-success callers (the chat-turn worker + the image-gen true-up), never in
+    a pre-flight caller (Spec M3, T3a widened the C1 scope)."""
     import importlib
 
-    module = importlib.import_module("persona_api.background.chat_turn_worker")
-    src = inspect.getsource(module)
-    assert ".capture_up_to(" in src
+    for module_name in _CAPTURE_UP_TO_CALLERS:
+        src = inspect.getsource(importlib.import_module(module_name))
+        # ``.capture_up_to`` (no trailing paren required): the run-worker watcher
+        # passes the bound method to ``asyncio.to_thread`` rather than calling it.
+        assert ".capture_up_to" in src, f"{module_name} should use .capture_up_to (post-success)"
 
-    for module_name in _OTHER_METERED_CALL_SITES:
+    for module_name in _DEDUCT_ONLY_CALL_SITES:
         other = importlib.import_module(module_name)
         assert ".capture_up_to" not in inspect.getsource(other)
 

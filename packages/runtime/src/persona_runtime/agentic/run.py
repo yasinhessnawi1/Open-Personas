@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from persona_runtime.agentic.step import Step  # noqa: TC001 — Pydantic needs runtime ref
 
-__all__ = ["CancelToken", "Run", "RunStatus"]
+__all__ = ["CancelToken", "Run", "RunStatus", "StepUsage"]
 
 
 class RunStatus(StrEnum):
@@ -92,6 +92,36 @@ class Run(BaseModel):
             msg = "naive datetime not allowed on Run timestamps; use datetime.now(UTC)"
             raise ValueError(msg)
         return value.astimezone(UTC) if value is not None else None
+
+
+class StepUsage(BaseModel):
+    """One step's model-call usage, surfaced for INCREMENTAL billing (Spec M3, T4a).
+
+    NOT persisted on ``Run``/``Step`` (billing is the api's concern, not the loop's)
+    and NOT an SSE :class:`~persona_runtime.agentic.events.RunEvent` (billing data
+    stays off the client stream + out of the persisted event log). The loop passes
+    it to the optional ``on_step_usage`` callback right after each step's model call
+    so the caller can meter the step's real cost and cut the run off at the NEXT
+    step boundary on exhaustion. Frozen boundary type.
+
+    Attributes:
+        step: The zero-based step index this usage belongs to.
+        provider: The served backend's provider name (for pricing).
+        model: The served backend's model name (for pricing).
+        prompt_tokens: Prompt tokens the step's model call consumed.
+        completion_tokens: Completion tokens the step's model call emitted.
+        cost_usd: Response-side actual cost in USD (OpenRouter usage.cost), or
+            ``None`` — the caller then prices from the token counts.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step: int = Field(ge=0)
+    provider: str
+    model: str
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    cost_usd: float | None = Field(default=None, ge=0.0)
 
 
 class CancelToken:

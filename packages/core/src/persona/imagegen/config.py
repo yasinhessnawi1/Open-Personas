@@ -122,8 +122,13 @@ class ImageBackendConfig(BaseSettings):
         extra="ignore",
     )
 
-    provider: ImageProvider = "openai"
-    model: str = "gpt-image-1"
+    # Spec M3 (D-M3-10, T3a): the wired default is GPT Image 2 via OpenRouter
+    # (``openai/gpt-5.4-image-2``, confirmed slug — token-metered, so billing
+    # prices its real cost). Both are env-overridable (``PERSONA_IMAGEGEN_PROVIDER``
+    # / ``PERSONA_IMAGEGEN_MODEL``) so the owner can switch/correct the slug — NOT
+    # hardcoded at the call site.
+    provider: ImageProvider = "openrouter"
+    model: str = "openai/gpt-5.4-image-2"
     api_key: SecretStr | None = Field(default=None, repr=False)
     base_url: str | None = None
     request_timeout_s: float = Field(default=120.0, gt=0.0)

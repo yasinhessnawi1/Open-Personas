@@ -625,6 +625,18 @@ class RuntimeFactory:
         """
         return self._openrouter_resolver
 
+    @property
+    def metadata_resolver(self) -> ChainedModelMetadataResolver:
+        """The shared cost-pricing chain (static + optional OpenRouter catalog).
+
+        The SAME instance every loop is built with as its ``cost_source`` (Spec
+        M2, D-M2-1). Spec M3 (T3a): exposed on ``app.state.metadata_resolver`` so
+        the image-gen path can price a token-metered OpenRouter image model
+        (``openai/gpt-5.4-image-2``) — the catalog link supplies the
+        ``estimate_catalog`` fallback when the response carries no ``usage.cost``.
+        """
+        return self._metadata_resolver
+
     @staticmethod
     def _build_metadata_resolver() -> tuple[
         OpenRouterCatalogClient | None,

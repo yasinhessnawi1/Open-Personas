@@ -64,6 +64,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from persona.billing import BillingConfig, credits_charged
 from persona.imagegen import (
     ContentRejectedError,
     GeneratedImage,
@@ -77,6 +78,7 @@ from persona.imagegen import (
 from persona.imagegen._merge import merge_visual_style
 from persona.logging import get_logger
 from persona.tools.audit import ToolAuditEvent
+from persona_runtime.cost import compute_turn_cost
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.errors import ConcurrencyCappedError
@@ -87,6 +89,7 @@ if TYPE_CHECKING:
     from persona.imagegen.protocol import ImageBackend
     from persona.imagegen.result import ImageMediaType
     from persona.tools.audit import ToolAuditLogger
+    from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
     from persona_api.editions import CreditsPolicy
@@ -94,7 +97,6 @@ if TYPE_CHECKING:
     from persona_api.storage import FileStorage
 
 __all__ = [
-    "DEFAULT_COST_PER_IMAGE_CREDITS",
     "ImagegenAvatarGenerator",
     "generate",
     "generate_avatar",
@@ -116,14 +118,15 @@ _AVATAR_OPTIONS: ImageGenOptions = ImageGenOptions(size="1024x1024", count=1, qu
 _LOG = get_logger("imagegen.service")
 
 
-#: Default per-image credit cost (D-15-3 cost containment). 100 credits per
-#: image at ``count <= 4`` caps a single tool invocation at 400 credits
-#: total — still a small fraction of the 100_000-credit default balance,
-#: leaving headroom for chat turns while keeping image generation visibly
-#: more expensive than per-token chat usage (research §1.1: OpenAI
-#: gpt-image-1 medium is ~$0.042/image, so 100 credits ≈ ~4 cents in the
-#: hypothetical 1¢-per-1000-credits accounting).
-DEFAULT_COST_PER_IMAGE_CREDITS: int = 100
+#: Fallback per-image CEILING pre-deducted before the provider call (Spec M3,
+#: T3a — the denial-of-wallet guard). The api route passes
+#: ``config.image_ceiling_credits`` (default 50); this bare default keeps a
+#: direct call (no config) guarded. The charge is trued-up to the real provider
+#: cost after generation (deduct the delta / refund the overage).
+_DEFAULT_IMAGE_CEILING_CREDITS: int = 50
+#: Fallback minimum image charge (Spec M3, T3a) — infra rides the floor (D-M3-4
+#: amendment). The route passes ``config.image_credit_floor`` (default 1).
+_DEFAULT_IMAGE_FLOOR_CREDITS: int = 1
 
 
 #: Mapping from supported IANA media types to filename extensions used in
@@ -162,17 +165,20 @@ async def generate(
     persona_visual_style: str | None,
     prompt: str,
     options: ImageGenOptions,
-    cost_per_image_credits: int = DEFAULT_COST_PER_IMAGE_CREDITS,
+    cost_source: CostSource | None = None,
+    billing_config: BillingConfig | None = None,
+    ceiling_per_image: int = _DEFAULT_IMAGE_CEILING_CREDITS,
+    floor: int = _DEFAULT_IMAGE_FLOOR_CREDITS,
     concurrency_slots: int = 1,
 ) -> GenerationResult:
-    """Run one full image-generation flow: cap → deduct → backend → persist.
+    """Run one full image-generation flow: cap → ceiling-deduct → backend → true-up → persist.
 
     On the happy path the returned :class:`GenerationResult` carries
     persisted images: each :attr:`persona.imagegen.result.GeneratedImage.workspace_path`
     is populated with the workspace-relative path
     (``uploads/<blake2b><ext>``) and :attr:`image_bytes` is zeroed so the
     response envelope does not double-carry the payload. The credits
-    ledger shows one ``-count*cost_per_image_credits`` entry; the audit
+    ledger shows a ceiling pre-deduct + a real-cost true-up entry; the audit
     log will carry the persona-layer
     :class:`persona.tools.audit.ToolAuditEvent` emitted by the
     ``generate_image`` tool factory (T12 owns that emission — the
@@ -228,10 +234,18 @@ async def generate(
             (:class:`persona.imagegen.result.ImageGenOptions`). The
             ``count <= 4`` cap (D-15-3) is already enforced by the
             Pydantic field; this service trusts that.
-        cost_per_image_credits: Credits per image. Defaults to
-            :data:`DEFAULT_COST_PER_IMAGE_CREDITS` (100). Override is
-            available for future per-quality pricing if D-15-3 gains
-            tiers — v0.1 ships flat.
+        cost_source: The provenance-carrying resolver chain for real-cost
+            pricing (Spec M3, T3a — ``app.state.metadata_resolver``). ``None``
+            uses ``compute_turn_cost``'s static-only default; an OpenRouter
+            ``usage.cost`` actual is priced regardless of source.
+        billing_config: The credit-formula config (``PERSONA_CREDIT_MARKUP``);
+            ``None`` reads the environment.
+        ceiling_per_image: The per-image CEILING pre-deducted before the
+            provider call (the denial-of-wallet guard); the charge is trued-up
+            to the real cost after generation. The api route passes
+            ``config.image_ceiling_credits``.
+        floor: The minimum image charge (infra rides the floor, D-M3-4
+            amendment). The route passes ``config.image_credit_floor``.
 
     Returns:
         :class:`GenerationResult` with images whose ``workspace_path``
@@ -253,7 +267,12 @@ async def generate(
     # Spec 33 (D-33-X-creditspolicy-di): production passes the edition's policy;
     # default to the metered policy so a direct call keeps today's behavior.
     credits_policy = credits_policy or MeteredCreditsPolicy()
-    total_cost = options.count * cost_per_image_credits
+    billing_config = billing_config or BillingConfig()
+    # Spec M3 (T3a, D-15-X-pre-deduct-credits): pre-deduct a per-image CEILING
+    # (the denial-of-wallet guard), NOT the real cost — the real cost is only
+    # known AFTER the token-metered provider call. The charge is trued-up to the
+    # real cost below (deduct the delta / refund the overage).
+    ceiling_total = options.count * ceiling_per_image
     merged_prompt = merge_visual_style(prompt, persona_visual_style)
 
     # Phase 1: cap + pre-deduct + backend call inside one transaction.
@@ -290,7 +309,7 @@ async def generate(
             credits_policy.deduct(
                 rls_engine=rls_engine,
                 user_id=user_id,
-                amount=total_cost,
+                amount=ceiling_total,
                 reason="image_gen_pre",
             )
             deduct_succeeded = True
@@ -317,10 +336,25 @@ async def generate(
             credits_policy.refund(
                 rls_engine=rls_engine,
                 user_id=user_id,
-                amount=total_cost,
+                amount=ceiling_total,
                 reason="image_gen_refund:backend_failure",
             )
         raise
+
+    # Spec M3 (T3a): true-up the ceiling pre-deduct to the REAL provider cost now
+    # that the token-metered response is in hand (prefers the OpenRouter
+    # ``usage.cost`` actual; else the resolver-chain estimate; else the floor).
+    # Net charge = ceil(MARKUP × real_cost) floored — infra rides the floor.
+    _true_up_image_charge(
+        credits_policy,
+        rls_engine,
+        user_id,
+        result=result,
+        ceiling=ceiling_total,
+        floor=floor,
+        cost_source=cost_source,
+        billing_config=billing_config,
+    )
 
     # Phase 2: persist bytes to the workspace (D-13-4 layout) and
     # rewrite the result so ``workspace_path`` is populated and
@@ -358,6 +392,77 @@ async def generate(
     )
 
     return result.model_copy(update={"images": stored_images})
+
+
+def _true_up_image_charge(
+    policy: CreditsPolicy,
+    rls_engine: Engine,
+    user_id: str,
+    *,
+    result: GenerationResult,
+    ceiling: int,
+    floor: int,
+    cost_source: CostSource | None,
+    billing_config: BillingConfig,
+) -> None:
+    """True-up the ceiling pre-deduct to the real image cost (Spec M3, T3a — D-M3-10).
+
+    Prices the generation like a chat turn (``compute_turn_cost`` over the served
+    model's token usage; the OpenRouter ``usage.cost`` actual takes precedence,
+    basis ``actual_openrouter``; else the resolver-chain estimate; else the
+    floor), then reconciles against the ``ceiling`` already pre-deducted:
+
+    * ``real > ceiling`` (a misconfigured-too-low ceiling) — capture the extra,
+      floored at 0 so a short balance never overdraws;
+    * ``real < ceiling`` (the common case) — refund the overage;
+    * ``real == ceiling`` — record the real cost with a zero adjustment.
+
+    The true ``cost_cents`` + ``cost_basis`` land on the true-up ledger row
+    (D-M3-12). Basis-agnostic: works whether the price is an actual or an
+    estimate (D-M3-R4).
+    """
+    cost_cents, basis = compute_turn_cost(
+        provider=result.provider,
+        model=result.model,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        actual_cost_usd=result.cost_usd,
+        source=cost_source,
+    )
+    real_charge = credits_charged(
+        provider_cents=cost_cents,
+        infra_flat_cents=0.0,  # infra via the credit floor (D-M3-4 amendment)
+        markup=billing_config.credit_markup,
+        floor=floor,
+    )
+    delta = real_charge - ceiling
+    if delta > 0:
+        policy.capture_up_to(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=delta,
+            reason=f"image_gen:{basis}",
+            cost_cents=cost_cents,
+            cost_basis=basis,
+        )
+    elif delta < 0:
+        policy.refund(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=-delta,
+            reason=f"image_gen_trueup:{basis}",
+            cost_cents=cost_cents,
+            cost_basis=basis,
+        )
+    else:
+        policy.deduct(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=0,
+            reason=f"image_gen:{basis}",
+            cost_cents=cost_cents,
+            cost_basis=basis,
+        )
 
 
 def _persist_bytes(

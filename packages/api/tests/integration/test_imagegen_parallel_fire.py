@@ -114,9 +114,12 @@ _TINY_PNG: bytes = bytes.fromhex(
 _BACKEND_HOLD_SECONDS: float = 0.5
 
 
-#: Per-image cost. Mirrors :data:`persona_api.imagegen.service.DEFAULT_COST_PER_IMAGE_CREDITS`
-#: which the route layer threads through unchanged on POST /imagegen.
-_PER_IMAGE_COST: int = 100
+#: Spec M3 (T3a): the per-image CEILING pre-deducted before the provider call
+#: (``config.image_ceiling_credits`` default) and the real charge the true-up
+#: settles to — the slow backend reports no usage, so the price is unpriced and
+#: falls to ``config.image_credit_floor`` (default 1).
+_IMAGE_CEILING: int = 50
+_REAL_CHARGE_FLOOR: int = 1
 
 
 #: How many concurrent requests to fire. ``tasks.md`` §T17 specifies 10.
@@ -410,21 +413,25 @@ def test_parallel_fire_only_one_request_succeeds_and_deducts(
     )
 
     # ------------------------------------------------------------------
-    # Credits-ledger invariant: exactly 1 × -100 deduct.
-    # Without the cap, parallel pre-deducts could land. Without
-    # pre-deduct, no deduct would land before the backend call (and a
-    # refund-on-failure pattern is N/A here — the one call succeeded).
+    # Credits-ledger invariant (Spec M3, T3a): the ONE successful request
+    # pre-deducts the per-image CEILING (50) then TRUES-UP to the real cost.
+    # The slow backend reports no usage → unpriced → the charge falls to the
+    # floor (1), so the true-up refunds the 49-credit overage: a [-50, +49]
+    # pair, net -1. The nine concurrency-capped requests write NOTHING (the cap
+    # raises before the pre-deduct). Without the cap, parallel pre-deducts would
+    # land; this pair proves exactly one request billed.
     # ------------------------------------------------------------------
     deltas = _tx_deltas(su, uid_a)
-    assert deltas == [-_PER_IMAGE_COST], (
-        f"expected exactly one -{_PER_IMAGE_COST} deduct (one success,"
+    assert deltas == [-_IMAGE_CEILING, _IMAGE_CEILING - _REAL_CHARGE_FLOOR], (
+        f"expected the ceiling pre-deduct + true-up refund pair"
+        f" [-{_IMAGE_CEILING}, {_IMAGE_CEILING - _REAL_CHARGE_FLOOR}] (one success,"
         f" nine concurrency-capped), got {deltas}"
     )
 
-    # Balance: exactly one deduction landed.
+    # Balance: exactly one net real charge (the floor) landed.
     final_balance = _balance(su, uid_a)
-    assert final_balance == start_balance - _PER_IMAGE_COST, (
-        f"expected final_balance == start_balance - {_PER_IMAGE_COST}"
+    assert final_balance == start_balance - _REAL_CHARGE_FLOOR, (
+        f"expected final_balance == start_balance - {_REAL_CHARGE_FLOOR}"
         f" (start={start_balance}, final={final_balance}, delta={start_balance - final_balance})"
     )
 

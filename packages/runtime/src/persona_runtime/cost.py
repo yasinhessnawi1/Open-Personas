@@ -29,16 +29,18 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
+from persona.billing.basis import CostBasis
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
     from persona.backends.model_metadata import ModelMetadata
 
+# Spec M3 (D-M3-12): ``CostBasis`` now lives in ``persona.billing.basis`` (core)
+# so the billing seam has one authoritative home for the vocabulary; re-exported
+# here so ``from persona_runtime.cost import CostBasis`` importers are unchanged.
 __all__ = ["CostBasis", "CostSource", "compute_turn_cost"]
 
 _logger = get_logger("runtime.cost")
-
-CostBasis = Literal["actual_openrouter", "estimate_static", "estimate_catalog", "unpriced"]
 
 #: Cents rounding applied to BOTH pricing arms: 6 decimals (micro-cent) so tiny
 #: turns don't collapse to 0.0 and float noise never leaks into the persisted

@@ -138,6 +138,18 @@ class GenerationResult(BaseModel):
         latency_ms: Wall-clock time from request send to response
             complete, measured client-side via :func:`time.perf_counter`
             (same convention as :class:`persona.backends.types.ChatResponse`).
+        prompt_tokens: Prompt tokens the generation consumed (Spec M3, T3a) —
+            token-metered image models (``openai/gpt-5.4-image-2`` via
+            OpenRouter, which rides chat-completions) report usage. ``0`` for
+            backends that do not surface usage (per-image-priced providers).
+        completion_tokens: Completion (image) tokens the generation emitted
+            (Spec M3, T3a). ``0`` when the backend reports no usage.
+        cost_usd: Response-side ACTUAL cost in USD (Spec M3, T3a) — the
+            OpenRouter ``usage.cost`` when usage accounting is opted in
+            (``usage: {"include": true}``), else ``None``. Mirrors
+            :attr:`persona.backends.types.TokenUsage.cost_usd` (D-M2-3); the
+            billing path prefers it (basis ``actual_openrouter``) and falls back
+            to a resolver estimate over the token counts when absent.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -146,3 +158,6 @@ class GenerationResult(BaseModel):
     provider: str
     model: str
     latency_ms: float = Field(ge=0.0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    cost_usd: float | None = Field(default=None, ge=0.0)

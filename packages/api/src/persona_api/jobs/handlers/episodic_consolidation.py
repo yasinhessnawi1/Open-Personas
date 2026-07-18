@@ -23,6 +23,9 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 
+from persona_api.services.background_billing import bill_background_llm
+from persona_api.services.llm_usage_collector import collect_llm_usage
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -31,7 +34,10 @@ if TYPE_CHECKING:
     from persona.stores.backend import Backend
     from persona.stores.engine import EpisodicConsolidationReport
     from persona.stores.summarizer import Summarizer
+    from persona_runtime.cost import CostSource
+    from sqlalchemy import Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
 
 __all__ = [
@@ -82,26 +88,54 @@ class EpisodicConsolidationHandler:
         *,
         engine: EpisodicEngineRunner,
         core_refresher: Callable[[str, str], Awaitable[None]] | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        floor: int = 1,
     ) -> None:
         self._engine = engine
         # K9 (K9-D-10): the always-in-context core block is refreshed on THIS background
         # cadence — never the turn path (acceptance-7). ``None`` ⇒ no refresh (byte-identical);
         # a refresh failure must NOT fail the consolidation job (fail-soft below).
         self._core_refresher = core_refresher
+        # Spec M3 (T5): OWNER-billed, idempotent. Both None → no billing. The engine's
+        # summarizer runs through a usage-collecting backend (wired at the root), so the
+        # ``collect_llm_usage`` block below captures this op's real summarizer cost.
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._floor = floor
 
     async def handle(self, payload: EpisodicConsolidationJobPayload, context: JobContext) -> None:
         # The engine is async end-to-end (summarizer awaits; the sync graph
         # merge is to_thread'd inside) — the RLS contextvar the executor bound
         # propagates through both, so every write stays owner-scoped.
-        report = await self._engine.run(context.owner_id, payload.persona_id)
-        if self._core_refresher is not None:
-            try:
-                await self._core_refresher(context.owner_id, payload.persona_id)
-            except Exception:  # noqa: BLE001 — a core-block refresh must never fail the job
-                _logger.opt(exception=True).warning(
-                    "core-block refresh failed; prior block stays "
-                    f"(owner={context.owner_id} persona={payload.persona_id})",
-                )
+        with collect_llm_usage() as usage:
+            report = await self._engine.run(context.owner_id, payload.persona_id)
+            if self._core_refresher is not None:
+                try:
+                    await self._core_refresher(context.owner_id, payload.persona_id)
+                except Exception:  # noqa: BLE001 — a core-block refresh must never fail the job
+                    _logger.opt(exception=True).warning(
+                        "core-block refresh failed; prior block stays "
+                        f"(owner={context.owner_id} persona={payload.persona_id})",
+                    )
+        # Spec M3 (T5): owner-bill the summarizer's real cost, idempotent + fail-soft.
+        totals = usage.totals()
+        bill_background_llm(
+            credits_policy=self._credits_policy,
+            rls_engine=self._rls_engine,
+            owner_id=context.owner_id,
+            provider=totals.provider,
+            model=totals.model,
+            prompt_tokens=totals.prompt_tokens,
+            completion_tokens=totals.completion_tokens,
+            cost_usd=totals.cost_usd,
+            surface="episodic_consolidation",
+            billing_key=episodic_consolidation_idempotency_key(payload),
+            cost_source=self._cost_source,
+            floor=self._floor,
+        )
         _logger.info(
             "episodic_consolidation ran",
             owner_id=context.owner_id,
@@ -165,13 +199,24 @@ def register_episodic_consolidation_handler(
     *,
     engine: EpisodicEngineRunner,
     core_refresher: Callable[[str, str], Awaitable[None]] | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
+    cost_source: CostSource | None = None,
+    floor: int = 1,
 ) -> None:
     """Register the sleep-time engine tenant (Spec K8, K8-D-8; K9-D-10 core-block refresh)."""
     registry.register(
         JobTypeSpec(
             type=EPISODIC_CONSOLIDATION_JOB_TYPE,
             payload_model=EpisodicConsolidationJobPayload,
-            handler=EpisodicConsolidationHandler(engine=engine, core_refresher=core_refresher),
+            handler=EpisodicConsolidationHandler(
+                engine=engine,
+                core_refresher=core_refresher,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
+                cost_source=cost_source,
+                floor=floor,
+            ),
             idempotency_key=episodic_consolidation_idempotency_key,
             retry=RetryPolicy(max_attempts=2),
             lease=MEDIUM_LEASE,

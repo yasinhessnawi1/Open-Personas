@@ -154,6 +154,32 @@ def _decode_data_url(url: str, model: str) -> tuple[bytes, ImageMediaType]:
     return image_bytes, media_type
 
 
+def _extract_usage(response: Any) -> tuple[int, int, float | None]:  # noqa: ANN401 — SDK type
+    """Read ``(prompt_tokens, completion_tokens, cost_usd)`` off the response (Spec M3, T3a).
+
+    OpenRouter image-gen rides chat-completions, so the response carries a
+    ``usage`` object exactly like a chat turn: ``prompt_tokens`` /
+    ``completion_tokens`` (image tokens land in ``completion_tokens``) and, with
+    usage accounting opted in, a ``cost`` extra. FAIL-OPEN (mirrors the M2 chat
+    parse): a missing / malformed usage yields ``(0, 0, None)`` — pricing
+    telemetry never breaks response parsing.
+    """
+    from persona.backends.openai_compat import (
+        _usage_cost_usd,  # noqa: PLC0415 — reuse the M2 parser
+    )
+
+    usage_obj = getattr(response, "usage", None)
+    if usage_obj is None:
+        return 0, 0, None
+    prompt = getattr(usage_obj, "prompt_tokens", 0)
+    completion = getattr(usage_obj, "completion_tokens", 0)
+    prompt_tokens = prompt if isinstance(prompt, int) and not isinstance(prompt, bool) else 0
+    completion_tokens = (
+        completion if isinstance(completion, int) and not isinstance(completion, bool) else 0
+    )
+    return max(0, prompt_tokens), max(0, completion_tokens), _usage_cost_usd(usage_obj)
+
+
 def _extract_image_url(entry: Any) -> str | None:  # noqa: ANN401 — untyped SDK extra
     """Pull the ``image_url.url`` string out of an ``images[]`` entry.
 
@@ -337,6 +363,11 @@ class OpenRouterImageBackend:
         extra_body: dict[str, Any] = {
             "modalities": ["image", "text"],
             "image_config": image_config,
+            # Spec M3 (T3a): opt into OpenRouter usage accounting so the final
+            # usage carries the routed request's real ``cost`` (the D-M2-3 merge,
+            # mirrored from chat) — ``openai/gpt-5.4-image-2`` is token-metered,
+            # so the billing path prices the actual (basis ``actual_openrouter``).
+            "usage": {"include": True},
         }
 
         started = time.perf_counter()
@@ -454,11 +485,19 @@ class OpenRouterImageBackend:
             revised_prompt=None,
         )
 
+        # Spec M3 (T3a): surface the token usage + the OpenRouter real-cost actual
+        # for the billing path. Fail-open (mirrors the M2 chat parse): missing /
+        # malformed usage degrades to ``0`` tokens / ``None`` cost, never raises.
+        prompt_tokens, completion_tokens, cost_usd = _extract_usage(response)
+
         return GenerationResult(
             images=[generated],
             provider="openrouter",
             model=self._model,
             latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
         )
 
     @staticmethod

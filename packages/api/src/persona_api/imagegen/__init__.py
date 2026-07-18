@@ -13,10 +13,9 @@ T16; integration tests in T15/T17/T18) import via
 from __future__ import annotations
 
 from persona_api.imagegen.concurrency import acquire_user_concurrency
-from persona_api.imagegen.service import DEFAULT_COST_PER_IMAGE_CREDITS, generate
+from persona_api.imagegen.service import generate
 
 __all__ = [
-    "DEFAULT_COST_PER_IMAGE_CREDITS",
     "acquire_user_concurrency",
     "generate",
 ]

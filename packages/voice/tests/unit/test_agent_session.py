@@ -290,6 +290,69 @@ async def test_agent_session_opens_call_record_on_active_and_closes_on_teardown(
     assert calls[-1] == "engine_dispose"
 
 
+class _SpyRecorderWithDuration:
+    """A CallRecorder double whose close() returns a duration (Spec M3, T6b-1/2)."""
+
+    def __init__(self, calls: list[str], duration_s: int) -> None:
+        self._calls = calls
+        self._duration_s = duration_s
+
+    def open(self, started_at: object = None) -> None:  # noqa: ARG002 — mirror CallRecorder
+        self._calls.append("recorder_open")
+
+    def close(self, *, end_reason: str, ended_at: object = None) -> int:  # noqa: ARG002 — mirror
+        self._calls.append("recorder_close")
+        return self._duration_s
+
+
+class _SpyBillingMeter:
+    """A turn-billing-meter double recording the teardown LiveKit infra tick."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+        self.infra_billed: list[int] = []
+
+    async def bill_call_infra(self, duration_s: int) -> None:
+        self.infra_billed.append(duration_s)
+        self._calls.append("infra_billed")
+
+
+async def test_teardown_finalizes_record_then_bills_livekit_infra_tick() -> None:
+    """Spec M3 (T6b-1/2): teardown finalizes the durable call-record AND bills the
+    LiveKit infra tick (per-min) using the duration close() returns — the same
+    teardown a delete_room cutoff reaches via the room-disconnect handler."""
+    calls: list[str] = []
+    ended = asyncio.Event()
+    recorder = _SpyRecorderWithDuration(calls, 180)
+    meter = _SpyBillingMeter(calls)
+    agent = AgentSession(
+        voice_room=_FakeRoom(calls),  # type: ignore[arg-type]
+        loop=_FakeLoop(calls),  # type: ignore[arg-type]
+        stt_seam=_FakeSttSeam(calls),  # type: ignore[arg-type]
+        tts_seam=_FakeTtsSeam(calls),
+        session=_FakeSessionMachine(calls),  # type: ignore[arg-type]
+        mcp_clients=[_FakeMcpClient(calls)],  # type: ignore[list-item]
+        livekit_url="ws://localhost:7880",
+        agent_token="tok",
+        ended=ended,
+        call_recorder=recorder,  # type: ignore[arg-type]
+        call_record_engine=_SpyEngine(calls),  # type: ignore[arg-type]
+        turn_billing_meter=meter,  # type: ignore[arg-type]
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "recorder_open" in calls:
+            break
+    ended.set()
+    await task
+
+    # The record finalizes FIRST (duration known), then the infra tick bills it.
+    assert meter.infra_billed == [180]
+    assert calls.index("recorder_close") < calls.index("infra_billed")
+
+
 async def test_agent_session_records_error_reason_on_crash() -> None:
     """A real crash in run() records end_reason='error' (not the clean
     'disconnect') — the record reflects WHY the call ended (V9-D-5)."""

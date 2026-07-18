@@ -11,13 +11,23 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, get_args
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from persona.backends import (
+    BackendConfig,
+    Provider,
+    ProviderCredentialMissingError,
+    ProviderCredentialResolver,
+    load_backend,
+)
+from persona.backends.errors import ProviderError
+from persona.billing import BillingConfig, credits_charged
 from persona.imagegen import ContentRejectedError, ImageGenError, craft_avatar_prompt
 from persona.logging import get_logger
 from persona.tools.audit import JSONLToolAuditLogger, ToolAuditEvent
+from persona_runtime.cost import compute_turn_cost
 from persona_runtime.routing import tier_for
 
 from persona_api.auth import AuthenticatedUser, get_current_user
@@ -63,6 +73,8 @@ from persona_api.services.provenance import avatar_ai_generated_from_source
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from persona.backends import ChatBackend
+    from persona.imagegen import GenerationResult
     from persona.schema.skills import SkillSpec
     from persona_runtime.tier import TierRegistry
 
@@ -293,6 +305,58 @@ async def _maybe_generate_avatar(
     persona_service.set_avatar_url(
         rls_engine=state.rls_engine, persona_id=persona_id, avatar_url=avatar_url
     )
+    # Spec M3 (T3b, D-M3-11): the avatar flips free → OWNER-billed at its real
+    # image cost, post-success. Fail-soft + idempotent (a persona must never fail
+    # to exist over a billing hiccup; a re-run keys to the same billing row).
+    _bill_avatar_owner(request, owner_id=owner_id, persona_id=persona_id, result=result)
+
+
+def _bill_avatar_owner(
+    request: Request,
+    *,
+    owner_id: str,
+    persona_id: str,
+    result: GenerationResult,
+) -> None:
+    """Owner-bill a successfully generated avatar (Spec M3, T3b — D-M3-11).
+
+    Prices the avatar generation like any image (``compute_turn_cost`` over the
+    served model's usage; OpenRouter ``usage.cost`` actual preferred), charges the
+    persona OWNER the real cost through the credit formula (floored — infra rides
+    the floor), and records ``cost_cents``/``cost_basis``. **Fail-soft** — any
+    error is logged, never raised (avatar gen must never break persona-create).
+    **Idempotent** — keyed on ``avatar:{persona_id}`` so a re-run (a retried
+    enrichment) does not double-charge (D-M3-R5).
+    """
+    try:
+        state = request.app.state
+        cost_cents, basis = compute_turn_cost(
+            provider=result.provider,
+            model=result.model,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            actual_cost_usd=result.cost_usd,
+            source=getattr(state, "metadata_resolver", None),
+        )
+        charge = credits_charged(
+            provider_cents=cost_cents,
+            infra_flat_cents=0.0,  # infra via the floor (D-M3-4 amendment)
+            markup=BillingConfig().credit_markup,
+            floor=state.config.image_credit_floor,
+        )
+        state.credits_policy.deduct_idempotent(
+            rls_engine=state.rls_engine,
+            user_id=owner_id,
+            amount=charge,
+            reason=f"avatar_gen:{basis}",
+            billing_key=f"avatar:{persona_id}",
+            cost_cents=cost_cents,
+            cost_basis=basis,
+        )
+    except Exception as exc:  # noqa: BLE001 — billing must NEVER break persona-create
+        _LOG.warning(
+            "avatar owner-billing failed (fail-soft)", persona_id=persona_id, error=str(exc)
+        )
 
 
 async def _enrich_persona_after_create(
@@ -461,6 +525,66 @@ def _rate_limit_headers(request: Request) -> dict[str, str]:
     return decision.headers() if decision is not None else {}
 
 
+#: Valid backend provider symbols (the ``Provider`` Literal), for validating the
+#: ``PERSONA_AUTHORING_MODEL`` override's ``provider/model`` string (T2c).
+_VALID_PROVIDERS: frozenset[str] = frozenset(get_args(Provider))
+
+
+def _build_authoring_override_backend(model_str: str) -> ChatBackend | None:
+    """Construct a backend for the ``PERSONA_AUTHORING_MODEL`` override (Spec M3, T2c).
+
+    ``model_str`` is a ``provider/model`` string (e.g. ``anthropic/claude-sonnet-5``
+    or an OpenRouter slug). Reuses the tier machinery — resolve the provider's
+    credentials (``ProviderCredentialResolver``) then :func:`load_backend` over a
+    :class:`BackendConfig`. **Fail-soft:** a malformed string, an unknown provider,
+    or a missing/empty API key returns ``None`` (the caller falls back to the
+    authoring tier) — the override never 500s persona authoring. The provider is
+    split on the FIRST ``/`` so OpenRouter slugs (``openrouter/z-ai/glm-4.6``)
+    keep their embedded slashes in the model.
+    """
+    provider_str, _, model = model_str.partition("/")
+    if not provider_str or not model or provider_str not in _VALID_PROVIDERS:
+        _LOG.warning(
+            "PERSONA_AUTHORING_MODEL malformed or unknown provider; using the authoring tier",
+            authoring_model=model_str,
+        )
+        return None
+    provider = cast("Provider", provider_str)
+    try:
+        creds = ProviderCredentialResolver().resolve(provider)
+        config = BackendConfig(
+            provider=provider,
+            model=model,
+            api_key=creds.api_key,
+            base_url=creds.base_url or None,
+        )
+        return load_backend(config)
+    except (ProviderError, ProviderCredentialMissingError) as exc:
+        _LOG.warning(
+            "PERSONA_AUTHORING_MODEL backend unavailable; using the authoring tier: {err}",
+            err=str(exc),
+        )
+        return None
+
+
+def _authoring_backend(request: Request) -> ChatBackend:
+    """The backend the authoring (draft) endpoints use (Spec M3, T2c).
+
+    When ``PERSONA_AUTHORING_MODEL`` is set AND resolvable, authoring runs on that
+    specific model (D-M3-9 — Sonnet 5, without repointing the frontier tier that
+    chat routing shares). Otherwise — unset, malformed, or keyless — it falls back
+    to today's frontier-tier behaviour (``require_model_backend``), unchanged.
+    """
+    override = request.app.state.config.authoring_model
+    if override:
+        backend = _build_authoring_override_backend(override)
+        if backend is not None:
+            return backend
+    return require_model_backend(
+        request, getattr(request.app.state, "authoring_tier", None) or tier_for("authoring")
+    )
+
+
 def _authoring_stream_response(
     request: Request,
     user: AuthenticatedUser,
@@ -472,24 +596,33 @@ def _authoring_stream_response(
     """Frame the service's semantic events as SSE; deduct AFTER the terminal draft.
 
     ``chunk`` → a forming-text frame; ``retry`` → a visible regenerating frame;
-    the terminal ``draft`` triggers the post-success credit deduct
-    (D-P0-deduct-after-validate / D-08-6) — deliberately NOT in a ``finally``, so
-    an aborted (generator cancelled mid-stream) or failed (provider error,
-    propagates before the draft) stream yields no terminal draft and deducts
-    nothing — then emits the validated-or-errored ``AuthoringDraft`` payload and
-    the ``done`` sentinel (mirrors chat). A validation-exhausted draft is a
-    delivered draft and DOES charge (D-10-8), unchanged from the blocking path.
+    ``cost`` → the metered real cost of the authoring turn (Spec M3, T2a) —
+    captured here, NOT framed to the client (a billing internal); the terminal
+    ``draft`` triggers the post-success credit deduct (D-P0-deduct-after-validate
+    / D-08-6) of that REAL cost — deliberately NOT in a ``finally``, so an aborted
+    (generator cancelled mid-stream) or failed (provider error, propagates before
+    the draft) stream yields no terminal draft and deducts nothing — then emits
+    the validated-or-errored ``AuthoringDraft`` payload and the ``done`` sentinel
+    (mirrors chat). A validation-exhausted draft is a delivered draft and DOES
+    charge (D-10-8), unchanged from the blocking path.
     """
 
     async def _frames() -> AsyncIterator[bytes]:
+        cost: authoring_service.AuthoringCost | None = None
         async for kind, payload in events:
             if kind == "chunk":
                 yield _sse("chunk", {"delta": payload, "is_final": False})
             elif kind == "retry":
                 yield _sse("retry", {"reason": payload})
+            elif kind == "cost":
+                # Spec M3 (T2a): the turn's summed real cost — captured for the
+                # deduct on the terminal draft; not surfaced to the client.
+                cost = cast("authoring_service.AuthoringCost", payload)
             else:  # "draft" — the single terminal event
                 draft = cast("AuthoringDraft", payload)
-                _deduct_and_audit(request, user, action, draft.prompt_version, reason=reason)
+                _deduct_authoring(
+                    request, user, action, draft.prompt_version, reason=reason, cost=cost
+                )
                 yield _sse("draft", draft.model_dump())
                 yield _sse("done", {})
 
@@ -521,12 +654,11 @@ async def author_persona(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(
-        request,
-        # Spec P9: authoring is a frontier surface; an unset app.state falls
-        # back to the POLICY default, never a silent mid downgrade.
-        getattr(request.app.state, "authoring_tier", None) or tier_for("authoring"),
-    )
+    # Spec M3 (T2c): PERSONA_AUTHORING_MODEL pins the authoring (draft) model
+    # (Sonnet 5) when set + resolvable; else today's frontier-tier backend. Spec P9:
+    # authoring is a frontier surface — a keyless/unwired fallback still 503s, never
+    # a silent mid downgrade.
+    backend = _authoring_backend(request)
     events = authoring_service.stream_authoring_draft(
         backend,
         body.description,
@@ -565,12 +697,11 @@ async def refine_persona(
     request.app.state.credits_policy.require_credits(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    backend = require_model_backend(
-        request,
-        # Spec P9: authoring is a frontier surface; an unset app.state falls
-        # back to the POLICY default, never a silent mid downgrade.
-        getattr(request.app.state, "authoring_tier", None) or tier_for("authoring"),
-    )
+    # Spec M3 (T2c): PERSONA_AUTHORING_MODEL pins the authoring (draft) model
+    # (Sonnet 5) when set + resolvable; else today's frontier-tier backend. Spec P9:
+    # authoring is a frontier surface — a keyless/unwired fallback still 503s, never
+    # a silent mid downgrade.
+    backend = _authoring_backend(request)
     events = authoring_service.stream_refine_authoring_draft(
         backend,
         body.current_yaml,
@@ -611,12 +742,18 @@ async def recommend_tools(
         request, getattr(request.app.state, "authoring_tier", None) or tier_for("authoring")
     )
     recommendations = await authoring_service.recommend_tools_for_persona(backend, body.description)
-    _deduct_and_audit(
+    # Spec M3 (T2b): the tool-recommender is a cheap mid-tier call not in the M3
+    # flat-fee audit (§6 lists only authoring/refine); it charges the floor
+    # (``cost=None`` → ``authoring_credit_floor``), which retires the flat 1000
+    # here too. Real per-call cost surfacing for the recommenders (blocking path)
+    # is a small follow-up if wanted.
+    _deduct_authoring(
         request,
         user,
         "persona.recommend_tools",
         authoring_service.RECOMMENDER_PROMPT_VERSION,
         reason="persona_tool_recommend",
+        cost=None,
     )
     return ToolRecommendationResponse(
         recommendations=recommendations,
@@ -655,12 +792,14 @@ async def recommend_capabilities(
         body.description,
         available_skills=tuple(BUILTIN_CATALOG.skills),
     )
-    _deduct_and_audit(
+    # Spec M3 (T2b): floor charge (mid-tier recommender; see recommend-tools note).
+    _deduct_authoring(
         request,
         user,
         "persona.recommend_capabilities",
         authoring_service.RECOMMENDER_PROMPT_VERSION,
         reason="persona_capability_recommend",
+        cost=None,
     )
     return ToolRecommendationResponse(
         recommendations=recommendations,
@@ -718,24 +857,54 @@ async def grant_tool(
     return _persona_detail(row, tier_registry=_tier_registry(request))
 
 
-def _deduct_and_audit(
+def _deduct_authoring(
     request: Request,
     user: AuthenticatedUser,
     action: str,
     prompt_version: str,
     *,
     reason: str,
+    cost: authoring_service.AuthoringCost | None,
 ) -> None:
-    """Deduct the flat authoring credit + record a targetless audit event (D-10-8).
+    """Deduct the authoring turn's REAL cost + record a targetless audit event (M3 T2b / D-10-8).
+
+    Replaces the pre-M3 flat 1000-credit deduct (D-M3-9): the charge is the ONE
+    credit formula ``max(floor, ceil(MARKUP × real_cost))`` over the metered
+    authoring cost (``cost``, summed across attempts by the service), floored at
+    ``authoring_credit_floor`` — infra rides the floor (D-M3-4 amendment), no
+    separate ``infra_flat``. The true provider ``cost_cents`` + ``cost_basis``
+    land on the ledger row; the reason carries the basis (``<reason>:<basis>``)
+    like chat. A ``None`` / ``unpriced`` cost (a backend that reported no usage)
+    charges the bare floor with the bare reason — a priceless turn is never
+    guessed at (mirrors chat's flat-floor arm).
 
     Author/refine create no persona row, so the audit ``target`` is empty; the
     eventual ``POST /v1/personas`` audits ``persona.create`` against the real id.
     """
+    config = request.app.state.config
+    floor = config.authoring_credit_floor
+    if cost is None or cost.cost_basis == "unpriced":
+        amount = floor
+        reason_final = reason
+        cost_cents: float | None = cost.cost_cents if cost is not None else None
+        cost_basis: str | None = cost.cost_basis if cost is not None else None
+    else:
+        amount = credits_charged(
+            provider_cents=cost.cost_cents,
+            infra_flat_cents=0.0,  # infra via the credit floor (D-M3-4 amendment)
+            markup=BillingConfig().credit_markup,
+            floor=floor,
+        )
+        reason_final = f"{reason}:{cost.cost_basis}"
+        cost_cents = cost.cost_cents
+        cost_basis = cost.cost_basis
     request.app.state.credits_policy.deduct(
         rls_engine=request.app.state.rls_engine,
         user_id=user.id,
-        amount=request.app.state.config.authoring_credit_cost,
-        reason=reason,
+        amount=amount,
+        reason=reason_final,
+        cost_cents=cost_cents,
+        cost_basis=cost_basis,
     )
     audit_service.record(
         engine=request.app.state.rls_engine,

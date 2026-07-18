@@ -1,37 +1,30 @@
-"""Integration tests for :func:`persona_api.imagegen.service.generate` (spec 15 T15).
+"""Integration tests for :func:`persona_api.imagegen.service.generate` (spec 15 T15; Spec M3 T3a).
 
-Three scenarios per ``tasks.md`` §T15 acceptance bullets:
+These exercise the FULL DB-backed flow against real Postgres 16 + Alembic —
+cap → ceiling pre-deduct → backend → true-up → persist — not the true-up
+ARITHMETIC (the overage / delta / exact / unpriced branches are proven in
+isolation by ``tests/unit/imagegen/test_image_trueup.py``). What they uniquely
+prove is that the ceiling pre-deduct AND the real-cost true-up BOTH land as real
+credit-ledger rows, that a backend failure refunds the ceiling (net zero), that
+the concurrency cap moves no credits, and that bytes persist at the D-13-4 layout.
 
-1. **Happy path** — bytes land on disk at the expected D-13-4 layout
-   (``uploads/<blake2b><ext>``); the credits ledger shows exactly one
-   ``-count*cost_per_image_credits`` entry; the returned
-   :class:`GenerationResult` carries images with ``workspace_path``
-   populated and ``image_bytes`` zeroed.
-2. **Backend failure → refund applied** — the mocked backend raises
-   :class:`ContentRejectedError`; the credits ledger shows a matching
-   deduct + refund pair (net zero); NO bytes land on disk; the original
-   exception propagates to the caller (so the route layer can map it to
-   HTTP 422).
-3. **Concurrency-capped → no credits touched** — a held advisory lock on
-   the same ``user_id`` causes the second call to raise
-   :class:`ConcurrencyCappedError`; the credits ledger is unchanged
-   (the cap fires BEFORE the deduct so the rollback leaves the balance
-   intact); NO bytes land on disk; NO refund entry appears.
+Ledger shape under Spec M3 T3a (ceiling+true-up, D-M3-10):
 
-These scenarios exercise the structural correctness of the three cost-
-discipline locks per decisions.md gate paragraph #3:
+1. **Happy path** — TWO ledger rows: a ``image_gen_pre`` pre-deduct of
+   ``count * ceiling_per_image`` (the denial-of-wallet guard), then a
+   ``image_gen_trueup:<basis>`` refund of the overage once the real token-metered
+   cost is known (``real < ceiling`` — the common case). Bytes land on disk at
+   the D-13-4 layout (``uploads/<blake2b><ext>``); ``image_bytes`` is zeroed.
+2. **Backend failure → refund** — the true-up never runs (the backend raised);
+   the ledger shows the ``image_gen_pre`` deduct + a matching
+   ``image_gen_refund:backend_failure`` (net zero); NO bytes on disk; the original
+   exception propagates so the route layer can map it to HTTP.
+3. **Concurrency-capped → no credits touched** — the cap fires BEFORE the
+   pre-deduct in the same transaction, so the rollback leaves the ledger empty.
 
-* pre-deduct (D-15-X-pre-deduct-credits): scenario 2 proves the deduct
-  lands BEFORE the backend call (the refund in the ledger is evidence).
-* refund-on-failure (D-15-X-credit-flow-semantics pattern (a)): scenario
-  2 proves the refund issues via :func:`credits_service.refund`.
-* concurrency cap (D-15-X-concurrency-cap): scenario 3 proves the cap
-  blocks parallel-fire before any credit movement.
-
-Tests use the ``migrated_engine`` fixture (real Postgres 16 + Alembic
-migrations) so the advisory lock primitive is exercised against the real
-Postgres feature it relies on; mocking the lock would invalidate the
-property under test.
+Tests use the ``migrated_engine`` fixture (real Postgres + Alembic + per-test
+TRUNCATE) so the advisory lock + the credit ledger are exercised against the
+real features they rely on; mocking them would invalidate the property under test.
 """
 
 # ruff: noqa: ANN401, ARG001, ARG002, E501
@@ -67,6 +60,20 @@ pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
+# Cost model under test (Spec M3 T3a). A priced OpenRouter ``usage.cost`` actual
+# of $0.03 → 3 credits (ceil(MARKUP=1.0 × 3.0¢)); the default ceiling is 50, so
+# the true-up refunds ``ceiling - 3`` per generation and the NET charge is 3.
+# Kept intentional (not the unpriced floor) so the two-row ledger reads clearly
+# and mirrors ``test_image_trueup.py``'s ``actual_openrouter`` reference cost.
+# ---------------------------------------------------------------------------
+
+_CEILING = 50
+_ACTUAL_COST_USD = 0.03
+_NET_CHARGE = 3  # ceil(1.0 × 3.0¢); real < ceiling → the true-up refunds the rest
+_TRUEUP_BASIS = "actual_openrouter"
+
+
+# ---------------------------------------------------------------------------
 # Test PNG bytes — minimum-valid 1x1 RGB PNG (mirrors test_workspace_cascade
 # and test_uploads). The two variants differ by a single byte so the
 # blake2b content-hash differs and the idempotent content-addressed write
@@ -93,11 +100,12 @@ _TINY_PNG_B: bytes = bytes.fromhex(
 
 
 class _HappyBackend:
-    """Mock backend that returns deterministic bytes from a fixed list.
+    """Mock backend returning deterministic bytes + a priced ``usage.cost`` actual.
 
-    Implements the :class:`persona.imagegen.protocol.ImageBackend`
-    Protocol structurally (duck-typed; ``runtime_checkable`` on the
-    Protocol verifies this works at runtime).
+    Implements the :class:`persona.imagegen.protocol.ImageBackend` Protocol
+    structurally (duck-typed). The returned :class:`GenerationResult` carries a
+    real ``cost_usd`` (an OpenRouter-style actual) so the service's true-up prices
+    the generation deterministically to :data:`_NET_CHARGE` credits.
     """
 
     def __init__(
@@ -105,17 +113,23 @@ class _HappyBackend:
         *,
         image_bytes_list: list[bytes],
         media_type: ImageMediaType = "image/png",
+        provider: str = "openrouter",
+        model: str = "openai/gpt-5.4-image-2",
+        cost_usd: float | None = _ACTUAL_COST_USD,
     ) -> None:
         self._image_bytes_list = image_bytes_list
         self._media_type: ImageMediaType = media_type
+        self._provider = provider
+        self._model = model
+        self._cost_usd = cost_usd
 
     @property
     def provider_name(self) -> str:
-        return "fake"
+        return self._provider
 
     @property
     def model_name(self) -> str:
-        return "fake-model-1"
+        return self._model
 
     async def generate(
         self,
@@ -123,9 +137,8 @@ class _HappyBackend:
         *,
         options: ImageGenOptions | None = None,
     ) -> GenerationResult:
-        # Honour ``options.count`` by slicing the pre-seeded byte list;
-        # the count cap (D-15-3, le=2) is enforced upstream by the
-        # ImageGenOptions Pydantic field.
+        # Honour ``options.count`` by slicing the pre-seeded byte list; the count
+        # cap (D-15-3) is enforced upstream by the ImageGenOptions Pydantic field.
         n = options.count if options is not None else 1
         images = [
             GeneratedImage(
@@ -143,6 +156,7 @@ class _HappyBackend:
             provider=self.provider_name,
             model=self.model_name,
             latency_ms=12.5,
+            cost_usd=self._cost_usd,
         )
 
     async def edit(
@@ -242,13 +256,11 @@ _PERSONA = "p_imagegen_svc"
 
 @pytest.fixture
 def seeded_engine(migrated_engine: Engine) -> Engine:
-    """Insert the FK target user row + a stub persona row so credits + workspace writes don't trip FKs.
+    """Insert the FK target user row so credits + workspace writes don't trip FKs.
 
-    The credits table has a CASCADE FK to ``users.id``; we insert the
-    user. The persona row isn't required for the service.generate flow
-    (the workspace path uses the persona id segment but doesn't FK-check
-    against ``personas``), but a future test refactor might want it — we
-    only seed the user here.
+    The credits table has a CASCADE FK to ``users.id``; we insert the user. The
+    persona row isn't required for the service.generate flow (the workspace path
+    uses the persona id segment but doesn't FK-check against ``personas``).
     """
     with migrated_engine.begin() as conn:
         conn.execute(
@@ -287,16 +299,24 @@ def _tx_reasons(engine: Engine, user_id: str) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
+def _has_row(engine: Engine, user_id: str) -> bool:
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(credits_t.c.user_id).where(credits_t.c.user_id == user_id)
+        ).first()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
-# Scenario 1: happy path — bytes on disk, credits deducted, no refund.
+# Scenario 1: happy path — bytes on disk, ceiling pre-deduct + true-up refund.
 # ---------------------------------------------------------------------------
 
 
-def test_generate_happy_path_persists_bytes_and_deducts_credits(
+def test_generate_happy_path_persists_bytes_and_writes_ceiling_and_trueup(
     seeded_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """A successful generation lands bytes at the D-13-4 workspace path AND deducts credits exactly once."""
+    """A successful generation lands bytes at the D-13-4 path AND writes the two-row ceiling+true-up ledger."""
     backend = _HappyBackend(image_bytes_list=[_TINY_PNG_A])
     options = ImageGenOptions(size="1024x1024", count=1, quality="standard")
 
@@ -312,7 +332,7 @@ def test_generate_happy_path_persists_bytes_and_deducts_credits(
             persona_visual_style=None,
             prompt="a red bicycle",
             options=options,
-            cost_per_image_credits=100,
+            ceiling_per_image=_CEILING,
         )
     )
 
@@ -333,19 +353,22 @@ def test_generate_happy_path_persists_bytes_and_deducts_credits(
     assert expected_path.is_file()
     assert expected_path.read_bytes() == _TINY_PNG_A
 
-    # Credits: exactly one deduct, no refund.
+    # Ledger: ceiling pre-deduct then a true-up refund of the overage (real < ceiling).
     deltas = _tx_deltas(seeded_engine, _USER)
-    assert deltas == [-100], f"expected one -100 deduct, got {deltas}"
+    assert deltas == [-_CEILING, _CEILING - _NET_CHARGE], (
+        f"expected [pre-deduct, true-up refund], got {deltas}"
+    )
     reasons = _tx_reasons(seeded_engine, _USER)
-    assert reasons == ["image_gen_pre"]
-    assert _balance(seeded_engine, _USER) == start_balance - 100
+    assert reasons == ["image_gen_pre", f"image_gen_trueup:{_TRUEUP_BASIS}"]
+    # Net charge is the REAL cost, not the ceiling.
+    assert _balance(seeded_engine, _USER) == start_balance - _NET_CHARGE
 
 
 def test_generate_happy_path_with_count_2_persists_two_files(
     seeded_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """``count=2`` (D-15-3 ceiling) lands two distinct files and deducts ``2 * cost``."""
+    """``count=2`` (D-15-3 ceiling) lands two distinct files; the pre-deduct scales by count, the true-up prices the call once."""
     backend = _HappyBackend(image_bytes_list=[_TINY_PNG_A, _TINY_PNG_B])
     options = ImageGenOptions(size="1024x1024", count=2, quality="standard")
 
@@ -359,7 +382,7 @@ def test_generate_happy_path_with_count_2_persists_two_files(
             persona_visual_style=None,
             prompt="two illustrations",
             options=options,
-            cost_per_image_credits=100,
+            ceiling_per_image=_CEILING,
         )
     )
 
@@ -372,8 +395,13 @@ def test_generate_happy_path_with_count_2_persists_two_files(
         on_disk = tmp_path / "workspace" / _USER / _PERSONA / img.workspace_path
         assert on_disk.is_file()
 
+    # Pre-deduct is count * ceiling; the true-up refunds down to the one real cost.
     deltas = _tx_deltas(seeded_engine, _USER)
-    assert deltas == [-200], f"expected one -200 deduct (count=2 * 100), got {deltas}"
+    assert deltas == [-2 * _CEILING, 2 * _CEILING - _NET_CHARGE], (
+        f"expected [-(2*ceiling), trueup refund], got {deltas}"
+    )
+    reasons = _tx_reasons(seeded_engine, _USER)
+    assert reasons == ["image_gen_pre", f"image_gen_trueup:{_TRUEUP_BASIS}"]
 
 
 def test_generate_happy_path_merges_visual_style_into_prompt(
@@ -404,7 +432,7 @@ def test_generate_happy_path_merges_visual_style_into_prompt(
             persona_visual_style="watercolour",
             prompt="a cat",
             options=ImageGenOptions(),
-            cost_per_image_credits=100,
+            ceiling_per_image=_CEILING,
         )
     )
     assert captured == ["a cat, in the style of watercolour"], (
@@ -413,8 +441,7 @@ def test_generate_happy_path_merges_visual_style_into_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 2: backend failure → refund applied; no bytes on disk; original
-# exception propagates.
+# Scenario 2: backend failure → the ceiling is refunded; the true-up never runs.
 # ---------------------------------------------------------------------------
 
 
@@ -422,7 +449,7 @@ def test_generate_backend_content_rejection_refunds_credits(
     seeded_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """Provider moderation rejection: deduct lands, refund issues, exception propagates, NO bytes on disk."""
+    """Provider moderation rejection: the ceiling pre-deduct is refunded, the exception propagates, NO bytes on disk."""
     backend = _RejectingBackend()
     options = ImageGenOptions(size="1024x1024", count=1, quality="standard")
     start_balance = _balance(seeded_engine, _USER) if _has_row(seeded_engine, _USER) else 100_000
@@ -438,7 +465,7 @@ def test_generate_backend_content_rejection_refunds_credits(
                 persona_visual_style=None,
                 prompt="anything",
                 options=options,
-                cost_per_image_credits=100,
+                ceiling_per_image=_CEILING,
             )
         )
 
@@ -446,9 +473,9 @@ def test_generate_backend_content_rejection_refunds_credits(
     assert excinfo.value.context.get("reason") == "provider_moderation"
     assert excinfo.value.context.get("stage") == "input"
 
-    # Credits: deduct + refund pair (audit trail captures the round trip).
+    # Credits: ceiling pre-deduct + a matching refund (the true-up never runs on failure).
     deltas = _tx_deltas(seeded_engine, _USER)
-    assert deltas == [-100, 100], f"expected deduct then refund, got {deltas}"
+    assert deltas == [-_CEILING, _CEILING], f"expected ceiling deduct then refund, got {deltas}"
     reasons = _tx_reasons(seeded_engine, _USER)
     assert reasons[0] == "image_gen_pre"
     assert reasons[1] == "image_gen_refund:backend_failure"
@@ -467,7 +494,7 @@ def test_generate_backend_transient_error_refunds_credits(
     seeded_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """:class:`ImageProviderError` (non-moderation) also triggers the refund-on-failure path."""
+    """:class:`ImageProviderError` (non-moderation) also triggers the ceiling refund-on-failure path."""
     backend = _FailingBackend()
     start_balance = _balance(seeded_engine, _USER) if _has_row(seeded_engine, _USER) else 100_000
 
@@ -482,12 +509,12 @@ def test_generate_backend_transient_error_refunds_credits(
                 persona_visual_style=None,
                 prompt="anything",
                 options=ImageGenOptions(),
-                cost_per_image_credits=100,
+                ceiling_per_image=_CEILING,
             )
         )
 
     deltas = _tx_deltas(seeded_engine, _USER)
-    assert deltas == [-100, 100]
+    assert deltas == [-_CEILING, _CEILING]
     assert _balance(seeded_engine, _USER) == start_balance
 
 
@@ -504,9 +531,9 @@ def test_generate_concurrency_capped_does_not_touch_credits(
 
     This is the binary structural proof of D-15-X-concurrency-cap +
     D-15-X-pre-deduct-credits combined: the cap fires INSIDE the same
-    transaction that owns the deduct, so when the cap raises
+    transaction that owns the pre-deduct, so when the cap raises
     ``ConcurrencyCappedError`` the surrounding ``with rls_engine.begin()``
-    rolls back and the deduct never happens. No refund needed either —
+    rolls back and the pre-deduct never happens. No refund needed either —
     the ledger is unchanged.
     """
     backend = _HappyBackend(image_bytes_list=[_TINY_PNG_A])
@@ -540,7 +567,7 @@ def test_generate_concurrency_capped_does_not_touch_credits(
                         persona_visual_style=None,
                         prompt="anything",
                         options=ImageGenOptions(),
-                        cost_per_image_credits=100,
+                        ceiling_per_image=_CEILING,
                     )
                 )
 
@@ -593,13 +620,13 @@ def test_generate_after_concurrency_cap_releases_succeeds(
                         persona_visual_style=None,
                         prompt="x",
                         options=ImageGenOptions(),
-                        cost_per_image_credits=100,
+                        ceiling_per_image=_CEILING,
                     )
                 )
         finally:
             holder_trans.rollback()
 
-    # Second call (after the holder released): proceeds normally.
+    # Second call (after the holder released): proceeds normally — two-row ledger.
     result = asyncio.run(
         imagegen_service.generate(
             rls_engine=seeded_engine,
@@ -610,26 +637,15 @@ def test_generate_after_concurrency_cap_releases_succeeds(
             persona_visual_style=None,
             prompt="x",
             options=ImageGenOptions(),
-            cost_per_image_credits=100,
+            ceiling_per_image=_CEILING,
         )
     )
     assert len(result.images) == 1
     assert result.images[0].workspace_path is not None
     deltas = _tx_deltas(seeded_engine, _USER)
-    assert deltas == [-100], "second call (lock free) deducts normally"
-
-
-# ---------------------------------------------------------------------------
-# Helper — checks if a credits row exists for the user (to safely call _balance).
-# ---------------------------------------------------------------------------
-
-
-def _has_row(engine: Engine, user_id: str) -> bool:
-    with engine.begin() as conn:
-        row = conn.execute(
-            select(credits_t.c.user_id).where(credits_t.c.user_id == user_id)
-        ).first()
-    return row is not None
+    assert deltas == [-_CEILING, _CEILING - _NET_CHARGE], (
+        "second call (lock free) writes the ceiling+true-up ledger normally"
+    )
 
 
 # ---------------------------------------------------------------------------

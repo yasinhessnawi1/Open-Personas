@@ -571,8 +571,9 @@ def test_imagegen_provider_rejection_returns_422(
     # BEFORE create so the create-time avatar gen also rejects (fail-soft to
     # null, free → no ledger movement, no bytes) — leaving the workspace
     # genuinely empty so the assertion is about the rejected imagegen POST, not
-    # the create-time avatar. The ledger deduct/refund pair below is the POST's
-    # (avatar generation is free and contributes no ledger rows).
+    # the create-time avatar. The rejecting backend also rejects the create-time
+    # avatar (fail-soft → null, no billing on the rejected path), so the ledger
+    # deduct/refund pair below is the imagegen POST's alone.
     c.app.state.image_backend = _RejectingBackend()
     pid = _create_persona(c, uid_a)
 
@@ -590,11 +591,12 @@ def test_imagegen_provider_rejection_returns_422(
     assert detail["context"]["reason"] == "provider_moderation"
     assert detail["context"]["stage"] == "input"
 
-    # Refund-on-failure landed: service layer issued the deduct + refund
-    # pair before propagating the exception (net-zero balance).
+    # Spec M3 (T3a): refund-on-full-failure landed — the service pre-deducted the
+    # CEILING (50 credits/image, count=1) then refunded it in full before
+    # propagating the exception (net-zero; no true-up on the failure path).
     deltas = _tx_deltas(su, uid_a)
-    assert -100 in deltas, f"expected deduct entry, got {deltas}"
-    assert 100 in deltas, f"expected refund entry, got {deltas}"
+    assert -50 in deltas, f"expected ceiling deduct entry, got {deltas}"
+    assert 50 in deltas, f"expected refund entry, got {deltas}"
 
     # No bytes on disk — the failure branch persists nothing.
     user_ws = workspace_root / uid_a / pid / "uploads"
@@ -625,10 +627,11 @@ def test_imagegen_provider_transient_error_returns_502(
     assert detail["error"] == "provider_error"
     assert detail["context"]["reason"] == "transient"
 
-    # Refund applied: deduct + refund pair lands in the ledger.
+    # Spec M3 (T3a): refund-on-full-failure — the ceiling pre-deduct (50) is
+    # refunded in full before the exception propagates (no true-up on failure).
     deltas = _tx_deltas(su, uid_a)
-    assert -100 in deltas, f"expected deduct entry, got {deltas}"
-    assert 100 in deltas, f"expected refund entry, got {deltas}"
+    assert -50 in deltas, f"expected ceiling deduct entry, got {deltas}"
+    assert 50 in deltas, f"expected refund entry, got {deltas}"
 
 
 # ---------------------------------------------------------------------------

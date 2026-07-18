@@ -335,15 +335,16 @@ class TestImageUnset:
         stub_image_backends: dict[str, types.ModuleType],
     ) -> None:
         """When neither form is set, the factory builds a default
-        :class:`ImageBackendConfig` — provider defaults to ``openai`` and
-        the concrete backend's fail-fast surfaces missing api_key."""
+        :class:`ImageBackendConfig` — provider defaults to ``openrouter``
+        (Spec M3 D-M3-10) and the concrete backend's fail-fast surfaces missing
+        api_key."""
         _clear_imagegen_env(monkeypatch)
         # No env vars set → ImageBackendConfig.from_env() yields the default
-        # provider=openai with api_key=None. The stub doesn't fail on missing
+        # provider=openrouter with api_key=None. The stub doesn't fail on missing
         # key, so we just verify the bare-single path is taken.
         backend = load_image_backend_from_env()
         assert not isinstance(backend, MultiModelImageBackend)
-        assert backend.provider_name == "openai"
+        assert backend.provider_name == "openrouter"
 
 
 class TestImageOpenRouterFreeModeDrop:

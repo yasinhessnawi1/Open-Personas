@@ -580,6 +580,34 @@ class UsageEntry(_Output):
     created_at: datetime
 
 
+class LedgerEntry(_Output):
+    """One credit-ledger row — the ALL-surface usage view (Spec M3, T8; D-M3-1).
+
+    Where :class:`UsageEntry` reads only ``turn_logs`` (chat turns), this reads the
+    ``credit_transactions`` ledger EVERY billed surface writes to — chat, authoring,
+    image (+ true-up rows), agentic runs, task legs, background LLM (episodic /
+    voice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and
+    sandbox — RLS-scoped + paginated (newest-first). Each row surfaces its
+    provenance so the web can label what was charged and how it was priced.
+
+    * ``reason`` — the surface label, ``"<surface>[:<basis>]"`` (e.g.
+      ``"image_gen:actual_openrouter"``, ``"voice:provider_meter"``,
+      ``"sandbox:infra_flat"``, ``"agentic_run:estimate_static"``).
+    * ``delta`` — credits moved (**negative = charged**; positive = refund / grant).
+    * ``cost_cents`` — the true pre-markup provider cost (``0.0`` for a zero-provider
+      ``infra_flat`` surface; ``None`` on a legacy pre-M3 / flat-floor row).
+    * ``cost_basis`` — the provenance vocabulary (``actual_openrouter`` /
+      ``estimate_static`` / ``estimate_catalog`` / ``provider_meter`` / ``infra_flat``
+      / ``unpriced``); ``None`` on legacy rows.
+    """
+
+    reason: str
+    delta: int
+    cost_cents: float | None = None
+    cost_basis: str | None = None
+    created_at: datetime
+
+
 # -- profile (Spec K6, K6-D-1) ----------------------------------------------
 
 

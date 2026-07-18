@@ -38,6 +38,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from persona.billing import BillingConfig, credits_charged
 from persona.errors import CheckpointTooLargeError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
@@ -50,6 +51,7 @@ from persona.tasks import (
     WaitKind,
     is_terminal,
 )
+from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
 
 if TYPE_CHECKING:
@@ -57,8 +59,12 @@ if TYPE_CHECKING:
 
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import StuckReport, Task
+    from persona_runtime.agentic.run import StepUsage
+    from persona_runtime.cost import CostSource
     from persona_runtime.legs import AgenticRunner, CheckpointWriter, LegOutcome
+    from sqlalchemy import Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
     from persona_api.tasks.continuation import TaskContinuation
     from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -129,6 +135,41 @@ class RunnableGuard(Protocol):
     def is_runnable(self, owner_id: str, task: Task) -> bool: ...
 
 
+class _LegBillingAccumulator:
+    """Sums a leg's real per-step model cost for the owner-billed deduct (Spec M3, T4b).
+
+    The leg's ``on_step_usage`` callback: each step's model-call usage is priced like
+    a chat turn (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual preferred;
+    else the resolver estimate; else unpriced). The cost is SUMMED across the leg's
+    steps (a leg can span tiers); the handler bills the total ONCE, after the CAS
+    append commits. On a re-delivery the leg re-runs and re-accumulates the SAME cost
+    — harmlessly discarded by the billing_key idempotency gate.
+    """
+
+    def __init__(self, cost_source: CostSource | None) -> None:
+        self._cost_source = cost_source
+        self._total_cents = 0.0
+        self._basis: str | None = None
+
+    async def on_step_usage(self, usage: StepUsage) -> None:
+        cost_cents, basis = compute_turn_cost(
+            provider=usage.provider,
+            model=usage.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            actual_cost_usd=usage.cost_usd,
+            source=self._cost_source,
+        )
+        self._total_cents += cost_cents
+        # Prefer a genuine basis over ``unpriced`` (same-provider legs share one).
+        if basis != "unpriced" or self._basis is None:
+            self._basis = basis
+
+    def result(self) -> tuple[float, str | None]:
+        """``(total_cost_cents, cost_basis)`` — basis ``None`` iff no step ran."""
+        return self._total_cents, self._basis
+
+
 class TaskLegHandler:
     """Runs one boxed leg as an A0 job; the checkpoint write rides the store CAS (A2-R-4)."""
 
@@ -148,6 +189,11 @@ class TaskLegHandler:
         budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
         on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
         on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        billing_config: BillingConfig | None = None,
+        agentic_floor: int = 1,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -182,6 +228,63 @@ class TaskLegHandler:
         # same account the dead-leg sweep voices). Optional + best-effort; None → the Tasks
         # surface's waiting(on_user) state is the durable floor.
         self._on_task_stuck = on_task_stuck
+        # Spec M3 (T4b): OWNER-billed, CAS-ridden idempotent leg billing. Both
+        # ``credits_policy`` and ``rls_engine`` None → no billing (the plain A2 /
+        # unit shape). ``cost_source`` is the shared metadata resolver
+        # (``runtime_factory.metadata_resolver``) so a leg's real cost prices with
+        # full catalog coverage; ``agentic_floor`` is the per-leg minimum (infra
+        # via the floor, D-M3-4 amendment).
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._billing_config = billing_config or BillingConfig()
+        self._agentic_floor = agentic_floor
+
+    def _billing_enabled(self) -> bool:
+        return self._credits_policy is not None and self._rls_engine is not None
+
+    async def _bill_leg(
+        self, owner: str, task_id: str, seq: int, accumulator: _LegBillingAccumulator
+    ) -> None:
+        """Owner-bill a committed leg's real cost, CAS-ridden idempotent (Spec M3, T4b, D-M3-R5).
+
+        Called ONLY when the leg's checkpoint CAS-append committed (disposition
+        CONTINUE / COMPLETED). The deduct is keyed ``billing_key = {task_id}:leg:{seq}``
+        — the SAME identity as the checkpoint — so a re-delivered leg (which re-runs
+        the model, re-accumulates the same cost, and CAS-no-ops the checkpoint) hits
+        the ``ON CONFLICT (billing_key) DO NOTHING`` gate and does NOT double-charge.
+        Uses ``capture_up_to_idempotent`` (floored) — a completed leg captures what
+        the owner can afford rather than hard-failing already-done work. Fail-soft:
+        a billing error never fails the (already-committed) leg.
+        """
+        if self._credits_policy is None or self._rls_engine is None:
+            return
+        cost_cents, basis = accumulator.result()
+        if basis is None:
+            return  # no metered model call this leg (nothing to bill)
+        charge = credits_charged(
+            provider_cents=cost_cents,
+            infra_flat_cents=0.0,  # infra via the per-leg floor (D-M3-4 amendment)
+            markup=self._billing_config.credit_markup,
+            floor=self._agentic_floor,
+        )
+        try:
+            self._credits_policy.capture_up_to_idempotent(
+                rls_engine=self._rls_engine,
+                user_id=owner,
+                amount=charge,
+                reason=f"task_leg:{basis}",
+                billing_key=f"{task_id}:leg:{seq}",
+                cost_cents=cost_cents,
+                cost_basis=basis,
+            )
+        except Exception as exc:  # noqa: BLE001 — billing must never fail a committed leg
+            _log.warning(
+                "task-leg owner-billing failed (fail-soft) task_id={tid} seq={seq}: {err}",
+                tid=task_id,
+                seq=seq,
+                err=str(exc),
+            )
 
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
@@ -206,6 +309,9 @@ class TaskLegHandler:
 
         runner = self._runner_builder.build(task.id, task.persona_id, self._box)
         executor = LegExecutor(runner=runner, writer=self._writer, sink=self._checkpoints)
+        # Spec M3 (T4b): meter the leg's real per-step cost for the owner-billed deduct.
+        # None when billing is unwired → the run_leg call stays byte-identical.
+        accumulator = _LegBillingAccumulator(self._cost_source) if self._billing_enabled() else None
         try:
             outcome = await executor.run_leg(
                 task=task,
@@ -214,6 +320,7 @@ class TaskLegHandler:
                 seq=seq,
                 box=self._box,
                 now=now,
+                on_step_usage=accumulator.on_step_usage if accumulator is not None else None,
             )
         except CheckpointTooLargeError as exc:
             # R9-005: the run FINISHED but its checkpoint cannot land within the store's budget
@@ -245,6 +352,18 @@ class TaskLegHandler:
             checkpoint_seq=seq,
             disposition=outcome.disposition.value,
         )
+        # Spec M3 (T4b): OWNER-bill the leg's real cost, RIDING the CAS-committed
+        # append. Only the CONTINUE / COMPLETED dispositions appended a checkpoint
+        # (FAILED / WAITING_APPROVAL do not; the CheckpointTooLargeError park returned
+        # above) — so we bill exactly the committed-work dispositions. Keyed
+        # ``{task_id}:leg:{seq}`` (the checkpoint's identity), so a re-delivered leg
+        # is a no-op via ``ON CONFLICT (billing_key) DO NOTHING`` — the deduct NEVER
+        # rides ``context.meter`` (which fires on every at-least-once execution).
+        if accumulator is not None and outcome.disposition in (
+            LegDisposition.CONTINUE,
+            LegDisposition.COMPLETED,
+        ):
+            await self._bill_leg(owner, payload.task_id, seq, accumulator)
         # Disposition → state machine (continuation / completion / waiting); raises on FAILED
         # so A0 re-delivers (transient). Skipped when no continuation is wired (idempotency-only).
         # A ScheduledFire's fire_time is the recurrence anchor — "is there a fire after THIS one?" —
@@ -348,6 +467,11 @@ def register_task_leg_handler(
     budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
     on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
     on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
+    cost_source: CostSource | None = None,
+    billing_config: BillingConfig | None = None,
+    agentic_floor: int = 1,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -367,6 +491,11 @@ def register_task_leg_handler(
                 budget_gate=budget_gate,
                 on_approval_parked=on_approval_parked,
                 on_task_stuck=on_task_stuck,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
+                cost_source=cost_source,
+                billing_config=billing_config,
+                agentic_floor=agentic_floor,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

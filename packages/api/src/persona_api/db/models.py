@@ -711,7 +711,23 @@ credit_transactions = Table(
     Column("delta", Integer, nullable=False),
     Column("reason", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # Spec M3 (migration 050): universal real-cost billing provenance + idempotency.
+    # ``cost_cents`` = the true provider cost pre-markup (DOUBLE PRECISION — sub-cent
+    # surfaces like chat/embeds/tool-calls must not round to 0); ``cost_basis`` = the
+    # provenance vocabulary (actual_openrouter|estimate_*|provider_meter|infra_flat|
+    # unpriced, D-M3-12); ``billing_key`` = the at-least-once idempotency anchor
+    # (partial-unique so background/task deducts don't double-charge on re-delivery,
+    # D-M3-R5). All nullable/additive — NULL = a legacy pre-M3 or flat-floor row.
+    Column("cost_cents", Float),
+    Column("cost_basis", Text),
+    Column("billing_key", Text),
     Index("idx_credit_tx_user", "user_id"),
+    Index(
+        "uq_credit_tx_billing_key",
+        "billing_key",
+        unique=True,
+        postgresql_where=text("billing_key IS NOT NULL"),
+    ),
 )
 
 audit_log = Table(

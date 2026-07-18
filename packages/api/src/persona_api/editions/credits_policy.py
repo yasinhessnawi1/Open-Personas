@@ -28,7 +28,13 @@ from persona.credits import (
     capture_up_to as _capture_up_to,
 )
 from persona.credits import (
+    capture_up_to_idempotent as _capture_up_to_idempotent,
+)
+from persona.credits import (
     deduct as _deduct,
+)
+from persona.credits import (
+    deduct_idempotent as _deduct_idempotent,
 )
 from persona.credits import (
     get_balance as _get_balance,
@@ -69,24 +75,98 @@ class CreditsPolicy(Protocol):
         """Pre-flight check; raise ``CreditsExhaustedError`` (→ 402) if empty."""
         ...
 
-    def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
-        """Deduct ``amount`` + record a ledger row. Returns the new balance."""
+    def deduct(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Deduct ``amount`` + record a ledger row. Returns the new balance.
+
+        Spec M3 (D-M3-12): ``cost_cents`` (true provider cost pre-markup) and
+        ``cost_basis`` (provenance) are recorded on the row when supplied; both
+        default ``None`` (pre-M3 callers write them as ``NULL``, byte-identical).
+        """
         ...
 
     def capture_up_to(
-        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
     ) -> tuple[int, int]:
         """Charge ``min(amount, balance)``, floored at 0. Returns ``(captured, new_balance)``.
 
         Spec M2 review (C1): the opt-in partial-capture path. ONLY the
         chat-turn worker's post-success billing calls this — every other
         metered caller keeps using :meth:`deduct`, whose all-or-nothing
-        semantics this method does not alter.
+        semantics this method does not alter. Spec M3 (D-M3-12): records
+        ``cost_cents`` / ``cost_basis`` when supplied.
         """
         ...
 
-    def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
-        """Reverse-deduct via a ledger entry. Returns the new balance."""
+    def deduct_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotent all-or-nothing deduct keyed on ``billing_key`` (Spec M3, D-M3-R5).
+
+        For at-least-once callers (owner-billed avatar / background / task
+        deducts): a re-delivered op with the same key does not double-charge.
+        """
+        ...
+
+    def capture_up_to_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> tuple[int, int]:
+        """Idempotent partial-capture keyed on ``billing_key`` (Spec M3, D-M3-R5).
+
+        The floored sibling of :meth:`deduct_idempotent` for POST-SUCCESS
+        at-least-once billing of completed work (task legs): captures what the
+        balance covers rather than hard-failing an already-done leg, and a
+        re-delivery with the same key does not double-charge. Returns
+        ``(captured, new_balance)``.
+        """
+        ...
+
+    def refund(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Reverse-deduct via a ledger entry. Returns the new balance.
+
+        Spec M3 (D-M3-12): records ``cost_cents`` / ``cost_basis`` when supplied
+        (the image true-up overage refund carries the refunded charge's basis).
+        """
         ...
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:
@@ -123,7 +203,16 @@ class MeteredCreditsPolicy:
     def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:
         return _require_credits(rls_engine=rls_engine, user_id=user_id)
 
-    def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
+    def deduct(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
         try:
             return _deduct(
                 rls_engine=rls_engine,
@@ -131,6 +220,8 @@ class MeteredCreditsPolicy:
                 amount=amount,
                 reason=reason,
                 daily_cap=self._daily_cap,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         except DailySpendCapExceededError as exc:
             # FAIL-LOUD + audited (R7-D-5): the spend rolled back in ``_deduct``'s
@@ -144,7 +235,14 @@ class MeteredCreditsPolicy:
             raise
 
     def capture_up_to(
-        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
     ) -> tuple[int, int]:
         """Spec M2 review (C1): semantics-free passthrough to ``persona.credits.capture_up_to``.
 
@@ -153,7 +251,8 @@ class MeteredCreditsPolicy:
         precedent: the policy stays amount-agnostic). It only forwards the
         day-cap it already owns (mirroring :meth:`deduct`) and, on a day-cap
         refusal, writes the SAME durable audit row :meth:`deduct` writes
-        (R7-D-5 fail-loud + audited) before re-raising.
+        (R7-D-5 fail-loud + audited) before re-raising. Spec M3 (D-M3-12):
+        forwards ``cost_cents`` / ``cost_basis`` to the recorded row.
         """
         try:
             return _capture_up_to(
@@ -162,6 +261,8 @@ class MeteredCreditsPolicy:
                 amount=amount,
                 reason=reason,
                 daily_cap=self._daily_cap,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         except DailySpendCapExceededError as exc:
             self._audit_daily_cap_refusal(
@@ -191,8 +292,80 @@ class MeteredCreditsPolicy:
                 )
             )
 
-    def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
-        return _refund(rls_engine=rls_engine, user_id=user_id, amount=amount, reason=reason)
+    def deduct_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        try:
+            return _deduct_idempotent(
+                rls_engine=rls_engine,
+                user_id=user_id,
+                amount=amount,
+                reason=reason,
+                billing_key=billing_key,
+                daily_cap=self._daily_cap,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+            )
+        except DailySpendCapExceededError as exc:
+            self._audit_daily_cap_refusal(
+                rls_engine=rls_engine, user_id=user_id, context=exc.context
+            )
+            raise
+
+    def capture_up_to_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> tuple[int, int]:
+        try:
+            return _capture_up_to_idempotent(
+                rls_engine=rls_engine,
+                user_id=user_id,
+                amount=amount,
+                reason=reason,
+                billing_key=billing_key,
+                daily_cap=self._daily_cap,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+            )
+        except DailySpendCapExceededError as exc:
+            self._audit_daily_cap_refusal(
+                rls_engine=rls_engine, user_id=user_id, context=exc.context
+            )
+            raise
+
+    def refund(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        return _refund(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=amount,
+            reason=reason,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:
         return _get_balance(rls_engine=rls_engine, user_id=user_id)
@@ -214,17 +387,68 @@ class UnlimitedCreditsPolicy:
     def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:
         return _UNLIMITED_BALANCE
 
-    def deduct(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
+    def deduct(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
         return _UNLIMITED_BALANCE
 
     def capture_up_to(
-        self, *, rls_engine: Engine, user_id: str, amount: int, reason: str
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
     ) -> tuple[int, int]:
         # Never reached in practice (community's ``deduct`` never raises), but
         # implemented for Protocol completeness: a no-op that "fully captures".
         return amount, _UNLIMITED_BALANCE
 
-    def refund(self, *, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
+    def deduct_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        return _UNLIMITED_BALANCE
+
+    def capture_up_to_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> tuple[int, int]:
+        return amount, _UNLIMITED_BALANCE
+
+    def refund(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
         return _UNLIMITED_BALANCE
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:

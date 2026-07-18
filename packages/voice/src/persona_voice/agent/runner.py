@@ -38,7 +38,9 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from livekit import api
 from persona.audit import JSONLAuditLogger
+from persona.billing import BillingConfig, CoreCreditsLedger
 from persona.config import PersonaCoreConfig
 from persona.errors import PersonaNotFoundError
 from persona.history import ConversationHistoryManager
@@ -65,6 +67,7 @@ from persona_voice.agent.language import (
     tts_is_utterance_level,
 )
 from persona_voice.agent.warmup import start_embedder_warmup
+from persona_voice.billing import VoiceExhaustionCutoff, VoiceTurnBillingMeter
 from persona_voice.model import (
     AsyncArtifactLane,
     VoiceHistoryCompactor,
@@ -336,6 +339,7 @@ class AgentSession:
         handback_poller: DelegationHandbackPoller | None = None,
         delegation_dispatcher: DelegationDispatcher | None = None,
         on_call_complete: Callable[[], None] | None = None,
+        turn_billing_meter: VoiceTurnBillingMeter | None = None,
     ) -> None:
         self._voice_room = voice_room
         self._loop = loop
@@ -374,6 +378,10 @@ class AgentSession:
         # the loop, best-effort. Accumulation rides the K2 background seam; it is NOT
         # gated by the graph-memory kill-switch (D-6 governs read/surfacing only).
         self._on_call_complete = on_call_complete
+        # Spec M3 (T6b-1): the per-turn owner-billing meter (fed by the producer,
+        # fired by the recorder). Held here so teardown can bill the call's LiveKit
+        # infra (per-min) once at end, off-loop + best-effort. ``None`` ⇒ unmetered.
+        self._turn_billing_meter = turn_billing_meter
 
     async def run(self) -> None:
         """Join the Room, run the loop until disconnect, then tear down."""
@@ -454,8 +462,16 @@ class AgentSession:
         # end_reason), then dispose its DEDICATED engine. Runs AFTER session.end()
         # safely — the recorder's engine is separate, so the session-engine
         # disposal above never strands this write. close() is itself best-effort.
+        call_duration_s: int | None = None
         if self._call_recorder is not None:
-            self._call_recorder.close(end_reason=self._end_reason)
+            call_duration_s = self._call_recorder.close(end_reason=self._end_reason)
+        # Spec M3 (T6b-1): bill the call's LiveKit infra (per-min) ONCE at end, off
+        # the loop + best-effort + idempotent (keyed per call, so a re-run of
+        # teardown is a clean no-op). Runs after the record is finalized so the
+        # duration is known; a billing hiccup never strands engine disposal below.
+        if self._turn_billing_meter is not None and call_duration_s is not None:
+            with contextlib.suppress(Exception):
+                await self._turn_billing_meter.bill_call_infra(call_duration_s)
         if self._call_record_engine is not None:
             with contextlib.suppress(Exception):
                 self._call_record_engine.dispose()
@@ -774,6 +790,29 @@ async def build_agent_session(
         voice_spec=persona.identity.voice,
     )
 
+    # Spec M3 (T6b-1): the per-turn owner-billing meter. Built HERE (not at the
+    # recorder/producer above) because it prices the ACTUALLY-SERVED STT/TTS
+    # providers — read off the live backends AFTER V14 language routing has picked
+    # them — and reads the V8 real-streamed-seconds off the STT seam. Injected into
+    # the already-constructed producer (feeds it TTS chars + LLM usage per turn) and
+    # recorder (fires the off-loop deduct on commit) via their late-binding setters,
+    # before run() fires the first turn. The deduct opens its own fresh short-lived
+    # RLS engine per turn (the ``_on_call_complete`` idiom) — never the audio loop.
+    turn_billing_meter = VoiceTurnBillingMeter(
+        ledger=CoreCreditsLedger(),
+        billing_config=BillingConfig(),
+        engine_factory=lambda: make_session_rls_engine(config.database_url, user_id=user_id),
+        user_id=user_id,
+        call_id=conversation_id,  # the durable per-call identity (stable across retry)
+        stt_provider=stt_backend.provider_name,
+        stt_model=stt_backend.model_name,
+        tts_provider=tts_backend.provider_name,
+        tts_model=tts_backend.model_name,
+        streamed_seconds_reader=lambda: stt_seam.streamed_seconds,
+    )
+    producer.set_turn_meter(turn_billing_meter)
+    recorder.set_billing_meter(turn_billing_meter)
+
     # --- transport + loop + orchestrator ---
     voice_room = room_factory()
     loop = StreamingLoop(
@@ -911,6 +950,50 @@ async def build_agent_session(
         conversation_id=conversation_id,
         ttl_s=config.livekit_token_ttl_s,
     )
+
+    # Spec M3 (T6b-2): the mid-call cutoff — wired into the per-turn meter's
+    # ``on_exhausted``. On the FIRST turn whose real deduct exhausts the balance it
+    # speaks one brief grounded notice (bounded), then deletes the room (both
+    # parties disconnect → the agent's room-disconnect handler drives the normal
+    # teardown: the call-record finalizes + the LiveKit infra tick bills). On a
+    # delete_room failure it falls back to the agent-leave path (``ended.set`` →
+    # run() unblocks → ``_teardown``). Reached only through the REAL deduct chain.
+    _cutoff_room_name = agent_token.room_name
+
+    async def _delete_room_on_exhaustion() -> None:
+        lk = api.LiveKitAPI(
+            config.livekit_url,
+            config.livekit_api_key.get_secret_value(),
+            config.livekit_api_secret.get_secret_value(),
+        )
+        try:
+            await lk.room.delete_room(api.DeleteRoomRequest(room=_cutoff_room_name))
+        finally:
+            await lk.aclose()
+
+    async def _speak_exhaustion_notice() -> None:
+        # The floor-gated narration seam (the same one delegation/artifact narration
+        # uses) — a grounded one-liner, never a raw canned string.
+        await orchestrator.notify_artifact_ready(
+            Transcript(
+                is_final=True,
+                text=(
+                    "The user has run out of voice credits, so the call must end now. In "
+                    "one short, warm sentence, let them know you're out of credits and "
+                    "have to say goodbye."
+                ),
+                confidence=1.0,
+            )
+        )
+
+    turn_billing_meter.set_on_exhausted(
+        VoiceExhaustionCutoff(
+            delete_room=_delete_room_on_exhaustion,
+            speak_notice=_speak_exhaustion_notice,
+            on_fallback=ended.set,
+        ).trigger
+    )
+
     # --- V9 (V9-D-5): the durable call-record writer over a DEDICATED RLS engine ---
     # Separate from the session engine on purpose: the clean-hangup path fires
     # ``session.end()`` (disposing the session engine) BEFORE ``_teardown``, so the
@@ -982,6 +1065,7 @@ async def build_agent_session(
         handback_poller=handback_poller,
         delegation_dispatcher=delegation_dispatcher,
         on_call_complete=_on_call_complete,
+        turn_billing_meter=turn_billing_meter,
     )
 
 

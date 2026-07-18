@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 import yaml
+from persona.billing import CostBasis  # noqa: TC001 — Pydantic needs the field type at runtime
 from persona.schema.conversation import ConversationMessage
 from persona.schema.persona import Persona
 from persona.tools import TOOL_CATALOG, known_tool_names
@@ -29,6 +30,7 @@ from persona.tools.mcp.catalog import (
     mcp_server_entry,
     recommender_provider_tag,
 )
+from persona_runtime.cost import compute_turn_cost
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from persona_api.schemas.responses import AuthoringDraft, ToolRecommendation
@@ -44,19 +46,48 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from persona.backends import ChatBackend
+    from persona.backends.types import TokenUsage
+    from persona_runtime.cost import CostSource
+
+
+class AuthoringCost(BaseModel):
+    """The real metered cost of one authoring generation (Spec M3, T2a).
+
+    Surfaced by the streamed authoring generators just before the terminal draft,
+    mirroring the chat loop's ``last_turn_cost_cents`` / ``last_turn_cost_basis``
+    (``compute_turn_cost`` over the served backend's provider/model/tokens, with an
+    OpenRouter ``usage.cost`` actual taking precedence). ``cost_cents`` is the SUM
+    across every generation the turn made (the validation-repair retry is a second
+    paid call, D-10-3), so the route bills the whole authoring turn once. The route
+    prices credits from this via the M3 formula (floored — infra rides the floor,
+    D-M3-4 amendment) and records ``cost_cents`` / ``cost_basis`` on the ledger row.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cost_cents: float = Field(ge=0.0)
+    cost_basis: CostBasis
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+
 
 #: One semantic event yielded by the streamed authoring generators (spec P0,
 #: D-P0-service-yields-events). The service is transport-agnostic — it knows
 #: nothing about SSE; the route maps each event to a ``text/event-stream`` frame.
 #: ``("chunk", delta)`` — a forming-text fragment;
 #: ``("retry", reason)`` — the validation-repair re-stream is starting;
+#: ``("cost", AuthoringCost)`` — the metered real cost (M3, T2a), emitted once
+#: immediately BEFORE the terminal draft (a non-billed pass-through for the client);
 #: ``("draft", AuthoringDraft)`` — the single terminal event (validated or errored).
 AuthoringStreamEvent = (
-    tuple[Literal["chunk", "retry"], str] | tuple[Literal["draft"], AuthoringDraft]
+    tuple[Literal["chunk", "retry"], str]
+    | tuple[Literal["cost"], AuthoringCost]
+    | tuple[Literal["draft"], AuthoringDraft]
 )
 
 __all__ = [
     "RECOMMENDER_PROMPT_VERSION",
+    "AuthoringCost",
     "AuthoringSampling",
     "AuthoringStreamEvent",
     "generate_authoring_draft",
@@ -66,6 +97,32 @@ __all__ = [
     "stream_authoring_draft",
     "stream_refine_authoring_draft",
 ]
+
+
+def _price_usage(
+    backend: ChatBackend,
+    usage: TokenUsage | None,
+    cost_source: CostSource | None,
+) -> tuple[float, CostBasis, int, int]:
+    """Price one authoring generation's usage → ``(cost_cents, basis, prompt, completion)``.
+
+    Mirrors the chat loop's ``compute_turn_cost`` call (D-M2-1/3): the served
+    backend's provider/model + token counts, with an OpenRouter ``usage.cost``
+    actual taking precedence. Authoring has no fallback wrapper, so the served
+    identity IS the backend's own ``provider_name`` / ``model_name``. ``usage is
+    None`` (a backend that reported none) degrades to ``(0.0, "unpriced", 0, 0)``.
+    """
+    if usage is None:
+        return 0.0, "unpriced", 0, 0
+    cost, basis = compute_turn_cost(
+        provider=backend.provider_name,
+        model=backend.model_name,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        actual_cost_usd=usage.cost_usd,
+        source=cost_source,
+    )
+    return cost, basis, usage.prompt_tokens, usage.completion_tokens
 
 
 class AuthoringSampling(BaseModel):
@@ -214,23 +271,38 @@ async def _generate_stream(
     backend: ChatBackend,
     messages: list[ConversationMessage],
     sampling: AuthoringSampling,
+    *,
+    cost_source: CostSource | None = None,
 ) -> AsyncIterator[AuthoringStreamEvent]:
     """Stream the same generate-loop as :func:`_generate`, yielding semantic events.
 
     Yields ``("chunk", delta)`` per text fragment as the model generates, then
     runs the SHARED :func:`_finalize_text` on the accumulated text. On a clean
-    first attempt the terminal ``("draft", AuthoringDraft)`` is emitted and the
-    stream ends. On validation failure it emits a visible ``("retry", ...)`` and
-    RE-STREAMS the deterministic repair attempt (D-P0-restream-retry), then emits
-    the terminal draft — validated, or carrying ``errors`` if the repair also
-    failed (D-P0-errors-on-terminal). NEVER a half-formed draft as terminal.
+    first attempt it emits ``("cost", AuthoringCost)`` then the terminal
+    ``("draft", AuthoringDraft)`` and ends. On validation failure it emits a
+    visible ``("retry", ...)`` and RE-STREAMS the deterministic repair attempt
+    (D-P0-restream-retry), then the SUMMED cost (both attempts were paid) and the
+    terminal draft — validated, or carrying ``errors`` if the repair also failed
+    (D-P0-errors-on-terminal). NEVER a half-formed draft as terminal.
+
+    Spec M3 (T2a): the metered real cost is accumulated across every generation
+    the turn made (``_price_usage`` over each attempt's final ``usage``) and
+    surfaced ONCE via the ``cost`` event just before the terminal draft, so the
+    route can bill the whole authoring turn its real cost (D-M3-9). ``usage``
+    rides the final ``StreamChunk`` of each attempt (``is_final=True``).
 
     Transport-agnostic (D-P0-service-yields-events): frames no SSE; the route
     maps these events to ``text/event-stream`` and deducts only after the
     terminal ``draft`` (so an aborted stream — this generator closed early — or a
-    provider error yields no draft and is never charged; D-08-6 lineage).
+    provider error yields no draft/cost and is never charged; D-08-6 lineage).
     """
+    total_cents = 0.0
+    total_prompt = 0
+    total_completion = 0
+    basis: CostBasis = "unpriced"
+
     buffer: list[str] = []
+    usage: TokenUsage | None = None
     async for chunk in backend.chat_stream(
         messages,
         temperature=sampling.temperature,
@@ -240,15 +312,23 @@ async def _generate_stream(
         if chunk.delta:
             buffer.append(chunk.delta)
             yield ("chunk", chunk.delta)
+        if chunk.usage is not None:
+            usage = chunk.usage
+    cents, basis, prompt_tok, completion_tok = _price_usage(backend, usage, cost_source)
+    total_cents += cents
+    total_prompt += prompt_tok
+    total_completion += completion_tok
     draft, errors = _finalize_text("".join(buffer))
     if not errors:
+        yield _cost_event(total_cents, basis, total_prompt, total_completion)
         yield ("draft", draft)
         return
 
     # Re-stream the deterministic repair attempt, visibly (D-P0-restream-retry /
-    # D-10-3): high temp to invent, low temp to fix.
+    # D-10-3): high temp to invent, low temp to fix. Its cost adds to the turn's.
     yield ("retry", "validation")
     repair: list[str] = []
+    repair_usage: TokenUsage | None = None
     async for chunk in backend.chat_stream(
         _retry_messages(messages, "".join(buffer), errors),
         temperature=_DETERMINISTIC.temperature,
@@ -258,8 +338,34 @@ async def _generate_stream(
         if chunk.delta:
             repair.append(chunk.delta)
             yield ("chunk", chunk.delta)
+        if chunk.usage is not None:
+            repair_usage = chunk.usage
+    r_cents, r_basis, r_prompt, r_completion = _price_usage(backend, repair_usage, cost_source)
+    total_cents += r_cents
+    total_prompt += r_prompt
+    total_completion += r_completion
+    # Same backend both attempts → same basis; keep the repair's when it priced
+    # (a genuine basis over a first-attempt ``unpriced`` miss).
+    if r_basis != "unpriced":
+        basis = r_basis
     draft2, _ = _finalize_text("".join(repair))
+    yield _cost_event(total_cents, basis, total_prompt, total_completion)
     yield ("draft", draft2)
+
+
+def _cost_event(
+    cost_cents: float, basis: CostBasis, prompt_tokens: int, completion_tokens: int
+) -> tuple[Literal["cost"], AuthoringCost]:
+    """Build the ``("cost", AuthoringCost)`` event (the summed authoring-turn cost)."""
+    return (
+        "cost",
+        AuthoringCost(
+            cost_cents=cost_cents,
+            cost_basis=basis,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ),
+    )
 
 
 async def generate_authoring_draft(
@@ -333,6 +439,7 @@ def stream_authoring_draft(
     available_skills: list[str],
     *,
     sampling: AuthoringSampling | None = None,
+    cost_source: CostSource | None = None,
 ) -> AsyncIterator[AuthoringStreamEvent]:
     """Stream a draft persona from a description (spec P0; D-10-2 contract preserved).
 
@@ -351,9 +458,15 @@ def stream_authoring_draft(
         sampling: Creative-generation sampling for the FIRST attempt. ``None``
             uses the :class:`AuthoringSampling` default. The repair re-stream is
             always deterministic (D-10-3).
+        cost_source: The provenance-carrying resolver chain for real-cost pricing
+            (Spec M3, T2a); ``None`` uses ``compute_turn_cost``'s zero-network
+            static-only default (exact for the Sonnet-class authoring model;
+            OpenRouter actuals pass through regardless).
     """
     messages = build_authoring_prompt(description, available_tools, available_skills)
-    return _generate_stream(backend, messages, sampling or AuthoringSampling())
+    return _generate_stream(
+        backend, messages, sampling or AuthoringSampling(), cost_source=cost_source
+    )
 
 
 def stream_refine_authoring_draft(
@@ -365,6 +478,7 @@ def stream_refine_authoring_draft(
     available_skills: list[str],
     *,
     sampling: AuthoringSampling | None = None,
+    cost_source: CostSource | None = None,
 ) -> AsyncIterator[AuthoringStreamEvent]:
     """Stream a refinement (§4); same event shape + shared finalize as the draft stream.
 
@@ -378,11 +492,15 @@ def stream_refine_authoring_draft(
         sampling: Creative-generation sampling for the FIRST attempt. ``None``
             uses the :class:`AuthoringSampling` default; the repair re-stream
             stays deterministic (D-10-3).
+        cost_source: The resolver chain for real-cost pricing (Spec M3, T2a);
+            ``None`` uses the static-only default.
     """
     messages = build_refinement_prompt(
         current_yaml, question, answer, available_tools, available_skills
     )
-    return _generate_stream(backend, messages, sampling or AuthoringSampling())
+    return _generate_stream(
+        backend, messages, sampling or AuthoringSampling(), cost_source=cost_source
+    )
 
 
 # -- tool recommender (spec 26 T09) -----------------------------------------

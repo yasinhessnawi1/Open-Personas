@@ -258,6 +258,13 @@ async def post_imagegen(
             persona_visual_style=persona_visual_style,
             prompt=body.prompt,
             options=options,
+            # Spec M3 (T3a): real-cost billing — the shared pricing chain prices the
+            # token-metered image model (estimate_catalog fallback when the response
+            # carries no usage.cost); the ceiling is pre-deducted then trued-up to
+            # the real cost. Infra rides the floor (D-M3-4 amendment).
+            cost_source=getattr(request.app.state, "metadata_resolver", None),
+            ceiling_per_image=request.app.state.config.image_ceiling_credits,
+            floor=request.app.state.config.image_credit_floor,
             # Spec R7 (R7-D-4): the per-user bounded-op concurrency cap (imagegen). 1 =
             # the ratified per-class default (byte-preserves the shipped cap-1); 0 =
             # community/uncapped (edition-gated on app.state).

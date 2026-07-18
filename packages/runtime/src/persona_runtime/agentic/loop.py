@@ -61,7 +61,7 @@ from persona.tools import format_tool_result
 
 from persona_runtime.agentic.compactor import StepHistoryCompactor
 from persona_runtime.agentic.events import RunEvent
-from persona_runtime.agentic.run import CancelToken, Run, RunStatus
+from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
 from persona_runtime.agentic.step import Step, StepType
 from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.prompt import RetrievedContext
@@ -217,6 +217,7 @@ class AgenticLoop:
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
         user_respond: Callable[[str], Awaitable[str]] | None = None,
         cancel_token: CancelToken | None = None,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
     ) -> Run:
         """Execute ``task`` to completion, returning the final :class:`Run`.
 
@@ -230,6 +231,12 @@ class AgenticLoop:
             user_respond: Optional async callback the loop ``await``\\ s on an
                 ask-user step; ``None`` → the loop proceeds with best judgment.
             cancel_token: Optional caller-held cancellation control.
+            on_step_usage: Optional async billing callback (Spec M3, T4a) — invoked
+                with a :class:`StepUsage` right after each step's model call so the
+                caller can meter the step's real cost incrementally and flip
+                ``cancel_token`` to cut the run off at the NEXT step boundary on
+                exhaustion. NOT an SSE event (stays off the client stream);
+                ``None`` → no metering (byte-unchanged for non-billing callers).
 
         Returns:
             The :class:`Run` with all steps, the final status, and the output.
@@ -306,6 +313,21 @@ class AgenticLoop:
             response = await backend.chat(context, tools=self._toolbox.get_specs())
             latency_ms = (time.perf_counter() - step_started) * 1000.0
             tokens = response.usage.total_tokens
+            # Spec M3 (T4a): surface this step's real model-call usage for
+            # incremental billing. The caller meters + may flip ``cancel_token``;
+            # the next iteration's boundary check (top of the loop) then stops the
+            # run cleanly — the in-flight step below completes first.
+            if on_step_usage is not None:
+                await on_step_usage(
+                    StepUsage(
+                        step=step_num,
+                        provider=backend.provider_name,
+                        model=backend.model_name,
+                        prompt_tokens=response.usage.prompt_tokens,
+                        completion_tokens=response.usage.completion_tokens,
+                        cost_usd=response.usage.cost_usd,
+                    )
+                )
 
             if response.tool_calls:
                 step, last_bad_tool, context = await self._handle_tool_calls(

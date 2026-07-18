@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import pytest
 from loguru import logger as _loguru_logger
 from persona.backends.types import StreamChunk
+from persona.billing import BillingConfig
 from persona.schema.conversation import Conversation
 from persona_api.background.chat_turn_worker import ChatTurnHandle, ChatTurnRegistry
 
@@ -80,13 +81,26 @@ class _RecordingSink:
 
 
 class _RecordingCredits:
-    """A CreditsPolicy double recording (amount, reason) per deduct."""
+    """A CreditsPolicy double recording (amount, reason) + (cost_cents, cost_basis) per deduct."""
 
     def __init__(self) -> None:
         self.deducts: list[tuple[int, str]] = []
+        #: Spec M3 (T1b): the recorded (cost_cents, cost_basis) per deduct — the
+        #: true unclamped provider cost + provenance now on the ledger row.
+        self.cost_records: list[tuple[float | None, str | None]] = []
 
-    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:  # noqa: ARG002
+    def deduct(
+        self,
+        *,
+        rls_engine: object,  # noqa: ARG002
+        user_id: str,  # noqa: ARG002
+        amount: int,
+        reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
         self.deducts.append((amount, reason))
+        self.cost_records.append((cost_cents, cost_basis))
         return 0
 
 
@@ -96,6 +110,7 @@ def _registry(
     credits_per_turn: int = 1,
     proportional: bool = True,
     max_turn_credits: int = 500,
+    billing_config: BillingConfig | None = None,
 ) -> ChatTurnRegistry:
     return ChatTurnRegistry(
         sink=_RecordingSink(),  # type: ignore[arg-type]
@@ -104,6 +119,7 @@ def _registry(
         credits_per_turn=credits_per_turn,
         proportional_credits=proportional,
         max_turn_credits=max_turn_credits,
+        billing_config=billing_config,
     )
 
 
@@ -120,7 +136,15 @@ class _ShortfallCredits:
         self._captured = captured
         self._day_cap_error = day_cap_error
 
-    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:  # noqa: ARG002
+    def deduct(
+        self,
+        *,
+        rls_engine: object,  # noqa: ARG002
+        user_id: str,  # noqa: ARG002
+        amount: int,
+        reason: str,
+        **_kwargs: object,
+    ) -> int:
         from persona.errors import CreditsExhaustedError
 
         self.deducts.append((amount, reason))
@@ -133,6 +157,7 @@ class _ShortfallCredits:
         user_id: str,  # noqa: ARG002
         amount: int,
         reason: str,
+        **_kwargs: object,
     ) -> tuple[int, int]:
         self.captures.append((amount, reason))
         if self._day_cap_error:
@@ -390,3 +415,78 @@ async def test_capture_shortfall_day_cap_refusal_does_not_escape() -> None:
     kinds = [None if it is None else it[0] for it in items]  # type: ignore[index]
     assert "done" in kinds, "the completion branch must still be reached"
     assert kinds[-1] is None  # end-of-stream sentinel
+
+
+# ---------------------------------------------------------------------------
+# Spec M3 (T1b) — the MeteredBilling retrofit: byte-identical parity at
+# markup=1.0 / infra=0 (the WHOLE matrix above is that proof, run at the
+# default config), plus the new machinery: markup folding + the cost_cents/
+# cost_basis columns carrying the TRUE unclamped cost (D-M3-12).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_config_is_byte_identical_parity() -> None:
+    """The retrofit at the DEFAULT BillingConfig (markup 1.0, chat infra 0) is
+    byte-identical to the pre-M3 ``max(floor, ceil(cost))`` — the same numbers
+    the matrix above pins. An explicit restatement of the parity gate."""
+    billing = _RecordingCredits()
+    reg = _registry(billing, billing_config=BillingConfig())
+    await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="actual_openrouter"))  # ceil 6
+    await _run_turn(reg, _CostLoop(cost_cents=1.0, cost_basis="estimate_static"))  # exact → 1
+    await _run_turn(reg, _CostLoop(cost_cents=2.9999999999, cost_basis="estimate_catalog"))  # 3
+    assert [a for a, _ in billing.deducts] == [6, 1, 3]
+
+
+@pytest.mark.asyncio
+async def test_markup_scales_the_proportional_charge() -> None:
+    """``PERSONA_CREDIT_MARKUP`` folds into the charge: 1.4 × 5.0c = 7.0c → 7
+    (the M4 margin knob; M3 ships 1.0 so this is opt-in and does not fire by
+    default)."""
+    billing = _RecordingCredits()
+    reg = _registry(billing, billing_config=BillingConfig(credit_markup=1.4))
+    await _run_turn(reg, _CostLoop(cost_cents=5.0, cost_basis="estimate_static"))
+    assert billing.deducts == [(7, "chat_turn:estimate_static")]
+
+
+@pytest.mark.asyncio
+async def test_cost_columns_carry_the_true_cost_and_basis() -> None:
+    """D-M3-12: the ledger row records the TRUE provider cost + provenance."""
+    billing = _RecordingCredits()
+    reg = _registry(billing)
+    await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="actual_openrouter"))
+    assert billing.deducts == [(6, "chat_turn:actual_openrouter")]
+    assert billing.cost_records == [(5.3, "actual_openrouter")]
+
+
+@pytest.mark.asyncio
+async def test_clamped_charge_still_logs_the_true_unclamped_cost() -> None:
+    """D-M3-12 (the logged-cost divergence fix): the sanity ceiling clamps the
+    CHARGE to 500, but the recorded ``cost_cents`` is the TRUE 50000.0 — the
+    clamp never distorts what the turn actually cost."""
+    billing = _RecordingCredits()
+    reg = _registry(billing)  # max_turn_credits=500
+    await _run_turn(reg, _CostLoop(cost_cents=50_000.0, cost_basis="estimate_static"))
+    assert billing.deducts == [(500, "chat_turn:estimate_static")]  # charge clamped
+    assert billing.cost_records == [(50_000.0, "estimate_static")]  # cost UNclamped
+
+
+@pytest.mark.asyncio
+async def test_flat_floor_still_records_the_true_cost_when_known() -> None:
+    """Kill-switch OFF charges the flat floor, but the row still records the
+    true cost + basis (telemetry-truthful — the charge is flat, the cost is not)."""
+    billing = _RecordingCredits()
+    reg = _registry(billing, proportional=False)
+    await _run_turn(reg, _CostLoop(cost_cents=5.3, cost_basis="actual_openrouter"))
+    assert billing.deducts == [(1, "chat_turn")]  # flat charge unchanged
+    assert billing.cost_records == [(5.3, "actual_openrouter")]  # true cost still logged
+
+
+@pytest.mark.asyncio
+async def test_legacy_loop_records_no_cost_columns() -> None:
+    """A loop exposing no valid recorded cost writes NULL cost columns."""
+    billing = _RecordingCredits()
+    reg = _registry(billing)
+    await _run_turn(reg, _LegacyLoop())
+    assert billing.deducts == [(1, "chat_turn")]
+    assert billing.cost_records == [(None, None)]

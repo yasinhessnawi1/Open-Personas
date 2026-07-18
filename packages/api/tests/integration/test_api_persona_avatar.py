@@ -72,11 +72,13 @@ _USER = "u_persona_avatar"
 class _HappyBackend:
     @property
     def provider_name(self) -> str:
-        return "fake"
+        # Spec M3 (T3b): OpenRouter + a real usage.cost so the owner-bill prices
+        # the avatar as an actual (basis actual_openrouter), not unpriced.
+        return "openrouter"
 
     @property
     def model_name(self) -> str:
-        return "fake-1"
+        return "openai/gpt-5.4-image-2"
 
     async def generate(
         self, prompt: str, *, options: ImageGenOptions | None = None
@@ -96,6 +98,9 @@ class _HappyBackend:
             provider=self.provider_name,
             model=self.model_name,
             latency_ms=5.0,
+            prompt_tokens=100,
+            completion_tokens=1000,
+            cost_usd=0.03,  # 3¢ → ceil(3.0) = 3 credits at markup 1.0
         )
 
     async def edit(self, *a: object, **k: object) -> GenerationResult:
@@ -213,14 +218,32 @@ def test_auto_generated_avatar_serves_through_uploads_route(
     assert resp.content == _TINY_PNG
 
 
-def test_auto_avatar_gen_is_free_no_ledger_movement(
+def test_auto_avatar_gen_is_owner_billed(
     client: tuple[TestClient, str, Path, Engine],
 ) -> None:
+    # Spec M3 (T3b, D-M3-11): build-time avatar gen flips free → OWNER-billed at
+    # its real image cost — exactly one ledger row, with an image cost_basis and
+    # the per-persona idempotency billing_key.
     c, _uid, _ws, su = client
-    _create(c)
+    detail = _create(c)
+    persona_id = detail["id"]
     with su.begin() as conn:
-        rows = conn.execute(select(credit_tx_t.c.delta).where(credit_tx_t.c.user_id == _USER)).all()
-    assert rows == [], f"build-time avatar gen must not touch credits; got {rows}"
+        rows = conn.execute(
+            select(
+                credit_tx_t.c.delta,
+                credit_tx_t.c.reason,
+                credit_tx_t.c.cost_basis,
+                credit_tx_t.c.billing_key,
+            )
+            .where(credit_tx_t.c.user_id == _USER)
+            .order_by(credit_tx_t.c.created_at)
+        ).all()
+    assert len(rows) == 1, f"avatar gen must write exactly one owner ledger row; got {rows}"
+    delta, reason, cost_basis, billing_key = rows[0]
+    assert delta == -3, "ceil(3.0¢) at markup 1.0"
+    assert reason == "avatar_gen:actual_openrouter"
+    assert cost_basis == "actual_openrouter"  # an image basis
+    assert billing_key == f"avatar:{persona_id}"  # idempotent per persona (D-M3-R5)
 
 
 # ---------------------------------------------------------------------------

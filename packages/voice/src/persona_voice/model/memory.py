@@ -37,6 +37,7 @@ from persona.schema.conversation import ConversationMessage
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
+    from persona_voice.billing import VoiceTurnBillingMeter
     from persona_voice.model.history import VoiceHistoryCompactor
     from persona_voice.model.transcript import VoiceTranscriptWriter
     from persona_voice.model.turn_context import VoiceTurnContext
@@ -79,12 +80,20 @@ class VoiceTurnRecorder:
         scheduler: Callable[[Coroutine[Any, Any, Any]], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         transcript_writer: VoiceTranscriptWriter | None = None,
+        billing_meter: VoiceTurnBillingMeter | None = None,
     ) -> None:
         self._ctx = context
         self._compactor = compactor
         self._summariser = summariser
         self._schedule = scheduler or _default_scheduler
         self._clock = clock or (lambda: datetime.now(UTC))
+        # Spec M3 (T6b-1): the per-turn owner-billing meter. On each committed turn
+        # this recorder fires the off-loop deduct of the turn's real metered cost
+        # (STT+TTS+LLM the producer fed it). ``None`` ⇒ unmetered voice. Best-effort
+        # by construction — this method MUST NOT raise (V4 runs it in ``finally``),
+        # and the meter is itself fail-soft.
+        self._billing_meter = billing_meter
+        self._turn_seq = 0
         # V9 (V9-D-1/D-2): persists each committed turn to the durable ``messages``
         # transcript (byte-for-byte with a chat turn). Optional — None on any path
         # that doesn't persist a transcript (e.g. unit tests / community voice).
@@ -97,6 +106,15 @@ class VoiceTurnRecorder:
         # Hold references to background compaction tasks so they are not GC'd
         # mid-flight (the standard asyncio fire-and-forget guard).
         self._bg_tasks: set[Any] = set()
+
+    def set_billing_meter(self, meter: VoiceTurnBillingMeter) -> None:
+        """Late-bind the per-turn billing meter (Spec M3, T6b-1).
+
+        The meter depends on the STT/TTS backends built after this recorder is
+        constructed, so the composition root injects it here before ``run()``
+        fires the first turn.
+        """
+        self._billing_meter = meter
 
     def note_user_message(self, text: str, *, synthetic: bool = False) -> None:
         """Record this turn's transcribed user message (correlation key).
@@ -176,6 +194,20 @@ class VoiceTurnRecorder:
                 truncated=reply.truncated,
                 now=now,
             )
+        # Spec M3 (T6b-1): bill this committed turn's real metered cost to the owner,
+        # off the audio loop + idempotent. Best-effort — the meter never raises, but
+        # guard anyway (this method MUST NOT raise). A turn with no metered cost
+        # charges nothing; the deduct runs on its own thread + fresh RLS engine.
+        if self._billing_meter is not None:
+            self._turn_seq += 1
+            try:
+                await self._billing_meter.bill_turn(self._turn_seq)
+            except Exception as exc:  # noqa: BLE001 — billing must never break the turn
+                _LOG.warning(
+                    "voice per-turn billing raised (fail-soft) persona_id={pid}: {err}",
+                    pid=self._ctx.persona_id,
+                    err=repr(exc)[:200],
+                )
         self._maybe_schedule_compaction()
 
     def _write_episodic(self, user_text: str, heard_text: str, *, synthetic: bool = False) -> None:

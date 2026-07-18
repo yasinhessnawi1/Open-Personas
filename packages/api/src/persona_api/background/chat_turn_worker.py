@@ -33,9 +33,9 @@ import asyncio
 import contextlib
 import math
 import time
-from decimal import ROUND_CEILING, Decimal
 from typing import TYPE_CHECKING, Protocol
 
+from persona.billing import BillingConfig, credits_charged
 from persona.logging import get_logger
 
 from persona_api.errors import (
@@ -170,6 +170,7 @@ class ChatTurnRegistry:
         credits_per_turn: int = 1,
         proportional_credits: bool = True,
         max_turn_credits: int = 500,
+        billing_config: BillingConfig | None = None,
         job_queue: JobQueue | None = None,
         origination_service: OriginationService | None = None,
         task_steering_service: TaskSteeringService | None = None,
@@ -190,6 +191,16 @@ class ChatTurnRegistry:
         # charged amount (never the persisted verbatim cost). <= 0 disables
         # it. PERSONA_API_MAX_TURN_CREDITS, default 500.
         self._max_turn_credits = max_turn_credits
+        # Spec M3 (T1b): chat now prices through the ONE credit formula
+        # (``persona.billing.credits_charged`` — the MeteredBilling seam's pricing
+        # function) + ``BillingConfig`` (``PERSONA_CREDIT_MARKUP``, default 1.0).
+        # At markup 1.0 the formula is byte-identical to the pre-M3 inline ceil,
+        # and chat carries NO per-call infra (``infra_flat_cents=0``) so the
+        # charge does not move (per-call infra on chat is a deliberate later flip;
+        # enabling it would change live money — parity is proven at infra 0 /
+        # markup 1.0). Populated columns ``cost_cents`` / ``cost_basis`` carry the
+        # true unclamped provider cost + provenance (D-M3-12).
+        self._billing_config = billing_config or BillingConfig()
         # Spec K2 (T8d): off-critical-path synthesis enqueue at the turn boundary.
         # Relocated from the old inline ``stream_turn`` to the detached worker's
         # clean-completion path; ``None`` → no-op (D-K2-2).
@@ -491,14 +502,24 @@ class ChatTurnRegistry:
         handle._chars_since_flush = 0
         handle._last_flush = now
 
-    def _turn_charge(self, loop: ConversationLoop) -> tuple[int, str]:
-        """The credits amount + ledger reason for one completed turn (Spec M2, D-M2-5).
+    def _turn_charge(self, loop: ConversationLoop) -> tuple[int, str, float | None, str | None]:
+        """Charge + reason + recorded (cost_cents, cost_basis) for one turn (M2 D-M2-5 / M3 T1b).
 
-        PROPORTIONAL (owner-ruled): ``max(credits_per_turn, ceil(cost_cents))``
-        at 1 credit = 1 cent, where ``cost_cents`` is the loop's recorded cost
-        for the just-completed turn (``last_turn_cost_cents`` — the SAME number
-        the TurnLog row persisted, actual or estimate per ``cost_basis``).
-        The flat floor arms:
+        Returns ``(amount, reason, cost_cents, cost_basis)``. The recorded
+        ``cost_cents`` / ``cost_basis`` are the loop's TRUE turn cost (unclamped —
+        D-M3-12) whenever it exposes a valid pair, INDEPENDENT of whether the
+        charge is proportional or a flat floor; they land on the ledger row so
+        every chat charge is self-describing (a kill-switch-OFF or clamped turn
+        still records what the turn really cost). ``None`` when the loop exposed
+        no valid cost (legacy / no-recorded turn).
+
+        PROPORTIONAL (owner-ruled): the charge is the ONE credit formula
+        ``credits_charged(provider_cents=cost, infra_flat_cents=0, markup, floor)``
+        (``persona.billing`` — the MeteredBilling seam's pricing function). At
+        ``markup=1.0`` / infra ``0`` this is byte-identical to the pre-M3 inline
+        ``max(credits_per_turn, ceil(Decimal(str(cost))))`` (parity, T1b). Chat
+        carries no per-call infra here (a deliberate later flip). The flat floor
+        arms:
 
         * kill-switch OFF (``PERSONA_API_PROPORTIONAL_CREDITS=false``) — the
           pre-M2 flat charge, byte-identical (the rollback hatch);
@@ -528,30 +549,48 @@ class ChatTurnRegistry:
         protect the wallet. A WARNING logs the computed and clamped amounts
         plus the basis whenever the ceiling actually bites.
         """
-        if not self._proportional_credits:
-            return self._credits_per_turn, "chat_turn"
-        cost = getattr(loop, "last_turn_cost_cents", None)
-        basis = getattr(loop, "last_turn_cost_basis", None)
+        cost_raw = getattr(loop, "last_turn_cost_cents", None)
+        basis_raw = getattr(loop, "last_turn_cost_basis", None)
+        # A valid recorded pair (a real float cost — ``bool`` excluded, since it is
+        # an ``int`` subclass that would crash ``Decimal(str(True))`` — plus a str
+        # basis). Narrowed here so ``priced_cost`` / ``priced_basis`` are typed; they
+        # are recorded on the ledger row VERBATIM whenever present, so the TRUE cost
+        # is logged even when the CHARGE is a flat floor or clamped (D-M3-12).
+        priced_cost: float | None = None
+        priced_basis: str | None = None
         if (
-            isinstance(cost, bool)
-            or not isinstance(cost, (int, float))
-            or not math.isfinite(cost)
-            or not isinstance(basis, str)
-            or basis == "unpriced"
+            not isinstance(cost_raw, bool)
+            and isinstance(cost_raw, (int, float))
+            and math.isfinite(cost_raw)
+            and isinstance(basis_raw, str)
         ):
-            return self._credits_per_turn, "chat_turn"
-        ceiled = int(Decimal(str(cost)).to_integral_value(rounding=ROUND_CEILING))
-        charge = max(self._credits_per_turn, ceiled)
+            priced_cost = float(cost_raw)
+            priced_basis = basis_raw
+        # Flat-floor arms (kill-switch OFF; no valid recorded cost; unpriced): the
+        # classic pre-M2 flat charge, byte-identical — bare ``chat_turn`` reason.
+        if not self._proportional_credits or priced_cost is None or priced_basis == "unpriced":
+            return self._credits_per_turn, "chat_turn", priced_cost, priced_basis
+        # PROPORTIONAL: the ONE credit formula. ``infra_flat_cents=0`` keeps chat's
+        # charge byte-identical to pre-M3 at ``markup=1.0`` (parity gate) — chat
+        # carries no per-call infra (a deliberate later flip).
+        charge = credits_charged(
+            provider_cents=priced_cost,
+            infra_flat_cents=0.0,
+            markup=self._billing_config.credit_markup,
+            floor=self._credits_per_turn,
+        )
         if self._max_turn_credits > 0 and charge > self._max_turn_credits:
             _log.warning(
                 "turn charge clamped to the sanity ceiling: computed={computed} "
                 "ceiling={ceiling} basis={basis}",
                 computed=charge,
                 ceiling=self._max_turn_credits,
-                basis=basis,
+                basis=priced_basis,
             )
             charge = self._max_turn_credits
-        return charge, f"chat_turn:{basis}"
+        # The clamp touched ONLY ``charge``; ``priced_cost`` stays the true,
+        # unclamped provider cost (D-M3-12 — basis honesty never traded for the wallet).
+        return charge, f"chat_turn:{priced_basis}", priced_cost, priced_basis
 
     def _deduct(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
         """Bill one turn on clean completion (D-P1-billing-contract; D-08-6 revision).
@@ -601,17 +640,27 @@ class ChatTurnRegistry:
             return
         policy = self._credits_policy
         engine = self._engine
-        amount, reason = self._turn_charge(loop)
+        amount, reason, cost_cents, cost_basis = self._turn_charge(loop)
         try:
             policy.deduct(
                 rls_engine=engine,
                 user_id=handle.owner_id,
                 amount=amount,
                 reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         except CreditsExhaustedError:
             if self._proportional_credits and reason != _FLAT_CHARGE_REASON:
-                self._capture_shortfall(policy, engine, handle, amount=amount, reason=reason)
+                self._capture_shortfall(
+                    policy,
+                    engine,
+                    handle,
+                    amount=amount,
+                    reason=reason,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
+                )
             else:
                 _log.warning(
                     "post-turn billing skipped: insufficient credits to bill the completed turn "
@@ -637,6 +686,8 @@ class ChatTurnRegistry:
         *,
         amount: int,
         reason: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
     ) -> None:
         """Spec M2 review (C1): capture whatever balance remains instead of nothing.
 
@@ -653,6 +704,8 @@ class ChatTurnRegistry:
                 user_id=handle.owner_id,
                 amount=amount,
                 reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         except DailySpendCapExceededError:
             _log.warning(

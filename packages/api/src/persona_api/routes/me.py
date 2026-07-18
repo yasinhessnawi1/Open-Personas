@@ -21,6 +21,7 @@ from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.schemas import (
     CreditsResponse,
+    LedgerEntry,
     NavCountsResponse,
     NotificationMarkReadResult,
     NotificationOut,
@@ -87,6 +88,41 @@ async def get_usage(
             cost_cents=float(cast("float", r["cost_cents"])),
             # Spec M2 (D-M2-4): pricing provenance; NULL = legacy pre-M2 row
             # (the web renders it as an estimate).
+            cost_basis=cast("str | None", r.get("cost_basis")),
+            created_at=cast("datetime", r["created_at"]),
+        )
+        for r in rows
+    ]
+
+
+@router.get("/usage/ledger", response_model=list[LedgerEntry])
+async def get_usage_ledger(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+    limit: int = 50,
+    offset: int = 0,
+) -> list[LedgerEntry]:
+    """The caller's ALL-surface credit ledger (Spec M3, T8; credit_transactions, RLS-scoped).
+
+    Where ``/v1/me/usage`` reads only ``turn_logs`` (chat turns), this reads the
+    ``credit_transactions`` ledger every billed surface writes to — chat, authoring,
+    image (+ true-up), agentic runs, task legs, background LLM (episodic /
+    voice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and
+    sandbox — newest-first, each row carrying its ``cost_basis`` provenance + the
+    credits moved (``delta``). Owner-scoped both by the RLS engine AND the explicit
+    ``user_id`` filter; the community-unmetered edition returns an empty list.
+    """
+    rows = request.app.state.credits_policy.list_usage(
+        rls_engine=request.app.state.rls_engine,
+        user_id=user.id,
+        limit=min(limit, 200),
+        offset=offset,
+    )
+    return [
+        LedgerEntry(
+            reason=str(r["reason"]),
+            delta=int(cast("int", r["delta"])),
+            cost_cents=cast("float | None", r.get("cost_cents")),
             cost_basis=cast("str | None", r.get("cost_basis")),
             created_at=cast("datetime", r["created_at"]),
         )

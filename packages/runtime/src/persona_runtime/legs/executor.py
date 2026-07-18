@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     )
 
     from persona_runtime.agentic.events import RunEvent
-    from persona_runtime.agentic.run import Run
+    from persona_runtime.agentic.run import Run, StepUsage
 
 __all__ = [
     "AgenticRunner",
@@ -128,6 +128,7 @@ class AgenticRunner(Protocol):
         *,
         on_event: Callable[[RunEvent], Awaitable[None]],
         cancel_token: CancelToken,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
     ) -> Run: ...
 
 
@@ -276,6 +277,7 @@ class LegExecutor:
         seq: int | None = None,
         now: datetime,
         external_cancel: CancelToken | None = None,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
     ) -> LegOutcome:
         """Reconstruct → run the boxed loop → write the checkpoint → return the outcome.
 
@@ -295,6 +297,10 @@ class LegExecutor:
             now: The write time (injected; core stays clock-free).
             external_cancel: A drain/cancel token to compose — a deploy or a user cancel
                 trips the same boundary mechanism, so the leg still checkpoints and stops.
+            on_step_usage: Optional per-step billing callback (Spec M3, T4b) — forwarded
+                to the loop so the api handler can meter the leg's real cost for the
+                owner-billed, CAS-ridden idempotent deduct. ``None`` → no metering
+                (byte-unchanged for a runner double without the kwarg).
 
         Returns:
             The :class:`LegOutcome` the api handler acts on.
@@ -306,7 +312,19 @@ class LegExecutor:
         watcher = _BoxWatcher(effective_box, token, clock=self._clock)
 
         try:
-            run = await self._runner.run(task_str, on_event=watcher.on_event, cancel_token=token)
+            if on_step_usage is not None:
+                run = await self._runner.run(
+                    task_str,
+                    on_event=watcher.on_event,
+                    cancel_token=token,
+                    on_step_usage=on_step_usage,
+                )
+            else:
+                # No billing wired — keep the call byte-identical so a runner double
+                # without ``on_step_usage`` (the A2 unit tests) is unaffected.
+                run = await self._runner.run(
+                    task_str, on_event=watcher.on_event, cancel_token=token
+                )
         except GatedActionProposedError as exc:
             # A3 gate (A3-D-X-gate-mechanism): the PolicyGatedToolbox recorded the proposal
             # durably BEFORE raising, then the exception propagated through the unmodified loop

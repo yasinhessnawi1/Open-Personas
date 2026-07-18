@@ -21,6 +21,7 @@ from persona.tasks import (
     Task,
     TaskState,
 )
+from persona_api.editions import MeteredCreditsPolicy
 from persona_api.jobs.queue import JobQueue
 from persona_api.tasks import (
     CheckpointStore,
@@ -30,7 +31,7 @@ from persona_api.tasks import (
     TaskStore,
 )
 from persona_runtime.agentic.events import RunEvent
-from persona_runtime.agentic.run import CancelToken, Run, RunStatus
+from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
 from persona_runtime.agentic.step import Step, StepType
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -365,8 +366,19 @@ class _WordyRunner:
         self._output = output
         self._status = status
 
-    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         self.calls += 1
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="m",
+                    prompt_tokens=100,
+                    completion_tokens=100,
+                    cost_usd=0.05,
+                )
+            )
         return Run(
             persona_id="persona_a",
             task=task,
@@ -494,6 +506,134 @@ async def test_checkpoint_compaction_keeps_the_task_progressing(
     assert checkpoint_token_count(latest) <= budget
     # Older findings were folded into the explicit marker, not lost (restorable via run records).
     assert any("earlier findings compacted" in c for c in latest.progress_conclusions)
+
+
+# --- Spec M3 (T4b): OWNER-billed, CAS-ridden idempotent leg billing --------------------------
+
+
+class _BillableRunner:
+    """A finished leg that surfaces a priceable per-step usage for the owner-billed deduct.
+
+    ``openrouter`` + ``usage.cost`` 0.03 USD → 3¢ → ceil(3.0) = 3 credits at markup 1.0.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
+        self.calls += 1
+        await on_event(RunEvent.thinking(0))
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="openai/gpt-5.4-image-2",
+                    prompt_tokens=100,
+                    completion_tokens=1000,
+                    cost_usd=0.03,
+                )
+            )
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=RunStatus.COMPLETED,
+            steps=[Step(type=StepType.FINAL, content="done", tokens=1100)],
+            output="done",
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+def _task_leg_ledger(engine: Engine, owner: str) -> list[tuple[int, str, object, object]]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT delta, reason, cost_basis, billing_key FROM credit_transactions "
+                "WHERE user_id = :u AND reason LIKE 'task_leg%' ORDER BY created_at, id"
+            ),
+            {"u": owner},
+        ).all()
+    return [(int(r[0]), str(r[1]), r[2], r[3]) for r in rows]
+
+
+def _billing_handler(app_engine: Engine, bill_engine: Engine, runner: object) -> TaskLegHandler:
+    return TaskLegHandler(
+        task_store=TaskStore(app_engine),
+        checkpoint_store=CheckpointStore(app_engine),
+        runner_builder=_FakeRunnerBuilder(runner),  # type: ignore[arg-type]
+        credits_policy=MeteredCreditsPolicy(),
+        rls_engine=bill_engine,  # superuser engine bypasses RLS for the ledger write
+        cost_source=None,  # static default; the OpenRouter actual prices regardless
+    )
+
+
+@pytest.mark.asyncio
+async def test_redelivery_does_not_double_charge_the_owner(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    # THE explicit acceptance: a re-delivered leg (same task_id/checkpoint_seq) charges the owner
+    # ONCE — the ON CONFLICT (billing_key) gate — while A0 meters BOTH executions to audit.
+    _seed_active_task(migrated_engine)
+    runner = _BillableRunner()
+    handler = _billing_handler(app_engine, migrated_engine, runner)
+    ctx = _FakeContext("user_a")
+    payload = TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER)
+
+    await handler.handle(payload, ctx)  # first delivery
+    await handler.handle(payload, ctx)  # forced re-delivery (SAME payload → same seq 0)
+
+    rows = _task_leg_ledger(migrated_engine, "user_a")
+    assert len(rows) == 1, f"owner must be billed exactly ONCE, not per re-delivery; got {rows}"
+    delta, reason, basis, billing_key = rows[0]
+    assert delta == -3  # ceil(3.0¢) at markup 1.0
+    assert reason == "task_leg:actual_openrouter"
+    assert basis == "actual_openrouter"
+    assert billing_key == "t1:leg:0"  # the checkpoint's identity — the CAS-ridden key
+    # The leg genuinely RE-RAN (at-least-once) and A0 metered BOTH executions (forensics)...
+    assert runner.calls == 2
+    assert ctx.meter_calls == [1100, 1100]
+    # ...but the owner credit ledger accrued exactly once (the billing_key gate).
+
+
+@pytest.mark.asyncio
+async def test_normal_leg_bills_the_owner_once_at_real_cost(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    _seed_active_task(migrated_engine)
+    handler = _billing_handler(app_engine, migrated_engine, _BillableRunner())
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+    rows = _task_leg_ledger(migrated_engine, "user_a")
+    assert len(rows) == 1
+    assert rows[0][0] == -3  # the real Sonnet-class cost, floored — not a flat fee
+
+
+@pytest.mark.asyncio
+async def test_over_budget_checkpoint_park_bills_the_owner_nothing(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    # R9-005 + T4b: the run FINISHES but the checkpoint overflows the budget → the handler parks
+    # (no append landed) → NO owner credit is charged (bills nothing extra).
+    from persona_runtime.legs import CompactingCheckpointWriter
+
+    _seed_active_task(migrated_engine)
+    budget = 24
+    handler = TaskLegHandler(
+        task_store=TaskStore(app_engine),
+        checkpoint_store=CheckpointStore(app_engine, token_budget=budget),
+        runner_builder=_FakeRunnerBuilder(_WordyRunner("a very long finished deliverable " * 20)),  # type: ignore[arg-type]
+        writer=CompactingCheckpointWriter(token_budget=budget),
+        credits_policy=MeteredCreditsPolicy(),
+        rls_engine=migrated_engine,
+        cost_source=None,
+    )
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+    # The task parked (over-budget checkpoint never landed) → no committed leg → no owner bill.
+    assert _task_leg_ledger(migrated_engine, "user_a") == []
 
 
 def test_default_writer_is_the_compacting_distiller() -> None:

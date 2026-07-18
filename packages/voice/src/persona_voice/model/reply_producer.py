@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     from persona.backends import ChatBackend
     from persona.backends.types import ToolSpec
 
+    from persona_voice.billing import VoiceTurnBillingMeter
     from persona_voice.loop.streaming import Transcript
     from persona_voice.model.memory import VoiceTurnRecorder
     from persona_voice.model.turn_context import VoiceTurnContext
@@ -156,6 +157,7 @@ class VoiceModelReplyProducer:
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
         turn_recorder: VoiceTurnRecorder | None = None,
         delegation_listener: Callable[[DelegatedTurnIntent], None] | None = None,
+        turn_meter: VoiceTurnBillingMeter | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._ctx = context
@@ -193,9 +195,26 @@ class VoiceModelReplyProducer:
         # chat pipeline (the durable ``delegated_turn`` job — T4). ``None`` ⇒ the gate still runs
         # (echo/confirm for the ear) but nothing is delegated (T3 placement; T4 wires it live).
         self._delegation_listener = delegation_listener
+        # Spec M3 (T6b-1): the per-turn owner-billing meter. When present, the
+        # producer feeds it this turn's real metered quantities as they occur —
+        # characters sent to TTS (each spoken chunk) + the model round's token
+        # usage (the final stream chunk) — for the off-loop deduct the turn
+        # recorder fires on commit. ``None`` ⇒ unmetered voice (byte-identical to
+        # pre-M3): the feed calls are simply skipped.
+        self._turn_meter = turn_meter
         self._clock = clock or (lambda: datetime.now(UTC))
         # Rotates the preamble across turns so the filler is not robotic (D-V5-5).
         self._preamble_index = 0
+
+    def set_turn_meter(self, meter: VoiceTurnBillingMeter) -> None:
+        """Late-bind the per-turn billing meter (Spec M3, T6b-1).
+
+        The composition root builds the meter after the STT/TTS backends exist
+        (their served provider identities feed the pricing), but the producer is
+        constructed earlier — so the runner injects it here, before ``run()`` fires
+        the first turn (the same late-binding posture as the broadcaster/lane holders).
+        """
+        self._turn_meter = meter
 
     async def __call__(self, final_transcript: Transcript) -> AsyncIterator[str]:
         """Return the token stream for one completed user turn (V4 awaits this)."""
@@ -513,7 +532,22 @@ class VoiceModelReplyProducer:
                 text_out.append(chunk.delta)
                 spoken = strip_converter.feed(chunk.delta)
                 if spoken:
+                    # Spec M3 (T6b-1): count characters sent to TTS (post-STRIP —
+                    # exactly the audio-bound text) for the served TTS provider's meter.
+                    if self._turn_meter is not None:
+                        self._turn_meter.note_tts_chars(len(spoken))
                     yield spoken
+            # Spec M3 (T6b-1): the final chunk carries usage (StreamChunk.usage);
+            # capture this round's real token usage for the served LLM's meter,
+            # summed across the turn's rounds (a tool round + re-prompt).
+            if chunk.usage is not None and self._turn_meter is not None:
+                self._turn_meter.note_llm_usage(
+                    prompt_tokens=chunk.usage.prompt_tokens,
+                    completion_tokens=chunk.usage.completion_tokens,
+                    cost_usd=chunk.usage.cost_usd,
+                    provider=backend.provider_name,
+                    model=backend.model_name,
+                )
             tcd = chunk.tool_call_delta
             if tcd is not None:
                 if tcd.call_id not in names:
@@ -524,6 +558,8 @@ class VoiceModelReplyProducer:
                 args_json[tcd.call_id] += tcd.arguments_delta
         spoken_tail = strip_converter.flush()
         if spoken_tail:
+            if self._turn_meter is not None:
+                self._turn_meter.note_tts_chars(len(spoken_tail))
             yield spoken_tail
         calls_out.extend(self._build_call(cid, names[cid], args_json[cid]) for cid in order)
 

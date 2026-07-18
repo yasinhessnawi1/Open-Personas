@@ -26,8 +26,11 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
+from persona.billing import BillingConfig, credits_charged
+from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
 from persona_runtime.agentic.run import CancelToken, RunStatus
+from persona_runtime.cost import compute_turn_cost
 from sqlalchemy import text, update
 
 from persona_api.db.models import runs as runs_t
@@ -55,9 +58,11 @@ _RUN_TERMINAL_COPY: dict[str, tuple[str, str]] = {
 if TYPE_CHECKING:
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.agentic.loop import AgenticLoop
-    from persona_runtime.agentic.run import Run
+    from persona_runtime.agentic.run import Run, StepUsage
+    from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
     from persona_api.realtime.channel import UserEventChannel
     from persona_api.services.within_runtime_origination import WithinRuntimeOriginator
@@ -91,6 +96,86 @@ class RunHandle:
         return await self.responses.get()
 
 
+class _RunBillingWatcher:
+    """Meters an agentic run per step + cuts it off on exhaustion (Spec M3, T4a).
+
+    The run's ``on_step_usage`` callback (mirrors ``_BoxWatcher``'s ``on_event``,
+    D-06-7): each completed step's model-call usage is priced like a chat turn
+    (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual preferred; else the
+    resolver estimate; else the floor) and CAPTURED incrementally (``capture_up_to``
+    — floored, caller-paid, never negative). When the balance can't cover the step
+    (a partial capture) or hits 0, the run's :class:`CancelToken` is flipped, so the
+    loop stops at the NEXT step boundary — the in-flight step finishes cleanly, and a
+    runaway loop cannot consume unbounded uncharged cost. The DB write is offloaded
+    off the event loop so the per-step billing never stalls other background tasks.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: CreditsPolicy,
+        rls_engine: Engine,
+        owner_id: str,
+        cancel_token: CancelToken,
+        cost_source: CostSource | None,
+        billing_config: BillingConfig,
+        floor: int,
+    ) -> None:
+        self._policy = policy
+        self._engine = rls_engine
+        self._owner = owner_id
+        self._cancel = cancel_token
+        self._cost_source = cost_source
+        self._config = billing_config
+        self._floor = floor
+
+    async def on_step_usage(self, usage: StepUsage) -> None:
+        cost_cents, basis = compute_turn_cost(
+            provider=usage.provider,
+            model=usage.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            actual_cost_usd=usage.cost_usd,
+            source=self._cost_source,
+        )
+        charge = credits_charged(
+            provider_cents=cost_cents,
+            infra_flat_cents=0.0,  # infra via the per-step floor (D-M3-4 amendment)
+            markup=self._config.credit_markup,
+            floor=self._floor,
+        )
+        try:
+            captured, new_balance = await asyncio.to_thread(
+                self._policy.capture_up_to,
+                rls_engine=self._engine,
+                user_id=self._owner,
+                amount=charge,
+                reason=f"agentic_run:{basis}",
+                cost_cents=cost_cents,
+                cost_basis=basis,
+            )
+        except DailySpendCapExceededError:
+            # The per-UTC-day spend cap was hit (the policy already audited the
+            # refusal). Cut the run off at the next step boundary.
+            _log.warning(
+                "agentic run hit the daily spend cap; cutting off owner={owner}", owner=self._owner
+            )
+            self._cancel.cancel()
+            return
+        if captured < charge or new_balance <= 0:
+            # Balance exhausted — capture ≤ balance landed (floored at 0, never
+            # negative); flip the token so the run stops at the next step boundary.
+            _log.warning(
+                "agentic run credits exhausted; cutting off at the next step boundary "
+                "owner={owner} captured={captured} charge={charge} balance={balance}",
+                owner=self._owner,
+                captured=captured,
+                charge=charge,
+                balance=new_balance,
+            )
+            self._cancel.cancel()
+
+
 class RunRegistry:
     """App-scoped registry of in-flight runs. Single-worker, in-process (S08-4)."""
 
@@ -101,9 +186,23 @@ class RunRegistry:
         job_queue: JobQueue | None = None,
         origination: WithinRuntimeOriginator | None = None,
         event_channel: UserEventChannel | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        cost_source: CostSource | None = None,
+        billing_config: BillingConfig | None = None,
+        agentic_floor: int = 1,
     ) -> None:
         self._engine = rls_engine
         self._handles: dict[str, RunHandle] = {}
+        # Spec M3 (T4a): incremental caller-paid billing. ``credits_policy`` None →
+        # no billing (unit/community-unmetered shape). ``cost_source`` None → the
+        # static-only pricing default (OpenRouter actuals pass through; static-table
+        # providers priced; catalog-only models fall to the floor). The floor is the
+        # per-step minimum (each step is one floored LLM call — infra via the floor,
+        # D-M3-4 amendment).
+        self._credits_policy = credits_policy
+        self._cost_source = cost_source
+        self._billing_config = billing_config or BillingConfig()
+        self._agentic_floor = agentic_floor
         # Spec A11: the in-process SSE bus. A committed run_terminal notification pings
         # the owner's open tabs live (notification.created); ``None`` → durable-only.
         self._event_channel = event_channel
@@ -174,13 +273,39 @@ class RunRegistry:
             event_log.append(event.model_dump(mode="json"))
             self._persist_progress(handle.run_id, event_log)
 
-        try:
-            run = await loop.run(
-                task_text,
-                on_event=_on_event,
-                user_respond=handle.user_respond,
+        # Spec M3 (T4a): the per-step billing watcher (caller-paid incremental
+        # deduct + exhaustion cutoff). None policy → no billing (unit/community).
+        billing_watcher = (
+            _RunBillingWatcher(
+                policy=self._credits_policy,
+                rls_engine=self._engine,
+                owner_id=handle.owner_id,
                 cancel_token=handle.cancel_token,
+                cost_source=self._cost_source,
+                billing_config=self._billing_config,
+                floor=self._agentic_floor,
             )
+            if self._credits_policy is not None
+            else None
+        )
+        try:
+            if billing_watcher is not None:
+                run = await loop.run(
+                    task_text,
+                    on_event=_on_event,
+                    user_respond=handle.user_respond,
+                    cancel_token=handle.cancel_token,
+                    on_step_usage=billing_watcher.on_step_usage,
+                )
+            else:
+                # No billing wired — keep the call byte-identical to pre-M3 so a loop
+                # double without ``on_step_usage`` (unit tests) is unaffected.
+                run = await loop.run(
+                    task_text,
+                    on_event=_on_event,
+                    user_respond=handle.user_respond,
+                    cancel_token=handle.cancel_token,
+                )
             # Persist by the API's run_id (the DB row), NOT run.id — the loop
             # assigns its own internal id, distinct from the API's row id.
             self._persist_final(handle.run_id, run)

@@ -58,6 +58,12 @@ class _ScriptedAgenticLoop:
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
         user_respond: Callable[[str], Awaitable[str]] | None = None,
         cancel_token: CancelToken | None = None,
+        # Spec M3 (T4a): the run worker now passes a per-step billing callback when
+        # a credits policy is wired (as create_app does here). This lifecycle double
+        # accepts-and-ignores it — the T4a billing hook itself is exercised by
+        # test_task_leg_handler.py; wiring it here would let a per-step capture flip
+        # the cancel token and perturb the status/event assertions below.
+        on_step_usage: Callable[..., Awaitable[None]] | None = None,  # noqa: ARG002
     ) -> Run:
         import asyncio
 

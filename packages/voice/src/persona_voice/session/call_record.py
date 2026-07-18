@@ -106,7 +106,7 @@ class CallRecorder:
                 err=repr(exc)[:300],
             )
 
-    def close(self, *, end_reason: EndReason, ended_at: datetime | None = None) -> None:
+    def close(self, *, end_reason: EndReason, ended_at: datetime | None = None) -> int | None:
         """Finalize the call-record with end time, duration, and reason.
 
         Best-effort; MUST NOT raise (runs in the session teardown's suppressed
@@ -114,6 +114,10 @@ class CallRecorder:
         ``started_at`` (the :meth:`open` value, or read-back if open was missed).
         A no-op-safe UPDATE: if the row was never inserted (open failed), the
         UPDATE simply matches nothing.
+
+        Returns the computed ``duration_s`` (whole seconds, or ``None`` when the
+        start is unknown) so teardown can bill the LiveKit infra tick (Spec M3,
+        T6b-1) without re-reading the row — the persistence itself stays best-effort.
         """
         ended = ended_at or self._clock()
         duration_s = self._duration_s(ended)
@@ -130,6 +134,7 @@ class CallRecorder:
                 cid=self._call_id,
                 err=repr(exc)[:300],
             )
+        return duration_s
 
     def _duration_s(self, ended: datetime) -> int | None:
         """Whole seconds from start to end, or ``None`` if start is unknown."""

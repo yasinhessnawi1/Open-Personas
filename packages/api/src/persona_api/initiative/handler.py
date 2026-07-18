@@ -37,15 +37,19 @@ from persona_api.db.engine import rls_connection
 from persona_api.db.models import personas as personas_t
 from persona_api.schedules.tombstones import TombstoneAction
 from persona_api.services import audit_service
+from persona_api.services.background_billing import bill_background_llm
+from persona_api.services.llm_usage_collector import collect_llm_usage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from persona.initiative import InitiativeCandidate, InitiativeSettings
     from persona.jobs import JobContext, JobRegistry
+    from persona_runtime.cost import CostSource
     from persona_runtime.initiative import InitiativeScanner
     from sqlalchemy import Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.schedules import ScheduleStore
     from persona_api.schedules.tombstones import ScheduleTombstoneStore
 
@@ -148,6 +152,10 @@ class InitiativeScanHandler:
         dial_reader: Callable[[str, str], InitiativeDial],
         sink: CandidateSink | None = None,
         pause_check: AutonomyPauseCheck = never_paused,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        floor: int = 1,
     ) -> None:
         """Inject the runtime scanner, the dial read (owner, persona → dial), the T7 sink.
 
@@ -163,6 +171,13 @@ class InitiativeScanHandler:
         self._dial_reader = dial_reader
         self._sink = sink
         self._pause_check = pause_check
+        # Spec M3 (T5b): OWNER-billed scan, idempotent + fail-soft. Both None → no
+        # billing. The scanner runs through a usage-collecting backend (wired at the
+        # root); the ``collect_llm_usage`` block below captures the real scan cost.
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._floor = floor
 
     async def handle(self, payload: InitiativeScanPayload, context: JobContext) -> None:
         """One scan fire; never raises a user-facing error (silence is the safe state)."""
@@ -177,8 +192,27 @@ class InitiativeScanHandler:
             # the one source of truth. No scan, no spend, no message.
             _log.info("initiative dial off; scan exits", persona_id=payload.persona_id)
             return
-        candidates = await self._scanner.scan(
-            context.owner_id, payload.persona_id, fire_time=payload.fire_time
+        with collect_llm_usage() as usage:
+            candidates = await self._scanner.scan(
+                context.owner_id, payload.persona_id, fire_time=payload.fire_time
+            )
+        # Spec M3 (T5b, D-M3-8): owner-bill the scan's real model cost, idempotent
+        # (per persona per fire) + fail-soft. A thin-material scan makes no model
+        # call → 0 tokens → charges nothing.
+        totals = usage.totals()
+        bill_background_llm(
+            credits_policy=self._credits_policy,
+            rls_engine=self._rls_engine,
+            owner_id=context.owner_id,
+            provider=totals.provider,
+            model=totals.model,
+            prompt_tokens=totals.prompt_tokens,
+            completion_tokens=totals.completion_tokens,
+            cost_usd=totals.cost_usd,
+            surface="initiative_scan",
+            billing_key=f"initiative_scan:{payload.persona_id}:{payload.fire_time.isoformat()}",
+            cost_source=self._cost_source,
+            floor=self._floor,
         )
         # The synthesis-style metering row (tension-5 ruling ADD): system-initiated,
         # credits_charged=0, cost visible — the A5-R-4 economics accumulate from

@@ -337,12 +337,15 @@ async def test_agentic_loop_dispatches_code_execution_end_to_end(
         {"code": "print(2+2)", "session_id": "e2e-user:e2e-conv"}
     ]
 
-    # ---- Credits deducted exactly once on the successful execute
+    # ---- Credits deducted exactly once on the successful execute (Spec M3 T7:
+    # sandbox is the standalone infra-flat surface — reclassified into the M3 schema).
     mock_deduct.assert_called_once()
     kwargs = mock_deduct.call_args.kwargs
     assert kwargs["user_id"] == "e2e-user"
     assert kwargs["amount"] == 1
-    assert kwargs["reason"] == "code_execution"
+    assert kwargs["reason"] == "sandbox:infra_flat"
+    assert kwargs["cost_cents"] == 0.0
+    assert kwargs["cost_basis"] == "infra_flat"
 
     # ---- Round trip proved: the substrate stdout reached the model's prompt
     # The final assistant message references the stdout the substrate returned.

@@ -44,6 +44,7 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona.errors import CreditsExhaustedError, DailySpendCapExceededError
 
@@ -54,7 +55,9 @@ __all__ = [
     "LOW_BALANCE_THRESHOLD",
     "book_day_spend",
     "capture_up_to",
+    "capture_up_to_idempotent",
     "deduct",
+    "deduct_idempotent",
     "ensure_balance",
     "get_balance",
     "list_turn_usage",
@@ -90,6 +93,14 @@ _credit_tx_t = Table(
     Column("delta", Integer, nullable=False),
     Column("reason", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # Spec M3 (migration 050): the mirror declares the 3 additive columns so the
+    # core ledger writers can project them. ``cost_cents`` = true provider cost
+    # pre-markup (Float — sub-cent surfaces must not round to 0); ``cost_basis``
+    # = provenance (D-M3-12); ``billing_key`` = idempotency anchor (D-M3-R5). The
+    # api-side route integration tests stay the drift guard against db/models.
+    Column("cost_cents", Float),
+    Column("cost_basis", Text),
+    Column("billing_key", Text),
 )
 
 _conversations_t = Table(
@@ -264,9 +275,22 @@ def book_day_spend(*, rls_engine: Engine, user_id: str, cost: int, cap: int) -> 
 
 
 def deduct(
-    *, rls_engine: Engine, user_id: str, amount: int, reason: str, daily_cap: int = 0
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    daily_cap: int = 0,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
 ) -> int:
     """Deduct ``amount`` credits and record a transaction. Returns the new balance.
+
+    Spec M3 (D-M3-12): ``cost_cents`` (true provider cost pre-markup) and
+    ``cost_basis`` (provenance) are recorded on the ledger row when supplied.
+    Both default ``None`` — the pre-M3 call shape writes them as ``NULL``,
+    byte-identical to before (the columns are additive + nullable). The
+    ``MeteredBilling`` seam passes them; direct M2/legacy callers do not.
 
     Spec R2 R2-D-3 (F-04): the decrement is **conditional and atomic** — the
     ``UPDATE`` carries ``WHERE balance >= :amount`` so a decrement that would
@@ -330,6 +354,8 @@ def deduct(
                 user_id=user_id,
                 delta=-amount,
                 reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         )
     return int(new_balance)
@@ -357,9 +383,19 @@ _CAPTURE_UP_TO_SQL = text(
 
 
 def capture_up_to(
-    *, rls_engine: Engine, user_id: str, amount: int, reason: str, daily_cap: int = 0
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    daily_cap: int = 0,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
 ) -> tuple[int, int]:
     """Charge ``min(amount, balance)`` — PARTIAL when the balance is short (Spec M2 review, C1).
+
+    Spec M3 (D-M3-12): records ``cost_cents`` / ``cost_basis`` on the ledger row
+    when supplied (default ``None`` → ``NULL``, byte-identical to pre-M3).
 
     The opt-in sibling of :func:`deduct`, for ONE caller only: the chat-turn
     worker's post-success billing (``persona_api.background.chat_turn_worker``).
@@ -425,13 +461,197 @@ def capture_up_to(
                     user_id=user_id,
                     delta=-captured,
                     reason=final_reason,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
                 )
             )
     return captured, new_balance
 
 
-def refund(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int:
+def deduct_idempotent(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    billing_key: str,
+    daily_cap: int = 0,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> int:
+    """Idempotent all-or-nothing ``deduct`` keyed on ``billing_key`` (Spec M3, D-M3-R5).
+
+    The strict sibling of :func:`deduct` for at-least-once callers (the T4b/T5
+    background + task deducts). Insert-first idempotency gate: the ledger row is
+    inserted with ``ON CONFLICT (billing_key) DO NOTHING RETURNING id`` **before**
+    the balance mutation; a re-delivered op (same key) inserts nothing → returns
+    the current balance without touching it (no double-charge). A first delivery
+    inserts the row and then applies the conditional decrement — **in the SAME
+    transaction**, so an exhausted-balance raise rolls the ledger insert back too
+    (no orphan row), and an over-``daily_cap`` booking rolls back everything
+    (fail-closed, the discipline :func:`deduct` already uses).
+
+    Returns the new balance (or the unchanged current balance on a re-delivery
+    no-op). Raises :class:`CreditsExhaustedError` when a FIRST delivery cannot be
+    afforded, :class:`DailySpendCapExceededError` when it would breach the cap.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        # Insert-first gate: consume the billing_key or detect the re-delivery.
+        inserted_id = conn.execute(
+            pg_insert(_credit_tx_t)
+            .values(
+                id=f"ctx_{uuid.uuid4().hex}",
+                user_id=user_id,
+                delta=-amount,
+                reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+                billing_key=billing_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["billing_key"],
+                index_where=_credit_tx_t.c.billing_key.isnot(None),
+            )
+            .returning(_credit_tx_t.c.id)
+        ).scalar_one_or_none()
+        if inserted_id is None:
+            # Already billed for this key — skip the balance mutation entirely.
+            return int(
+                conn.execute(
+                    select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
+                ).scalar_one()
+            )
+        # Day-cap FIRST, atomically-with the decrement (over-cap ⇒ raise ⇒ the
+        # whole txn, incl. the insert above, rolls back).
+        if daily_cap > 0 and amount > 0:
+            booked = _book_day_spend_conn(conn, user_id=user_id, cost=amount, cap=daily_cap)
+            if booked is None:
+                spent = _current_day_spent(conn, user_id=user_id)
+                raise DailySpendCapExceededError(
+                    "Daily spend cap reached — this resets at UTC midnight.",
+                    context={
+                        "cap": str(daily_cap),
+                        "spent": str(spent),
+                        "requested_cost": str(amount),
+                        "reset_epoch": str(_next_utc_midnight_epoch()),
+                    },
+                )
+        new_balance = conn.execute(
+            update(_credits_t)
+            .where(_credits_t.c.user_id == user_id, _credits_t.c.balance >= amount)
+            .values(balance=_credits_t.c.balance - amount, updated_at=text("now()"))
+            .returning(_credits_t.c.balance)
+        ).scalar_one_or_none()
+        if new_balance is None:
+            # Unaffordable FIRST delivery — raise; the ``with`` rolls back the
+            # ledger insert (no orphan row) and any day-spend booked above.
+            raise CreditsExhaustedError(
+                "Your free credits are used up. Top-up coming soon — contact support.",
+                context={"amount": str(amount), "reason": reason},
+            )
+    return int(new_balance)
+
+
+def capture_up_to_idempotent(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    billing_key: str,
+    daily_cap: int = 0,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> tuple[int, int]:
+    """Idempotent partial-capture keyed on ``billing_key`` (Spec M3, D-M3-R5).
+
+    The floored sibling of :func:`capture_up_to` for at-least-once post-success /
+    incremental callers (T4b/T5 owner deducts). Because the captured amount is
+    only known after the balance is locked, the idempotency gate is a **claim
+    row** (``delta=0``) inserted with ``ON CONFLICT (billing_key) DO NOTHING
+    RETURNING id``; a re-delivery inserts nothing → returns ``(0, balance)`` with
+    no capture. A first delivery then runs the atomic ``capture_up_to`` decrement
+    and **updates the same claim row** to the captured delta (+ ``:shortfall``
+    suffix when partial) — all in ONE transaction, so an over-``daily_cap``
+    booking rolls back the claim + the capture together (fail-closed).
+
+    Note (intentional divergence from :func:`capture_up_to`): a first delivery
+    that captures ``0`` (balance already 0) still leaves the ``delta=0`` claim
+    row — the ``billing_key`` must be durably consumed so a later retry after a
+    top-up does not re-bill an op that already ran (exactly-once semantics).
+
+    Returns ``(captured, new_balance)``.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        claim_id = conn.execute(
+            pg_insert(_credit_tx_t)
+            .values(
+                id=f"ctx_{uuid.uuid4().hex}",
+                user_id=user_id,
+                delta=0,
+                reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+                billing_key=billing_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["billing_key"],
+                index_where=_credit_tx_t.c.billing_key.isnot(None),
+            )
+            .returning(_credit_tx_t.c.id)
+        ).scalar_one_or_none()
+        current_balance = int(
+            conn.execute(
+                select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
+            ).scalar_one()
+        )
+        if claim_id is None:
+            # Already billed for this key — no capture.
+            return 0, current_balance
+        if amount <= 0:
+            # Nothing to capture; the claim (delta 0) durably consumes the key.
+            return 0, current_balance
+        row = conn.execute(_CAPTURE_UP_TO_SQL, {"uid": user_id, "amount": amount}).mappings().one()
+        captured = int(row["captured"])
+        new_balance = int(row["new_balance"])
+        if daily_cap > 0 and captured > 0:
+            booked = _book_day_spend_conn(conn, user_id=user_id, cost=captured, cap=daily_cap)
+            if booked is None:
+                spent = _current_day_spent(conn, user_id=user_id)
+                raise DailySpendCapExceededError(
+                    "Daily spend cap reached — this resets at UTC midnight.",
+                    context={
+                        "cap": str(daily_cap),
+                        "spent": str(spent),
+                        "requested_cost": str(captured),
+                        "reset_epoch": str(_next_utc_midnight_epoch()),
+                    },
+                )
+        final_reason = reason if captured >= amount else f"{reason}:shortfall"
+        conn.execute(
+            update(_credit_tx_t)
+            .where(_credit_tx_t.c.id == claim_id)
+            .values(delta=-captured, reason=final_reason)
+        )
+    return captured, new_balance
+
+
+def refund(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> int:
     """Refund ``amount`` credits via a reverse-deduct ledger entry. Returns the new balance.
+
+    Spec M3 (D-M3-12): records ``cost_cents`` / ``cost_basis`` when supplied
+    (default ``None`` → ``NULL``, byte-identical to pre-M3) — the image true-up
+    overage refund (T3) carries the basis of the refunded charge.
 
     Pattern (a) per D-15-X-credit-flow-semantics (spec 15 T13): writes
     ``INSERT INTO credit_transactions (delta=+amount, reason=...)`` and runs
@@ -464,6 +684,8 @@ def refund(*, rls_engine: Engine, user_id: str, amount: int, reason: str) -> int
                 user_id=user_id,
                 delta=amount,
                 reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
             )
         )
     return int(new_balance)

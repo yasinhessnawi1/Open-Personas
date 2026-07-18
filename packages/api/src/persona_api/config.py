@@ -66,8 +66,10 @@ class APIConfig(BaseSettings):
         rate_limit_default: Default per-user-per-endpoint-per-minute limit (§6).
         rate_limit_messages / rate_limit_runs / rate_limit_author: Per-endpoint
             overrides (§6 table).
-        authoring_credit_cost: Flat credit deduction per authoring call (D-08-6,
-            §11 risk).
+        authoring_credit_floor: Minimum credit charge for an authoring call — the
+            FLOOR of the M3 real-cost charge ``max(floor, ceil(MARKUP × real_cost))``
+            (D-M3-9; replaces the pre-M3 flat 1000). Infra rides this floor
+            (D-M3-4 amendment).
     """
 
     model_config = SettingsConfigDict(
@@ -507,6 +509,29 @@ class APIConfig(BaseSettings):
 
     # LLM-assisted authoring (§6.3): the model tier the authoring endpoint uses.
     authoring_tier: str = "frontier"
+    # Spec M3 (D-M3-9, T2c): pin the persona-AUTHORING model specifically (e.g.
+    # ``anthropic/claude-sonnet-5`` or an OpenRouter slug) WITHOUT repointing the
+    # whole frontier tier (which would hijack chat routing). ``provider/model``
+    # string; unset (``None``) = today's frontier-tier behaviour, unchanged. An
+    # unresolvable/misconfigured value fail-softs back to the tier (never 500s
+    # authoring). Billing is unaffected — it prices the actual served model, so
+    # Sonnet 5's real cost is recovered automatically.
+    authoring_model: str | None = Field(default=None, validation_alias="PERSONA_AUTHORING_MODEL")
+    # Spec M3 (D-M3-10, T3a): image generation bills its REAL provider cost
+    # (GPT Image 2 via OpenRouter) through the credit formula. ``image_credit_floor``
+    # is the minimum charge (infra via the floor per the D-M3-4 amendment);
+    # ``image_ceiling_credits`` is the per-image CEILING pre-deducted BEFORE the
+    # provider call (the denial-of-wallet guard, D-15-X-pre-deduct-credits) — the
+    # charge is then trued-up to the real cost (deduct the delta / refund the
+    # overage). The ceiling must exceed any real per-image cost (a few ¢); 50
+    # credits is generous headroom while bounding a parallel-fire attacker.
+    image_credit_floor: int = 1
+    image_ceiling_credits: int = 50
+    # Spec M3 (T4a): agentic runs bill their REAL per-step model cost incrementally
+    # (caller-paid), cut off at a step boundary on exhaustion. Each step is one
+    # floored LLM call — this is the per-step minimum charge (infra via the floor,
+    # D-M3-4 amendment), mirroring the chat per-turn floor.
+    agentic_credit_floor: int = 1
 
     # Authoring sampling knobs (drafter creativity). The FIRST draft / refinement
     # generation samples at these values so persona NAMES + personality come out
@@ -548,7 +573,7 @@ class APIConfig(BaseSettings):
     # Credits (D-08-6): per successful chat turn + per authoring call.
     # Spec M2 (D-M2-5): ``credits_per_turn`` is now the FLOOR of the
     # proportional chat-turn charge (max(floor, ceil(cost_cents)) at
-    # 1 credit = 1¢), not the whole price. Authoring stays flat.
+    # 1 credit = 1¢), not the whole price.
     # Rollback fidelity (M2 re-verify, rider H2): kill-switch OFF
     # (PERSONA_API_PROPORTIONAL_CREDITS=false) + credits_per_turn > 1 restores
     # the full pre-M2 classic-reject semantics INCLUDING the balance < amount
@@ -559,7 +584,11 @@ class APIConfig(BaseSettings):
     # turn charge to the pre-M2 flat ``credits_per_turn`` (telemetry layers
     # unaffected). Read from PERSONA_API_PROPORTIONAL_CREDITS.
     proportional_credits: bool = True
-    authoring_credit_cost: int = 1000
+    # Spec M3 (D-M3-9): authoring bills its REAL Sonnet-class token cost through
+    # the credit formula, floored here (replaces the pre-M3 flat-1000 per-call fee,
+    # which is retired). Infra rides this floor (D-M3-4 amendment), so no separate
+    # per-call infra add.
+    authoring_credit_floor: int = 1
 
     # Spec M2 review (reviewer defense-in-depth, adjudicated TAKE): a hard
     # ceiling on the per-turn PROPORTIONAL charge computed in

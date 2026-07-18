@@ -90,7 +90,9 @@ class _RecordingCredits:
     def __init__(self) -> None:
         self.deducts: list[tuple[str, int, str]] = []
 
-    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:
+    def deduct(
+        self, *, rls_engine: object, user_id: str, amount: int, reason: str, **_kwargs: object
+    ) -> int:
         self.deducts.append((user_id, amount, reason))
         return 0
 

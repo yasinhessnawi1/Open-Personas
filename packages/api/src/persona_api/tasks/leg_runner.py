@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from persona.tasks import LegBox
     from persona_runtime.agentic.events import RunEvent
-    from persona_runtime.agentic.run import CancelToken, Run
+    from persona_runtime.agentic.run import CancelToken, Run, StepUsage
 
     from persona_api.services.runtime_factory import RuntimeFactory
 
@@ -41,10 +41,17 @@ class _DeferredLoopRunner:
         *,
         on_event: Callable[[RunEvent], Awaitable[None]],
         cancel_token: CancelToken,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
     ) -> Run:
-        """Build the identical-runtime loop, then delegate the leg's execution to it."""
+        """Build the identical-runtime loop, then delegate the leg's execution to it.
+
+        Spec M3 (T4b): ``on_step_usage`` (the leg-billing hook) is forwarded to the
+        loop so the api handler can meter the leg's real per-step cost.
+        """
         loop = await self._factory.build_agentic_loop(self._persona_id)
-        return await loop.run(task, on_event=on_event, cancel_token=cancel_token)
+        return await loop.run(
+            task, on_event=on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+        )
 
 
 class RuntimeFactoryLegRunnerBuilder:

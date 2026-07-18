@@ -11,6 +11,48 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Universal real-cost metering & credit billing (Spec M3, 2026-07-15)
+
+> Most paid surfaces charged a flat fee (or nothing) regardless of what the
+> provider actually cost us — silent margin loss and no cost visibility. M3 makes
+> EVERY paid surface recover its real cost through one seam and one formula from
+> one living pricing table: `credits = max(floor, ceil(MARKUP × (provider_cents +
+> infra_flat_cents)))` at 1 credit = 1¢, `MARKUP` default 1.0 (pass-through). Each
+> ledger row records the true pre-markup cost + how it was priced.
+
+#### Added
+- **All-surface usage ledger** — `GET /v1/me/usage/ledger` returns the
+  `credit_transactions` log across every billed surface (chat, authoring, image
+  + true-ups, agentic runs, task legs, background LLM, voice per-turn + LiveKit,
+  avatar, sandbox), each row carrying its `cost_basis` provenance + credits
+  moved. The existing `/v1/me/usage` (chat turn_logs) is unchanged.
+- **Voice per-turn owner billing + mid-call cutoff** — a live call bills the
+  caller its real cost per committed turn (served STT + TTS + LLM, priced at the
+  *actually-served* provider's rate — Gladia/ElevenLabs primary, Deepgram/Cartesia
+  fallback) plus a LiveKit infra tick at call end, off the audio loop + idempotent
+  + fail-soft; on credit exhaustion the call ends (one grounded spoken notice, then
+  the room is closed).
+- **Idempotent billing** — `credit_transactions.billing_key` (partial-unique) so
+  at-least-once background/task/voice deducts never double-charge on retry.
+- **One pricing truth** — `persona.billing` (formula + `MeteredBilling` seam +
+  pricing registry) in persona-core; a docs↔registry sync test keeps
+  `docs/pricing/pricing-table.md` honest. New `cost_basis` provenance vocabulary
+  (`actual_openrouter` / `estimate_static` / `estimate_catalog` / `provider_meter`
+  / `infra_flat` / `unpriced`).
+
+#### Changed
+- **Chat, authoring, image, avatar, agentic runs, task legs, background LLM**
+  (episodic consolidation / voice-autopick / initiative scan) now bill their REAL
+  provider cost (OpenRouter `usage.cost` actuals where present, else a priced
+  estimate), replacing flat fees. Image adds a ceiling pre-deduct trued-up to the
+  real cost. Agentic runs meter per step and cut off on exhaustion.
+- **Sandbox execution** reclassified into the M3 schema (`infra_flat` basis,
+  `cost_cents` recorded); its flat ~1-credit charge is unchanged. Embeddings /
+  connectors / MCP infra inside an enclosing op is subsumed by that op's floor —
+  no separate hot-path charge.
+- **`credit_transactions`** gains `cost_cents` (DOUBLE PRECISION, true pre-markup
+  provider cost) + `cost_basis` + `billing_key` (migration 050, all additive).
+
 ### Utterance-level multilingual voice — code-switching STT + text-follow TTS (Spec V14, 2026-07-15)
 
 > A persona's voice pipeline was language-PINNED per call: Deepgram silently

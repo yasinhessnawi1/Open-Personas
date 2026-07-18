@@ -32,6 +32,8 @@ from sqlalchemy import select
 from persona_api.db.models import personas as personas_t
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services import persona_service
+from persona_api.services.background_billing import bill_background_llm
+from persona_api.services.llm_usage_collector import UsageCollectingBackend, collect_llm_usage
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
@@ -278,12 +280,34 @@ async def maybe_assign_voice(
         return
 
     try:
-        backend = registry.get(getattr(config, "voice_pick_tier", "small"))
-        choice = await choose_voice(persona=persona, backend=backend, options=options)
+        # Spec M3 (T5b): wrap the pick model's backend so the real usage of the
+        # auto-pick call is captured for owner billing.
+        backend = UsageCollectingBackend(registry.get(getattr(config, "voice_pick_tier", "small")))
+        with collect_llm_usage() as usage:
+            choice = await choose_voice(persona=persona, backend=backend, options=options)
     except Exception as exc:  # noqa: BLE001 — model/routing error → keep default
         _LOG.warning("voice auto-pick failed at model selection", persona_id=persona_id)
         _LOG.debug("voice pick model error", error=str(exc)[:200])
         return
+    # Spec M3 (T5b, D-M3-8): owner-bill the auto-pick's real model cost, idempotent
+    # (once per persona) + fail-soft — charged whether or not the pick was usable
+    # (the LLM cost was incurred). No model call (empty catalogue path handled above)
+    # → charges nothing.
+    totals = usage.totals()
+    bill_background_llm(
+        credits_policy=getattr(state, "credits_policy", None),
+        rls_engine=rls_engine,
+        owner_id=owner_id,
+        provider=totals.provider,
+        model=totals.model,
+        prompt_tokens=totals.prompt_tokens,
+        completion_tokens=totals.completion_tokens,
+        cost_usd=totals.cost_usd,
+        surface="voice_pick",
+        billing_key=f"voice_pick:{persona_id}",
+        cost_source=getattr(state, "metadata_resolver", None),
+        floor=getattr(config, "agentic_credit_floor", 1),
+    )
     if choice is None:
         return
 

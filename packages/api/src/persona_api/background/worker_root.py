@@ -29,6 +29,7 @@ import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona.billing import BillingConfig
 from persona.config import PersonaCoreConfig
 from persona.events import EventTriggerSettings
 from persona.graph import ConsolidationPass, PostgresEntityRegistry, build_graph_store
@@ -49,6 +50,7 @@ from persona_runtime.routing import tier_for
 
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
+from persona_api.editions.factory import build_credits_policy
 from persona_api.errors import CommunityDbError
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
 from persona_api.initiative.handler import (
@@ -99,6 +101,7 @@ from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
+from persona_api.services.llm_usage_collector import UsageCollectingBackend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.handler import RunnableGuard, register_task_leg_handler
@@ -121,6 +124,7 @@ if TYPE_CHECKING:
 
     from persona_api.approvals.sweep import ApprovalSweepRunner
     from persona_api.config import APIConfig
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.catalog_sync import CatalogSyncTask
     from persona_api.jobs.skill_catalog_sync import SkillCatalogSyncTask
     from persona_api.jobs.worker import Worker
@@ -301,8 +305,10 @@ def build_worker_registry(
     if episodic_settings.engine_enabled and memory_backend is not None:
         # The interim tier summarizer (K8-D-10): the engine's OWN tier knob; P7 swaps in
         # behind the same Protocol later. Shared with the K9 core-block refresher below.
+        # Spec M3 (T5): wrap the summarizer's chat backend so ``collect_llm_usage``
+        # in the handler captures the real per-op summarizer cost for owner billing.
         episodic_summarizer = TierSummarizer(
-            backend=tier_registry.get(config.episodic_summary_tier)
+            backend=UsageCollectingBackend(tier_registry.get(config.episodic_summary_tier))
         )
         episodic_engine = EpisodicConsolidationEngine(
             backend=memory_backend,
@@ -323,7 +329,16 @@ def build_worker_registry(
             audit_logger=build_audit_logger(config, rls_engine),
         )
         register_episodic_consolidation_handler(
-            registry, engine=episodic_engine, core_refresher=core_refresher
+            registry,
+            engine=episodic_engine,
+            core_refresher=core_refresher,
+            # Spec M3 (T5): owner-billed summarizer cost, idempotent + fail-soft.
+            credits_policy=build_credits_policy(config),
+            rls_engine=rls_engine,
+            cost_source=(
+                runtime_factory.metadata_resolver if runtime_factory is not None else None
+            ),
+            floor=config.agentic_credit_floor,
         )
     # Event triggers (Spec A7, T6) — env-gated at the composition root
     # (PERSONA_EVENT_TRIGGERS_ENABLED, default OFF — the A5 criterion-9 posture; OFF ⇒ the leg
@@ -362,6 +377,10 @@ def build_worker_registry(
             event_channel=event_channel,
             on_leg_settled=on_leg_settled,
             runnable_guard=kill_switch,
+            # Spec M3 (T4b): owner-billed leg billing — the same edition policy the
+            # chat/run paths use; the per-leg floor from config.
+            credits_policy=build_credits_policy(config),
+            agentic_floor=config.agentic_credit_floor,
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -373,7 +392,11 @@ def build_worker_registry(
     # synthesis_tier precedent; Phase-1 ruling 1).
     initiative_settings = InitiativeSettings()
     if initiative_settings.enabled:
-        initiative_backend = tier_registry.get(initiative_settings.scan_tier)
+        # Spec M3 (T5b): wrap the scan backend so ``collect_llm_usage`` in the handler
+        # captures the scan's real cost for owner billing.
+        initiative_backend = UsageCollectingBackend(
+            tier_registry.get(initiative_settings.scan_tier)
+        )
         scanner = InitiativeScanner(
             graph=ApiScanGraphReader(graph_store),
             conversations=ApiScanConversationReader(rls_engine),
@@ -449,6 +472,13 @@ def build_worker_registry(
                 dial_reader=_dial_reader,
                 sink=pipeline,
                 pause_check=kill_switch.is_owner_autonomy_paused,
+                # Spec M3 (T5b): owner-billed scan cost, idempotent + fail-soft.
+                credits_policy=build_credits_policy(config),
+                rls_engine=rls_engine,
+                cost_source=(
+                    runtime_factory.metadata_resolver if runtime_factory is not None else None
+                ),
+                floor=config.agentic_credit_floor,
             ),
         )
         # Spec A9 (A9-D-5/D-7): the ``delegated_turn`` tenant — voice's confirmed spoken ask
@@ -563,6 +593,8 @@ def _register_task_leg_tenant(
     event_channel: UserEventChannel | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
     runnable_guard: RunnableGuard | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    agentic_floor: int = 1,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
 
@@ -641,6 +673,15 @@ def _register_task_leg_tenant(
         budget_gate=budget_gate,
         on_approval_parked=on_approval_parked,
         on_task_stuck=on_task_stuck,
+        # Spec M3 (T4b): OWNER-billed, CAS-ridden idempotent leg billing. The
+        # ``cost_source`` is the shared pricing chain (full catalog coverage);
+        # ``rls_engine`` is the same owner-scoped engine the stores use (the A0
+        # worker binds ``current_user_id`` before the handler runs).
+        credits_policy=credits_policy,
+        rls_engine=rls_engine,
+        cost_source=runtime_factory.metadata_resolver,
+        billing_config=BillingConfig(),
+        agentic_floor=agentic_floor,
     )
     # The A1→A2 bridge: a schedule fire → a task leg at the head-of-fire seq (Spec A4). Without it
     # an origination-created schedule fires a payload the leg handler can't parse (the inert trap).

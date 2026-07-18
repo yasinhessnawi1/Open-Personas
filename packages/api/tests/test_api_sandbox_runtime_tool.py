@@ -12,8 +12,10 @@ Covers:
   for ``(owner_id, conversation_id)``; without context, no pool acquire happens
   and no credits deduct (CLI / one-shot path).
 - Credits hook composition: ``credits_service.deduct`` is called with
-  ``user_id=owner_id, amount=1, reason="code_execution"`` after a successful
-  execute. Hook failure is logged but doesn't break the tool result.
+  ``user_id=owner_id, amount=1, reason="sandbox:infra_flat"`` (Spec M3 T7 — the
+  standalone infra-flat surface: zero provider cost, ``cost_cents=0.0``,
+  ``cost_basis="infra_flat"``) after a successful execute. Hook failure is logged
+  but doesn't break the tool result.
 """
 
 from __future__ import annotations
@@ -263,12 +265,16 @@ async def test_pool_tool_with_context_acquires_pool_and_deducts_credits(
         assert fake.execute_calls == [
             {"code": "print('hi')", "session_id": "alice:c1", "input_files": []}
         ]
-        # Credits deducted exactly once with the right shape.
+        # Credits deducted exactly once with the M3 infra-flat shape (Spec M3, T7):
+        # sandbox is a standalone infra-flat surface — ~1-credit charge, zero provider
+        # cost, basis + reason reclassified into the M3 schema.
         mock_policy.deduct.assert_called_once()
         kwargs = mock_policy.deduct.call_args.kwargs
         assert kwargs["user_id"] == "alice"
         assert kwargs["amount"] == 1
-        assert kwargs["reason"] == "code_execution"
+        assert kwargs["reason"] == "sandbox:infra_flat"
+        assert kwargs["cost_cents"] == 0.0
+        assert kwargs["cost_basis"] == "infra_flat"
     finally:
         reset_sandbox_request_context(token)
 

@@ -88,6 +88,12 @@ def _stream_of(content: str) -> object:
 class _ScriptedBackend:
     """Streams the canned draft; ``chat`` kept for non-streaming callers (recommenders)."""
 
+    #: Spec M3 (T2a): _price_usage reads provider/model. ``scripted`` is not in the
+    #: static pricing table → the turn prices ``unpriced`` (0.0¢) and the authoring
+    #: charge falls to the floor — the "balance decreased" billing tests still hold.
+    provider_name = "scripted"
+    model_name = "scripted"
+
     def chat_stream(self, messages: list, **_kwargs: object) -> object:  # noqa: ARG002
         return _stream_of(_DRAFT_RESPONSE)
 
@@ -104,12 +110,18 @@ class _ScriptedBackend:
 class _BadYamlStreamBackend:
     """Streams schema-invalid YAML on BOTH attempts → validation-exhausted draft."""
 
+    provider_name = "scripted"
+    model_name = "scripted"
+
     def chat_stream(self, messages: list, **_kwargs: object) -> object:  # noqa: ARG002
         return _stream_of(_BAD_RESPONSE)
 
 
 class _RaisingStreamBackend:
     """``chat_stream`` raises mid-iteration — a provider failure (no terminal draft)."""
+
+    provider_name = "scripted"
+    model_name = "scripted"
 
     def chat_stream(self, messages: list, **_kwargs: object) -> object:  # noqa: ARG002
         async def _gen() -> object:
@@ -125,7 +137,8 @@ class _NoCreditsPolicy:
     def require_credits(self, *, rls_engine: object, user_id: str) -> int:  # noqa: ARG002
         raise CreditsExhaustedError("insufficient credits")
 
-    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:  # noqa: ARG002
+    def deduct(self, **_kwargs: object) -> int:
+        # Never reached (require_credits raises first); signature-flexible stub.
         return 0
 
 
@@ -269,6 +282,44 @@ def test_author_no_charge_on_provider_failure(client: tuple[TestClient, str]) ->
     with contextlib.suppress(Exception):
         c.post("/v1/personas/author", json={"description": "x"}, headers=_auth(uid))
     assert _balance(c, uid) == before
+
+
+class _PriceableStreamBackend:
+    """Streams the canned draft AND reports a priceable served model + real usage.
+
+    Spec M3 (T2b): ``anthropic`` / ``claude-sonnet-5`` is in the static pricing
+    table (0.30 / 1.50 ¢ per 1k tok), so 2000 prompt + 800 completion tokens cost
+    ``2·0.30 + 0.8·1.50 = 1.8¢`` → ``ceil(1.8) = 2`` credits at MARKUP 1.0 (infra
+    via the floor). The charge is observable as the balance delta.
+    """
+
+    provider_name = "anthropic"
+    model_name = "claude-sonnet-5"
+
+    def chat_stream(self, messages: list, **_kwargs: object) -> object:  # noqa: ARG002
+        async def _gen() -> object:
+            mid = len(_DRAFT_RESPONSE) // 2
+            yield StreamChunk(delta=_DRAFT_RESPONSE[:mid], is_final=False)
+            yield StreamChunk(
+                delta=_DRAFT_RESPONSE[mid:],
+                is_final=True,
+                usage=TokenUsage(prompt_tokens=2000, completion_tokens=800, total_tokens=2800),
+            )
+
+        return _gen()
+
+
+def test_author_charges_the_real_token_cost_not_a_flat_fee(
+    client: tuple[TestClient, str],
+) -> None:
+    # Spec M3 (T2b, D-M3-9): the charge is the REAL Sonnet-5 token cost through the
+    # credit formula (max(floor, ceil(MARKUP × cost))), NOT the retired flat 1000.
+    # 1.8¢ → 2 credits; observable as the balance delta.
+    c, uid = client
+    c.app.state.tier_registry = _StubRegistry(_PriceableStreamBackend())  # type: ignore[arg-type]
+    before = _balance(c, uid)
+    _author_stream(c, uid, "a tenancy assistant")
+    assert before - _balance(c, uid) == 2  # ceil(1.8), not 1000
 
 
 def test_author_validation_exhausted_still_charges(client: tuple[TestClient, str]) -> None:

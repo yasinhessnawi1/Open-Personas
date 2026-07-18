@@ -281,3 +281,70 @@ class TestOffCriticalPathCompaction:
         )
 
         assert scheduled == []
+
+
+class _RecordingMeter:
+    """A billing-meter double recording each bill_turn call (Spec M3, T6b-1)."""
+
+    def __init__(self) -> None:
+        self.billed: list[int] = []
+
+    async def bill_turn(self, turn_seq: int) -> None:
+        self.billed.append(turn_seq)
+
+
+class _RaisingMeter:
+    async def bill_turn(self, turn_seq: int) -> None:
+        raise RuntimeError("billing exploded")
+
+
+class TestPerTurnBilling:
+    """Spec M3 (T6b-1): the recorder fires the per-turn owner deduct on commit."""
+
+    @pytest.mark.asyncio
+    async def test_bill_turn_fires_with_incrementing_seq(self) -> None:
+        ctx, _ = _context()
+        meter = _RecordingMeter()
+        recorder = VoiceTurnRecorder(ctx, billing_meter=meter)  # type: ignore[arg-type]
+        recorder.note_user_message("hi")
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="hello", truncated=False, token_count=1)
+        )
+        recorder.note_user_message("again")
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="yes", truncated=False, token_count=1)
+        )
+        assert meter.billed == [1, 2]  # one deduct per committed turn, keyed by seq
+
+    @pytest.mark.asyncio
+    async def test_orphan_reply_does_not_bill(self) -> None:
+        ctx, _ = _context()
+        meter = _RecordingMeter()
+        recorder = VoiceTurnRecorder(ctx, billing_meter=meter)  # type: ignore[arg-type]
+        # No note_user_message → nothing to correlate → not a turn → no bill.
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="orphan", truncated=False, token_count=1)
+        )
+        assert meter.billed == []
+
+    @pytest.mark.asyncio
+    async def test_billing_raise_is_fail_soft_and_commit_still_happens(self) -> None:
+        ctx, _ = _context()
+        recorder = VoiceTurnRecorder(ctx, billing_meter=_RaisingMeter())  # type: ignore[arg-type]
+        recorder.note_user_message("hi")
+        # MUST NOT raise — a billing failure can never break the turn commit.
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="hello there", truncated=False, token_count=2)
+        )
+        # The turn still committed both halves to the live conversation.
+        assert [m.role for m in ctx.conversation.messages] == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_no_meter_is_a_noop(self) -> None:
+        ctx, _ = _context()
+        recorder = VoiceTurnRecorder(ctx)  # unmetered voice
+        recorder.note_user_message("hi")
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="hello", truncated=False, token_count=1)
+        )
+        assert len(ctx.conversation.messages) == 2  # commit happened, no billing wired

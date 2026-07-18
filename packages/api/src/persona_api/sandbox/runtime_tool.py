@@ -150,7 +150,16 @@ def make_pool_code_execution_tool(
         await pool.acquire(user_id=ctx.owner_id, conversation_id=ctx.conversation_id)
 
     async def _on_execute_success(_result: ExecutionResult) -> None:
-        """Credits hook fired by the T03 body on outcome=="ok"."""
+        """Credits hook fired by the T03 body on outcome=="ok".
+
+        Spec M3 (T7): sandbox exec is a **standalone infra-flat** surface — a
+        genuinely standalone op (no enclosing billed turn/run subsumes it), so it
+        keeps its own ledger row. Reclassified into the M3 schema: basis
+        ``infra_flat`` (a zero-provider-cost surface — the ~1-credit charge is the
+        per-exec infra rate, not a provider cost), ``cost_cents=0.0`` (no provider
+        cost to record), reason ``sandbox:infra_flat``. The flat ``credit_cost``
+        amount is unchanged (D-12-3).
+        """
         ctx = get_sandbox_request_context()
         if ctx is None:
             # No request context → CLI / one-shot path; no billing.
@@ -160,7 +169,9 @@ def make_pool_code_execution_tool(
             rls_engine=rls_engine,
             user_id=ctx.owner_id,
             amount=credit_cost,
-            reason="code_execution",
+            reason="sandbox:infra_flat",
+            cost_cents=0.0,
+            cost_basis="infra_flat",
         )
 
     def _resolve_persona_workspace() -> Path | None:

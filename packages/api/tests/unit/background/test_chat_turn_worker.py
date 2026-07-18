@@ -110,7 +110,9 @@ class _RecordingCredits:
     def __init__(self) -> None:
         self.deducts: list[tuple[str, int, str]] = []
 
-    def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:
+    def deduct(
+        self, *, rls_engine: object, user_id: str, amount: int, reason: str, **_kwargs: object
+    ) -> int:
         self.deducts.append((user_id, amount, reason))
         return 0
 
@@ -251,7 +253,9 @@ async def test_deduct_exhaustion_does_not_lose_the_completed_turn() -> None:
     from persona.errors import CreditsExhaustedError
 
     class _ExhaustedCredits(_RecordingCredits):
-        def deduct(self, *, rls_engine: object, user_id: str, amount: int, reason: str) -> int:
+        def deduct(
+            self, *, rls_engine: object, user_id: str, amount: int, reason: str, **_kwargs: object
+        ) -> int:
             self.deducts.append((user_id, amount, reason))
             raise CreditsExhaustedError("exhausted", context={"amount": str(amount)})
 

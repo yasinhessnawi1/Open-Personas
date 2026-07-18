@@ -31,7 +31,9 @@ from __future__ import annotations
 from persona.credits.service import (
     LOW_BALANCE_THRESHOLD,
     capture_up_to,
+    capture_up_to_idempotent,
     deduct,
+    deduct_idempotent,
     ensure_balance,
     get_balance,
     list_turn_usage,
@@ -43,7 +45,9 @@ from persona.credits.service import (
 __all__ = [
     "LOW_BALANCE_THRESHOLD",
     "capture_up_to",
+    "capture_up_to_idempotent",
     "deduct",
+    "deduct_idempotent",
     "ensure_balance",
     "get_balance",
     "list_turn_usage",
