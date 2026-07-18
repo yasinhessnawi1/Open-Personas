@@ -59,6 +59,16 @@ class _RaisingLedger(_RecordingLedger):
         raise RuntimeError("ledger exploded")
 
 
+class _DuplicateKeyLedger(_RecordingLedger):
+    """An idempotent re-fire: a re-used ``billing_key`` captures NOTHING (ON
+    CONFLICT DO NOTHING) while the balance stays fully healthy — the exact shape
+    ``capture_up_to_idempotent`` returns for an already-billed key (Finding 1)."""
+
+    def capture_up_to_idempotent(self, **kw: object) -> tuple[int, int]:
+        self.calls.append(kw)
+        return 0, 500  # captured 0, but 500 credits still remain
+
+
 def _meter(
     ledger: object,
     *,
@@ -240,6 +250,25 @@ class TestBillTurn:
         # Must not raise — a billing failure can never break the turn/audio path.
         asyncio.run(meter.bill_turn(1))
 
+    def test_idempotent_noop_does_not_falsely_trigger_the_cutoff(self) -> None:
+        # Finding 1: a re-used billing_key returns captured=0 with a HEALTHY balance
+        # (idempotent ON CONFLICT DO NOTHING = "already billed"). That is a
+        # duplicate tick, NOT exhaustion — it must never fire the mid-call cutoff.
+        # (The live bug: a conversation_id-scoped billing_key was reused across
+        # calls, so every call's first turn hit a stale key and cut off ~37s in on a
+        # 97k-credit account.)
+        fired: list[bool] = []
+
+        async def _on_exhausted() -> None:
+            fired.append(True)
+
+        ledger = _DuplicateKeyLedger()
+        meter = _meter(ledger, streamed_seconds=[30.0], on_exhausted=_on_exhausted)
+        meter.note_tts_chars(1000)
+        asyncio.run(meter.bill_turn(1))
+        assert ledger.calls, "the turn was still submitted to the ledger"
+        assert fired == [], "captured=0 with a healthy balance must NOT cut off the call"
+
     def test_take_turn_runs_even_when_charge_is_skipped(self) -> None:
         # A no-cost turn still advances the STT delta baseline (take_turn happened),
         # so the NEXT turn bills only its own new audio.
@@ -356,16 +385,20 @@ class TestExhaustionSignal:
         async def _on_exhausted() -> None:
             fired.append(1)
 
-        # charged 9 (gladia 60s 1.25 + flash 1000ch 5.0 + 0 llm → 6.25¢→7? recompute):
-        # gladia 60s=1.25, flash 1000=5.0 → 6.25¢ → ceil 7. Capture only 3 → short.
+        # A GENUINE partial capture — the balance couldn't cover the full charge —
+        # floors the balance to 0, so it fires via ``new_balance <= 0``. (Capturing
+        # < charged with a *healthy* balance is an idempotent no-op, NOT exhaustion:
+        # see ``test_idempotent_noop_does_not_falsely_trigger_the_cutoff``. That
+        # distinction is Finding 1's fix — captured<charged alone no longer trips
+        # the cutoff.)
         meter = _meter(
-            _FixedLedger(captured=3, new_balance=5),
+            _FixedLedger(captured=3, new_balance=0),
             streamed_seconds=[60.0],
             on_exhausted=_on_exhausted,
         )
         meter.note_tts_chars(1000)
         asyncio.run(meter.bill_turn(1))
-        assert fired == [1]  # captured < charged → exhausted
+        assert fired == [1]  # partial capture floored the balance to 0 → exhausted
 
     def test_fires_when_balance_hits_zero_even_if_fully_captured(self) -> None:
         fired: list[int] = []

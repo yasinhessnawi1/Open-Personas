@@ -279,8 +279,15 @@ class VoiceTurnBillingMeter:
     def _charge_turn(self, provider_cents: float, billing_key: str) -> bool:
         """Capture the turn's charge off-loop; return whether it EXHAUSTED the balance.
 
-        Exhausted = the capture landed less than the charge (balance was short) OR
-        the balance is now at/below zero — either way the caller is out of credit.
+        Exhausted ⇔ the balance is now at/below zero. Do NOT infer exhaustion from
+        ``captured < charged``: ``capture_up_to_idempotent`` ALSO returns
+        ``captured == 0`` with a fully healthy ``new_balance`` on an idempotent
+        no-op (a re-used ``billing_key`` → ``ON CONFLICT DO NOTHING`` = "already
+        billed for this key"). That is a duplicate tick, not an out-of-credit
+        condition. (Finding 1: a stale/duplicate ``billing_key`` was tripping the
+        mid-call cutoff at a healthy balance — killing every call ~37s in.) A
+        genuine short capture floors the balance to 0, so ``new_balance <= 0``
+        detects real exhaustion without the false positive.
         """
         engine = self._engine_factory()
         try:
@@ -297,8 +304,7 @@ class VoiceTurnBillingMeter:
             )
         finally:
             engine.dispose()
-        short = result.captured is not None and result.captured < result.charged
-        return short or result.new_balance <= 0
+        return result.new_balance <= 0
 
     async def bill_call_infra(self, duration_s: int) -> None:
         """Bill the call's LiveKit infra (per-min) at teardown, off-loop + idempotent.
