@@ -14,6 +14,7 @@ import pytest
 from persona.schema.tools import PersistedArtifact, ToolResult
 from persona_runtime.agentic.events import RunEvent
 from persona_voice.loop.streaming import Transcript
+from persona_voice.transport import broadcast as broadcast_module
 from persona_voice.transport.broadcast import BROADCAST_TOPIC, DataChannelBroadcaster
 from persona_voice.turn_taking.states import (
     ConversationalState,
@@ -25,11 +26,16 @@ pytestmark = [pytest.mark.asyncio]
 
 
 class _CapturingRoom:
-    """Records every publish_data call — the ONLY sink the broadcaster targets."""
+    """Records every publish_data call — the ONLY sink the broadcaster targets.
 
-    def __init__(self, *, raises: bool = False) -> None:
+    ``is_connected`` is a plain settable attribute (mirroring VoiceRoom's
+    ``is_connected`` property) so R9-052 liveness-gating tests can toggle it.
+    """
+
+    def __init__(self, *, raises: bool = False, connected: bool = True) -> None:
         self.calls: list[dict[str, object]] = []
         self._raises = raises
+        self.is_connected = connected
 
     async def publish_data(
         self, payload: bytes, *, reliable: bool = True, topic: str | None = None
@@ -244,3 +250,83 @@ async def test_activity_frames_carry_the_using_x_badge() -> None:
     assert end["type"] == "activity_end"  # type: ignore[index]
     assert end["activity_id"] == "a1"  # pairs with the start  # type: ignore[index]
     assert end["status"] == "ok"  # type: ignore[index]
+
+
+# ---------- R9-052: gate publish on Room liveness (teardown warning flood)
+
+
+def _patch_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace the module logger's ``warning`` with a recorder, return the log."""
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        broadcast_module._logger,
+        "warning",
+        lambda msg, **_kw: warnings.append(msg),
+    )
+    return warnings
+
+
+async def test_disconnected_room_skips_publish_and_warns_at_most_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many frames hitting a torn-down Room must not flood the log — one
+    warning on the connected→disconnected transition, then silence."""
+    warnings = _patch_warnings(monkeypatch)
+    room = _CapturingRoom(connected=False)
+    bc = DataChannelBroadcaster(room)  # type: ignore[arg-type]
+
+    await bc.on_state_changed(
+        _transition(ConversationalState.LISTENING, TransitionTrigger.PERSONA_FINISHED)
+    )
+    await bc.on_user_transcript(Transcript(is_final=False, text="x", confidence=0.5))
+    await bc.on_user_transcript(Transcript(is_final=True, text="x", confidence=0.9))
+    await bc.on_persona_text("y", is_final=True)
+    await bc.on_run_event(
+        RunEvent.activity_start(
+            -1,
+            activity_id="a",
+            kind="web",
+            name="web_search",
+            label="Searching the web",
+            args_summary={},
+        )
+    )
+
+    assert room.calls == []
+    assert warnings == ["voice data-channel closed; suppressing further publishes (topic={topic})"]
+
+
+async def test_single_genuine_publish_error_while_connected_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real transport error while the Room IS connected still warns (not
+    silently swallowed by the liveness gate) — and only once per error."""
+    warnings = _patch_warnings(monkeypatch)
+    room = _CapturingRoom(raises=True, connected=True)
+    bc = DataChannelBroadcaster(room)  # type: ignore[arg-type]
+
+    await bc.on_persona_text("y", is_final=True)
+
+    assert warnings == ["voice data-channel publish failed (topic={topic})"]
+
+
+async def test_reconnect_resets_suppression_so_a_later_error_warns_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """disconnect (one warning) -> stays disconnected (silent) -> reconnect ->
+    a genuine publish error afterwards warns again (the flag reset)."""
+    warnings = _patch_warnings(monkeypatch)
+    room = _CapturingRoom(connected=False)
+    bc = DataChannelBroadcaster(room)  # type: ignore[arg-type]
+
+    await bc.on_persona_text("a", is_final=True)
+    await bc.on_persona_text("b", is_final=True)
+    assert room.calls == []
+    assert len(warnings) == 1
+
+    room.is_connected = True
+    room._raises = True  # simulate a genuine transport error post-reconnect
+    await bc.on_persona_text("c", is_final=True)
+
+    assert len(warnings) == 2
+    assert warnings[1] == "voice data-channel publish failed (topic={topic})"

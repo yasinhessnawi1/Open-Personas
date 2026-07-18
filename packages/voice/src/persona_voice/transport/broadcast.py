@@ -126,6 +126,10 @@ class DataChannelBroadcaster:
         self._topic = topic
         self._user_segment = 0
         self._persona_segment = 0
+        # R9-052: set once we've warned about a disconnected Room so the flood
+        # of still-live listener callbacks firing after teardown warns exactly
+        # once, not per frame. Reset whenever the Room is observed connected.
+        self._publish_suppressed = False
 
     async def on_state_changed(self, transition: ConversationalTransition) -> None:
         """V4 ``ConversationalStateListener`` — broadcast the state transition."""
@@ -171,7 +175,27 @@ class DataChannelBroadcaster:
         await self._publish(encode_run_event_frame(event))
 
     async def _publish(self, payload: bytes) -> None:
-        """Publish one reliable frame; swallow + log transport errors (never raise)."""
+        """Publish one reliable frame; swallow + log transport errors (never raise).
+
+        Gated on Room liveness (R9-052). Room teardown (e.g. a billing cutoff
+        calling ``delete_room``) doesn't instantly stop the still-live caption /
+        state / run-event listeners — they keep firing for the last few frames
+        of the turn before their owning tasks are cancelled, and each one used
+        to hit the ``except`` below and warn, flooding the log (hundreds of
+        identical lines per teardown). While the Room is disconnected we skip
+        the publish silently, warning exactly ONCE on the connected→disconnected
+        transition. Observing the Room connected again resets the flag, so a
+        later reconnect's genuine error still surfaces.
+        """
+        if not self._room.is_connected:
+            if not self._publish_suppressed:
+                self._publish_suppressed = True
+                _logger.warning(
+                    "voice data-channel closed; suppressing further publishes (topic={topic})",
+                    topic=self._topic,
+                )
+            return
+        self._publish_suppressed = False
         try:
             await self._room.publish_data(payload, reliable=True, topic=self._topic)
         except Exception:  # noqa: BLE001 — listener contract: never raise into the turn
