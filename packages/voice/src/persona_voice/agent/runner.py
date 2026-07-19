@@ -803,7 +803,12 @@ async def build_agent_session(
         billing_config=BillingConfig(),
         engine_factory=lambda: make_session_rls_engine(config.database_url, user_id=user_id),
         user_id=user_id,
-        call_id=conversation_id,  # the durable per-call identity (stable across retry)
+        call_id=session_id,  # per-CALL identity (unique per connection). NOT conversation_id:
+        # a voice conversation persists across separate calls, so conversation_id would collide
+        # the per-turn billing_key (voice:{call_id}:{turn_seq}) + the :livekit infra charge
+        # across calls — under-billing repeat calls and (pre cb3d156) tripping a false ~37s
+        # exhaustion cutoff on the stale-key idempotent no-op. session_id is per-call-unique
+        # (R9-056; runner linkage covered by the V6 voice operator pass, meter by turn_meter tests).
         stt_provider=stt_backend.provider_name,
         stt_model=stt_backend.model_name,
         tts_provider=tts_backend.provider_name,
