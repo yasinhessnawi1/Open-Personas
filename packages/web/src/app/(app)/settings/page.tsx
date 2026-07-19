@@ -5,9 +5,16 @@ import { PageBody, PageHeader, Stack } from "@/components/layout";
 import { ErrorState } from "@/components/patterns/error-state";
 import { LowBalanceWarningCard } from "@/components/settings/low-balance-warning-card";
 import { PreferencesCard } from "@/components/settings/preferences-card";
+import { UsageBreakdown } from "@/components/settings/usage-breakdown";
 import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
+import {
+  aggregateBySurface,
+  type LedgerEntry,
+  type SurfaceKey,
+  totalsOf,
+} from "@/lib/usage-surfaces";
 
 /**
  * Spec F2 T31 — Settings page (rebuilt presentation).
@@ -41,16 +48,58 @@ export default async function SettingsPage() {
   // see conversation-list.tsx / R9-044.
   const format = await getFormatter();
   const api = await serverApi();
-  const [user, credits, usage] = await Promise.all([
+  const [user, credits, usage, ledger] = await Promise.all([
     currentUser(),
     api.GET("/v1/me/credits").then(unwrap),
     api.GET("/v1/me/usage").then(unwrap),
+    // Spec M3 — the ALL-surface ledger. Additive + fail-soft: a ledger error (or
+    // the community edition's empty list) degrades to an empty breakdown, never a
+    // crashed settings page (keeps the DO-NOT-TOUCH credits/usage plumbing intact).
+    api
+      .GET("/v1/me/usage/ledger")
+      .then(unwrap)
+      .catch(() => [] as LedgerEntry[]),
   ]);
 
   const email = user?.primaryEmailAddress?.emailAddress ?? "";
   const name =
     [user?.firstName, user?.lastName].filter(Boolean).join(" ") || email;
   const exhausted = credits.balance === 0;
+
+  // Spec M3 — fold the raw ledger into an ordered per-surface breakdown.
+  const surfaceGroups = aggregateBySurface(ledger);
+  const ledgerTotals = totalsOf(surfaceGroups);
+  const surfaceNames: Record<SurfaceKey, string> = {
+    chat: t("surfaceChat"),
+    authoring: t("surfaceAuthoring"),
+    image: t("surfaceImage"),
+    voice: t("surfaceVoice"),
+    agentic: t("surfaceAgentic"),
+    task: t("surfaceTask"),
+    background: t("surfaceBackground"),
+    sandbox: t("surfaceSandbox"),
+    other: t("surfaceOther"),
+  };
+  const basisNames: Record<string, string> = {
+    actual_openrouter: t("basisMetered"),
+    provider_meter: t("basisMetered"),
+    estimate_static: t("basisEstimate"),
+    estimate_catalog: t("basisEstimate"),
+    infra_flat: t("basisFlat"),
+    unpriced: t("basisUnpriced"),
+    mixed: t("basisMixed"),
+  };
+  const usageCopy = {
+    surface: (key: SurfaceKey) => surfaceNames[key],
+    basis: (basis: string | null) =>
+      basis == null ? t("basisNone") : (basisNames[basis] ?? basis),
+    events: (count: number) => t("eventCount", { count }),
+    credits: (amount: number) => format.number(amount),
+    cost: (cents: number) => `$${(cents / 100).toFixed(4)}`,
+    creditsLabel: t("colCredits"),
+    costLabel: t("colProviderCost"),
+    totalLabel: t("usageTotal"),
+  };
 
   return (
     <PageBody>
@@ -171,59 +220,89 @@ export default async function SettingsPage() {
             <h2 className="type-caption font-mono text-muted-foreground uppercase">
               {t("usage")}
             </h2>
-            {usage.length === 0 ? (
-              <p className="type-ui text-muted-foreground">{t("usageEmpty")}</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="type-ui w-full">
-                  <thead>
-                    <tr className="type-caption border-b text-left text-muted-foreground uppercase">
-                      <th className="py-2 pr-3 font-medium">{t("colWhen")}</th>
-                      <th className="py-2 pr-3 font-medium">{t("colTier")}</th>
-                      <th className="py-2 pr-3 font-medium">{t("colModel")}</th>
-                      <th className="py-2 pr-3 text-right font-medium">
-                        {t("colTokens")}
-                      </th>
-                      <th className="py-2 text-right font-medium">
-                        {t("colCost")}
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {usage.map((row, i) => (
-                      <tr
-                        // biome-ignore lint/suspicious/noArrayIndexKey: usage rows have no id
-                        key={i}
-                        className="border-b last:border-0"
-                      >
-                        <td className="py-2 pr-3 whitespace-nowrap text-muted-foreground">
-                          {format.dateTime(new Date(row.created_at), {
-                            dateStyle: "medium",
-                            timeStyle: "short",
-                          })}
-                        </td>
-                        <td className="py-2 pr-3">
-                          <span className="type-caption font-mono uppercase">
-                            {row.tier_used}
-                          </span>
-                        </td>
-                        <td className="type-caption py-2 pr-3 font-mono">
-                          {row.model_name}
-                        </td>
-                        <td className="py-2 pr-3 text-right tabular-nums">
-                          {format.number(
-                            row.prompt_tokens + row.completion_tokens,
-                          )}
-                        </td>
-                        <td className="py-2 text-right tabular-nums">
-                          ${(row.cost_cents / 100).toFixed(4)}
-                        </td>
+
+            {/* Spec M3 — the ALL-surface breakdown (chat, images, voice, runs,
+                tasks, background, sandbox). Headline view when the ledger has
+                rows; the cloud editions meter here. */}
+            {surfaceGroups.length > 0 ? (
+              <UsageBreakdown
+                groups={surfaceGroups}
+                total={ledgerTotals}
+                copy={usageCopy}
+              />
+            ) : null}
+
+            {/* Per-turn chat token detail (unchanged; the community edition's
+                honest view when the ledger is unmetered). Sub-labelled only when
+                the surface breakdown sits above it. */}
+            {usage.length > 0 ? (
+              <div className={surfaceGroups.length > 0 ? "mt-2" : undefined}>
+                {surfaceGroups.length > 0 ? (
+                  <h3 className="type-caption font-mono text-muted-foreground uppercase">
+                    {t("usageDetailHeading")}
+                  </h3>
+                ) : null}
+                <div className="overflow-x-auto">
+                  <table className="type-ui w-full">
+                    <thead>
+                      <tr className="type-caption border-b text-left text-muted-foreground uppercase">
+                        <th className="py-2 pr-3 font-medium">
+                          {t("colWhen")}
+                        </th>
+                        <th className="py-2 pr-3 font-medium">
+                          {t("colTier")}
+                        </th>
+                        <th className="py-2 pr-3 font-medium">
+                          {t("colModel")}
+                        </th>
+                        <th className="py-2 pr-3 text-right font-medium">
+                          {t("colTokens")}
+                        </th>
+                        <th className="py-2 text-right font-medium">
+                          {t("colCost")}
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {usage.map((row, i) => (
+                        <tr
+                          // biome-ignore lint/suspicious/noArrayIndexKey: usage rows have no id
+                          key={i}
+                          className="border-b last:border-0"
+                        >
+                          <td className="py-2 pr-3 whitespace-nowrap text-muted-foreground">
+                            {format.dateTime(new Date(row.created_at), {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                            })}
+                          </td>
+                          <td className="py-2 pr-3">
+                            <span className="type-caption font-mono uppercase">
+                              {row.tier_used}
+                            </span>
+                          </td>
+                          <td className="type-caption py-2 pr-3 font-mono">
+                            {row.model_name}
+                          </td>
+                          <td className="py-2 pr-3 text-right tabular-nums">
+                            {format.number(
+                              row.prompt_tokens + row.completion_tokens,
+                            )}
+                          </td>
+                          <td className="py-2 text-right tabular-nums">
+                            ${(row.cost_cents / 100).toFixed(4)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            )}
+            ) : null}
+
+            {surfaceGroups.length === 0 && usage.length === 0 ? (
+              <p className="type-ui text-muted-foreground">{t("usageEmpty")}</p>
+            ) : null}
           </Card>
 
           <Card

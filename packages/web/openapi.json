@@ -1577,6 +1577,62 @@
         }
       }
     },
+    "/v1/me/usage/ledger": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Get Usage Ledger",
+        "description": "The caller's ALL-surface credit ledger (Spec M3, T8; credit_transactions, RLS-scoped).\n\nWhere ``/v1/me/usage`` reads only ``turn_logs`` (chat turns), this reads the\n``credit_transactions`` ledger every billed surface writes to \u2014 chat, authoring,\nimage (+ true-up), agentic runs, task legs, background LLM (episodic /\nvoice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and\nsandbox \u2014 newest-first, each row carrying its ``cost_basis`` provenance + the\ncredits moved (``delta``). Owner-scoped both by the RLS engine AND the explicit\n``user_id`` filter; the community-unmetered edition returns an empty list.",
+        "operationId": "get_usage_ledger_v1_me_usage_ledger_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LedgerEntry"
+                  },
+                  "title": "Response Get Usage Ledger V1 Me Usage Ledger Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/nav-counts": {
       "get": {
         "tags": ["me"],
@@ -6224,6 +6280,50 @@
         "description": "Set a persona's initiative restraint level (Spec A6, B4 \u2014 the dial switch).\n\n``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``\nlets all-safe plans execute. The level persists regardless of the platform initiative flag; the\nroute reflects whether initiative is globally enabled so the UX is honest about when it acts."
       },
       "JsonValue": {},
+      "LedgerEntry": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "delta": {
+            "type": "integer",
+            "title": "Delta"
+          },
+          "cost_cents": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Cents"
+          },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["reason", "delta", "created_at"],
+        "title": "LedgerEntry",
+        "description": "One credit-ledger row \u2014 the ALL-surface usage view (Spec M3, T8; D-M3-1).\n\nWhere :class:`UsageEntry` reads only ``turn_logs`` (chat turns), this reads the\n``credit_transactions`` ledger EVERY billed surface writes to \u2014 chat, authoring,\nimage (+ true-up rows), agentic runs, task legs, background LLM (episodic /\nvoice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and\nsandbox \u2014 RLS-scoped + paginated (newest-first). Each row surfaces its\nprovenance so the web can label what was charged and how it was priced.\n\n* ``reason`` \u2014 the surface label, ``\"<surface>[:<basis>]\"`` (e.g.\n  ``\"image_gen:actual_openrouter\"``, ``\"voice:provider_meter\"``,\n  ``\"sandbox:infra_flat\"``, ``\"agentic_run:estimate_static\"``).\n* ``delta`` \u2014 credits moved (**negative = charged**; positive = refund / grant).\n* ``cost_cents`` \u2014 the true pre-markup provider cost (``0.0`` for a zero-provider\n  ``infra_flat`` surface; ``None`` on a legacy pre-M3 / flat-floor row).\n* ``cost_basis`` \u2014 the provenance vocabulary (``actual_openrouter`` /\n  ``estimate_static`` / ``estimate_catalog`` / ``provider_meter`` / ``infra_flat``\n  / ``unpriced``); ``None`` on legacy rows."
+      },
       "LedgerOut": {
         "properties": {
           "model_micros": {

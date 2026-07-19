@@ -792,6 +792,34 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/usage/ledger": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Usage Ledger
+     * @description The caller's ALL-surface credit ledger (Spec M3, T8; credit_transactions, RLS-scoped).
+     *
+     *     Where ``/v1/me/usage`` reads only ``turn_logs`` (chat turns), this reads the
+     *     ``credit_transactions`` ledger every billed surface writes to — chat, authoring,
+     *     image (+ true-up), agentic runs, task legs, background LLM (episodic /
+     *     voice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and
+     *     sandbox — newest-first, each row carrying its ``cost_basis`` provenance + the
+     *     credits moved (``delta``). Owner-scoped both by the RLS engine AND the explicit
+     *     ``user_id`` filter; the community-unmetered edition returns an empty list.
+     */
+    get: operations["get_usage_ledger_v1_me_usage_ledger_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/me/nav-counts": {
     parameters: {
       query?: never;
@@ -3544,6 +3572,42 @@ export interface components {
       dial: "off" | "propose_only" | "act_within_envelope";
     };
     JsonValue: unknown;
+    /**
+     * LedgerEntry
+     * @description One credit-ledger row — the ALL-surface usage view (Spec M3, T8; D-M3-1).
+     *
+     *     Where :class:`UsageEntry` reads only ``turn_logs`` (chat turns), this reads the
+     *     ``credit_transactions`` ledger EVERY billed surface writes to — chat, authoring,
+     *     image (+ true-up rows), agentic runs, task legs, background LLM (episodic /
+     *     voice-autopick / initiative), voice per-turn + the LiveKit tick, avatar, and
+     *     sandbox — RLS-scoped + paginated (newest-first). Each row surfaces its
+     *     provenance so the web can label what was charged and how it was priced.
+     *
+     *     * ``reason`` — the surface label, ``"<surface>[:<basis>]"`` (e.g.
+     *       ``"image_gen:actual_openrouter"``, ``"voice:provider_meter"``,
+     *       ``"sandbox:infra_flat"``, ``"agentic_run:estimate_static"``).
+     *     * ``delta`` — credits moved (**negative = charged**; positive = refund / grant).
+     *     * ``cost_cents`` — the true pre-markup provider cost (``0.0`` for a zero-provider
+     *       ``infra_flat`` surface; ``None`` on a legacy pre-M3 / flat-floor row).
+     *     * ``cost_basis`` — the provenance vocabulary (``actual_openrouter`` /
+     *       ``estimate_static`` / ``estimate_catalog`` / ``provider_meter`` / ``infra_flat``
+     *       / ``unpriced``); ``None`` on legacy rows.
+     */
+    LedgerEntry: {
+      /** Reason */
+      reason: string;
+      /** Delta */
+      delta: number;
+      /** Cost Cents */
+      cost_cents?: number | null;
+      /** Cost Basis */
+      cost_basis?: string | null;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+    };
     /**
      * LedgerOut
      * @description The cost ledger, per kind + total (µ-dollars).
@@ -6390,6 +6454,38 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["UsageEntry"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_usage_ledger_v1_me_usage_ledger_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LedgerEntry"][];
         };
       };
       /** @description Validation Error */
