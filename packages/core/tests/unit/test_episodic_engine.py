@@ -27,6 +27,7 @@ from persona.errors import SummarizerError
 from persona.graph.models import NodeKind
 from persona.graph.protocol import UpdateIntent
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
+from persona.schema.conversation import ORIGINATED_METADATA_KEY
 from persona.stores.engine import EpisodicConsolidationEngine, _episode_label
 from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.pyramid import EpisodicPyramid
@@ -140,12 +141,15 @@ class _RecordingSummarizer:
         return await self._stub.summarize(content, target_tokens=target_tokens)
 
 
-def _chunk(*, hours_ago: float, text: str | None = None) -> PersonaChunk:
+def _chunk(
+    *, hours_ago: float, text: str | None = None, metadata: dict[str, str] | None = None
+) -> PersonaChunk:
     cid = mint_chunk_id("p1", "episodic")
     created = _NOW - timedelta(hours=hours_ago)
     return PersonaChunk(
         id=cid,
         text=text or f"USER: at {hours_ago}h\nASSISTANT: noted",
+        metadata=metadata or {},
         created_at=created,
         provenance=ChunkProvenance(
             source=WriteSource.SYSTEM,
@@ -353,3 +357,124 @@ def test_episode_label_reads_from_the_gist_not_a_timestamp() -> None:
     label = _episode_label(long, when)
     assert len(label) == 60  # noqa: PLR2004 — the 60-char label cap
     assert label.endswith("…")
+
+
+# --- D-K12-F: transient assistant-action/system-event windows never graduate ----
+
+
+def test_an_agentic_run_window_emits_no_graph_candidate() -> None:
+    """A window entirely of agentic-run task-completion chunks stays episodic only."""
+    backend = _SpyBackend()
+    chunks = [
+        _chunk(
+            hours_ago=3.0,
+            text="TASK: check inbox\n\nOUTCOME: no unread mail",
+            metadata={"source": "agentic_run", "run_id": "run-1"},
+        ),
+        _chunk(
+            hours_ago=2.9,
+            text="TASK: check inbox\n\nOUTCOME: two unread mails",
+            metadata={"source": "agentic_run", "run_id": "run-2"},
+        ),
+    ]
+    for c in chunks:
+        backend.seed_raw("p1", c)
+    engine, pyramid, graph = _engine(backend)
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.gists_written == 1  # the episodic gist still lands (recall untouched)
+    assert report.candidates_emitted == 0  # but nothing graduates to the graph
+    assert report.candidates_excluded_transient == 1
+    assert graph.candidates == []
+    assert len(pyramid.gists("p1")) == 1  # noqa: PLR2004 — the §0 floor: episodic is untouched
+
+
+def test_a_task_milestone_window_emits_no_graph_candidate() -> None:
+    """A window of task-milestone notices ('completed the task') stays episodic only."""
+    backend = _SpyBackend()
+    chunks = [
+        _chunk(
+            hours_ago=3.0,
+            text="Task started: weekly report",
+            metadata={"source": "task_milestone", "milestone": "task_started"},
+        ),
+        _chunk(
+            hours_ago=2.9,
+            text="The assistant completed the task: weekly report",
+            metadata={"source": "task_milestone", "milestone": "completed"},
+        ),
+    ]
+    for c in chunks:
+        backend.seed_raw("p1", c)
+    engine, _, graph = _engine(backend)
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.candidates_emitted == 0
+    assert report.candidates_excluded_transient == 1
+    assert graph.candidates == []
+
+
+def test_an_originated_window_emits_no_graph_candidate() -> None:
+    """A window of proactive/originated assistant reports stays episodic only."""
+    backend = _SpyBackend()
+    chunks = [
+        _chunk(
+            hours_ago=3.0,
+            text="ASSISTANT (originated): Scheduled reminder fired on 2026-07-07 at 09:00",
+            metadata={ORIGINATED_METADATA_KEY: "true", "conversation_id": "conv-1"},
+        ),
+        _chunk(
+            hours_ago=2.9,
+            text="ASSISTANT (originated): reported completing the daily check",
+            metadata={ORIGINATED_METADATA_KEY: "true", "conversation_id": "conv-1"},
+        ),
+    ]
+    for c in chunks:
+        backend.seed_raw("p1", c)
+    engine, _, graph = _engine(backend)
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.candidates_emitted == 0
+    assert report.candidates_excluded_transient == 1
+    assert graph.candidates == []
+
+
+def test_a_real_user_fact_window_still_graduates() -> None:
+    """Durable user/world knowledge is unaffected — the existing behaviour holds."""
+    backend = _SpyBackend()
+    chunks = [
+        _chunk(
+            hours_ago=3.0,
+            text="USER: I want a recurring email check every morning\nASSISTANT: got it",
+        ),
+        _chunk(hours_ago=2.9, text="USER: my dog is named Balto\nASSISTANT: noted"),
+    ]
+    for c in chunks:
+        backend.seed_raw("p1", c)
+    engine, _, graph = _engine(backend)
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.candidates_emitted == 1
+    assert report.candidates_excluded_transient == 0
+    assert len(graph.candidates) == 1
+
+
+def test_a_mixed_window_with_any_durable_chunk_still_graduates() -> None:
+    """A window is excluded only when EVERY chunk is transient — never drop real knowledge."""
+    backend = _SpyBackend()
+    chunks = [
+        _chunk(
+            hours_ago=3.0,
+            text="TASK: check inbox\n\nOUTCOME: done",
+            metadata={"source": "agentic_run"},
+        ),
+        _chunk(hours_ago=2.9, text="USER: I prefer dark mode\nASSISTANT: switched it on"),
+    ]
+    for c in chunks:
+        backend.seed_raw("p1", c)
+    engine, _, graph = _engine(backend)
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.candidates_emitted == 1
+    assert report.candidates_excluded_transient == 0
+    assert len(graph.candidates) == 1

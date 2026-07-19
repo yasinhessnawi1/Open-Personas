@@ -39,6 +39,7 @@ from persona.graph.models import NodeKind, NodeProvenance
 from persona.graph.protocol import KnowledgeCandidate
 from persona.logging import get_logger
 from persona.schema.chunks import WriteSource
+from persona.schema.conversation import ORIGINATED_METADATA_KEY
 from persona.stores.lifecycle import classify_band
 from persona.stores.pyramid import make_gist_id
 from persona.stores.summarizer import assemble_summarizer_input
@@ -64,6 +65,13 @@ __all__ = [
 _log = get_logger("stores.episodic_engine")
 
 _ENGINE_WRITTEN_BY = "episodic.engine"
+
+#: ``metadata["source"]`` values that mark a chunk as a transient assistant-action /
+#: system-event record rather than durable knowledge (D-K12-F). Both markers were
+#: already stamped by their write-back paths for exactly this kind of downstream
+#: filtering (D-06-8's comment on ``agentic_run``; the milestone recorder's
+#: ``task_milestone``) — no new write-side change, just a read at candidate time.
+_TRANSIENT_CHUNK_SOURCES = frozenset({"agentic_run", "task_milestone"})
 
 
 @runtime_checkable
@@ -95,6 +103,9 @@ class EpisodicConsolidationReport(BaseModel):
     gists_written: int
     candidates_emitted: int
     skipped: tuple[SkippedWindow, ...] = ()
+    # --- D-K12-F: transient assistant-action/system-event windows (honest report,
+    # never a silent skip — but NOT a failure, so distinct from `skipped`).
+    candidates_excluded_transient: int = 0
     # --- T7 tiering (K8-D-3/7): the band-materialization half of the pass.
     bands_demoted: int = 0
     bands_promoted: int = 0
@@ -174,6 +185,7 @@ class EpisodicConsolidationEngine:
         windows, deferred = self._form_windows(uncovered, now=moment)
         gists_written = 0
         candidates_emitted = 0
+        candidates_excluded_transient = 0
         skipped: list[SkippedWindow] = []
 
         existing_gist_ids = {g.id for g in self._pyramid.gists(persona_id)}
@@ -207,6 +219,22 @@ class EpisodicConsolidationEngine:
                 )
                 continue  # per-window isolation — the run continues
 
+            if _is_transient_window(window):
+                # D-K12-F: episodic (what happened — a scheduled fire resumed, a
+                # task completed, a proactive message went out), not durable
+                # knowledge (what's true). The gist above already covers it for
+                # recall; only the graph-graduation step is skipped. A window
+                # carrying even one non-transient chunk still emits (never drop
+                # real user/world knowledge).
+                candidates_excluded_transient += 1
+                _log.info(
+                    "episodic window is transient action/event log; no graph "
+                    "candidate emitted persona={p} members={m}",
+                    p=persona_id,
+                    m=len(window),
+                )
+                continue
+
             try:
                 candidate = self._candidate_for(persona_id, text, window_end)
                 # merge is sync + LLM-free (contract §1); off the loop so a slow
@@ -231,6 +259,7 @@ class EpisodicConsolidationEngine:
             windows_deferred_open=deferred,
             gists_written=gists_written,
             candidates_emitted=candidates_emitted,
+            candidates_excluded_transient=candidates_excluded_transient,
             skipped=tuple(skipped),
             bands_demoted=demoted,
             bands_promoted=promoted,
@@ -238,11 +267,12 @@ class EpisodicConsolidationEngine:
         )
         _log.info(
             "episodic consolidation ran persona={p} windows={w} gists={g} "
-            "candidates={c} skipped={s}",
+            "candidates={c} excluded_transient={x} skipped={s}",
             p=persona_id,
             w=report.windows_formed,
             g=report.gists_written,
             c=report.candidates_emitted,
+            x=report.candidates_excluded_transient,
             s=len(report.skipped),
         )
         return report
@@ -405,3 +435,36 @@ def _episode_label(gist_text: str, window_end: datetime) -> str:
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """Cosine similarity for L2-normalised vectors (a plain dot product)."""
     return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def _is_transient_window(window: Sequence[PersonaChunk]) -> bool:
+    """True when every chunk in the window is a transient action/event log (D-K12-F).
+
+    A window is excluded from graph graduation only when it is ENTIRELY
+    transient — a window carrying even one durable-knowledge chunk still
+    emits a candidate, so real user/world knowledge is never dropped
+    alongside the noise it happened to cluster with.
+    """
+    return all(_is_transient_chunk(c) for c in window)
+
+
+def _is_transient_chunk(chunk: PersonaChunk) -> bool:
+    """One chunk's transient-ness, from markers its write-back path already stamps.
+
+    Three known transient write-back paths, each already tagging its own chunks
+    for exactly this kind of downstream distinction (no new write-side change):
+
+    - the agentic loop's end-of-run summary (D-06-8): ``metadata["source"] ==
+      "agentic_run"`` — "TASK: … / OUTCOME: …", a task-completion notice.
+    - the A2 task milestone recorder: ``metadata["source"] == "task_milestone"``
+      — started/progress/waiting/completed/failed notices.
+    - the origination service's proactive assistant message (Spec C0, D-C0-3):
+      ``metadata[ORIGINATED_METADATA_KEY] == "true"`` — an "ASSISTANT
+      (originated): …" report with no preceding user turn.
+
+    A normal conversational turn (``runtime.loop``'s per-turn write-back) carries
+    none of these markers and is never excluded, whatever it discusses.
+    """
+    if chunk.metadata.get("source") in _TRANSIENT_CHUNK_SOURCES:
+        return True
+    return chunk.metadata.get(ORIGINATED_METADATA_KEY) == "true"

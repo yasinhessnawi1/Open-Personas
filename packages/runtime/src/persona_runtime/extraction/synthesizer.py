@@ -13,10 +13,14 @@ Both write paths converge on K0's one merge; this is the synthesis feeder. The
 direct-write tool (T7) is the other. The means guard (D-K2-7) runs here as
 defense-in-depth behind the eval-gated prompt.
 
-Link wiring is single-pass and best-effort: a ``proposed_relation`` whose target
-is a candidate already merged in this batch is wired to that node; a forward /
-unknown target is skipped (logged), to re-form on a later synthesis. This avoids
-double-merging (which would pollute the provenance trail).
+Link wiring: a ``proposed_relation`` whose target is a candidate already merged
+in this batch is wired to that node. A target NOT in this batch falls back to a
+dense read against the EXISTING graph (K12-T3, D-K12-B) — the same lookup
+``UpdateResolver`` uses for a correction's target hint — so a real TEMPORAL/
+CAUSAL edge to an already-learned concept is wired instead of silently dropped.
+Only a target that resolves nowhere (truly forward/unknown) is skipped (logged),
+to re-form on a later synthesis. This avoids double-merging (which would
+pollute the provenance trail).
 """
 
 from __future__ import annotations
@@ -42,6 +46,12 @@ if TYPE_CHECKING:
 __all__ = ["Synthesizer", "build_synthesizer"]
 
 _logger = get_logger("extraction.synthesizer")
+
+# Max cosine distance for a target-concept → existing-node dense match to be
+# trusted (lower = closer). Mirrors ``UpdateResolver``'s confidence bar
+# (K2 T4): a wrong-node edge is worse than a missed one, so a fuzzy/unrelated
+# top hit is rejected rather than wired. Flagged for real-data re-tune.
+_TARGET_RESOLUTION_MAX_DISTANCE = 0.4
 
 
 class Synthesizer:
@@ -114,7 +124,9 @@ class Synthesizer:
                     interaction_id=interaction.interaction_id,
                 )
                 continue
-            knowledge = self._assemble(candidate, mention_to_id, concept_to_node, base_provenance)
+            knowledge = self._assemble(
+                owner_id, candidate, mention_to_id, concept_to_node, base_provenance
+            )
             outcome = self._store.merge(
                 owner_id, self._resolve_update(owner_id, candidate, knowledge)
             )
@@ -124,6 +136,7 @@ class Synthesizer:
 
     def _assemble(
         self,
+        owner_id: str,
         candidate: ExtractionCandidate,
         mention_to_id: dict[str, str],
         concept_to_node: dict[str, str],
@@ -139,6 +152,8 @@ class Synthesizer:
         proposed_links: list[ProposedLink] = []
         for relation in candidate.proposed_relations:
             target_node_id = concept_to_node.get(relation.target_concept)
+            if target_node_id is None:
+                target_node_id = self._resolve_existing_target(owner_id, relation.target_concept)
             if target_node_id is None:
                 _logger.debug(
                     "synthesis skipped an unresolved relation target",
@@ -166,6 +181,27 @@ class Synthesizer:
             provenance=base_provenance.model_copy(update={"grounding": candidate.evidence_span}),
             update_intent=candidate.update_intent,
         )
+
+    def _resolve_existing_target(self, owner_id: str, target_concept: str) -> str | None:
+        """Fall back to the EXISTING graph for a relation target missing from this batch.
+
+        A same-batch miss (``concept_to_node`` has no entry) doesn't mean the target
+        doesn't exist — it may have been learned in an earlier synthesis run. Before
+        dropping the relation (the old behaviour, which silently lost real TEMPORAL/
+        CAUSAL edges to already-known concepts), try the dense read leg the same way
+        :class:`~persona_runtime.extraction.update.UpdateResolver` resolves a
+        free-text hint: embed ``target_concept``, take the top-1 dense hit, and
+        accept it only within the confidence bar so a fuzzy/unrelated match never
+        wires the WRONG edge. Shared by TEMPORAL now; K12-T4 reuses this exact path
+        for CAUSAL.
+        """
+        hits = self._store.search_dense(owner_id, target_concept, 1)
+        if not hits:
+            return None
+        top = hits[0]
+        if top.distance is None or top.distance > _TARGET_RESOLUTION_MAX_DISTANCE:
+            return None
+        return top.id
 
     def _resolve_update(
         self, owner_id: str, candidate: ExtractionCandidate, knowledge: KnowledgeCandidate

@@ -23,13 +23,14 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from persona.graph.models import (  # noqa: TC001 — Pydantic needs runtime access
     LinkType,
     NodeKind,
 )
 from persona.graph.protocol import UpdateIntent  # noqa: TC001 — Pydantic needs runtime access
+from persona.logging import get_logger
 from persona.wellbeing import WellbeingCategory  # noqa: TC001 — Pydantic needs runtime access
 
 __all__ = [
@@ -40,10 +41,19 @@ __all__ = [
     "ProposedRelation",
 ]
 
+_logger = get_logger("extraction.models")
+
 # The only link types K2 ASSERTS at extraction (D-K0-8): temporal where the account
 # orders events, causal only on stated/strongly-implied causation. SEMANTIC is K0's
 # automatic baseline; ENTITY falls out of canonical resolution — neither is asserted.
 _K2_ASSERTABLE_LINKS = frozenset({LinkType.TEMPORAL, LinkType.CAUSAL})
+
+# The graph-node label guide (K12, T5; D-K12-D): concept_name is a concise 1-3
+# word noun phrase — the prompt (persona_runtime.extraction.prompt) instructs the
+# model directly. D-K12-D is explicit that this is a *soft* length guide, NOT a
+# hard truncation: a meaningful phrase beats a mangled word-count cut, so this
+# module never rewrites the model's label — it only normalises surrounding
+# whitespace.
 
 
 class InteractionKind(StrEnum):
@@ -121,7 +131,12 @@ class ExtractionCandidate(BaseModel):
     convention).
 
     Attributes:
-        concept_name: Short canonical label for the concept.
+        concept_name: Short canonical label for the concept — the graph's node
+            label (K12, T5). A concise 1-3 word noun phrase; the model is
+            instructed to produce this directly (the prompt). This is a soft
+            length guide, not a hard truncation (D-K12-D): a label that runs
+            long is kept intact — a meaningful phrase beats a mangled cut.
+            This field only strips surrounding whitespace.
         content: The durable understanding, in the user's framing.
         node_kind: What the candidate represents (:class:`persona.graph.models.NodeKind`).
         evidence_span: The **verbatim** basis from the interaction that grounds
@@ -154,6 +169,31 @@ class ExtractionCandidate(BaseModel):
     update_intent: UpdateIntent = UpdateIntent.NONE
     update_target_hint: str | None = None
     proposed_relations: tuple[ProposedRelation, ...] = ()
+
+    @field_validator("concept_name", mode="after")
+    @classmethod
+    def _normalize_concept_name_whitespace(cls, value: str) -> str:
+        """Soft length guide (K12, T5; D-K12-D): never truncate, only normalise.
+
+        The prompt instructs a 1-3 word ``concept_name``; that's the actual guide.
+        This validator does NOT enforce the word count — a model that emits a
+        longer-but-meaningful label is kept as-is, since a hard word-count cut
+        can mangle meaning (e.g. "focus during long study sessions" truncated to
+        "focus during long" drops the actual concept). Only surrounding
+        whitespace is stripped. If stripping would empty the value, the original
+        is kept so the ``min_length=1`` contract still holds (the prompt
+        guarantees non-empty output; this validator never raises).
+        """
+        stripped = value.strip()
+        if not stripped:
+            return value
+        if stripped != value:
+            _logger.debug(
+                "concept_name whitespace normalized",
+                original=value,
+                normalized=stripped,
+            )
+        return stripped
 
 
 class ExtractionInput(BaseModel):

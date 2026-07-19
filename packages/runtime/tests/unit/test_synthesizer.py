@@ -20,7 +20,7 @@ from persona.extraction import (
     InteractionKind,
     ProposedRelation,
 )
-from persona.graph.models import LinkType, NodeKind
+from persona.graph.models import ConceptNode, LinkType, NodeKind
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, MergeOutcome, UpdateIntent
 from persona.schema.chunks import WriteSource
 from persona_runtime.extraction.synthesizer import Synthesizer
@@ -56,14 +56,22 @@ class _FakeUpdateResolver:
 
 
 class _FakeGraphStore:
-    def __init__(self) -> None:
+    def __init__(self, *, dense_hits: list[ConceptNode] | None = None) -> None:
         self.merges: list[tuple[str, KnowledgeCandidate]] = []
         self._n = 0
+        self._dense_hits = dense_hits or []
+        self.dense_queries: list[str] = []
 
     def merge(self, owner_id: str, candidate: KnowledgeCandidate) -> MergeOutcome:
         self.merges.append((owner_id, candidate))
         self._n += 1
         return MergeOutcome(action=MergeAction.CREATED, node_id=f"node-{self._n}")
+
+    def search_dense(
+        self, owner_id: str, query: str, top_k: int, *, allowlist: set[str] | None = None
+    ) -> list[ConceptNode]:
+        self.dense_queries.append(query)
+        return self._dense_hits[:top_k]
 
 
 def _cand(

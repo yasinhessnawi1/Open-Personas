@@ -39,8 +39,11 @@ __all__ = [
 # Bumped on any change to the rules or examples; recorded with extraction outputs
 # and the K2-R-2 eval run so a behaviour change is a traceable, re-measured event.
 # v2: added the proposed_relations (temporal/causal) contract + the conservative-
-# causation examples (T4). T6's hard gate grades the current version.
-EXTRACTION_PROMPT_VERSION = "v2"
+# causation examples (T4). v3: added rule 8 (K12, T5) — concept_name is a concise
+# 1-3 word label, never a sentence or a truncation of content; trimmed the few-shot
+# concept_name examples that exceeded 3 words to match. T6's hard gate grades the
+# current version.
+EXTRACTION_PROMPT_VERSION = "v3"
 
 _NODE_KINDS = ", ".join(k.value for k in NodeKind)
 _WELLBEING = ", ".join(c.value for c in WellbeingCategory)
@@ -62,7 +65,7 @@ EXAMPLE_RICH_OUTPUT = """{"candidates": [
 
 # A speculation trap → capture the GROUNDED struggle; NEVER the inferred diagnosis.
 EXAMPLE_SPECULATION_OUTPUT = """{"candidates": [
-  {"concept_name": "focus during long study sessions",
+  {"concept_name": "study focus struggle",
    "content": "The user struggles to focus during long study sessions.",
    "node_kind": "circumstance",
    "evidence_span": "I just can't focus when I study for more than an hour",
@@ -89,7 +92,7 @@ EXAMPLE_MEANS_REDACTION_OUTPUT = """{"candidates": [
 EXAMPLE_STATED_CAUSATION_OUTPUT = """{"candidates": [
   {"concept_name": "burnout", "content": "The user experienced burnout.",
    "node_kind": "circumstance", "evidence_span": "I burned out", "proposed_relations": []},
-  {"concept_name": "left job at Acme", "content": "The user left their job at Acme.",
+  {"concept_name": "left Acme job", "content": "The user left their job at Acme.",
    "node_kind": "circumstance", "evidence_span": "I left Acme because I burned out",
    "entity_mentions": ["Acme"],
    "proposed_relations": [
@@ -102,13 +105,13 @@ EXAMPLE_STATED_CAUSATION_OUTPUT = """{"candidates": [
 # A temporal relation is fine; a causal one is DECLINED (D-K0-8). The decline is
 # the proof of criterion 4.
 EXAMPLE_CAUSATION_TRAP_OUTPUT = """{"candidates": [
-  {"concept_name": "started a new diet", "content": "The user started a new diet last month.",
+  {"concept_name": "started new diet", "content": "The user started a new diet last month.",
    "node_kind": "circumstance", "evidence_span": "I started a new diet last month",
    "proposed_relations": []},
   {"concept_name": "feeling more tired", "content": "The user has been feeling more tired lately.",
    "node_kind": "circumstance", "evidence_span": "I've been more tired lately",
    "proposed_relations": [
-     {"target_concept": "started a new diet", "link_type": "temporal",
+     {"target_concept": "started new diet", "link_type": "temporal",
       "reason": "the diet began, then the tiredness was noticed"}
    ]}
 ]}"""
@@ -123,7 +126,9 @@ Return ONLY a JSON object of the form {{"candidates": [ ... ]}} with no prose an
 no markdown fences. If nothing durable was conveyed, return {{"candidates": []}}.
 
 Each candidate object has these fields:
-- "concept_name": a short label (e.g. "vegetarian diet").
+- "concept_name": a CONCISE 1-3 word noun-phrase label for the concept — e.g. \
+"vegetarian diet", "flight to Germany", "work style", "email check schedule". \
+Meaningful, never a sentence, never a verbatim truncation of "content", never empty.
 - "content": the durable understanding, in the USER'S OWN framing, one or two sentences.
 - "node_kind": one of: {_NODE_KINDS}.
 - "evidence_span": a VERBATIM quote from the interaction that grounds this candidate.
@@ -163,6 +168,10 @@ means-free span instead.
 7. THE USER'S VOICE WINS. When the user corrects or reverses an earlier statement, \
 set update_intent to "update" or "contradict" and describe the prior knowledge in \
 update_target_hint.
+8. CONCISE LABELS. "concept_name" is a short, meaningful noun phrase — 1 TO 3 WORDS \
+capturing the concept (e.g. "vegetarian diet", "flight to Germany", "work style"). \
+It is NEVER a full sentence, NEVER a truncation of "content" (that field carries the \
+full understanding; the label is a separate, short paraphrase of it), and NEVER empty.
 
 Example — a rich exchange yields a restrained, grounded set:
 {EXAMPLE_RICH_OUTPUT}

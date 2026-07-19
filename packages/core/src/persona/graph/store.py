@@ -103,6 +103,7 @@ class _StoreBackend(Protocol):
     ) -> None: ...
     def seed_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
     def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]: ...
+    def entity_edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]: ...
     def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]: ...
     def fts_query(self, owner_id: str, query: str, top_k: int) -> list[ConceptNode]: ...
     def neighbors(
@@ -556,6 +557,16 @@ class PostgresGraphStore:
         on-the-fly via :meth:`neighbors`, not here). RLS-scoped; a read (CQS).
         """
         return self._backend.edges_among(owner_id, node_ids)
+
+    def entity_edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """On-the-fly ENTITY links induced by a node set (D-K12-A).
+
+        The seed-window counterpart of ``entity_neighbors``: expands the
+        ``graph_node_entities`` association table across ``node_ids`` so entity
+        relations surface on the overview window too, not only via ``neighbors``
+        on the focus/detail path. RLS-scoped; a read (CQS).
+        """
+        return self._backend.entity_edges_among(owner_id, node_ids)
 
     def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
         """The A5 noticing pool — salience+recency ordered, subject-safe at the read.

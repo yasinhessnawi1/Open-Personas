@@ -72,6 +72,9 @@ class _OwnerScopedStore:
     def edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[object]:  # noqa: ARG002
         return []
 
+    def entity_edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[object]:  # noqa: ARG002
+        return []
+
     def neighbors(
         self,
         owner_id: str,  # noqa: ARG002

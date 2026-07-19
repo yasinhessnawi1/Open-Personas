@@ -96,6 +96,56 @@ def test_candidate_defaults_are_conservative() -> None:
     assert c.update_target_hint is None
 
 
+# --- concept_name: the 1-3 word graph-node label guide (K12, T5) ---
+
+
+def test_candidate_concept_name_within_the_guide_is_unchanged() -> None:
+    c = _candidate(concept_name="vegetarian diet")
+    assert c.concept_name == "vegetarian diet"
+
+
+def test_candidate_concept_name_single_word_is_unchanged() -> None:
+    c = _candidate(concept_name="burnout")
+    assert c.concept_name == "burnout"
+
+
+def test_candidate_overlong_concept_name_is_kept_unchanged() -> None:
+    # D-K12-D: the 1-3 word rule is a SOFT length guide, not a hard truncation.
+    # A model that ignores the prompt's instruction keeps its meaningful label
+    # rather than being mangled by a word-count cut — "focus during long study
+    # sessions" truncated to "focus during long" would drop the actual concept
+    # ("study sessions"), so the label passes through untouched instead.
+    c = _candidate(concept_name="focus during long study sessions")
+    assert c.concept_name == "focus during long study sessions"
+    assert len(c.concept_name.split()) == 5
+
+
+def test_candidate_concept_name_whitespace_is_normalized() -> None:
+    # Surrounding whitespace is stripped — that's the only normalisation this
+    # validator performs; the words themselves are never rearranged or cut.
+    c = _candidate(concept_name="  vegetarian diet  ")
+    assert c.concept_name == "vegetarian diet"
+
+
+def test_candidate_whitespace_only_concept_name_is_left_as_is() -> None:
+    # Stripping a whitespace-only value would empty it, breaking min_length=1;
+    # the validator never raises here (the prompt guarantees non-empty output),
+    # so the original whitespace-only string is kept rather than rejected.
+    c = _candidate(concept_name="   ")
+    assert c.concept_name == "   "
+
+
+def test_candidate_concept_name_never_touches_content() -> None:
+    # Normalising the label never rewrites ``content`` — the full understanding
+    # stays untouched for retrieval + the detail panel (D-K12-D).
+    c = _candidate(
+        concept_name="the user really struggles to focus during long study sessions",
+        content="The user struggles to focus during long study sessions.",
+    )
+    assert c.content == "The user struggles to focus during long study sessions."
+    assert c.concept_name == "the user really struggles to focus during long study sessions"
+
+
 def test_candidate_carries_resolved_to_be_entity_mentions() -> None:
     c = _candidate(entity_mentions=(EntityMention(surface="my doctor"),))
     assert c.entity_mentions[0].surface == "my doctor"

@@ -12,10 +12,12 @@ follow-up — YAGNI for the read batch).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from persona.extraction import InteractionKind
 from persona.graph.config import GraphSettings
+from persona.graph.models import LinkType, TypedLink, make_edge_id
 from persona.graph.retrieval import HybridRetriever
 from persona.stores.episodic import EpisodicStore
 from pydantic import Field
@@ -44,7 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from persona.audit import AuditLogger
-    from persona.graph.models import ConceptNode, NodeProvenance, TypedLink
+    from persona.graph.models import ConceptNode, NodeProvenance
     from persona.graph.protocol import GraphStore
     from persona.schema.chunks import PersonaChunk
     from persona.stores.backend import Backend
@@ -155,6 +157,126 @@ def build_window(
     )
 
 
+def _temporal_key(node: ConceptNode) -> datetime:
+    """The node's asserted-time anchor for before/after ordering (D-K12-B).
+
+    The earliest :attr:`NodeProvenance.written_at` across the node's
+    provenance trail — when the fact was FIRST established, which is the
+    natural before/after anchor. Falls back to :attr:`ConceptNode.created_at`
+    when the trail is empty or carries no ``written_at`` (never crashes,
+    never returns ``None``). Used by both the cluster sort and the
+    consecutive-pair tie check in :func:`_derive_temporal_edges` so they
+    agree on the same value.
+    """
+    return min((p.written_at for p in node.provenance), default=node.created_at)
+
+
+def _derive_temporal_edges(nodes: list[ConceptNode], edges: list[TypedLink]) -> list[TypedLink]:
+    """Read-time TEMPORAL edges among window nodes that SHARE CONTEXT (D-K12-B).
+
+    Two nodes share context when they concern the same canonical entity (an
+    ENTITY edge already present in ``edges``, on-the-fly per D-K0-9) OR were
+    written from the same source interaction (any ``provenance.interaction_id``
+    in common). Shared-context is unioned across BOTH signals (a node can
+    belong to more than one group) via a plain union-find, so overlapping
+    entity/interaction pairs merge into one cluster rather than fragmenting.
+
+    Each resulting cluster is ordered by the node's asserted time — the
+    EARLIEST :attr:`NodeProvenance.written_at` across its provenance trail
+    (when the fact was first established), falling back to
+    :attr:`ConceptNode.created_at` only when a node has no provenance
+    ``written_at`` to read (never ``None``, never a crash) — see
+    :func:`_temporal_key`. Per D-K12-B this is the ASSERTED time, not the DB
+    row's creation time: a consolidated/backfilled node's ``created_at`` can
+    postdate the event it describes, which would give a wrong before/after
+    order if ``created_at`` were used directly. Ties are broken by id, for
+    determinism. Ordered clusters get CONSECUTIVE TEMPORAL edges — A→B→C for
+    a 3-node cluster, never all-pairs and never a chain across unrelated
+    clusters. Direction is older → newer; a consecutive pair with the EXACT
+    same temporal key (a true tie — no real before/after to assert) is
+    skipped rather than given an arbitrary direction. Computed fresh on every
+    read (like ENTITY edges) — no materialisation, no migration.
+
+    An LLM-asserted TEMPORAL edge (materialised in ``graph_edges`` via ``merge.py``)
+    runs newer → older (the just-merged candidate points at its chronologically
+    earlier target) — the OPPOSITE order from a derived edge's older → newer. Because
+    :func:`make_edge_id` is order-dependent, the two would mint DIFFERENT ids for the
+    same node pair and both would render as contradictory duplicate temporal arrows.
+    The asserted edge carries real LLM-judged semantic order, so it wins: derivation
+    is SUPPRESSED for any pair that already has a TEMPORAL edge among ``edges`` in
+    EITHER direction, and only fills pairs with no asserted temporal relation.
+    """
+    if len(nodes) < 2:  # noqa: PLR2004 — an edge needs two distinct endpoints
+        return []
+    node_ids = {n.id for n in nodes}
+    asserted_temporal_pairs = {
+        frozenset((edge.src_node_id, edge.dst_node_id))
+        for edge in edges
+        if edge.link_type == LinkType.TEMPORAL
+    }
+    parent: dict[str, str] = {n.id: n.id for n in nodes}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for edge in edges:
+        if (
+            edge.link_type == LinkType.ENTITY
+            and edge.src_node_id in node_ids
+            and edge.dst_node_id in node_ids
+        ):
+            union(edge.src_node_id, edge.dst_node_id)
+
+    by_interaction: dict[str, list[str]] = {}
+    for node in nodes:
+        interaction_ids = {
+            p.interaction_id for p in node.provenance if p.interaction_id is not None
+        }
+        for interaction_id in interaction_ids:
+            by_interaction.setdefault(interaction_id, []).append(node.id)
+    for group in by_interaction.values():
+        for other in group[1:]:
+            union(group[0], other)
+
+    clusters: dict[str, list[ConceptNode]] = {}
+    for node in nodes:
+        clusters.setdefault(find(node.id), []).append(node)
+
+    now = datetime.now(UTC)
+    derived: list[TypedLink] = []
+    for cluster in clusters.values():
+        if len(cluster) < 2:  # noqa: PLR2004 — a chain needs at least two nodes
+            continue
+        ordered = sorted(cluster, key=lambda n: (_temporal_key(n), n.id))
+        for older, newer in zip(ordered, ordered[1:], strict=False):
+            if _temporal_key(older) == _temporal_key(newer):
+                # Simultaneous — no real before/after to assert (a same-instant tie
+                # in the test/seed data, or two facts written in the same batch).
+                continue
+            if frozenset((older.id, newer.id)) in asserted_temporal_pairs:
+                # An LLM-asserted TEMPORAL edge already relates this pair (in either
+                # direction) — it wins over the derived one (see docstring above).
+                continue
+            derived.append(
+                TypedLink(
+                    id=make_edge_id(older.id, newer.id, LinkType.TEMPORAL),
+                    src_node_id=older.id,
+                    dst_node_id=newer.id,
+                    link_type=LinkType.TEMPORAL,
+                    created_at=now,
+                )
+            )
+    return derived
+
+
 def _assemble_window(
     store: GraphStore,
     owner_id: str,
@@ -166,23 +288,52 @@ def _assemble_window(
     extra_edges: list[TypedLink] | None = None,
 ) -> MemoryWindowResponse:
     node_ids = [n.id for n in nodes]
-    edges = list(store.edges_among(owner_id, node_ids))
+    # Entity relations (D-K12-A) are captured in the join table but never materialised
+    # as ``graph_edges`` rows (D-K0-9) — union the on-the-fly ENTITY edges in so they
+    # surface on this window too, not only via ``neighbors`` on the focus/detail path.
+    # ``seen_edges`` below (keyed by the deterministic edge id) dedupes any overlap.
+    edges = [*store.edges_among(owner_id, node_ids), *store.entity_edges_among(owner_id, node_ids)]
     if extra_edges:
         edges.extend(extra_edges)
+    # Temporal relations (D-K12-B) are derived read-time from timestamps + shared
+    # context (never materialised either). An LLM-asserted TEMPORAL edge runs the
+    # OPPOSITE direction from a derived one (newer → older vs. older → newer), so a
+    # same-pair collision does NOT collapse via the by-id dedup below — suppression
+    # happens inside ``_derive_temporal_edges`` itself (skips any pair already
+    # asserted, in either direction) before the edges are ever merged here.
+    edges.extend(_derive_temporal_edges(nodes, edges))
     degree: dict[str, int] = dict.fromkeys(node_ids, 0)
     seen_edges: set[str] = set()
+    # ENTITY edges are synthesised on-the-fly by TWO independent sources that disagree on the
+    # edge id for the SAME relationship: ``neighbors`` (feeding ``extra_edges``) anchors the id
+    # at the focus node (``{focus_id}::entity::{neighbor_id}``), while ``entity_edges_among``
+    # canonicalises lexicographically (``make_edge_id`` is order-dependent) — so the two sources
+    # can mint different ids for one A-B relationship. Dedup ENTITY edges by their UNORDERED
+    # node-pair + link_type instead, so the relationship collapses to one edge regardless of
+    # which source produced it or which direction its id encodes (no double-counted degree).
+    # Non-entity edges (semantic/temporal/causal) carry a stable, deterministic (src, type, dst)
+    # id (``make_edge_id``) whether sourced from a ``graph_edges`` row or derived read-time
+    # (D-K12-B temporal), so id-based dedup applies to them unchanged either way.
+    seen_entity_pairs: set[tuple[frozenset[str], str]] = set()
     link_views: list[MemoryLinkEdge] = []
     for edge in edges:
-        if edge.id in seen_edges:
-            continue
-        seen_edges.add(edge.id)
+        link_type = str(edge.link_type)
+        if edge.link_type == LinkType.ENTITY:
+            entity_key = (frozenset((edge.src_node_id, edge.dst_node_id)), link_type)
+            if entity_key in seen_entity_pairs:
+                continue
+            seen_entity_pairs.add(entity_key)
+        else:
+            if edge.id in seen_edges:
+                continue
+            seen_edges.add(edge.id)
         degree[edge.src_node_id] = degree.get(edge.src_node_id, 0) + 1
         degree[edge.dst_node_id] = degree.get(edge.dst_node_id, 0) + 1
         link_views.append(
             MemoryLinkEdge(
                 src_node_id=edge.src_node_id,
                 dst_node_id=edge.dst_node_id,
-                link_type=str(edge.link_type),
+                link_type=link_type,
                 weight=edge.weight,
             )
         )

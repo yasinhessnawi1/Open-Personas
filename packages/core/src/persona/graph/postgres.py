@@ -47,6 +47,7 @@ from persona.graph.models import (
     NodeProvenance,
     NodeVersion,
     TypedLink,
+    make_edge_id,
 )
 
 if TYPE_CHECKING:
@@ -342,7 +343,10 @@ class PostgresGraphBackend:
             return []
         stmt = (
             select(graph_nodes)
-            .where(graph_nodes.c.owner_id == owner_id)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into.is_(None),  # consolidated-away nodes stay hidden (K7-D-4)
+            )
             .order_by(graph_nodes.c.created_at.desc())
             .limit(limit)
         )
@@ -369,6 +373,63 @@ class PostgresGraphBackend:
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_link(dict(r)) for r in rows]
+
+    def entity_edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """Synthesised ENTITY links among a node set (D-K12-A; K12 thread A).
+
+        The seed window historically showed only ``edges_among``'s materialised
+        semantic/temporal/causal edges — entity relations (captured in the
+        ``graph_node_entities`` join table) never surfaced there, only on the
+        focus/detail path (:meth:`neighbors`/:meth:`entity_neighbors`, D-K0-9).
+        This expands that same join table across ``node_ids``: for every pair
+        that shares >=1 canonical entity, one on-the-fly ``TypedLink(link_type=
+        ENTITY)`` — mirroring the edge shape :meth:`~persona.graph.store.
+        PostgresGraphStore.neighbors` already synthesises (deterministic
+        ``make_edge_id``, no ``graph_edges`` row). ``DISTINCT`` on the node-id
+        pair collapses multiple shared entities to one edge; ``node_id <
+        node_id`` picks a single direction per pair (no duplicate reverse edge).
+        Both endpoints must be live (``merged_into IS NULL``, K7-D-4) — a
+        consolidated-away node contributes no entity edge. RLS-scoped; a read
+        (CQS).
+        """
+        ids = list(node_ids)
+        if len(ids) < 2:  # noqa: PLR2004 — an edge needs two distinct endpoints in the set
+            return []
+        mine = graph_node_entities.alias("mine")
+        theirs = graph_node_entities.alias("theirs")
+        src_nodes = graph_nodes.alias("src_nodes")
+        dst_nodes = graph_nodes.alias("dst_nodes")
+        stmt = (
+            select(mine.c.node_id.label("src"), theirs.c.node_id.label("dst"))
+            .distinct()
+            .select_from(mine.join(theirs, mine.c.entity_id == theirs.c.entity_id))
+            .join(src_nodes, src_nodes.c.id == mine.c.node_id)
+            .join(dst_nodes, dst_nodes.c.id == theirs.c.node_id)
+            .where(
+                mine.c.owner_id == owner_id,
+                theirs.c.owner_id == owner_id,
+                src_nodes.c.owner_id == owner_id,
+                dst_nodes.c.owner_id == owner_id,
+                mine.c.node_id.in_(ids),
+                theirs.c.node_id.in_(ids),
+                mine.c.node_id < theirs.c.node_id,
+                src_nodes.c.merged_into.is_(None),
+                dst_nodes.c.merged_into.is_(None),
+            )
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        now = datetime.now(UTC)
+        return [
+            TypedLink(
+                id=make_edge_id(str(src), str(dst), LinkType.ENTITY),
+                src_node_id=str(src),
+                dst_node_id=str(dst),
+                link_type=LinkType.ENTITY,
+                created_at=now,
+            )
+            for src, dst in rows
+        ]
 
     def next_node_index(self, owner_id: str) -> int:
         """The next collision-free ``make_node_id`` index for the owner (Spec K7, K7-D-9).

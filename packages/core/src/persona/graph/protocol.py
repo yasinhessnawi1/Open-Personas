@@ -494,6 +494,18 @@ class GraphStore(Protocol):
         """
         ...
 
+    def entity_edges_among(self, owner_id: str, node_ids: Sequence[str]) -> list[TypedLink]:
+        """On-the-fly ENTITY links induced by a node set (D-K12-A, K12 thread A).
+
+        The seed window's counterpart to :meth:`edges_among`: expands the
+        ``graph_node_entities`` association table across ``node_ids`` — for every
+        pair that shares >=1 canonical entity, one synthesised
+        ``TypedLink(link_type=ENTITY)`` (mirroring the shape :meth:`neighbors`
+        already produces for the focus/detail path, D-K0-9). Not materialised in
+        ``graph_edges``. RLS-scoped; a read (CQS).
+        """
+        ...
+
     def recent_nodes(self, owner_id: str, *, limit: int) -> list[ConceptNode]:
         """The A5 noticing pool — the owner's most-salient, most-recent nodes.
 

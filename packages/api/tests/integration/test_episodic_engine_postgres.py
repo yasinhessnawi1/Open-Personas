@@ -26,6 +26,7 @@ import pytest
 from persona.audit import MemoryAuditLogger
 from persona.graph import build_graph_store
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
+from persona.schema.conversation import ORIGINATED_METADATA_KEY
 from persona.stores.engine import EpisodicConsolidationEngine
 from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.postgres import PostgresBackend
@@ -66,12 +67,13 @@ def env(pg_engine: Engine, embedder: HashEmbedder384) -> dict[str, object]:
     return {"backend": backend, "graph": graph, "engine": engine, "pg": pg_engine}
 
 
-def _chunk(*, hours_ago: float, text: str) -> PersonaChunk:
+def _chunk(*, hours_ago: float, text: str, metadata: dict[str, str] | None = None) -> PersonaChunk:
     cid = mint_chunk_id("p1", "episodic")
     created = _NOW - timedelta(hours=hours_ago)
     return PersonaChunk(
         id=cid,
         text=text,
+        metadata=metadata or {},
         created_at=created,
         provenance=ChunkProvenance(
             source=WriteSource.SYSTEM,
@@ -217,3 +219,71 @@ def test_engine_demotes_old_covered_chunks_on_the_real_db(env: dict[str, object]
     store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger(), settings=_SETTINGS)
     displayed = store.resolve_display("p1", [rows[old[0].id]])
     assert displayed[0].text.startswith(OLDER_MEMORY_MARKER)
+
+
+# --- D-K12-F: transient assistant-action/system-event logs never graduate -------
+
+
+def _live_graph_node_contents(pg: Engine, owner_id: str = "u1") -> list[str]:
+    """Every non-merged-away graph node's ``content`` for ``owner_id`` (the real table)."""
+    from sqlalchemy import text
+
+    with pg.connect() as conn:
+        rows = conn.execute(
+            text("SELECT content FROM graph_nodes WHERE owner_id = :owner AND merged_into IS NULL"),
+            {"owner": owner_id},
+        ).all()
+    return [r.content for r in rows]
+
+
+def test_transient_action_event_logs_do_not_graduate_to_the_graph(
+    env: dict[str, object],
+) -> None:
+    """The D-K12-F gate, against the REAL K7 merge (not a hand-forced end state).
+
+    A window of purely transient assistant-action/system-event chunks (a
+    scheduled-fire origination report + a task-milestone completion notice —
+    the exact shapes the owner's live graph showed polluting it) produces NO
+    durable graph node, while a separate window stating a real user goal still
+    graduates — proven by driving one real ``engine.run`` consolidation pass
+    end to end, then reading the actual ``graph_nodes`` table.
+    """
+    backend: PostgresBackend = env["backend"]  # type: ignore[assignment]
+    engine: EpisodicConsolidationEngine = env["engine"]  # type: ignore[assignment]
+    pg: Engine = env["pg"]  # type: ignore[assignment]
+
+    transient = [
+        _chunk(
+            hours_ago=3.0,
+            text=(
+                "ASSISTANT (originated): Scheduled reminder fired on 2026-07-07 "
+                "at 09:00 — sched-abc123"
+            ),
+            metadata={ORIGINATED_METADATA_KEY: "true", "conversation_id": "conv-1"},
+        ),
+        _chunk(
+            hours_ago=2.9,
+            text="The assistant completed the task: daily inbox check",
+            metadata={"source": "task_milestone", "milestone": "completed", "task_id": "t1"},
+        ),
+    ]
+    durable = [
+        _chunk(
+            hours_ago=1.5,
+            text=(
+                "USER: I want you to set up a recurring email check every "
+                "morning\nASSISTANT: done, I'll check every morning"
+            ),
+        ),
+        _chunk(hours_ago=1.4, text="USER: also my dog is named Balto\nASSISTANT: noted"),
+    ]
+    backend.upsert(persona_id="p1", store_kind="episodic", chunks=[*transient, *durable])
+
+    report = asyncio.run(engine.run("u1", "p1", now=_NOW))
+    assert report.gists_written == 2  # noqa: PLR2004 — both sessions still gist (recall untouched)
+    assert report.candidates_emitted == 1  # only the durable session graduates
+    assert report.candidates_excluded_transient == 1
+
+    contents = _live_graph_node_contents(pg)
+    assert not any("fired on" in c or "completed the task" in c for c in contents)
+    assert any("wants" in c or "recurring email check" in c for c in contents)

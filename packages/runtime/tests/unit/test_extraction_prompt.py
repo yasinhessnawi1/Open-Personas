@@ -8,6 +8,7 @@ means-redaction (D-K2-7) and grounded-not-inferred (no speculative diagnosis).
 
 from __future__ import annotations
 
+import pytest
 from persona.extraction import ExtractionInput, InteractionKind
 from persona.graph.models import LinkType
 from persona.wellbeing import WellbeingCategory
@@ -15,6 +16,7 @@ from persona_runtime.extraction.parse import parse_candidates
 from persona_runtime.extraction.prompt import (
     EXAMPLE_CAUSATION_TRAP_OUTPUT,
     EXAMPLE_MEANS_REDACTION_OUTPUT,
+    EXAMPLE_RICH_OUTPUT,
     EXAMPLE_SMALL_TALK_OUTPUT,
     EXAMPLE_SPECULATION_OUTPUT,
     EXAMPLE_STATED_CAUSATION_OUTPUT,
@@ -24,10 +26,10 @@ from persona_runtime.extraction.prompt import (
 )
 
 
-def test_prompt_version_is_pinned_at_v2() -> None:
-    # Bumped for the T4 proposed_relations addition (Spec-10 versioning); T6's
-    # hard gate now grades v2.
-    assert EXTRACTION_PROMPT_VERSION == "v2"
+def test_prompt_version_is_pinned_at_v3() -> None:
+    # Bumped for the K12-T5 concise-concept-name rule (Spec-10 versioning); T6's
+    # hard gate now grades v3.
+    assert EXTRACTION_PROMPT_VERSION == "v3"
 
 
 def test_system_prompt_encodes_the_section_4_rules() -> None:
@@ -50,6 +52,37 @@ def test_system_prompt_encodes_the_section_4_rules() -> None:
     assert "proposed_relations" in EXTRACTION_SYSTEM_PROMPT
     assert "temporal" in p
     assert "causal" in p
+
+
+# --- K12, T5: concise concept_name labels (the graph's node label) ---
+
+
+def test_system_prompt_instructs_a_concise_1_to_3_word_concept_name() -> None:
+    p = EXTRACTION_SYSTEM_PROMPT.lower()
+    assert "1-3 word" in p or "1 to 3 word" in p
+    # NOT a truncation of content — the label is a separate, short paraphrase.
+    assert "truncation" in p
+    assert "never empty" in p
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        EXAMPLE_RICH_OUTPUT,
+        EXAMPLE_SPECULATION_OUTPUT,
+        EXAMPLE_MEANS_REDACTION_OUTPUT,
+        EXAMPLE_STATED_CAUSATION_OUTPUT,
+        EXAMPLE_CAUSATION_TRAP_OUTPUT,
+    ],
+)
+def test_few_shot_concept_names_are_at_most_three_words(example: str) -> None:
+    # The frozen few-shot examples ARE the spec-by-example (K12-T5): every
+    # concept_name they show the model must itself respect the 1-3 word guide,
+    # and none may be a verbatim prefix of its own content.
+    for candidate in parse_candidates(example):
+        words = candidate.concept_name.split()
+        assert 1 <= len(words) <= 3, candidate.concept_name
+        assert not candidate.content.startswith(candidate.concept_name)
 
 
 def test_system_prompt_lists_the_five_wellbeing_categories() -> None:
