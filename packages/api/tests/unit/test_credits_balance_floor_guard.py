@@ -35,20 +35,29 @@ def test_credits_model_declares_a_nonnegative_balance_check() -> None:
 
 
 def test_deduct_uses_a_conditional_decrement() -> None:
-    """The ``deduct`` path must gate the UPDATE on ``balance >= :amount`` (the
-    atomic floor that closes the double-spend race). Asserted at the source level
-    so the predicate cannot be dropped without this failing in the default lane."""
+    """The ``deduct`` path must remain STRICT all-or-nothing with an atomic floor.
+
+    Spec M4 T1a (owner Decision 1) moved the floor from M3's single-counter
+    ``WHERE balance >= :amount`` UPDATE into the two-bucket ``_draw_from_buckets``
+    lock-then-allocate: ``SELECT ... FOR UPDATE`` serialises concurrent same-user
+    draws (closing the double-spend race exactly as R2-D-3 did), and the strict
+    (``allow_partial=False``) arm raises ``CreditsExhaustedError`` on an
+    over-spendable amount, writing nothing. Asserted at the source level so the
+    floor cannot be dropped without this failing in the default lane."""
     import inspect
 
     from persona.credits import service
 
-    src = inspect.getsource(service.deduct)
-    # The conditional predicate (``_credits_t.c.balance >= amount``) + the
-    # None-branch raise are the load-bearing lines of the R2-D-3 fix.
-    assert "balance >= amount" in src.replace("_credits_t.c.", ""), (
-        "deduct must carry a `balance >= amount` WHERE predicate (the atomic floor)"
+    deduct_src = inspect.getsource(service.deduct)
+    assert "allow_partial=False" in deduct_src, (
+        "deduct must use the STRICT (all-or-nothing) two-bucket draw"
     )
-    assert "scalar_one_or_none" in src, (
-        "deduct must use scalar_one_or_none so an overdraw (no row) is detected"
+    draw_src = inspect.getsource(service._draw_from_buckets)  # noqa: SLF001
+    # ``FOR UPDATE`` on the credits row is the atomic floor (serialises draws); the
+    # strict raise is the overdraw rejection — the load-bearing lines of the fix.
+    assert "with_for_update" in draw_src, (
+        "the two-bucket draw must lock FOR UPDATE (the atomic floor serialising draws)"
     )
-    assert "CreditsExhaustedError" in src, "an overdraw must raise CreditsExhaustedError"
+    assert "CreditsExhaustedError" in draw_src, (
+        "an over-spendable strict draw must raise CreditsExhaustedError"
+    )

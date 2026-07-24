@@ -82,9 +82,11 @@ __all__ = [
     "memory_chunks",
     "messages",
     "metadata",
+    "payg_grants",
     "persona_mcp_assignments",
     "personas",
     "rate_limit_buckets",
+    "subscription",
     "request_telemetry",
     "runs",
     "schedules",
@@ -692,7 +694,20 @@ credits = Table(  # noqa: A001 — schema table name (spec §5), not the stdlib 
     "credits",
     metadata,
     Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    # Spec M4 T1a — THE ALLOWANCE BUCKET (monthly-reset, no rollover). NOT the total
+    # spendable: total = this + Σ(unexpired payg_grants.credits_remaining). ALWAYS read
+    # the total via ``persona.credits.service.get_balance()``; NEVER read this column
+    # directly as "the balance". The physical name stays ``balance`` (conceptually
+    # ``allowance_balance``) purely to keep the M3 adversarial credits parity tests
+    # pristine — they encode this column name (D-M4-rename → Option A). The bucket-aware
+    # deduct draws THIS bucket first, then FIFO oldest-expiring PAYG lots.
     Column("balance", Integer, nullable=False, server_default=text("100000")),
+    # Spec M4 T1a (D-M4-R3) — the lazy monthly-reset marker: 'YYYY-MM' (UTC) of the
+    # allowance's last reset. NULL = never reset by the monthly cycle (T6 stamps it on
+    # first lazy reset; the guarded conditional UPDATE resets only when this differs from
+    # the current UTC month, so a month rolls over exactly once — the R7 day_spend
+    # idempotent-per-period pattern). Inert until T6 wires the reset.
+    Column("allowance_period", Text),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     # Spec R2 R2-D-3 (F-04): the durable DB-level floor for the money path. The
     # conditional decrement in ``persona.credits.service.deduct`` makes a negative
@@ -701,6 +716,78 @@ credits = Table(  # noqa: A001 — schema table name (spec §5), not the stdlib 
     # repair of any pre-fix negative rows); declared here so a fresh-DB
     # ``metadata.create_all`` builds it too (split-home discipline, cf. messages).
     CheckConstraint("balance >= 0", name="credits_balance_nonneg_check"),
+)
+
+# Spec M4 T1a — the PAYG "lots" bucket (D-M4-R6, owner Decision 1). One row per
+# purchased dollar-pack grant; per-lot 12-month expiry is exact (a single counter
+# could not track partial consumption of a specific grant). PAYG spendable =
+# Σ(credits_remaining) over rows WHERE expires_at > now(); the bucket-aware deduct
+# draws these AFTER the allowance bucket, oldest-expiring first (FIFO — retires
+# soonest-expiring credit first, best for the user). RLS-scoped by ``user_id``
+# (ENABLE/FORCE + policy in migration 051; the 048 split-home template).
+payg_grants = Table(
+    "payg_grants",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # ``credits_total`` = the lot's original size (¢); ``credits_remaining`` = current
+    # spendable remainder (drawn down by the FIFO deduct, never below 0).
+    Column("credits_total", Integer, nullable=False),
+    Column("credits_remaining", Integer, nullable=False),
+    Column("granted_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # granted_at + 12 months (computed by the granting task, T4a — stored, not derived).
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    # The Stripe payment_intent / event id — one lot per grant. The SECONDARY
+    # idempotency guard (the primary anchor is ``credit_transactions.billing_key``,
+    # T1b's grant path): a re-delivered ``payment_intent.succeeded`` cannot mint a
+    # second lot (UNIQUE below).
+    Column("source_billing_key", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("credits_remaining >= 0", name="payg_grants_remaining_nonneg_check"),
+    CheckConstraint(
+        "credits_remaining <= credits_total", name="payg_grants_remaining_le_total_check"
+    ),
+    # Idempotent grant: one lot per Stripe event.
+    Index("uq_payg_grants_source_key", "source_billing_key", unique=True),
+    # The FIFO-draw + spendable-sum index: only non-empty lots, ordered by expiry.
+    Index(
+        "idx_payg_grants_spendable",
+        "user_id",
+        "expires_at",
+        postgresql_where=text("credits_remaining > 0"),
+    ),
+)
+
+# Spec M4 T1a — the per-user subscription record (D-M4-5). One row per user (teams
+# / seats = M5, D-M4-10). ``plan_code`` defaults 'free' → a user with no paid sub is
+# permanently Free (D-M4-9). Stripe ids + period bounds are bound by the webhook
+# lifecycle (T3); NULL until a paid checkout completes. RLS-scoped by ``user_id``.
+subscription = Table(
+    "subscription",
+    metadata,
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("plan_code", Text, nullable=False, server_default=text("'free'")),  # free|plus|pro
+    Column("status", Text, nullable=False, server_default=text("'active'")),  # active|past_due|...
+    Column("stripe_customer_id", Text),
+    Column("stripe_subscription_id", Text),
+    Column("current_period_start", DateTime(timezone=True)),
+    Column("current_period_end", DateTime(timezone=True)),
+    Column("cancel_at_period_end", Boolean, nullable=False, server_default=text("false")),
+    # Spec M4 T7b — the per-user Pro auto-top-up opt-in (migration 052). OFF by default;
+    # only a Pro user may enable it (``plan.auto_topup_eligible`` gate at the toggle +
+    # the trigger). When ON and the balance CROSSES below $2, a background off-session $10
+    # charge tops up via the ``payment_intent.succeeded`` webhook (idempotent on the PI id).
+    Column("auto_topup_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # One Stripe subscription id maps to one user (partial-unique — NULL for Free users).
+    Index(
+        "uq_subscription_stripe_sub",
+        "stripe_subscription_id",
+        unique=True,
+        postgresql_where=text("stripe_subscription_id IS NOT NULL"),
+    ),
+    Index("idx_subscription_customer", "stripe_customer_id"),
 )
 
 credit_transactions = Table(

@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
+    from persona_api.billing import StripeGateway
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
     from persona_api.realtime.channel import UserEventChannel
@@ -120,6 +121,7 @@ class _RunBillingWatcher:
         cost_source: CostSource | None,
         billing_config: BillingConfig,
         floor: int,
+        gateway: StripeGateway | None = None,
     ) -> None:
         self._policy = policy
         self._engine = rls_engine
@@ -128,6 +130,10 @@ class _RunBillingWatcher:
         self._cost_source = cost_source
         self._config = billing_config
         self._floor = floor
+        # Spec M4 T7b: Pro auto-top-up off the hot path — fired when a per-step capture
+        # CROSSES below $2. None → community/flag-off (no auto-top-up).
+        self._gateway = gateway
+        self._topup_tasks: set[asyncio.Task[None]] = set()
 
     async def on_step_usage(self, usage: StepUsage) -> None:
         cost_cents, basis = compute_turn_cost(
@@ -162,6 +168,10 @@ class _RunBillingWatcher:
             )
             self._cancel.cancel()
             return
+        # Spec M4 T7b: a per-step capture may have CROSSED the $2 floor — fire the Pro
+        # auto-top-up OFF the hot path (detached; the next step never waits on Stripe).
+        # ``old_balance = new_balance + captured`` (the pre-capture total).
+        self._schedule_auto_topup(old_balance=new_balance + captured, new_balance=new_balance)
         if captured < charge or new_balance <= 0:
             # Balance exhausted — capture ≤ balance landed (floored at 0, never
             # negative); flip the token so the run stops at the next step boundary.
@@ -175,6 +185,45 @@ class _RunBillingWatcher:
             )
             self._cancel.cancel()
 
+    def _schedule_auto_topup(self, *, old_balance: int, new_balance: int) -> None:
+        """Fire the Pro auto-top-up trigger OFF the hot path (Spec M4, T7b).
+
+        Detaches a task that runs :func:`maybe_auto_topup` on a worker thread so the Stripe
+        round-trip never blocks the run's step loop. A no-op for everyone except a Pro,
+        opted-in owner who just crossed below $2 (the guards live in the trigger). Community /
+        flag-off (``gateway is None``) → not scheduled. Errors are swallowed (a run's billing
+        side effect must never break the run); the task is tracked to avoid GC.
+        """
+        if self._gateway is None:
+            return
+        gateway = self._gateway
+        engine = self._engine
+        owner = self._owner
+
+        async def _run() -> None:
+            from persona_api.billing.autotopup import maybe_auto_topup  # noqa: PLC0415
+
+            try:
+                await asyncio.to_thread(
+                    maybe_auto_topup,
+                    rls_engine=engine,
+                    gateway=gateway,
+                    user_id=owner,
+                    old_balance=old_balance,
+                    new_balance=new_balance,
+                )
+            except Exception:  # noqa: BLE001 — a billing side effect must never break the run
+                _log.opt(exception=True).warning(
+                    "auto-top-up task failed for owner={owner}", owner=owner
+                )
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            return  # no running loop — skip the convenience
+        self._topup_tasks.add(task)
+        task.add_done_callback(self._topup_tasks.discard)
+
 
 class RunRegistry:
     """App-scoped registry of in-flight runs. Single-worker, in-process (S08-4)."""
@@ -187,12 +236,16 @@ class RunRegistry:
         origination: WithinRuntimeOriginator | None = None,
         event_channel: UserEventChannel | None = None,
         credits_policy: CreditsPolicy | None = None,
+        gateway: StripeGateway | None = None,
         cost_source: CostSource | None = None,
         billing_config: BillingConfig | None = None,
         agentic_floor: int = 1,
     ) -> None:
         self._engine = rls_engine
         self._handles: dict[str, RunHandle] = {}
+        # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
+        # after a per-step capture that CROSSES below $2). None → community/flag-off.
+        self._gateway = gateway
         # Spec M3 (T4a): incremental caller-paid billing. ``credits_policy`` None →
         # no billing (unit/community-unmetered shape). ``cost_source`` None → the
         # static-only pricing default (OpenRouter actuals pass through; static-table
@@ -284,6 +337,7 @@ class RunRegistry:
                 cost_source=self._cost_source,
                 billing_config=self._billing_config,
                 floor=self._agentic_floor,
+                gateway=self._gateway,
             )
             if self._credits_policy is not None
             else None

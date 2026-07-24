@@ -21,6 +21,13 @@ from persona_voice.agent.runner import AgentSession
 pytestmark = [pytest.mark.asyncio]
 
 
+class _FakeConfig:
+    """Minimal launcher config stand-in — only ``is_cloud`` is read by ``_ensure_singletons``
+    (Spec M4 T5c: the free-registry build is cloud-gated; ``False`` ⇒ community, no gating)."""
+
+    is_cloud = False
+
+
 class _FakeSessionMachine:
     def __init__(self, calls: list[str]) -> None:
         self._calls = calls
@@ -499,7 +506,7 @@ async def test_launcher_spawns_runner_with_shared_singletons() -> None:
         received.update(kwargs)
 
     launcher = InProcessAgentLauncher(
-        config=object(),  # type: ignore[arg-type]
+        config=_FakeConfig(),  # type: ignore[arg-type]
         runner=_fake_runner,
     )
     # Pre-set the singletons so _ensure_singletons skips the heavy bge/tier build.
@@ -530,7 +537,7 @@ async def test_launcher_isolates_a_failing_session() -> None:
         msg = "agent crashed"
         raise RuntimeError(msg)
 
-    launcher = InProcessAgentLauncher(config=object(), runner=_boom_runner)  # type: ignore[arg-type]
+    launcher = InProcessAgentLauncher(config=_FakeConfig(), runner=_boom_runner)  # type: ignore[arg-type]
     launcher._embedder = object()  # type: ignore[assignment]  # noqa: SLF001
     launcher._tier_registry = None  # type: ignore[assignment]  # noqa: SLF001
 
@@ -558,7 +565,7 @@ async def test_warm_starts_the_crisis_encoder_warmup_off_loop() -> None:
         def warmup(self) -> None:
             self.warmed += 1
 
-    launcher = InProcessAgentLauncher(config=object())  # type: ignore[arg-type]
+    launcher = InProcessAgentLauncher(config=_FakeConfig())  # type: ignore[arg-type]
     # Pre-set the heavy singletons so warm() skips the real bge/tier build; the bad
     # sentinel embedder makes start_embedder_warmup's encode fail, which it swallows.
     launcher._embedder = object()  # type: ignore[assignment]  # noqa: SLF001

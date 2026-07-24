@@ -39,6 +39,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    func,
     insert,
     select,
     text,
@@ -46,13 +47,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from persona.billing.plans import default_plan
 from persona.errors import CreditsExhaustedError, DailySpendCapExceededError
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
 
 __all__ = [
-    "LOW_BALANCE_THRESHOLD",
     "book_day_spend",
     "capture_up_to",
     "capture_up_to_idempotent",
@@ -60,15 +61,30 @@ __all__ = [
     "deduct_idempotent",
     "ensure_balance",
     "get_balance",
+    "grant_idempotent",
+    "grant_payg_lot_idempotent",
     "list_turn_usage",
     "list_usage",
+    "refresh_free_allowance_lazy",
     "refund",
     "require_credits",
+    "reset_allowance_idempotent",
+    "wallet_snapshot",
 ]
 
+# Spec M4 T6 (Option A, D-M4-rename precedent): the pre-first-refresh SEED for a new
+# ``credits`` row — NOT the free allowance. The real free allowance is the plans-catalog
+# value (``default_plan().included_allowance_credits`` = 300 = $3) that the lazy monthly
+# refresh (:func:`refresh_free_allowance_lazy`) overwrites onto the row on a free user's
+# first metered access (their ``allowance_period`` is NULL ⇒ the refresh fires at once, so
+# the 100_000 seed is never meaningfully spendable). Kept at 100_000 so the M3 credits
+# parity + imagegen suites — which call this core surface DIRECTLY, below the policy that
+# fires the refresh — stay pristine (zero-edit).
 _DEFAULT_BALANCE = 100_000
-# Below this threshold the web app surfaces a low-balance warning (D-11-12).
-LOW_BALANCE_THRESHOLD = 10_000
+# Spec M4 T8: the flat LOW_BALANCE_THRESHOLD (10_000, D-11-12) is RETIRED — the
+# low-balance warning line is now PER-PLAN (20% of the plan's included allowance,
+# ``persona.billing.plans.Plan.low_balance_threshold_credits``); the /v1/me routes
+# resolve the caller's plan and compare against that.
 
 
 # Module-private minimal table views. persona-core cannot import the api
@@ -81,8 +97,34 @@ _credits_t = Table(
     "credits",
     _md,
     Column("user_id", Text, primary_key=True),
+    # Spec M4 T1a — THE ALLOWANCE BUCKET (monthly-reset, no rollover). NOT the total
+    # spendable: total = this + Σ(unexpired ``payg_grants.credits_remaining``). Read the
+    # total via :func:`get_balance`; NEVER read this column directly as "the balance".
+    # The physical name stays ``balance`` (conceptually ``allowance_balance``) to keep
+    # the M3 credits parity tests pristine (they encode this column name; D-M4-rename →
+    # Option A). The bucket-aware deduct draws THIS bucket first, then FIFO PAYG lots.
     Column("balance", Integer, nullable=False),
+    # Spec M4 T1a (D-M4-R3) — the lazy monthly-reset marker ('YYYY-MM' UTC); declared so
+    # the core mirror matches the api-owned schema. Inert until T6 wires the reset.
+    Column("allowance_period", Text),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+# Spec M4 T1a (D-M4-R6) — the PAYG "lots" bucket mirror. The core ledger writers draw
+# these AFTER the allowance bucket, oldest-expiring first (FIFO). Column names/types
+# match the api-owned canonical ``persona_api.db.models.payg_grants``; the api-side
+# integration tests are the drift guard (the ``_credit_tx_t`` pattern).
+_payg_grants_t = Table(
+    "payg_grants",
+    _md,
+    Column("id", Text, primary_key=True),
+    Column("user_id", Text, nullable=False),
+    Column("credits_total", Integer, nullable=False),
+    Column("credits_remaining", Integer, nullable=False),
+    Column("granted_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("source_billing_key", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
 _credit_tx_t = Table(
@@ -141,7 +183,14 @@ _turn_logs_t = Table(
 
 
 def ensure_balance(*, rls_engine: Engine, user_id: str) -> int:
-    """Return the user's balance, creating the row with the default on first use."""
+    """Ensure the caller's ``credits`` row exists; return the ALLOWANCE bucket.
+
+    Spec M4 T1a: the returned value is the allowance bucket (the ``credits.balance``
+    column), NOT the total spendable — internal callers use this only to guarantee
+    the row before a bucket-aware draw. The public "what's my balance" surface is
+    :func:`get_balance` (allowance + unexpired PAYG). Behaviour is otherwise
+    byte-identical to M3 (ensure row, default on first use).
+    """
     with rls_engine.begin() as conn:
         row = conn.execute(
             select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
@@ -152,27 +201,191 @@ def ensure_balance(*, rls_engine: Engine, user_id: str) -> int:
     return _DEFAULT_BALANCE
 
 
+def _current_total(conn: Connection, *, user_id: str) -> int:
+    """Total spendable = allowance bucket + Σ(unexpired PAYG lot remainders).
+
+    Spec M4 T1a (owner Decision 1): the two-bucket balance, read on an OPEN
+    transaction (no lock — a plain read). ``credits.balance`` is the allowance
+    bucket; expired lots (``expires_at <= now()``) are excluded from the sum.
+    """
+    allowance = int(
+        conn.execute(
+            select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
+        ).scalar_one()
+    )
+    payg = conn.execute(
+        select(func.coalesce(func.sum(_payg_grants_t.c.credits_remaining), 0)).where(
+            _payg_grants_t.c.user_id == user_id,
+            _payg_grants_t.c.credits_remaining > 0,
+            _payg_grants_t.c.expires_at > func.now(),
+        )
+    ).scalar_one()
+    return allowance + int(payg)
+
+
+def _draw_from_buckets(
+    conn: Connection, *, user_id: str, amount: int, allow_partial: bool
+) -> tuple[int, int]:
+    """Allowance-first then FIFO-PAYG draw on an OPEN transaction (Spec M4 T1a).
+
+    The lock-then-allocate core of the two-bucket deduct (owner Decision 1). Locks
+    the ``credits`` row (the allowance bucket) and the caller's unexpired non-empty
+    PAYG lots ``FOR UPDATE`` (oldest-expiring first — FIFO), computes
+    ``spendable = allowance + Σ lots``, then draws from the allowance bucket FIRST
+    and the lots FIFO. Never overdraws (each take is floored by that bucket's own
+    remainder); the ``FOR UPDATE`` on the ``credits`` row serialises concurrent
+    same-user draws exactly as M3's conditional decrement did (the double-spend
+    guarantee is preserved).
+
+    ``allow_partial=False`` (strict): an ``amount`` exceeding ``spendable`` raises
+    :class:`CreditsExhaustedError` and writes NOTHING (the caller's transaction
+    rolls back). ``allow_partial=True`` (capture): draws ``min(amount, spendable)``,
+    floored at 0. Returns ``(taken, new_total)`` where ``new_total`` is the post-draw
+    total spendable. **Allowance-only path (no lots) is byte-identical to M3's
+    single-counter decrement** — ``spendable == allowance``, one ``credits`` UPDATE,
+    same exhaustion raise.
+    """
+    allowance = int(
+        conn.execute(
+            select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id).with_for_update()
+        ).scalar_one()
+    )
+    lots = conn.execute(
+        select(_payg_grants_t.c.id, _payg_grants_t.c.credits_remaining)
+        .where(
+            _payg_grants_t.c.user_id == user_id,
+            _payg_grants_t.c.credits_remaining > 0,
+            _payg_grants_t.c.expires_at > func.now(),
+        )
+        .order_by(
+            _payg_grants_t.c.expires_at.asc(),
+            _payg_grants_t.c.granted_at.asc(),
+            _payg_grants_t.c.id.asc(),
+        )
+        .with_for_update()
+    ).all()
+    payg_total = sum(int(r[1]) for r in lots)
+    spendable = allowance + payg_total
+    if not allow_partial and amount > spendable:
+        # Spec M4 T7a (Tension-5): NO product copy in core — the user-facing upgrade prompt
+        # lives at each SURFACE (the api 402 handler's ``CREDITS_EXHAUSTED_DETAIL``; voice's
+        # own "insufficient credits"). Core raises the bare typed error + machine context.
+        raise CreditsExhaustedError(
+            context={"amount": str(amount), "spendable": str(spendable)},
+        )
+    take = amount if not allow_partial else min(amount, spendable)
+    if take <= 0:
+        return 0, spendable
+    # Allowance bucket first.
+    allowance_take = min(allowance, take)
+    if allowance_take > 0:
+        conn.execute(
+            update(_credits_t)
+            .where(_credits_t.c.user_id == user_id)
+            .values(balance=_credits_t.c.balance - allowance_take, updated_at=text("now()"))
+        )
+    # Remainder from PAYG lots, FIFO oldest-expiring.
+    remainder = take - allowance_take
+    for lot_id, lot_remaining in lots:
+        if remainder <= 0:
+            break
+        lot_take = min(int(lot_remaining), remainder)
+        conn.execute(
+            update(_payg_grants_t)
+            .where(_payg_grants_t.c.id == lot_id)
+            .values(credits_remaining=_payg_grants_t.c.credits_remaining - lot_take)
+        )
+        remainder -= lot_take
+    return take, spendable - take
+
+
 def get_balance(*, rls_engine: Engine, user_id: str) -> int:
-    """Current balance (creates the default row if absent)."""
-    return ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    """Current TOTAL spendable = allowance bucket + unexpired PAYG (Spec M4 T1a).
+
+    The enforced total accessor (owner Decision 1): never read ``credits.balance``
+    directly as "the balance" — it is only the allowance bucket. Creates the default
+    ``credits`` row if absent.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        return _current_total(conn, user_id=user_id)
+
+
+def wallet_snapshot(*, rls_engine: Engine, user_id: str) -> dict[str, object]:
+    """The two-bucket wallet, read-only (Spec M4, T8): allowance + PAYG lots + total.
+
+    One consistent read (a single transaction, no locks — CQS: pure read) of the
+    caller's wallet: the allowance bucket (``credits.balance`` + its
+    ``allowance_period`` month stamp) and every LIVE PAYG lot (unexpired,
+    ``credits_remaining > 0``) in the FIFO spend order (:func:`_draw_from_buckets`'s
+    oldest-expiring-first), plus the derived total. Creates the default ``credits``
+    row if absent (mirrors :func:`get_balance`).
+
+    Returns keys: ``allowance_balance`` (int), ``allowance_period`` (str | None),
+    ``payg_lots`` (list of ``{credits_remaining, credits_total, expires_at}`` dicts,
+    FIFO order), ``total_balance`` (int).
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        row = conn.execute(
+            select(_credits_t.c.balance, _credits_t.c.allowance_period).where(
+                _credits_t.c.user_id == user_id
+            )
+        ).one()
+        allowance = int(row[0])
+        period = str(row[1]) if row[1] is not None else None
+        lots = conn.execute(
+            select(
+                _payg_grants_t.c.credits_remaining,
+                _payg_grants_t.c.credits_total,
+                _payg_grants_t.c.expires_at,
+            )
+            .where(
+                _payg_grants_t.c.user_id == user_id,
+                _payg_grants_t.c.credits_remaining > 0,
+                _payg_grants_t.c.expires_at > func.now(),
+            )
+            .order_by(
+                _payg_grants_t.c.expires_at.asc(),
+                _payg_grants_t.c.granted_at.asc(),
+                _payg_grants_t.c.id.asc(),
+            )
+        ).all()
+    lot_dicts: list[dict[str, object]] = [
+        {
+            "credits_remaining": int(lot[0]),
+            "credits_total": int(lot[1]),
+            "expires_at": lot[2],
+        }
+        for lot in lots
+    ]
+    return {
+        "allowance_balance": allowance,
+        "allowance_period": period,
+        "payg_lots": lot_dicts,
+        "total_balance": allowance + sum(int(lot[0]) for lot in lots),
+    }
 
 
 def require_credits(*, rls_engine: Engine, user_id: str) -> int:
     """Pre-flight credit check: raise :class:`CreditsExhaustedError` (→ 402) if
-    the caller has no credits left. Returns the balance.
+    the caller has no credits left. Returns the total spendable balance.
 
     Called at the **top** of every generation endpoint — chat, agentic runs,
     persona authoring and refinement — *before* the SSE stream / run starts.
     Raising inside the SSE generator yields the spec-08 "response already
     started" trap, so the pre-flight gate is the right place (D-11-12).
     The post-success ``deduct`` (D-08-6) is unchanged.
+
+    Spec M4 T1a: the gate now checks the TWO-BUCKET total (allowance + unexpired
+    PAYG) via :func:`get_balance`, so a user with a spent allowance but live PAYG
+    lots passes.
     """
-    balance = ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    balance = get_balance(rls_engine=rls_engine, user_id=user_id)
     if balance <= 0:
-        raise CreditsExhaustedError(
-            "Your free credits are used up. Top-up coming soon — contact support.",
-            context={"balance": str(balance)},
-        )
+        # Spec M4 T7a (Tension-5): no product copy in core — the surface owns the prompt
+        # (api 402 handler / voice handler). Core raises the bare typed error + context.
+        raise CreditsExhaustedError(context={"balance": str(balance)})
     return balance
 
 
@@ -317,8 +530,8 @@ def deduct(
     """
     ensure_balance(rls_engine=rls_engine, user_id=user_id)
     with rls_engine.begin() as conn:
-        # R7: book the day-cap FIRST, atomically-with the decrement below. Over-cap
-        # ⇒ raise before any spend is booked; the ``with`` rolls back the whole txn.
+        # R7: book the day-cap FIRST, atomically-with the two-bucket draw below.
+        # Over-cap ⇒ raise before any spend is booked; the ``with`` rolls back the txn.
         if daily_cap > 0 and amount > 0:
             booked = _book_day_spend_conn(conn, user_id=user_id, cost=amount, cap=daily_cap)
             if booked is None:
@@ -332,22 +545,14 @@ def deduct(
                         "reset_epoch": str(_next_utc_midnight_epoch()),
                     },
                 )
-        new_balance = conn.execute(
-            update(_credits_t)
-            .where(_credits_t.c.user_id == user_id, _credits_t.c.balance >= amount)
-            .values(balance=_credits_t.c.balance - amount, updated_at=text("now()"))
-            .returning(_credits_t.c.balance)
-        ).scalar_one_or_none()
-        if new_balance is None:
-            # No row matched ``balance >= amount`` → insufficient funds. Raise
-            # WITHOUT writing a ledger row; the rolled-back transaction records
-            # nothing (the ``with`` block rolls back on the exception — including
-            # any day-spend booked just above, so an unaffordable turn never
-            # consumes the day counter either).
-            raise CreditsExhaustedError(
-                "Your free credits are used up. Top-up coming soon — contact support.",
-                context={"amount": str(amount), "reason": reason},
-            )
+        # Spec M4 T1a: allowance-first then FIFO-PAYG draw (strict). Unaffordable ⇒
+        # ``CreditsExhaustedError``, writes nothing (the ``with`` rolls back the
+        # day-spend booked above too). The allowance-only path (no PAYG lots) is
+        # byte-identical to M3's conditional decrement — same exhaustion raise, same
+        # single-counter move (test_credits_double_spend is the regression floor).
+        _taken, new_total = _draw_from_buckets(
+            conn, user_id=user_id, amount=amount, allow_partial=False
+        )
         conn.execute(
             insert(_credit_tx_t).values(
                 id=f"ctx_{uuid.uuid4().hex}",
@@ -358,28 +563,7 @@ def deduct(
                 cost_basis=cost_basis,
             )
         )
-    return int(new_balance)
-
-
-#: Spec M2 review (C1): the opt-in partial-capture sibling of ``deduct``'s
-#: conditional decrement. ONE atomic statement: a CTE row-locks the caller's
-#: ``credits`` row and computes ``captured = LEAST(balance, :amount)``; the
-#: outer UPDATE decrements by exactly that (never more than the row has), so
-#: the result is floored at 0 by construction — no separate ``GREATEST``/CHECK
-#: race is needed. ``RETURNING`` hands back both the new balance and the
-#: captured delta in the same round trip (the CTE's ``capped.balance``/
-#: ``capped.captured`` are evaluated against the PRE-update snapshot the
-#: ``FOR UPDATE`` lock pinned, while ``credits.balance`` in RETURNING is the
-#: POST-update value — the standard Postgres old/new-in-one-statement idiom).
-_CAPTURE_UP_TO_SQL = text(
-    "WITH capped AS ("
-    "  SELECT user_id, balance, LEAST(balance, :amount) AS captured "
-    "  FROM credits WHERE user_id = :uid FOR UPDATE"
-    ") "
-    "UPDATE credits SET balance = credits.balance - capped.captured, updated_at = now() "
-    "FROM capped WHERE credits.user_id = capped.user_id "
-    "RETURNING credits.balance AS new_balance, capped.captured AS captured"
-)
+    return int(new_total)
 
 
 def capture_up_to(
@@ -411,8 +595,8 @@ def capture_up_to(
     so the pre-flight ``require_credits`` gate (``balance > 0``) keeps passing
     turns that can no longer be charged their true cost.
 
-    This charges ``captured = min(amount, balance)`` in a SINGLE atomic
-    statement (:data:`_CAPTURE_UP_TO_SQL`) that floors the balance at 0 — a
+    This charges ``captured = min(amount, spendable)`` via the two-bucket
+    :func:`_draw_from_buckets` (``allow_partial=True``) that floors at 0 — a
     short charge is captured in full up to what remains, rather than rejected
     outright. The ledger row records the CAPTURED delta (never the requested
     ``amount``); when ``captured < amount`` the ``reason`` is suffixed
@@ -435,11 +619,14 @@ def capture_up_to(
     """
     ensure_balance(rls_engine=rls_engine, user_id=user_id)
     if amount <= 0:
-        return 0, ensure_balance(rls_engine=rls_engine, user_id=user_id)
+        return 0, get_balance(rls_engine=rls_engine, user_id=user_id)
     with rls_engine.begin() as conn:
-        row = conn.execute(_CAPTURE_UP_TO_SQL, {"uid": user_id, "amount": amount}).mappings().one()
-        captured = int(row["captured"])
-        new_balance = int(row["new_balance"])
+        # Spec M4 T1a: allowance-first then FIFO-PAYG partial draw, floored at 0.
+        # The allowance-only path is byte-identical to M3's ``LEAST(balance, :amount)``
+        # capture (test_credits_capture_up_to is the regression floor).
+        captured, new_total = _draw_from_buckets(
+            conn, user_id=user_id, amount=amount, allow_partial=True
+        )
         if daily_cap > 0 and captured > 0:
             booked = _book_day_spend_conn(conn, user_id=user_id, cost=captured, cap=daily_cap)
             if booked is None:
@@ -465,7 +652,7 @@ def capture_up_to(
                     cost_basis=cost_basis,
                 )
             )
-    return captured, new_balance
+    return captured, new_total
 
 
 def deduct_idempotent(
@@ -516,13 +703,9 @@ def deduct_idempotent(
             .returning(_credit_tx_t.c.id)
         ).scalar_one_or_none()
         if inserted_id is None:
-            # Already billed for this key — skip the balance mutation entirely.
-            return int(
-                conn.execute(
-                    select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
-                ).scalar_one()
-            )
-        # Day-cap FIRST, atomically-with the decrement (over-cap ⇒ raise ⇒ the
+            # Already billed for this key — skip the draw entirely; return the total.
+            return _current_total(conn, user_id=user_id)
+        # Day-cap FIRST, atomically-with the two-bucket draw (over-cap ⇒ raise ⇒ the
         # whole txn, incl. the insert above, rolls back).
         if daily_cap > 0 and amount > 0:
             booked = _book_day_spend_conn(conn, user_id=user_id, cost=amount, cap=daily_cap)
@@ -537,20 +720,13 @@ def deduct_idempotent(
                         "reset_epoch": str(_next_utc_midnight_epoch()),
                     },
                 )
-        new_balance = conn.execute(
-            update(_credits_t)
-            .where(_credits_t.c.user_id == user_id, _credits_t.c.balance >= amount)
-            .values(balance=_credits_t.c.balance - amount, updated_at=text("now()"))
-            .returning(_credits_t.c.balance)
-        ).scalar_one_or_none()
-        if new_balance is None:
-            # Unaffordable FIRST delivery — raise; the ``with`` rolls back the
-            # ledger insert (no orphan row) and any day-spend booked above.
-            raise CreditsExhaustedError(
-                "Your free credits are used up. Top-up coming soon — contact support.",
-                context={"amount": str(amount), "reason": reason},
-            )
-    return int(new_balance)
+        # Spec M4 T1a: allowance-first then FIFO-PAYG draw (strict). An unaffordable
+        # FIRST delivery ⇒ ``CreditsExhaustedError``; the ``with`` rolls back the ledger
+        # insert (no orphan row) + any day-spend booked above.
+        _taken, new_total = _draw_from_buckets(
+            conn, user_id=user_id, amount=amount, allow_partial=False
+        )
+    return int(new_total)
 
 
 def capture_up_to_idempotent(
@@ -602,20 +778,16 @@ def capture_up_to_idempotent(
             )
             .returning(_credit_tx_t.c.id)
         ).scalar_one_or_none()
-        current_balance = int(
-            conn.execute(
-                select(_credits_t.c.balance).where(_credits_t.c.user_id == user_id)
-            ).scalar_one()
-        )
         if claim_id is None:
-            # Already billed for this key — no capture.
-            return 0, current_balance
+            # Already billed for this key — no capture. Return the two-bucket total.
+            return 0, _current_total(conn, user_id=user_id)
         if amount <= 0:
             # Nothing to capture; the claim (delta 0) durably consumes the key.
-            return 0, current_balance
-        row = conn.execute(_CAPTURE_UP_TO_SQL, {"uid": user_id, "amount": amount}).mappings().one()
-        captured = int(row["captured"])
-        new_balance = int(row["new_balance"])
+            return 0, _current_total(conn, user_id=user_id)
+        # Spec M4 T1a: allowance-first then FIFO-PAYG partial draw, floored at 0.
+        captured, new_total = _draw_from_buckets(
+            conn, user_id=user_id, amount=amount, allow_partial=True
+        )
         if daily_cap > 0 and captured > 0:
             booked = _book_day_spend_conn(conn, user_id=user_id, cost=captured, cap=daily_cap)
             if booked is None:
@@ -635,7 +807,260 @@ def capture_up_to_idempotent(
             .where(_credit_tx_t.c.id == claim_id)
             .values(delta=-captured, reason=final_reason)
         )
-    return captured, new_balance
+    return captured, new_total
+
+
+def grant_idempotent(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    amount: int,
+    reason: str,
+    billing_key: str,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> int:
+    """Idempotent positive-delta grant to the ALLOWANCE bucket (Spec M4, T1b).
+
+    The exactly-once grant primitive the Stripe webhook rides — a subscription
+    renewal (``invoice.paid`` → ``grant_subscription``) or a monthly free refresh
+    (``grant_free_refresh``) credits the **allowance bucket** (``credits.balance``).
+    The mirror-image of :func:`deduct_idempotent`: insert-first ``billing_key`` gate
+    (``pg_insert(...).on_conflict_do_nothing(billing_key) RETURNING id``), then a
+    POSITIVE ``UPDATE credits SET balance = balance + :amount`` in the SAME
+    transaction. Because Stripe delivers at-least-once, a re-delivered event carries
+    the same ``billing_key`` → the insert is a no-op → the balance is left untouched
+    (grants exactly once, no double-grant). ``billing_key`` = the Stripe event /
+    invoice id.
+
+    The PAYG **lot** grant (``topup_payg`` → a ``payg_grants`` row, idempotent on
+    T1a's ``UNIQUE(source_billing_key)``) is a SEPARATE T4 primitive — this grants
+    only the allowance counter.
+
+    Returns the new TOTAL spendable (allowance + unexpired PAYG) after the grant, or
+    the unchanged current total on a re-delivery no-op.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        # Insert-first gate: consume the billing_key or detect the re-delivery. The
+        # positive ``delta`` is the grant (the mirror of deduct_idempotent's ``-amount``).
+        inserted_id = conn.execute(
+            pg_insert(_credit_tx_t)
+            .values(
+                id=f"ctx_{uuid.uuid4().hex}",
+                user_id=user_id,
+                delta=amount,
+                reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+                billing_key=billing_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["billing_key"],
+                index_where=_credit_tx_t.c.billing_key.isnot(None),
+            )
+            .returning(_credit_tx_t.c.id)
+        ).scalar_one_or_none()
+        if inserted_id is None:
+            # Already granted for this key — grant nothing; return the current total.
+            return _current_total(conn, user_id=user_id)
+        # First delivery: credit the ALLOWANCE bucket in the SAME transaction, so a
+        # rollback would undo the ledger insert too (no orphan grant row).
+        conn.execute(
+            update(_credits_t)
+            .where(_credits_t.c.user_id == user_id)
+            .values(balance=_credits_t.c.balance + amount, updated_at=text("now()"))
+        )
+        return _current_total(conn, user_id=user_id)
+
+
+def reset_allowance_idempotent(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    allowance: int,
+    allowance_period: str,
+    reason: str,
+    billing_key: str,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> int:
+    """Idempotently OVERWRITE the allowance bucket to ``allowance`` (Spec M4, T3b).
+
+    The subscription-renewal reset (owner Decision 1: **overwrite, no rollover** — NOT
+    a top-up). Keyed on the Stripe invoice id: the insert-first ``ON CONFLICT
+    (billing_key) DO NOTHING`` gate makes a re-delivered ``invoice.paid`` reset **exactly
+    once**. This gate is load-bearing — a *bare* overwrite is NOT idempotent: if the user
+    spends part of the allowance between two deliveries, a second overwrite would
+    re-inflate the balance (wiping the spend, a double-grant). With the gate, only the
+    FIRST delivery overwrites.
+
+    On the first delivery, in ONE transaction: lock + read the old allowance, claim the
+    ``billing_key`` (a ledger row whose ``delta = allowance - old_balance`` — the honest
+    net change, which may be negative), then **SET balance = allowance** (overwrite the
+    allowance bucket; PAYG lots are untouched) and stamp ``allowance_period`` (the UTC
+    month, so T6's lazy monthly free-reset sees a matching period and no-ops for a paid
+    user). A re-delivery inserts nothing → returns the current total without overwriting.
+
+    Returns the new TOTAL spendable (allowance + unexpired PAYG).
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        # Lock the allowance row + read the pre-reset value (for the honest ledger delta).
+        old_allowance = int(
+            conn.execute(
+                select(_credits_t.c.balance)
+                .where(_credits_t.c.user_id == user_id)
+                .with_for_update()
+            ).scalar_one()
+        )
+        # Insert-first gate: claim the invoice's billing_key or detect the re-delivery.
+        inserted_id = conn.execute(
+            pg_insert(_credit_tx_t)
+            .values(
+                id=f"ctx_{uuid.uuid4().hex}",
+                user_id=user_id,
+                delta=allowance - old_allowance,
+                reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+                billing_key=billing_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["billing_key"],
+                index_where=_credit_tx_t.c.billing_key.isnot(None),
+            )
+            .returning(_credit_tx_t.c.id)
+        ).scalar_one_or_none()
+        if inserted_id is None:
+            # Already reset for this invoice — NO overwrite (exactly-once; the spend the
+            # user made after the first delivery is preserved).
+            return _current_total(conn, user_id=user_id)
+        # First delivery: OVERWRITE the allowance bucket + stamp the period.
+        conn.execute(
+            update(_credits_t)
+            .where(_credits_t.c.user_id == user_id)
+            .values(balance=allowance, allowance_period=allowance_period, updated_at=text("now()"))
+        )
+        return _current_total(conn, user_id=user_id)
+
+
+# --- Spec M4 T6: lazy monthly free-allowance refresh (on-access self-heal) ----
+#
+# DB-authoritative UTC month key ``'YYYY-MM'`` — the SAME DB-clock discipline as the R7
+# day counter (``now()`` is the transaction timestamp, so the boundary is immune to
+# app/DB skew; no cron/leader needed — a dormant free user self-heals on their next touch).
+_UTC_MONTH = "to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')"
+
+# The guarded conditional overwrite (mirrors the R7 conditional-write discipline): reset the
+# allowance bucket to the free plan's allowance + stamp the current month ONLY when BOTH
+#   (a) the stored period differs from the current month — ``IS DISTINCT FROM`` treats a
+#       NULL/never-stamped period as different, so a fresh row refreshes on first access; and
+#   (b) the user is NOT on a paid plan — no ``subscription`` row with ``plan_code <> 'free'``.
+#       An ABSENT subscription row = free (consistent with T5c) and DOES get the refresh; a
+#       paid ``plus``/``pro`` row is NEVER touched (its allowance resets on ``invoice.paid``
+#       via :func:`reset_allowance_idempotent`, which stamps the period — so even a free→paid
+#       race converges: whichever stamps the current month first, the other's guard no-ops).
+# Re-run in the same month ⇒ the WHERE matches no row ⇒ no-op (idempotent-per-period). The
+# PAYG lots are a SEPARATE bucket, untouched. RLS scopes both the UPDATE and the subquery to
+# the caller (``:uid`` is the current user), so no cross-tenant read/write is possible.
+_REFRESH_FREE_ALLOWANCE_SQL = text(
+    "UPDATE credits SET balance = :allowance, "
+    f"allowance_period = {_UTC_MONTH}, updated_at = now() "
+    f"WHERE user_id = :uid AND allowance_period IS DISTINCT FROM {_UTC_MONTH} "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM subscription s WHERE s.user_id = :uid AND s.plan_code <> 'free'"
+    ") RETURNING balance"
+)
+
+
+def refresh_free_allowance_lazy(*, rls_engine: Engine, user_id: str) -> bool:
+    """Lazily reset a FREE user's monthly allowance on access (Spec M4, T6).
+
+    The cron-free monthly free-tier refresh: overwrite the allowance bucket to the free
+    plan's ``included_allowance_credits`` (the plans catalog — 300 = $3, owner-locked) and
+    stamp the current UTC month, but ONLY on a free user's FIRST access in a new month (the
+    guarded UPDATE in :data:`_REFRESH_FREE_ALLOWANCE_SQL`). A paid user is never touched; a
+    re-access in the same month is a no-op. NOT a top-up — an OVERWRITE (no rollover, owner
+    Decision 1); the PAYG lots are a separate bucket and are untouched.
+
+    Called from the cloud credits POLICY layer at the top of every metered access
+    (``require_credits`` / ``get_balance`` / the ``deduct``/``capture`` methods), so a free
+    user's balance is always the current month's allowance without a scheduler — and the
+    100_000 seed (:data:`_DEFAULT_BALANCE`) is corrected to $3 before the first spend. The
+    community ``UnlimitedCreditsPolicy`` never calls this (edition-gated: no plans, no reset).
+
+    Returns ``True`` if a reset landed (a free user's first access this UTC month), else
+    ``False`` (a no-op: already refreshed this month, or a paid user).
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)  # guarantee the row before the guard
+    allowance = default_plan().included_allowance_credits
+    with rls_engine.begin() as conn:
+        landed = conn.execute(
+            _REFRESH_FREE_ALLOWANCE_SQL, {"uid": user_id, "allowance": allowance}
+        ).scalar_one_or_none()
+    return landed is not None
+
+
+def grant_payg_lot_idempotent(
+    *,
+    rls_engine: Engine,
+    user_id: str,
+    credit_amount: int,
+    reason: str,
+    source_billing_key: str,
+    cost_cents: float | None = None,
+    cost_basis: str | None = None,
+) -> int:
+    """Idempotently grant a PAYG lot with a 12-month expiry (Spec M4, T4a).
+
+    A one-time pack purchase (``payment_intent.succeeded``) grants a ``payg_grants`` lot —
+    the SEPARATE PAYG bucket, so this NEVER touches the allowance (``credits.balance``).
+    Idempotency rides T1a's ``UNIQUE(source_billing_key)``: the insert-first ``ON CONFLICT
+    DO NOTHING`` on the Stripe payment_intent id makes a re-delivered PI grant exactly ONE
+    lot. ``credits_total = credits_remaining = credits`` (``$X`` buys ``X*100`` credits,
+    1:1); ``expires_at = now() + 12 months`` (DB-authoritative). On a first delivery an
+    audit ledger row is also written (``delta = +credits``, basis ``topup_payg``) so the
+    purchase shows in ``/v1/me/*/ledger``; the running total is still computed from the
+    lots, not the ledger. Returns the new TOTAL spendable.
+    """
+    ensure_balance(rls_engine=rls_engine, user_id=user_id)
+    with rls_engine.begin() as conn:
+        # Insert-first gate on the lot's UNIQUE source_billing_key (the PI id).
+        lot_id = conn.execute(
+            pg_insert(_payg_grants_t)
+            .values(
+                id=f"payg_{uuid.uuid4().hex}",
+                user_id=user_id,
+                credits_total=credit_amount,
+                credits_remaining=credit_amount,
+                expires_at=text("now() + interval '12 months'"),
+                source_billing_key=source_billing_key,
+            )
+            .on_conflict_do_nothing(index_elements=["source_billing_key"])
+            .returning(_payg_grants_t.c.id)
+        ).scalar_one_or_none()
+        if lot_id is None:
+            # Already granted for this payment_intent — exactly one lot.
+            return _current_total(conn, user_id=user_id)
+        # Audit ledger row (belt-and-braces idempotent on billing_key too).
+        conn.execute(
+            pg_insert(_credit_tx_t)
+            .values(
+                id=f"ctx_{uuid.uuid4().hex}",
+                user_id=user_id,
+                delta=credit_amount,
+                reason=reason,
+                cost_cents=cost_cents,
+                cost_basis=cost_basis,
+                billing_key=source_billing_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["billing_key"],
+                index_where=_credit_tx_t.c.billing_key.isnot(None),
+            )
+        )
+        return _current_total(conn, user_id=user_id)
 
 
 def refund(
@@ -669,15 +1094,22 @@ def refund(
     no-op — no ledger row, no balance change, returns the current balance.
     """
     if amount == 0:
-        return ensure_balance(rls_engine=rls_engine, user_id=user_id)
+        return get_balance(rls_engine=rls_engine, user_id=user_id)
     ensure_balance(rls_engine=rls_engine, user_id=user_id)
     with rls_engine.begin() as conn:
-        new_balance = conn.execute(
+        # Spec M4 T1a (D-M4-refund→allowance): a refund credits the ALLOWANCE bucket
+        # (``credits.balance``), never a PAYG lot. Documented edge: when the original
+        # charge drew from PAYG (the allowance was empty), refunding to the allowance
+        # converts a 12-month PAYG credit into a monthly-reset allowance credit — a
+        # deliberate, approved choice. Refund magnitude is small (the image true-up
+        # overage, a few credits seconds after the charge, which drew allowance-first
+        # anyway → an exact reversal in the common case); per-charge source-lot tracking
+        # is not worth it (YAGNI).
+        conn.execute(
             update(_credits_t)
             .where(_credits_t.c.user_id == user_id)
             .values(balance=_credits_t.c.balance + amount, updated_at=text("now()"))
-            .returning(_credits_t.c.balance)
-        ).scalar_one()
+        )
         conn.execute(
             insert(_credit_tx_t).values(
                 id=f"ctx_{uuid.uuid4().hex}",
@@ -688,7 +1120,8 @@ def refund(
                 cost_basis=cost_basis,
             )
         )
-    return int(new_balance)
+        new_total = _current_total(conn, user_id=user_id)
+    return int(new_total)
 
 
 def list_usage(

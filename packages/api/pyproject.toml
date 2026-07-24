@@ -45,6 +45,13 @@ dependencies = [
     # Lazy-imported only on the embedded community path (db/community_managed.py);
     # cloud + legacy-sqlite + external-DSN boots never touch it.
     "pixeltable-pgserver==0.5.1",
+    # Spec M4 (T2a) — Stripe payments. persona-api-ONLY (persona-core stays
+    # provider-agnostic + MIT-clean); LAZY-imported at the use-site (billing/gateway.py)
+    # so a community / flag-off boot never imports the SDK — M4 ships dark behind
+    # PERSONA_BILLING_STRIPE_ENABLED (default false). v8+ StripeClient instance API
+    # (no module globals). MIT; transitives = typing_extensions + requests (already
+    # resolved), httpx only via the async extra (already present).
+    "stripe>=15,<16",
 ]
 
 # Portable console entrypoint — `uv run persona-api` / `python -m persona_api`.

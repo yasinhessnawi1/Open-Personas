@@ -45,27 +45,35 @@ _CAPTURE_UP_TO_CALLERS = (
 
 
 def test_deduct_still_uses_a_conditional_all_or_nothing_decrement() -> None:
-    """``deduct``'s conditional floor (R2-D-3) is untouched by C1's addition."""
+    """``deduct``'s all-or-nothing floor (R2-D-3) is untouched by C1's addition.
+
+    Spec M4 T1a re-expressed the floor over the two-bucket draw: deduct uses the
+    STRICT (``allow_partial=False``) arm of ``_draw_from_buckets``, whose over-
+    spendable path raises ``CreditsExhaustedError`` and writes nothing."""
     from persona.credits import service
 
     src = inspect.getsource(service.deduct)
-    assert "balance >= amount" in src.replace("_credits_t.c.", ""), (
-        "deduct must still carry a `balance >= amount` WHERE predicate (the atomic floor)"
+    assert "allow_partial=False" in src, "deduct must use the STRICT (all-or-nothing) draw"
+    assert "CreditsExhaustedError" in inspect.getsource(service._draw_from_buckets), (  # noqa: SLF001
+        "an overdraw must still raise CreditsExhaustedError"
     )
-    assert "CreditsExhaustedError" in src, "an overdraw must still raise CreditsExhaustedError"
 
 
 def test_capture_up_to_is_additive_not_a_deduct_rewrite() -> None:
     """``capture_up_to`` is a NEW, separate function — it does not replace or
-    alias ``deduct`` (both must independently exist and differ)."""
+    alias ``deduct`` (both must independently exist and differ).
+
+    Spec M4 T1a: both delegate to the shared ``_draw_from_buckets`` but with
+    OPPOSITE ``allow_partial`` — deduct strict (``False``), capture partial-floored
+    (``True``); the partial floor is ``min(allowance, take)`` + the FIFO lot walk."""
     from persona.credits import service
 
     assert service.deduct is not service.capture_up_to
     capture_src = inspect.getsource(service.capture_up_to)
-    # The hard-reject predicate lives only in ``deduct`` — never here.
-    assert "balance >= amount" not in capture_src.replace("_credits_t.c.", "")
-    # The partial-capture floor lives in the atomic SQL: LEAST(balance, amount).
-    assert "LEAST" in str(service._CAPTURE_UP_TO_SQL)  # noqa: SLF001
+    deduct_src = inspect.getsource(service.deduct)
+    # capture is the PARTIAL (floored) arm; deduct is the STRICT arm — never swapped.
+    assert "allow_partial=True" in capture_src, "capture_up_to must use the PARTIAL (floored) draw"
+    assert "allow_partial=False" in deduct_src, "deduct must use the STRICT draw (never partial)"
 
 
 def test_preflight_callers_still_call_deduct_not_capture_up_to() -> None:

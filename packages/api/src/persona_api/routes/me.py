@@ -7,6 +7,7 @@ from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from persona.billing.plans import Plan, get_plan
 from persona.errors import (
     InvalidTimezoneError,
     PersonaNotFoundError,
@@ -25,19 +26,21 @@ from persona_api.schemas import (
     NavCountsResponse,
     NotificationMarkReadResult,
     NotificationOut,
+    PaygLotOut,
     UpdateProfileRequest,
     UsageEntry,
     UserProfileResponse,
+    WalletResponse,
 )
 from persona_api.schemas.requests import ScheduleCreateRequest, ScheduleRescheduleRequest
 from persona_api.services import (
     calendar_reschedule_service,
-    credits_service,
     nav_counts_service,
     notifications_service,
     occurrences_service,
     schedule_create_service,
     schedule_delete_service,
+    subscription_service,
     user_service,
 )
 from persona_api.services.calendar_reschedule_service import ReschedulePreview
@@ -48,21 +51,78 @@ from persona_api.tasks.store import TaskStore
 router = APIRouter(prefix="/v1/me", tags=["me"])
 
 
+def _plan_for_user(request: Request, user_id: str) -> Plan:
+    """The caller's plan from their ``subscription`` row — absent/unknown ⇒ Free (Spec M4).
+
+    A pure read used by the credits/wallet surfaces to pick the PER-PLAN low-balance
+    warning line (T8). Absent row = free (the T5c precedent); an unknown ``plan_code``
+    (forward-compat) also falls back to Free — the restrictive default.
+    """
+    sub = subscription_service.get_subscription(request.app.state.rls_engine, user_id=user_id)
+    code = str(sub.get("plan_code") or "free") if sub is not None else "free"
+    try:
+        return get_plan(code)
+    except (KeyError, ValueError):
+        return get_plan("free")
+
+
 @router.get("/credits", response_model=CreditsResponse)
 async def get_credits(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> CreditsResponse:
-    """The caller's current credit balance (stub counter; §5.5).
+    """The caller's current credit balance (§5.5).
 
-    ``low_balance`` is surfaced inline so the web app shows the under-limit
-    warning without a second round-trip (D-11-12).
+    ``low_balance`` is surfaced inline so the web app shows the under-limit warning
+    without a second round-trip (D-11-12). The warning line is PER-PLAN (Spec M4 T8 —
+    20% of the plan's included allowance: Free 60, Plus 400, Pro 1200; the flat 10 000
+    threshold is retired). Community's unmetered sentinel balance is never "low".
     """
     balance = request.app.state.credits_policy.get_balance(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
-    low = balance < credits_service.LOW_BALANCE_THRESHOLD
+    plan = _plan_for_user(request, user.id)
+    low = balance < plan.low_balance_threshold_credits
     return CreditsResponse(balance=balance, low_balance=low)
+
+
+@router.get("/wallet", response_model=WalletResponse)
+async def get_wallet(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> WalletResponse:
+    """The caller's two-bucket dollar-wallet (Spec M4, T8) — the settings billing surface.
+
+    Read-only composition of two RLS-scoped reads (no business logic here): the policy's
+    ``wallet_snapshot`` (allowance bucket + period stamp + live PAYG lots in FIFO spend
+    order + total — the Metered policy self-heals the free monthly allowance first, T6)
+    and the caller's ``subscription`` row (``plan_code`` / ``auto_topup_enabled``; absent
+    ⇒ ``free`` / ``False``). ``low_balance`` compares the total against the caller's
+    per-plan warning line. Community reports the unmetered sentinel (no lots, never low).
+    """
+    snapshot = request.app.state.credits_policy.wallet_snapshot(
+        rls_engine=request.app.state.rls_engine, user_id=user.id
+    )
+    sub = subscription_service.get_subscription(request.app.state.rls_engine, user_id=user.id)
+    plan = _plan_for_user(request, user.id)
+    total = int(cast("int", snapshot["total_balance"]))
+    return WalletResponse(
+        total_balance=total,
+        allowance_balance=int(cast("int", snapshot["allowance_balance"])),
+        allowance_period=cast("str | None", snapshot["allowance_period"]),
+        payg_lots=[
+            PaygLotOut(
+                credits_remaining=int(cast("int", lot["credits_remaining"])),
+                credits_total=int(cast("int", lot["credits_total"])),
+                expires_at=cast("datetime", lot["expires_at"]),
+            )
+            for lot in cast("list[dict[str, object]]", snapshot["payg_lots"])
+        ],
+        plan_code=str(sub.get("plan_code") or "free") if sub is not None else "free",
+        auto_topup_enabled=bool(sub.get("auto_topup_enabled")) if sub is not None else False,
+        low_balance=total < plan.low_balance_threshold_credits,
+        low_balance_threshold=plan.low_balance_threshold_credits,
+    )
 
 
 @router.get("/usage", response_model=list[UsageEntry])

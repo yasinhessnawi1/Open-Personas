@@ -40,16 +40,31 @@ from persona.credits import (
     get_balance as _get_balance,
 )
 from persona.credits import (
+    grant_idempotent as _grant_idempotent,
+)
+from persona.credits import (
+    grant_payg_lot_idempotent as _grant_payg_lot_idempotent,
+)
+from persona.credits import (
     list_turn_usage as _list_turn_usage,
 )
 from persona.credits import (
     list_usage as _list_usage,
 )
 from persona.credits import (
+    refresh_free_allowance_lazy as _refresh_free_allowance_lazy,
+)
+from persona.credits import (
     refund as _refund,
 )
 from persona.credits import (
     require_credits as _require_credits,
+)
+from persona.credits import (
+    reset_allowance_idempotent as _reset_allowance_idempotent,
+)
+from persona.credits import (
+    wallet_snapshot as _wallet_snapshot,
 )
 from persona.errors import DailySpendCapExceededError
 
@@ -152,6 +167,65 @@ class CreditsPolicy(Protocol):
         """
         ...
 
+    def grant_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotent positive-delta grant to the allowance bucket (Spec M4, T1b).
+
+        The exactly-once grant the Stripe webhook rides — a subscription renewal
+        (``grant_subscription``) or a monthly free refresh (``grant_free_refresh``)
+        credits the allowance bucket; a re-delivered event (same ``billing_key``)
+        grants nothing. Returns the new total spendable.
+        """
+        ...
+
+    def reset_allowance_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        allowance: int,
+        allowance_period: str,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotent OVERWRITE of the allowance bucket to ``allowance`` (Spec M4, T3b).
+
+        The subscription-renewal reset (owner Decision 1: overwrite, no rollover), keyed
+        on the invoice id; a re-delivered ``invoice.paid`` resets exactly once. Returns
+        the new total spendable.
+        """
+        ...
+
+    def grant_payg_lot_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        credit_amount: int,
+        reason: str,
+        source_billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotently grant a PAYG lot (12-mo expiry) keyed on the PI id (Spec M4, T4a).
+
+        A one-time pack purchase grants a ``payg_grants`` lot (the SEPARATE PAYG bucket —
+        allowance untouched); a re-delivered ``payment_intent.succeeded`` grants one lot.
+        Returns the new total spendable.
+        """
+        ...
+
     def refund(
         self,
         *,
@@ -171,6 +245,10 @@ class CreditsPolicy(Protocol):
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:
         """The current balance."""
+        ...
+
+    def wallet_snapshot(self, *, rls_engine: Engine, user_id: str) -> dict[str, object]:
+        """The two-bucket wallet read (Spec M4 T8): allowance + PAYG lots + total."""
         ...
 
     def list_usage(
@@ -200,7 +278,26 @@ class MeteredCreditsPolicy:
     def __init__(self, *, daily_cap: int = 0) -> None:
         self._daily_cap = daily_cap
 
+    def _refresh_free_allowance(self, *, rls_engine: Engine, user_id: str) -> None:
+        """Spec M4 T6: self-heal a free user's monthly allowance on access (cloud only).
+
+        Lazily overwrites a free user's allowance to the free plan's amount ($3) once per
+        UTC month (idempotent; a paid user is never touched — the core ``NOT EXISTS`` guard).
+
+        Fired at the READ/pre-flight gates (``require_credits`` / ``get_balance``) AND the
+        IDEMPOTENT ``deduct``/``capture`` variants — the background/owner-billed paths that
+        skip the pre-flight (so a dormant free user self-heals even on a pure background
+        deduct, closing that edge). Deliberately NOT fired in the plain ``deduct`` /
+        ``capture_up_to``: every user-facing route reaching those runs a ``require_credits``
+        pre-flight FIRST, which already refreshed — so a second call there is redundant and
+        would clobber a paid/seeded balance in the policy-level unit tests. Community's
+        :class:`UnlimitedCreditsPolicy` never runs this (it overrides every method as a
+        no-op), so the refresh is cloud-only / edition-gated, community byte-identical.
+        """
+        _refresh_free_allowance_lazy(rls_engine=rls_engine, user_id=user_id)
+
     def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:
+        self._refresh_free_allowance(rls_engine=rls_engine, user_id=user_id)
         return _require_credits(rls_engine=rls_engine, user_id=user_id)
 
     def deduct(
@@ -213,6 +310,13 @@ class MeteredCreditsPolicy:
         cost_cents: float | None = None,
         cost_basis: str | None = None,
     ) -> int:
+        # No free-allowance refresh here: every user-facing route that reaches the plain
+        # ``deduct`` (chat post-success, imagegen pre-deduct, authoring) runs a
+        # ``require_credits`` pre-flight FIRST — which already self-heals the free allowance
+        # (Spec M4 T6). The refresh rides ``require_credits`` / ``get_balance`` + the
+        # idempotent variants (the background/owner-billed paths that skip the pre-flight);
+        # firing it again here would be redundant AND would clobber a paid/seeded balance in
+        # the policy-level unit tests that deduct without a pre-flight.
         try:
             return _deduct(
                 rls_engine=rls_engine,
@@ -253,6 +357,12 @@ class MeteredCreditsPolicy:
         refusal, writes the SAME durable audit row :meth:`deduct` writes
         (R7-D-5 fail-loud + audited) before re-raising. Spec M3 (D-M3-12):
         forwards ``cost_cents`` / ``cost_basis`` to the recorded row.
+
+        No free-allowance refresh here (Spec M4 T6): the chat-turn worker's post-success
+        ``capture_up_to`` runs AFTER the turn's ``require_credits`` pre-flight, which already
+        self-healed the free allowance. The refresh rides ``require_credits`` / ``get_balance``
+        + the idempotent variants (background paths); firing it here would clobber a seeded
+        balance in the policy-level worker tests.
         """
         try:
             return _capture_up_to(
@@ -303,6 +413,7 @@ class MeteredCreditsPolicy:
         cost_cents: float | None = None,
         cost_basis: str | None = None,
     ) -> int:
+        self._refresh_free_allowance(rls_engine=rls_engine, user_id=user_id)
         try:
             return _deduct_idempotent(
                 rls_engine=rls_engine,
@@ -331,6 +442,7 @@ class MeteredCreditsPolicy:
         cost_cents: float | None = None,
         cost_basis: str | None = None,
     ) -> tuple[int, int]:
+        self._refresh_free_allowance(rls_engine=rls_engine, user_id=user_id)
         try:
             return _capture_up_to_idempotent(
                 rls_engine=rls_engine,
@@ -347,6 +459,74 @@ class MeteredCreditsPolicy:
                 rls_engine=rls_engine, user_id=user_id, context=exc.context
             )
             raise
+
+    def grant_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # Grants are not spend — no day-cap (that guards deductions); a plain delegate.
+        return _grant_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=amount,
+            reason=reason,
+            billing_key=billing_key,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
+
+    def reset_allowance_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        allowance: int,
+        allowance_period: str,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # An overwrite reset, not spend — no day-cap; a plain delegate.
+        return _reset_allowance_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            allowance=allowance,
+            allowance_period=allowance_period,
+            reason=reason,
+            billing_key=billing_key,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
+
+    def grant_payg_lot_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        credit_amount: int,
+        reason: str,
+        source_billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # A PAYG lot grant, not spend — no day-cap; a plain delegate.
+        return _grant_payg_lot_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            credit_amount=credit_amount,
+            reason=reason,
+            source_billing_key=source_billing_key,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
 
     def refund(
         self,
@@ -368,7 +548,15 @@ class MeteredCreditsPolicy:
         )
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:
+        self._refresh_free_allowance(rls_engine=rls_engine, user_id=user_id)
         return _get_balance(rls_engine=rls_engine, user_id=user_id)
+
+    def wallet_snapshot(self, *, rls_engine: Engine, user_id: str) -> dict[str, object]:
+        # A balance-read surface (the settings wallet page) — self-heal the free monthly
+        # allowance first (Spec M4 T6/T8, same as get_balance) so a dormant free user's
+        # wallet always shows the current month's allowance.
+        self._refresh_free_allowance(rls_engine=rls_engine, user_id=user_id)
+        return _wallet_snapshot(rls_engine=rls_engine, user_id=user_id)
 
     def list_usage(
         self, *, rls_engine: Engine, user_id: str, limit: int, offset: int
@@ -439,6 +627,49 @@ class UnlimitedCreditsPolicy:
     ) -> tuple[int, int]:
         return amount, _UNLIMITED_BALANCE
 
+    def grant_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # Community: unmetered — no plans, no grants, no DB write (M4 is a cloud no-op).
+        return _UNLIMITED_BALANCE
+
+    def reset_allowance_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        allowance: int,
+        allowance_period: str,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # Community: unmetered — no plans, no allowance reset, no DB write (cloud no-op).
+        return _UNLIMITED_BALANCE
+
+    def grant_payg_lot_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        credit_amount: int,
+        reason: str,
+        source_billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # Community: unmetered — no PAYG packs, no lot, no DB write (cloud no-op).
+        return _UNLIMITED_BALANCE
+
     def refund(
         self,
         *,
@@ -453,6 +684,15 @@ class UnlimitedCreditsPolicy:
 
     def get_balance(self, *, rls_engine: Engine, user_id: str) -> int:
         return _UNLIMITED_BALANCE
+
+    def wallet_snapshot(self, *, rls_engine: Engine, user_id: str) -> dict[str, object]:
+        # Community: unmetered — no buckets, no lots, no DB read (the sentinel shape).
+        return {
+            "allowance_balance": _UNLIMITED_BALANCE,
+            "allowance_period": None,
+            "payg_lots": [],
+            "total_balance": _UNLIMITED_BALANCE,
+        }
 
     def list_usage(
         self, *, rls_engine: Engine, user_id: str, limit: int, offset: int

@@ -15,7 +15,11 @@ from persona_api.editions.credits_policy import (
     MeteredCreditsPolicy,
     UnlimitedCreditsPolicy,
 )
-from persona_api.editions.factory import build_credits_policy, build_owner_resolver
+from persona_api.editions.factory import (
+    build_credits_policy,
+    build_owner_resolver,
+    build_stripe_gateway,
+)
 from persona_api.editions.gateway_guard import check_gateway_edition_posture
 from persona_api.editions.guard import check_public_noauth_guard
 from persona_api.editions.owner_resolver import (
@@ -34,6 +38,7 @@ __all__ = [
     "UnlimitedCreditsPolicy",
     "build_credits_policy",
     "build_owner_resolver",
+    "build_stripe_gateway",
     "check_cloud_config_guard",
     "check_gateway_edition_posture",
     "check_per_tenant_mcp_posture",

@@ -489,3 +489,24 @@ class ApprovalDecisionRequest(_Input):
     decision: Literal["approve", "deny", "modify"]
     edited_arguments: dict[str, JsonValue] | None = None
     note: str = Field(default="", max_length=2000)
+
+
+class CheckoutRequest(_Input):
+    """Start a subscribe Checkout Session for a purchasable plan (Spec M4, T2b).
+
+    ``plan_code`` is the plan to subscribe to — only ``plus`` / ``pro`` are Stripe
+    subscriptions (``free`` is not purchasable → 400). The plan's Stripe Price id is
+    resolved from config (``PERSONA_STRIPE_PRICE_<PLAN>``), never sent by the client.
+    """
+
+    plan_code: Literal["plus", "pro"]
+
+
+class PackCheckoutRequest(_Input):
+    """Start a one-time PAYG dollar-pack Checkout Session (Spec M4, T4a).
+
+    ``pack`` is the dollar amount ``'5'`` / ``'10'`` / ``'25'`` / ``'50'``; the pack's
+    Stripe Price id + credit amount are resolved server-side from config + the registry.
+    """
+
+    pack: Literal["5", "10", "25", "50"]

@@ -758,12 +758,41 @@ export interface paths {
     };
     /**
      * Get Credits
-     * @description The caller's current credit balance (stub counter; §5.5).
+     * @description The caller's current credit balance (§5.5).
      *
-     *     ``low_balance`` is surfaced inline so the web app shows the under-limit
-     *     warning without a second round-trip (D-11-12).
+     *     ``low_balance`` is surfaced inline so the web app shows the under-limit warning
+     *     without a second round-trip (D-11-12). The warning line is PER-PLAN (Spec M4 T8 —
+     *     20% of the plan's included allowance: Free 60, Plus 400, Pro 1200; the flat 10 000
+     *     threshold is retired). Community's unmetered sentinel balance is never "low".
      */
     get: operations["get_credits_v1_me_credits_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/me/wallet": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Wallet
+     * @description The caller's two-bucket dollar-wallet (Spec M4, T8) — the settings billing surface.
+     *
+     *     Read-only composition of two RLS-scoped reads (no business logic here): the policy's
+     *     ``wallet_snapshot`` (allowance bucket + period stamp + live PAYG lots in FIFO spend
+     *     order + total — the Metered policy self-heals the free monthly allowance first, T6)
+     *     and the caller's ``subscription`` row (``plan_code`` / ``auto_topup_enabled``; absent
+     *     ⇒ ``free`` / ``False``). ``low_balance`` compares the total against the caller's
+     *     per-plan warning line. Community reports the unmetered sentinel (no lots, never low).
+     */
+    get: operations["get_wallet_v1_me_wallet_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -2461,6 +2490,137 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/billing/config": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Billing Config
+     * @description The client-side billing config (the web needs the publishable key for Stripe.js).
+     *
+     *     404 when billing is disabled (community / flag-off). Never returns the secret key —
+     *     only the client-safe publishable key.
+     */
+    get: operations["get_billing_config_v1_billing_config_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/billing/checkout": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Checkout
+     * @description Start a subscribe Checkout Session for the caller's own account (Spec M4, T2b).
+     *
+     *     Resolves the plan's Stripe Price id from config (400 if the plan is not purchasable /
+     *     the owner has not configured its Price id), reuses-or-creates the caller's ONE Stripe
+     *     customer (stored on their own RLS-scoped ``subscription`` row), and returns the hosted
+     *     checkout url with Stripe Tax on. 404 when billing is disabled; 401 unauthenticated.
+     *     The session is bound to the caller's customer, so a user can never check out for
+     *     another tenant.
+     */
+    post: operations["create_checkout_v1_billing_checkout_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/billing/checkout/pack": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Pack Checkout
+     * @description Start a one-time PAYG dollar-pack Checkout Session for the caller (Spec M4, T4a).
+     *
+     *     Resolves the pack's Price id from config (400 if the owner has not configured it) + its
+     *     credit amount from the registry, reuses-or-creates the caller's ONE Stripe customer, and
+     *     returns the hosted checkout url (Stripe Tax on; the card is saved for Pro auto-top-up).
+     *     The grant happens on ``payment_intent.succeeded`` (T4a webhook handler). 404 when dark;
+     *     401 unauthenticated; scoped to the caller.
+     */
+    post: operations["create_pack_checkout_v1_billing_checkout_pack_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/billing/portal": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create Portal
+     * @description Open the Stripe billing portal for the caller (Spec M4, T2b).
+     *
+     *     Self-serve plan change / cancel / payment-method / invoices; the changes flow back
+     *     as the T3 webhook lifecycle. Reuses the caller's own customer (RLS-scoped). 404 when
+     *     disabled; 401 unauthenticated.
+     */
+    post: operations["create_portal_v1_billing_portal_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/billing/webhook": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Stripe Webhook
+     * @description The Stripe webhook — the payment system's security boundary (Spec M4, T3a).
+     *
+     *     **UNAUTHENTICATED** (Stripe calls it server-to-server): the SIGNATURE is the only
+     *     auth. Deliberately carries NO ``Depends(get_current_user)`` and NO Pydantic body
+     *     model — a body model would auto-parse + re-encode the payload and break the HMAC.
+     *
+     *     The RAW request body is read (``await request.body()``) BEFORE any parsing and
+     *     verified against ``PERSONA_STRIPE_WEBHOOK_SECRET``. An absent header / forged or
+     *     stale signature / malformed body → **400 with ZERO side effect** (rejected before
+     *     any handler runs). A verified event dispatches to its handler (T3b; idempotent on
+     *     ``event.id``); an unhandled type is a 200 no-op (never 4xx — that makes Stripe
+     *     retry forever). 404 when billing is disabled (the dark gate).
+     */
+    post: operations["stripe_webhook_v1_billing_webhook_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2712,6 +2872,20 @@ export interface components {
       /** Queued */
       queued: boolean;
     };
+    /**
+     * BillingConfigResponse
+     * @description The client-side billing config the web needs to boot Stripe.js (Spec M4, T2a).
+     *
+     *     Only reachable when billing is active (cloud + flag + key); a community / flag-off
+     *     install 404s the whole ``/v1/billing`` surface. Never carries the secret key —
+     *     only the client-safe publishable key.
+     */
+    BillingConfigResponse: {
+      /** Enabled */
+      enabled: boolean;
+      /** Publishable Key */
+      publishable_key: string;
+    };
     /** Body_create_upload_v1_personas__persona_id__uploads_post */
     Body_create_upload_v1_personas__persona_id__uploads_post: {
       /** File */
@@ -2836,6 +3010,29 @@ export interface components {
       metadata?: {
         [key: string]: string;
       };
+    };
+    /**
+     * CheckoutRequest
+     * @description Start a subscribe Checkout Session for a purchasable plan (Spec M4, T2b).
+     *
+     *     ``plan_code`` is the plan to subscribe to — only ``plus`` / ``pro`` are Stripe
+     *     subscriptions (``free`` is not purchasable → 400). The plan's Stripe Price id is
+     *     resolved from config (``PERSONA_STRIPE_PRICE_<PLAN>``), never sent by the client.
+     */
+    CheckoutRequest: {
+      /**
+       * Plan Code
+       * @enum {string}
+       */
+      plan_code: "plus" | "pro";
+    };
+    /**
+     * CheckoutSessionResponse
+     * @description A Stripe Checkout Session — the web redirects the browser to ``url`` (Spec M4, T2b).
+     */
+    CheckoutSessionResponse: {
+      /** Url */
+      url: string;
     };
     /**
      * ClarifyingQuestion
@@ -3079,11 +3276,12 @@ export interface components {
     };
     /**
      * CreditsResponse
-     * @description The user's current credit balance (stub counter).
+     * @description The user's current credit balance.
      *
-     *     ``low_balance`` is True when the balance is below
-     *     :data:`credits_service.LOW_BALANCE_THRESHOLD` (10 000 by default) — the web
-     *     app uses it to surface the under-limit warning (D-11-12).
+     *     ``low_balance`` is True when the balance is below the caller's PER-PLAN warning
+     *     line (Spec M4 T8 — 20% of the plan's included allowance: Free 60, Plus 400,
+     *     Pro 1200; the flat 10 000 threshold is retired). The web app uses it to surface
+     *     the under-limit warning (D-11-12).
      */
     CreditsResponse: {
       /** Balance */
@@ -4325,6 +4523,35 @@ export interface components {
       truncated: boolean;
     };
     /**
+     * PackCheckoutRequest
+     * @description Start a one-time PAYG dollar-pack Checkout Session (Spec M4, T4a).
+     *
+     *     ``pack`` is the dollar amount ``'5'`` / ``'10'`` / ``'25'`` / ``'50'``; the pack's
+     *     Stripe Price id + credit amount are resolved server-side from config + the registry.
+     */
+    PackCheckoutRequest: {
+      /**
+       * Pack
+       * @enum {string}
+       */
+      pack: "5" | "10" | "25" | "50";
+    };
+    /**
+     * PaygLotOut
+     * @description One live PAYG lot in the wallet, FIFO order (oldest-expiring first; Spec M4 T8).
+     */
+    PaygLotOut: {
+      /** Credits Remaining */
+      credits_remaining: number;
+      /** Credits Total */
+      credits_total: number;
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string;
+    };
+    /**
      * PersonaCapabilities
      * @description Deployment-derived capability flags surfaced with the persona detail.
      *
@@ -4562,6 +4789,14 @@ export interface components {
     PersonaTTSRequest: {
       /** Text */
       text: string;
+    };
+    /**
+     * PortalSessionResponse
+     * @description A Stripe billing-portal session — the web redirects to ``url`` (Spec M4, T2b).
+     */
+    PortalSessionResponse: {
+      /** Url */
+      url: string;
     };
     /**
      * PostMessageRequest
@@ -5333,6 +5568,37 @@ export interface components {
       input?: unknown;
       /** Context */
       ctx?: Record<string, never>;
+    };
+    /**
+     * WalletResponse
+     * @description The two-bucket dollar-wallet (Spec M4, T8) — the settings billing surface.
+     *
+     *     ``total_balance`` = ``allowance_balance`` + Σ live PAYG lot remainders (the only
+     *     number spend checks use); ``allowance_period`` is the UTC ``YYYY-MM`` month stamp
+     *     of the last allowance reset (``None`` = never reset). ``payg_lots`` lists the live
+     *     lots in the FIFO spend order. ``plan_code`` / ``auto_topup_enabled`` come from the
+     *     caller's subscription row (absent → ``free`` / ``False``). ``low_balance`` compares
+     *     ``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's
+     *     included allowance). Community (unmetered) reports the sentinel balance with no
+     *     lots and ``low_balance=False``.
+     */
+    WalletResponse: {
+      /** Total Balance */
+      total_balance: number;
+      /** Allowance Balance */
+      allowance_balance: number;
+      /** Allowance Period */
+      allowance_period: string | null;
+      /** Payg Lots */
+      payg_lots: components["schemas"]["PaygLotOut"][];
+      /** Plan Code */
+      plan_code: string;
+      /** Auto Topup Enabled */
+      auto_topup_enabled: boolean;
+      /** Low Balance */
+      low_balance: boolean;
+      /** Low Balance Threshold */
+      low_balance_threshold: number;
     };
   };
   responses: never;
@@ -6431,6 +6697,26 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["CreditsResponse"];
+        };
+      };
+    };
+  };
+  get_wallet_v1_me_wallet_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletResponse"];
         };
       };
     };
@@ -8699,6 +8985,134 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_billing_config_v1_billing_config_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BillingConfigResponse"];
+        };
+      };
+    };
+  };
+  create_checkout_v1_billing_checkout_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CheckoutRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CheckoutSessionResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_pack_checkout_v1_billing_checkout_pack_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PackCheckoutRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CheckoutSessionResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_portal_v1_billing_portal_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PortalSessionResponse"];
+        };
+      };
+    };
+  };
+  stripe_webhook_v1_billing_webhook_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: boolean;
+          };
         };
       };
     };

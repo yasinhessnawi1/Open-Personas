@@ -38,9 +38,12 @@ from persona.backends.credentials import (
     ProviderCredentialResolver,
     TierResolution,
     filter_openrouter_free_mode,
+    parse_models_list,
     resolve_tier_config,
 )
 from persona.backends.errors import (
+    LocalProviderInModelsListError,
+    MalformedTierModelsError,
     ProviderCredentialMissingError,
 )
 from persona.backends.errors import (
@@ -60,6 +63,7 @@ __all__ = [
     "TierConfig",
     "TierMetadata",
     "TierRegistry",
+    "free_tier_registry_from_env",
     "tier_metadata_from_env",
     "tier_registry_from_env",
 ]
@@ -74,6 +78,15 @@ _TIER_ENV_PREFIXES: dict[str, str] = {
     "frontier": "PERSONA_FRONTIER_",
     "mid": "PERSONA_MID_",
     "small": "PERSONA_SMALL_",
+}
+
+# Spec M4 (T5a) — the FREE plan's dedicated model-set env prefixes. A SEPARATE,
+# free-only registry is built from these (``free_tier_registry_from_env``); a free
+# user's whole tier chain comes from here, never the paid ``PERSONA_<TIER>_`` vars.
+_FREE_TIER_ENV_PREFIXES: dict[str, str] = {
+    "frontier": "PERSONA_FREE_FRONTIER_",
+    "mid": "PERSONA_FREE_MID_",
+    "small": "PERSONA_FREE_SMALL_",
 }
 
 
@@ -554,6 +567,72 @@ def tier_registry_from_env(
             provider=single.provider,
         )
 
+    return TierRegistry(tiers)
+
+
+def free_tier_registry_from_env(
+    *,
+    openrouter_subscription_mode: OpenRouterSubscriptionMode | None = None,
+) -> TierRegistry:
+    """Build a FREE-ONLY :class:`TierRegistry` from ``PERSONA_FREE_<TIER>_MODELS`` (Spec M4, T5a).
+
+    The free plan's dedicated model set (D-M4-4): a SEPARATE registry whose every tier's whole
+    :class:`~persona.backends.multi_model.MultiModelChatBackend` fallback chain is free-only, so a
+    free user's fallback walk can NEVER reach a paid model. Reads ``PERSONA_FREE_FRONTIER_MODELS``
+    / ``PERSONA_FREE_MID_MODELS`` (+ optional ``PERSONA_FREE_SMALL_MODELS``) through the SAME
+    parse / credential-resolve / wrapper path the paid tiers use.
+
+    **FAIL-CLOSED (the crux, T5a):** a tier whose ``PERSONA_FREE_<TIER>_MODELS`` is unset, empty,
+    malformed, or has no resolvable credentials is simply ABSENT — there is **NO** fallback to the
+    ``PERSONA_*`` default (unlike :func:`tier_registry_from_env`). If nothing free is configured the
+    registry is EMPTY, so a free user's :meth:`TierRegistry.get` raises
+    :class:`~persona_runtime.errors.TierNotConfiguredError` (→ the graceful T5b "capacity full /
+    upgrade" response) rather than serving a paid model. Only frontier + mid need configuring —
+    ``small`` falls back within the free registry (``small → mid → frontier``, all free).
+
+    Args:
+        openrouter_subscription_mode: Resolved OpenRouter mode (``"free"`` / ``"paid"``) or
+            ``None`` — passed through the same ``:free``-suffix filter as the paid builder.
+
+    Returns:
+        A free-only registry (possibly empty — fail-closed).
+    """
+    tiers: dict[str, TierConfig] = {}
+    env_snapshot: dict[str, str] = dict(os.environ)
+    resolver = ProviderCredentialResolver(env=env_snapshot)
+    for tier_name, prefix in _FREE_TIER_ENV_PREFIXES.items():
+        raw = env_snapshot.get(f"{prefix}MODELS", "").strip()
+        if not raw:
+            continue  # fail-closed: an unconfigured free tier is ABSENT (never a paid default)
+        try:
+            models = parse_models_list(tier_name, raw)
+            filtered = filter_openrouter_free_mode(
+                models,
+                mode=openrouter_subscription_mode,
+                tier_name=tier_name,
+                keep_free_suffix=True,
+            )
+            if not filtered:
+                continue
+            tiers[tier_name] = _tier_config_from_models_list(
+                tier_name=tier_name,
+                prefix=prefix,
+                resolution=TierResolution(tier=tier_name, models=filtered, triplet=None),
+                resolver=resolver,
+            )
+        except (
+            MalformedTierModelsError,
+            LocalProviderInModelsListError,
+            ModelsListTierNotConfiguredError,
+        ) as exc:
+            # Fail-closed: a broken free tier is ABSENT, never a paid fallback. Boot proceeds
+            # (paid users unaffected); a free user on this tier gets the graceful T5b response.
+            _logger.warning(
+                "free tier {tier} not built ({error}); absent — fail-closed (no paid fallback)",
+                tier=tier_name,
+                error=type(exc).__name__,
+            )
+            continue
     return TierRegistry(tiers)
 
 

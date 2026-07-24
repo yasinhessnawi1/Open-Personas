@@ -222,6 +222,39 @@ class APIConfig(BaseSettings):
     max_concurrent_long_ops_per_user: int = Field(
         default=3, ge=0, validation_alias="MAX_CONCURRENT_LONG_OPS_PER_USER"
     )
+    # Spec M4 (T2a) — Stripe payments. M4 ships DARK: the billing surface is
+    # constructed ONLY when the edition is ``cloud`` AND this flag is on AND a secret
+    # key is present (see :meth:`stripe_billing_active`). Community / flag-off construct
+    # ZERO Stripe — the SDK is never even imported (billing/gateway.py lazy-imports it).
+    # Keys are owner-supplied (test then live); never echo real values.
+    billing_stripe_enabled: bool = Field(
+        default=False, validation_alias="PERSONA_BILLING_STRIPE_ENABLED"
+    )
+    stripe_secret_key: str = Field(default="", validation_alias="PERSONA_STRIPE_SECRET_KEY")
+    stripe_webhook_secret: str = Field(default="", validation_alias="PERSONA_STRIPE_WEBHOOK_SECRET")
+    stripe_publishable_key: str = Field(
+        default="", validation_alias="PERSONA_STRIPE_PUBLISHABLE_KEY"
+    )
+    # Spec M4 (T2b) — the plan → Stripe Price id mapping (owner creates the real
+    # Products/Prices at go-live; these stay CONFIG, never hardcoded). Free has no Price
+    # (it is not a Stripe subscription). Checkout/portal redirect URLs are the web's
+    # return targets.
+    stripe_price_plus: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PLUS")
+    stripe_price_pro: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PRO")
+    # Spec M4 (T4a) — the one-time PAYG dollar-pack Price ids ($5/$10/$25/$50), config.
+    stripe_price_pack_5: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PACK_5")
+    stripe_price_pack_10: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PACK_10")
+    stripe_price_pack_25: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PACK_25")
+    stripe_price_pack_50: str = Field(default="", validation_alias="PERSONA_STRIPE_PRICE_PACK_50")
+    stripe_checkout_success_url: str = Field(
+        default="", validation_alias="PERSONA_STRIPE_CHECKOUT_SUCCESS_URL"
+    )
+    stripe_checkout_cancel_url: str = Field(
+        default="", validation_alias="PERSONA_STRIPE_CHECKOUT_CANCEL_URL"
+    )
+    stripe_portal_return_url: str = Field(
+        default="", validation_alias="PERSONA_STRIPE_PORTAL_RETURN_URL"
+    )
     # Maintenance sweep cadence (D-A0-4): each worker periodically rescues expired
     # leases (the rescuer), ages terminal jobs older than ``archive_after`` into the
     # cold ``jobs_archive`` (the cleaner — keeps the hot table small), and purges
@@ -638,6 +671,62 @@ class APIConfig(BaseSettings):
         if self.in_process_worker is not None:
             return self.in_process_worker
         return self.edition is Edition.community and community_managed
+
+    def stripe_billing_active(self) -> bool:
+        """Whether the Stripe billing surface should be constructed (Spec M4, T2a).
+
+        The single dark-flag + edition gate (mirrors ``build_credits_policy``'s edition
+        seam): billing is live ONLY in the ``cloud`` edition, with
+        ``PERSONA_BILLING_STRIPE_ENABLED`` on, and a secret key present. Community and
+        flag-off both construct ZERO Stripe (M4 ships dark until live keys) — the SDK is
+        never imported on those paths.
+        """
+        return (
+            self.edition is Edition.cloud
+            and self.billing_stripe_enabled
+            and bool(self.stripe_secret_key)
+        )
+
+    def stripe_price_id(self, plan_code: str) -> str:
+        """The configured Stripe Price id for a purchasable plan (Spec M4, T2b).
+
+        Returns the ``PERSONA_STRIPE_PRICE_<PLAN>`` value for ``plus`` / ``pro``, or an
+        empty string for a plan that is not a Stripe subscription (``free``) or one
+        whose Price id the owner has not configured. The route treats an empty result
+        as "not purchasable" (400) — the Price ids stay config, never hardcoded.
+        """
+        return {"plus": self.stripe_price_plus, "pro": self.stripe_price_pro}.get(plan_code, "")
+
+    def plan_code_for_price(self, price_id: str) -> str | None:
+        """The plan a configured Stripe Price id belongs to (Spec M4, T3b — reverse map).
+
+        The webhook's ``invoice.paid`` / ``customer.subscription.updated`` handlers resolve
+        the plan from the event's line-item Price id (robust vs event ordering). Returns
+        ``'plus'`` / ``'pro'`` for a configured Price, else ``None`` (an empty ``price_id``,
+        or a Price we do not recognise → the handler treats it as "not our plan" and
+        no-ops). Empty config never matches a real (non-empty) Price id.
+        """
+        if not price_id:
+            return None
+        if self.stripe_price_plus and price_id == self.stripe_price_plus:
+            return "plus"
+        if self.stripe_price_pro and price_id == self.stripe_price_pro:
+            return "pro"
+        return None
+
+    def stripe_price_for_pack(self, pack: str) -> str:
+        """The configured Stripe Price id for a PAYG dollar-pack key (Spec M4, T4a).
+
+        ``pack`` is the dollar amount as a string (``'5'`` / ``'10'`` / ``'25'`` / ``'50'``);
+        returns the ``PERSONA_STRIPE_PRICE_PACK_<N>`` value, or ``''`` for an unknown /
+        unconfigured pack (the route treats it as "not purchasable" → 400).
+        """
+        return {
+            "5": self.stripe_price_pack_5,
+            "10": self.stripe_price_pack_10,
+            "25": self.stripe_price_pack_25,
+            "50": self.stripe_price_pack_50,
+        }.get(pack, "")
 
     @property
     def effective_app_database_url(self) -> str:

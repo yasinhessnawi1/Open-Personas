@@ -543,15 +543,71 @@ class TurnIntoFileResponse(_Output):
 
 
 class CreditsResponse(_Output):
-    """The user's current credit balance (stub counter).
+    """The user's current credit balance.
 
-    ``low_balance`` is True when the balance is below
-    :data:`credits_service.LOW_BALANCE_THRESHOLD` (10 000 by default) — the web
-    app uses it to surface the under-limit warning (D-11-12).
+    ``low_balance`` is True when the balance is below the caller's PER-PLAN warning
+    line (Spec M4 T8 — 20% of the plan's included allowance: Free 60, Plus 400,
+    Pro 1200; the flat 10 000 threshold is retired). The web app uses it to surface
+    the under-limit warning (D-11-12).
     """
 
     balance: int
     low_balance: bool = False
+
+
+class PaygLotOut(_Output):
+    """One live PAYG lot in the wallet, FIFO order (oldest-expiring first; Spec M4 T8)."""
+
+    credits_remaining: int
+    credits_total: int
+    expires_at: datetime
+
+
+class WalletResponse(_Output):
+    """The two-bucket dollar-wallet (Spec M4, T8) — the settings billing surface.
+
+    ``total_balance`` = ``allowance_balance`` + Σ live PAYG lot remainders (the only
+    number spend checks use); ``allowance_period`` is the UTC ``YYYY-MM`` month stamp
+    of the last allowance reset (``None`` = never reset). ``payg_lots`` lists the live
+    lots in the FIFO spend order. ``plan_code`` / ``auto_topup_enabled`` come from the
+    caller's subscription row (absent → ``free`` / ``False``). ``low_balance`` compares
+    ``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's
+    included allowance). Community (unmetered) reports the sentinel balance with no
+    lots and ``low_balance=False``.
+    """
+
+    total_balance: int
+    allowance_balance: int
+    allowance_period: str | None
+    payg_lots: list[PaygLotOut]
+    plan_code: str
+    auto_topup_enabled: bool
+    low_balance: bool
+    low_balance_threshold: int
+
+
+class BillingConfigResponse(_Output):
+    """The client-side billing config the web needs to boot Stripe.js (Spec M4, T2a).
+
+    Only reachable when billing is active (cloud + flag + key); a community / flag-off
+    install 404s the whole ``/v1/billing`` surface. Never carries the secret key —
+    only the client-safe publishable key.
+    """
+
+    enabled: bool
+    publishable_key: str
+
+
+class CheckoutSessionResponse(_Output):
+    """A Stripe Checkout Session — the web redirects the browser to ``url`` (Spec M4, T2b)."""
+
+    url: str
+
+
+class PortalSessionResponse(_Output):
+    """A Stripe billing-portal session — the web redirects to ``url`` (Spec M4, T2b)."""
+
+    url: str
 
 
 class UsageEntry(_Output):

@@ -35,11 +35,12 @@ from persona.stores.document_store import DocumentStore
 from persona.stores.postgres import PostgresBackend
 from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription
-from persona_runtime.tier import tier_registry_from_env
+from persona_runtime.tier import free_tier_registry_from_env, tier_registry_from_env
 
 from persona_api.background.chat_turn_worker import ChatTurnRegistry
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.background.run_worker import RunRegistry
+from persona_api.billing import build_event_dispatcher
 from persona_api.config import APIConfig, Edition
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
 from persona_api.db.community import (
@@ -58,6 +59,7 @@ from persona_api.db.engine import create_db_engine
 from persona_api.editions import (
     build_credits_policy,
     build_owner_resolver,
+    build_stripe_gateway,
     check_cloud_config_guard,
     check_gateway_edition_posture,
     check_per_tenant_mcp_posture,
@@ -82,6 +84,7 @@ from persona_api.routes import (
     approvals,
     artifacts,
     autonomy,
+    billing,
     calls,
     connectors,
     conversations,
@@ -437,6 +440,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # ``cost_source`` uses the static default (the shared resolver is wired
             # later in the lifespan) — OpenRouter actuals still price exactly.
             credits_policy=app.state.credits_policy,
+            # Spec M4 T7b: Pro auto-top-up on a per-step capture crossing below $2 (off-loop).
+            gateway=app.state.stripe_gateway,
             billing_config=BillingConfig(),
             agentic_floor=config.agentic_credit_floor,
         )
@@ -532,6 +537,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             sink=chat_turn_sink,
             rls_engine=rls_engine,
             credits_policy=app.state.credits_policy,
+            # Spec M4 T7b: Pro auto-top-up on a post-turn deduct crossing below $2 (off-loop).
+            gateway=app.state.stripe_gateway,
             credits_per_turn=config.credits_per_turn,
             # Spec M2 (D-M2-5): proportional chat-turn billing (floor above);
             # PERSONA_API_PROPORTIONAL_CREDITS=false is the rollback hatch.
@@ -700,6 +707,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             tier_registry = tier_registry_from_env(openrouter_subscription_mode=openrouter_mode)
         except TierNotConfiguredError:
             tier_registry = None
+        # Spec M4 (T5a): the FREE plan's dedicated free-only tier registry — built ONLY in the
+        # cloud edition (community is unmetered, no plans → no gating; ``None`` makes
+        # ``RuntimeFactory._plan_tier_selection`` short-circuit to the paid tiers, byte-identical).
+        # Fail-closed: unconfigured ``PERSONA_FREE_*_MODELS`` ⇒ an EMPTY registry (a free user's
+        # turn raises → the graceful T5b response), never a paid fallback.
+        free_tier_registry = (
+            free_tier_registry_from_env(openrouter_subscription_mode=openrouter_mode)
+            if config.edition is Edition.cloud
+            else None
+        )
         if tier_registry is not None:
             from persona_runtime.crisis_encoder import (
                 build_crisis_encoder,
@@ -720,6 +737,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 embedder=app.state.embedder,
                 crisis_encoder=crisis_encoder,
                 tier_registry=tier_registry,
+                # Spec M4 (T5a): the free-only registry (cloud) or None (community → no gating).
+                free_tier_registry=free_tier_registry,
                 # Postgres turn_logs (D-08-7); RLS-scoped via conversations.
                 turn_log_writer=PostgresTurnLogWriter(rls_engine),
                 audit_root=Path(config.audit_root),
@@ -1063,6 +1082,16 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # tests that hit the app without TestClient's lifespan).
     app.state.owner_resolver = build_owner_resolver(config)
     app.state.credits_policy = build_credits_policy(config)
+    # Spec M4 (T2a): the Stripe gateway, set at factory time (like the edition seams).
+    # ``None`` on a community / flag-off boot — every billing route 404s then, and the
+    # ``stripe`` SDK is never imported (M4 ships dark until live keys).
+    app.state.stripe_gateway = build_stripe_gateway(config)
+    # Spec M4 (T3a): the webhook event router (T3b's lifecycle handlers). Cheap + SDK-free.
+    app.state.webhook_dispatcher = build_event_dispatcher()
+    # Spec M4 (T3b): the webhook's cross-tenant READ-ONLY resolution engine — a factory-time
+    # default (the lifespan overrides it with the real admin engine at startup). Declared here
+    # so the attribute always exists (a no-lifespan unit test never touches it).
+    app.state.admin_engine = None
     # R5-D-4: the file-storage backend, set at factory time (stateless, like the
     # edition seams) so routes that read ``app.state.file_storage`` work even when
     # the lifespan hasn't run (tests hitting the app without TestClient's lifespan).
@@ -1152,3 +1181,4 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(tasks.router)  # spec A6: the tasks read surface (list / detail / audit)
     app.include_router(models.router)  # spec M1: model catalog — curated shortlist + browse-all
     app.include_router(voice.router)  # R9-025a: tts/stt proxy — read-aloud + mic dictation
+    app.include_router(billing.router)  # spec M4: Stripe billing (gated dark; 404 when off)

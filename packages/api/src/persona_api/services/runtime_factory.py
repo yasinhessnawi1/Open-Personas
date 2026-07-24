@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
+    from persona.backends import ChatBackend
     from persona.graph.fusion import HybridResult
     from persona.graph.protocol import GraphStore
     from persona.imagegen import ImageBackend
@@ -125,6 +126,7 @@ class RuntimeFactory:
         rls_engine: Engine,
         embedder: Embedder,
         tier_registry: TierRegistry,
+        free_tier_registry: TierRegistry | None = None,
         turn_log_writer: TurnLogWriter,
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
@@ -178,6 +180,13 @@ class RuntimeFactory:
         # transport. None ⇒ PostgresBackend built per-request (today's behavior).
         self._memory_backend = memory_backend
         self._tier_registry = tier_registry
+        # Spec M4 (T5a): the free plan's dedicated free-only tier registry (D-M4-4). None
+        # ⇒ plan gating is OFF (community / no free set configured) → every user resolves
+        # the paid ``_tier_registry`` + the preferred_model passthrough, byte-identical to
+        # pre-M4. When present (cloud), a FREE user resolves THIS registry (whose whole
+        # fallback chain is free-only) + NO preferred override — a free user can never
+        # reach a paid model. See :meth:`_plan_tier_selection`.
+        self._free_tier_registry = free_tier_registry
         self._turn_log_writer = turn_log_writer
         self._audit_root = audit_root
         # R5-D-2: the app-selected audit backend (Postgres when multi-worker,
@@ -927,7 +936,7 @@ class RuntimeFactory:
             try:
                 # Spec P9: summarization is the background surface (small) —
                 # stated via the policy instead of an incidental literal.
-                small_backend = self._tier_registry.get(tier_for("background"))
+                small_backend = self._plan_tier_registry().get(tier_for("background"))
             except (
                 ProviderError,
                 TierNotConfiguredError,
@@ -1351,7 +1360,7 @@ class RuntimeFactory:
             override=(self._api_config.recognition_tier if self._api_config is not None else None),
         )
         try:
-            backend = self._tier_registry.get(recognition_tier)
+            backend = self._plan_tier_registry().get(recognition_tier)
         # Both TierNotConfiguredError flavours: the registry's own (tier name
         # unresolvable, persona_runtime.errors) AND the MODELS-list all-fail
         # (persona.backends.errors) — sibling classes, not aliases. Catching
@@ -1408,7 +1417,7 @@ class RuntimeFactory:
         if not settings.enabled:
             return None
         try:
-            backend = self._tier_registry.get(settings.scan_tier)
+            backend = self._plan_tier_registry().get(settings.scan_tier)
         except Exception:  # noqa: BLE001 — keyless env: the gate stays inert, never breaks chat
             return None
         return ModelInitiativeVerbInterpreter(backend)
@@ -1539,6 +1548,55 @@ class RuntimeFactory:
 
         return _provider
 
+    def _plan_tier_selection(
+        self,
+    ) -> tuple[TierRegistry, Callable[[str], ChatBackend | None] | None]:
+        """Resolve the caller's plan → (tier_registry, preferred_backend_provider) (Spec M4, T5a).
+
+        THE free-tier no-paid-fallback gate, enforced at loop CONSTRUCTION. Returns:
+
+        * **Gating off** (``_free_tier_registry is None`` — community, or no free set configured):
+          ``(self._tier_registry, build_openrouter_passthrough)`` — byte-identical to pre-M4
+          (every user resolves the paid tiers + the ``preferred_model`` passthrough).
+        * **Free plan** (cloud, the caller's ``subscription.plan_code == 'free'``): ``(the FREE-ONLY
+          registry, None)`` — the whole tier chain is free-only AND ``preferred_backend_provider``
+          is disabled (``preferred_model`` is inert, no escape hatch), so a free user can NEVER
+          reach a paid model.
+        * **Paid plan** (plus / pro): ``(self._tier_registry, build_openrouter_passthrough)`` — the
+          full paid tiers + fallback + preferred override, unchanged.
+
+        The plan is read RLS-scoped from the caller's ``subscription`` row (the ``current_user_id``
+        contextvar owner); an absent row / no scope defaults to ``free`` (fail-safe — the
+        restrictive set), so a lookup miss can never open the paid tiers to a free user.
+        """
+        if self._free_tier_registry is None:
+            return self._tier_registry, build_openrouter_passthrough  # gating off (community/paid)
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services import subscription_service
+
+        user_id = current_user_id.get()
+        plan_code = "free"
+        if user_id:
+            row = subscription_service.get_subscription(self._engine, user_id=user_id)
+            if row is not None:
+                plan_code = str(row.get("plan_code") or "free")
+        if plan_code == "free":
+            # Free-only registry + NO preferred override (preferred_model inert; no escape hatch).
+            return self._free_tier_registry, None
+        return self._tier_registry, build_openrouter_passthrough  # paid plan → full tiers
+
+    def _plan_tier_registry(self) -> TierRegistry:
+        """The plan-selected tier registry for the current owner (Spec M4, T5c).
+
+        The background sibling of :meth:`_plan_tier_selection`: a FREE owner's owner-billed
+        background LLM (summarize / recognition / initiative-scan / title) resolves the
+        free-only registry (never a paid fallback); paid / community resolve the paid tiers.
+        Same per-call owner-plan read. An empty free registry ``.get`` raises
+        ``TierNotConfiguredError`` — the existing fail-soft catches at these sites treat that
+        as "surface not wired" (skip), which is the fail-closed behaviour (no paid fallback).
+        """
+        return self._plan_tier_selection()[0]
+
     async def build_conversation_loop(self, persona_id: str) -> ConversationLoop:
         """Construct the ConversationLoop for ``persona_id`` (KEYSTONE 1, T08).
 
@@ -1550,6 +1608,10 @@ class RuntimeFactory:
         ``code_execution`` dispatch drains it.
         """
         persona = self._load_persona(persona_id)
+        # Spec M4 (T5a): the free-tier no-paid-fallback gate — a FREE caller resolves the
+        # free-only registry + a disabled preferred_model override; paid / community are
+        # byte-identical (paid tiers + passthrough).
+        chat_tier_registry, chat_preferred_provider = self._plan_tier_selection()
         scanner, scanned = self._scan_skills(persona)
         # M1a shared holder — created BEFORE the toolbox so the
         # code_execution tool's drain-and-clear provider closes over the
@@ -1578,8 +1640,12 @@ class RuntimeFactory:
             # resolves frontier every turn (pin still honored at the loop's
             # override short-circuit). The heuristic cascade is retired from
             # the default path, retained dormant.
-            router=PolicyRouter(tier_registry=self._tier_registry),
-            tier_registry=self._tier_registry,
+            # Spec M4 (T5a): the plan-resolved registry (free → free-only; paid/community →
+            # the paid tiers). PolicyRouter picks a tier NAME; the registry returns the
+            # pre-built (free-only for a free user) MultiModelChatBackend — so the whole
+            # fallback walk stays within the plan's model set.
+            router=PolicyRouter(tier_registry=chat_tier_registry),
+            tier_registry=chat_tier_registry,
             turn_log_writer=self._turn_log_writer,
             # Spec 23 T13: app-scoped intelligent-routing wiring. The shared
             # latency tracker persists per-model EWMA across requests; the
@@ -1598,7 +1664,11 @@ class RuntimeFactory:
             # bad choice returns None from the provider and the loop's override
             # short-circuit (T3) falls back to the tier default, so this is
             # byte-identical for personas that never set ``preferred_model``.
-            preferred_backend_provider=build_openrouter_passthrough,
+            # Spec M4 (T5a): ``None`` for a FREE caller — the preferred_model override is
+            # DISABLED (loop.py: ``preferred_backend_provider is None`` ⇒ the persona's
+            # preferred_model is inert), so a free user's ``preferred_model=<any paid id>``
+            # can never front a paid model. Paid/community keep the OpenRouter passthrough.
+            preferred_backend_provider=chat_preferred_provider,
             # Spec R7 (R7-D-1 discharge of D-23-X): the soft per-day cost-bias ramp's
             # real cross-session spend source (today's recorded turn_logs cost for
             # this owner+persona). Fail-soft to 0.0; replaces the old construction-
@@ -1676,6 +1746,10 @@ class RuntimeFactory:
         :meth:`build_conversation_loop`.
         """
         persona = self._load_persona(persona_id)
+        # Spec M4 (T5a): the free-tier gate — a FREE owner's agentic run resolves the
+        # free-only registry (agentic wires no preferred_model override, so the registry
+        # swap alone keeps the whole step-tier fallback walk free-only).
+        agentic_tier_registry, _ = self._plan_tier_selection()
         _scanner, scanned = self._scan_skills(persona)
         deferred_holder: list[SandboxFile] = []
         toolbox = await self._build_toolbox(
@@ -1692,8 +1766,10 @@ class RuntimeFactory:
             prompt_builder=PromptBuilder(),
             # Spec P9 (P9-D-1): step tiers come from _tier_for_step (D-06-6),
             # not this router — composed for Protocol parity with the chat loop.
-            router=PolicyRouter(tier_registry=self._tier_registry),
-            tier_registry=self._tier_registry,
+            # Spec M4 (T5a): the plan-resolved registry (free → free-only; paid/community
+            # → the paid tiers). Agentic step tiers all resolve through this registry.
+            router=PolicyRouter(tier_registry=agentic_tier_registry),
+            tier_registry=agentic_tier_registry,
             # Spec S1 (S1-D-7): injection audit sink (R5: backend-selected).
             audit_logger=self._resolve_audit_logger(),
             # Spec S3 (S3-D-2): the real consent store (empty ≡ DenyUnvettedConsent).
@@ -1739,7 +1815,7 @@ class RuntimeFactory:
             "title",
             override=(self._api_config.title_tier if self._api_config is not None else None),
         )
-        backend = self._tier_registry.get(title_tier)
+        backend = self._plan_tier_registry().get(title_tier)
         now = datetime.now(UTC)
         prompt = [
             ConversationMessage(

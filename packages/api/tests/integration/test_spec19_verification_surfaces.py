@@ -408,12 +408,21 @@ class TestSurface12FileWriteProducedFiles:
 
 
 class TestSurface14CreditsLowBalance:
-    """``GET /v1/me/credits`` returns ``low_balance=true`` when balance is
-    under the 10_000 threshold (D-11-12). Boundary cases: default balance is
-    above threshold; setting balance to 5_000 flips ``low_balance``.
+    """``GET /v1/me/credits`` low-balance warning — PER-PLAN threshold (Spec M4 T8).
+
+    The warning line is 20% of the caller's plan allowance (Free 60 / Plus 400 /
+    Pro 1200; absent subscription row = Free — the flat 10_000 threshold is retired,
+    D-11-12 amended). Boundary cases: a fresh free user's refreshed monthly allowance
+    ($3 = 300) is ABOVE the free line (60) — not "always low"; a balance forced under
+    the free line flips ``low_balance``.
     """
 
-    def test_default_balance_above_threshold(self, tmp_path: Path) -> None:
+    def test_fresh_free_user_monthly_allowance_is_above_threshold(self, tmp_path: Path) -> None:
+        """The REAL fresh-free-user journey, no seed: the GET fires the Spec M4 T6 lazy
+        refresh (NULL period ⇒ overwrite to the $3 monthly allowance), and 300 sits above
+        the free plan's 60-credit warning line — a free user is NOT permanently 'low'."""
+        from persona.billing.plans import default_plan
+
         ctx = _make_client_fixture(tmp_path, user_id="user_t23_cr1")
         if ctx is None:
             pytest.skip("APP_DATABASE_URL not set")
@@ -422,7 +431,9 @@ class TestSurface14CreditsLowBalance:
             resp = c.get("/v1/me/credits", headers=_auth(uid))
             assert resp.status_code == 200
             body = resp.json()
-            assert body["balance"] >= 10_000
+            # The refresh landed the plans-catalog free allowance (300 = $3), not the seed.
+            assert body["balance"] == default_plan().included_allowance_credits == 300
+            # 300 >= the free plan's per-plan line (60) → not low.
             assert body["low_balance"] is False
         finally:
             c.__exit__(None, None, None)
@@ -434,14 +445,18 @@ class TestSurface14CreditsLowBalance:
             pytest.skip("APP_DATABASE_URL not set")
         c, uid = ctx
         try:
-            # Force balance to 5_000 (below the 10_000 LOW_BALANCE_THRESHOLD).
+            # Force balance to 40 — below the FREE plan's per-plan line (60 = 20% of 300).
+            # The current-month allowance_period stamp isolates the Spec M4 T6 lazy refresh
+            # (which would otherwise overwrite this controlled balance back to 300) — the
+            # stamp isolates the REFRESH; the threshold itself is exercised for real.
             su = make_rls_engine(os.environ["DATABASE_URL"])
             with su.begin() as conn:
                 conn.execute(
                     text(
-                        "INSERT INTO credits (user_id, balance, updated_at) "
-                        "VALUES (:u, 5000, NOW()) "
-                        "ON CONFLICT (user_id) DO UPDATE SET balance = 5000"
+                        "INSERT INTO credits (user_id, balance, allowance_period, updated_at) "
+                        "VALUES (:u, 40, to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM'), NOW()) "
+                        "ON CONFLICT (user_id) DO UPDATE SET balance = 40, "
+                        "allowance_period = to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')"
                     ),
                     {"u": uid},
                 )
@@ -450,8 +465,8 @@ class TestSurface14CreditsLowBalance:
             resp = c.get("/v1/me/credits", headers=_auth(uid))
             assert resp.status_code == 200
             body = resp.json()
-            assert body["balance"] == 5_000
-            assert body["low_balance"] is True
+            assert body["balance"] == 40
+            assert body["low_balance"] is True  # 40 < 60, the free plan's warning line
         finally:
             c.__exit__(None, None, None)
             _cleanup_user(uid)

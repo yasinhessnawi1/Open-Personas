@@ -15,7 +15,6 @@ prefer the persona-core path.
 from __future__ import annotations
 
 from persona.credits import (
-    LOW_BALANCE_THRESHOLD,
     deduct,
     ensure_balance,
     get_balance,
@@ -23,10 +22,10 @@ from persona.credits import (
     list_usage,
     refund,
     require_credits,
+    wallet_snapshot,
 )
 
 __all__ = [
-    "LOW_BALANCE_THRESHOLD",
     "deduct",
     "ensure_balance",
     "get_balance",
@@ -34,4 +33,5 @@ __all__ = [
     "list_usage",
     "refund",
     "require_credits",
+    "wallet_snapshot",
 ]

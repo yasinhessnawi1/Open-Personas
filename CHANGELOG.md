@@ -11,6 +11,53 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Payments, plans & free tier (Spec M4, 2026-07-24)
+
+> Credits existed but could not be bought, and nothing stopped a free account
+> from burning paid models. M4 makes the wallet real: a two-bucket dollar ledger
+> (monthly allowance + purchasable PAYG lots), Stripe billing shipped dark
+> behind a flag, a Free/Plus/Pro plan ladder, and a free tier that can NEVER
+> reach a paid model on any LLM surface.
+
+#### Added
+- **Two-bucket dollar ledger** — the balance splits into a monthly *allowance*
+  bucket (overwrite-reset, no rollover) + purchasable *PAYG lots*
+  (`payg_grants`, per-lot 12-month expiry). Spend draws allowance first, then
+  lots FIFO (oldest-expiring); every existing idempotency/parity guarantee
+  carries over (migration 051, additive).
+- **Stripe billing, shipped dark** — checkout (subscribe Plus/Pro + one-time $5/$10/$25/$50
+  PAYG packs with Stripe Tax), customer portal, and a signature-verified webhook
+  lifecycle (bind/renew/cancel/past-due + exactly-once grants keyed on Stripe
+  event/invoice/payment-intent ids). Constructed ONLY when cloud + flag + key
+  (`PERSONA_BILLING_STRIPE_ENABLED`, default off — community never imports the SDK).
+- **Plan ladder + catalog** — Free ($0/$3 allowance), Plus ($15/$20), Pro
+  ($50/$60) + PAYG packs, in code (`persona.billing.plans`) with a `$`↔credit
+  presentation layer (1 credit = 1¢).
+- **Free tier with NO paid fallback** — a separate fail-closed free-only model
+  registry (`PERSONA_FREE_*_MODELS`) resolved per-request from the caller's
+  plan across EVERY LLM surface (chat, agentic, voice, background); the
+  `preferred_model` escape is disabled for free users; unconfigured → the call
+  fails, never a paid default. Exhaustion returns a structured 402 upgrade
+  prompt (product copy lives at the surface, not in core).
+- **Lazy monthly free refresh** — a free user's allowance overwrite-resets to
+  $3 on their first metered access each UTC month (guarded conditional UPDATE;
+  idempotent per month; paid users are never touched — their reset rides
+  `invoice.paid`). No cron.
+- **Pro opt-in auto-top-up** — off-session $10 charge on the saved card when a
+  Pro, opted-in balance crosses below $2 (hourly idempotency key → no double
+  charge; grant rides the PI-idempotent webhook; 3DS falls back to an
+  on-session prompt; fired off the hot path). Off by default (migration 052).
+- **Wallet surface** — `GET /v1/me/wallet`: allowance + period stamp, live PAYG
+  lots in FIFO order, total, plan + auto-top-up flag, and the per-plan
+  low-balance line.
+
+#### Changed
+- **Per-plan low-balance warning** — the flat 10 000-credit threshold is
+  retired; the line is 20% of the plan's included allowance (Free 60, Plus 400,
+  Pro 1200; absent subscription = Free).
+- **Production margin via env** — `PERSONA_CREDIT_MARKUP=2.0` is the documented
+  go-live setting (the code default stays 1.0 = pass-through; env-flip rollback).
+
 ### Universal real-cost metering & credit billing (Spec M3, 2026-07-15)
 
 > Most paid surfaces charged a flat fee (or nothing) regardless of what the

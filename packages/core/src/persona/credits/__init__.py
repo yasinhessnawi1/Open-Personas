@@ -16,7 +16,9 @@ Public surface mirrors the prior ``persona_api.services.credits_service``:
   (Spec M2 review, C1); ONLY the chat-turn worker's post-success billing uses
   it — every other caller keeps using ``deduct`` unchanged.
 * :func:`list_usage` / :func:`list_turn_usage` — paginated audit log views.
-* :data:`LOW_BALANCE_THRESHOLD` — UI warning threshold.
+* :func:`wallet_snapshot` — the two-bucket wallet read (Spec M4 T8). The flat
+  ``LOW_BALANCE_THRESHOLD`` is retired: the warning line is per-plan
+  (``persona.billing.plans.Plan.low_balance_threshold_credits``).
 
 The implementation is verbatim from ``persona_api.services.credits_service`` with
 one structural change: the SQLAlchemy table objects are defined locally on a
@@ -29,29 +31,37 @@ guards that the two table views agree.
 from __future__ import annotations
 
 from persona.credits.service import (
-    LOW_BALANCE_THRESHOLD,
     capture_up_to,
     capture_up_to_idempotent,
     deduct,
     deduct_idempotent,
     ensure_balance,
     get_balance,
+    grant_idempotent,
+    grant_payg_lot_idempotent,
     list_turn_usage,
     list_usage,
+    refresh_free_allowance_lazy,
     refund,
     require_credits,
+    reset_allowance_idempotent,
+    wallet_snapshot,
 )
 
 __all__ = [
-    "LOW_BALANCE_THRESHOLD",
     "capture_up_to",
     "capture_up_to_idempotent",
     "deduct",
     "deduct_idempotent",
     "ensure_balance",
     "get_balance",
+    "grant_idempotent",
+    "grant_payg_lot_idempotent",
     "list_turn_usage",
     "list_usage",
+    "refresh_free_allowance_lazy",
     "refund",
     "require_credits",
+    "reset_allowance_idempotent",
+    "wallet_snapshot",
 ]

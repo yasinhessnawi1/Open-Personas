@@ -22,9 +22,10 @@ from persona_api.editions.owner_resolver import (
 )
 
 if TYPE_CHECKING:
+    from persona_api.billing import StripeGateway
     from persona_api.config import APIConfig
 
-__all__ = ["build_credits_policy", "build_owner_resolver"]
+__all__ = ["build_credits_policy", "build_owner_resolver", "build_stripe_gateway"]
 
 
 def build_owner_resolver(config: APIConfig) -> OwnerResolver:
@@ -46,3 +47,24 @@ def build_credits_policy(config: APIConfig) -> CreditsPolicy:
     if config.edition is Edition.cloud:
         return MeteredCreditsPolicy(daily_cap=config.credits_max_per_day)
     return UnlimitedCreditsPolicy()
+
+
+def build_stripe_gateway(config: APIConfig) -> StripeGateway | None:
+    """The Stripe gateway when billing is ACTIVE, else ``None`` (Spec M4, T2a).
+
+    Mirrors :func:`build_credits_policy`'s edition seam: billing is constructed ONLY
+    when ``config.stripe_billing_active()`` (cloud + ``PERSONA_BILLING_STRIPE_ENABLED``
+    + a secret key). Community and flag-off return ``None`` — ZERO Stripe, and the
+    ``stripe`` SDK is never imported (``StripeGateway`` lazy-imports it, and this
+    factory only imports+constructs it on the active path). M4 ships dark until the
+    owner supplies live keys and flips the flag.
+    """
+    if not config.stripe_billing_active():
+        return None
+    from persona_api.billing import StripeGateway  # noqa: PLC0415 — active path only
+
+    return StripeGateway(
+        secret_key=config.stripe_secret_key,
+        publishable_key=config.stripe_publishable_key,
+        webhook_secret=config.stripe_webhook_secret,
+    )

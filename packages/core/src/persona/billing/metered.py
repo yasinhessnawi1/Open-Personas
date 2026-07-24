@@ -108,6 +108,61 @@ class LedgerPort(Protocol):
         cost_basis: str | None = None,
     ) -> tuple[int, int]: ...
 
+    def grant_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotent positive-delta grant to the allowance bucket (Spec M4, T1b).
+
+        The exactly-once grant the Stripe webhook rides (subscription renewal /
+        free refresh); a re-delivered event (same ``billing_key``) grants nothing.
+        """
+        ...
+
+    def reset_allowance_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        allowance: int,
+        allowance_period: str,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotent OVERWRITE of the allowance bucket to ``allowance`` (Spec M4, T3b).
+
+        The subscription-renewal reset (owner Decision 1: overwrite, no rollover), keyed
+        on the invoice id; a re-delivered ``invoice.paid`` resets exactly once.
+        """
+        ...
+
+    def grant_payg_lot_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        credit_amount: int,
+        reason: str,
+        source_billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        """Idempotently grant a PAYG lot (12-mo expiry) keyed on the PI id (Spec M4, T4a).
+
+        A one-time pack purchase grants a ``payg_grants`` lot (the SEPARATE PAYG bucket,
+        allowance untouched); a re-delivered ``payment_intent.succeeded`` grants one lot.
+        """
+        ...
+
 
 class ChargeResult(BaseModel):
     """The outcome of one :meth:`MeteredBilling.charge` (frozen boundary type).
@@ -357,6 +412,78 @@ class CoreCreditsLedger:
             reason=reason,
             billing_key=billing_key,
             daily_cap=self._daily_cap,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
+
+    def grant_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        amount: int,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        # Grants are not spend — no ``daily_cap`` (that guards deductions).
+        from persona.credits import grant_idempotent  # noqa: PLC0415
+
+        return grant_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            amount=amount,
+            reason=reason,
+            billing_key=billing_key,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
+
+    def reset_allowance_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        allowance: int,
+        allowance_period: str,
+        reason: str,
+        billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        from persona.credits import reset_allowance_idempotent  # noqa: PLC0415
+
+        return reset_allowance_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            allowance=allowance,
+            allowance_period=allowance_period,
+            reason=reason,
+            billing_key=billing_key,
+            cost_cents=cost_cents,
+            cost_basis=cost_basis,
+        )
+
+    def grant_payg_lot_idempotent(
+        self,
+        *,
+        rls_engine: Engine,
+        user_id: str,
+        credit_amount: int,
+        reason: str,
+        source_billing_key: str,
+        cost_cents: float | None = None,
+        cost_basis: str | None = None,
+    ) -> int:
+        from persona.credits import grant_payg_lot_idempotent  # noqa: PLC0415
+
+        return grant_payg_lot_idempotent(
+            rls_engine=rls_engine,
+            user_id=user_id,
+            credit_amount=credit_amount,
+            reason=reason,
+            source_billing_key=source_billing_key,
             cost_cents=cost_cents,
             cost_basis=cost_basis,
         )

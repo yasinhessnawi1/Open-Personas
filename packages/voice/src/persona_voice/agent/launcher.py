@@ -21,7 +21,7 @@ import asyncio
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
-from persona_runtime.tier import tier_registry_from_env
+from persona_runtime.tier import free_tier_registry_from_env, tier_registry_from_env
 
 from persona_voice.agent.runner import run_agent_session
 
@@ -73,6 +73,10 @@ class InProcessAgentLauncher:
         self._broadcaster_factory = broadcaster_factory
         self._embedder: Embedder | None = None
         self._tier_registry: TierRegistry | None = None
+        # Spec M4 (T5c): the free plan's free-only tier registry (cloud only). None ⇒ no
+        # gating (community / not configured) → paid tiers, byte-identical. A FREE caller's
+        # voice LLM resolves this (registry swap per call in build_agent_session).
+        self._free_tier_registry: TierRegistry | None = None
         # R6 (T8): the process-shared crisis encoder + its off-loop warm-up task, built
         # once like the embedder and injected into every call's VoiceTurnContext so the
         # voice safety gate composes the encoder (euphemistic/non-English recall).
@@ -110,6 +114,7 @@ class InProcessAgentLauncher:
                 config=self._config,
                 embedder=self._embedder,
                 tier_registry=self._tier_registry,
+                free_tier_registry=self._free_tier_registry,
                 crisis_encoder=self._crisis_encoder,
                 broadcaster_factory=self._broadcaster_factory,
             )
@@ -136,6 +141,12 @@ class InProcessAgentLauncher:
                 self._embedder = SentenceTransformerEmbedder(model_name=_BGE_MODEL, device="cpu")
             if self._tier_registry is None:
                 self._tier_registry = tier_registry_from_env()
+            # Spec M4 (T5c): build the free-only registry ONCE in the cloud edition (mirrors
+            # persona_api app.py). Community (not cloud) → stays None → no gating. Fail-closed:
+            # unconfigured PERSONA_FREE_*_MODELS ⇒ an empty registry (a free caller's tier get
+            # raises → the call fails rather than reaching a paid model).
+            if self._config.is_cloud and self._free_tier_registry is None:
+                self._free_tier_registry = free_tier_registry_from_env()
             if self._crisis_encoder is None:
                 # R6 (T8): lazy — the model loads at :meth:`warm` (off-loop), never on a
                 # call's first turn. Built only when enabled; disabled ⇒ lexical-only (V11).

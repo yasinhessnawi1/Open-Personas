@@ -399,6 +399,8 @@ def _body(error: str, detail: str, context: dict[str, str]) -> dict[str, Any]:
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the exception → HTTP-response handlers to ``app``."""
+    # Spec M4 (T5b): the free-tier fail-closed surface (an empty free registry raises this).
+    from persona_runtime.errors import TierNotConfiguredError
 
     @app.exception_handler(AuthenticationError)
     async def _auth(_: Request, exc: AuthenticationError) -> JSONResponse:
@@ -427,10 +429,15 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(CreditsExhaustedError)
     async def _credits(_: Request, exc: CreditsExhaustedError) -> JSONResponse:
-        return JSONResponse(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            content=_body("credits_exhausted", exc.message or "insufficient credits", exc.context),
-        )
+        # Spec M4 (T5b, Tension-5): a real upgrade prompt — the copy lives HERE (api layer),
+        # never the core "contact support" message. Rides M3's exhaustion cutoff; the
+        # structured ``action`` lets the web render the plan-appropriate CTA (Upgrade for a
+        # Free user, Add credits for a paid user). ``exc.context`` (balance) is preserved.
+        from persona_api.billing.messages import CREDITS_EXHAUSTED_DETAIL, UPGRADE_ACTION
+
+        body = _body("credits_exhausted", CREDITS_EXHAUSTED_DETAIL, exc.context)
+        body["action"] = UPGRADE_ACTION
+        return JSONResponse(status_code=status.HTTP_402_PAYMENT_REQUIRED, content=body)
 
     @app.exception_handler(DailySpendCapExceededError)
     async def _daily_cap_429(_: Request, exc: DailySpendCapExceededError) -> JSONResponse:
@@ -723,6 +730,29 @@ def register_exception_handlers(app: FastAPI) -> None:
                 exc.message or "model backend is not configured",
                 exc.context,
             ),
+            headers={"Retry-After": "30"},
+        )
+
+    @app.exception_handler(TierNotConfiguredError)
+    async def _tier_unavailable_503(_: Request, exc: TierNotConfiguredError) -> JSONResponse:
+        """No model tier resolves — the graceful surface, never a 500 (Spec M4, T5b).
+
+        Fires on the fail-closed free-tier path (a Free user whose ``PERSONA_FREE_*_MODELS``
+        is unconfigured → the T5a free registry is empty → ``get`` raises), and on a
+        misconfigured paid tier. Either way a first-class 503 + upgrade hint, never a leaked
+        stack trace / a silent paid completion. Type-only log (never the context).
+        """
+        from persona_api.billing.messages import (
+            FREE_CAPACITY_UNAVAILABLE_DETAIL,
+            UPGRADE_ACTION,
+        )
+
+        _log.warning("model tier unavailable ({kind})", kind=type(exc).__name__)
+        body = _body("model_capacity_unavailable", FREE_CAPACITY_UNAVAILABLE_DETAIL, {})
+        body["action"] = UPGRADE_ACTION
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=body,
             headers={"Retry-After": "30"},
         )
 

@@ -349,11 +349,17 @@ def test_parallel_fire_only_one_request_succeeds_and_deducts(
     # ``require_credits`` route gate calls ``ensure_balance`` which
     # inserts the default 100_000 row; we materialise it here so the
     # starting balance does not race with the 10 concurrent calls.
+    # Stamp allowance_period to the CURRENT UTC month (the same DB-authoritative key the
+    # Spec M4 T6 lazy refresh uses) so the route's ``require_credits`` refresh no-ops here
+    # — this test deliberately controls the starting balance (100_000) and asserts the
+    # concurrency/deduct behaviour, not the free-tier refresh (test-seed only).
     with su.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO credits (user_id, balance) VALUES (:i, 100000)"
-                " ON CONFLICT (user_id) DO UPDATE SET balance = 100000"
+                "INSERT INTO credits (user_id, balance, allowance_period) "
+                "VALUES (:i, 100000, to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')) "
+                "ON CONFLICT (user_id) DO UPDATE SET balance = 100000, "
+                "allowance_period = to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')"
             ),
             {"i": uid_a},
         )

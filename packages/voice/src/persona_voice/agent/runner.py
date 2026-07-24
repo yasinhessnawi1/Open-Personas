@@ -227,6 +227,52 @@ def _load_user_name(engine: Engine, user_id: str) -> str | None:
     return " ".join(parts) or None
 
 
+def _load_plan_code(engine: Engine, user_id: str) -> str:
+    """The caller's subscription ``plan_code`` (Spec M4, T5c) — raw SELECT, fail-safe to 'free'.
+
+    A raw ``SELECT`` on the ``subscription`` table (keeps persona-voice free of a persona-api
+    dependency — the layering line, mirrors :func:`_load_user_name`), resolved ONCE at session
+    setup (off the per-utterance path). Fail-SAFE: no row / any error ⇒ ``'free'`` (the
+    restrictive set), so a lookup miss can never open the paid tiers to a free caller.
+    """
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT plan_code FROM subscription WHERE user_id = :uid"),
+                {"uid": user_id},
+            ).first()
+    except Exception:  # noqa: BLE001 — a plan read must never break a call; default free (safe)
+        _logger.opt(exception=True).warning("voice: plan read failed; defaulting free (fail-safe)")
+        return "free"
+    if row is not None and row[0]:
+        return str(row[0])
+    return "free"
+
+
+def _select_voice_tier_registry(
+    *,
+    config: VoiceConfig,
+    tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+    rls_engine: Engine,
+    user_id: str,
+) -> TierRegistry:
+    """Plan-select the voice tier registry (Spec M4, T5c — the chat ``_plan_tier_selection`` twin).
+
+    A FREE caller (cloud + ``subscription.plan_code == 'free'``) resolves the FREE-ONLY
+    registry: voice wires no ``preferred_backend_provider``, so swapping the registry makes the
+    WHOLE voice LLM chain (generation ``mid`` + summariser/gate ``small``) free-only — no paid
+    fallback anywhere in the walk. Community (``free_tier_registry`` None) / paid → the injected
+    paid registry, byte-identical. Fail-closed: an empty free registry raises when a tier is
+    got (the call fails rather than reaching a paid model).
+    """
+    if free_tier_registry is None or not config.is_cloud:
+        return tier_registry  # gating off (community / not configured) → paid tiers, unchanged
+    if _load_plan_code(rls_engine, user_id) == "free":
+        return free_tier_registry
+    return tier_registry  # paid plan → full paid tiers
+
+
 def _load_core_block(
     engine: Engine, embedder: Embedder, persona_id: str, audit_root: Path
 ) -> str | None:
@@ -486,6 +532,7 @@ async def build_agent_session(
     config: VoiceConfig,
     embedder: Embedder | None = None,
     tier_registry: TierRegistry | None = None,
+    free_tier_registry: TierRegistry | None = None,
     crisis_encoder: CrisisScorer | None = None,
     core_config: PersonaCoreConfig | None = None,
     stt_config: StreamingSTTConfig | None = None,
@@ -539,6 +586,17 @@ async def build_agent_session(
 
     # --- session RLS engine + persona + stores (tenant-isolated) ---
     rls_engine = make_session_rls_engine(config.database_url, user_id=user_id)
+    # Spec M4 (T5c): free-tier no-paid-fallback — a FREE caller's voice LLM resolves the
+    # free-only registry (voice wires no preferred override, so the registry swap covers the
+    # whole generation + summariser/gate chain). Paid / community byte-identical. Resolved
+    # here (off the per-utterance loop) on the session RLS engine.
+    tier_registry = _select_voice_tier_registry(
+        config=config,
+        tier_registry=tier_registry,
+        free_tier_registry=free_tier_registry,
+        rls_engine=rls_engine,
+        user_id=user_id,
+    )
     persona = _load_persona(rls_engine, persona_id)
     stores = _build_stores(rls_engine, embedder, audit_root)
     # K6 (K6-D-6): resolve the caller's name ONCE at session setup (off the
@@ -1083,6 +1141,7 @@ async def run_agent_session(
     config: VoiceConfig,
     embedder: Embedder | None = None,
     tier_registry: TierRegistry | None = None,
+    free_tier_registry: TierRegistry | None = None,
     crisis_encoder: CrisisScorer | None = None,
     core_config: PersonaCoreConfig | None = None,
     broadcaster_factory: Callable[[VoiceRoom], DataChannelBroadcaster] | None = None,
@@ -1101,6 +1160,7 @@ async def run_agent_session(
         conversation_id=conversation_id,
         config=config,
         embedder=embedder,
+        free_tier_registry=free_tier_registry,
         tier_registry=tier_registry,
         crisis_encoder=crisis_encoder,
         core_config=core_config,

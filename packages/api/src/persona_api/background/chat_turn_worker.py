@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from persona_runtime.loop import ConversationLoop
     from sqlalchemy import Engine
 
+    from persona_api.billing import StripeGateway
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.initiative.verb_service import InitiativeVerbService
     from persona_api.jobs.queue import JobQueue
@@ -167,6 +168,7 @@ class ChatTurnRegistry:
         sink: ChatTurnSink,
         rls_engine: Engine | None = None,
         credits_policy: CreditsPolicy | None = None,
+        gateway: StripeGateway | None = None,
         credits_per_turn: int = 1,
         proportional_credits: bool = True,
         max_turn_credits: int = 500,
@@ -180,6 +182,10 @@ class ChatTurnRegistry:
         self._sink = sink
         self._engine = rls_engine
         self._credits_policy = credits_policy
+        # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
+        # after a deduct that CROSSES below $2). None → community/flag-off (no auto-top-up).
+        self._gateway = gateway
+        self._topup_tasks: set[asyncio.Task[None]] = set()
         self._credits_per_turn = credits_per_turn
         # Spec M2 (D-M2-5): proportional billing — max(floor, ceil(cost_cents))
         # at 1 credit = 1¢, computed in ``_turn_charge`` from the loop's
@@ -642,13 +648,20 @@ class ChatTurnRegistry:
         engine = self._engine
         amount, reason, cost_cents, cost_basis = self._turn_charge(loop)
         try:
-            policy.deduct(
+            new_balance = policy.deduct(
                 rls_engine=engine,
                 user_id=handle.owner_id,
                 amount=amount,
                 reason=reason,
                 cost_cents=cost_cents,
                 cost_basis=cost_basis,
+            )
+            # Spec M4 T7b: a successful deduct may have CROSSED the $2 floor — fire the Pro
+            # auto-top-up OFF the hot path (the turn's side effects below never wait on Stripe).
+            # ``old_balance = new_balance + amount`` (the pre-deduct total); the crossing guard
+            # + Pro/opted-in gate live in ``maybe_auto_topup`` (a no-op for everyone else).
+            self._schedule_auto_topup(
+                user_id=handle.owner_id, old_balance=new_balance + amount, new_balance=new_balance
             )
         except CreditsExhaustedError:
             if self._proportional_credits and reason != _FLAT_CHARGE_REASON:
@@ -677,6 +690,43 @@ class ChatTurnRegistry:
                 conv=handle.conversation_id,
                 amount=amount,
             )
+
+    def _schedule_auto_topup(self, *, user_id: str, old_balance: int, new_balance: int) -> None:
+        """Fire the Pro auto-top-up trigger OFF the hot path (Spec M4, T7b).
+
+        Detaches a task that runs :func:`maybe_auto_topup` on a worker thread
+        (``asyncio.to_thread``) so the Stripe round-trip never blocks the event loop or the
+        turn's completion. The trigger is a no-op for everyone except a Pro, opted-in user who
+        just crossed below $2 (the guards live in the trigger). Community/flag-off
+        (``gateway is None``) → not scheduled. Any error inside is swallowed (a completed turn
+        must never be broken by a billing side effect); the task is tracked to avoid GC.
+        """
+        if self._gateway is None or self._engine is None:
+            return
+        gateway = self._gateway
+        engine = self._engine
+
+        async def _run() -> None:
+            from persona_api.billing.autotopup import maybe_auto_topup  # noqa: PLC0415
+
+            try:
+                await asyncio.to_thread(
+                    maybe_auto_topup,
+                    rls_engine=engine,
+                    gateway=gateway,
+                    user_id=user_id,
+                    old_balance=old_balance,
+                    new_balance=new_balance,
+                )
+            except Exception:  # noqa: BLE001 — a billing side effect must never break the turn
+                _log.opt(exception=True).warning("auto-top-up task failed for owner={}", user_id)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            return  # no running loop (never on the async completion path) — skip the convenience
+        self._topup_tasks.add(task)
+        task.add_done_callback(self._topup_tasks.discard)
 
     def _capture_shortfall(
         self,
