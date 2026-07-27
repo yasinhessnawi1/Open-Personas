@@ -84,7 +84,7 @@ export function ConversationCalendar({
             <SheetTitle className="min-w-0 flex-1 truncate font-heading text-base font-semibold tracking-tight">
               {t("title", { name: personaName })}
             </SheetTitle>
-            <span className="mr-6 shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+            <span className="type-caption mr-6 shrink-0 text-muted-foreground">
               {t("thisChat")}
             </span>
           </header>

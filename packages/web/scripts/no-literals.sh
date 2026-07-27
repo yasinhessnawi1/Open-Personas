@@ -42,6 +42,41 @@ ALLOWLIST=(
   'src/components/ui/button.tsx:31'                 # text-[0.8rem] — button sm sizing (F2 T01 audit)
   'src/components/chat/output/highlighted-code.tsx:102'  # F4 T07 — github-dark Shiki theme container bg matches the inline pre rendered by codeToHtml
   'src/components/chat/output/highlighted-code.tsx:118'  # F4 T07 — github-dark plain-fallback bg+fg before Shiki tokenises
+  # --- typography-sizing retokenise sweep (no-literals gate closure) ---
+  # Sans-serif count badges (item/persona/memory counts): tabular-nums, NOT
+  # font-mono, NOT uppercase. .type-caption would wrongly swap the family to
+  # Geist Mono; .type-ui/.type-body don't express the deliberately smaller
+  # 11px badge size. Same exact pattern repeats 3x.
+  'src/components/connectors/connectors-manager.tsx:185'  # text-[11px] — category item-count badge
+  'src/components/activity/review.tsx:141'                # text-[11px] — section item-count badge (same pattern)
+  'src/components/persona/persona-memories-modal.tsx:80'  # text-[11px] — memory-count badge (same pattern)
+  # Sans-serif status pills (connector card): title-case translated copy
+  # ("Checking…", "Connected", "Coming soon"). Not mono, not uppercase —
+  # .type-caption would force both uppercase AND a Geist Mono family swap.
+  'src/components/connectors/connector-card.tsx:71'  # text-[11px] — "checking" state pill
+  'src/components/connectors/connector-card.tsx:75'  # text-[11px] — "connected" state pill
+  'src/components/connectors/connector-card.tsx:80'  # text-[11px] — "coming soon" state pill
+  # Sans-serif 13px segmented-toggle / inline label text: sits between
+  # .type-ui (14px) and text-xs (12px) as a deliberate toggle-button size;
+  # not mono, so .type-code is the wrong family.
+  'src/components/artifacts/artifact-gallery.tsx:385'  # text-[13px] — segmented-control button label (default size)
+  'src/components/memory/memory-view.tsx:60'           # text-[13px] — mode-toggle button label (same pattern)
+  'src/components/activity/review.tsx:457'             # text-[13px] — upcoming-card persona label (same pattern)
+  # Sans-serif semibold uppercase status Pill (attention/critical/good/
+  # scheduled tags): deliberately bold sans, not mono — .type-caption would
+  # swap the family to Geist Mono and drop the font-semibold weight that
+  # gives the pill its visual loudness.
+  'src/components/activity/review.tsx:86'   # text-[10px] — Pill component (tag/status label)
+  # Fraunces-italic editorial pullquotes (persona's own words, voiced line):
+  # text-[0.95rem] sits between .type-ui (0.875rem) and .type-heading
+  # (1.5rem) at the heading FAMILY, which no .type-* token expresses.
+  'src/components/activity/review.tsx:210'  # text-[0.95rem] — WaitingCard voiced pullquote
+  'src/components/activity/review.tsx:346'  # text-[0.95rem] — IdeaCard voiced pullquote (same pattern)
+  # Sans-serif footer key-hint bar: wraps translated hint copy in the default
+  # sans family (child <kbd> elements carry their own font-mono); the
+  # wrapper's text-[11px] can't move to a mono .type-* without changing the
+  # hint text's family too.
+  'src/components/shell/command-palette.tsx:545'  # text-[11px] — footer key-hint bar wrapper
 )
 
 # Known-legacy entries: the audit-named text-[0.65rem] uses awaiting close.

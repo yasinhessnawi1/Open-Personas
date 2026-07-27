@@ -117,7 +117,7 @@ export function PersonaMemoriesModal({
                       <p className="min-w-0 flex-1 truncate text-sm font-medium">
                         {m.name}
                       </p>
-                      <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                      <span className="type-caption normal-case tracking-normal shrink-0 text-muted-foreground">
                         {format.dateTime(new Date(m.created_at), {
                           dateStyle: "medium",
                         })}
@@ -140,7 +140,7 @@ export function PersonaMemoriesModal({
               </ul>
             )}
             {data && data.total > data.items.length ? (
-              <p className="pt-3 text-center font-mono text-[11px] text-muted-foreground">
+              <p className="type-caption normal-case tracking-normal pt-3 text-center text-muted-foreground">
                 {t("more", { count: data.total - data.items.length })}
               </p>
             ) : null}

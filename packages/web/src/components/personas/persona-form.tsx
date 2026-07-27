@@ -528,7 +528,7 @@ function Field({
   return (
     // biome-ignore lint/a11y/noLabelWithoutControl: the form control is passed as children
     <label className="flex flex-col gap-1.5">
-      <span className="font-mono text-[11px] text-muted-foreground">
+      <span className="type-caption normal-case tracking-normal text-muted-foreground">
         {label}
       </span>
       {hint ? (
@@ -617,7 +617,7 @@ function ListEditor({
             {locked ? (
               <span
                 role="img"
-                className="mt-1 grid size-6 shrink-0 place-items-center font-mono text-[10px] text-muted-foreground"
+                className="type-caption mt-1 grid size-6 shrink-0 place-items-center text-muted-foreground"
                 title={lockedLabel}
                 aria-label={lockedLabel}
               >
@@ -758,7 +758,7 @@ function EpistemicChip({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label="epistemic marker"
-      className="mt-0.5 h-6 shrink-0 rounded-full border border-border bg-background px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+      className="type-caption mt-0.5 h-6 shrink-0 rounded-full border border-border bg-background px-2 text-muted-foreground"
     >
       {EPISTEMIC_OPTIONS.map((opt) => (
         <option key={opt} value={opt}>
@@ -781,9 +781,7 @@ function MetaField({
   return (
     // biome-ignore lint/a11y/noLabelWithoutControl: the control is passed as children
     <label className="flex items-center gap-1.5">
-      <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-        {label}
-      </span>
+      <span className="type-caption text-muted-foreground">{label}</span>
       {children}
     </label>
   );

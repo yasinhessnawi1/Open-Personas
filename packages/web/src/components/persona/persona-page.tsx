@@ -190,7 +190,7 @@ export function PersonaPage({
         </Link>
         <span
           className={cn(
-            "ml-auto flex items-center gap-1.5 font-mono text-[11px]",
+            "type-caption normal-case tracking-normal ml-auto flex items-center gap-1.5",
             status === "error" ? "text-destructive" : "text-muted-foreground",
           )}
           data-slot="save-status"
@@ -292,7 +292,7 @@ export function PersonaPage({
         {/* right rail (kit): at-a-glance · quick actions · danger zone */}
         <aside className="mt-6 flex flex-col gap-4 lg:sticky lg:top-14 lg:mt-0 lg:max-h-[calc(100vh-4.5rem)] lg:self-start lg:overflow-y-auto">
           <section className="rounded-xl border border-border bg-card p-4">
-            <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+            <h3 className="type-caption mb-3 text-muted-foreground">
               {t("glance")}
             </h3>
             <dl className="flex flex-col gap-2 text-sm">
@@ -349,7 +349,7 @@ export function PersonaPage({
           </section>
 
           <section className="rounded-xl border border-border bg-card p-4">
-            <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+            <h3 className="type-caption mb-3 text-muted-foreground">
               {t("quickActions")}
             </h3>
             <div className="flex flex-col gap-2">
@@ -391,7 +391,7 @@ export function PersonaPage({
           </section>
 
           <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
-            <h3 className="mb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-destructive">
+            <h3 className="type-caption mb-2 text-destructive">
               {t("dangerZone")}
             </h3>
             <p className="mb-3 text-sm text-muted-foreground">

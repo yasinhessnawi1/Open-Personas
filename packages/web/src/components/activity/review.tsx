@@ -211,7 +211,7 @@ function WaitingCard({
           {item.title}
         </p>
         {item.detail ? (
-          <p className="font-mono text-[11px] text-muted-foreground">
+          <p className="type-caption normal-case tracking-normal text-muted-foreground">
             {item.detail}
           </p>
         ) : null}
@@ -263,7 +263,7 @@ function StuckCard({
         </div>
         <p className="type-body">{item.title}</p>
         {item.detail ? (
-          <p className="font-mono text-[11px] text-destructive">
+          <p className="type-caption normal-case tracking-normal text-destructive">
             {item.detail}
           </p>
         ) : null}
@@ -347,7 +347,7 @@ function IdeaCard({
           {item.title}
         </p>
         {item.detail ? (
-          <p className="font-mono text-[11px] text-muted-foreground">
+          <p className="type-caption normal-case tracking-normal text-muted-foreground">
             {item.detail}
           </p>
         ) : null}
@@ -446,7 +446,7 @@ export function Review({
                     : undefined
                 }
               >
-                <p className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                <p className="type-caption normal-case tracking-normal tabular-nums text-muted-foreground">
                   {new Date(u.fire_at).toLocaleString(locale, {
                     weekday: "short",
                     hour: "2-digit",

@@ -466,7 +466,7 @@ export function CommandPalette({ data }: { data: SidebarData }) {
               aria-controls={listId}
               className="min-w-0 flex-1 bg-transparent type-body text-foreground outline-none placeholder:text-muted-foreground"
             />
-            <kbd className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            <kbd className="type-caption normal-case tracking-normal rounded border border-border px-1.5 py-0.5 text-muted-foreground">
               esc
             </kbd>
           </div>
@@ -484,7 +484,7 @@ export function CommandPalette({ data }: { data: SidebarData }) {
             ) : (
               grouped.map(({ group, items, flatIndex }) => (
                 <div key={group} className="mb-1">
-                  <p className="px-2.5 pt-2 pb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                  <p className="type-caption px-2.5 pt-2 pb-1 text-muted-foreground">
                     {t(group)}
                   </p>
                   {items.map((item) => {

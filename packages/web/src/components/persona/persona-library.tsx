@@ -45,7 +45,7 @@ export function PersonaLibrary({ personas }: { personas: PersonaSummary[] }) {
           className="h-10 w-full rounded-full border border-border bg-background pl-9 pr-4 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
       </div>
-      <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
+      <p className="type-caption text-muted-foreground">
         {t("count", { count: visible.length })}
       </p>
       <Grid cols={{ base: 1, sm: 2, lg: 3 }} gap={4}>

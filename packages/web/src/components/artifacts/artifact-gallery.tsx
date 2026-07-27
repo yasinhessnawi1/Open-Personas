@@ -253,7 +253,7 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
             onChange={setTypeFilter}
             ariaLabel={t("typeLabel")}
           />
-          <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+          <span className="type-caption ml-auto text-muted-foreground">
             {t("countOf", { shown: items.length, total: initial.total })}
           </span>
         </div>
@@ -307,7 +307,7 @@ export function ArtifactGallery({ personaId, initial }: ArtifactGalleryProps) {
                   <Dialog.Title className="min-w-0 flex-1 truncate font-heading text-base font-semibold">
                     {displayName(preview)}
                   </Dialog.Title>
-                  <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  <span className="type-caption shrink-0 rounded border border-border px-1.5 py-0.5 text-muted-foreground">
                     {extBadge(preview)}
                   </span>
                 </div>
@@ -508,7 +508,7 @@ function FilePreview({
           {state.text}
         </pre>
         {state.truncated ? (
-          <p className="border-border border-t px-5 py-2 text-center font-mono text-[10px] text-muted-foreground">
+          <p className="type-caption normal-case tracking-normal border-border border-t px-5 py-2 text-center text-muted-foreground">
             {`preview truncated · download ${t} for the full file`}
           </p>
         ) : null}
@@ -608,7 +608,7 @@ function ArtifactTile({
                   className="size-9 text-muted-foreground"
                   aria-hidden="true"
                 />
-                <span className="rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                <span className="type-caption rounded border border-border bg-background px-1.5 py-0.5 text-muted-foreground">
                   {extBadge(item)}
                 </span>
               </span>
@@ -617,7 +617,7 @@ function ArtifactTile({
         </div>
         <div className="flex flex-col gap-0.5 px-3 py-2.5 text-left">
           <span className="truncate text-sm font-medium">{name}</span>
-          <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-muted-foreground">
+          <span className="type-caption text-muted-foreground">
             {formatBytes(item.size_bytes)}
             {item.metadata?.source
               ? ` · ${t(`source.${item.metadata.source}`)}`
