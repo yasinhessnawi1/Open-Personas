@@ -225,3 +225,43 @@ def test_drain_still_awaits_in_flight_jobs_after_a_claim_error() -> None:
 
     asyncio.run(scenario())
     assert finished.is_set(), "in-flight work must still complete during a claim-error drain"
+
+
+# --- R9-049: maintenance-sweep DB failures must not crash the worker loop ----
+# Mirrors R9-043: unlike the scheduler-tick/catalog-sync calls in the same
+# loop (already `except Exception … must not crash the worker loop`),
+# `_maybe_run_maintenance` -> `run_maintenance` was UNGUARDED against DB
+# errors — a DB drop during the sweep propagated straight out of `run()`, the
+# same crash shape R9-043 fixed for `claim()`.
+
+
+def test_maintenance_error_does_not_crash_the_loop() -> None:
+    worker = _worker(poll_interval_seconds=0.01, poll_jitter_seconds=0.0)
+    queue = _mock_queue()
+    queue.reclaim_expired.side_effect = OperationalError("reclaim", {}, Exception("conn dropped"))
+
+    def _claim_then_drain(**_kw: object) -> list[object]:
+        worker.request_drain()
+        return []
+
+    queue.claim.side_effect = _claim_then_drain
+    worker._queue = queue
+
+    asyncio.run(worker.run(install_signal_handlers=False))  # must not raise
+
+    assert worker._draining.is_set()
+    assert queue.reclaim_expired.called, "sanity: maintenance actually ran and hit the DB error"
+
+
+def test_maintenance_error_still_updates_cadence_clock() -> None:
+    """A failed sweep must not spin hot retrying every loop iteration — the
+    cadence clock advances even on failure, same as the other guarded
+    periodic tasks (scheduler tick, catalog sync, ...)."""
+    worker = _worker()
+    queue = _mock_queue()
+    queue.reclaim_expired.side_effect = OperationalError("reclaim", {}, Exception("conn dropped"))
+    worker._queue = queue
+
+    worker._maybe_run_maintenance()  # must not raise
+
+    assert worker._last_maintenance > 0.0

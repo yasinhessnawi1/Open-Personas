@@ -337,6 +337,83 @@ class TestCancelledErrorDegrade:
         assert raised, "genuine external cancellation must still raise CancelledError"
 
 
+# Section: R9-049 — _reopen() shares R9-042's unguarded connect shape
+#
+# The R8 reconnect-on-401 path (_reopen, called from _reauth_and_reconnect) opens
+# a fresh transport the exact same way connect() does — a refused/dropped
+# reconnect target surfaces as a bare CancelledError too. Mirrors
+# TestCancelledErrorDegrade above, but drives _reopen() directly (the state a
+# post-401 reconnect attempt is in: previously connected, headers refreshed).
+
+
+class TestReopenCancelledErrorDegrade:
+    """R9-049: a refused reconnect target must degrade (return None,
+    fail-closed) — never crash uncaught as a bare CancelledError."""
+
+    @pytest.mark.asyncio
+    async def test_reopen_degrades_on_refused_connection(self) -> None:
+        port = _unused_tcp_port()
+        client = MCPClient(server_name="gh", server_url=f"http://127.0.0.1:{port}/mcp")
+        # The post-401 state _reauth_and_reconnect leaves us in before calling
+        # _reopen(): was connected, headers just refreshed by the reauth callback.
+        client._connected = True
+        client._headers = {"Authorization": "Bearer NEW"}
+        # No exception — this is exactly what crashed before the fix (a bare
+        # CancelledError propagating straight out of _reopen()).
+        result = await client._reopen()
+        assert result is None
+        assert not client.is_connected
+
+    @pytest.mark.asyncio
+    async def test_reopen_recovers_after_refused_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A graceful degrade must leave the client reusable for a later reconnect.
+        port = _unused_tcp_port()
+        client = MCPClient(server_name="gh", server_url=f"http://127.0.0.1:{port}/mcp")
+        client._connected = True
+        assert await client._reopen() is None
+        assert not client.is_connected
+
+        _patch_sdk(monkeypatch, tools=["search"])
+        session = await client._reopen()
+        assert session is not None
+        assert client.is_connected
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_reopen_genuine_task_cancellation_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The invariant: a genuinely-cancelled OUTER task calling _reopen()
+        still raises CancelledError — the fix must never swallow a real cancel."""
+        import mcp
+        import mcp.client.streamable_http as shttp
+
+        never_connects = asyncio.Event()
+
+        @asynccontextmanager
+        async def fake_transport_hangs(_url: str, **_kwargs: Any) -> Any:
+            await never_connects.wait()
+            yield (MagicMock(), MagicMock(), MagicMock())  # pragma: no cover — unreachable
+
+        monkeypatch.setattr(shttp, "streamablehttp_client", fake_transport_hangs)
+        monkeypatch.setattr(mcp, "ClientSession", MagicMock())
+
+        client = MCPClient(server_name="hang", server_url="https://slow/mcp")
+        client._connected = True
+        task = asyncio.create_task(client._reopen())
+        await asyncio.sleep(0.05)  # let it get stuck inside transport __aenter__
+        assert not task.done(), "expected the _reopen() task to still be hung"
+        task.cancel()
+        raised = False
+        try:
+            await task
+        except asyncio.CancelledError:
+            raised = True
+        assert raised, "genuine external cancellation must still raise CancelledError"
+
+
 # Section: load_mcp_clients helper
 
 

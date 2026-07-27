@@ -350,10 +350,19 @@ class Worker:
             _log.info("drained cleanly", finished=len(done))
 
     def _maybe_run_maintenance(self) -> None:
-        """Run the maintenance sweep if its cadence has elapsed (monotonic clock)."""
+        """Run the maintenance sweep if its cadence has elapsed (monotonic clock).
+
+        Guarded the same way every other periodic task in this loop is
+        (scheduler tick, catalog sync, ...): a DB failure during the sweep is
+        logged, never crashes the loop — R9-049, the sibling of R9-043's
+        claim() guard (a DB drop during maintenance crashed the same way).
+        """
         elapsed = time.monotonic() - self._last_maintenance
         if elapsed >= self._maintenance_interval:
-            self.run_maintenance()
+            try:
+                self.run_maintenance()
+            except Exception:  # noqa: BLE001 — a maintenance failure must not crash the worker loop
+                _log.exception("maintenance sweep failed", worker_id=self._worker_id)
             self._last_maintenance = time.monotonic()
 
     def _maybe_run_scheduler_tick(self) -> None:

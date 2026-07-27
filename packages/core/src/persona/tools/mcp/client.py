@@ -331,7 +331,16 @@ class MCPClient:
             return await self._reopen()
 
     async def _reopen(self) -> ClientSession | None:
-        """Tear down the current transport and reopen it with the refreshed headers."""
+        """Tear down the current transport and reopen it with the refreshed headers.
+
+        Shares R9-042's unguarded-connect shape with :meth:`connect` — a
+        refused/dropped reconnect target (e.g. an OAuth MCP server whose
+        endpoint drops mid-session) surfaces here the same way: a BARE
+        :class:`asyncio.CancelledError` from anyio task-group teardown, not
+        the real error (R9-049). Mirrors :meth:`connect`'s classify-then-
+        degrade handling via :meth:`_drain_after_cancelled_connect` /
+        :func:`_first_non_cancelled_leaf` instead of inventing a new shape.
+        """
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
@@ -348,6 +357,23 @@ class MCPClient:
         stack = AsyncExitStack()
         try:
             session, _tools = await self._open_session(stack, streamablehttp_client, ClientSession)
+        except asyncio.CancelledError:
+            # R9-049 (mirrors R9-042): drain the exit stack to classify. A real
+            # failure underneath degrades fail-closed, same as the Exception
+            # branch below; a clean drain means genuine external
+            # cancellation — re-raise, never swallow it.
+            real_error = await self._drain_after_cancelled_connect(stack)
+            if real_error is None:
+                raise
+            self._exit_stack = None
+            self._session = None
+            self._connected = False
+            _logger.warning(
+                "mcp reconnect failed",
+                server=self._server_name,
+                error=type(real_error).__name__,
+            )
+            return None
         except Exception as e:  # noqa: BLE001 — a failed reconnect is fail-closed
             await stack.aclose()
             self._exit_stack = None
