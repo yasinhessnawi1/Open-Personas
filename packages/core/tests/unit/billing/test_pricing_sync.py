@@ -11,21 +11,32 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from persona.billing.pricing_registry import registry_keys
 
 
-def _pricing_table_path() -> Path:
+def _find_pricing_table() -> Path | None:
     """Locate ``docs/pricing/pricing-table.md`` by ascending from this file.
 
-    Robust across the worktree layout (``docs`` is a symlink to the main
-    checkout) and CI — ``exists()`` follows the symlink.
+    Returns ``None`` when the table is not on disk. ``docs/`` is intentionally
+    gitignored (private IP, same tier as ``.env``), so the human pricing table
+    is present in a local checkout but ABSENT in a fresh CI runner. The
+    registry↔docs sync is therefore a LOCAL-only invariant (like the R-19-1
+    filesystem audit): the tests below run it where ``docs/`` exists and
+    ``pytest.skip`` on a CI runner that legitimately has no ``docs/`` tree,
+    rather than failing on a file the repo deliberately never ships.
     """
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "docs" / "pricing" / "pricing-table.md"
         if candidate.exists():
             return candidate
-    msg = "docs/pricing/pricing-table.md not found ascending from the test file"
-    raise FileNotFoundError(msg)
+    return None
+
+
+_SKIP_NO_DOCS = (
+    "docs/pricing/pricing-table.md not on disk (docs/ is gitignored); "
+    "registry↔docs pricing sync is a local-only check, not a CI gate"
+)
 
 
 def _docs_surface_keys(table: str) -> set[tuple[str, str]]:
@@ -49,7 +60,10 @@ def _docs_surface_keys(table: str) -> set[tuple[str, str]]:
 
 
 def test_registry_and_docs_pricing_table_are_in_sync() -> None:
-    docs_keys = _docs_surface_keys(_pricing_table_path().read_text(encoding="utf-8"))
+    path = _find_pricing_table()
+    if path is None:
+        pytest.skip(_SKIP_NO_DOCS)
+    docs_keys = _docs_surface_keys(path.read_text(encoding="utf-8"))
     code_keys = registry_keys()
     missing_in_docs = code_keys - docs_keys
     orphan_in_docs = docs_keys - code_keys
@@ -59,4 +73,7 @@ def test_registry_and_docs_pricing_table_are_in_sync() -> None:
 
 def test_docs_table_is_non_empty() -> None:
     # Guards the parser against silently matching an empty set against an empty set.
-    assert _docs_surface_keys(_pricing_table_path().read_text(encoding="utf-8"))
+    path = _find_pricing_table()
+    if path is None:
+        pytest.skip(_SKIP_NO_DOCS)
+    assert _docs_surface_keys(path.read_text(encoding="utf-8"))
