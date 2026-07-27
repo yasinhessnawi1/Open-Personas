@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from persona.backends._tool_shim import (
     ShimState,
+    new_shim_state,
     parse_tool_call_delta,
     parse_tool_calls,
     render_tool_instructions,
@@ -105,6 +106,12 @@ class HFLocalBackend:
         self._load_lock = asyncio.Lock()
         self._model: Any = None
         self._tokenizer: Any = None
+        # R9-046: carries the shim's synthetic call_id numbering forward
+        # across rounds of one multi-round agentic turn. This instance is
+        # cached + reused by the runtime's TierRegistry for the life of the
+        # process, so a monotonically-increasing counter here never resets
+        # mid-turn (a strict superset of "unique within one turn").
+        self._shim_call_seq = 0
         _LOG.debug(
             "constructed",
             provider="local",
@@ -301,7 +308,11 @@ class HFLocalBackend:
         )
         thread.start()
 
-        shim_state: ShimState | None = ShimState() if tools else None
+        # R9-046: resume synthetic call_id numbering from the prior round
+        # instead of resetting to shim-1 every round.
+        shim_state: ShimState | None = (
+            new_shim_state(starting_call_seq=self._shim_call_seq) if tools else None
+        )
         completion_tokens = 0
         try:
             async for text in streamer:
@@ -317,6 +328,10 @@ class HFLocalBackend:
         finally:
             cancel_event.set()
             thread.join(timeout=5.0)
+            if shim_state is not None:
+                # Persist this round's final call_seq so the next round
+                # (same backend instance) continues numbering forward.
+                self._shim_call_seq = shim_state.call_seq
         yield StreamChunk(
             delta="",
             is_final=True,

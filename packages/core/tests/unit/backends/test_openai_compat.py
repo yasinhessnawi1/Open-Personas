@@ -820,6 +820,45 @@ class TestOpenAIStream:
         assert finals[0].usage is not None
         assert finals[0].usage.total_tokens == 10
 
+    @pytest.mark.asyncio
+    async def test_shim_call_ids_unique_across_rounds(self) -> None:
+        """R9-046: a multi-round tool-calling turn must not re-mint ``shim-1``.
+
+        The runtime's agentic loop calls ``chat_stream`` once per LLM round
+        on the SAME (cached, reused) backend instance, feeding the prior
+        round's tool result back in. Before the fix, each call constructed
+        a fresh ``ShimState()`` so round 2's first synthetic call_id
+        collided with round 1's (``shim-1`` both times).
+        """
+        # whisper isn't in groq's native-tools allow-list → shim path.
+        backend = OpenAICompatibleBackend(_config("groq", model="whisper-large-v3"))
+        tools = [ToolSpec(name="web_search", description="search", parameters={})]
+
+        async def _stream_one_round(payload: str) -> str:
+            chunks_in = [_openai_stream_chunk(content=payload)]
+            with patch.object(
+                backend._openai.chat.completions,  # type: ignore[union-attr]
+                "create",
+                new=AsyncMock(return_value=_async_iter(chunks_in)),
+            ):
+                collected: list[StreamChunk] = []
+                async for c in backend.chat_stream([_user("hi")], tools=tools):
+                    collected.append(c)
+            deltas = [c.tool_call_delta for c in collected if c.tool_call_delta is not None]
+            assert len(deltas) == 1
+            call_id = deltas[0].call_id
+            assert call_id is not None
+            return call_id
+
+        round1_id = await _stream_one_round('{"tool": "web_search", "args": {"query": "a"}}')
+        round2_id = await _stream_one_round('{"tool": "web_search", "args": {"query": "b"}}')
+
+        assert round1_id == "shim-1"
+        # Round 2 must NOT reuse round 1's id — a fresh ShimState() per
+        # round would emit "shim-1" again here.
+        assert round2_id != round1_id
+        assert round2_id == "shim-2"
+
 
 # -----------------------------------------------------------------------------
 # Streaming — Anthropic

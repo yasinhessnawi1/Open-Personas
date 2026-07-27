@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from persona.backends._tool_shim import (
     ShimState,
+    new_shim_state,
     parse_tool_call_delta,
     parse_tool_calls,
     render_tool_instructions,
@@ -228,6 +229,47 @@ class TestParseToolCallDelta:
         assert state.brace_depth == 1
         _, delta = parse_tool_call_delta(' "x", "args": {}}', state)
         assert delta is not None
+
+
+class TestNewShimState:
+    """R9-046: synthetic call_id numbering must be resumable across rounds."""
+
+    def test_default_reproduces_original_single_round_numbering(self) -> None:
+        state = new_shim_state()
+        _, delta1 = parse_tool_call_delta('{"tool": "a", "args": {}}', state)
+        _, delta2 = parse_tool_call_delta('{"tool": "b", "args": {}}', state)
+        assert delta1 is not None
+        assert delta2 is not None
+        assert delta1.call_id == "shim-1"
+        assert delta2.call_id == "shim-2"
+
+    def test_seeded_state_resumes_numbering_from_prior_round(self) -> None:
+        # Round 1: a fresh backend-instance counter starts at 0.
+        round1 = new_shim_state(starting_call_seq=0)
+        _, delta1 = parse_tool_call_delta('{"tool": "a", "args": {}}', round1)
+        assert delta1 is not None
+        assert delta1.call_id == "shim-1"
+
+        # Round 2: the backend threads round1's final call_seq back in —
+        # a fresh ShimState() (call_seq reset to 0) would collide on
+        # "shim-1" again; the seeded state must not.
+        round2 = new_shim_state(starting_call_seq=round1.call_seq)
+        _, delta2 = parse_tool_call_delta('{"tool": "b", "args": {}}', round2)
+        assert delta2 is not None
+        assert delta2.call_id == "shim-2"
+        assert delta2.call_id != delta1.call_id
+
+    def test_three_rounds_never_collide(self) -> None:
+        seq = 0
+        seen_ids: list[str] = []
+        for tool_name in ("a", "b", "c"):
+            state = new_shim_state(starting_call_seq=seq)
+            _, delta = parse_tool_call_delta(f'{{"tool": "{tool_name}", "args": {{}}}}', state)
+            assert delta is not None
+            seen_ids.append(delta.call_id)
+            seq = state.call_seq  # thread forward, as each backend does post-round
+        assert seen_ids == ["shim-1", "shim-2", "shim-3"]
+        assert len(set(seen_ids)) == 3
 
 
 @pytest.mark.parametrize(

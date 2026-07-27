@@ -26,6 +26,7 @@ from persona.schema.tools import ToolCall
 
 __all__ = [
     "ShimState",
+    "new_shim_state",
     "parse_tool_call_delta",
     "parse_tool_calls",
     "render_tool_instructions",
@@ -203,6 +204,39 @@ class ShimState:
     call_seq: int = 0
     pending_block_start: int = -1
     _emitted_text_len: int = field(default=0, repr=False)
+
+
+def new_shim_state(*, starting_call_seq: int = 0) -> ShimState:
+    """Construct a :class:`ShimState` for one LLM round of a (possibly
+    multi-round) agentic tool-calling turn.
+
+    Backends must NOT let synthetic ``call_id`` numbering reset to
+    ``shim-1`` on every round of a multi-round turn (LLM calls a tool,
+    gets the result fed back, calls again, ...) — a fresh ``ShimState()``
+    per round would then emit ``shim-1``/``shim-2`` in round 1 AND again
+    in round 2, colliding across rounds. Any consumer that pairs
+    ``tool_call`` <-> ``tool_result`` by ``call_id`` across the whole
+    turn (not just within one round) would then mismatch (R9-046).
+
+    Callers thread the previous round's final ``ShimState.call_seq`` back
+    in via ``starting_call_seq`` so numbering keeps counting up instead of
+    resetting. Each of the four provider call sites (``openai_compat.py``
+    x2, ``hf_local.py``, ``ollama.py``) keeps a small instance-level
+    counter (``self._shim_call_seq``) that persists for the life of the
+    backend instance — which the runtime's tier registry caches and
+    reuses across every round of a turn — and updates it from the
+    resulting ``ShimState.call_seq`` once each round's stream completes.
+    Default ``starting_call_seq=0`` reproduces the original single-round
+    numbering (``shim-1``, ``shim-2``, ...).
+
+    Args:
+        starting_call_seq: The call-id sequence number to resume counting
+            from (0 for a turn's first round).
+
+    Returns:
+        A fresh :class:`ShimState` seeded to continue numbering.
+    """
+    return ShimState(call_seq=starting_call_seq)
 
 
 def parse_tool_call_delta(chunk: str, state: ShimState) -> tuple[str, ToolCallDelta | None]:

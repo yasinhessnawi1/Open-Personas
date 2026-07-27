@@ -31,6 +31,7 @@ import openai
 
 from persona.backends._tool_shim import (
     ShimState,
+    new_shim_state,
     parse_tool_call_delta,
     parse_tool_calls,
     render_tool_instructions,
@@ -378,6 +379,12 @@ class OpenAICompatibleBackend:
         self._supports_native_tools = _native_tools_supported(self._provider, self._model)
         self._supports_vision = vision_supported(self._provider, self._model)
         self._workspace_root = workspace_root
+        # R9-046: carries the shim's synthetic call_id numbering forward
+        # across rounds of one multi-round agentic turn. This instance is
+        # cached + reused by the runtime's TierRegistry for the life of the
+        # process, so a monotonically-increasing counter here never resets
+        # mid-turn (a strict superset of "unique within one turn").
+        self._shim_call_seq = 0
 
         api_key = config.api_key.get_secret_value()
         base_url = config.base_url or DEFAULT_BASE_URLS.get(self._provider)
@@ -549,7 +556,9 @@ class OpenAICompatibleBackend:
         shim_state: ShimState | None = None
         if not use_native and tools:
             system_text = _append_shim_instructions(system_text, tools)
-            shim_state = ShimState()
+            # R9-046: resume synthetic call_id numbering from the prior
+            # round instead of resetting to shim-1 every round.
+            shim_state = new_shim_state(starting_call_seq=self._shim_call_seq)
 
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -659,6 +668,11 @@ class OpenAICompatibleBackend:
                 completion_tokens = (
                     getattr(usage_obj, "output_tokens", completion_tokens) or completion_tokens
                 )
+
+        if shim_state is not None:
+            # R9-046: persist this round's final call_seq so the next
+            # round (same backend instance) continues numbering forward.
+            self._shim_call_seq = shim_state.call_seq
 
         usage = TokenUsage(
             prompt_tokens=prompt_tokens,
@@ -776,7 +790,9 @@ class OpenAICompatibleBackend:
         shim_state: ShimState | None = None
         if not use_native and tools:
             msgs = _prepend_shim_to_openai(msgs, tools)
-            shim_state = ShimState()
+            # R9-046: resume synthetic call_id numbering from the prior
+            # round instead of resetting to shim-1 every round.
+            shim_state = new_shim_state(starting_call_seq=self._shim_call_seq)
 
         # D-20-X-deepseek-reasoning-strip-invariant (mirrors _chat_openai).
         msgs = _strip_reasoning_for_provider(msgs, self._provider)
@@ -880,6 +896,11 @@ class OpenAICompatibleBackend:
                         arguments_delta=(getattr(fn, "arguments", "") if fn else "") or "",
                     ),
                 )
+
+        if shim_state is not None:
+            # R9-046: persist this round's final call_seq so the next
+            # round (same backend instance) continues numbering forward.
+            self._shim_call_seq = shim_state.call_seq
 
         if usage is None:
             usage = TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)

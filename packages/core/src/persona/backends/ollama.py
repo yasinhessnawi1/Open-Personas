@@ -22,6 +22,7 @@ import httpx
 
 from persona.backends._tool_shim import (
     ShimState,
+    new_shim_state,
     parse_tool_call_delta,
     parse_tool_calls,
     render_tool_instructions,
@@ -109,6 +110,12 @@ class OllamaBackend:
         self._use_vision = use_vision
         self._workspace_root = workspace_root
         self._client: httpx.AsyncClient | None = None
+        # R9-046: carries the shim's synthetic call_id numbering forward
+        # across rounds of one multi-round agentic turn. This instance is
+        # cached + reused by the runtime's TierRegistry for the life of the
+        # process, so a monotonically-increasing counter here never resets
+        # mid-turn (a strict superset of "unique within one turn").
+        self._shim_call_seq = 0
         # Ollama behind a proxy may require an Authorization header.
         api_key = config.api_key.get_secret_value() if config.api_key else None
         self._auth_header: dict[str, str] = (
@@ -229,8 +236,12 @@ class OllamaBackend:
         body = self._build_body(
             messages, tools, temperature, max_tokens, stop, stream=True, top_p=top_p, top_k=top_k
         )
+        # R9-046: resume synthetic call_id numbering from the prior round
+        # instead of resetting to shim-1 every round.
         shim_state: ShimState | None = (
-            ShimState() if (tools and not self._use_native_tools) else None
+            new_shim_state(starting_call_seq=self._shim_call_seq)
+            if (tools and not self._use_native_tools)
+            else None
         )
         try:
             async with self._ensure_client().stream("POST", "/api/chat", json=body) as response:
@@ -245,6 +256,11 @@ class OllamaBackend:
                         break
         except httpx.HTTPError as exc:
             self._reraise_httpx(exc)
+        finally:
+            if shim_state is not None:
+                # Persist this round's final call_seq so the next round
+                # (same backend instance) continues numbering forward.
+                self._shim_call_seq = shim_state.call_seq
 
     # ------------------------------------------------------------------
     # Request building
