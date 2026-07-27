@@ -1032,7 +1032,7 @@ async def build_agent_session(
         try:
             await lk.room.delete_room(api.DeleteRoomRequest(room=_cutoff_room_name))
         finally:
-            await lk.aclose()
+            await lk.aclose()  # type: ignore[no-untyped-call]  # livekit SDK's aclose() is untyped (R9-057)
 
     async def _speak_exhaustion_notice() -> None:
         # The floor-gated narration seam (the same one delegation/artifact narration
