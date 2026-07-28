@@ -181,8 +181,16 @@ async def _setup_telegram(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, Coroutine[object, object, None]]:
-    """Assemble the Telegram adapter → (deliverer, inbound-transport runner)."""
+) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None] | None]:
+    """Assemble the Telegram adapter → (deliverer, HTTP app, inbound-transport runner).
+
+    The HTTP app — the webhook receiver AND the authenticated
+    ``/v1/connectors/telegram/link`` issue route — is built UNCONDITIONALLY (R9-061):
+    the web front-door calls the link route regardless of which transport receives
+    Telegram's own messages. The runner is the long-poll loop in ``longpoll`` mode;
+    in ``webhook`` mode inbound delivery IS the HTTP app being served (via
+    ``http_apps`` in ``_amain``), so there is no separate runner (``None``).
+    """
     client = TelegramClient(bot_token=token, http=http, api_base_url=config.telegram_api_base_url)
     bot_username = config.telegram_bot_username or await _telegram_username(client)
     telegram_linking = TelegramLinkingService(linking=linking_service, bot_username=bot_username)
@@ -199,31 +207,32 @@ async def _setup_telegram(
         run_turn=run_turn,
         now=_now,
     )
+    ttl = timedelta(minutes=config.telegram_link_token_ttl_minutes)
+
+    async def issue_deep_link(owner_id: str) -> str:
+        return telegram_linking.issue_deep_link(owner_id=owner_id, now=_now(), ttl=ttl)
+
+    secret = config.telegram_webhook_secret
+    app = build_telegram_app(
+        webhook_secret=secret,
+        on_update=flow.handle,
+        issue_deep_link=issue_deep_link,
+        verify_jwt=make_jwt_verifier(config),
+        link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
+        now=_now,
+    )
     if config.telegram_transport == "webhook":
-        ttl = timedelta(minutes=config.telegram_link_token_ttl_minutes)
-
-        async def issue_deep_link(owner_id: str) -> str:
-            return telegram_linking.issue_deep_link(owner_id=owner_id, now=_now(), ttl=ttl)
-
-        secret = config.telegram_webhook_secret
         await client.set_webhook(
             url=config.telegram_webhook_url,
             secret_token=secret.get_secret_value() if secret is not None else None,
             allowed_updates=["message"],
         )
-        app = build_telegram_app(
-            webhook_secret=secret,
-            on_update=flow.handle,
-            issue_deep_link=issue_deep_link,
-            verify_jwt=make_jwt_verifier(config),
-            link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
-            now=_now,
-        )
-        return connector, _serve_app(app, port=_HTTP_PORT)
+        return connector, app, None
     await client.delete_webhook()  # ensure no webhook competes with long-poll
-    return connector, run_long_poll(
+    runner = run_long_poll(
         client=client, on_update=flow.handle, timeout=config.telegram_longpoll_timeout_seconds
     )
+    return connector, app, runner
 
 
 async def _telegram_username(client: TelegramClient) -> str:
@@ -239,13 +248,20 @@ async def _setup_discord(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, Coroutine[object, object, None]]:
-    """Assemble the Discord adapter → (deliverer, gateway runner)."""
+) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None]]:
+    """Assemble the Discord adapter → (deliverer, OAuth-link HTTP app, gateway runner).
+
+    Discord's inbound message transport is ALWAYS the gateway WebSocket (there is no
+    HTTP alternative), but the OAuth ``/v1/connectors/discord/link`` issue route + the
+    ``/discord/oauth/callback`` route are the web front-door's account-linking carrier
+    and are built UNCONDITIONALLY here (R9-061), independent of the gateway runner.
+    """
     client = discord_adapter.DiscordClient(
         bot_token=token, http=http, api_base_url=config.discord_api_base_url
     )
@@ -272,7 +288,45 @@ async def _setup_discord(
         connect=_gateway_connect,
         gateway_url=config.discord_gateway_url,
     )
-    return connector, gateway.run()
+    client_secret = config.discord_oauth_client_secret
+    if (
+        client_secret is None
+        or not config.discord_oauth_client_id
+        or not config.discord_oauth_redirect_uri
+    ):
+        raise ConnectorError(
+            "Discord account linking requires PERSONA_CONNECTORS_DISCORD_OAUTH_"
+            "{CLIENT_ID,CLIENT_SECRET,REDIRECT_URI} to be set"
+        )
+    oauth_client = discord_adapter.DiscordOAuthClient(
+        client_id=config.discord_oauth_client_id,
+        client_secret=client_secret,
+        redirect_uri=config.discord_oauth_redirect_uri,
+        http=http,
+        api_base_url=config.discord_api_base_url,
+    )
+    discord_linking = discord_adapter.DiscordLinkingService(
+        linking=linking_service,
+        oauth=oauth_client,
+        client_id=config.discord_oauth_client_id,
+        redirect_uri=config.discord_oauth_redirect_uri,
+    )
+    ttl = timedelta(minutes=config.discord_link_token_ttl_minutes)
+
+    async def issue_authorize_url(owner_id: str) -> str:
+        return discord_linking.issue_authorize_url(owner_id=owner_id, now=_now(), ttl=ttl)
+
+    async def complete_oauth(code: str, state: str) -> str:
+        return await discord_linking.complete_oauth(code=code, state=state, now=_now())
+
+    app = discord_adapter.build_discord_app(
+        issue_authorize_url=issue_authorize_url,
+        complete_oauth=complete_oauth,
+        verify_jwt=make_jwt_verifier(config),
+        link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
+        now=_now,
+    )
+    return connector, app, gateway.run()
 
 
 async def _setup_slack(
@@ -280,13 +334,23 @@ async def _setup_slack(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, Coroutine[object, object, None]]:
-    """Assemble the Slack adapter → (deliverer, socket-mode / HTTP-events runner)."""
+) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None] | None]:
+    """Assemble the Slack adapter → (deliverer, HTTP app, socket-mode runner).
+
+    The OAuth ``/v1/connectors/slack/link`` issue route + the ``/slack/oauth/callback``
+    route are the web front-door's account-linking carrier and are built
+    UNCONDITIONALLY (R9-061), independent of the event transport. In ``http`` transport
+    mode the signed ``/slack/events`` route is mounted onto the SAME app (served via
+    ``http_apps`` in ``_amain``, no separate runner — ``None``); in ``socket`` mode the
+    events route is never mounted (D-C3-2 — it stays HTTP-transport-only) and the
+    runner is the socket-mode WS loop.
+    """
     client = slack_adapter.SlackClient(
         bot_token=token, http=http, api_base_url=config.slack_api_base_url
     )
@@ -307,6 +371,44 @@ async def _setup_slack(
         now=_now,
         bot_user_id=bot_user_id,
     )
+    client_secret = config.slack_oauth_client_secret
+    if (
+        client_secret is None
+        or not config.slack_oauth_client_id
+        or not config.slack_oauth_redirect_uri
+    ):
+        raise ConnectorError(
+            "Slack account linking requires PERSONA_CONNECTORS_SLACK_OAUTH_"
+            "{CLIENT_ID,CLIENT_SECRET,REDIRECT_URI} to be set"
+        )
+    oauth_client = slack_adapter.SlackOAuthClient(
+        client_id=config.slack_oauth_client_id,
+        client_secret=client_secret,
+        redirect_uri=config.slack_oauth_redirect_uri,
+        http=http,
+        api_base_url=config.slack_api_base_url,
+    )
+    slack_linking = slack_adapter.SlackLinkingService(
+        linking=linking_service,
+        oauth=oauth_client,
+        client_id=config.slack_oauth_client_id,
+        redirect_uri=config.slack_oauth_redirect_uri,
+    )
+    ttl = timedelta(minutes=config.slack_link_token_ttl_minutes)
+
+    async def issue_authorize_url(owner_id: str) -> str:
+        return slack_linking.issue_authorize_url(owner_id=owner_id, now=_now(), ttl=ttl)
+
+    async def complete_oauth(code: str, state: str) -> str:
+        return await slack_linking.complete_oauth(code=code, state=state, now=_now())
+
+    app = slack_adapter.build_slack_app(
+        issue_authorize_url=issue_authorize_url,
+        complete_oauth=complete_oauth,
+        verify_jwt=make_jwt_verifier(config),
+        link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
+        now=_now,
+    )
     if config.slack_transport == "socket":
         app_token = config.slack_app_token
         if app_token is None:
@@ -318,11 +420,15 @@ async def _setup_slack(
             connect=_socket_connect,
             api_base_url=config.slack_api_base_url,
         )
-        return connector, socket.run()
+        return connector, app, socket.run()
     events_app = slack_adapter.build_events_app(
         signing_secret=config.slack_signing_secret, on_event=flow.handle, now=_now
     )
-    return connector, _serve_app(events_app, port=_HTTP_PORT)
+    # Mount the HTTP-events route onto the SAME app as the OAuth link/callback routes
+    # (one platform → one http_apps entry) — no path collision (/slack/events vs
+    # /v1/connectors/slack/link + /slack/oauth/callback).
+    app.router.routes.extend(events_app.router.routes)
+    return connector, app, None
 
 
 def _build_twilio_client(config: ConnectorConfig, http: httpx.AsyncClient) -> TwilioClient:
@@ -622,7 +728,7 @@ async def _amain() -> None:
     http_apps: dict[str, FastAPI] = {}  # platform → ASGI app, mounted + served once below
 
     if config.telegram_bot_token is not None:
-        connector, runner = await _setup_telegram(
+        connector, app, runner = await _setup_telegram(
             config=config,
             token=config.telegram_bot_token,
             http=http,
@@ -634,12 +740,15 @@ async def _amain() -> None:
             owner_scope=composition.owner_scope,
         )
         deliverers["telegram"] = connector
-        runners.append(runner)
+        http_apps["telegram"] = app
+        if runner is not None:
+            runners.append(runner)
     if config.discord_bot_token is not None:
-        connector, runner = await _setup_discord(
+        connector, app, runner = await _setup_discord(
             config=config,
             token=config.discord_bot_token,
             http=http,
+            linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,
             list_persona_names=list_persona_names,
@@ -647,12 +756,14 @@ async def _amain() -> None:
             owner_scope=composition.owner_scope,
         )
         deliverers["discord"] = connector
+        http_apps["discord"] = app
         runners.append(runner)
     if config.slack_bot_token is not None:
-        connector, runner = await _setup_slack(
+        connector, app, runner = await _setup_slack(
             config=config,
             token=config.slack_bot_token,
             http=http,
+            linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,
             list_persona_names=list_persona_names,
@@ -660,7 +771,9 @@ async def _amain() -> None:
             owner_scope=composition.owner_scope,
         )
         deliverers["slack"] = connector
-        runners.append(runner)
+        http_apps["slack"] = app
+        if runner is not None:
+            runners.append(runner)
 
     # The two Twilio phone channels share ONE client (one account, channel by the From
     # prefix — D-C4-1); built once, only when at least one phone channel is configured.
@@ -721,10 +834,15 @@ async def _amain() -> None:
             "channel (PERSONA_CONNECTORS_TWILIO_{WHATSAPP,SMS}_FROM)"
         )
 
-    # The phone channels serve HTTP (webhook/status/issue routes). Each Twilio app already
-    # namespaces ALL its routes by ``/{platform}/…`` (e.g. ``/whatsapp/webhook`` vs
-    # ``/sms/webhook``), so they never collide; collect them onto ONE parent app served
-    # once on the HTTP port (mirror Slack's events app being served on ``_HTTP_PORT``).
+    # Every configured platform contributes an HTTP app — Telegram (webhook + link),
+    # Discord/Slack (OAuth link + callback, + Slack's signed events route in ``http``
+    # transport), the phone channels (webhook/status/issue), email (webhook/issue) —
+    # regardless of that platform's own message-receiving transport (R9-061: the web
+    # front-door's link route and OAuth's callback route are HTTP endpoints that must be
+    # served no matter how messages themselves arrive). Each app already namespaces ALL
+    # its routes by ``/{platform}/…`` / ``/v1/connectors/{platform}/link`` (e.g.
+    # ``/whatsapp/webhook`` vs ``/sms/webhook`` vs ``/discord/oauth/callback``), so they
+    # never collide; collect them onto ONE parent app served once on the HTTP port.
     if http_apps:
         from fastapi import FastAPI as _FastAPI
 
