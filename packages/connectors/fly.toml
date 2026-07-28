@@ -31,6 +31,22 @@ kill_timeout = "30s"
   # audience the api + voice verify.
   PERSONA_CONNECTORS_JWT_ALGORITHMS = "RS256"
   PERSONA_CONNECTORS_JWT_AUDIENCE = "persona-api"
+  # CRITICAL: without this the connector defaults to `community` edition and
+  # builds a local Chroma memory store at /app/.persona_chroma (root-owned →
+  # PermissionError, crash-loop). cloud ⇒ the shared PostgresBackend memory
+  # (__main__.py:120-124), the same store the api uses.
+  PERSONA_EDITION = "cloud"
+  # The connector runs the FULL persona runtime (_build_runtime_factory mirrors
+  # the api's lifespan: embedder + tiers + models + safety). audit_root /
+  # workspace_root / sandbox_root default CWD-relative to /app/... (root-owned,
+  # non-writable by the `persona` user) → PermissionError. No volume here (like
+  # voice), so point them at the writable ephemeral /tmp; the durable turn log
+  # already goes to Postgres (PostgresTurnLogWriter), and audit routes to the DB.
+  PERSONA_API_AUDIT_BACKEND = "postgres"
+  PERSONA_API_AUDIT_ROOT = "/tmp/persona/audit"
+  PERSONA_API_WORKSPACE_ROOT = "/tmp/persona/workspace"
+  PERSONA_TOOLS_SANDBOX_ROOT = "/tmp/persona/tools"
+  PERSONA_TURNLOG_PATH = "/tmp/persona/turnlogs"
 
 [http_service]
   internal_port = 8080
@@ -63,8 +79,9 @@ kill_timeout = "30s"
     timeout = "5s"
 
 [[vm]]
-  # No HF models / no per-call audio — just websocket clients + a DB pool +
-  # FastAPI. 1 GB is comfortable headroom over the ~300 MB Python/websockets
-  # working set (well under the api/voice 2 GB, which carry the embedder).
+  # _build_runtime_factory loads the SAME heavy runtime the api does: the
+  # bge-small embedder + the multilingual crisis-safety encoder + model
+  # backends + per-message working set. 2 GB matches api/voice (1 GB OOMs on
+  # the embedder+encoder, the 2026-07-11 api incident class).
   size = "shared-cpu-1x"
-  memory = "1024mb"
+  memory = "2048mb"
