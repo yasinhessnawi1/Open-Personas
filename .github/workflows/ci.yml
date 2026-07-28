@@ -63,33 +63,36 @@ jobs:
       - run: uv sync --all-packages
       # The integration suite exercises the real embedder
       # (BAAI/bge-small-en-v1.5) — every persona-create touches it via the
-      # registry's first-load identity indexing. Without caching, every CI
-      # run risks 429 from HF Hub's shared rate limit on GHA IPs (observed
-      # mid-deploy on the v0.2 push: 3 tests in test_spec19_verification_
-      # surfaces.py failed with HfHubHTTPError 429). Cache keyed by model id
-      # so it persists across branches/PRs.
+      # registry's first-load identity indexing — AND the rerank live leg
+      # (test_recall_scorer_live.py) exercises the cross-encoder reranker
+      # (cross-encoder/ms-marco-MiniLM-L6-v2). The integration run is HF-offline,
+      # so BOTH must be pre-warmed here or those tests raise LocalEntryNotFoundError
+      # at setup. Without caching, every CI run also risks 429 from HF Hub's shared
+      # rate limit on GHA IPs (observed mid-deploy on the v0.2 push: 3 tests in
+      # test_spec19_verification_surfaces.py failed with HfHubHTTPError 429). Cache
+      # keyed by the model set so it persists across branches/PRs.
       - name: Cache HuggingFace Hub
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-cache-v1-bge-small-en-v1.5
+          key: hf-cache-v2-bge-small-plus-crossencoder-msmarco
       # Warm the embedder cache with retries. On a cache hit the load is
       # instant; on a cache miss (first run after invalidation) we retry with
       # exponential backoff so transient HF 429s don't fail the job. After
       # this step the integration suite's first persona-create finds the model
       # already on disk and never touches the network.
-      - name: warm embedder cache (retry HF 429)
+      - name: warm HF model cache — embedder + reranker (retry HF 429)
         run: |
           for attempt in 1 2 3 4 5; do
-            if uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"; then
-              echo "embedder warmed (attempt $attempt)"
+            if uv run python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('BAAI/bge-small-en-v1.5'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L6-v2')"; then
+              echo "HF models warmed (attempt $attempt)"
               exit 0
             fi
             sleep_for=$((attempt * 15))
-            echo "embedder warm attempt $attempt failed; sleeping ${sleep_for}s before retry"
+            echo "HF model warm attempt $attempt failed; sleeping ${sleep_for}s before retry"
             sleep "$sleep_for"
           done
-          echo "::error::failed to warm embedder cache after 5 attempts"
+          echo "::error::failed to warm HF model cache after 5 attempts"
           exit 1
       # The RLS tests need a non-superuser role (FORCE RLS bypasses superusers
       # and table owners — D-07-5). Provision `persona_app` so the RLS suite
