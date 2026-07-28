@@ -1,0 +1,70 @@
+# Open Persona — persona-connectors Fly.io app config (app: open-persona-connectors).
+#
+# Single Machine. The connector holds persistent OUTBOUND clients (Discord
+# gateway WS, Slack socket, Telegram long-poll) + an HTTP server (:8080) for
+# inbound webhooks (Twilio/Postmark) + OAuth callbacks. Never autoscale (each
+# machine would open duplicate gateway/socket sessions → duplicate deliveries)
+# and never autostop (a cold start drops the persistent connections + misses
+# inbound webhooks). It shares the api's Postgres (conversation + link store).
+
+app = "open-persona-connectors"
+primary_region = "fra"                  # Frankfurt — co-located with open-persona-api
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+  # fly.toml lives next to the Dockerfile (packages/connectors/). The Dockerfile's
+  # `COPY packages/<member>/...` paths assume the REPO ROOT as the build context,
+  # so invoke flyctl from the repo root:
+  #   flyctl deploy -c packages/connectors/fly.toml
+
+[deploy]
+  # No release_command: the connector reads/writes tables the api's alembic
+  # migrations own (shared DB); the api app runs the migrations once per deploy.
+  strategy = "rolling"
+
+[env]
+  PERSONA_LOG_LEVEL = "INFO"
+  # JWT verification of the /v1/connectors/*/link routes — RS256 against the
+  # Clerk static public key (PERSONA_CONNECTORS_JWT_PUBLIC_KEY secret), same
+  # audience the api + voice verify.
+  PERSONA_CONNECTORS_JWT_ALGORITHMS = "RS256"
+  PERSONA_CONNECTORS_JWT_AUDIENCE = "persona-api"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # CRITICAL: single Machine — duplicate gateway/socket sessions on a second
+  # machine would double-deliver. No autostop — cold start drops the persistent
+  # outbound connections + misses inbound webhooks.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 200
+
+# No unauthenticated HTTP route to probe (webhooks are signature-gated, OAuth
+# callbacks are state-gated), so a top-level TCP check on :8080 is the honest
+# liveness signal — same posture as packages/voice/fly.toml. The HTTP server
+# binds :8080 whenever an HTTP-serving connector (Twilio/Postmark/Slack-HTTP/
+# Telegram-webhook) is configured, which is the case whenever inbound webhooks
+# are in use.
+[checks]
+  [checks.listener]
+    type = "tcp"
+    port = 8080
+    grace_period = "60s"
+    interval = "30s"
+    timeout = "5s"
+
+[[vm]]
+  # No HF models / no per-call audio — just websocket clients + a DB pool +
+  # FastAPI. 1 GB is comfortable headroom over the ~300 MB Python/websockets
+  # working set (well under the api/voice 2 GB, which carry the embedder).
+  size = "shared-cpu-1x"
+  memory = "1024mb"
