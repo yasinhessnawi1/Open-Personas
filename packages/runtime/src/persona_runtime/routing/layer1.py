@@ -24,6 +24,15 @@ both router types call through.
 
 Empty filter set after constraints other than vision raises
 :class:`RoutingConstraintsUnsatisfiableError` with the reason that fired.
+
+An empty **starting** tier set (no tier configured at all — e.g. a cloud
+free-plan caller handed an empty free ``TierRegistry`` per M4, R9-059) is
+a distinct failure mode from any of the three constraints above and is
+checked first: it raises :class:`TierNotConfiguredError`, the same
+exception :meth:`TierRegistry.get` raises, so it rides the app's existing
+graceful 503 + upgrade-CTA handler instead of being misdiagnosed as
+``context_window_exceeded`` (a `RoutingConstraintsUnsatisfiableError`
+with no registered handler, which previously 500'd).
 """
 
 from __future__ import annotations
@@ -34,6 +43,8 @@ from persona.backends.errors import (
     NoVisionTierConfiguredError,
     RoutingConstraintsUnsatisfiableError,
 )
+
+from persona_runtime.errors import TierNotConfiguredError
 
 if TYPE_CHECKING:
     from persona_runtime.routing.types import RoutingContext
@@ -61,6 +72,10 @@ def apply_constraint_filter(
         :attr:`TierRegistry.configured_tier_names`.
 
     Raises:
+        TierNotConfiguredError: ``tier_registry`` is configured (non-``None``)
+            but has an empty tier set — no tier is configured at all
+            (R9-059). Distinct from the constraint failures below; caught by
+            the app's existing graceful 503 + upgrade-CTA handler.
         NoVisionTierConfiguredError: ``context.requires_vision`` is ``True``
             and no configured tier is vision-capable (Spec 13 fail-loud,
             preserved structured-context shape).
@@ -73,6 +88,15 @@ def apply_constraint_filter(
         return ("frontier", "mid", "small")
 
     configured = tier_registry.configured_tier_names
+    if not configured:
+        raise TierNotConfiguredError(
+            "no model tier is configured",
+            context={
+                "requested": "(any)",
+                "configured": "(none)",
+                "reason": "empty_tier_registry",
+            },
+        )
     filtered: tuple[str, ...] = configured
 
     # --- Vision constraint (Spec 13) ---

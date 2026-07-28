@@ -119,6 +119,7 @@ if TYPE_CHECKING:
 
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
     from persona.stores.backend import Backend
+    from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
 __all__ = ["create_app"]
@@ -220,6 +221,38 @@ def _e2b_api_key_present() -> bool:
     import os
 
     return bool(os.environ.get("E2B_API_KEY", "").strip())
+
+
+def _warn_if_cloud_free_registry_empty(
+    config: APIConfig, free_tier_registry: TierRegistry | None
+) -> None:
+    """Loud startup WARNING when cloud + an empty free-tier registry (R9-059).
+
+    M4 fail-closed semantics mean an unconfigured ``PERSONA_FREE_*_MODELS`` set
+    yields an EMPTY (non-``None``) registry — every free-plan / no-subscription
+    caller is handed it, and their turn now fails via the graceful
+    ``TierNotConfiguredError`` path (see ``persona_runtime.routing.layer1``).
+    That failure is correct (no silent paid fallback) but easy to miss until a
+    real user hits it. This warns the operator the moment the process boots,
+    without blocking boot — WARNING only, never raises.
+
+    Args:
+        config: The resolved :class:`APIConfig` for this boot.
+        free_tier_registry: The cloud free-tier registry, or ``None`` in
+            community (no gating — never warns).
+    """
+    if (
+        config.edition is Edition.cloud
+        and free_tier_registry is not None
+        and not free_tier_registry.configured_tier_names
+    ):
+        _LOG.warning(
+            "cloud edition is up but no PERSONA_FREE_*_MODELS are configured — "
+            "every free-plan / no-subscription caller will get an empty tier "
+            "registry and fail chat. Set PERSONA_FREE_FRONTIER_MODELS / "
+            "PERSONA_FREE_MID_MODELS, or ensure operator accounts have a paid "
+            "subscription row."
+        )
 
 
 @asynccontextmanager
@@ -717,6 +750,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             if config.edition is Edition.cloud
             else None
         )
+        _warn_if_cloud_free_registry_empty(config, free_tier_registry)
         if tier_registry is not None:
             from persona_runtime.crisis_encoder import (
                 build_crisis_encoder,

@@ -12,8 +12,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from loguru import logger as _loguru_logger
-from persona_api.app import create_app
+from persona.backends import BackendConfig
+from persona_api.app import _warn_if_cloud_free_registry_empty, create_app
 from persona_api.config import APIConfig, Edition
+from persona_runtime.tier import TierConfig, TierRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -134,3 +136,58 @@ def test_effective_app_url_falls_back_to_database_url() -> None:
 def test_jwt_algorithms_list() -> None:
     cfg = APIConfig(jwt_algorithms="HS256, RS256")
     assert cfg.jwt_algorithms_list == ["HS256", "RS256"]
+
+
+# ---------------------------------------------------------------------------
+# R9-059 — startup WARNING when cloud + an empty free-tier registry.
+#
+# M4 fail-closed semantics (D-M4-4) mean an unconfigured PERSONA_FREE_*_MODELS
+# yields an EMPTY (non-None) registry, silently handed to every free-plan /
+# no-subscription caller. ``_warn_if_cloud_free_registry_empty`` is the pure,
+# directly-testable unit ``_lifespan`` calls right after building that
+# registry (mirrors the ``_compose_image_backend`` / ``_resolve_openrouter_
+# subscription_mode`` pattern of unit-testing app.py helpers without a full
+# DB-backed lifespan boot).
+# ---------------------------------------------------------------------------
+
+
+def _backend_cfg() -> BackendConfig:
+    return BackendConfig(provider="anthropic", model="claude-test", api_key="sk-test")
+
+
+def test_warns_when_cloud_and_free_registry_empty(
+    loguru_info_capture: list[str],
+) -> None:
+    empty_free_registry = TierRegistry({})
+    _warn_if_cloud_free_registry_empty(APIConfig(edition=Edition.cloud), empty_free_registry)
+    warnings = [line for line in loguru_info_capture if "PERSONA_FREE_*_MODELS" in line]
+    assert len(warnings) == 1, loguru_info_capture
+    assert "empty tier registry and fail chat" in warnings[0]
+
+
+def test_no_warning_when_free_registry_has_tiers(
+    loguru_info_capture: list[str],
+) -> None:
+    non_empty_free_registry = TierRegistry(
+        {"frontier": TierConfig(name="frontier", backend_config=_backend_cfg())}
+    )
+    _warn_if_cloud_free_registry_empty(APIConfig(edition=Edition.cloud), non_empty_free_registry)
+    assert not [line for line in loguru_info_capture if "PERSONA_FREE_*_MODELS" in line]
+
+
+def test_no_warning_when_free_registry_is_none(
+    loguru_info_capture: list[str],
+) -> None:
+    # Community — no free-tier gating at all (RuntimeFactory short-circuits on None).
+    _warn_if_cloud_free_registry_empty(APIConfig(edition=Edition.cloud), None)
+    assert not [line for line in loguru_info_capture if "PERSONA_FREE_*_MODELS" in line]
+
+
+def test_no_warning_when_community_even_with_empty_registry(
+    loguru_info_capture: list[str],
+) -> None:
+    # Defensive: community never builds a free registry in practice (app.py passes
+    # None), but the edition gate must hold even if one were somehow passed.
+    empty_free_registry = TierRegistry({})
+    _warn_if_cloud_free_registry_empty(APIConfig(edition=Edition.community), empty_free_registry)
+    assert not [line for line in loguru_info_capture if "PERSONA_FREE_*_MODELS" in line]

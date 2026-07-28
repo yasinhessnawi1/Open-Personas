@@ -18,6 +18,7 @@ from persona.backends.errors import (
     NoVisionTierConfiguredError,
     RoutingConstraintsUnsatisfiableError,
 )
+from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.routing import RoutingContext, apply_constraint_filter
 from persona_runtime.tier import TierConfig, TierMetadata, TierRegistry
 
@@ -102,6 +103,31 @@ class TestNoRegistry:
         # Legacy unit-test path — no constraint enforcement when registry absent.
         result = apply_constraint_filter(_context(requires_vision=True), None)
         assert result == ("frontier", "mid", "small")
+
+
+# ----- Empty tier registry (R9-059) -----------------------------------------
+
+
+class TestEmptyTierRegistry:
+    def test_empty_registry_raises_tier_not_configured_not_routing_error(self) -> None:
+        """An empty TierRegistry (e.g. a cloud free-plan caller with unconfigured
+        ``PERSONA_FREE_*_MODELS``, M4) must raise the GRACEFUL, HANDLED
+        ``TierNotConfiguredError`` — never the misleading
+        ``RoutingConstraintsUnsatisfiableError`` (which has no registered app
+        handler and previously 500'd, mislabelled ``context_window_exceeded``)."""
+        registry = TierRegistry({})
+        with pytest.raises(TierNotConfiguredError) as excinfo:
+            apply_constraint_filter(_context(), registry)
+        # Not the routing-constraints error, and not mislabelled as a window problem.
+        assert not isinstance(excinfo.value, RoutingConstraintsUnsatisfiableError)
+        assert excinfo.value.context.get("reason") != "context_window_exceeded"
+
+    def test_empty_registry_raises_even_for_a_vision_turn(self) -> None:
+        # The empty-registry check fires BEFORE the vision filter — same clear
+        # signal regardless of which constraint the turn would have hit next.
+        registry = TierRegistry({})
+        with pytest.raises(TierNotConfiguredError):
+            apply_constraint_filter(_context(requires_vision=True), registry)
 
 
 # ----- Vision constraint ---------------------------------------------------
