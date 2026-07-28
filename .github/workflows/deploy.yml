@@ -159,6 +159,51 @@ jobs:
         run: |
           flyctl status --app open-persona-voice
 
+  deploy-connectors:
+    # Same gate as the other jobs: green CI on main, or a manual workflow_dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    concurrency:
+      # Independent group: connectors redeploys without blocking/being blocked by
+      # api / voice / livekit.
+      group: deploy-connectors
+      cancel-in-progress: false
+    steps:
+      - name: Checkout the commit CI verified
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Repo-root build context (the connectors Dockerfile COPYs packages/<member>/,
+      # same as api/voice). fly.toml at packages/connectors/fly.toml; $WORKSPACE
+      # makes --config absolute. FLY_API_TOKEN must be org-scoped (same as the other
+      # jobs). Generous --wait-timeout: like voice, the connector loads the bge-small
+      # embedder + the multilingual crisis encoder before the :8080 listener binds
+      # (its TCP health check), which is minutes on a shared VM.
+      - name: flyctl deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          flyctl deploy \
+            --remote-only \
+            --config "$WORKSPACE/packages/connectors/fly.toml" \
+            --app open-persona-connectors \
+            --strategy rolling \
+            --wait-timeout 900
+
+      - name: Confirm machine status
+        if: success()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl status --app open-persona-connectors
+
   deploy-livekit:
     # Same gate as the other jobs: green CI on main, or a manual workflow_dispatch.
     if: >-
