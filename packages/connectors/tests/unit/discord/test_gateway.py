@@ -33,6 +33,7 @@ from persona_connectors.discord.gateway import (
     interpret_frame,
 )
 from pydantic import SecretStr
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 _TOKEN = "gw-bot-token.secret"  # noqa: S105 — test literal
 
@@ -57,6 +58,50 @@ class _FakeConn:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeConnClosesOnSecondSend:
+    """A connection whose SECOND ``send`` raises a ``ConnectionClosed`` subclass.
+
+    Discord's gateway routinely closes with 1000 (OK) and expects a reconnect — this
+    stands in for a heartbeat/heartbeat-request response racing exactly that close
+    (production, 2026-07-29). The FIRST send (IDENTIFY) must still succeed, so the fake
+    only starts failing from the second call on.
+    """
+
+    def __init__(self, incoming: list[str], closed_exc: type[Exception]) -> None:
+        self._incoming = list(incoming)
+        self._closed_exc = closed_exc
+        self.sent: list[str] = []
+        self.closed = False
+        self._send_count = 0
+
+    async def send(self, message: str) -> None:
+        self._send_count += 1
+        if self._send_count >= 2:
+            raise self._closed_exc(None, None)  # type: ignore[call-arg]
+        self.sent.append(message)
+
+    async def recv(self) -> str:
+        if not self._incoming:
+            raise _ClosedError
+        return self._incoming.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _CancellingConn:
+    """A connection whose ``recv`` raises ``CancelledError`` — a normal shutdown."""
+
+    async def send(self, _message: str) -> None:
+        raise AssertionError("send should not be reached before the cancellation")
+
+    async def recv(self) -> str:
+        raise asyncio.CancelledError
+
+    async def close(self) -> None:
+        return None
 
 
 async def _block(_seconds: float) -> None:
@@ -322,3 +367,101 @@ async def test_run_resumes_on_reconnect_using_the_resume_url() -> None:
     resume = json.loads(conn2.sent[0])
     assert resume["op"] == 6  # RESUME, not a fresh IDENTIFY
     assert resume["d"]["session_id"] == "s1"
+
+
+# --- R9-071: a closed-connection SEND must reconnect, never crash the service ---
+
+
+@pytest.mark.asyncio
+async def test_apply_heartbeat_request_send_on_closed_connection_reconnects() -> None:
+    """The exact production site: ``_apply``'s HeartbeatRequest branch sends a heartbeat
+    reply; if the peer already closed (Discord's routine 1000), that must reconnect, not
+    raise ``ConnectionClosedOK`` out of ``_apply`` (the traceback captured 2026-07-29).
+    """
+    gateway = _gateway()
+    conn = _FakeConnClosesOnSecondSend([], ConnectionClosedOK)
+    await conn.send("priming the first send so the NEXT one is the failing one")
+    control = await gateway._apply(conn, HeartbeatRequest())
+    assert control is _Control.RESUME_RECONNECT  # not an exception
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_due_send_on_closed_connection_reports_dead_not_raises() -> None:
+    gateway = _gateway()
+    conn = _FakeConnClosesOnSecondSend([], ConnectionClosedError)
+    await conn.send("priming")
+    dead = await gateway._heartbeat_due(conn)
+    assert dead is True  # treated exactly like a missed ACK — reconnect + resume
+
+
+@pytest.mark.parametrize("closed_exc", [ConnectionClosedOK, ConnectionClosedError])
+@pytest.mark.asyncio
+async def test_run_reconnects_when_a_heartbeat_send_hits_a_closed_connection(
+    closed_exc: type[Exception],
+) -> None:
+    """End to end over ``run()``: HELLO → IDENTIFY (send #1, succeeds) → the server
+    requests a heartbeat (op 1) → our reply send (send #2) hits the closed connection →
+    ``run`` must NOT propagate the exception; it reconnects (a second ``connect`` attempt
+    happens) and keeps looping, for both ``ConnectionClosedOK`` and ``ConnectionClosedError``.
+    """
+    conn1 = _FakeConnClosesOnSecondSend(
+        [
+            json.dumps({"op": 10, "d": {"heartbeat_interval": 600000}}),
+            json.dumps({"op": 1}),  # server-requested heartbeat NOW — its reply send dies
+        ],
+        closed_exc,
+    )
+    conn2 = _FakeConn()  # recv() immediately raises -> ends the 2nd connection cleanly
+    conns: list[object] = [conn1, conn2]
+    connects: list[str] = []
+
+    async def connect(url: str) -> object:
+        connects.append(url)
+        return conns.pop(0)
+
+    gateway = _gateway(connect=connect)
+    await gateway.run(should_continue=lambda: not conn2.closed)
+
+    # A second connect attempt happened — the loop reconnected instead of crashing.
+    assert connects == ["wss://gw.test", "wss://gw.test"]
+    assert conn1.closed is True
+    assert conn2.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_reconnects_on_a_closed_send_during_identify() -> None:
+    """A send-time close during the very first IDENTIFY/RESUME (inside ``_run_connection``'s
+    Hello handling, not ``_apply``) must also reconnect rather than propagate.
+    """
+    conn1 = _FakeConnClosesOnSecondSend(
+        [json.dumps({"op": 10, "d": {"heartbeat_interval": 600000}})], ConnectionClosedOK
+    )
+    # Force send #1 (the IDENTIFY itself) to be the failing one.
+    conn1._send_count = 1  # noqa: SLF001 — test setup: pre-arm so the very next send fails
+    conn2 = _FakeConn()
+    conns: list[object] = [conn1, conn2]
+    connects: list[str] = []
+
+    async def connect(url: str) -> object:
+        connects.append(url)
+        return conns.pop(0)
+
+    gateway = _gateway(connect=connect)
+    await gateway.run(should_continue=lambda: not conn2.closed)
+
+    assert connects == ["wss://gw.test", "wss://gw.test"]
+    assert conn1.sent == []  # the IDENTIFY never actually went out
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_from_the_gateway_still_propagates() -> None:
+    """Normal shutdown (``asyncio.CancelledError``) must never be swallowed by any of the
+    new defensive layers — it must propagate all the way out of ``run()``.
+    """
+
+    async def connect(_url: str) -> _CancellingConn:
+        return _CancellingConn()
+
+    gateway = _gateway(connect=connect)
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.run()

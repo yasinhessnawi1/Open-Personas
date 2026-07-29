@@ -36,12 +36,16 @@ import json
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
+from websockets.exceptions import ConnectionClosed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from pydantic import SecretStr
+
+_log = get_logger("connectors.discord_gateway")
 
 __all__ = [
     "Dispatch",
@@ -79,6 +83,13 @@ INTENTS_DIRECT_MESSAGES = 1 << 12
 # thundering herd across MANY bots reconnecting at once; with a single bot (D-C3-X-v1-reach)
 # that is moot, so a deterministic half-interval offset is operationally fine + testable.
 _FIRST_HEARTBEAT_FRACTION = 0.5
+
+# A short pause before a fresh ``connect``/reconnect attempt after an unexpected failure
+# (R9-071) — stops a persistently-failing gateway from hot-spinning the reconnect loop.
+# Not applied on the ordinary control-flow reconnects (a dropped recv, op 7, a resumable
+# op 9) — those are already paced by real network I/O; only the defensive fallback paths
+# in :meth:`DiscordGateway.run` use it.
+_RECONNECT_BACKOFF_SECONDS = 1.0
 
 
 # --- payload builders (pure; the token is unwrapped by the caller at the call site) ---
@@ -283,8 +294,31 @@ class DiscordGateway:
         self._session = GatewaySession()
         self._acked = True
 
-    async def _identify_or_resume(self, conn: GatewayConnection) -> None:
-        """Authenticate the connection: RESUME an existing session, else a fresh IDENTIFY."""
+    async def _send(self, conn: GatewayConnection, payload: dict[str, object]) -> bool:
+        """Send a gateway frame; return ``False`` (never raise) if the peer already closed.
+
+        Discord's gateway routinely closes a connection with code 1000 (OK) and expects a
+        reconnect — that is normal operation, not an error (R9-071). A send racing that
+        close must be treated exactly like a dropped ``recv()``: the caller reconnects and
+        resumes. Left unguarded, ``ConnectionClosedOK``/``ConnectionClosedError`` escapes
+        ``_apply`` → ``_run_connection`` → ``run`` → the service's ``asyncio.gather``,
+        killing every platform + the HTTP server, not just this gateway (production, 2026-07-29).
+        """
+        try:
+            await conn.send(json.dumps(payload))
+        except ConnectionClosed as exc:
+            _log.info(
+                "discord gateway: send on a closed connection ({error}); reconnecting",
+                error=str(exc),
+            )
+            return False
+        return True
+
+    async def _identify_or_resume(self, conn: GatewayConnection) -> bool:
+        """Authenticate the connection: RESUME an existing session, else a fresh IDENTIFY.
+
+        Returns ``False`` (instead of raising) if the connection is already closed.
+        """
         token = self._token.get_secret_value()
         if self._session.can_resume():
             assert self._session.session_id is not None
@@ -294,20 +328,20 @@ class DiscordGateway:
             )
         else:
             payload = build_identify(token, intents=self._intents)
-        await conn.send(json.dumps(payload))
+        return await self._send(conn, payload)
 
     async def _apply(self, conn: GatewayConnection, directive: GatewayDirective) -> _Control:
         """Apply one directive; return the recv-loop control signal (the lifecycle logic)."""
         if isinstance(directive, Hello):
             self._acked = True
-            await self._identify_or_resume(conn)
-            return _Control.CONTINUE
+            sent = await self._identify_or_resume(conn)
+            return _Control.CONTINUE if sent else _Control.RESUME_RECONNECT
         if isinstance(directive, HeartbeatAck):
             self._acked = True
             return _Control.CONTINUE
         if isinstance(directive, HeartbeatRequest):
-            await conn.send(json.dumps(build_heartbeat(self._session.last_seq)))
-            return _Control.CONTINUE
+            sent = await self._send(conn, build_heartbeat(self._session.last_seq))
+            return _Control.CONTINUE if sent else _Control.RESUME_RECONNECT
         if isinstance(directive, Dispatch):
             self._session.advance(directive.seq)
             if directive.event_type == "READY":
@@ -328,13 +362,14 @@ class DiscordGateway:
         The ACK watchdog: if the previous heartbeat was never ACKed (``self._acked`` is
         still ``False`` when the next is due), the connection is dead — return ``True`` so
         the caller reconnects (and resumes). Otherwise send the heartbeat and arm the
-        watchdog (``_acked = False`` until the server ACKs).
+        watchdog (``_acked = False`` until the server ACKs). A send that fails because the
+        peer already closed the connection is ALSO reported dead (never raised — R9-071).
         """
         if not self._acked:
             return True
         self._acked = False
-        await conn.send(json.dumps(build_heartbeat(self._session.last_seq)))
-        return False
+        sent = await self._send(conn, build_heartbeat(self._session.last_seq))
+        return not sent
 
     async def run(self, *, should_continue: Callable[[], bool] = lambda: True) -> None:
         """Maintain the gateway: connect → identify/resume → recv + heartbeat → reconnect.
@@ -342,6 +377,14 @@ class DiscordGateway:
         The live I/O loop (the deploy seam): reconnects to the resume URL (keeping the
         session) on a drop / op 7 / resumable op 9, and to the base gateway with a fresh
         session on a non-resumable op 9. Exercised end-to-end by the operator pass.
+
+        Defense in depth (R9-071): a failed ``connect`` or an unexpected exception out of
+        ``_run_connection`` is logged and reconnected rather than propagated — the send-path
+        close (a closed/broken connection) is already handled inside ``_apply``/
+        ``_heartbeat_due``, but this outer guard means a bug in the gateway can *never*
+        crash the whole connector service the way it did in production. A short backoff
+        avoids hot-spinning a persistently-failing gateway. ``asyncio.CancelledError``
+        (normal shutdown) is always re-raised, never swallowed.
         """
         while should_continue():
             resume_url = self._session.resume_url
@@ -350,15 +393,32 @@ class DiscordGateway:
                 if self._session.can_resume() and resume_url is not None
                 else self._gateway_url
             )
-            conn = await self._connect(url)
+            try:
+                conn = await self._connect(url)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a failed connect must not kill the service
+                _log.warning("discord gateway connect failed ({error}); retrying", error=str(exc))
+                await self._sleep(_RECONNECT_BACKOFF_SECONDS)
+                continue
             control = _Control.RESUME_RECONNECT
+            failed = False
             try:
                 control = await self._run_connection(conn, should_continue)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — defense in depth, see docstring
+                _log.warning(
+                    "discord gateway connection error ({error}); reconnecting", error=str(exc)
+                )
+                failed = True
             finally:
                 with contextlib.suppress(Exception):
                     await conn.close()
             if control is _Control.FRESH_RECONNECT:
                 self._session.reset()
+            if failed:
+                await self._sleep(_RECONNECT_BACKOFF_SECONDS)
 
     async def _run_connection(
         self, conn: GatewayConnection, should_continue: Callable[[], bool]
@@ -369,7 +429,13 @@ class DiscordGateway:
             while should_continue():
                 try:
                     raw = await conn.recv()
-                except Exception:  # noqa: BLE001 — any drop ends the session → reconnect+resume
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — any drop ends the session → reconnect
+                    _log.info(
+                        "discord gateway connection closed ({error}); reconnecting",
+                        error=str(exc),
+                    )
                     return _Control.RESUME_RECONNECT
                 try:
                     frame = json.loads(raw)
@@ -380,7 +446,9 @@ class DiscordGateway:
                 directive = interpret_frame(frame)
                 if isinstance(directive, Hello) and heartbeat is None:
                     self._acked = True
-                    await self._identify_or_resume(conn)
+                    sent = await self._identify_or_resume(conn)
+                    if not sent:
+                        return _Control.RESUME_RECONNECT
                     heartbeat = asyncio.create_task(
                         self._heartbeat_loop(conn, directive.heartbeat_interval_ms / 1000)
                     )

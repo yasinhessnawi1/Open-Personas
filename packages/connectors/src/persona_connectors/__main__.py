@@ -184,6 +184,32 @@ async def _serve_app(app: FastAPI, *, port: int) -> None:
     await server.serve()
 
 
+async def _supervised(name: str, runner: Coroutine[object, object, None]) -> None:
+    """Run one platform's runner; contain a crash so it can't take the others down (R9-071).
+
+    ``asyncio.gather(*runners)`` propagates the FIRST exception raised by ANY awaitable it
+    is given — without this, a bug in one platform's runner (observed: a Discord gateway
+    heartbeat send racing a normal 1000-close) ends every OTHER runner too, including the
+    shared HTTP server (link routes, OAuth callbacks, webhooks), so Telegram/Slack/email
+    all stop responding along with the crashed platform. Instead, the crash is logged
+    loudly (naming the platform) and this coroutine returns normally, so ``gather`` keeps
+    waiting on every other runner. ``asyncio.CancelledError`` (the deploy SIGINT shutdown
+    path) is always re-raised, never swallowed — a clean shutdown must still cancel
+    everything together, exactly as before.
+    """
+    try:
+        await runner
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — contain the crash, never kill the service
+        _log.error(
+            "connector runner '{name}' exited unexpectedly ({error}) — it will NOT be "
+            "restarted; other platforms keep serving",
+            name=name,
+            error=str(exc),
+        )
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -814,7 +840,7 @@ async def _amain() -> None:
         deliverers["telegram"] = connector
         http_apps["telegram"] = app
         if runner is not None:
-            runners.append(runner)
+            runners.append(_supervised("telegram", runner))
     if config.discord_bot_token is not None:
         connector, app, runner = await _setup_discord(
             config=config,
@@ -829,7 +855,7 @@ async def _amain() -> None:
         )
         deliverers["discord"] = connector
         http_apps["discord"] = app
-        runners.append(runner)
+        runners.append(_supervised("discord", runner))
     if config.slack_bot_token is not None:
         connector, app, runner = await _setup_slack(
             config=config,
@@ -845,7 +871,7 @@ async def _amain() -> None:
         deliverers["slack"] = connector
         http_apps["slack"] = app
         if runner is not None:
-            runners.append(runner)
+            runners.append(_supervised("slack", runner))
 
     # The two Twilio phone channels share ONE client (one account, channel by the From
     # prefix — D-C4-1); built once, only when at least one phone channel is configured.
@@ -926,7 +952,7 @@ async def _amain() -> None:
             parent = _FastAPI(title="persona-connectors (twilio)")
             for app in http_apps.values():
                 parent.router.routes.extend(app.router.routes)
-        runners.append(_serve_app(parent, port=_HTTP_PORT))
+        runners.append(_supervised("http", _serve_app(parent, port=_HTTP_PORT)))
 
     # Register every configured connector as a C0 MessageDeliverer (criterion 6 / 8).
     build_delivery_router(

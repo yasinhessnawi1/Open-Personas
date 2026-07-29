@@ -22,6 +22,7 @@ HTTP-transport-only, D-C3-2) while ``http`` transport mode does.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import urllib.parse
 from datetime import UTC, datetime, timedelta
@@ -31,7 +32,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from persona_connectors.__main__ import _setup_discord, _setup_slack, _setup_telegram
+from persona_connectors.__main__ import _setup_discord, _setup_slack, _setup_telegram, _supervised
 from persona_connectors.config import ConnectorConfig
 from pydantic import SecretStr
 
@@ -316,3 +317,56 @@ async def test_slack_http_transport_mounts_events_on_the_same_app_no_extra_runne
     events_resp = client.post("/slack/events", json={"type": "url_verification"})
     assert events_resp.status_code != 404
     await http.aclose()
+
+
+# --- _supervised (R9-071): one crashed platform runner must never kill the others ---
+
+
+@pytest.mark.asyncio
+async def test_supervised_contains_a_crashed_runner_instead_of_propagating() -> None:
+    """``asyncio.gather(*runners)`` propagates the FIRST raised exception, which would
+    end every OTHER runner (+ the HTTP server) along with the crashed one. ``_supervised``
+    must swallow (and log) a crashed runner's exception so ``gather`` keeps waiting on the
+    rest — proven directly here, and end-to-end via ``asyncio.gather`` below.
+    """
+
+    async def crashing_runner() -> None:
+        raise RuntimeError("discord gateway blew up")
+
+    await _supervised("discord", crashing_runner())  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_gather_over_supervised_runners_lets_the_others_keep_serving() -> None:
+    """One platform's runner crashing must not stop the others from running to
+    completion under the SAME ``asyncio.gather`` call ``_amain`` uses.
+    """
+    other_ran = False
+
+    async def crashing_runner() -> None:
+        raise RuntimeError("discord gateway blew up")
+
+    async def healthy_runner() -> None:
+        nonlocal other_ran
+        await asyncio.sleep(0)  # yield once, so both are genuinely concurrent
+        other_ran = True
+
+    # Must not raise — a crashed platform runner is contained, not propagated.
+    await asyncio.gather(
+        _supervised("discord", crashing_runner()),
+        _supervised("telegram", healthy_runner()),
+    )
+    assert other_ran is True
+
+
+@pytest.mark.asyncio
+async def test_supervised_reraises_cancelled_error_for_clean_shutdown() -> None:
+    """Normal shutdown (``asyncio.CancelledError``) must propagate untouched — the
+    containment layer only swallows genuine crashes, never a deliberate cancellation.
+    """
+
+    async def cancelled_runner() -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _supervised("discord", cancelled_runner())
