@@ -42,11 +42,21 @@ export interface ConnectorMeta {
   /** The kit's category section this platform files under (R11-B4). */
   readonly category: ConnectorCategory;
   /**
-   * Whether this platform's linking backend is wired in the running connector service today
-   * (the wired-capability rule, T10). Discord/Slack OAuth issue routes exist but are NOT
-   * mounted (C6-KL-2), so they are `false` until that C3 completion lands; the first-connection
-   * guidance invites only ready platforms. Flip to `true` when C6-KL-2 mounts them. (The
-   * ConnectFlow's 503 fail-soft, T7, remains the safety net regardless.)
+   * Whether this platform is connectable on the running deployment today (the
+   * wired-capability rule, T10) — `false` renders "Coming soon" instead of a Connect
+   * button that cannot succeed. The first-connection guidance invites only ready
+   * platforms; the ConnectFlow's 503 fail-soft (T7) remains the safety net regardless.
+   *
+   * Two things gate readiness, and BOTH must hold:
+   *  1. the connector service mounts the platform's link/OAuth routes, and
+   *  2. the platform's own provider side is actually usable on this deployment.
+   *
+   * Current state (2026-07-29): Discord + Slack flipped to `true` — R9-061 mounted their
+   * link + OAuth-callback routes for real (they had never been mounted in ANY transport),
+   * verified live. WhatsApp + SMS flipped to `false` — their routes are mounted, but both
+   * ride Twilio senders that require a paid Twilio subscription this deployment does not
+   * have yet, so a Connect attempt cannot complete. Flip them back when the Twilio senders
+   * are registered.
    */
   readonly backendReady: boolean;
 }
@@ -66,7 +76,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
     icon: MessageCircle,
     identityKind: "phone",
     mechanism: "code",
-    backendReady: true,
+    backendReady: false,
   },
   {
     key: "sms",
@@ -74,7 +84,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
     icon: MessageSquare,
     identityKind: "phone",
     mechanism: "code",
-    backendReady: true,
+    backendReady: false,
   },
   {
     key: "discord",
@@ -82,7 +92,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
     icon: MessagesSquare,
     identityKind: "id",
     mechanism: "oauth",
-    backendReady: false,
+    backendReady: true,
   },
   {
     key: "slack",
@@ -90,7 +100,7 @@ export const CONNECTOR_CATALOGUE: readonly ConnectorMeta[] = [
     icon: Hash,
     identityKind: "id",
     mechanism: "oauth",
-    backendReady: false,
+    backendReady: true,
   },
   {
     key: "email",

@@ -161,9 +161,25 @@ async def _run_idle_sweep(
 
 
 async def _serve_app(app: FastAPI, *, port: int) -> None:
-    """Serve an ASGI app on ``port`` (the HTTP transport runner — webhook / Slack events)."""
+    """Serve an ASGI app on ``port`` (the HTTP transport runner — webhook / Slack events).
+
+    ``proxy_headers`` + ``forwarded_allow_ips`` are LOAD-BEARING, not hygiene (mirrors
+    the api image's ``--proxy-headers --forwarded-allow-ips=*``): every deployment
+    terminates TLS at a proxy (Fly) and forwards plain HTTP here. Twilio signs the
+    REQUEST URL (``verify_twilio_signature(auth_token, str(request.url), …)`` —
+    ``_twilio/app.py``), so without these uvicorn reconstructs ``http://…`` while
+    Twilio signed ``https://…``, the signatures never match, and EVERY inbound
+    WhatsApp/SMS webhook is rejected 403 — observed in production 2026-07-29.
+    """
     server = uvicorn.Server(
-        uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")  # noqa: S104 — container-bound
+        uvicorn.Config(
+            app,
+            host="0.0.0.0",  # noqa: S104 — container-bound
+            port=port,
+            log_level="info",
+            proxy_headers=True,
+            forwarded_allow_ips="*",
+        )
     )
     await server.serve()
 
