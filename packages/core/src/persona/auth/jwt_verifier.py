@@ -201,6 +201,7 @@ def make_jwks_verifier(
     algorithms: Sequence[str],
     fetch_jwks: Callable[[], Awaitable[dict[str, Any]]],
     cache_ttl_seconds: int = 600,
+    min_refetch_interval_seconds: float = 60.0,
 ) -> Callable[[str], Awaitable[AuthenticatedUser]]:
     """Build a JWKS-based JWT verifier (R9-062) — key-rotation- and multi-instance-safe.
 
@@ -225,6 +226,18 @@ def make_jwks_verifier(
       unresolvable ``kid``, and any signature/claims failure all raise
       :class:`~persona.errors.AuthenticationError` — never a silently-accepted
       token.
+    * **The unknown-``kid`` refetch is rate-limited** (``min_refetch_interval_seconds``).
+      The refetch exists so a rotated signing key is picked up without a redeploy,
+      but it is reachable by an UNAUTHENTICATED caller: the ``kid`` is read from
+      the token header before any signature check, so an attacker minting tokens
+      with random ``kid``s would otherwise turn every request into an outbound
+      JWKS fetch — request amplification against both this process (blocking
+      network I/O per request) and the IdP (rate-limit/ban). The cooldown caps
+      forced refetches at one per interval, process-wide; requests arriving
+      inside the cooldown are answered from cache and fail closed on a genuinely
+      unknown ``kid``. A real rotation is picked up on the next request after the
+      interval (or by the ordinary TTL refresh), so the window is bounded and
+      self-healing.
 
     Args:
         jwks_url: The pinned JWKS document URL (e.g. a Clerk instance's
@@ -241,8 +254,13 @@ def make_jwks_verifier(
             verification is exercised with no network access.
         cache_ttl_seconds: How long a fetched JWKS is reused before the next
             request triggers a fresh fetch. The refetch-on-unknown-``kid`` path
-            (key rotation) is separate from this TTL — it always refetches once,
-            regardless of how fresh the cache is.
+            (key rotation) is separate from this TTL — it bypasses cache
+            freshness, but is itself capped by ``min_refetch_interval_seconds``.
+        min_refetch_interval_seconds: Minimum wall-clock gap between two
+            unknown-``kid`` forced refetches (default 60s). Bounds the outbound
+            fetch rate an unauthenticated caller can drive, since ``kid`` is read
+            pre-verification (see the security posture above). Ordinary
+            TTL-driven refreshes are unaffected.
 
     Returns:
         An async ``verify(token) -> AuthenticatedUser`` callable, the same
@@ -263,6 +281,9 @@ def make_jwks_verifier(
 
     _cached_jwks: dict[str, Any] | None = None
     _cached_at: float = 0.0
+    # Monotonic stamp of the last unknown-kid FORCED refetch (the rate-limit anchor).
+    # Starts at -inf so the first genuine rotation is picked up immediately.
+    _last_forced_at: float = float("-inf")
 
     async def _get_jwks(*, force: bool) -> dict[str, Any]:
         nonlocal _cached_jwks, _cached_at
@@ -286,11 +307,21 @@ def make_jwks_verifier(
         return fetched
 
     async def _resolve_key(kid: str) -> dict[str, Any] | None:
+        nonlocal _last_forced_at
         jwks = await _get_jwks(force=False)
         key = _select_jwk(jwks, kid)
         if key is not None:
             return key
-        # Unknown kid: refetch ONCE (handles key rotation) before failing closed.
+        # Unknown kid: refetch ONCE (handles key rotation) before failing closed —
+        # but rate-limited. `kid` is attacker-supplied (read pre-verification), so an
+        # unthrottled forced refetch here is an unauthenticated outbound-fetch
+        # amplifier against this process and the IdP. Inside the cooldown we answer
+        # from cache, which fails closed for a genuinely unknown kid; a real rotation
+        # is picked up on the first request after the window.
+        now = time.monotonic()
+        if (now - _last_forced_at) < min_refetch_interval_seconds:
+            return None
+        _last_forced_at = now
         jwks = await _get_jwks(force=True)
         return _select_jwk(jwks, kid)
 

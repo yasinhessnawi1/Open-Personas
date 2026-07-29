@@ -13,6 +13,7 @@ This module is part of the import-decoupled surface — it does NOT import
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -89,6 +90,35 @@ class ConnectorConfig(BaseSettings):
     # a redeploy. Not a credential (a JWKS endpoint is public); a plain URL, unset by default
     # so existing static-key deployments are byte-identical.
     jwt_jwks_url: str | None = Field(default=None)
+
+    @field_validator("jwt_jwks_url", mode="after")
+    @classmethod
+    def _require_https_jwks_url(cls, v: str | None) -> str | None:
+        """Reject a non-HTTPS JWKS URL — it is the authentication TRUST ANCHOR.
+
+        Whoever controls this document controls which signatures verify, i.e. who
+        can authenticate as anyone. Fetched over plaintext ``http://``, a network
+        attacker (hostile Wi-Fi, compromised hop, DNS spoof) can substitute their
+        own keys and mint tokens the connector accepts — a full auth bypass with
+        no other guardrail behind it. Fail fast at construction rather than trust
+        a downgraded anchor at runtime. Loopback is allowed so a local
+        dev/test IdP stub still works (nothing to intercept on the loopback path).
+        """
+        if v is None:
+            return None
+        url = v.strip()
+        if not url:
+            return None
+        parsed = urlparse(url)
+        loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        if parsed.scheme == "https" or (parsed.scheme == "http" and loopback):
+            return url
+        msg = (
+            "PERSONA_CONNECTORS_JWT_JWKS_URL must be an https:// URL (the JWT trust "
+            f"anchor); got {parsed.scheme or '<no scheme>'}://. Plaintext http:// is "
+            "permitted only for loopback (localhost/127.0.0.1/::1) dev stubs."
+        )
+        raise ValueError(msg)
 
     @field_validator("jwt_algorithms", mode="before")
     @classmethod

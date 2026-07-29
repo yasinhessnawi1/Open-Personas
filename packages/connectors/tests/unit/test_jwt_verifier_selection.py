@@ -24,6 +24,7 @@ from jose.backends.cryptography_backend import CryptographyRSAKey
 from persona.errors import AuthenticationError
 from persona_connectors.__main__ import _build_connector_verifier
 from persona_connectors.config import ConnectorConfig
+from pydantic import ValidationError
 
 
 def _rsa_keypair() -> tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]:
@@ -91,3 +92,32 @@ def test_jwks_verifier_fails_closed_on_unknown_kid() -> None:
     verify = _build_connector_verifier(config, http)
     with pytest.raises(AuthenticationError):
         asyncio.run(verify(token))
+
+
+# --- R9-062 security review: the JWKS URL is the auth TRUST ANCHOR ------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://evil.example.com/.well-known/jwks.json",  # plaintext: MITM can swap keys
+        "ftp://issuer.test/jwks.json",
+        "issuer.test/jwks.json",  # no scheme
+    ],
+)
+def test_non_https_jwks_url_is_rejected_at_construction(url: str) -> None:
+    """A downgraded trust anchor is a full auth bypass — fail fast, never at runtime."""
+    with pytest.raises(ValidationError, match="https"):
+        ConnectorConfig(jwt_jwks_url=url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://quiet-mink-13.clerk.accounts.dev/.well-known/jwks.json",
+        "http://localhost:9999/.well-known/jwks.json",  # loopback dev stub: nothing to intercept
+        "http://127.0.0.1:9999/.well-known/jwks.json",
+    ],
+)
+def test_https_and_loopback_jwks_urls_are_accepted(url: str) -> None:
+    assert ConnectorConfig(jwt_jwks_url=url).jwt_jwks_url == url

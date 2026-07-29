@@ -254,3 +254,62 @@ def test_cache_is_reused_within_ttl_no_refetch_for_a_known_kid() -> None:
     asyncio.run(verify(token))
     asyncio.run(verify(token))
     assert calls == 1  # the second verify reused the cached JWKS
+
+
+# --- R9-062 security review: unknown-kid refetch is rate-limited (DoS guard) ---------
+#
+# `kid` is read from the token header BEFORE any signature check, so the
+# unknown-kid forced refetch is reachable by an unauthenticated caller. Without a
+# cooldown, N crafted tokens with random kids drive N outbound JWKS fetches —
+# amplification against this process (blocking I/O per request) and the IdP.
+
+
+def test_unknown_kid_flood_does_not_drive_one_fetch_per_request() -> None:
+    """Many unknown-kid tokens must NOT each trigger a forced refetch."""
+    priv, _pub = _rsa_keypair()
+    calls = 0
+
+    async def fetch_jwks() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return _jwks_of()  # never contains any kid the attacker claims
+
+    verify = make_jwks_verifier(
+        jwks_url="https://issuer.test/.well-known/jwks.json",
+        audience=None,
+        algorithms=["RS256"],
+        fetch_jwks=fetch_jwks,
+        min_refetch_interval_seconds=60.0,
+    )
+    # 25 requests, each with a DIFFERENT unknown kid (the attacker's cheap move).
+    for i in range(25):
+        token = _sign(priv, f"forged-{i}", {"sub": "u1", "exp": int(time.time()) + 60})
+        with pytest.raises(AuthenticationError):
+            asyncio.run(verify(token))
+    # Initial cache-fill + at most ONE forced refetch inside the cooldown window —
+    # NOT one per request (which would be 26+).
+    assert calls == 2, f"expected the refetch to be rate-limited, got {calls} fetches"
+
+
+def test_rotation_is_still_picked_up_when_the_cooldown_has_elapsed() -> None:
+    """The cooldown must not defeat its purpose: a real rotation still resolves."""
+    priv, pub = _rsa_keypair()
+    rotated_in = False
+
+    async def fetch_jwks() -> dict[str, object]:
+        # Simulates the IdP rotating: the new kid only appears on a later fetch.
+        return _jwks_of(_jwk_from_public_key(pub, kid="rotated")) if rotated_in else _jwks_of()
+
+    verify = make_jwks_verifier(
+        jwks_url="https://issuer.test/.well-known/jwks.json",
+        audience=None,
+        algorithms=["RS256"],
+        fetch_jwks=fetch_jwks,
+        cache_ttl_seconds=0,  # ordinary refresh path open
+        min_refetch_interval_seconds=0.0,  # cooldown elapsed
+    )
+    token = _sign(priv, "rotated", {"sub": "u1", "exp": int(time.time()) + 60})
+    with pytest.raises(AuthenticationError):
+        asyncio.run(verify(token))  # not published yet
+    rotated_in = True
+    assert asyncio.run(verify(token)).id == "u1"  # picked up, no redeploy
