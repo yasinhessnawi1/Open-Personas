@@ -12,7 +12,12 @@ Only the **provider-agnostic** verification surface lives here:
 * :class:`JwtVerifierConfig` — the structural settings shape ``make_jwt_verifier``
   needs (both :class:`persona_api.config.APIConfig` and persona-voice's future
   ``VoiceConfig`` satisfy it).
-* :func:`make_jwt_verifier` — the algorithm-confusion-hardened builder.
+* :func:`make_jwt_verifier` — the algorithm-confusion-hardened builder for one
+  statically pinned key.
+* :func:`make_jwks_verifier` (R9-062, additive) — the JWKS-based builder that
+  resolves the verification key per-token by ``kid``, for callers that must
+  verify tokens from any instance of a provider (or survive key rotation)
+  instead of pinning to one static key.
 
 The FastAPI-specific glue (``get_verify_token``, ``get_current_user``,
 ``_bearer_token``) stays in persona-api — it depends on framework objects
@@ -24,11 +29,13 @@ from __future__ import annotations
 from persona.auth.jwt_verifier import (
     AuthenticatedUser,
     JwtVerifierConfig,
+    make_jwks_verifier,
     make_jwt_verifier,
 )
 
 __all__ = [
     "AuthenticatedUser",
     "JwtVerifierConfig",
+    "make_jwks_verifier",
     "make_jwt_verifier",
 ]

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import uvicorn
-from persona.auth.jwt_verifier import make_jwt_verifier
+from persona.auth.jwt_verifier import make_jwks_verifier, make_jwt_verifier
 from persona.events import EventTriggerSettings
 from persona.logging import get_logger
 from persona.stores.chroma import ChromaBackend
@@ -95,8 +95,10 @@ if TYPE_CHECKING:
         Mapping,
         Sequence,
     )
+    from typing import Any
 
     from fastapi import FastAPI
+    from persona.auth.jwt_verifier import AuthenticatedUser
     from persona.delivery import MessageDeliverer
     from pydantic import SecretStr
     from sqlalchemy.engine import Engine
@@ -170,6 +172,40 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+_JWKS_FETCH_TIMEOUT_SECONDS = 10.0  # short — the JWKS fetch sits on the request's auth path
+
+
+def _build_connector_verifier(
+    config: ConnectorConfig, http: httpx.AsyncClient
+) -> Callable[[str], Awaitable[AuthenticatedUser]]:
+    """Select the JWT verifier: JWKS (R9-062) when configured, else the static-key default.
+
+    ``PERSONA_CONNECTORS_JWT_JWKS_URL`` set → build a
+    :func:`~persona.auth.jwt_verifier.make_jwks_verifier` that fetches (and caches) the
+    JWKS from that PINNED url via the shared ``httpx.AsyncClient`` — this lets the connector
+    verify Clerk tokens from ANY Clerk instance (dev + prod) and survive key rotation, instead
+    of pinning to one static public key. Unset (the default) → the existing
+    :func:`~persona.auth.jwt_verifier.make_jwt_verifier` static verifier, byte-identical to
+    every deployment predating this option.
+    """
+    if config.jwt_jwks_url is None:
+        return make_jwt_verifier(config)
+    jwks_url = config.jwt_jwks_url
+
+    async def fetch_jwks() -> dict[str, Any]:
+        response = await http.get(jwks_url, timeout=_JWKS_FETCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload
+
+    return make_jwks_verifier(
+        jwks_url=jwks_url,
+        audience=config.jwt_audience,
+        algorithms=config.jwt_algorithms_list,
+        fetch_jwks=fetch_jwks,
+    )
+
+
 async def _setup_telegram(
     *,
     config: ConnectorConfig,
@@ -217,7 +253,7 @@ async def _setup_telegram(
         webhook_secret=secret,
         on_update=flow.handle,
         issue_deep_link=issue_deep_link,
-        verify_jwt=make_jwt_verifier(config),
+        verify_jwt=_build_connector_verifier(config, http),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -322,7 +358,7 @@ async def _setup_discord(
     app = discord_adapter.build_discord_app(
         issue_authorize_url=issue_authorize_url,
         complete_oauth=complete_oauth,
-        verify_jwt=make_jwt_verifier(config),
+        verify_jwt=_build_connector_verifier(config, http),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -405,7 +441,7 @@ async def _setup_slack(
     app = slack_adapter.build_slack_app(
         issue_authorize_url=issue_authorize_url,
         complete_oauth=complete_oauth,
-        verify_jwt=make_jwt_verifier(config),
+        verify_jwt=_build_connector_verifier(config, http),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -450,6 +486,7 @@ async def _setup_whatsapp(
     *,
     config: ConnectorConfig,
     twilio_client: TwilioClient,
+    http: httpx.AsyncClient,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -506,6 +543,7 @@ async def _setup_whatsapp(
 
     return connector, _build_phone_app(
         config=config,
+        http=http,
         platform=whatsapp_adapter.PLATFORM,
         destination=config.twilio_whatsapp_from,
         phone_linking=phone_linking,
@@ -518,6 +556,7 @@ async def _setup_sms(
     *,
     config: ConnectorConfig,
     twilio_client: TwilioClient,
+    http: httpx.AsyncClient,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -564,6 +603,7 @@ async def _setup_sms(
 
     return connector, _build_phone_app(
         config=config,
+        http=http,
         platform=sms_adapter.PLATFORM,
         destination=config.twilio_sms_from,
         phone_linking=phone_linking,
@@ -623,7 +663,7 @@ async def _setup_email(
         webhook_auth=webhook_auth,
         on_inbound=flow.handle,
         issue_code=issue_code,
-        verify_jwt=make_jwt_verifier(config),
+        verify_jwt=_build_connector_verifier(config, http),
         # C6-D-7: the PUBLIC inbound address the reversed flow shows ("email the code to …");
         # C6-D-8: expires_at = issue_time + ttl (single-source, from config).
         destination=config.email_inbound_address,
@@ -636,6 +676,7 @@ async def _setup_email(
 def _build_phone_app(
     *,
     config: ConnectorConfig,
+    http: httpx.AsyncClient,
     platform: str,
     destination: str,
     phone_linking: PhoneLinkingService,
@@ -659,7 +700,7 @@ def _build_phone_app(
         on_inbound=on_inbound,
         on_status=on_status,
         issue_code=issue_code,
-        verify_jwt=make_jwt_verifier(config),
+        verify_jwt=_build_connector_verifier(config, http),
         destination=destination,
         link_ttl=ttl,
         now=_now,
@@ -783,6 +824,7 @@ async def _amain() -> None:
             connector, app = await _setup_whatsapp(
                 config=config,
                 twilio_client=twilio_client,
+                http=http,
                 linking_service=linking_service,
                 resolver=resolver,
                 conversation_store=conversation_store,
@@ -797,6 +839,7 @@ async def _amain() -> None:
             connector, app = await _setup_sms(
                 config=config,
                 twilio_client=twilio_client,
+                http=http,
                 linking_service=linking_service,
                 resolver=resolver,
                 conversation_store=conversation_store,

@@ -82,6 +82,13 @@ class ConnectorConfig(BaseSettings):
     jwt_public_key: SecretStr | None = Field(default=None)
     jwt_algorithms: str = Field(default="HS256")
     jwt_audience: str | None = Field(default=None)
+    # R9-062: opt-in JWKS-based verification (persona.auth.jwt_verifier.make_jwks_verifier).
+    # When set, the connector verifies Clerk tokens against this instance's published JWKS
+    # (kid-matched, refetch-on-rotation) instead of the single static ``jwt_public_key`` —
+    # so it works against ANY Clerk instance (dev + prod) and survives key rotation without
+    # a redeploy. Not a credential (a JWKS endpoint is public); a plain URL, unset by default
+    # so existing static-key deployments are byte-identical.
+    jwt_jwks_url: str | None = Field(default=None)
 
     @field_validator("jwt_algorithms", mode="before")
     @classmethod
