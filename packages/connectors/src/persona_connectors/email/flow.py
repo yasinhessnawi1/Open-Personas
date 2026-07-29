@@ -23,7 +23,10 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 
 from persona_connectors._phone.linking import RedeemStatus
-from persona_connectors._postmark.authentication import sender_is_authentic
+from persona_connectors._postmark.authentication import (
+    parse_authentication_results,
+    sender_is_authentic,
+)
 from persona_connectors.email.transport import EmailFlowTransport
 from persona_connectors.errors import IdentityNotLinkedError
 
@@ -76,9 +79,21 @@ class EmailInboundFlow:
         # B2 — sender authenticity (the payload is already B1-authenticated by the app). A
         # spoofed / non-DMARC ``From`` gets ZERO access: no bind, no turn, no reply.
         if not sender_is_authentic(parsed.authentication_results):
+            # Log the OBSERVED verdicts, not just the refusal. "not DMARC-authentic" alone
+            # cannot distinguish the two very different causes: the sender genuinely failed
+            # DMARC (working as intended) vs the ESP never stamped a `dmarc=` token at all
+            # (in which case this gate can NEVER pass and inbound email is dead by
+            # construction). These are verdict tokens (`pass`/`fail`/`none`/absent), NOT
+            # message content — safe to log, and the only way to tell those apart from prod.
+            _verdicts = parse_authentication_results(parsed.authentication_results)
             _log.warning(
-                "email inbound rejected: From not DMARC-authentic (fp={fp})",
+                "email inbound rejected: From not DMARC-authentic "
+                "(fp={fp} dmarc={dmarc} spf={spf} dkim={dkim} header_present={present})",
                 fp=_fingerprint(parsed.inbound.sender_id),
+                dmarc=_verdicts.dmarc or "<absent>",
+                spf=_verdicts.spf or "<absent>",
+                dkim=_verdicts.dkim or "<absent>",
+                present=parsed.authentication_results is not None,
             )
             return
 
