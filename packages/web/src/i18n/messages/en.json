@@ -199,6 +199,18 @@
     "basisMixed": "Mixed",
     "basisNone": "—"
   },
+  "billing": {
+    "title": "Billing",
+    "subtitle": "Your plan, your credits, and how to add more.",
+    "planLabel": "Plan",
+    "enabledIntro": "You are on the Free plan. Plans, credit packs, and auto top-up land here shortly.",
+    "unmeteredBody": "This install runs unmetered, so there is nothing to pay for. Every persona, every conversation, no credits and no limits.",
+    "successTitle": "Payment confirmed",
+    "successBody": "Thank you. Your credits are being added right now and will show on your balance within a few seconds.",
+    "cancelTitle": "Checkout cancelled",
+    "cancelBody": "No payment was taken and nothing changed. Come back whenever you are ready.",
+    "backToSettings": "Back to settings"
+  },
   "conversations": {
     "title": "Conversations",
     "subtitle": "Every chat you've had with your personas.",
