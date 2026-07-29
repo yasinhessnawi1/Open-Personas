@@ -23,6 +23,8 @@ HTTP-transport-only, D-C3-2) while ``http`` transport mode does.
 from __future__ import annotations
 
 import contextlib
+import urllib.parse
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 _TOKEN = SecretStr("test-bot-token")  # noqa: S105 — test literal
+_NOW = datetime(2026, 7, 29, 12, 0, 0, tzinfo=UTC)
+_TTL = timedelta(minutes=15)
 
 
 def _config(**overrides: object) -> ConnectorConfig:
@@ -216,6 +220,78 @@ async def test_slack_socket_mode_serves_link_and_callback_but_not_events() -> No
     # D-C3-2: socket mode must NOT serve the HTTP-signed events route.
     events_resp = client.post("/slack/events", json={"type": "url_verification"})
     assert events_resp.status_code == 404
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_slack_setup_forwards_the_configured_scopes_into_the_authorize_url() -> None:
+    """R9-067: ``_setup_slack`` must forward ``ConnectorConfig.slack_scope`` /
+    ``slack_user_scope`` into the ``SlackLinkingService`` it builds — the CONFIGURED
+    values, not the class defaults and not empty-by-accident (the original bug).
+
+    A spy subclass captures the constructed instance so the actual authorize URL can be
+    built from it and inspected, rather than trusting that the kwargs were merely passed.
+    """
+    from persona_connectors import __main__ as main_module
+
+    captured: dict[str, object] = {}
+    real_cls = main_module.slack_adapter.SlackLinkingService
+
+    class _SpyLinkingService(real_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)  # type: ignore[arg-type]
+            captured["instance"] = self
+
+    monkeypatch_target = main_module.slack_adapter
+    original = monkeypatch_target.SlackLinkingService
+    monkeypatch_target.SlackLinkingService = _SpyLinkingService  # type: ignore[misc]
+    try:
+        http = _mock_client(_slack_handler)
+        config = _config(
+            slack_transport="socket",
+            slack_app_token="xapp-test",  # noqa: S106
+            slack_scope="custom:scope,another:scope",
+            slack_user_scope="custom.user.scope",
+        )
+        connector, app, runner = await _setup_slack(
+            config=config,
+            token=_TOKEN,
+            http=http,
+            **_common_kwargs(),  # type: ignore[arg-type]
+        )
+        assert connector is not None
+        if runner is not None:
+            runner.close()
+        await http.aclose()
+    finally:
+        monkeypatch_target.SlackLinkingService = original  # type: ignore[misc]
+
+    instance = captured["instance"]
+    url = instance.issue_authorize_url(  # type: ignore[attr-defined]
+        owner_id="owner-1", now=_NOW, ttl=_TTL
+    )
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert query["scope"] == ["custom:scope,another:scope"]
+    assert query["user_scope"] == ["custom.user.scope"]
+
+
+@pytest.mark.asyncio
+async def test_slack_with_bot_token_but_empty_scope_fails_fast() -> None:
+    """R9-067: an empty ``PERSONA_CONNECTORS_SLACK_SCOPE`` can ONLY ever reproduce
+    Slack's "No scopes requested" install rejection — refuse at startup, never let a
+    broken install link reach a user.
+    """
+    from persona_connectors.errors import ConnectorError
+
+    http = _mock_client(_slack_handler)
+    config = _config(slack_transport="socket", slack_app_token="xapp-test", slack_scope="")  # noqa: S106
+    with pytest.raises(ConnectorError):
+        await _setup_slack(
+            config=config,
+            token=_TOKEN,
+            http=http,
+            **_common_kwargs(),  # type: ignore[arg-type]
+        )
     await http.aclose()
 
 

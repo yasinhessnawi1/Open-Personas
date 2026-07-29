@@ -140,6 +140,52 @@ def test_authorize_url_carries_state_scope_and_redirect() -> None:
     assert query["redirect_uri"] == ["https://app.test/cb"]
 
 
+def test_authorize_url_carries_user_scope_when_provided() -> None:
+    """R9-067: ``user_scope`` rides the authorize URL exactly like ``scope`` does."""
+    url = build_authorize_url(
+        client_id="client-1",
+        redirect_uri="https://app.test/cb",
+        state="STATE123",
+        scope="im:history,chat:write,im:write",
+        user_scope="identity.basic",
+    )
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert query["scope"] == ["im:history,chat:write,im:write"]
+    assert query["user_scope"] == ["identity.basic"]
+
+
+def test_authorize_url_omits_scope_and_user_scope_when_empty() -> None:
+    """R9-067's bug, pinned: the (pre-fix) no-argument call must still omit both —
+    this is the exact call shape that reproduced Slack's "No scopes requested" reject.
+    """
+    url = build_authorize_url(
+        client_id="client-1", redirect_uri="https://app.test/cb", state="STATE123"
+    )
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert "scope" not in query
+    assert "user_scope" not in query
+
+
+def test_issue_authorize_url_carries_the_service_configured_scopes() -> None:
+    """The service (as ``__main__._setup_slack`` builds it) forwards its OWN configured
+    ``scope``/``user_scope`` into every issued authorize URL — not empty defaults-by-accident.
+    """
+    store = _FakeLinkStore()
+    linking = LinkingService(store)
+    slack = SlackLinkingService(
+        linking=linking,
+        oauth=_FakeOAuth(),
+        client_id="client-1",
+        redirect_uri="https://app.test/slack/oauth/callback",
+        scope="im:history,chat:write,im:write",
+        user_scope="identity.basic",
+    )
+    url = slack.issue_authorize_url(owner_id=_OWNER, now=_NOW, ttl=_TTL)
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert query["scope"] == ["im:history,chat:write,im:write"]
+    assert query["user_scope"] == ["identity.basic"]
+
+
 # --- binding-shape symmetry across ALL THREE carriers ---
 
 

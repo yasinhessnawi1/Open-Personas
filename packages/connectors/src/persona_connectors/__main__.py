@@ -402,7 +402,20 @@ async def _setup_slack(
     ``http_apps`` in ``_amain``, no separate runner — ``None``); in ``socket`` mode the
     events route is never mounted (D-C3-2 — it stays HTTP-transport-only) and the
     runner is the socket-mode WS loop.
+
+    R9-067 fail-fast: a Slack bot token configured with an empty
+    ``PERSONA_CONNECTORS_SLACK_SCOPE`` can only ever produce Slack's own "No
+    scopes requested" rejection on the authorize page — never a working install
+    link — so that misconfiguration is refused HERE, at startup, rather than
+    reaching a user as a broken link.
     """
+    if not config.slack_scope:
+        raise ConnectorError(
+            "Slack is configured (a bot token is set) but "
+            "PERSONA_CONNECTORS_SLACK_SCOPE is empty — Slack's authorize page "
+            "rejects an install with no scopes requested, so this must never "
+            "reach a user as a broken install link"
+        )
     client = slack_adapter.SlackClient(
         bot_token=token, http=http, api_base_url=config.slack_api_base_url
     )
@@ -445,6 +458,8 @@ async def _setup_slack(
         oauth=oauth_client,
         client_id=config.slack_oauth_client_id,
         redirect_uri=config.slack_oauth_redirect_uri,
+        scope=config.slack_scope,
+        user_scope=config.slack_user_scope,
     )
     ttl = timedelta(minutes=config.slack_link_token_ttl_minutes)
 

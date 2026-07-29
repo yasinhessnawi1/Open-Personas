@@ -206,6 +206,28 @@ class ConnectorConfig(BaseSettings):
     slack_oauth_client_id: str = Field(default="")
     slack_oauth_client_secret: SecretStr | None = Field(default=None)
     slack_oauth_redirect_uri: str = Field(default="")
+    # The OAuth v2 BOT scopes (comma-separated, carried verbatim into the
+    # authorize URL's ``scope`` param). R9-067: Slack's authorize page HARD
+    # REJECTS an install with "Invalid permissions requested / No scopes
+    # requested" when this is empty — so the default must be non-empty out of
+    # the box, derived from what this connector actually does on the wire:
+    # ``im:history`` (subscribe to the ``message.im`` event this adapter's
+    # ``events.py``/socket handler consumes), ``chat:write`` (``connector.py``'s
+    # ``chat.postMessage`` reply), ``im:write`` (``client.py``'s
+    # ``conversations.open`` DM-channel lookup before every reply). Every scope
+    # here is load-bearing — none is speculative.
+    slack_scope: str = Field(default="im:history,chat:write,im:write")
+    # The OAuth v2 USER scope(s) (comma-separated → the authorize URL's
+    # ``user_scope`` param). ``identity.basic`` makes explicit that the OAuth
+    # callback is reading the AUTHORIZING USER's own Slack id (``authed_user.id``)
+    # — the identity ``linking.py`` binds, which per its own docstring "equals
+    # the ``message.im`` ``user``" (both workspace-scoped ``U…``). Slack's
+    # ``oauth.v2.access`` response includes ``authed_user.id`` unconditionally
+    # even with an empty ``user_scope``, so this isn't load-bearing for the fix
+    # itself — but it costs the installer nothing extra (we never use the
+    # resulting ``xoxp-`` user token) and keeps the authorize consent screen
+    # honest about what identity the install carries.
+    slack_user_scope: str = Field(default="identity.basic")
     # The Web API base — overridable for a faithful stub in tests.
     slack_api_base_url: str = Field(default="https://slack.com/api")
     # D-C3-2: ``socket`` (default, no public endpoint) vs ``http`` (public signed endpoint).
