@@ -42,6 +42,14 @@ kill_timeout = "30s"
   # non-writable by the `persona` user) → PermissionError. No volume here (like
   # voice), so point them at the writable ephemeral /tmp; the durable turn log
   # already goes to Postgres (PostgresTurnLogWriter), and audit routes to the DB.
+  # Opt OUT of the built-in MCP servers on this surface (empty string = none;
+  # `None`/unset would enable the catalog's default subset). In the connector they
+  # never come up — prod logs show `built-in MCP server never opened its port` for
+  # every one, each costing a ~20s spawn timeout, so a single inbound message paid
+  # ~60s of dead wait before the persona could even start composing a reply. They
+  # are unavailable either way, so disabling them removes the stall without
+  # removing a capability. Revisit if/when the launcher works in this image.
+  PERSONA_MCP_BUILTIN_ENABLED = ""
   PERSONA_API_AUDIT_BACKEND = "postgres"
   PERSONA_API_AUDIT_ROOT = "/tmp/persona/audit"
   PERSONA_API_WORKSPACE_ROOT = "/tmp/persona/workspace"
