@@ -5,6 +5,10 @@ routing + command + linking + ownership wiring + the no-streaming typing indicat
 The routing DECISION is C1's (tested in test_routing); here we prove the I/O wires
 it correctly: the right persona is foregrounded, the turn is collected, and the
 reply is sent — and ownership holds (an unlinked identity gets zero access).
+
+R9-065 additions: the observability decision points (ignore reason, ``/start``
+redeem status) actually log, AND — the important guardrail — no emitted log
+record ever contains message text or the raw ``/start`` link token.
 """
 # ruff: noqa: ARG002 — the fakes mirror real protocol signatures; unused params are intentional.
 
@@ -12,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.delivery import DeliveryOutcome, DeliveryResult
 from persona_connectors.domain.conversation_model import ForegroundRef, ForegroundResult
 from persona_connectors.domain.resolution import ResolvedIdentity, UnlinkedIdentity
@@ -25,9 +31,26 @@ from persona_connectors.telegram.replies import (
     NO_PERSONAS_MESSAGE,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 _NOW = datetime(2026, 6, 25, 12, 0, 0, tzinfo=UTC)
 _CHAT = "555"
 _NAMES = {"astrid": ["Astrid"], "kai": ["Kai"]}
+
+
+@pytest.fixture
+def loguru_capture() -> Iterator[list[str]]:
+    """Loguru sink capturing every emitted line — ``persona.logging`` wraps loguru,
+    so stdlib ``caplog`` sees nothing (the established repo idiom, e.g.
+    ``test_api_app_factory.py``'s ``loguru_info_capture``). Captured at the lowest
+    level so the privacy guardrail test below sees EVERYTHING this module emits."""
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="TRACE")
+    try:
+        yield captured
+    finally:
+        _loguru_logger.remove(sink_id)
 
 
 class _FakeClient:
@@ -296,3 +319,72 @@ async def test_no_name_no_active_multiple_personas_lists() -> None:
     assert "Astrid" in client.messages[0][1]
     assert connector.sent == []
     assert turn.requests == []
+
+
+# --- observability (R9-065) ---
+
+
+@pytest.mark.asyncio
+async def test_ignored_update_logs_the_reason(loguru_capture: list[str]) -> None:
+    """An InboundIgnore — the most likely silent-drop site — must log its reason."""
+    flow, _client, _connector, _store, _turn = _flow()
+    await flow.handle({"update_id": 42, "edited_message": {"message_id": 5}})
+    assert any("non-message-update" in line for line in loguru_capture), loguru_capture
+
+
+@pytest.mark.asyncio
+async def test_start_redeem_linked_logs_the_status(loguru_capture: list[str]) -> None:
+    flow, _client, _connector, _store, _turn = _flow(
+        linking=_FakeLinking(
+            RedeemResult(status=RedeemStatus.linked, owner_id="user_a", message="You're linked!")
+        )
+    )
+    await flow.handle(_text_update("/start sometoken"))
+    assert any("status=linked" in line for line in loguru_capture), loguru_capture
+
+
+@pytest.mark.asyncio
+async def test_start_redeem_failed_logs_the_status(loguru_capture: list[str]) -> None:
+    flow, _client, _connector, _store, _turn = _flow(
+        linking=_FakeLinking(RedeemResult(status=RedeemStatus.failed, message="didn't work"))
+    )
+    await flow.handle(_text_update("/start staletoken"))
+    assert any("status=failed" in line for line in loguru_capture), loguru_capture
+
+
+@pytest.mark.asyncio
+async def test_not_a_link_attempt_logs_the_status(loguru_capture: list[str]) -> None:
+    """A normal message still runs the redeem check (bare-/start branch) — logged too."""
+    flow, _client, _connector, _store, _turn = _flow()
+    await flow.handle(_text_update("Kai, hello"))
+    assert any("status=not_a_link_attempt" in line for line in loguru_capture), loguru_capture
+
+
+@pytest.mark.asyncio
+async def test_no_log_record_ever_contains_message_text_or_the_start_token(
+    loguru_capture: list[str],
+) -> None:
+    """The important guardrail: message content and the /start bearer token must
+    NEVER reach a log record, across every branch this module can take — a plain
+    message, a linked /start, and a failed /start."""
+    sentinel_text = "SENTINEL-MESSAGE-BODY-DO-NOT-LOG-9f3c"
+    sentinel_token = "SENTINEL-START-TOKEN-DO-NOT-LOG-7ae1"
+
+    plain_flow, *_ = _flow()
+    await plain_flow.handle(_text_update(f"hello {sentinel_text} world"))
+
+    linked_flow, *_ = _flow(
+        linking=_FakeLinking(
+            RedeemResult(status=RedeemStatus.linked, owner_id="user_a", message="linked!")
+        )
+    )
+    await linked_flow.handle(_text_update(f"/start {sentinel_token}"))
+
+    failed_flow, *_ = _flow(
+        linking=_FakeLinking(RedeemResult(status=RedeemStatus.failed, message="nope"))
+    )
+    await failed_flow.handle(_text_update(f"/start {sentinel_token}-failed"))
+
+    for line in loguru_capture:
+        assert sentinel_text not in line, f"message text leaked into a log line: {line!r}"
+        assert sentinel_token not in line, f"/start token leaked into a log line: {line!r}"

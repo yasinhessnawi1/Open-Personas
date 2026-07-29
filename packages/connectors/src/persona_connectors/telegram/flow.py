@@ -21,6 +21,16 @@ listing the owner's personas — are injected callables the composition root sup
 this module imports no ``persona_api``. Ownership holds exactly as on the web (the
 shared C1 resolution gate): an unlinked identity gets a link-instruction and ZERO
 access; a resolved owner only ever touches their own personas.
+
+**Observability (R9-065):** every decision point on the inbound path logs — the raw
+update's arrival, an :class:`~persona_connectors.telegram.inbound.InboundIgnore`
+reason (the most likely silent-drop site), the ``/start`` redeem's
+:class:`~persona_connectors.telegram.linking.RedeemStatus`, a non-text decline, and
+each system reply this module sends — so a dropped update is traceable end-to-end.
+**Never logged:** message text/content (only presence/kind), and never the
+``/start`` deep-link token (a bearer credential — only its redeem STATUS is
+logged). Telegram chat/user ids are logged (operationally necessary, already
+stored).
 """
 
 from __future__ import annotations
@@ -28,6 +38,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from typing import TYPE_CHECKING
+
+from persona.logging import get_logger
 
 from persona_connectors.domain.flow import FlowCommands, SharedInboundFlow, TurnRequest
 from persona_connectors.telegram.inbound import (
@@ -53,6 +65,8 @@ if TYPE_CHECKING:
 # here so existing importers (``telegram/__init__``, the composition root) are unchanged.
 __all__ = ["InboundFlow", "TurnRequest"]
 
+_log = get_logger("connectors.telegram_flow")
+
 # The typing chat action lasts ~5s, so refresh just under that while the turn runs.
 _TYPING_REFRESH_SECONDS = 4.0
 
@@ -60,6 +74,28 @@ _TYPING_REFRESH_SECONDS = 4.0
 # ``/new`` is the universal C1-D-3 boundary. The shared flow takes this as data so it
 # never hard-codes Telegram's verb (D-C3-X-flow-skeleton).
 _TELEGRAM_COMMANDS = FlowCommands(greeting_commands=frozenset({"/start"}))
+
+
+def _peek_conversation_key(update: dict[str, object]) -> str | None:
+    """Best-effort chat id straight off the raw update, for logging only.
+
+    Read *before* :func:`~persona_connectors.telegram.inbound.classify_update` runs
+    (an ignored/malformed update never reaches a parsed shape), so entry logging can
+    still carry the chat id when one is present. Touches only the numeric/string
+    ``message.chat.id`` field — never message text/content.
+    """
+    message = update.get("message")
+    if not isinstance(message, dict):
+        return None
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return None
+    chat_id = chat.get("id")
+    if isinstance(chat_id, bool):
+        return None
+    if isinstance(chat_id, int | str) and chat_id != "":
+        return str(chat_id)
+    return None
 
 
 @contextlib.asynccontextmanager
@@ -144,31 +180,73 @@ class InboundFlow:
 
     async def handle(self, update: dict[str, object]) -> None:
         """Handle one raw Telegram ``Update`` (the transport's ``on_update`` callback)."""
+        update_id = update.get("update_id")
+        _log.info(
+            "telegram update received (update_id={update_id} chat={chat})",
+            update_id=update_id,
+            chat=_peek_conversation_key(update),
+        )
         outcome = classify_update(update, now=self._now())
         if isinstance(outcome, InboundIgnore):
+            # The most likely silent-drop site (R9-065) — always log why.
+            _log.info(
+                "telegram update {update_id} ignored: reason={reason}",
+                update_id=update_id,
+                reason=outcome.reason,
+            )
             return
         if isinstance(outcome, InboundNonText):
             # Non-text → a friendly text-only decline (D-C2-6); no runtime turn.
+            _log.info(
+                "telegram update {update_id} declined: kind={kind} chat={chat}",
+                update_id=update_id,
+                kind=outcome.kind.value,
+                chat=outcome.conversation_key,
+            )
             await self._client.send_message(
                 chat_id=outcome.conversation_key, text=decline_message(outcome.kind)
             )
+            _log.info(
+                "telegram update {update_id}: system reply sent (decline) chat={chat}",
+                update_id=update_id,
+                chat=outcome.conversation_key,
+            )
             return
-        await self._handle_text(outcome.inbound)
+        await self._handle_text(outcome.inbound, update_id=update_id)
 
-    async def _handle_text(self, inbound: NormalisedInbound) -> None:
+    async def _handle_text(self, inbound: NormalisedInbound, *, update_id: object = None) -> None:
         # AUTH CARRIER (surface-side, the binding WRITE): /start <token> redeems +
         # binds (or fails closed). The shared flow only ever READS the binding, so
         # this Telegram-specific deep-link redeem stays here, before delegation. A
         # bare /start (no token) falls through (not_a_link_attempt) and the shared
-        # flow's greeting vocabulary lists the personas.
+        # flow's greeting vocabulary lists the personas. NEVER log the token itself
+        # (a bearer credential) — only the resulting RedeemStatus.
         redeem = self._linking.redeem_start_command(
             text=inbound.text, platform_identity=inbound.sender_id, now=self._now()
+        )
+        _log.info(
+            "telegram update {update_id}: start-redeem status={status} chat={chat}",
+            update_id=update_id,
+            status=redeem.status.value,
+            chat=inbound.conversation_key,
         )
         if redeem.status in (RedeemStatus.linked, RedeemStatus.failed):
             await self._client.send_message(
                 chat_id=inbound.conversation_key, text=redeem.message or ""
             )
+            _log.info(
+                "telegram update {update_id}: system reply sent (redeem={status}) chat={chat}",
+                update_id=update_id,
+                status=redeem.status.value,
+                chat=inbound.conversation_key,
+            )
             return
 
         # The platform-agnostic sequence (resolve → /new → route → drive → send) is C1's.
         await self._shared.handle_text(inbound, transport=self._transport)
+        _log.info(
+            "telegram update {update_id}: delegated to shared flow (persona reply path) "
+            "chat={chat}",
+            update_id=update_id,
+            chat=inbound.conversation_key,
+        )
