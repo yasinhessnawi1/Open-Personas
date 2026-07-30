@@ -14,6 +14,7 @@ import json
 
 import httpx
 import pytest
+from loguru import logger as _loguru
 from persona_connectors.errors import SlackApiError
 from persona_connectors.slack.socket import (
     SlackSocketClient,
@@ -295,3 +296,81 @@ def _client(handler: object, conn: _FakeConn, *, on_event: object = None) -> Sla
         connect=connect,  # type: ignore[arg-type]
         api_base_url="https://slack.test/api",
     )
+
+
+# --- R9-078: the socket loop must be OBSERVABLE (open / hello / envelope / reconnect) ---
+
+
+@pytest.mark.asyncio
+async def test_run_logs_connect_hello_envelope_and_reconnect_without_leaking_secrets() -> None:
+    """Production had ZERO Slack log lines, so a silent Slack could not be localised
+    between "the socket never opened", "it opened but Slack sends no events" (an
+    owner-side app-config leg) and "events arrive but the flow drops them". Each of
+    those steps now names itself — while the app token and the socket URL's one-time
+    ticket stay out of the log entirely.
+    """
+    ticket_url = "wss://socket.test/link/?ticket=TICKET-DO-NOT-LOG&app_id=A123"
+    conn = _FakeConn(
+        [
+            json.dumps({"type": "hello"}),
+            json.dumps(
+                {
+                    "type": "events_api",
+                    "envelope_id": "e1",
+                    "payload": {
+                        "event": {
+                            "type": "message",
+                            "channel_type": "im",
+                            "text": "my private words",
+                        }
+                    },
+                }
+            ),
+            json.dumps({"type": "disconnect", "reason": "refresh"}),
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "url": ticket_url})
+
+    records: list[str] = []
+    sink_id = _loguru.add(records.append, level="INFO")
+    try:
+        client = _client(handler, conn)
+        await client.run(should_continue=lambda: not conn.closed)
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "opening a connection URL" in blob  # the open was attempted
+    assert "socket.test" in blob  # …to a named endpoint
+    assert "connected" in blob  # the WS opened
+    assert "hello" in blob  # Slack accepted the connection
+    assert "events_api envelope e1" in blob  # an event actually arrived
+    assert "channel_type=im" in blob
+    assert "disconnect requested by Slack" in blob  # and why the session ended
+
+    # Never the app token, never the URL's one-time ticket, never the message text.
+    assert _APP_TOKEN not in blob
+    assert "TICKET-DO-NOT-LOG" not in blob
+    assert "my private words" not in blob
+
+
+@pytest.mark.asyncio
+async def test_run_logs_a_dropped_connection_as_a_reconnect() -> None:
+    """A drop (recv raising) is the third failure shape — it must not be silent either."""
+    conn = _FakeConn()  # empty → recv raises immediately
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "url": "wss://socket.test/link"})
+
+    records: list[str] = []
+    sink_id = _loguru.add(records.append, level="INFO")
+    try:
+        await _client(handler, conn).run(should_continue=lambda: not conn.closed)
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "receive ended" in blob
+    assert "reconnecting" in blob

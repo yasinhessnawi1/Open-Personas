@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 from persona.logging import get_logger
@@ -47,6 +48,16 @@ __all__ = [
 ]
 
 _log = get_logger("connectors.slack_socket")
+
+
+def _endpoint(url: str) -> str:
+    """The socket URL's HOST only — the query string carries a one-time connection ticket.
+
+    Socket-mode URLs look like ``wss://wss-primary.slack.com/link/?ticket=…&app_id=…``.
+    The ticket is a credential, so only the host is ever logged (the app-token itself is a
+    ``SecretStr`` that never leaves the ``apps.connections.open`` header — module docstring).
+    """
+    return urlsplit(url).netloc or "<unparsable>"
 
 
 class SocketHello(BaseModel):
@@ -201,15 +212,41 @@ class SlackSocketClient:
 
         The live I/O loop (the deploy seam). Each ``events_api`` envelope is **acked** then its
         inner event dispatched; a ``disconnect`` (or a drop) reconnects with a fresh URL.
+
+        R9-078 (observability): this loop used to log NOTHING — not the open, not the
+        ``hello``, not a single arriving envelope — so a Slack that never replied could not
+        be localised between "the socket never opened", "the socket is open but Slack sends
+        no events" (an owner-side Event-Subscriptions / bot-scope leg) and "events arrive but
+        the flow drops them". Every step now says so. The app token is never logged (it is a
+        ``SecretStr`` used only in the open call's header) and neither is the socket URL's
+        one-time ticket — see :func:`_endpoint`.
         """
+        connections = 0
         while should_continue():
+            connections += 1
+            _log.info(
+                "slack socket: opening a connection URL (attempt #{n}) via apps.connections.open",
+                n=connections,
+            )
             url = await self.open_connection_url()
+            _log.info(
+                "slack socket: connecting to {endpoint} (attempt #{n})",
+                endpoint=_endpoint(url),
+                n=connections,
+            )
             conn = await self._connect(url)
+            _log.info("slack socket: connected to {endpoint}", endpoint=_endpoint(url))
             try:
                 await self._receive_loop(conn, should_continue)
             finally:
                 with contextlib.suppress(Exception):
                     await conn.close()
+            _log.info(
+                "slack socket: session #{n} ended — reconnecting with a fresh URL "
+                "(continue={cont})",
+                n=connections,
+                cont=should_continue(),
+            )
 
     async def _receive_loop(
         self, conn: SlackSocketConnection, should_continue: Callable[[], bool]
@@ -217,16 +254,45 @@ class SlackSocketClient:
         while should_continue():
             try:
                 raw = await conn.recv()
-            except Exception:  # noqa: BLE001 — a drop ends the session → reconnect
+            except Exception as exc:  # noqa: BLE001 — a drop ends the session → reconnect
+                _log.info(
+                    "slack socket: receive ended ({error_class}: {error}) — reconnecting",
+                    error_class=type(exc).__name__,
+                    error=str(exc),
+                )
                 return
             try:
                 envelope = json.loads(raw)
             except (ValueError, TypeError):
+                _log.warning("slack socket: dropped a frame that is not valid JSON")
                 continue
             if not isinstance(envelope, dict):
+                _log.warning("slack socket: dropped a JSON frame that is not an object")
                 continue
             directive = interpret_envelope(envelope)
+            if isinstance(directive, SocketHello):
+                # The connection is live and Slack has accepted it. If this line appears but
+                # no `events_api` line ever follows, the gap is on the Slack APP side (Event
+                # Subscriptions off / the bot not subscribed to message.im or app_mention),
+                # not in this process.
+                _log.info("slack socket: hello — the connection is live, awaiting events")
+            elif isinstance(directive, SocketIgnore):
+                _log.warning(
+                    "slack socket: ignoring an envelope ({reason} type={type})",
+                    reason=directive.reason,
+                    type=str(envelope.get("type", "<none>")),
+                )
             if isinstance(directive, SocketEvent):
+                # Envelope TYPES only — never the message text (a Slack event carries the
+                # user's words in `text`).
+                _log.info(
+                    "slack socket: events_api envelope {envelope_id} "
+                    "(event_type={event_type} subtype={subtype} channel_type={channel_type})",
+                    envelope_id=directive.envelope_id,
+                    event_type=str(directive.event.get("type", "<none>")),
+                    subtype=str(directive.event.get("subtype", "<none>")),
+                    channel_type=str(directive.event.get("channel_type", "<none>")),
+                )
                 # Ack first (Slack re-delivers unacked envelopes), then dispatch the event.
                 # A closed connection on the ack send (R9-071 sibling) must reconnect, not
                 # raise — the event is simply not dispatched this round; Slack will
@@ -236,5 +302,15 @@ class SlackSocketClient:
                     return  # reconnect with a fresh URL
                 if directive.event:
                     await self._on_event(directive.event)
+                else:
+                    _log.warning(
+                        "slack socket: envelope {envelope_id} carried no inner event — acked, "
+                        "not dispatched",
+                        envelope_id=directive.envelope_id,
+                    )
             elif isinstance(directive, SocketDisconnect):
+                _log.info(
+                    "slack socket: disconnect requested by Slack (reason={reason}) — reconnecting",
+                    reason=directive.reason or "<none>",
+                )
                 return  # reconnect with a fresh URL
