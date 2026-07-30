@@ -23,7 +23,9 @@ import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import httpx
+from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
+from websockets.exceptions import ConnectionClosed
 
 from persona_connectors.errors import SlackApiError
 
@@ -43,6 +45,8 @@ __all__ = [
     "build_ack",
     "interpret_envelope",
 ]
+
+_log = get_logger("connectors.slack_socket")
 
 
 class SocketHello(BaseModel):
@@ -172,6 +176,26 @@ class SlackSocketClient:
             )
         return url
 
+    async def _send(self, conn: SlackSocketConnection, payload: dict[str, object]) -> bool:
+        """Send a socket frame; return ``False`` (never raise) if the peer already closed.
+
+        A socket-mode connection can close (a normal ``disconnect`` refresh, a network
+        drop) between the envelope arriving and this ack going out — that races exactly
+        like Discord's gateway send-on-a-closing-connection (R9-071). Left unguarded,
+        ``ConnectionClosed`` escapes ``_receive_loop`` → ``run`` → the service's
+        ``asyncio.gather``, killing every platform + the HTTP server, not just this
+        socket (the same production shape, 2026-07-29 sibling fix).
+        """
+        try:
+            await conn.send(json.dumps(payload))
+        except ConnectionClosed as exc:
+            _log.info(
+                "slack socket: send on a closed connection ({error}); reconnecting",
+                error=str(exc),
+            )
+            return False
+        return True
+
     async def run(self, *, should_continue: Callable[[], bool] = lambda: True) -> None:
         """Maintain the socket: open → recv envelopes → ack + dispatch → reconnect on close.
 
@@ -204,7 +228,12 @@ class SlackSocketClient:
             directive = interpret_envelope(envelope)
             if isinstance(directive, SocketEvent):
                 # Ack first (Slack re-delivers unacked envelopes), then dispatch the event.
-                await conn.send(json.dumps(build_ack(directive.envelope_id)))
+                # A closed connection on the ack send (R9-071 sibling) must reconnect, not
+                # raise — the event is simply not dispatched this round; Slack will
+                # re-deliver the unacked envelope once the fresh socket is open.
+                sent = await self._send(conn, build_ack(directive.envelope_id))
+                if not sent:
+                    return  # reconnect with a fresh URL
                 if directive.event:
                     await self._on_event(directive.event)
             elif isinstance(directive, SocketDisconnect):
