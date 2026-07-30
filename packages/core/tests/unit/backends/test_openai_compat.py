@@ -24,6 +24,7 @@ from persona.backends.errors import (
     AuthenticationError,
     BackendTimeoutError,
     ModelNotFoundError,
+    ModelUnavailableError,
     ProviderError,
     RateLimitError,
 )
@@ -1006,6 +1007,52 @@ class TestErrorMapping:
             pytest.raises(BackendTimeoutError),
         ):
             await backend.chat([_user("x")])
+
+    @pytest.mark.asyncio
+    async def test_openai_403_to_model_unavailable_error(self) -> None:
+        """R9-073a — Cloudflare's 403 ("not available on the Workers Free
+        plan") surfaces through the openai-py SDK as PermissionDeniedError;
+        it must map to ModelUnavailableError, NOT the generic ProviderError
+        catch-all (which the MultiModelChatBackend classifier would SURFACE
+        rather than fall back on)."""
+        backend = OpenAICompatibleBackend(_config("cloudflare", model="@cf/zai-org/glm-5.2"))
+        exc = openai.PermissionDeniedError(
+            "Model @cf/zai-org/glm-5.2 is not available on the Workers Free plan",
+            response=_fake_response(status=403),
+            body=None,
+        )
+        with (
+            patch.object(
+                backend._openai.chat.completions,  # type: ignore[union-attr]
+                "create",
+                new=AsyncMock(side_effect=exc),
+            ),
+            pytest.raises(ModelUnavailableError) as info,
+        ):
+            await backend.chat([_user("x")])
+        assert info.value.context["provider"] == "cloudflare"
+        assert info.value.context["model"] == "@cf/zai-org/glm-5.2"
+        # Must NOT be mistaken for a bad/missing key.
+        assert not isinstance(info.value, AuthenticationError)
+
+    @pytest.mark.asyncio
+    async def test_anthropic_403_to_model_unavailable_error(self) -> None:
+        """Mirror of the openai-SDK case for the anthropic-SDK dispatch path."""
+        backend = OpenAICompatibleBackend(_config("anthropic", model="claude-x"))
+        exc = anthropic.PermissionDeniedError(
+            "model requires a different plan", response=_fake_response(status=403), body=None
+        )
+        with (
+            patch.object(
+                backend._anthropic.messages,  # type: ignore[union-attr]
+                "create",
+                new=AsyncMock(side_effect=exc),
+            ),
+            pytest.raises(ModelUnavailableError) as info,
+        ):
+            await backend.chat([_user("x")])
+        assert info.value.context["provider"] == "anthropic"
+        assert info.value.context["model"] == "claude-x"
 
     @pytest.mark.asyncio
     async def test_unmapped_error_becomes_provider_error(self) -> None:

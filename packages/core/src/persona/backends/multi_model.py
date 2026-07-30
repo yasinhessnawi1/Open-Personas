@@ -5,8 +5,9 @@ Protocol-compatible backend per D-20-9 / D-20-10 / D-20-12 / D-20-15:
 
 * **D-20-9** — three-bucket classifier:
   RETRY-THEN-FALLBACK (transient: timeouts, 5xx, 409, short rate-limits) /
-  FALLBACK-NO-RETRY (semi-permanent: auth, model-missing, credit-out,
-  long rate-limits) / SURFACE (semantic: bad-request, content-policy).
+  FALLBACK-NO-RETRY (semi-permanent: auth, model-missing, model-unavailable
+  (R9-073a — 403 plan/entitlement denial), credit-out, long rate-limits) /
+  SURFACE (semantic: bad-request, content-policy).
 * **D-20-10** — N=1 same-model retry with a 200ms ± jittered ±50% sleep
   before falling through. Wrapper is the SOLE retry decider; the SDK-level
   retry loops MUST be disabled (``max_retries=0`` on openai/anthropic SDK
@@ -38,6 +39,7 @@ from persona.backends.errors import (
     BackendVisionNotSupportedError,
     EmptyCompletionError,
     ModelNotFoundError,
+    ModelUnavailableError,
     NoVisionCapableModelError,
     ProviderCredentialMissingError,
     ProviderError,
@@ -566,9 +568,16 @@ class MultiModelChatBackend:
         if isinstance(exc, BackendVisionNotSupportedError):
             return _FALLBACK_NO_RETRY
 
-        # Auth / model-missing / runtime cred-missing all FALLBACK-NO-RETRY.
-        # (Auth covers D-20-12 cross-provider SKIP-AND-FALLBACK case.)
-        if isinstance(exc, AuthenticationError | ModelNotFoundError):
+        # Auth / model-missing / model-unavailable / runtime cred-missing all
+        # FALLBACK-NO-RETRY. (Auth covers D-20-12 cross-provider
+        # SKIP-AND-FALLBACK case.) R9-073a: ModelUnavailableError (403
+        # plan/entitlement denial, e.g. Cloudflare "not available on the
+        # Workers Free plan") is permanent for THIS model — retrying it is
+        # pointless — but the whole point of a multi-model tier is that the
+        # operator listed alternates for exactly this case, so it skips
+        # straight to the next backend rather than surfacing and killing the
+        # turn.
+        if isinstance(exc, AuthenticationError | ModelNotFoundError | ModelUnavailableError):
             return _FALLBACK_NO_RETRY
         if isinstance(exc, ProviderCredentialMissingError):
             return _FALLBACK_NO_RETRY

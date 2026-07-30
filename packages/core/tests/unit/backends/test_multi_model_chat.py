@@ -30,6 +30,7 @@ from persona.backends.errors import (
     BackendTimeoutError,
     BackendVisionNotSupportedError,
     ModelNotFoundError,
+    ModelUnavailableError,
     NoVisionCapableModelError,
     ProviderCredentialMissingError,
     ProviderError,
@@ -419,6 +420,90 @@ class TestFallbackNoRetry:
         assert "AuthenticationError" in joined
 
     @pytest.mark.asyncio
+    async def test_model_unavailable_403_falls_back_no_retry(self) -> None:
+        """R9-073a — production repro: a permanent 403 model-unavailability
+        (Cloudflare "not available on the Workers Free plan") on the primary
+        must NOT retry the same model and must NOT propagate out of the turn;
+        the next model in the tier serves the reply."""
+        from loguru import logger as _loguru_logger
+
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(str(msg)),
+            level="WARNING",
+            serialize=True,
+        )
+        try:
+            primary = _ScriptedBackend(
+                "cloudflare",
+                "@cf/zai-org/glm-5.2",
+                [
+                    ModelUnavailableError(
+                        "Model @cf/zai-org/glm-5.2 is not available on the Workers Free plan",
+                        context={"provider": "cloudflare", "model": "@cf/zai-org/glm-5.2"},
+                    )
+                ],
+            )
+            secondary = _ScriptedBackend(
+                "nvidia",
+                "nemotron-3-super-120b-a12b",
+                [_ok_response("nvidia", "nemotron-3-super-120b-a12b", "served by fallback")],
+            )
+            wrapper = MultiModelChatBackend([primary, secondary], tier_name="frontier")
+            response = await wrapper.chat([_user_msg()])
+        finally:
+            _loguru_logger.remove(sink_id)
+        assert response.provider == "nvidia"
+        assert response.content == "served by fallback"
+        # No pointless retry against the same (permanently unavailable) model.
+        assert primary.call_count == 1
+        assert secondary.call_count == 1
+        # Operator-visible WARNING in the same shape as the transient path.
+        joined = "".join(captured)
+        assert "fallback" in joined.lower()
+        assert "ModelUnavailableError" in joined
+        assert "cloudflare" in joined
+
+    @pytest.mark.asyncio
+    async def test_model_unavailable_403_third_model_in_tier_serves(self) -> None:
+        """Mirrors the exact production tier order: two usable fallbacks
+        behind a permanently-403ing primary — the turn must be served, not
+        killed."""
+        cloudflare = _ScriptedBackend(
+            "cloudflare",
+            "@cf/zai-org/glm-5.2",
+            [
+                ModelUnavailableError(
+                    "not available on the Workers Free plan",
+                    context={"provider": "cloudflare", "model": "@cf/zai-org/glm-5.2"},
+                )
+            ],
+        )
+        nvidia = _ScriptedBackend(
+            "nvidia",
+            "nemotron-3-super-120b-a12b",
+            [
+                ModelUnavailableError(
+                    "also unavailable",
+                    context={"provider": "nvidia", "model": "nemotron-3-super-120b-a12b"},
+                )
+            ],
+        )
+        anthropic_backend = _ScriptedBackend(
+            "anthropic",
+            "claude-sonnet-4-6",
+            [_ok_response("anthropic", "claude-sonnet-4-6", "final answer")],
+        )
+        wrapper = MultiModelChatBackend(
+            [cloudflare, nvidia, anthropic_backend], tier_name="frontier"
+        )
+        response = await wrapper.chat([_user_msg()])
+        assert response.content == "final answer"
+        assert cloudflare.call_count == 1
+        assert nvidia.call_count == 1
+        assert anthropic_backend.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_provider_credential_missing_runtime_falls_back(self) -> None:
         """D-20-15 runtime path — resolver did not catch this slot earlier."""
         primary = _ScriptedBackend(
@@ -531,6 +616,30 @@ class TestExhaustion:
         assert b1.call_count == 1
         assert b2.call_count == 1
         assert b3.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_all_models_permanently_unavailable_surfaces_never_silent(self) -> None:
+        """R9-073a — every model in the tier is permanently 403'd: the error
+        MUST surface to the caller (AllModelsFailedError), never a silent
+        empty reply."""
+        b1 = _ScriptedBackend(
+            "cloudflare",
+            "@cf/zai-org/glm-5.2",
+            [ModelUnavailableError("nope", context={"provider": "cloudflare"})],
+        )
+        b2 = _ScriptedBackend(
+            "nvidia",
+            "nemotron",
+            [ModelUnavailableError("nope", context={"provider": "nvidia"})],
+        )
+        wrapper = MultiModelChatBackend([b1, b2], tier_name="frontier")
+        with pytest.raises(AllModelsFailedError) as excinfo:
+            await wrapper.chat([_user_msg()])
+        assert excinfo.value.context["attempt_count"] == "2"
+        assert excinfo.value.context["final_error_class"] == "ModelUnavailableError"
+        # Neither backend was pointlessly retried against itself.
+        assert b1.call_count == 1
+        assert b2.call_count == 1
 
     @pytest.mark.asyncio
     async def test_all_models_failed_is_not_provider_error_d20_16(self) -> None:

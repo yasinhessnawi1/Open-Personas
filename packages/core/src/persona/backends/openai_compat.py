@@ -42,6 +42,7 @@ from persona.backends.errors import (
     BackendTimeoutError,
     BackendVisionNotSupportedError,
     ModelNotFoundError,
+    ModelUnavailableError,
     ProviderError,
     RateLimitError,
 )
@@ -929,6 +930,16 @@ class OpenAICompatibleBackend:
             raise ModelNotFoundError(
                 str(exc), context={"provider": provider, "model": model}
             ) from exc
+        # R9-073a: a 403 from the Anthropic SDK is account/model entitlement
+        # denial (e.g. a model requires a plan this key doesn't have) — the
+        # key itself is valid (that's AuthenticationError, 401), so this is
+        # NOT an auth failure; it's ModelUnavailableError, distinct so the
+        # MultiModelChatBackend classifier can bucket it FALLBACK-NO-RETRY
+        # without conflating it with a bad/missing key.
+        if isinstance(exc, anthropic.PermissionDeniedError):
+            raise ModelUnavailableError(
+                str(exc), context={"provider": provider, "model": model}
+            ) from exc
         if isinstance(exc, anthropic.APITimeoutError | anthropic.APIConnectionError):
             raise BackendTimeoutError(str(exc), context={"provider": provider}) from exc
 
@@ -945,6 +956,14 @@ class OpenAICompatibleBackend:
             raise RateLimitError(str(exc), context=openai_ctx) from exc
         if isinstance(exc, openai.NotFoundError):
             raise ModelNotFoundError(
+                str(exc), context={"provider": provider, "model": model}
+            ) from exc
+        # R9-073a: production 403 — Cloudflare Workers AI ("Model ... is not
+        # available on the Workers Free plan") surfaces through the openai-py
+        # SDK (Cloudflare's OpenAI-compatible endpoint) as PermissionDeniedError.
+        # Same rationale as the Anthropic branch above: valid key, wrong plan.
+        if isinstance(exc, openai.PermissionDeniedError):
+            raise ModelUnavailableError(
                 str(exc), context={"provider": provider, "model": model}
             ) from exc
         if isinstance(exc, openai.APITimeoutError | openai.APIConnectionError):

@@ -22,9 +22,9 @@ layer rather than be swept into generic retry handlers.
 1. **Provider-layer errors** root at :class:`ProviderError(PersonaError)`.
    Backends raise these for HTTP/SDK failures: :class:`AuthenticationError`,
    :class:`RateLimitError`, :class:`ModelNotFoundError`,
-   :class:`BackendTimeoutError`. The :class:`MultiModelChatBackend`
-   classifier (Spec 20 T15) buckets these per D-20-9 into SURFACE /
-   RETRY-THEN-FALLBACK / FALLBACK-NO-RETRY.
+   :class:`ModelUnavailableError`, :class:`BackendTimeoutError`. The
+   :class:`MultiModelChatBackend` classifier (Spec 20 T15) buckets these per
+   D-20-9 into SURFACE / RETRY-THEN-FALLBACK / FALLBACK-NO-RETRY.
 
 2. **Wrapper-layer + configuration-layer errors** root at
    :class:`PersonaError` directly (NOT :class:`ProviderError`):
@@ -68,6 +68,7 @@ __all__ = [
     "LocalProviderInModelsListError",
     "MalformedTierModelsError",
     "ModelNotFoundError",
+    "ModelUnavailableError",
     "NoVisionCapableModelError",
     "NoVisionTierConfiguredError",
     "OpenRouterBalanceProbeError",
@@ -115,6 +116,32 @@ class ModelNotFoundError(ProviderError):
 
     Maps Anthropic / OpenAI ``NotFoundError`` (model variant) and Ollama's
     ``404 {"error": "model 'xxx' not found"}`` response.
+    """
+
+
+class ModelUnavailableError(ProviderError):
+    """Raised when a provider refuses to serve the configured model at all (R9-073a).
+
+    Maps a 403 ``PermissionDeniedError`` from the ``anthropic`` / ``openai``
+    SDKs (both used across every ``OpenAICompatibleBackend`` provider,
+    including Cloudflare) — the account-level "this model requires a
+    different plan / entitlement" rejection, e.g. Cloudflare Workers AI's
+    ``AiError 5035: Model ... is not available on the Workers Free plan``.
+
+    Distinct from :class:`AuthenticationError` (401 — the key itself is
+    missing/invalid) and from :class:`ModelNotFoundError` (404 — the model
+    name is unknown to the provider): here the key is valid and the model
+    exists, but THIS account may never call THIS model. Retrying the same
+    model is always pointless (no amount of retrying upgrades the plan), but
+    an operator who configured multiple models in a tier's fallback list
+    almost certainly did so anticipating exactly this — a bad model choice
+    should not take the whole tier down. :class:`MultiModelChatBackend`
+    (Spec 20 D-20-9) therefore buckets this FALLBACK-NO-RETRY, same as
+    :class:`AuthenticationError` / :class:`ModelNotFoundError`, logging the
+    fallback at WARNING so the misconfiguration stays visible to operators.
+
+    Context: ``{"provider", "model"}`` (the standard :class:`ProviderError`
+    fields).
     """
 
 
