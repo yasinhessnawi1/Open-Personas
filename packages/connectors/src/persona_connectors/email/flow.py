@@ -132,19 +132,43 @@ class EmailInboundFlow:
         # binds the B1+B2-validated From (never the editable body — C1-D-5). A linked sender's
         # code-shaped message is normal conversation, so the redeem is gated unlinked-only. An
         # unlinked non-code message falls through to the shared flow (its link-instruction).
+        # R9-077 (observability first): every branch below used to return SILENTLY, so a
+        # message that reached this method and never produced a turn left no trace at all —
+        # production showed `POST /email/webhook 200` and then 23 minutes of nothing. Each
+        # branch now names itself, with the sender fingerprinted (never the address, never
+        # the message content, never the code).
+        fp = _fingerprint(inbound.sender_id)
         if not self._is_linked(inbound.sender_id):
             redeem = self._linking.redeem_emailed_code(
                 text=inbound.text, platform_identity=inbound.sender_id, now=self._now()
             )
             if redeem.status in (RedeemStatus.linked, RedeemStatus.failed):
+                _log.info(
+                    "email inbound handled by the OTP carrier: no turn this message "
+                    "(fp={fp} redeem={status})",
+                    fp=fp,
+                    status=redeem.status.value,
+                )
                 await transport.send_system(
                     conversation_key=inbound.conversation_key, text=redeem.message or ""
                 )
                 return
+            _log.info(
+                "email inbound from an UNLINKED sender, not a code — the shared flow will "
+                "reply with the link instruction (fp={fp} redeem={status})",
+                fp=fp,
+                status=redeem.status.value,
+            )
         elif not inbound.text.strip():
             # A LINKED sender with an empty body: acknowledge an attachment-only email
             # gracefully (criterion 9), else nothing to do. (An UNLINKED empty body falls
             # through above to the shared flow's link-instruction — zero access, not an ack.)
+            _log.warning(
+                "email inbound has no usable text after quote-stripping: no turn "
+                "(fp={fp} attachments={attachments})",
+                fp=fp,
+                attachments=parsed.has_attachments,
+            )
             if parsed.has_attachments:
                 await transport.send_system(
                     conversation_key=inbound.conversation_key, text=_ATTACHMENT_ACK
@@ -153,6 +177,11 @@ class EmailInboundFlow:
 
         # The platform-agnostic sequence (resolve → /new → route → drive → send) is C1's; the
         # plus-address tag (A2) selects the persona deterministically when present.
+        _log.info(
+            "email inbound accepted → shared flow (fp={fp} persona_tag={tag})",
+            fp=fp,
+            tag=parsed.envelope_persona_tag or "<none>",
+        )
         await self._shared.handle_text(
             inbound, transport=transport, envelope_persona_tag=parsed.envelope_persona_tag
         )

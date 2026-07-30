@@ -16,15 +16,17 @@ FastAPI app for the email channel. Two routes, injected-dependency-only (api-fre
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from persona.errors import AuthenticationError
+from persona.logging import get_logger
 
 from persona_connectors._postmark.webhook import guard_inbound
-from persona_connectors.email.inbound import parse_inbound_email
+from persona_connectors.email.inbound import missing_inbound_field, parse_inbound_email
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -36,6 +38,8 @@ if TYPE_CHECKING:
 
 __all__ = ["build_email_app"]
 
+_log = get_logger("connectors.email_app")
+
 # The email-link token default TTL (the composition root passes the config value,
 # ``config.email_link_token_ttl_minutes``); the default is only a test fallback.
 _DEFAULT_LINK_TTL = timedelta(minutes=15)
@@ -43,6 +47,11 @@ _DEFAULT_LINK_TTL = timedelta(minutes=15)
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _fingerprint(identity: str) -> str:
+    """A short one-way fingerprint of an email address — correlation, never the address."""
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
 
 
 def build_email_app(
@@ -78,10 +87,30 @@ def build_email_app(
         async def handle() -> bool:
             # Parsed ONLY after B1 passes (validate-before-parse). A malformed payload
             # (parse → None) is a 200 no-op — Postmark must not retry a bad body.
+            #
+            # R9-077 (observability first): this no-op used to be TOTALLY silent, so a
+            # production drop showed as `POST /email/webhook 200` with nothing after it
+            # and no way to tell an unparsable payload from a downstream early return.
+            # Both outcomes now name themselves. Never the message content: the sender is
+            # a sha256 fingerprint, and only field NAMES + envelope flags are logged.
             payload = await request.json()
             parsed = parse_inbound_email(payload, now=now())
-            if parsed is not None:
-                await on_inbound(parsed)
+            if parsed is None:
+                _log.warning(
+                    "email inbound dropped: payload could not be parsed "
+                    "(missing_field={field} sender_present={sender_present})",
+                    field=missing_inbound_field(payload) or "unknown",
+                    sender_present=bool(payload.get("From") or payload.get("FromFull")),
+                )
+                return True
+            _log.info(
+                "email inbound parsed (fp={fp} persona_tag={tag} attachments={attachments}) "
+                "— dispatching to the flow",
+                fp=_fingerprint(parsed.inbound.sender_id),
+                tag=parsed.envelope_persona_tag or "<none>",
+                attachments=parsed.has_attachments,
+            )
+            await on_inbound(parsed)
             return True
 
         result = await guard_inbound(

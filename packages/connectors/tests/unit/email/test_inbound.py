@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from persona_connectors.email.inbound import parse_inbound_email
+from persona_connectors.email.inbound import missing_inbound_field, parse_inbound_email
 
 _NOW = datetime(2026, 6, 27, 12, 0, 0, tzinfo=UTC)
 _ROOT = "<root@mail.gmail.com>"
@@ -156,3 +156,34 @@ def test_fallback_parse_when_no_stripped_reply() -> None:
     assert parsed is not None
     assert "The new question here." in parsed.inbound.text
     assert "old quoted text" not in parsed.inbound.text
+
+
+# --- R9-077: name the field whose absence makes the parse a silent 200 no-op ---
+
+
+def test_missing_inbound_field_is_empty_for_a_parsable_payload() -> None:
+    assert missing_inbound_field(_payload()) == ""
+
+
+def test_missing_inbound_field_names_the_absent_sender() -> None:
+    payload = _payload(From="", FromFull={})
+    assert parse_inbound_email(payload, now=_NOW) is None
+    assert missing_inbound_field(payload) == "sender"
+
+
+def test_missing_inbound_field_names_the_absent_message_id() -> None:
+    payload = _payload(MessageID="", Headers=[])
+    assert parse_inbound_email(payload, now=_NOW) is None
+    assert missing_inbound_field(payload) == "message_id"
+
+
+def test_postmark_tracking_id_backstops_a_missing_message_id_header() -> None:
+    """The reason branch (a) is arguably UNREACHABLE on real Postmark traffic: the
+    top-level ``MessageID`` GUID backstops an absent ``Message-ID`` header, and the
+    conversation key falls back to the message id. Pinned so the inference is checkable
+    rather than assumed."""
+    payload = _payload(Headers=[])  # no Message-ID / In-Reply-To / References at all
+    parsed = parse_inbound_email(payload, now=_NOW)
+    assert parsed is not None
+    assert parsed.inbound.conversation_key == "postmark-uuid-123"
+    assert missing_inbound_field(payload) == ""

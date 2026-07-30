@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-__all__ = ["ParsedEmail", "parse_inbound_email"]
+__all__ = ["ParsedEmail", "missing_inbound_field", "parse_inbound_email"]
 
 
 class ParsedEmail(BaseModel):
@@ -71,23 +71,61 @@ def _headers_map(payload: Mapping[str, object]) -> dict[str, str]:
     return headers
 
 
+def _extract_sender(payload: Mapping[str, object]) -> str:
+    """The lower-cased ``From`` address (``FromFull.Email`` first), or ``""`` if absent."""
+    from_full = payload.get("FromFull")
+    sender = _str(from_full.get("Email")) if isinstance(from_full, dict) else ""
+    if not sender:
+        sender = _str(payload.get("From"))
+    return sender.lower()
+
+
+def _extract_message_id(headers: Mapping[str, str], payload: Mapping[str, object]) -> str:
+    """The RFC 5322 ``Message-ID``, else Postmark's own tracking id, else ``""``."""
+    return headers.get("message-id", "").strip() or _str(payload.get("MessageID"))
+
+
+def missing_inbound_field(payload: Mapping[str, object]) -> str:
+    """Name the field whose absence makes :func:`parse_inbound_email` return ``None``.
+
+    R9-077 (observability): an unparsable payload is a **200 no-op** — Postmark must not
+    retry a bad body — so without this the webhook drops the message with no record of
+    why. The caller logs the returned field name; it shares the extractors with
+    :func:`parse_inbound_email`, so the two can never drift.
+
+    Returns:
+        ``"sender"`` / ``"message_id"`` / ``"conversation_key"`` — the first field the
+        parser found absent — or ``""`` when the payload parses.
+    """
+    if not _extract_sender(payload):
+        return "sender"
+    headers = _headers_map(payload)
+    message_id = _extract_message_id(headers, payload)
+    if not message_id:
+        return "message_id"
+    if not derive_conversation_key(
+        message_id=message_id,
+        in_reply_to=headers.get("in-reply-to"),
+        references=headers.get("references"),
+    ):
+        return "conversation_key"
+    return ""
+
+
 def parse_inbound_email(payload: Mapping[str, object], *, now: datetime) -> ParsedEmail | None:
     """Normalise a Postmark inbound-parse payload, or ``None`` if malformed (no sender / id).
 
     ``now`` is the tz-aware UTC ingestion time (the ``received_at`` — the everywhere-aware
     rule). Returns ``None`` (silently skipped upstream) when the ``From`` address or a usable
-    message id is absent.
+    message id is absent; :func:`missing_inbound_field` names which one, for the caller's log.
     """
     from_full = payload.get("FromFull")
-    sender = _str(from_full.get("Email")) if isinstance(from_full, dict) else ""
-    if not sender:
-        sender = _str(payload.get("From"))
+    sender = _extract_sender(payload)
     if not sender:
         return None
-    sender = sender.lower()
 
     headers = _headers_map(payload)
-    message_id = headers.get("message-id", "").strip() or _str(payload.get("MessageID"))
+    message_id = _extract_message_id(headers, payload)
     if not message_id:
         return None
     in_reply_to = headers.get("in-reply-to")

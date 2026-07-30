@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from loguru import logger as _loguru
 from persona_connectors._phone.linking import RedeemResult, RedeemStatus
 from persona_connectors.domain.normalise import NormalisedInbound
 from persona_connectors.email.flow import EmailInboundFlow
@@ -181,3 +182,80 @@ async def test_linked_attachment_only_is_acknowledged() -> None:
     assert len(connector.system) == 1
     assert "attachments" in connector.system[0]["text"].lower()
     assert shared.calls == []
+
+
+# --- R9-077: every silent early return must NAME itself in the log ---
+
+
+def _capture(level: str = "INFO") -> tuple[list[str], int]:
+    records: list[str] = []
+    return records, _loguru.add(records.append, level=level)
+
+
+@pytest.mark.asyncio
+async def test_otp_carrier_branch_is_logged_without_the_address_or_the_code() -> None:
+    """The leading suspect for the production drop: an UNLINKED sender whose code-shaped
+    message is answered by the carrier and returns — previously with no log at all."""
+    connector, shared, linking = (
+        _FakeConnector(),
+        _FakeShared(),
+        _FakeLinking(status=RedeemStatus.failed, message="that code didn't work"),
+    )
+    records, sink_id = _capture()
+    try:
+        await _flow(connector, shared, linking).handle(_parsed(text="BADCODE12"))
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "OTP carrier" in blob  # the branch names itself
+    assert "redeem=failed" in blob  # …and which outcome it took
+    assert "bob@example.com" not in blob  # the address is fingerprinted, never logged
+    assert "BADCODE12" not in blob  # and the code never appears
+
+
+@pytest.mark.asyncio
+async def test_linked_empty_body_branch_is_logged() -> None:
+    """A LINKED sender whose body strips to nothing: a real drop, now visible."""
+    connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=True)
+    records, sink_id = _capture("WARNING")
+    try:
+        await _flow(connector, shared, linking).handle(_parsed(text="   ", attachments=False))
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "no usable text" in blob
+    assert "attachments=False" in blob
+    assert "bob@example.com" not in blob
+
+
+@pytest.mark.asyncio
+async def test_the_accepted_path_is_logged_too() -> None:
+    """The positive evidence the operator pass needs: this message DID reach the flow."""
+    connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=True)
+    records, sink_id = _capture()
+    try:
+        await _flow(connector, shared, linking).handle(_parsed(text="Astrid, hi"))
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "accepted" in blob
+    assert "persona_tag=astrid" in blob
+    assert "Astrid, hi" not in blob  # never the message content
+
+
+@pytest.mark.asyncio
+async def test_unlinked_non_code_fall_through_is_logged() -> None:
+    """The third unlinked shape (not a code) reaches the shared flow — say so."""
+    connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=False)
+    records, sink_id = _capture()
+    try:
+        await _flow(connector, shared, linking).handle(_parsed(text="hello there"))
+    finally:
+        _loguru.remove(sink_id)
+
+    blob = "".join(records)
+    assert "UNLINKED" in blob
+    assert "redeem=not_a_link_attempt" in blob
