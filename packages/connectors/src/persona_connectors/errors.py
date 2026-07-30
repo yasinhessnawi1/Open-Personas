@@ -28,6 +28,7 @@ __all__ = [
     "SlackRateLimitError",
     "TelegramApiError",
     "TelegramRateLimitError",
+    "TurnFailedError",
     "TwilioApiError",
     "TwilioRateLimitError",
 ]
@@ -56,6 +57,19 @@ class LinkTokenInvalidError(ConnectorError):
 
     Single-use + short-TTL + platform-bound (C1-D-5); any violation fails loud so
     a replayed/forged/stale token never binds an identity.
+    """
+
+
+class TurnFailedError(ConnectorError):
+    """A persona turn reached a terminal ``error`` state instead of completing (R9-076).
+
+    The connector drives a turn through persona-api's detached chat-turn worker,
+    which never raises out of the background task — it finalizes the partial as
+    ``error`` and emits an error frame. The reply collector turns that frame into
+    this domain error so the shared inbound flow answers honestly (its
+    ``TURN_FAILED_MESSAGE``) instead of sending an empty persona reply. The
+    ``context`` carries the conversation id + the worker's message, never the
+    conversation text.
     """
 
 

@@ -18,26 +18,32 @@ below.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import yaml
+from persona_api.background.chat_turn_worker import ChatTurnRegistry
 from persona_api.config import Edition
 from persona_api.db.community import make_community_engine
 from persona_api.db.engine import create_db_engine
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import persona_service
-from persona_api.services.chat_service import _load_conversation
+from persona_api.services.chat_service import start_chat_turn
+from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.delivery_router import DeliveryRouter
 from sqlalchemy import text as _sql
 
-from persona_connectors.errors import ConnectorError
+from persona_connectors.errors import ConnectorError, TurnFailedError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
+    from persona.backends import StreamChunk
     from persona.delivery import MessageDeliverer
+    from persona_api.background.chat_turn_worker import ChatTurnHandle
     from persona_api.services.runtime_factory import RuntimeFactory
     from sqlalchemy.engine import Engine
 
@@ -211,38 +217,146 @@ def build_email_recipient_resolver(
     return recipient_for
 
 
+@dataclass
+class _ConversationLock:
+    """A per-conversation lock plus its live waiter count (so the map stays bounded)."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    holders: int = 0
+
+
+class _ConversationLocks:
+    """Serialises this process's turns per conversation (R9-076).
+
+    A connector turn now PERSISTS (``open_turn`` → drive → ``finalize``), and the
+    api's one-active-turn invariant (D-P1-one-active-turn) allows exactly one
+    in-flight assistant row per conversation. Two messages arriving back-to-back on
+    the same chat — the normal texting shape — would otherwise race: the second
+    would either be refused (``TurnAlreadyActiveError``) or load a history the first
+    turn had not written yet, which is precisely the amnesia R9-076 fixes. Queueing
+    them here makes the second turn see the first, in order.
+
+    Entries are dropped when their last holder leaves, so a long-lived service never
+    accumulates one lock per conversation it has ever seen.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, _ConversationLock] = {}
+
+    @contextlib.asynccontextmanager
+    async def hold(self, conversation_id: str) -> AsyncIterator[None]:
+        """Hold the conversation's turn lock for the duration of the body."""
+        entry = self._locks.get(conversation_id)
+        if entry is None:
+            entry = _ConversationLock()
+            self._locks[conversation_id] = entry
+        entry.holders += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.holders -= 1
+            if entry.holders <= 0:
+                self._locks.pop(conversation_id, None)
+
+
+async def _collect_reply(handle: ChatTurnHandle) -> str:
+    """Drain a detached turn's live tail to its terminal frame and return the text.
+
+    The connector's no-streaming counterpart to api's
+    :func:`~persona_api.services.chat_service.stream_turn`: same queue, same
+    terminal contract, no SSE. Persistence + finalize happen in the worker, so a
+    fault here can never lose the turn.
+
+    Raises:
+        TurnFailedError: The turn finalized as ``error`` — the shared flow answers
+            honestly rather than sending an empty persona reply.
+    """
+    parts: list[str] = []
+    while True:
+        item = await handle.events.get()
+        if item is None:  # end-of-stream sentinel
+            break
+        kind, payload = item
+        if kind == "chunk":
+            delta = cast("StreamChunk", payload).delta
+            if delta:
+                parts.append(delta)
+        elif kind == "done":
+            break
+        elif kind == "error":
+            detail = cast("Mapping[str, object]", payload).get("message")
+            raise TurnFailedError(
+                "the persona turn failed",
+                context={
+                    "conversation_id": handle.conversation_id,
+                    "detail": str(detail) if detail is not None else "",
+                },
+            )
+    return "".join(parts)
+
+
 def build_reply_runner(
     *,
     runtime_factory: RuntimeFactory,
     rls_engine: Engine,
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
 ) -> Callable[[TurnRequest], Awaitable[str]]:
-    """Build the ``run_turn`` callable: drive ``ConversationLoop.turn`` + collect the reply.
+    """Build the ``run_turn`` callable: run a turn through api's OWN chat-turn path.
 
-    The no-streaming collector (§3): under the owner scope, build the persona's loop
-    (reusing api's ``RuntimeFactory`` in-process — C1-D-1, the ``run_worker.py``
-    pattern), load the conversation, run the turn, and accumulate ``chunk.delta`` to
-    completion. The contextvar set by ``owner_scope`` persists across the awaits
-    (task-local), so every store read inside the turn is RLS-scoped to the owner.
+    The no-streaming collector (§3), but the turn itself is persisted by the exact
+    seam the web chat uses — :func:`~persona_api.services.chat_service.start_chat_turn`
+    over :class:`~persona_api.services.chat_turn_sink.MessagesTurnSink` and
+    :class:`~persona_api.background.chat_turn_worker.ChatTurnRegistry` (C1-D-1, the
+    ``run_worker.py`` pattern: import api's services in-process and bind the RLS
+    contextvar per unit of work). So one write path, not two: ``open_turn`` persists
+    the user message + the in-progress assistant row, the worker checkpoints and
+    finalizes, and the conversation the web UI reads is byte-identically the
+    conversation the connector wrote.
+
+    R9-076 — why this changed: the previous collector only ever READ
+    (``_load_conversation``) and drove the loop; nothing was ever written back. The
+    conversation row existed (chats appeared in the web UI) but stayed empty, and —
+    far worse — every inbound re-loaded that empty history, so a persona had **no
+    memory at all** on any connector. Reusing the api seam fixes both at once.
+
+    Every write is owner-scoped: ``owner_scope`` binds ``current_user_id`` for the
+    start (``open_turn``/heal), and the detached worker re-binds the same owner for
+    its checkpoint/finalize writes (its own ``run_worker.py`` discipline).
+
+    Billing is deliberately NOT wired here (``credits_policy`` unset ⇒ the registry
+    bills nothing), so this fix changes persistence only and never live money;
+    metering connector turns is its own decision.
+
+    ``request.persona_id`` is not passed down: ``start_chat_turn`` derives the persona
+    from the conversation ROW, and the connector's conversation store creates one
+    conversation per (owner, platform, channel, persona) — so the two always agree,
+    and the DB stays the single source of truth for which persona owns a turn.
 
     NOTE (deploy seam): the heavy ``RuntimeFactory`` (embedder/tier-registry/model
-    backends) is built by the service entry from the live env; this collector is
-    exercised by the live operator pass, not CI (the same posture as api's own
+    backends) is built by the service entry from the live env; the model half of this
+    path is exercised by the live operator pass, not CI (the same posture as api's own
     ``@external`` turn tests).
     """
+    sink = MessagesTurnSink(rls_engine)
+    registry = ChatTurnRegistry(sink=sink, rls_engine=rls_engine)
+    locks = _ConversationLocks()
 
     async def run_turn(request: TurnRequest) -> str:
-        with owner_scope(request.owner_id):
-            loop = await runtime_factory.build_conversation_loop(request.persona_id)
-            with rls_engine.begin() as conn:
-                conversation = _load_conversation(conn, request.conversation_id)
-            reply = ""
-            async for chunk in loop.turn(conversation, request.text):
-                if chunk.delta:
-                    reply += chunk.delta
-                if chunk.is_final:
-                    break
-            return reply
+        async with locks.hold(request.conversation_id):
+            with owner_scope(request.owner_id):
+                handle = await start_chat_turn(
+                    rls_engine=rls_engine,
+                    sink=sink,
+                    registry=registry,
+                    loop_builder=runtime_factory.build_conversation_loop,
+                    owner_id=request.owner_id,
+                    conversation_id=request.conversation_id,
+                    user_message=request.text,
+                )
+            # The worker owns persistence + the owner scope from here; the collector
+            # only drains the in-process queue (no DB touch), so it runs unscoped.
+            return await _collect_reply(handle)
 
     return run_turn
 
