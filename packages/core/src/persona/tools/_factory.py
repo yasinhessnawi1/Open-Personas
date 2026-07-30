@@ -22,6 +22,7 @@ from persona.tools.builtin.file_write import make_file_write_tool
 from persona.tools.builtin.json_query import make_json_query_tool
 from persona.tools.builtin.mcp_search import make_mcp_search_tool
 from persona.tools.builtin.regex_match import make_regex_match_tool
+from persona.tools.builtin.schedule_introspection import SCHEDULE_INTROSPECT_TOOL_NAME
 from persona.tools.builtin.text_diff import make_text_diff_tool
 from persona.tools.builtin.web_fetch import make_web_fetch_tool
 from persona.tools.builtin.web_search import make_web_search_tool
@@ -38,9 +39,29 @@ if TYPE_CHECKING:
     from persona.tools.protocol import AsyncTool
     from persona.tools.workspace_persister import WorkspacePersister
 
-__all__ = ["build_default_toolbox"]
+__all__ = ["SELF_KNOWLEDGE_TOOLS", "build_default_toolbox"]
 
 _logger = get_logger("tools.factory")
+
+#: Composition-injected tools whose PRESENCE in ``extra_tools`` IS the authorization —
+#: they are auto-allowed rather than gated on the persona's ``tools`` list.
+#:
+#: These are not capabilities a persona opts into; they are how a persona knows things
+#: about itself, and they are never named in a YAML allow-list (they are absent from
+#: :data:`persona.tools.catalog.TOOL_CATALOG` for exactly that reason). Without the
+#: auto-allow, ``build_default_toolbox`` REGISTERS them and then filters them straight
+#: back out for every persona with a non-empty allow-list — which is every persona, since
+#: :func:`persona.schema.defaults.ensure_default_capabilities` guarantees a floor of three.
+#: The tool would exist, be composed, be logged in ``extra_tool_count``, and still never
+#: reach the model.
+#:
+#: * ``use_skill`` — the skill-dispatch meta-tool (D-04-10). The allow-list enumerates
+#:   capabilities, not the dispatch mechanism; without this the model calls the skill name
+#:   directly and gets ``ToolNotAllowedError`` ("document_generation is not available").
+#: * ``schedule_introspect`` — the read-only calendar window (R9-075). A persona could
+#:   create schedules but had no way to read them back, so "what's on my calendar?" was
+#:   answered from imagination.
+SELF_KNOWLEDGE_TOOLS: frozenset[str] = frozenset({"use_skill", SCHEDULE_INTROSPECT_TOOL_NAME})
 
 #: The server name the Docker MCP Gateway registers under (Spec N1, D-N1-6); its
 #: aggregated tools are prefixed ``mcp:docker:<tool>``.
@@ -267,25 +288,19 @@ async def build_default_toolbox(
         allow_list_size=len(persona.tools),
     )
 
-    # The ``use_skill`` meta-tool (D-04-10) is composed into ``extra_tools`` by the
-    # runtime/API ONLY when the persona has scanned skills — its presence IS the
-    # authorization, exactly like assigned BYO MCP tools (D-30-6). It is never named
-    # in a persona's YAML ``tools`` allow-list (that list enumerates capabilities,
-    # not the skill-dispatch mechanism). Without this auto-allow, a persona with an
-    # explicit allow-list would have ``use_skill`` filtered out of the toolbox, so
-    # the model never sees it and calls the skill name directly → ToolNotAllowedError
-    # (e.g. "document_generation is not available"). Auto-allow it whenever it was
-    # injected, matching the BYO precedent below.
-    skill_meta_allow = [t.name for t in (extra_tools or []) if t.name == "use_skill"]
+    # Composition-injected tools whose PRESENCE is the authorization — see
+    # ``SELF_KNOWLEDGE_TOOLS`` above. Auto-allowed whenever injected, matching the BYO
+    # precedent below.
+    injected_allow = [t.name for t in (extra_tools or []) if t.name in SELF_KNOWLEDGE_TOOLS]
 
     # The allow-list: the persona's declared tools PLUS the server-grant expansion
-    # (D-N7-1) PLUS the assigned BYO tool names PLUS the composed use_skill
-    # meta-tool. The bare ``mcp:<name>`` grant entries stay in the list — they are
+    # (D-N7-1) PLUS the assigned BYO tool names PLUS the auto-allowed injected tools.
+    # The bare ``mcp:<name>`` grant entries stay in the list — they are
     # the documented grant form; no tool registers under a bare name, so they are
     # never advertised. When the persona declares nothing (dev-permissive None
     # path) every tool is allowed anyway (all-allowed), preserving prior behaviour.
     allow_list = (
-        [*persona.tools, *grant_allow, *byo_allow, *skill_meta_allow] if persona.tools else None
+        [*persona.tools, *grant_allow, *byo_allow, *injected_allow] if persona.tools else None
     )
     toolbox = Toolbox(all_tools, allow_list=allow_list)
     return toolbox, mcp_clients

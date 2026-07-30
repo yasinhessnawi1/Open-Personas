@@ -30,6 +30,7 @@ __all__ = [
     "FileExtractionError",
     "GatedActionProposedError",
     "InvalidRecurrenceRuleError",
+    "InvalidScheduleScopeError",
     "InvalidTimezoneError",
     "JobStateError",
     "MCPBuiltinServerError",
@@ -575,6 +576,19 @@ class ScheduleConcurrentEditError(PersonaError):
     ``context`` carries the ``schedule_id`` and the attempt count. Rare by
     construction (contention is one schedule's edit coinciding with its own tick
     re-arm); a persistent failure signals genuine hot contention, not a lost edit.
+    """
+
+
+class InvalidScheduleScopeError(PersonaError):
+    """Raised when a schedule-introspection scope name is not one this system knows.
+
+    R9-075. The read-only ``schedule_introspect`` tool takes a ``scope``
+    (``mine`` = this persona's own schedules, ``all`` = everything the user has
+    scheduled). A model-supplied value outside that vocabulary is rejected here
+    rather than silently coerced to a default — a persona must never answer "your
+    whole calendar" when it in fact looked at one persona's slice. ``context``
+    carries the rejected ``scope`` and the ``supported`` vocabulary so the tool
+    can hand the model a corrective message.
     """
 
 

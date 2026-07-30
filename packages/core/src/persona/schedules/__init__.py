@@ -32,6 +32,13 @@ from persona.schedules.proposal import (
     resolve_proposal,
 )
 from persona.schedules.quiet_hours import QuietHours, quiet_hours_edge
+from persona.schedules.reader import (
+    ScheduleAgenda,
+    ScheduledOccurrence,
+    ScheduleReader,
+    ScheduleScope,
+    parse_schedule_scope,
+)
 from persona.schedules.vocabulary import (
     RecurrenceKind,
     RecurrencePattern,
@@ -54,11 +61,16 @@ __all__ = [
     "RescheduleProposal",
     "RescheduleProposalStatus",
     "Schedule",
+    "ScheduleAgenda",
+    "ScheduleReader",
+    "ScheduleScope",
+    "ScheduledOccurrence",
     "decide_fire",
     "fire_idempotency_key",
     "fire_payload",
     "next_fire_after",
     "occurrences_between",
+    "parse_schedule_scope",
     "pattern_to_rule",
     "quiet_hours_edge",
     "render_human_terms",

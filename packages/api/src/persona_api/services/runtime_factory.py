@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from persona.imagegen import ImageBackend
     from persona.sandbox.result import SandboxFile
     from persona.schedules import QuietHours
+    from persona.schedules.reader import ScheduleReader
     from persona.schema.chunks import PersonaChunk
     from persona.stores.backend import Backend
     from persona.stores.core_memory import CoreMemoryStore
@@ -981,6 +982,22 @@ class RuntimeFactory:
                 persona_id=persona.persona_id,
             )
         )
+        # R9-075 — the read-only ``schedule_introspect`` tool: the persona's window onto the
+        # calendar. Personas could CREATE schedules (A1/A10) and the web could RENDER them (A8),
+        # but the toolbox had no read surface for either, so "what's on my calendar this week?"
+        # was answered from imagination. Reads through the SAME occurrences model the calendar
+        # renders (no second recurrence path). The reader is resolved per dispatch from the RLS
+        # ``current_user_id`` contextvar — owner-scoped, fail-closed off-request — and the tool
+        # is auto-allowed in ``build_default_toolbox`` (``SELF_KNOWLEDGE_TOOLS``): it is not a
+        # capability a persona opts into, and no persona's YAML allow-list names it.
+        from persona.tools.builtin.schedule_introspection import make_schedule_introspection_tool
+
+        extra.append(
+            make_schedule_introspection_tool(
+                reader_provider=self._build_schedule_reader_provider(),
+                persona_id=persona.persona_id,
+            )
+        )
         # Spec 27 (D-27-3) — lazily spawn the built-in MCP servers THIS persona
         # references (mcp:<server>:) and hand their loopback URLs to the factory.
         # A persona that uses no built-in MCP spawns nothing.
@@ -1545,6 +1562,34 @@ class RuntimeFactory:
             if not owner:
                 return None
             return APITaskStateReader(task_store, checkpoint_store, owner)
+
+        return _provider
+
+    def _build_schedule_reader_provider(self) -> Callable[[], ScheduleReader | None]:
+        """The owner-scoped schedule reader provider (R9-075).
+
+        Backs the ``schedule_introspect`` tool: resolves the caller's reader at dispatch from
+        the RLS ``current_user_id`` contextvar, so a toolbox built once stays scoped to the
+        owner of each request and fails closed off-request (no owner ⇒ ``None`` ⇒ the tool
+        reports it has no calendar access rather than answering blind). Mirrors
+        :meth:`_build_task_reader_provider`.
+
+        The occurrence caps come from the ``APIConfig``; on the CLI / test path where none was
+        injected, a default-constructed config supplies the same defaults the hosted service
+        uses, so the tool behaves identically rather than being silently absent.
+        """
+        from persona_api.config import APIConfig
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.schedules.reader import APIScheduleReader
+
+        config = self._api_config if self._api_config is not None else APIConfig()
+        engine = self._engine
+
+        def _provider() -> ScheduleReader | None:
+            owner = current_user_id.get()
+            if not owner:
+                return None
+            return APIScheduleReader(engine, config, owner)
 
         return _provider
 

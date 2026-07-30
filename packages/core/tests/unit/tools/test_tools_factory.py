@@ -322,6 +322,34 @@ class TestBuildDefaultToolboxWithMCP:
         assert toolbox.is_allowed("use_skill")
 
     @pytest.mark.asyncio
+    async def test_schedule_introspect_extra_tool_is_auto_allowed(self, tmp_path: Path) -> None:
+        # R9-075: ``schedule_introspect`` is how a persona knows what it has committed to,
+        # not a capability anyone opts into — no persona's allow-list names it (it is
+        # deliberately absent from TOOL_CATALOG). Registering it without auto-allowing it
+        # would change nothing: EVERY persona has a non-empty allow-list (the
+        # ensure_default_capabilities floor), so the tool would be composed and then
+        # filtered straight back out before the model ever saw it.
+        from persona.tools.builtin.schedule_introspection import (
+            make_schedule_introspection_tool,
+        )
+
+        def _reader_provider() -> None:
+            return None
+
+        schedule_tool = make_schedule_introspection_tool(
+            reader_provider=_reader_provider, persona_id="astrid"
+        )
+
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["file_read", "code_execution", "web_search"])
+        toolbox, _ = await build_default_toolbox(config, persona, extra_tools=[schedule_tool])
+
+        assert "schedule_introspect" in toolbox.names(), (
+            "schedule_introspect must be advertised even with an explicit allow-list"
+        )
+        assert toolbox.is_allowed("schedule_introspect")
+
+    @pytest.mark.asyncio
     async def test_unreachable_mcp_server_graceful(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
