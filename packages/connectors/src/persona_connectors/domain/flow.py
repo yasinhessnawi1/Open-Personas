@@ -32,9 +32,10 @@ convention. Owned surface — api-free.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from persona.logging import get_logger
+from persona.logging import get_logger, redact_secrets
 from persona.schema.origination import PersonaIdentityTag
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +53,7 @@ from persona_connectors.domain.system_replies import (
     NEW_CONVERSATION_MESSAGE,
     NO_ACTIVE_TO_RESET_MESSAGE,
     NO_PERSONAS_MESSAGE,
+    TURN_FAILED_MESSAGE,
     render_list_and_instructions,
 )
 
@@ -260,26 +262,62 @@ class SharedInboundFlow:
 
         # 5. Drive the turn: foreground (flip-or-continue) → collect the reply with a
         #    typing indicator (no-streaming) → render + send whole.
-        foreground = self._store.foreground(
-            owner_id=owner_id, platform=platform, channel_key=chat, persona_id=decision.persona_id
-        )
-        addressable = names.get(decision.persona_id)
-        display_name = addressable[0] if addressable else decision.persona_id
-        tag = PersonaIdentityTag(
-            persona_id=decision.persona_id, display_name=display_name, visual_ref=None
-        )
-        async with transport.typing(chat):
-            reply = await self._run_turn(
-                TurnRequest(
-                    owner_id=owner_id,
-                    conversation_id=foreground.conversation_id,
-                    persona_id=decision.persona_id,
-                    text=inbound.text,
-                )
+        #
+        # R9-073b: ANY failure from here on (a store fault, a provider error, a model the
+        # account can't serve, a credits rejection, a timeout — anything) must never escape
+        # this call. Before this guard, a provider exception (observed in production,
+        # 2026-07-29: Cloudflare rejecting a model the account's plan can't serve) propagated
+        # out of `handle_text`, out of the platform's own inbound handler, and permanently
+        # ended THAT platform's inbound loop — every later message on the same platform was
+        # silently dropped for the rest of the process's life. This is the ONE seam every
+        # text adapter shares (Telegram/Discord/Slack/email/WhatsApp/SMS all call
+        # `handle_text`), so catching it here fixes it once instead of five times: log the
+        # failure (platform + persona + the exception CLASS + its redacted message — never
+        # the conversation text), tell the user honestly through the SAME system-reply
+        # transport every adapter already has (never a persona reply — no persona said
+        # this), and return so the caller's loop moves on to the next message.
+        # `asyncio.CancelledError` is a `BaseException`, not `Exception`, so a clean
+        # shutdown always propagates through this untouched.
+        try:
+            foreground = self._store.foreground(
+                owner_id=owner_id,
+                platform=platform,
+                channel_key=chat,
+                persona_id=decision.persona_id,
             )
-        await transport.send_persona(
-            NormalisedOutbound(persona=tag, text=reply, conversation_key=chat)
-        )
+            addressable = names.get(decision.persona_id)
+            display_name = addressable[0] if addressable else decision.persona_id
+            tag = PersonaIdentityTag(
+                persona_id=decision.persona_id, display_name=display_name, visual_ref=None
+            )
+            async with transport.typing(chat):
+                reply = await self._run_turn(
+                    TurnRequest(
+                        owner_id=owner_id,
+                        conversation_id=foreground.conversation_id,
+                        persona_id=decision.persona_id,
+                        text=inbound.text,
+                    )
+                )
+            await transport.send_persona(
+                NormalisedOutbound(persona=tag, text=reply, conversation_key=chat)
+            )
+        except Exception as exc:  # noqa: BLE001 — a turn fault must never kill the platform loop
+            _log.error(
+                "turn failed (platform={platform} persona={persona_id} "
+                "error_class={error_class} error={error}) — replying honestly, "
+                "continuing the loop",
+                platform=platform,
+                persona_id=decision.persona_id,
+                error_class=type(exc).__name__,
+                error=redact_secrets(str(exc)),
+            )
+            # Best-effort: even the apology send is guarded — a transport that is ALSO
+            # down must not turn one bad turn into a second, unhandled crash.
+            with contextlib.suppress(Exception):
+                await transport.send_system(conversation_key=chat, text=TURN_FAILED_MESSAGE)
+            return
+
         # Spec A7 (T6): a delivered turn is a connector.message_received event — emit it (best-
         # effort; the reply already went out, so a hiccup must never surface). Only a DELIVERED turn
         # emits (the early-return branches above are not "a message reached the persona").

@@ -24,6 +24,7 @@ __all__ = [
     "NEW_CONVERSATION_MESSAGE",
     "NO_ACTIVE_TO_RESET_MESSAGE",
     "NO_PERSONAS_MESSAGE",
+    "TURN_FAILED_MESSAGE",
     "render_list_and_instructions",
 ]
 
@@ -35,6 +36,12 @@ NO_PERSONAS_MESSAGE = (
     "You don't have any personas yet. Create one in your Open Persona web app, "
     "then come back here and message it by name."
 )
+
+# R9-073b: the honest, human, non-technical reply for a failed turn (a provider error, an
+# unavailable model, a credits/timeout fault — anything). NEVER leak provider text, model
+# ids, or account/billing detail here — this is a fixed, product-voice string, never built
+# from ``str(exc)``, so there is nothing for a provider's own wording to leak into.
+TURN_FAILED_MESSAGE = "Sorry, something went wrong on my end. Please try again in a moment."
 
 # The non-text graceful declines (D-C2-6) — platform-NEUTRAL product-voice copy, so
 # every adapter maps its own (platform-specific) non-text *kind* to these shared

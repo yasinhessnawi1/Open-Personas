@@ -30,6 +30,7 @@ from persona_connectors.domain.system_replies import (
     NEW_CONVERSATION_MESSAGE,
     NO_ACTIVE_TO_RESET_MESSAGE,
     NO_PERSONAS_MESSAGE,
+    TURN_FAILED_MESSAGE,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +105,37 @@ class _TurnRunner:
         await asyncio.sleep(0)
         self.requests.append(request)
         return self.reply
+
+
+class _FlakyTurnRunner:
+    """Fails on its first N calls (a provider/model/credits fault), then serves normally.
+
+    Stands in for the production shape (R9-073b): a provider raises out of ``run_turn``.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_times: int = 1,
+        fail_message: str = "boom",
+        reply: str = "Hello from the persona",
+    ) -> None:
+        self._fail_times = fail_times
+        self._fail_message = fail_message
+        self.reply = reply
+        self.calls = 0
+
+    async def __call__(self, request: TurnRequest) -> str:
+        await asyncio.sleep(0)
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise RuntimeError(self._fail_message)
+        return self.reply
+
+
+async def _cancelling_turn(_request: TurnRequest) -> str:
+    """A run_turn stand-in for a genuine shutdown mid-turn — never treated as a fault."""
+    raise asyncio.CancelledError
 
 
 def _flow(
@@ -331,3 +363,88 @@ async def test_none_envelope_tag_is_todays_chat_behavior() -> None:
     await flow.handle_text(_inbound("Kai, hello"), transport=transport, envelope_persona_tag=None)
     assert store.foregrounded == ["kai"]
     assert turn.requests[0].persona_id == "kai"
+
+
+# --- R9-073b: a turn/provider failure must never kill the platform loop ---
+
+
+@pytest.mark.asyncio
+async def test_turn_failure_replies_honestly_and_the_loop_continues() -> None:
+    """The production failure (captured 2026-07-29): a provider raised out of ``run_turn``
+    (Cloudflare rejecting a model the account's plan can't serve) and that exception
+    escaped ``handle_text`` — permanently ending the platform's inbound loop. Now: the
+    user gets the honest apology, no exception escapes, and the VERY NEXT message on the
+    same flow is still processed normally — proving the loop was never killed.
+    """
+    turn = _FlakyTurnRunner(
+        fail_times=1,
+        fail_message=(
+            "Model @cf/zai-org/glm-5.2 is not available on the Workers Free plan: "
+            "This model requires a Workers Paid plan"
+        ),
+    )
+    flow, transport, _store, _turn = _flow(turn=turn)  # type: ignore[arg-type]
+
+    # First message: the turn blows up.
+    await flow.handle_text(_inbound("Kai, hello"), transport=transport)
+    assert transport.system == [(_CHAT, TURN_FAILED_MESSAGE)]
+    assert transport.persona == []  # no persona reply — a persona never said this
+
+    # Second message on the SAME flow instance: the loop kept going.
+    await flow.handle_text(_inbound("Kai, are you there?"), transport=transport)
+    assert len(transport.persona) == 1
+    assert transport.persona[0].text == "Hello from the persona"
+    assert turn.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_failure_reply_never_leaks_provider_or_model_text() -> None:
+    """The privacy/leak guard: the error reply is a FIXED product-voice string, never
+    built from the provider's own exception text, so a provider name / model id /
+    billing detail can never reach the user — mirrors the existing no-content-logging
+    posture proven for message bodies (see telegram/test_flow.py)."""
+    sentinel_provider = "cloudflare"
+    sentinel_model = "@cf/zai-org/glm-5.2"
+    turn = _FlakyTurnRunner(
+        fail_times=1,
+        fail_message=(
+            f"AiError: Model {sentinel_model} is not available on the Workers Free plan "
+            f"[provider={sentinel_provider} underlying=PermissionDeniedError]"
+        ),
+    )
+    flow, transport, _store, _turn = _flow(turn=turn)  # type: ignore[arg-type]
+
+    await flow.handle_text(_inbound("Kai, hello"), transport=transport)
+
+    assert len(transport.system) == 1
+    sent_text = transport.system[0][1]
+    assert sent_text == TURN_FAILED_MESSAGE
+    assert sentinel_provider not in sent_text
+    assert sentinel_model not in sent_text
+    assert "PermissionDeniedError" not in sent_text
+    assert "cf/zai-org" not in sent_text
+
+
+@pytest.mark.asyncio
+async def test_turn_failure_is_caught_regardless_of_exception_type() -> None:
+    """Not just a provider error — ANY exception while producing/sending the reply (a
+    store fault, a timeout, ...) must be caught the same way. A plain non-PersonaError
+    exception (no ``context``/``redact``-friendly shape) proves the guard doesn't assume
+    a particular exception hierarchy."""
+    flow, transport, _store, _turn = _flow(
+        turn=_FlakyTurnRunner(fail_times=1, fail_message="connection timed out")  # type: ignore[arg-type]
+    )
+    await flow.handle_text(_inbound("Kai, hello"), transport=transport)
+    assert transport.system == [(_CHAT, TURN_FAILED_MESSAGE)]
+
+
+@pytest.mark.asyncio
+async def test_turn_cancelled_error_propagates_not_swallowed() -> None:
+    """A clean shutdown (``asyncio.CancelledError``) is a ``BaseException``, not caught by
+    the ``except Exception`` turn-failure guard — it must propagate untouched, and the
+    honest-apology path must NOT fire for a deliberate cancellation."""
+    flow, transport, _store, _turn = _flow(turn=_cancelling_turn)  # type: ignore[arg-type]
+    with pytest.raises(asyncio.CancelledError):
+        await flow.handle_text(_inbound("Kai, hello"), transport=transport)
+    assert transport.system == []
+    assert transport.persona == []
