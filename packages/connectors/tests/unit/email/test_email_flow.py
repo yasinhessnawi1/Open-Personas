@@ -20,6 +20,9 @@ from persona_connectors.errors import IdentityNotLinkedError
 _NOW = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
 _PASS = "mx.postmark.com; dkim=pass; spf=pass; dmarc=pass (p=REJECT)"
 _FAIL = "mx.postmark.com; dkim=fail; spf=softfail; dmarc=fail"
+# Postmark's real signal (no Authentication-Results at all): the aligned DKIM_VALID_AU token.
+_SPAM_TESTS_ALIGNED = "DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS"
+_SPAM_TESTS_UNALIGNED = "DKIM_SIGNED,DKIM_VALID,SPF_PASS"
 
 
 class _FakeConnector:
@@ -73,7 +76,12 @@ class _FakeLinking:
 
 
 def _parsed(
-    *, text: str, auth: str = _PASS, tag: str | None = "astrid", attachments: bool = False
+    *,
+    text: str,
+    auth: str | None = _PASS,
+    spam_tests: str | None = None,
+    tag: str | None = "astrid",
+    attachments: bool = False,
 ) -> ParsedEmail:
     inbound = NormalisedInbound(
         platform="email",
@@ -89,6 +97,8 @@ def _parsed(
         subject="Re: Hi",
         references="<root@x>",
         authentication_results=auth,
+        spam_tests=spam_tests,
+        received_spf=None,
         has_attachments=attachments,
     )
 
@@ -109,6 +119,27 @@ async def test_b2_fail_gives_zero_access() -> None:
     """A DMARC-failing From → no reply, no bind, the shared flow never runs (fail-closed)."""
     connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=True)
     await _flow(connector, shared, linking).handle(_parsed(text="Astrid, hi", auth=_FAIL))
+    assert connector.system == []
+    assert connector.replies == []
+    assert shared.calls == []
+
+
+@pytest.mark.asyncio
+async def test_b2_real_postmark_case_no_auth_results_but_aligned_dkim_passes() -> None:
+    """R9-072's actual fix: no Authentication-Results header at all (Postmark's real inbound
+    shape) but X-Spam-Tests carries DKIM_VALID_AU → authentic, the shared flow runs."""
+    connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=True)
+    parsed = _parsed(text="Astrid, hi", auth=None, spam_tests=_SPAM_TESTS_ALIGNED)
+    await _flow(connector, shared, linking).handle(parsed)
+    assert shared.calls == [("Astrid, hi", "astrid")]
+
+
+@pytest.mark.asyncio
+async def test_b2_unaligned_dkim_without_au_still_gives_zero_access() -> None:
+    """A validly-signed but NOT From:-aligned DKIM (no _AU) → still zero access."""
+    connector, shared, linking = _FakeConnector(), _FakeShared(), _FakeLinking(linked=True)
+    parsed = _parsed(text="Astrid, hi", auth=None, spam_tests=_SPAM_TESTS_UNALIGNED)
+    await _flow(connector, shared, linking).handle(parsed)
     assert connector.system == []
     assert connector.replies == []
     assert shared.calls == []

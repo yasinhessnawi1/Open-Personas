@@ -80,6 +80,42 @@ def test_extracts_the_routing_signals_for_groups_a2_b2_and_e() -> None:
     assert parsed.has_attachments is False
 
 
+def test_extracts_postmarks_real_aligned_signal_headers() -> None:
+    """Postmark's ACTUAL inbound payload never carries Authentication-Results — X-Spam-Tests
+    (DKIM_VALID_AU) and Received-SPF are the headers B2 really has to work with (R9-072)."""
+    payload = _payload(
+        Headers=[
+            {"Name": "Message-ID", "Value": _REPLY_ID},
+            {"Name": "In-Reply-To", "Value": _ROOT},
+            {"Name": "References", "Value": f"{_ROOT} {_REPLY_ID}"},
+            {
+                "Name": "Received-SPF",
+                "Value": (
+                    "Pass (mx.postmark.com: domain of example.com designates "
+                    "1.2.3.4 as permitted sender)"
+                ),
+            },
+            {"Name": "DKIM-Signature", "Value": "v=1; a=rsa-sha256; d=example.com; ..."},
+            {
+                "Name": "X-Spam-Checker-Version",
+                "Value": "SpamAssassin 3.4.0 (2014-02-07) on mx.postmark.com",
+            },
+            {"Name": "X-Spam-Status", "Value": "No, score=-0.1"},
+            {
+                "Name": "X-Spam-Tests",
+                "Value": "DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS",
+            },
+            {"Name": "MIME-Version", "Value": "1.0"},
+        ]
+    )
+    parsed = parse_inbound_email(payload, now=_NOW)
+    assert parsed is not None
+    assert parsed.authentication_results is None  # Postmark never sends this header
+    assert parsed.spam_tests == "DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS"
+    assert parsed.received_spf is not None
+    assert parsed.received_spf.startswith("Pass")
+
+
 def test_attachments_are_flagged_not_processed() -> None:
     payload = _payload(
         Attachments=[

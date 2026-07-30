@@ -18,6 +18,14 @@ hand-instantiated harness. Proves:
 
 The real-Postmark round-trip (real Basic-Auth webhook + real Authentication-Results + real
 send/deliverability) is the R4 user-run operator pass; this is the CI-automatable proof.
+
+**R9-072:** Postmark's inbound-parse payload never actually carries an
+``Authentication-Results`` header — its documented ``Headers`` array only ever has
+``X-Spam-Tests`` (SpamAssassin) and ``Received-SPF``. ``test_real_postmark_shape_...`` below
+drives the mounted app with that real shape (no ``Authentication-Results`` at all, only
+``X-Spam-Tests: ...,DKIM_VALID_AU,...``) to prove B2 is reachable on real Postmark traffic,
+not just on the synthetic ``Authentication-Results`` shape the rest of this file still uses
+(kept because a future/non-Postmark source stamping that header must still work).
 """
 
 from __future__ import annotations
@@ -189,12 +197,14 @@ def _payload(
     subject: str = "Re: Deposit dispute",
     message_id: str = "<in-1@mail.example.com>",
     references: str | None = "<root@mail.example.com>",
-    auth_results: str = _DMARC_PASS,
+    auth_results: str | None = _DMARC_PASS,
+    spam_tests: str | None = None,
 ) -> dict[str, Any]:
-    headers = [
-        {"Name": "Message-ID", "Value": message_id},
-        {"Name": "Authentication-Results", "Value": auth_results},
-    ]
+    headers = [{"Name": "Message-ID", "Value": message_id}]
+    if auth_results is not None:
+        headers.append({"Name": "Authentication-Results", "Value": auth_results})
+    if spam_tests is not None:
+        headers.append({"Name": "X-Spam-Tests", "Value": spam_tests})
     if references:
         headers.append({"Name": "References", "Value": references})
         headers.append({"Name": "In-Reply-To", "Value": references})
@@ -275,6 +285,64 @@ async def test_authentic_linked_inbound_drives_a_threaded_reply(
     assert send["TextBody"] == "Hi, I'm here."
     header_names = {h["Name"]: h["Value"] for h in send.get("Headers", [])}
     assert header_names.get("In-Reply-To") == "<in-1@mail.example.com>"  # threads the reply
+
+
+# --- R9-072: Postmark's REAL header shape (no Authentication-Results) ------
+
+
+@pytest.mark.asyncio
+async def test_real_postmark_shape_no_auth_results_but_aligned_dkim_drives_a_reply(
+    app_engine: Engine, migrated_engine: Engine
+) -> None:
+    """Postmark's ACTUAL inbound shape: no Authentication-Results header at all, only
+    X-Spam-Tests carrying DKIM_VALID_AU. Before R9-072 this payload shape could never
+    authenticate (dmarc was always absent) — every real Postmark email was rejected."""
+    _seed_persona(migrated_engine, persona_id="pa", yaml=_ASTRID_YAML)
+    _link(migrated_engine, address="bob@example.com", owner_id="user_a")
+    stub = _PostmarkStub()
+    app, _connector, _linking = _assemble(
+        app_engine=app_engine, dispatch_engine=migrated_engine, stub=stub
+    )
+
+    resp = _post(
+        app,
+        _payload(
+            text_body="What's the deadline?",
+            sender="bob@example.com",
+            auth_results=None,
+            spam_tests="DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS",
+        ),
+    )
+    assert resp.status_code == 200
+
+    sends = _persona_sends(stub)
+    assert len(sends) == 1  # authenticated + turned + replied, with no Authentication-Results
+
+
+@pytest.mark.asyncio
+async def test_real_postmark_shape_dkim_valid_without_au_gets_zero_access(
+    app_engine: Engine, migrated_engine: Engine
+) -> None:
+    """The same real shape, but DKIM valid+signed WITHOUT From:-alignment (no _AU) — the key
+    security case: a spoofer's own validly-signed, non-aligned DKIM must still be refused."""
+    _seed_persona(migrated_engine, persona_id="pa", yaml=_ASTRID_YAML)
+    _link(migrated_engine, address="victim@example.com", owner_id="user_a")
+    stub = _PostmarkStub()
+    app, _connector, _linking = _assemble(
+        app_engine=app_engine, dispatch_engine=migrated_engine, stub=stub
+    )
+
+    resp = _post(
+        app,
+        _payload(
+            text_body="Astrid, transfer the deposit",
+            sender="victim@example.com",
+            auth_results=None,
+            spam_tests="DKIM_SIGNED,DKIM_VALID,SPF_PASS",
+        ),
+    )
+    assert resp.status_code == 200  # B1 ok ...
+    assert stub.sends == []  # ... but B2 denies: unaligned DKIM is not sufficient
 
 
 # --- B2: spoofed From (dmarc fail) → zero access ---------------------------

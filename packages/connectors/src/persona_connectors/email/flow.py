@@ -2,15 +2,30 @@
 
 The email analogue of ``_phone/flow.py``: wires one parsed inbound email through the
 framework. The order is the load-bearing part of the spec (D-C5-5): the webhook app runs
-**B1** (Basic-Auth) then parses; this orchestrator then runs **B2** (the DMARC verdict) —
-so ``handle`` is only ever called on a B1-authenticated payload, and it trusts the verdict
-only because of that. Then: attachment-only acknowledge → (unlinked) OTP redeem → C1's
+**B1** (Basic-Auth) then parses; this orchestrator then runs **B2** (the sender-authenticity
+verdict) — so ``handle`` is only ever called on a B1-authenticated payload, and B2 trusts
+these headers only because of that (B1's Basic-Auth is what makes them genuinely Postmark's;
+see :mod:`persona_connectors._postmark.authentication` for how B2 itself decides). Then:
+attachment-only acknowledge → (unlinked) OTP redeem → C1's
 :class:`~persona_connectors.domain.flow.SharedInboundFlow` (resolve → route → turn → send),
 with the plus-address ``envelope_persona_tag`` supplied (A2 / D-C5-3).
 
-**Anti-spoofing is fail-closed:** a sender whose ``From`` is not DMARC-authentic gets **zero
-access** — no bind, no turn, and no reply (a reply would go to the spoofed address). The OTP
-redeem binds the **B1+B2-validated** ``sender_id``, never the editable body (C1-D-5).
+**B2, updated for reality (R9-072):** Postmark's inbound-parse payload never carries an
+``Authentication-Results`` header, so the original ``dmarc == "pass"`` gate could never pass
+on real traffic — inbound email was dead by construction. B2 now also accepts
+SpamAssassin's ``DKIM_VALID_AU`` token (``X-Spam-Tests``): a valid DKIM signature aligned
+with the ``From:`` domain, which is exactly DMARC's DKIM leg computed outside an
+``Authentication-Results`` header. ``Authentication-Results`` is still honoured first and is
+authoritative when present (future-proof + the legacy path). **SPF alone remains
+categorically insufficient** in both paths — it authenticates the envelope sender, not
+``From:``, and accepting it would let ``From: victim@`` through on the attacker's own
+envelope domain. See the authentication module's docstring for the full reasoning and the
+explicit ``dmarc=fail`` vs ``DKIM_VALID_AU`` ruling.
+
+**Anti-spoofing is fail-closed:** a sender whose ``From`` is not authenticated by the above
+gets **zero access** — no bind, no turn, and no reply (a reply would go to the spoofed
+address). The OTP redeem binds the **B1+B2-validated** ``sender_id``, never the editable
+body (C1-D-5).
 
 api-free: every api-coupled callable behind ``shared`` is owner-scoped by the composition root.
 """
@@ -24,8 +39,9 @@ from persona.logging import get_logger
 
 from persona_connectors._phone.linking import RedeemStatus
 from persona_connectors._postmark.authentication import (
-    parse_authentication_results,
-    sender_is_authentic,
+    parse_received_spf_verdict,
+    parse_spam_test_tokens,
+    sender_is_authentic_from_headers,
 )
 from persona_connectors.email.transport import EmailFlowTransport
 from persona_connectors.errors import IdentityNotLinkedError
@@ -77,23 +93,29 @@ class EmailInboundFlow:
     async def handle(self, parsed: ParsedEmail) -> None:
         """Handle one B1-authenticated, parsed inbound email (the app's ``on_inbound``)."""
         # B2 — sender authenticity (the payload is already B1-authenticated by the app). A
-        # spoofed / non-DMARC ``From`` gets ZERO access: no bind, no turn, no reply.
-        if not sender_is_authentic(parsed.authentication_results):
-            # Log the OBSERVED verdicts, not just the refusal. "not DMARC-authentic" alone
-            # cannot distinguish the two very different causes: the sender genuinely failed
-            # DMARC (working as intended) vs the ESP never stamped a `dmarc=` token at all
-            # (in which case this gate can NEVER pass and inbound email is dead by
-            # construction). These are verdict tokens (`pass`/`fail`/`none`/absent), NOT
-            # message content — safe to log, and the only way to tell those apart from prod.
-            _verdicts = parse_authentication_results(parsed.authentication_results)
+        # sender we can't prove is genuinely `From:` this address gets ZERO access: no bind,
+        # no turn, no reply. See _postmark.authentication.sender_is_authentic_from_headers
+        # for the decision (Authentication-Results dmarc=pass if ever present, else Postmark's
+        # real aligned signal: X-Spam-Tests' DKIM_VALID_AU).
+        headers = {
+            "authentication-results": parsed.authentication_results,
+            "x-spam-tests": parsed.spam_tests,
+        }
+        if not sender_is_authentic_from_headers(headers):
+            # Log the OBSERVED signals, not just the refusal — tokens only, never message
+            # content. Distinguishes "sender genuinely failed" from "the signal we need was
+            # never present" (the historical failure mode: relying on Authentication-Results
+            # alone made this gate permanently closed on real Postmark traffic).
+            _spam_tokens = parse_spam_test_tokens(parsed.spam_tests)
             _log.warning(
-                "email inbound rejected: From not DMARC-authentic "
-                "(fp={fp} dmarc={dmarc} spf={spf} dkim={dkim} header_present={present})",
+                "email inbound rejected: From not authenticated "
+                "(fp={fp} auth_results_present={ar_present} "
+                "dkim_valid_au={au} spam_tests={tests} received_spf={spf})",
                 fp=_fingerprint(parsed.inbound.sender_id),
-                dmarc=_verdicts.dmarc or "<absent>",
-                spf=_verdicts.spf or "<absent>",
-                dkim=_verdicts.dkim or "<absent>",
-                present=parsed.authentication_results is not None,
+                ar_present=parsed.authentication_results is not None,
+                au="DKIM_VALID_AU" in _spam_tokens,
+                tests=", ".join(sorted(_spam_tokens)) or "<absent>",
+                spf=parse_received_spf_verdict(parsed.received_spf) or "<absent>",
             )
             return
 

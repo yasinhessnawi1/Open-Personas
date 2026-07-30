@@ -8,8 +8,13 @@ plus the email-specific routing signals the webhook (Group E) needs downstream:
   Postmark's own tracking ``MessageID`` and NOT the subject.
 - **envelope_persona_tag** — Postmark's ``MailboxHash`` (``inbound+astrid@`` → ``astrid``),
   the deterministic persona selector fed to the flow's ``envelope_persona_tag`` (A2 / D-C5-3).
-- **authentication_results** — the ESP-stamped ``Authentication-Results`` header, for the B2
-  sender-authenticity gate (trusted only post-B1).
+- **authentication_results** / **spam_tests** / **received_spf** — the raw headers the B2
+  sender-authenticity gate (:mod:`persona_connectors._postmark.authentication`) decides over
+  (trusted only post-B1). Postmark's real inbound payload never carries
+  ``Authentication-Results`` — ``spam_tests`` (``X-Spam-Tests``, SpamAssassin's
+  ``DKIM_VALID_AU`` token) is the aligned signal B2 actually keys on; ``received_spf`` is
+  carried through for diagnostics only, never for authorisation (SPF alone doesn't protect
+  ``From:``).
 - **subject** / **references** — for the reply's ``Re:`` + threading (Group E).
 - **has_attachments** — attachments are acknowledged, not processed (v1, criterion 9).
 
@@ -44,6 +49,8 @@ class ParsedEmail(BaseModel):
     subject: str
     references: str | None
     authentication_results: str | None
+    spam_tests: str | None
+    received_spf: str | None
     has_attachments: bool
 
 
@@ -118,6 +125,8 @@ def parse_inbound_email(payload: Mapping[str, object], *, now: datetime) -> Pars
         subject=subject,
         references=references,
         authentication_results=headers.get("authentication-results"),
+        spam_tests=headers.get("x-spam-tests"),
+        received_spf=headers.get("received-spf"),
         has_attachments=bool(isinstance(attachments, list) and attachments),
     )
 
