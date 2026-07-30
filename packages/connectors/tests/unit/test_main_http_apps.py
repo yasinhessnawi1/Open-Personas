@@ -129,8 +129,10 @@ async def test_telegram_longpoll_serves_the_link_route_not_404() -> None:
         **_common_kwargs(),  # type: ignore[arg-type]
     )
     assert connector is not None
-    assert runner is not None  # longpoll IS the message-receiving runner
-    runner.close()  # never actually run the poll loop
+    # longpoll IS the message-receiving runner — a zero-arg FACTORY (R9-073c), never
+    # called here, so there is no dangling coroutine to close.
+    assert runner is not None
+    assert callable(runner)
     client = TestClient(app)
     resp = client.post("/v1/connectors/telegram/link")
     assert resp.status_code == 401  # missing bearer — the route EXISTS (was 404 pre-fix)
@@ -171,7 +173,9 @@ async def test_discord_gateway_serves_the_link_and_oauth_callback_routes_not_404
         **_common_kwargs(),  # type: ignore[arg-type]
     )
     assert connector is not None
-    runner.close()  # never open a real gateway websocket
+    # A zero-arg FACTORY (``gateway.run``, R9-073c) — never called here, so no real
+    # gateway websocket ever opens and there is no coroutine to close.
+    assert callable(runner)
     client = TestClient(app)
     link_resp = client.post("/v1/connectors/discord/link")
     assert link_resp.status_code == 401  # was 404 pre-fix (the app was never built)
@@ -211,8 +215,10 @@ async def test_slack_socket_mode_serves_link_and_callback_but_not_events() -> No
         **_common_kwargs(),  # type: ignore[arg-type]
     )
     assert connector is not None
-    assert runner is not None  # socket mode IS the message-receiving runner
-    runner.close()  # never open a real socket-mode websocket
+    # socket mode IS the message-receiving runner — a zero-arg FACTORY (``socket.run``,
+    # R9-073c), never called here, so no real socket-mode websocket ever opens.
+    assert runner is not None
+    assert callable(runner)
     client = TestClient(app)
     link_resp = client.post("/v1/connectors/slack/link")
     assert link_resp.status_code == 401  # was 404 pre-fix (the app was never built)
@@ -261,8 +267,8 @@ async def test_slack_setup_forwards_the_configured_scopes_into_the_authorize_url
             **_common_kwargs(),  # type: ignore[arg-type]
         )
         assert connector is not None
-        if runner is not None:
-            runner.close()
+        # A zero-arg FACTORY when present (R9-073c) — never called, nothing to close.
+        assert runner is None or callable(runner)
         await http.aclose()
     finally:
         monkeypatch_target.SlackLinkingService = original  # type: ignore[misc]
@@ -319,7 +325,13 @@ async def test_slack_http_transport_mounts_events_on_the_same_app_no_extra_runne
     await http.aclose()
 
 
-# --- _supervised (R9-071): one crashed platform runner must never kill the others ---
+# --- _supervised (R9-071 contain / R9-073c heal): a crashed runner restarts, with a
+# bounded backoff, instead of leaving that platform dead for the process's lifetime ---
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """An injected ``sleep`` that returns instantly — the backoff delay itself is not
+    what these tests are proving; the RESTART + ceiling behaviour is."""
 
 
 @pytest.mark.asyncio
@@ -327,19 +339,100 @@ async def test_supervised_contains_a_crashed_runner_instead_of_propagating() -> 
     """``asyncio.gather(*runners)`` propagates the FIRST raised exception, which would
     end every OTHER runner (+ the HTTP server) along with the crashed one. ``_supervised``
     must swallow (and log) a crashed runner's exception so ``gather`` keeps waiting on the
-    rest — proven directly here, and end-to-end via ``asyncio.gather`` below.
+    rest — proven directly here, and end-to-end via ``asyncio.gather`` below. The runner
+    always fails, so this also exercises the ceiling (else the call never returns).
     """
 
     async def crashing_runner() -> None:
         raise RuntimeError("discord gateway blew up")
 
-    await _supervised("discord", crashing_runner())  # must not raise
+    # Must not raise — a crashed platform runner is contained, not propagated.
+    await _supervised("discord", crashing_runner, sleep=_no_sleep)
+
+
+@pytest.mark.asyncio
+async def test_supervised_restarts_a_crashed_runner_then_it_recovers() -> None:
+    """The FIRST crash is a RESTART, not a permanent death (R9-073c) — ``make_runner`` is
+    called again; once it stops raising, ``_supervised`` returns cleanly (no ceiling hit).
+    """
+    calls = 0
+
+    async def flaky_runner() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("Model @cf/zai-org/glm-5.2 is not available")
+        # the second attempt "recovers" (a real runner would now serve forever; a test
+        # double just returns, which `_supervised` treats as a clean completion).
+
+    await _supervised("telegram", flaky_runner, sleep=_no_sleep)
+    assert calls == 2  # crashed once, restarted once, then stopped (no more restarts)
+
+
+@pytest.mark.asyncio
+async def test_supervised_backs_off_exponentially_and_stops_at_the_ceiling() -> None:
+    """A PERSISTENTLY crashing runner is retried with exponential backoff (1s doubling to
+    a 60s cap) up to the ceiling, then ``_supervised`` gives up (returns) rather than
+    retrying forever — proven via the exact backoff schedule handed to the injected sleep.
+    """
+    calls = 0
+    delays: list[float] = []
+
+    async def crashing_runner() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("permanently broken")
+
+    async def _record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    await _supervised("discord", crashing_runner, sleep=_record_sleep)
+
+    assert calls == 11  # the initial attempt + 10 restarts (the ceiling)
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0, 60.0]
+
+
+@pytest.mark.asyncio
+async def test_supervised_resets_the_ceiling_after_a_healthy_stint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that stayed up a good while before crashing again must NOT count toward
+    the SAME ceiling as a hot-spinning one — the failure count resets after
+    ``_RESTART_HEALTHY_UPTIME_SECONDS`` of uptime (an injected ``monotonic`` proves it
+    without a real wait).
+
+    The ceiling is monkeypatched down to 1 so the reset is OBSERVABLE purely from the
+    call count: crash #1 is unhealthy (0s uptime) so the failure count is 1 afterwards;
+    crash #2 is healthy (150s uptime) so, if the reset fires, the count drops back to 0
+    (then 1) and a THIRD attempt happens — without the reset it would be 2, over the
+    ceiling of 1, and ``_supervised`` would give up after only 2 calls.
+    """
+    from persona_connectors import __main__ as main_module
+
+    monkeypatch.setattr(main_module, "_RESTART_MAX_CONSECUTIVE_FAILURES", 1)
+
+    calls = 0
+    clock = iter([0.0, 1.0, 10.0, 160.0, 999.0])
+
+    def fake_monotonic() -> float:
+        return next(clock)
+
+    async def flaky_runner() -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise RuntimeError(f"crash #{calls}")
+        # the third attempt "recovers" — a clean return, no more restarts.
+
+    await _supervised("discord", flaky_runner, sleep=_no_sleep, monotonic=fake_monotonic)
+    assert calls == 3  # the healthy-uptime reset let it try a third time, past ceiling=1
 
 
 @pytest.mark.asyncio
 async def test_gather_over_supervised_runners_lets_the_others_keep_serving() -> None:
-    """One platform's runner crashing must not stop the others from running to
-    completion under the SAME ``asyncio.gather`` call ``_amain`` uses.
+    """One platform's runner crashing (and eventually being given up on) must not stop
+    the others from running to completion under the SAME ``asyncio.gather`` call
+    ``_amain`` uses.
     """
     other_ran = False
 
@@ -353,8 +446,8 @@ async def test_gather_over_supervised_runners_lets_the_others_keep_serving() -> 
 
     # Must not raise — a crashed platform runner is contained, not propagated.
     await asyncio.gather(
-        _supervised("discord", crashing_runner()),
-        _supervised("telegram", healthy_runner()),
+        _supervised("discord", crashing_runner, sleep=_no_sleep),
+        _supervised("telegram", healthy_runner),
     )
     assert other_ran is True
 
@@ -362,11 +455,12 @@ async def test_gather_over_supervised_runners_lets_the_others_keep_serving() -> 
 @pytest.mark.asyncio
 async def test_supervised_reraises_cancelled_error_for_clean_shutdown() -> None:
     """Normal shutdown (``asyncio.CancelledError``) must propagate untouched — the
-    containment layer only swallows genuine crashes, never a deliberate cancellation.
+    containment/restart layer only ever swallows genuine crashes, never a deliberate
+    cancellation, and it must not be retried like an ordinary crash.
     """
 
     async def cancelled_runner() -> None:
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await _supervised("discord", cancelled_runner())
+        await _supervised("discord", cancelled_runner)

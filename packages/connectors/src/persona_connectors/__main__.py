@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -184,30 +186,96 @@ async def _serve_app(app: FastAPI, *, port: int) -> None:
     await server.serve()
 
 
-async def _supervised(name: str, runner: Coroutine[object, object, None]) -> None:
-    """Run one platform's runner; contain a crash so it can't take the others down (R9-071).
+# R9-073c: a crashed runner is RESTARTED, not left dead — exponential backoff from 1s
+# (fast recovery from a one-off blip: a transient network drop, a momentary provider
+# hiccup) doubling up to a 60s cap (so a persistently-failing runner doesn't hot-spin the
+# reconnect/retry — the same order of magnitude as the gateway/socket-mode reconnect
+# backoffs already in this codebase, kept small enough that a genuinely-transient outage
+# self-heals inside a couple of minutes).
+_RESTART_BACKOFF_INITIAL_SECONDS = 1.0
+_RESTART_BACKOFF_MAX_SECONDS = 60.0
+_RESTART_BACKOFF_MULTIPLIER = 2.0
+# A runner that stayed up at least this long before crashing was genuinely healthy — that
+# fault resets the failure count/backoff to a fresh start rather than counting toward the
+# ceiling below. Without this, a platform that has run flawlessly for months would
+# eventually trip the ceiling on nothing but ordinary, widely-spaced transient faults;
+# WITH it, only a runner that keeps crashing IN QUICK SUCCESSION (i.e. is genuinely,
+# persistently broken — a revoked token, a permanently-rejecting API) can ever reach it.
+_RESTART_HEALTHY_UPTIME_SECONDS = 120.0
+# After this many crashes IN A ROW (each arriving before the runner proved itself healthy),
+# stop restarting and leave the platform down for the rest of the process's lifetime. A
+# broken credential or a permanently-rejecting API must not retry forever, spamming the
+# log and burning reconnect attempts — but it IS given a real chance first: the backoff
+# schedule from attempt 1 through this ceiling sums to ~1+2+4+8+16+32+60+60+60+60s, close
+# to 5 minutes of retrying before giving up.
+_RESTART_MAX_CONSECUTIVE_FAILURES = 10
+
+
+async def _supervised(
+    name: str,
+    make_runner: Callable[[], Coroutine[object, object, None]],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Run one platform's runner; RESTART a crash with backoff (R9-071 contain, R9-073c heal).
 
     ``asyncio.gather(*runners)`` propagates the FIRST exception raised by ANY awaitable it
-    is given — without this, a bug in one platform's runner (observed: a Discord gateway
-    heartbeat send racing a normal 1000-close) ends every OTHER runner too, including the
-    shared HTTP server (link routes, OAuth callbacks, webhooks), so Telegram/Slack/email
-    all stop responding along with the crashed platform. Instead, the crash is logged
-    loudly (naming the platform) and this coroutine returns normally, so ``gather`` keeps
-    waiting on every other runner. ``asyncio.CancelledError`` (the deploy SIGINT shutdown
-    path) is always re-raised, never swallowed — a clean shutdown must still cancel
-    everything together, exactly as before.
+    is given — without containment, a bug in one platform's runner (observed: a Discord
+    gateway heartbeat send racing a normal 1000-close; separately, a provider rejecting an
+    unavailable model) would end every OTHER runner too, including the shared HTTP server
+    (link routes, OAuth callbacks, webhooks), so every platform stops responding along with
+    the crashed one. That containment alone left the crashed platform dead for the rest of
+    the process's life (observed in production, 2026-07-29: Telegram never came back after
+    one bad turn) — every later message on that platform was silently dropped. This SELF-
+    HEALS instead: on a crash, ``make_runner`` is called again (a fresh coroutine — a bare
+    ``Coroutine`` can only be awaited once, so the caller supplies a zero-argument FACTORY,
+    not an already-created one) after an exponential backoff, up to
+    :data:`_RESTART_MAX_CONSECUTIVE_FAILURES` consecutive failures, after which this
+    platform stays down (logged loudly) while every other platform keeps serving.
+    ``asyncio.CancelledError`` (the deploy SIGINT shutdown path) is always re-raised, never
+    swallowed — a clean shutdown must still cancel everything together, exactly as before.
     """
-    try:
-        await runner
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001 — contain the crash, never kill the service
-        _log.error(
-            "connector runner '{name}' exited unexpectedly ({error}) — it will NOT be "
-            "restarted; other platforms keep serving",
-            name=name,
-            error=str(exc),
-        )
+    consecutive_failures = 0
+    backoff = _RESTART_BACKOFF_INITIAL_SECONDS
+    while True:
+        started_at = monotonic()
+        try:
+            await make_runner()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — contain the crash, restart instead of dying
+            if monotonic() - started_at >= _RESTART_HEALTHY_UPTIME_SECONDS:
+                consecutive_failures = 0
+                backoff = _RESTART_BACKOFF_INITIAL_SECONDS
+            consecutive_failures += 1
+            if consecutive_failures > _RESTART_MAX_CONSECUTIVE_FAILURES:
+                _log.error(
+                    "connector runner '{name}' crashed {count} times in a row ({error}) — "
+                    "giving up; this platform stays DOWN for the rest of the process's "
+                    "lifetime, other platforms keep serving",
+                    name=name,
+                    count=consecutive_failures,
+                    error=str(exc),
+                )
+                return
+            _log.error(
+                "connector runner '{name}' exited unexpectedly ({error}) — restarting in "
+                "{backoff:.1f}s (attempt {count}/{ceiling}); other platforms keep serving",
+                name=name,
+                error=str(exc),
+                backoff=backoff,
+                count=consecutive_failures,
+                ceiling=_RESTART_MAX_CONSECUTIVE_FAILURES,
+            )
+            await sleep(backoff)
+            backoff = min(backoff * _RESTART_BACKOFF_MULTIPLIER, _RESTART_BACKOFF_MAX_SECONDS)
+        else:
+            # Every real runner (long-poll / gateway / socket-mode / the HTTP server) loops
+            # forever until `should_continue()` goes false or it's cancelled, so a normal
+            # RETURN (no exception) means "genuinely done" (e.g. a test double), not a
+            # crash — no restart, no error logged.
+            return
 
 
 def _now() -> datetime:
@@ -259,15 +327,18 @@ async def _setup_telegram(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None] | None]:
-    """Assemble the Telegram adapter → (deliverer, HTTP app, inbound-transport runner).
+) -> tuple[MessageDeliverer, FastAPI, Callable[[], Coroutine[object, object, None]] | None]:
+    """Assemble the Telegram adapter → (deliverer, HTTP app, inbound-transport runner factory).
 
     The HTTP app — the webhook receiver AND the authenticated
     ``/v1/connectors/telegram/link`` issue route — is built UNCONDITIONALLY (R9-061):
     the web front-door calls the link route regardless of which transport receives
     Telegram's own messages. The runner is the long-poll loop in ``longpoll`` mode;
     in ``webhook`` mode inbound delivery IS the HTTP app being served (via
-    ``http_apps`` in ``_amain``), so there is no separate runner (``None``).
+    ``http_apps`` in ``_amain``), so there is no separate runner (``None``). The runner is
+    a zero-argument FACTORY (R9-073c), not an already-created coroutine — ``_supervised``
+    restarts a crashed platform by calling it again, and a bare ``Coroutine`` can only ever
+    be awaited once.
     """
     client = TelegramClient(bot_token=token, http=http, api_base_url=config.telegram_api_base_url)
     bot_username = config.telegram_bot_username or await _telegram_username(client)
@@ -307,8 +378,11 @@ async def _setup_telegram(
         )
         return connector, app, None
     await client.delete_webhook()  # ensure no webhook competes with long-poll
-    runner = run_long_poll(
-        client=client, on_update=flow.handle, timeout=config.telegram_longpoll_timeout_seconds
+    runner = functools.partial(
+        run_long_poll,
+        client=client,
+        on_update=flow.handle,
+        timeout=config.telegram_longpoll_timeout_seconds,
     )
     return connector, app, runner
 
@@ -332,13 +406,17 @@ async def _setup_discord(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None]]:
-    """Assemble the Discord adapter → (deliverer, OAuth-link HTTP app, gateway runner).
+) -> tuple[MessageDeliverer, FastAPI, Callable[[], Coroutine[object, object, None]]]:
+    """Assemble the Discord adapter → (deliverer, OAuth-link HTTP app, gateway runner factory).
 
     Discord's inbound message transport is ALWAYS the gateway WebSocket (there is no
     HTTP alternative), but the OAuth ``/v1/connectors/discord/link`` issue route + the
     ``/discord/oauth/callback`` route are the web front-door's account-linking carrier
-    and are built UNCONDITIONALLY here (R9-061), independent of the gateway runner.
+    and are built UNCONDITIONALLY here (R9-061), independent of the gateway runner. The
+    runner is the ``gateway.run`` BOUND METHOD, not a called coroutine (R9-073c) —
+    ``_supervised`` restarts a crashed gateway by calling it again; the same
+    ``DiscordGateway`` instance is reused across restarts, so its session state (for a
+    RESUME rather than a cold IDENTIFY) survives the restart too.
     """
     client = discord_adapter.DiscordClient(
         bot_token=token, http=http, api_base_url=config.discord_api_base_url
@@ -404,7 +482,7 @@ async def _setup_discord(
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
-    return connector, app, gateway.run()
+    return connector, app, gateway.run
 
 
 async def _setup_slack(
@@ -418,8 +496,8 @@ async def _setup_slack(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
-) -> tuple[MessageDeliverer, FastAPI, Coroutine[object, object, None] | None]:
-    """Assemble the Slack adapter → (deliverer, HTTP app, socket-mode runner).
+) -> tuple[MessageDeliverer, FastAPI, Callable[[], Coroutine[object, object, None]] | None]:
+    """Assemble the Slack adapter → (deliverer, HTTP app, socket-mode runner factory).
 
     The OAuth ``/v1/connectors/slack/link`` issue route + the ``/slack/oauth/callback``
     route are the web front-door's account-linking carrier and are built
@@ -427,7 +505,8 @@ async def _setup_slack(
     mode the signed ``/slack/events`` route is mounted onto the SAME app (served via
     ``http_apps`` in ``_amain``, no separate runner — ``None``); in ``socket`` mode the
     events route is never mounted (D-C3-2 — it stays HTTP-transport-only) and the
-    runner is the socket-mode WS loop.
+    runner is the ``socket.run`` BOUND METHOD, not a called coroutine (R9-073c) —
+    ``_supervised`` restarts a crashed socket by calling it again.
 
     R9-067 fail-fast: a Slack bot token configured with an empty
     ``PERSONA_CONNECTORS_SLACK_SCOPE`` can only ever produce Slack's own "No
@@ -513,7 +592,7 @@ async def _setup_slack(
             connect=_socket_connect,
             api_base_url=config.slack_api_base_url,
         )
-        return connector, app, socket.run()
+        return connector, app, socket.run
     events_app = slack_adapter.build_events_app(
         signing_secret=config.slack_signing_secret, on_event=flow.handle, now=_now
     )
@@ -952,7 +1031,7 @@ async def _amain() -> None:
             parent = _FastAPI(title="persona-connectors (twilio)")
             for app in http_apps.values():
                 parent.router.routes.extend(app.router.routes)
-        runners.append(_supervised("http", _serve_app(parent, port=_HTTP_PORT)))
+        runners.append(_supervised("http", functools.partial(_serve_app, parent, port=_HTTP_PORT)))
 
     # Register every configured connector as a C0 MessageDeliverer (criterion 6 / 8).
     build_delivery_router(
