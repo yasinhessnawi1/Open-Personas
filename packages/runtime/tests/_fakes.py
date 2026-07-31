@@ -83,12 +83,18 @@ class ScriptedBackend:
         model_name: str = "claude-sonnet-4-6",
         chat_script: list[Any] | None = None,
         supports_vision: bool = False,
+        supports_native_tools: bool = False,
     ) -> None:
         self._rounds = rounds
         self._index = 0
         self._provider_name = provider_name
         self._model_name = model_name
         self._supports_vision = supports_vision
+        # R9-068: was hardcoded False while ``provider_name`` defaulted to a
+        # NATIVE-format provider ("anthropic") — precisely the production
+        # mismatch that orphaned tool messages. Now settable so the pairing
+        # invariant can be exercised in BOTH directions. Default unchanged.
+        self._supports_native_tools = supports_native_tools
         self.chat_stream_calls = 0
         # The agentic loop (spec 06) drives non-streaming chat() through a
         # scripted SEQUENCE of ChatResponses (plan -> tool -> tool -> final).
@@ -118,7 +124,7 @@ class ScriptedBackend:
 
     @property
     def supports_native_tools(self) -> bool:
-        return False
+        return self._supports_native_tools
 
     @property
     def supports_vision(self) -> bool:

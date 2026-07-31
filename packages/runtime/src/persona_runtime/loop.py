@@ -1530,7 +1530,17 @@ class ConversationLoop:
                             )
                         )
                     tool_messages.append(
-                        format_tool_result(call, result, provider_name=backend.provider_name)
+                        format_tool_result(
+                            call,
+                            result,
+                            provider_name=backend.provider_name,
+                            # R9-068: the SAME flag that gated the assistant
+                            # tool_calls append above. Passing it here is what
+                            # makes the pairing invariant hold by construction —
+                            # native format is emitted only when the assistant
+                            # message that owns the call was actually appended.
+                            native=backend.supports_native_tools,
+                        )
                     )
                     if (
                         call.name == "use_skill"

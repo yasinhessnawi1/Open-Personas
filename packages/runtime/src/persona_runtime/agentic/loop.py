@@ -456,7 +456,14 @@ class AgenticLoop:
             if result.is_error and self._is_unknown_tool(call):
                 bad_tool_this_step = call.name
             new_context.append(
-                format_tool_result(call, result, provider_name=backend.provider_name)
+                format_tool_result(
+                    call,
+                    result,
+                    provider_name=backend.provider_name,
+                    # R9-068: same flag that gated the assistant tool_calls
+                    # append above, so the pair cannot disagree.
+                    native=backend.supports_native_tools,
+                )
             )
             await self._emit(
                 on_event,

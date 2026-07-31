@@ -61,6 +61,7 @@ def format_tool_result(
     result: ToolResult,
     *,
     provider_name: str,
+    native: bool = True,
 ) -> ConversationMessage:
     """Format a tool result for the given provider's API.
 
@@ -71,6 +72,11 @@ def format_tool_result(
             ``groq``, ``together``, ``nvidia`` (Spec 20), ``openrouter``
             (Spec 22, R9-030), ``cloudflare``, ``ollama``, ``local`` — the
             full :data:`persona.backends.config.Provider` vocabulary.
+        native: Whether the ACTIVE backend will actually issue native
+            ``tool_calls`` for this turn — i.e. the caller's
+            ``backend.supports_native_tools`` (R9-068). ``False`` forces the
+            shim form regardless of ``provider_name``. See the pairing
+            invariant below for why this parameter exists.
 
     Returns:
         A :class:`ConversationMessage` with the correct ``role`` and
@@ -83,8 +89,48 @@ def format_tool_result(
             providers. This is a programmer-error boundary (D-03-6), not a
             domain exception — deliberately fail-fast (see the module
             docstring for why R9-030 kept this posture).
+
+    THE PAIRING INVARIANT (R9-068). A ``role="tool"`` message is only legal
+    when the PRECEDING ``assistant`` message carries the matching
+    ``tool_calls``. The runtime appends that assistant message only when
+    ``backend.supports_native_tools`` is true. Before R9-068 this function
+    decided the result FORMAT from ``provider_name`` alone, so the two
+    decisions read DIFFERENT inputs and could disagree: native-tools support
+    is resolved per ``(provider, MODEL)`` against a capability matrix
+    (``_native_tools_supported``), while the format branch matched the
+    provider only. An openrouter model absent from that matrix therefore
+    produced ``supports_native_tools=False`` (assistant message SKIPPED) plus
+    a ``role="tool"`` result (native format) — an orphaned tool message, and a
+    provider 400: "tool message has no preceding assistant tool call".
+
+    That failure was first seen 2026-06-10 in a MIXED fallback chain and
+    patched in ``MultiModelBackend.supports_native_tools`` by widening
+    ``all(...)`` to ``any(...)``. That patch only rescued mixed chains; a
+    chain whose models are ALL outside the matrix still reported ``False``
+    and still emitted ``role="tool"``. R9-068 fixes it at the source instead:
+    ``native`` now drives BOTH decisions, so the append and the format cannot
+    disagree by construction.
     """
     now = datetime.now(UTC)
+
+    if not native:
+        # Shim form: the active backend will NOT emit native tool_calls, so
+        # there will be no preceding assistant.tool_calls for a role="tool"
+        # message to attach to. Carry the result as ordinary conversation text
+        # (identical to the ollama/local branch below) — always legal, never
+        # orphanable. provider_format stays "shim" so the backend adapters
+        # treat it as text rather than lifting it into a structured block.
+        return ConversationMessage(
+            role="user",
+            content=f"{result.tool_name} returned: {result.content}",
+            created_at=now,
+            metadata={
+                "tool_call_id": tool_call.call_id,
+                "tool_name": result.tool_name,
+                "is_error": str(result.is_error),
+                "provider_format": "shim",
+            },
+        )
 
     match provider_name:
         case "anthropic":

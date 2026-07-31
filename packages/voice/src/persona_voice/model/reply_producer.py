@@ -618,7 +618,16 @@ class VoiceModelReplyProducer:
                     tool_calls=[call],
                 )
             )
-        messages.append(format_tool_result(call, result, provider_name=backend.provider_name))
+        messages.append(
+            format_tool_result(
+                call,
+                result,
+                provider_name=backend.provider_name,
+                # R9-068: same flag that gated the assistant tool_calls append
+                # above, so the pair cannot disagree.
+                native=backend.supports_native_tools,
+            )
+        )
         return messages
 
     def _offered_specs(self, backend: ChatBackend) -> list[ToolSpec] | None:  # noqa: ARG002 — backend reserved for future per-provider gating
