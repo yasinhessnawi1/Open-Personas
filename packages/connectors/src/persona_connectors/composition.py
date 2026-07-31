@@ -25,13 +25,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import yaml
-from persona_api.background.chat_turn_worker import ChatTurnRegistry
 from persona_api.config import Edition
 from persona_api.db.community import make_community_engine
 from persona_api.db.engine import create_db_engine
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import persona_service
 from persona_api.services.chat_service import start_chat_turn
+from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.delivery_router import DeliveryRouter
 from sqlalchemy import text as _sql
@@ -44,6 +44,10 @@ if TYPE_CHECKING:
     from persona.backends import StreamChunk
     from persona.delivery import MessageDeliverer
     from persona_api.background.chat_turn_worker import ChatTurnHandle
+    from persona_api.billing import StripeGateway
+    from persona_api.config import APIConfig
+    from persona_api.editions.credits_policy import CreditsPolicy
+    from persona_api.jobs.queue import JobQueue
     from persona_api.services.runtime_factory import RuntimeFactory
     from sqlalchemy.engine import Engine
 
@@ -301,6 +305,10 @@ def build_reply_runner(
     runtime_factory: RuntimeFactory,
     rls_engine: Engine,
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+    api_config: APIConfig,
+    credits_policy: CreditsPolicy,
+    gateway: StripeGateway | None,
+    job_queue: JobQueue | None,
 ) -> Callable[[TurnRequest], Awaitable[str]]:
     """Build the ``run_turn`` callable: run a turn through api's OWN chat-turn path.
 
@@ -324,9 +332,28 @@ def build_reply_runner(
     start (``open_turn``/heal), and the detached worker re-binds the same owner for
     its checkpoint/finalize writes (its own ``run_worker.py`` discipline).
 
-    Billing is deliberately NOT wired here (``credits_policy`` unset ⇒ the registry
-    bills nothing), so this fix changes persistence only and never live money;
-    metering connector turns is its own decision.
+    R9-079 — billing parity: a turn sent on Telegram / Discord / Slack / WhatsApp /
+    SMS / email is a normal chat turn and is charged as one. The registry is composed
+    through the SAME :func:`~persona_api.services.chat_turn_composition.build_chat_turn_registry`
+    the api's own lifespan uses, from the same :class:`~persona_api.config.APIConfig`,
+    so the credits policy, the Stripe auto-top-up gateway, the per-turn floor, the
+    proportional switch, the charge ceiling and the credit markup are identical on
+    both surfaces. Previously this called ``ChatTurnRegistry(sink=…, rls_engine=…)``
+    and every billing input fell to its constructor default — ``credits_policy=None``
+    means "bill nothing", so every connector turn ran for free, silently. The
+    collaborators are REQUIRED arguments here for exactly that reason: "unbilled"
+    (community's ``UnlimitedCreditsPolicy``) must be a stated decision, never a
+    forgotten keyword.
+
+    The four conversational-verb worker services (A4 origination / A4 steering /
+    A8 reschedule / A5 initiative) are deliberately left at ``None``. They are a
+    coherent group that belongs to a DIFFERENT gap from this one: the connector's
+    ``RuntimeFactory`` does build the loop-side interpreters, so a persona can
+    confirm a task contract over Telegram while this worker drops it — a real
+    defect, but one whose fix needs its own decisions (the failure notifier
+    originates through the C0 delivery seam, and the A11 live-session registry
+    that carries an originated account to an open tab lives in the API process,
+    not here). Wiring them half-way would be worse than leaving the gap visible.
 
     ``request.persona_id`` is not passed down: ``start_chat_turn`` derives the persona
     from the conversation ROW, and the connector's conversation store creates one
@@ -337,9 +364,39 @@ def build_reply_runner(
     backends) is built by the service entry from the live env; the model half of this
     path is exercised by the live operator pass, not CI (the same posture as api's own
     ``@external`` turn tests).
+
+    Args:
+        runtime_factory: The reused api runtime that builds each turn's loop.
+        rls_engine: The RLS-scoped engine every owner-scoped write runs on.
+        owner_scope: Binds ``current_user_id`` for the duration of a unit of work.
+        api_config: The resolved api config — the single source of the per-turn
+            credit floor, the proportional switch and the charge ceiling.
+        credits_policy: The edition's credits policy
+            (``persona_api.editions.build_credits_policy``). Community's unlimited
+            policy is how a self-host install stays unbilled.
+        gateway: The Stripe gateway for Pro auto-top-up
+            (``persona_api.editions.build_stripe_gateway``); ``None`` when billing
+            is not active.
+        job_queue: The durable queue for the turn-boundary synthesis enqueue;
+            ``None`` makes it a no-op.
+
+    Returns:
+        The ``run_turn`` callable the connector flows inject.
     """
     sink = MessagesTurnSink(rls_engine)
-    registry = ChatTurnRegistry(sink=sink, rls_engine=rls_engine)
+    registry = build_chat_turn_registry(
+        sink=sink,
+        rls_engine=rls_engine,
+        config=api_config,
+        credits_policy=credits_policy,
+        gateway=gateway,
+        job_queue=job_queue,
+        # R9-079: see the note above — the A4/A5/A8 verb services are a separate gap.
+        origination_service=None,
+        task_steering_service=None,
+        task_reschedule_service=None,
+        initiative_verb_service=None,
+    )
     locks = _ConversationLocks()
 
     async def run_turn(request: TurnRequest) -> str:

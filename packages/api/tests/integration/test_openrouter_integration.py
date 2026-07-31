@@ -34,10 +34,8 @@ from persona.backends.multi_model import MultiModelChatBackend
 from persona.backends.openrouter_catalog import OpenRouterSubscriptionState
 from persona.imagegen import load_image_backend_from_env
 from persona.imagegen.multi_model_image import MultiModelImageBackend
-from persona_api.app import (
-    _compose_image_backend,
-    _resolve_openrouter_subscription_mode,
-)
+from persona_api.app import _compose_image_backend
+from persona_api.services.model_tiers import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 
 pytestmark = pytest.mark.integration
@@ -64,7 +62,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Composition-root mode resolution (app.py helper)
+# Composition-root mode resolution (the shared persona_api.services.model_tiers helper)
 # ---------------------------------------------------------------------------
 
 
@@ -72,14 +70,14 @@ class TestCompositionRootModeResolution:
     def test_no_key_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _clear_env(monkeypatch)
         # No PERSONA_OPENROUTER_API_KEY → resolver returns None → mode None.
-        assert _resolve_openrouter_subscription_mode() is None
+        assert resolve_openrouter_subscription_mode() is None
 
     def test_env_override_paid_skips_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _clear_env(monkeypatch)
         monkeypatch.setenv("PERSONA_OPENROUTER_API_KEY", "sk-or-v1-test")
         monkeypatch.setenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", "paid")
         # Real resolver path, but the env override means NO network probe.
-        assert _resolve_openrouter_subscription_mode() == "paid"
+        assert resolve_openrouter_subscription_mode() == "paid"
 
     def test_auth_error_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # D-22-9 fail-loud at the resolver becomes graceful-degrade at the
@@ -89,14 +87,17 @@ class TestCompositionRootModeResolution:
                 "bad key", context={"provider": "openrouter", "status_code": "401"}
             )
 
-        monkeypatch.setattr("persona_api.app.resolve_openrouter_subscription", _boom)
-        assert _resolve_openrouter_subscription_mode() is None
+        monkeypatch.setattr(
+            "persona_api.services.model_tiers.resolve_openrouter_subscription", _boom
+        )
+        assert resolve_openrouter_subscription_mode() is None
 
     def test_probe_paid_threads_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "persona_api.app.resolve_openrouter_subscription", lambda: _paid_state()
+            "persona_api.services.model_tiers.resolve_openrouter_subscription",
+            lambda: _paid_state(),
         )
-        assert _resolve_openrouter_subscription_mode() == "paid"
+        assert resolve_openrouter_subscription_mode() == "paid"
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ class TestChatFreeModeFilterEndToEnd:
 
         # mode resolved as free by the env override → threaded into the registry.
         monkeypatch.setenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", "free")
-        mode = _resolve_openrouter_subscription_mode()
+        mode = resolve_openrouter_subscription_mode()
         reg = tier_registry_from_env(openrouter_subscription_mode=mode)
         backend = reg.get("frontier")
         assert isinstance(backend, MultiModelChatBackend)

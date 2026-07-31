@@ -20,10 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.backends.types import StreamChunk
+from persona_api.config import APIConfig, Edition
 from persona_api.db.community import create_community_schema, ensure_owner, make_community_engine
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
+from persona_api.editions.factory import build_credits_policy
 from persona_connectors.composition import build_reply_runner
 from persona_connectors.domain.flow import TurnRequest
 from persona_connectors.errors import TurnFailedError
@@ -35,6 +37,16 @@ if TYPE_CHECKING:
 
     from persona.schema.conversation import Conversation
     from sqlalchemy import Engine
+
+# The community (self-host) billing set: an explicit UnlimitedCreditsPolicy — "unbilled"
+# is a stated decision here, never a forgotten keyword (R9-079).
+_COMMUNITY_CONFIG = APIConfig(edition=Edition.community)
+_UNBILLED = {
+    "api_config": _COMMUNITY_CONFIG,
+    "credits_policy": build_credits_policy(_COMMUNITY_CONFIG),
+    "gateway": None,
+    "job_queue": None,
+}
 
 _OWNER = "user_alice"
 _PERSONA = "astrid"
@@ -144,6 +156,7 @@ async def test_turn_persists_both_the_user_message_and_the_reply(engine: Engine)
         runtime_factory=factory,  # type: ignore[arg-type]
         rls_engine=engine,
         owner_scope=_owner_scope,
+        **_UNBILLED,
     )
 
     reply = await run_turn(_request("hello there"))
@@ -167,6 +180,7 @@ async def test_second_turn_sees_the_first_turn_in_history(engine: Engine) -> Non
         runtime_factory=_FakeRuntimeFactory(loop),  # type: ignore[arg-type]
         rls_engine=engine,
         owner_scope=_owner_scope,
+        **_UNBILLED,
     )
 
     await run_turn(_request("my name is Yasin"))
@@ -192,6 +206,7 @@ async def test_back_to_back_messages_are_ordered_not_refused(engine: Engine) -> 
         runtime_factory=_FakeRuntimeFactory(loop),  # type: ignore[arg-type]
         rls_engine=engine,
         owner_scope=_owner_scope,
+        **_UNBILLED,
     )
 
     first, second = await asyncio.gather(run_turn(_request("one")), run_turn(_request("two")))
@@ -220,6 +235,7 @@ async def test_a_failed_turn_raises_a_domain_error_and_persists_the_partial(
         runtime_factory=_FakeRuntimeFactory(_RaisingLoop()),  # type: ignore[arg-type]
         rls_engine=engine,
         owner_scope=_owner_scope,
+        **_UNBILLED,
     )
 
     with pytest.raises(TurnFailedError):

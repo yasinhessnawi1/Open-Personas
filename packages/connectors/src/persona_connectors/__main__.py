@@ -35,13 +35,18 @@ from persona.stores.chroma import ChromaBackend
 from persona.stores.postgres import PostgresBackend
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.config import APIConfig, Edition
-from persona_api.editions.factory import build_credits_policy
+from persona_api.editions.factory import build_credits_policy, build_stripe_gateway
 from persona_api.events import (
     build_event_dispatcher,
     make_connector_linked_emit,
     make_message_received_emit,
 )
+from persona_api.jobs import JobQueue
 from persona_api.services import persona_service
+from persona_api.services.model_tiers import (
+    build_free_tier_registry,
+    resolve_openrouter_subscription_mode,
+)
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
 from persona_runtime.tier import tier_registry_from_env
@@ -102,6 +107,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from persona.auth.jwt_verifier import AuthenticatedUser
     from persona.delivery import MessageDeliverer
+    from persona_api.editions.credits_policy import CreditsPolicy
     from pydantic import SecretStr
     from sqlalchemy.engine import Engine
 
@@ -113,11 +119,34 @@ _IDLE_SWEEP_INTERVAL_SECONDS = 300  # run the lazy-expiry backstop every 5 minut
 _HTTP_PORT = 8080  # the single HTTP-serving transport's port (webhook / Slack events)
 
 
-def _build_runtime_factory(api_config: APIConfig, rls_engine: Engine) -> RuntimeFactory:
+def _build_runtime_factory(
+    api_config: APIConfig, rls_engine: Engine, *, credits_policy: CreditsPolicy
+) -> RuntimeFactory:
     """Build the reused api runtime (mirrors app.py's lifespan, community + cloud).
 
     The deploy seam — torch (embedder) + model backends load here from the live env.
     Code-execution + image backends are off for the connector v1 (text-to-text).
+
+    R9-074 — model-selection parity: a connector turn must resolve the SAME tier
+    registry a web-chat turn does. Two things were missing and both defaulted the
+    dangerous way. The OpenRouter subscription mode was never resolved, so the
+    ``:free``-suffix filter never applied to the paid tiers; and ``free_tier_registry``
+    was never passed at all, which ``RuntimeFactory._plan_tier_selection`` reads as
+    *"plan gating is OFF"* — so every free-plan user was served the PAID tiers on
+    every connector. Both now come from the shared
+    :mod:`persona_api.services.model_tiers` helpers the api's own lifespan calls, so
+    the two composition roots cannot drift apart again. Community is unaffected:
+    :func:`~persona_api.services.model_tiers.build_free_tier_registry` returns ``None``
+    outside the cloud edition, which is the byte-identical ungated path.
+
+    Args:
+        api_config: The resolved api config for this boot.
+        rls_engine: The RLS-scoped engine every owner-scoped read/write runs on.
+        credits_policy: The edition's credits policy, shared with the chat-turn
+            registry so both halves of a turn meter through one object (as in api).
+
+    Returns:
+        The composed :class:`~persona_api.services.runtime_factory.RuntimeFactory`.
     """
     embedder = persona_service.default_embedder(api_config.embedder_model)
     if api_config.edition is Edition.community:
@@ -126,15 +155,19 @@ def _build_runtime_factory(api_config: APIConfig, rls_engine: Engine) -> Runtime
         )
     else:
         memory_backend = PostgresBackend(engine=rls_engine, embedder=embedder)
+    openrouter_mode = resolve_openrouter_subscription_mode()
     return RuntimeFactory(
         rls_engine=rls_engine,
         embedder=embedder,
-        tier_registry=tier_registry_from_env(),
+        tier_registry=tier_registry_from_env(openrouter_subscription_mode=openrouter_mode),
+        free_tier_registry=build_free_tier_registry(
+            api_config, openrouter_subscription_mode=openrouter_mode
+        ),
         turn_log_writer=PostgresTurnLogWriter(rls_engine),
         audit_root=Path(api_config.audit_root),
         workspace_root=Path(api_config.workspace_root),
         api_config=api_config,
-        credits_policy=build_credits_policy(api_config),
+        credits_policy=credits_policy,
         memory_backend=memory_backend,
     )
 
@@ -869,9 +902,23 @@ async def _amain() -> None:
 
     # The reused api runtime + the injected flow callables (owner-scoped) — built once,
     # shared by every adapter.
-    runtime_factory = _build_runtime_factory(api_config, rls_engine)
+    #
+    # R9-079 billing parity: the edition's credits policy + Stripe gateway are built from
+    # the SAME api factories app.py's create_app uses (``app.state.credits_policy`` /
+    # ``app.state.stripe_gateway``), and the ONE policy object is shared by the runtime
+    # factory and the chat-turn registry exactly as it is in the api. The job queue rides
+    # the cross-tenant dispatch engine (the connector's counterpart to api's admin engine),
+    # so a connector turn also enqueues turn-boundary synthesis like a web turn.
+    credits_policy = build_credits_policy(api_config)
+    runtime_factory = _build_runtime_factory(api_config, rls_engine, credits_policy=credits_policy)
     run_turn = build_reply_runner(
-        runtime_factory=runtime_factory, rls_engine=rls_engine, owner_scope=composition.owner_scope
+        runtime_factory=runtime_factory,
+        rls_engine=rls_engine,
+        owner_scope=composition.owner_scope,
+        api_config=api_config,
+        credits_policy=credits_policy,
+        gateway=build_stripe_gateway(api_config),
+        job_queue=JobQueue(dispatch_engine),
     )
     list_persona_names = build_persona_name_lister(
         rls_engine=rls_engine, owner_scope=composition.owner_scope
