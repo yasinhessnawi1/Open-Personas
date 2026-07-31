@@ -55,6 +55,21 @@ kill_timeout = "30s"
   PERSONA_LOG_LEVEL = "INFO"
   PERSONA_API_JWT_ALGORITHMS = "RS256"
   PERSONA_API_JWT_AUDIENCE = "persona-api"
+  # persona-voice base URL. UNSET in prod until 2026-07-31, and the default is
+  # "" — which is the `not_configured` branch of routes/voice.py::
+  # _voice_service_base, so EVERY voice call 503'd with
+  # {"error":"voice_unavailable","reason":"not_configured"}. It also silently
+  # disabled the persona voice auto-pick (voice_assignment_service returns early
+  # on an empty base_url), so new personas never got a voice assigned.
+  # PUBLIC https, not the Fly 6PN `.internal` address: DNS resolves
+  # open-persona-voice.internal to its fdaa:… 6PN IPv6, but connecting to
+  # :8001 there fails (ConnectError) because the voice process binds 0.0.0.0
+  # (IPv4-only) and so never accepts on the IPv6 private network. Revisit the
+  # internal address only if voice is changed to bind [::]. The api reaches
+  # voice server-to-server here (routes/voice.py proxies, forwarding the
+  # caller's own bearer which voice re-verifies) — this URL is never handed to
+  # the browser, so the public hop costs a round trip, not correctness.
+  PERSONA_VOICE_SERVICE_URL = "https://voice.openpersonasai.com"
   # JSONL audit + turnlog roots; written to the mounted volume below.
   # PERSONA_API_ prefix — APIConfig.audit_root field reads via Pydantic Settings
   # with env_prefix="PERSONA_API_" (config.py:52). Surfaced at launch when the
