@@ -29,6 +29,7 @@ established ``audit_service`` posture; the load-bearing atomicity is checkpoint 
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import TaskNotFoundError
@@ -62,6 +63,16 @@ if TYPE_CHECKING:
 __all__ = ["CheckpointStore", "TaskStore"]
 
 _log = get_logger("api.tasks.store")
+
+
+def _as_id_list(value: object) -> list[str]:
+    """Coerce a stored JSON id array to ``list[str]`` (community SQLite may hand back text)."""
+    if isinstance(value, str):
+        loaded = json.loads(value)
+        return [str(v) for v in loaded] if isinstance(loaded, list) else []
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return []
 
 
 class TaskStore:
@@ -169,6 +180,43 @@ class TaskStore:
             return False
         self._audit(owner_id, "task.unpause", self.get(owner_id, task_id))
         return True
+
+    def record_run(self, owner_id: str, task_id: str, run_id: str) -> None:
+        """Link a leg's agentic run to the task by appending to ``run_ids``.
+
+        A task leg executes a real agentic run; ``run_ids`` is the linkage the Tasks
+        surface drills through to the Spec-08 run viewer. Read-modify-write inside ONE
+        row-locked transaction (``SELECT ... FOR UPDATE``) — the column is JSON, so an
+        append is not a single atomic statement on both dialects. Appending the SAME id
+        twice is a no-op, so a caller may safely retry.
+
+        Args:
+            owner_id: The RLS scope (the task's owner).
+            task_id: The task to link.
+            run_id: The ``runs`` row id to append.
+
+        Raises:
+            TaskNotFoundError: If the task is not visible to ``owner_id``.
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            row = conn.execute(
+                select(tasks_t.c.run_ids).where(tasks_t.c.id == task_id).with_for_update()
+            ).first()
+            if row is None:
+                raise TaskNotFoundError("task not found", context={"task_id": task_id})
+            existing = _as_id_list(row[0])
+            if run_id in existing:
+                return
+            conn.execute(
+                update(tasks_t).where(tasks_t.c.id == task_id).values(run_ids=[*existing, run_id])
+            )
+        audit_service.record(
+            engine=self._engine,
+            user_id=owner_id,
+            action="task.record_run",
+            target=task_id,
+            metadata={"run_id": run_id},
+        )
 
     # --- internals ----------------------------------------------------------
 

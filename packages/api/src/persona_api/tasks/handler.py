@@ -25,6 +25,14 @@ accumulating core stays under the store's budget by construction (R9-005: the
 ``BasicCheckpointWriter`` stand-in must never run live — it appends unboundedly and
 deterministically trips ``CheckpointTooLargeError``).
 
+**The leg's agentic run is a real Spec-08 run (D-08-5).** The leg opens a ``runs`` row before
+the loop starts, snapshots ``runs.steps`` as events arrive, finalises it with the run's own
+status/steps/output/error, and appends the run id to ``tasks.run_ids``. It writes through
+:mod:`persona_api.services.run_record` — the SAME writer the interactive worker uses. This is
+the A0 rule ("the worker is a different place to run, never a different *thing* that runs")
+applied to the run record: a second writer is how the background leg came to spend real money
+and leave nothing viewable.
+
 **Over-budget checkpoint = deterministic, never retried (R9-005).** A
 :class:`~persona.errors.CheckpointTooLargeError` from the store gate fires AFTER the agentic run
 finished — re-delivering the job re-runs the whole leg (full model + sandbox spend) into the
@@ -35,6 +43,7 @@ via ``on_task_stuck``), and lets the job SUCCEED — one execution, no retry bur
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -54,12 +63,15 @@ from persona.tasks import (
 from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
 
+from persona_api.services import run_record
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import StuckReport, Task
-    from persona_runtime.agentic.run import StepUsage
+    from persona_runtime.agentic.events import RunEvent
+    from persona_runtime.agentic.run import CancelToken, Run, StepUsage
     from persona_runtime.cost import CostSource
     from persona_runtime.legs import AgenticRunner, CheckpointWriter, LegOutcome
     from sqlalchemy import Engine
@@ -170,6 +182,131 @@ class _LegBillingAccumulator:
         return self._total_cents, self._basis
 
 
+class _LegRunRecord:
+    """The leg's durable ``runs`` row — opened before the run, settled after it (D-08-5).
+
+    A leg executes a real ``AgenticLoop``, so it IS a Spec-08 run and belongs in ``runs``
+    exactly like an interactive one: same row, same ``steps`` snapshotting, same terminal
+    field set. Every write goes through :mod:`persona_api.services.run_record`, the single
+    writer the interactive :class:`~persona_api.background.run_worker.RunRegistry` also
+    uses — a second writer is precisely how the two paths drifted apart (the leg's run was
+    invisible to the run viewer while the interactive one recorded correctly).
+
+    **Viewable-not-resumable (D-08-5).** :meth:`wrap` decorates the leg's runner so every
+    loop event appends to the log and re-snapshots ``runs.steps``; a crash mid-leg leaves
+    the run inspectable up to its last event.
+
+    **At-least-once.** A re-delivered leg re-runs the model, so it opens a NEW run row and
+    links it — the same forensic posture as ``context.meter`` (A0 meters executions) while
+    the checkpoint + task ledger stay exactly-once via the store CAS.
+    """
+
+    def __init__(self, engine: Engine, *, owner_id: str, persona_id: str, task_text: str) -> None:
+        self.run_id = f"run_{uuid.uuid4().hex}"
+        self._engine = engine
+        self._owner = owner_id
+        self._persona_id = persona_id
+        self._task_text = task_text
+        #: The run the wrapped runner returned — available even when ``run_leg`` went on
+        #: to raise (the over-budget checkpoint path: the run finished, the write did not).
+        self.captured_run: Run | None = None
+
+    def open(self, *, now: datetime) -> None:
+        """INSERT the ``running`` row. Raises loudly if the persona is not the owner's."""
+        run_record.insert_run(
+            self._engine,
+            run_id=self.run_id,
+            owner_id=self._owner,
+            persona_id=self._persona_id,
+            task=self._task_text,
+            started_at=now,
+        )
+
+    def wrap(self, runner: AgenticRunner) -> AgenticRunner:
+        """Decorate ``runner`` so its events snapshot to ``runs.steps`` as they arrive."""
+        return _RecordingRunner(runner, record=self)
+
+    def snapshot(self, event_log: list[dict[str, object]]) -> None:
+        run_record.persist_progress(
+            self._engine, run_id=self.run_id, event_log=event_log, owner_id=self._owner
+        )
+
+    def finish(self, run: Run) -> None:
+        """Write the terminal record from the finished run (status/steps/output/error)."""
+        run_record.persist_final(self._engine, run_id=self.run_id, run=run, owner_id=self._owner)
+
+    def stop(self, *, reason: str, now: datetime) -> None:
+        """Terminate a run that never produced a :class:`Run` object.
+
+        Only the A3 approval gate reaches here: ``GatedActionProposedError`` propagates
+        out of the loop, so there is no run to read a status from. ``cancelled`` is the
+        honest member of the ``runs_status_check`` vocabulary — the run stopped early and
+        executed nothing — with the gate's reason in ``error``. (``awaiting_user`` is NOT
+        used: the restart sweep reaps it as an orphan on the premise that an in-process
+        response queue is waiting, and for a gated leg none is.)
+        """
+        run_record.persist_terminal(
+            self._engine,
+            run_id=self.run_id,
+            status="cancelled",
+            error=reason,
+            finished_at=now,
+            owner_id=self._owner,
+        )
+
+    def fail(self, message: str) -> None:
+        """Mark the run errored when the leg itself raised (nothing finished).
+
+        Best-effort on purpose: this is called on a path that is already re-raising the
+        real failure, so a write that fails too must log, not replace the cause the
+        caller (and A0's retry/dead-letter accounting) needs to see.
+        """
+        try:
+            run_record.persist_error(
+                self._engine, run_id=self.run_id, message=message, owner_id=self._owner
+            )
+        except Exception as exc:  # noqa: BLE001 — never mask the failure being re-raised
+            _log.warning(
+                "leg run-record error write failed run_id={rid}: {err}",
+                rid=self.run_id,
+                err=str(exc),
+            )
+
+
+class _RecordingRunner:
+    """Wraps the leg's :class:`AgenticRunner` to snapshot its progress into ``runs``."""
+
+    def __init__(self, inner: AgenticRunner, *, record: _LegRunRecord) -> None:
+        self._inner = inner
+        self._record = record
+
+    async def run(
+        self,
+        task: str,
+        *,
+        on_event: Callable[[RunEvent], Awaitable[None]],
+        cancel_token: CancelToken,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
+    ) -> Run:
+        event_log: list[dict[str, object]] = []
+
+        async def _on_event(event: RunEvent) -> None:
+            await on_event(event)
+            event_log.append(event.model_dump(mode="json"))
+            self._record.snapshot(event_log)
+
+        if on_step_usage is not None:
+            run = await self._inner.run(
+                task, on_event=_on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+            )
+        else:
+            # No billing wired — keep the call byte-identical to the executor's own
+            # convention so a runner double without ``on_step_usage`` is unaffected.
+            run = await self._inner.run(task, on_event=_on_event, cancel_token=cancel_token)
+        self._record.captured_run = run
+        return run
+
+
 class TaskLegHandler:
     """Runs one boxed leg as an A0 job; the checkpoint write rides the store CAS (A2-R-4)."""
 
@@ -228,9 +365,13 @@ class TaskLegHandler:
         # same account the dead-leg sweep voices). Optional + best-effort; None → the Tasks
         # surface's waiting(on_user) state is the durable floor.
         self._on_task_stuck = on_task_stuck
+        # ``rls_engine`` is the owner-scoped engine the stores use (the A0 worker binds
+        # ``current_user_id`` before the handler runs). It carries TWO concerns: the
+        # durable ``runs`` record for the leg's agentic run (whenever it is present) and
+        # — together with ``credits_policy`` — the M3 leg billing. ``None`` → the plain
+        # A2 / unit shape: no billing and no run record.
         # Spec M3 (T4b): OWNER-billed, CAS-ridden idempotent leg billing. Both
-        # ``credits_policy`` and ``rls_engine`` None → no billing (the plain A2 /
-        # unit shape). ``cost_source`` is the shared metadata resolver
+        # ``credits_policy`` and ``rls_engine`` None → no billing. ``cost_source`` is the resolver
         # (``runtime_factory.metadata_resolver``) so a leg's real cost prices with
         # full catalog coverage; ``agentic_floor`` is the per-leg minimum (infra
         # via the floor, D-M3-4 amendment).
@@ -308,6 +449,13 @@ class TaskLegHandler:
         seq = 0 if payload.predecessor_seq is None else payload.predecessor_seq + 1
 
         runner = self._runner_builder.build(task.id, task.persona_id, self._box)
+        # The leg's agentic run is a first-class Spec-08 run: open its ``runs`` row and link
+        # it to the task BEFORE the loop starts, then snapshot progress through the wrapped
+        # runner. Without this a scheduled leg spent real money and left nothing viewable.
+        # ``None`` when no engine is wired (the plain A2 unit shape).
+        record = self._open_run_record(owner, task, now)
+        if record is not None:
+            runner = record.wrap(runner)
         executor = LegExecutor(runner=runner, writer=self._writer, sink=self._checkpoints)
         # Spec M3 (T4b): meter the leg's real per-step cost for the owner-billed deduct.
         # None when billing is unwired → the run_leg call stays byte-identical.
@@ -323,6 +471,10 @@ class TaskLegHandler:
                 on_step_usage=accumulator.on_step_usage if accumulator is not None else None,
             )
         except CheckpointTooLargeError as exc:
+            # The RUN itself finished — settle its record from what the wrapped runner
+            # captured, so an over-budget checkpoint never costs the run's visibility.
+            if record is not None:
+                self._settle_run_record(record, run=record.captured_run, cause=str(exc), now=now)
             # R9-005: the run FINISHED but its checkpoint cannot land within the store's budget
             # (D-A2-1's post-compaction fail-fast). This is deterministic — re-raising would burn
             # A0's retries re-running the whole leg (full model spend) into the same write
@@ -332,6 +484,17 @@ class TaskLegHandler:
             # is not ledgered (no append landed) — the lesser cost vs. 3× re-spend.
             await self._park_stuck(owner, task, cause=str(exc), now=now)
             return
+        except Exception as exc:
+            # The leg blew up (A0 will re-deliver). Record the failure before re-raising —
+            # an invisible failed run is half of why the missing record mattered.
+            if record is not None:
+                record.fail(str(exc))
+            raise
+        # The run finished (COMPLETED / CONTINUE / FAILED), or the A3 gate ended the leg with
+        # no run at all — settle the durable record either way, before anything downstream
+        # (metering, billing, the continuation) can raise and strand it in ``running``.
+        if record is not None:
+            self._settle_run_record(record, run=outcome.run, cause=_gate_reason(outcome), now=now)
         # A0 metering visibility (per-job spend → audit_log); the task ledger already accrued
         # via the CAS append. On a re-delivery the leg re-runs, so A0 records this execution's
         # spend (forensics) while the ledger no-ops — A0 meters executions, A2 accounts work.
@@ -426,6 +589,40 @@ class TaskLegHandler:
                     "task lifecycle emit failed task_id={tid}: {err}", tid=task.id, err=str(exc)
                 )
 
+    def _open_run_record(self, owner: str, task: Task, now: datetime) -> _LegRunRecord | None:
+        """Open the leg's ``runs`` row and link it to the task, before any model spend.
+
+        Returns ``None`` when no engine is wired (a bare A2/unit handler keeps its old,
+        record-free shape). The insert precedes the run deliberately: a broken
+        persona/owner invariant fails here, loudly and for free, rather than after a leg's
+        worth of tokens — and never by silently skipping the record.
+
+        Raises:
+            RunPersonaOwnerMismatchError: If the task's persona is not the leg owner's.
+        """
+        if self._rls_engine is None:
+            return None
+        record = _LegRunRecord(
+            self._rls_engine,
+            owner_id=owner,
+            persona_id=task.persona_id,
+            task_text=task.contract.goal,
+        )
+        record.open(now=now)
+        self._tasks.record_run(owner, task.id, record.run_id)
+        return record
+
+    def _settle_run_record(
+        self, record: _LegRunRecord, *, run: Run | None, cause: str | None, now: datetime
+    ) -> None:
+        """Write the leg run's terminal record — from the run, else from the stop cause."""
+        if run is not None:
+            record.finish(run)
+        elif cause is not None:
+            record.stop(reason=cause, now=now)
+        else:  # pragma: no cover — a run-less leg always carries a cause
+            record.fail("the leg ended without producing a run")
+
     async def _park_stuck(self, owner: str, task: Task, *, cause: str, now: datetime) -> None:
         """Park the task ``waiting(on_user)`` with an honest cause + voice it (R9-005).
 
@@ -450,6 +647,14 @@ class TaskLegHandler:
                 await self._on_task_stuck(owner, report)
             except Exception as exc:  # noqa: BLE001 — the voice is additive; the park stands
                 _log.warning("stuck voicing failed task_id={tid}: {err}", tid=task.id, err=str(exc))
+
+
+def _gate_reason(outcome: LegOutcome) -> str | None:
+    """The stop reason for a leg that produced no run (the A3 approval gate)."""
+    if outcome.disposition is not LegDisposition.WAITING_APPROVAL:
+        return None
+    proposal = outcome.proposal_id or "unknown"
+    return f"stopped for approval (proposal {proposal})"
 
 
 def register_task_leg_handler(

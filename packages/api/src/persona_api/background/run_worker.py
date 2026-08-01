@@ -31,16 +31,15 @@ from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
 from persona_runtime.agentic.run import CancelToken, RunStatus
 from persona_runtime.cost import compute_turn_cost
-from sqlalchemy import text, update
+from sqlalchemy import text
 
-from persona_api.db.models import runs as runs_t
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import (
     SandboxRequestContext,
     reset_sandbox_request_context,
     set_sandbox_request_context,
 )
-from persona_api.services import notifications_service
+from persona_api.services import notifications_service, run_record
 from persona_api.services.persona_service import persona_name_from_yaml
 from persona_api.services.synthesis_trigger import enqueue_run_synthesis
 
@@ -421,34 +420,23 @@ class RunRegistry:
             )
 
     def _persist_progress(self, run_id: str, event_log: list[dict[str, object]]) -> None:
-        """Snapshot the event log to runs.steps as it grows (crash-viewable)."""
-        with self._engine.begin() as conn:
-            conn.execute(update(runs_t).where(runs_t.c.id == run_id).values(steps=event_log))
+        """Snapshot the event log to runs.steps as it grows (crash-viewable).
+
+        Delegates to :mod:`persona_api.services.run_record` — the ONE writer of the runs
+        row, shared with the background task leg so the two execution paths cannot drift
+        into two different records. The owner scope is the ambient one this worker binds
+        for the run's lifetime (``current_user_id``), so no explicit owner is passed.
+        """
+        run_record.persist_progress(self._engine, run_id=run_id, event_log=event_log)
 
     def _persist_final(self, run_id: str, run: Run) -> None:
-        with self._engine.begin() as conn:
-            conn.execute(
-                update(runs_t)
-                .where(runs_t.c.id == run_id)
-                .values(
-                    status=str(run.status),
-                    steps=[s.model_dump(mode="json") for s in run.steps],
-                    output=run.output,
-                    error=run.error,
-                    finished_at=run.finished_at,
-                )
-            )
+        run_record.persist_final(self._engine, run_id=run_id, run=run)
         # Server-authored run-terminal notification (P6-D-3/D4-c) — separate,
         # best-effort side-effect AFTER the authoritative persist commits.
         self._notify_run_terminal(run_id, str(run.status))
 
     def _persist_error(self, run_id: str, message: str) -> None:
-        with self._engine.begin() as conn:
-            conn.execute(
-                update(runs_t)
-                .where(runs_t.c.id == run_id)
-                .values(status=str(RunStatus.ERROR), error=message)
-            )
+        run_record.persist_error(self._engine, run_id=run_id, message=message)
         self._notify_run_terminal(run_id, str(RunStatus.ERROR))
 
     def _notify_run_terminal(self, run_id: str, status: str) -> None:

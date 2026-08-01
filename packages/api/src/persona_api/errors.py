@@ -64,6 +64,7 @@ __all__ = [
     "RateLimitExceededError",
     "RefinementLimitError",
     "RunNotFoundError",
+    "RunPersonaOwnerMismatchError",
     "ScheduleStateError",
     "TurnAlreadyActiveError",
     "TurnNotActiveError",
@@ -172,6 +173,17 @@ class ConversationNotFoundError(PersonaError):
 
 class RunNotFoundError(PersonaError):
     """Raised when a run is not visible to the current user (→ 404)."""
+
+
+class RunPersonaOwnerMismatchError(PersonaError):
+    """Raised when a run's persona does not belong to the run's owner (→ 500).
+
+    The ``runs`` table carries a composite FK ``(persona_id, owner_id) → personas(id,
+    owner_id)``: a run's persona MUST be the same owner's. A background writer that hits
+    it has a broken invariant upstream, so the write fails loudly instead of skipping the
+    record — an unrecorded run is invisible, which is the failure mode this guards.
+    ``context`` carries ``run_id`` / ``owner_id`` / ``persona_id``.
+    """
 
 
 class MemoryNodeNotFoundError(PersonaError):

@@ -11,6 +11,19 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Background runs are visible (2026-08-01)
+
+#### Fixed
+- **A scheduled task's agentic run is recorded like any other run**: the
+  background task leg ran a real agentic loop and spent real money but wrote no
+  `runs` row, so it never appeared in the run viewer and `tasks.run_ids` stayed
+  empty, while interactive runs recorded correctly. The leg now opens its run
+  row before the loop starts, snapshots `runs.steps` as events arrive
+  (viewable-not-resumable), finalises with the run's own status/steps/output/
+  error, and links the run id to the task. Failed, capped and approval-gated
+  legs are recorded too, so a background failure is never silent. Both paths
+  write through one shared persister rather than two.
+
 ### Payments, plans & free tier (Spec M4, 2026-07-24)
 
 > Credits existed but could not be bought, and nothing stopped a free account

@@ -7,11 +7,14 @@ mapping and the column set lives in one spot.
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from persona.tasks import Contract, CostLedger, Task, TaskCheckpoint, TaskState, WaitKind
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy import RowMapping
 
 __all__ = [
@@ -20,6 +23,17 @@ __all__ = [
     "row_to_task",
     "task_values",
 ]
+
+
+def _utc(value: datetime) -> datetime:
+    """Re-attach UTC to a stored instant from a NOT NULL column.
+
+    The non-optional twin of :func:`~persona_api.db.engine.aware_utc`: storage convention
+    IS UTC, but the community SQLite engine keeps no tzinfo and hands instants back naive,
+    which the ``Task`` validator rejects outright (the R4-C1 finding family). Postgres
+    values are already aware and pass through untouched.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def task_values(task: Task) -> dict[str, Any]:
@@ -67,8 +81,8 @@ def row_to_task(row: RowMapping) -> Task:
         run_ids=tuple(row["run_ids"]),
         workspace_id=row["workspace_id"],
         schedule_id=row["schedule_id"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        created_at=_utc(row["created_at"]),
+        updated_at=_utc(row["updated_at"]),
         schema_version=row["schema_version"],
     )
 
