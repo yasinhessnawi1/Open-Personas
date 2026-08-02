@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 from unittest.mock import MagicMock
 
+import pytest
 from persona.jobs import JobRegistry
 from persona_api.background.worker_root import InProcessWorker
 from persona_api.jobs import Worker
@@ -265,3 +267,31 @@ def test_maintenance_error_still_updates_cadence_clock() -> None:
     worker._maybe_run_maintenance()  # must not raise
 
     assert worker._last_maintenance > 0.0
+
+
+@pytest.mark.asyncio
+async def test_the_real_loop_stamps_its_heartbeat() -> None:
+    """`/healthz`'s liveness signal must come from the REAL loop (R9-093).
+
+    The health-route tests use a fake worker, so without this the beat could
+    silently never be stamped in production and every check would still pass —
+    the "synthetic harness proves the wrong thing" trap. This drives the actual
+    `Worker.run()` and asserts the stamp lands.
+    """
+    worker = _worker(poll_interval_seconds=0.01, poll_jitter_seconds=0.0)
+    assert worker.last_beat_at is None, "no beat before the loop has turned"
+
+    task = asyncio.create_task(worker.run(install_signal_handlers=False))
+    try:
+        for _ in range(200):
+            if worker.last_beat_at is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert worker.last_beat_at is not None, (
+            "the real loop never stamped a heartbeat — /healthz would report a "
+            "healthy worker as permanently 'starting'"
+        )
+    finally:
+        worker.request_drain()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(task, timeout=5)

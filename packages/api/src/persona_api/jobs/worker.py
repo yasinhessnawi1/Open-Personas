@@ -181,10 +181,28 @@ class Worker:
         self._last_initiative_provision: float | None = None
         self._last_approval_sweep: float | None = None
         self._last_dead_leg_sweep: float | None = None
+        # R9-093 observability: wall-clock of the last completed loop iteration.
+        # ``None`` until the loop first turns. A dead loop leaves this frozen,
+        # which is what makes "the background half stopped" OBSERVABLE — the
+        # 2026-08-01 stall was invisible for an hour precisely because a dead
+        # loop and an idle one looked identical from outside the process.
+        # Wall-clock (not monotonic) so it can be reported and compared directly.
+        self._last_beat_at: datetime | None = None
 
     @property
     def worker_id(self) -> str:
         return self._worker_id
+
+    @property
+    def last_beat_at(self) -> datetime | None:
+        """When the loop last completed an iteration, or ``None`` if never.
+
+        The liveness signal for :func:`~persona_api.routes.health.healthz`.
+        Supervision (R9-093) restarts a CRASHED loop; this catches the other
+        shape — a loop that is alive but wedged (a hung await), which no
+        restart-on-exception can detect because nothing ever raises.
+        """
+        return self._last_beat_at
 
     def request_drain(self) -> None:
         """Signal the run loop to stop claiming and drain. Idempotent.
@@ -244,6 +262,10 @@ class Worker:
             concurrency=self._concurrency,
         )
         while not self._draining.is_set():
+            # R9-093: stamp BEFORE the sweeps, so the beat proves the loop is
+            # turning even while a slow sweep runs. Stamping after would let a
+            # long-but-healthy sweep look like a stall.
+            self._last_beat_at = datetime.now(UTC)
             self._maybe_run_maintenance()
             self._maybe_run_scheduler_tick()
             await self._maybe_run_catalog_sync()

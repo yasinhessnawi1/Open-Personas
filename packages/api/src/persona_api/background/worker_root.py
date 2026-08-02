@@ -1080,6 +1080,16 @@ class InProcessWorker:
         self._worker = worker
         self._task: asyncio.Task[None] | None = None
 
+    @property
+    def last_beat_at(self) -> datetime | None:
+        """When the wrapped loop last completed an iteration (R9-093 observability).
+
+        Read by :func:`~persona_api.routes.health.healthz`. Supervision restarts a
+        CRASHED loop; a frozen beat is how the OTHER shape — alive but wedged on a
+        hung await, where nothing ever raises — becomes visible instead of silent.
+        """
+        return self._worker.last_beat_at
+
     def start(self) -> None:
         """Launch the supervised claim→execute loop as a background task. Idempotent.
 
