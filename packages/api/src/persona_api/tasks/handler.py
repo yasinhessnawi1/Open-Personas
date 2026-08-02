@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from persona.billing import BillingConfig, credits_charged
 from persona.errors import CheckpointTooLargeError
@@ -657,6 +657,32 @@ def _gate_reason(outcome: LegOutcome) -> str | None:
     return f"stopped for approval (proposal {proposal})"
 
 
+#: The ``task_leg`` retry policy, sized for PROVIDER CAPACITY rather than a code
+#: fault (R9-092).
+#:
+#: The default (3 attempts, 2s base) backs off 2s then 4s and dead-letters in
+#: ~6 SECONDS — hopeless against a free-tier rate limit that resets on a
+#: per-minute window. Observed in production: a scheduled leg died with "every
+#: backend in MultiModelChatBackend exhausted" after the two free frontier
+#: models returned ``EmptyCompletionError`` and ``RateLimitError``.
+#:
+#: Why the tolerance belongs HERE and not in the model wrapper: that wrapper's
+#: same-model retry is a 200ms sleep and it deliberately DISCARDS any
+#: ``Retry-After`` hint above 2s (D-20-10). Failing fast is correct for a
+#: user-facing turn — nobody waits a minute for a chat reply — and that is
+#: precisely why chat kept working while scheduled legs failed on the identical
+#: chain. Background work can afford to wait, so the waiting lives at the job layer.
+#:
+#: 30s base ⇒ 30/60/120/240s: ~7.5 minutes across 5 attempts, comfortably past a
+#: per-minute limit and still bounded. Safe to retry — the leg is
+#: idempotency-keyed and checkpointed, and a rate-limited call is rejected BEFORE
+#: token generation, so a retried attempt costs ~nothing. A genuine bug simply
+#: dead-letters later, the right trade for background work.
+TASK_LEG_RETRY_POLICY: Final = RetryPolicy(
+    max_attempts=5, base_backoff_seconds=30.0, max_backoff_seconds=600.0
+)
+
+
 def register_task_leg_handler(
     registry: JobRegistry,
     *,
@@ -703,7 +729,7 @@ def register_task_leg_handler(
                 agentic_floor=agentic_floor,
             ),
             idempotency_key=task_leg_idempotency_key,
-            retry=RetryPolicy(max_attempts=3),
+            retry=TASK_LEG_RETRY_POLICY,
             lease=LONG_LEASE,
         )
     )
