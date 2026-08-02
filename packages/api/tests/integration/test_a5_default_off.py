@@ -115,6 +115,7 @@ def _registry_types(app_engine: Engine, tmp_path: Path) -> set[str]:
             rls_engine=app_engine,
             embedder=_Emb(),  # type: ignore[arg-type]
             tier_registry=_Registry(),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
             config=APIConfig(audit_root=str(tmp_path)),
             synthesis_tier="small",
         ).types()

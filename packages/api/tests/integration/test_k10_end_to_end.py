@@ -232,6 +232,7 @@ def test_managed_chat_to_memory_recall_end_to_end(
                 rls_engine=rls_engine,
                 embedder=embedder,
                 tier_registry=_FakeTierRegistry(),  # type: ignore[arg-type]
+                free_tier_registry=None,  # R9-096: no plans here — gating off, stated
                 config=APIConfig(audit_root=str(base / "worker-audit")),
                 synthesis_tier="small",
                 memory_backend=client.app.state.memory_backend,

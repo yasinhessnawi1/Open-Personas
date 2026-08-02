@@ -671,6 +671,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="elevenlabs"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=engine,
             )
@@ -702,6 +703,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="elevenlabs"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=object(),
             )
@@ -729,6 +731,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="cartesia"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=object(),
             )
@@ -762,6 +765,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="cartesia"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("should-not-be-picked")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=engine,
             )
@@ -793,6 +797,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="cartesia"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("c1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=object(),
             )
@@ -808,6 +813,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="elevenlabs", voice_service_url=""),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=object(),
             )
@@ -817,7 +823,11 @@ class TestReconcileVoiceAssignments:
     def test_missing_composition_pieces_is_a_noop(self) -> None:
         counts = asyncio.run(
             vas.reconcile_voice_assignments(
-                config=None, registry=None, sweep_engine=None, rls_engine=None
+                config=None,
+                registry=None,
+                free_tier_registry=None,
+                sweep_engine=None,
+                rls_engine=None,
             )
         )
         assert counts == {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
@@ -830,6 +840,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="elevenlabs"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=_RaisingSweepEngine(),
                 rls_engine=object(),
             )
@@ -848,6 +859,7 @@ class TestReconcileVoiceAssignments:
             vas.reconcile_voice_assignments(
                 config=_reconcile_config(voice_tts_provider="elevenlabs"),
                 registry=SimpleNamespace(get=lambda _t: _FakeBackend("v1")),
+                free_tier_registry=None,  # R9-096: no plans in these tests
                 sweep_engine=sweep,
                 rls_engine=object(),
             )

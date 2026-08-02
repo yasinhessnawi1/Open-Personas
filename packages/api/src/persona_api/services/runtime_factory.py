@@ -64,6 +64,7 @@ from persona_api.editions import MeteredCreditsPolicy
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
+from persona_api.services.model_tiers import select_plan_tier_registry
 from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
 
@@ -1613,22 +1614,21 @@ class RuntimeFactory:
         The plan is read RLS-scoped from the caller's ``subscription`` row (the ``current_user_id``
         contextvar owner); an absent row / no scope defaults to ``free`` (fail-safe — the
         restrictive set), so a lookup miss can never open the paid tiers to a free user.
-        """
-        if self._free_tier_registry is None:
-            return self._tier_registry, build_openrouter_passthrough  # gating off (community/paid)
-        from persona_api.middleware.rls_context import current_user_id
-        from persona_api.services import subscription_service
 
-        user_id = current_user_id.get()
-        plan_code = "free"
-        if user_id:
-            row = subscription_service.get_subscription(self._engine, user_id=user_id)
-            if row is not None:
-                plan_code = str(row.get("plan_code") or "free")
-        if plan_code == "free":
+        R9-096: the registry half of the decision is delegated to
+        :func:`~persona_api.services.model_tiers.select_plan_tier_registry` — the ONE definition
+        the worker's background jobs and the voice auto-pick now share. Only the
+        ``preferred_backend_provider`` half (a chat-loop concern) is decided here.
+        """
+        registry = select_plan_tier_registry(
+            rls_engine=self._engine,
+            paid_tier_registry=self._tier_registry,
+            free_tier_registry=self._free_tier_registry,
+        )
+        if registry is self._free_tier_registry:
             # Free-only registry + NO preferred override (preferred_model inert; no escape hatch).
-            return self._free_tier_registry, None
-        return self._tier_registry, build_openrouter_passthrough  # paid plan → full tiers
+            return registry, None
+        return registry, build_openrouter_passthrough  # gating off, or a paid plan → full tiers
 
     def _plan_tier_registry(self) -> TierRegistry:
         """The plan-selected tier registry for the current owner (Spec M4, T5c).
@@ -1639,6 +1639,13 @@ class RuntimeFactory:
         Same per-call owner-plan read. An empty free registry ``.get`` raises
         ``TierNotConfiguredError`` — the existing fail-soft catches at these sites treat that
         as "surface not wired" (skip), which is the fail-closed behaviour (no paid fallback).
+
+        Only the surfaces this factory itself builds (the A4/A8 recognition interpreters, the
+        title builder) go through this method. A surface composed OUTSIDE the factory — the
+        in-process worker's job registry — cannot call it, because the factory is not
+        necessarily present there; it uses
+        :func:`~persona_api.services.model_tiers.plan_scoped_background_backend`, which resolves
+        through the same :func:`~persona_api.services.model_tiers.select_plan_tier_registry`.
         """
         return self._plan_tier_selection()[0]
 

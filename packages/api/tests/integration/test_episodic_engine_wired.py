@@ -147,6 +147,7 @@ def _registry(app_engine: Engine, embedder: Embedder, audit_root: Path) -> objec
         rls_engine=app_engine,
         embedder=embedder,
         tier_registry=_FakeTierRegistry(),  # type: ignore[arg-type]
+        free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         config=APIConfig(audit_root=str(audit_root)),
         synthesis_tier="small",
         memory_backend=PostgresBackend(engine=app_engine, embedder=embedder),

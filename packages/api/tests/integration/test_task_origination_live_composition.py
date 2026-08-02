@@ -332,6 +332,7 @@ async def test_a4_flows_through_the_real_composition_root(
             rls_engine=rls_engine,
             embedder=embedder,
             tier_registry=_ScriptedRegistry(),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
             config=APIConfig(audit_root=str(_AUDIT)),
             synthesis_tier="small",
             runtime_factory=factory,

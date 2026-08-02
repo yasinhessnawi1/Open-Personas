@@ -33,7 +33,8 @@ from persona_api.db.models import personas as personas_t
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services import persona_service
 from persona_api.services.background_billing import bill_background_llm
-from persona_api.services.llm_usage_collector import UsageCollectingBackend, collect_llm_usage
+from persona_api.services.llm_usage_collector import collect_llm_usage
+from persona_api.services.model_tiers import plan_scoped_background_backend
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
@@ -280,9 +281,18 @@ async def maybe_assign_voice(
         return
 
     try:
-        # Spec M3 (T5b): wrap the pick model's backend so the real usage of the
-        # auto-pick call is captured for owner billing.
-        backend = UsageCollectingBackend(registry.get(getattr(config, "voice_pick_tier", "small")))
+        # Spec M3 (T5b): the pick model's backend is metered so the real usage of the
+        # auto-pick call is captured for owner billing. R9-096: and plan-scoped — this
+        # is an owner-billed background LLM call like the worker's, and it used to
+        # resolve the app's PAID registry for every owner. The create request has the
+        # owner bound in ``current_user_id``, so the plan read resolves here.
+        backend = plan_scoped_background_backend(
+            tier=getattr(config, "voice_pick_tier", "small"),
+            rls_engine=rls_engine,
+            paid_tier_registry=registry,
+            free_tier_registry=getattr(state, "free_tier_registry", None),
+            metered=True,
+        )
         with collect_llm_usage() as usage:
             choice = await choose_voice(persona=persona, backend=backend, options=options)
     except Exception as exc:  # noqa: BLE001 — model/routing error → keep default
@@ -328,6 +338,7 @@ async def _remap_voice_for(
     persona_id: str,
     config: APIConfig | None,
     registry: TierRegistry | None,
+    free_tier_registry: TierRegistry | None,
     rls_engine: Engine | None,
     bearer: str | None,
 ) -> bool:
@@ -410,7 +421,18 @@ async def _remap_voice_for(
         return False
 
     try:
-        backend = registry.get(getattr(config, "voice_pick_tier", "small"))
+        # R9-096: plan-scoped like the create-time pick. Both callers bind the persona
+        # owner in ``current_user_id`` first — the request path via the RLS middleware,
+        # the boot reconciliation sweep explicitly per persona — so the plan read
+        # resolves the right owner in both. Unmetered here (the remap has no billing
+        # seam; only the create-time pick bills, once per persona).
+        backend = plan_scoped_background_backend(
+            tier=getattr(config, "voice_pick_tier", "small"),
+            rls_engine=rls_engine,
+            paid_tier_registry=registry,
+            free_tier_registry=free_tier_registry,
+            metered=False,
+        )
         choice = await choose_voice(persona=persona, backend=backend, options=options)
     except Exception as exc:  # noqa: BLE001 — model/routing error → keep current
         _LOG.warning("voice auto-remap failed at model selection", persona_id=persona_id)
@@ -478,6 +500,8 @@ async def maybe_remap_voice(
         persona_id=persona_id,
         config=config,
         registry=registry,
+        # R9-096: the plan gate's free half travels with the paid half.
+        free_tier_registry=getattr(state, "free_tier_registry", None),
         rls_engine=rls_engine,
         bearer=bearer,
     )
@@ -487,6 +511,7 @@ async def reconcile_voice_assignments(
     *,
     config: APIConfig | None,
     registry: TierRegistry | None,
+    free_tier_registry: TierRegistry | None,
     sweep_engine: Engine | None,
     rls_engine: Engine | None,
 ) -> dict[str, int]:
@@ -529,7 +554,9 @@ async def reconcile_voice_assignments(
       owner scope is set via the ``current_user_id`` contextvar per persona (the
       same pattern :class:`~persona_api.tasks.dead_leg_sweep.DeadLegSweeper` uses)
       before calling :func:`_remap_voice_for` on ``rls_engine`` and reset in a
-      ``finally`` — no scope leak across personas.
+      ``finally`` — no scope leak across personas. That binding is also what lets
+      ``free_tier_registry`` (R9-096) plan-gate the pick per persona owner: the
+      model this sweep runs follows each owner's plan, not the process's paid tiers.
     - Fully fail-soft: any unexpected error (e.g. the persona listing itself
       failing) is caught, logged ONCE at WARNING, and the pass returns its
       partial counts — it never crashes or delays boot, and a failed persona
@@ -583,6 +610,7 @@ async def reconcile_voice_assignments(
                 persona_id=row.id,
                 config=config,
                 registry=registry,
+                free_tier_registry=free_tier_registry,
                 rls_engine=rls_engine,
                 bearer=None,  # no per-request caller at boot; community/no-auth accepts it
             )

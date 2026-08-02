@@ -232,6 +232,7 @@ def _build_fire_machinery(
         rls_engine=app_engine,
         embedder=embedder,
         tier_registry=_Registry(),  # type: ignore[arg-type]
+        free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         config=APIConfig(audit_root=str(_AUDIT)),
         synthesis_tier="small",
         runtime_factory=factory,

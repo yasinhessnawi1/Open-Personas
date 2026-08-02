@@ -20,6 +20,24 @@ the RLS engine's checkout listener scopes every connection to it — so the sing
 shared graph store + entity registry are owner-scoped per job automatically (no
 per-job rebuild). The synthesis tier (``config.synthesis_tier``, default
 ``small``) is the eval-re-run gate's tier, NOT the frontier/sonnet tier.
+
+**Model backends are the one thing that could NOT be resolved once (R9-096).** The
+per-job owner scope makes a shared *store* correct, and the same reasoning was
+wrongly applied to model backends: every background LLM backend here used to be
+``tier_registry.get(<tier>)`` at worker startup, on the app's PAID registry, with
+no owner bound. One instance therefore served every owner's jobs on paid models —
+including free-plan owners, whose episodic consolidations were billed as
+``estimate_static`` paid-model cost. That is a cost leak and a D-M4-9 violation
+("a free user must NEVER reach a paid model"), and it is the exact sibling of
+R9-074 (the connector composing from the global registry once).
+
+Every background backend is now built by
+:func:`~persona_api.services.model_tiers.plan_scoped_background_backend`, which
+defers the registry choice to CALL time inside the job's owner scope. The tier
+NAME knobs (``config.episodic_summary_tier`` etc.) are untouched — what changed is
+which registry the name resolves against. ``free_tier_registry`` is a REQUIRED
+keyword on both composition entry points, so "plan gating off" can only ever be a
+stated decision (``None`` = community / self-host), never a forgotten argument.
 """
 
 from __future__ import annotations
@@ -101,7 +119,7 @@ from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
-from persona_api.services.llm_usage_collector import UsageCollectingBackend
+from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.handler import RunnableGuard, register_task_leg_handler
@@ -146,6 +164,7 @@ def build_worker_registry(
     rls_engine: Engine,
     embedder: Embedder,
     tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
     config: APIConfig,
     synthesis_tier: str,
     runtime_factory: RuntimeFactory | None = None,
@@ -170,8 +189,16 @@ def build_worker_registry(
     Args:
         rls_engine: The ``persona_app`` RLS engine handlers run on.
         embedder: The persona-memory embedder (shared, lazy weights).
-        tier_registry: The app-scoped tier registry; ``get(synthesis_tier)``
-            resolves the synthesis backend (fallback ``small → mid → frontier``).
+        tier_registry: The app-scoped PAID tier registry. Still the readiness
+            signal for tenant registration (``file_extract_queue_ready``), but no
+            background backend is resolved from it directly any more — see
+            ``free_tier_registry``.
+        free_tier_registry: The cloud free-plan registry, or ``None`` when plan
+            gating is off (community / self-host). REQUIRED (R9-096): every
+            background LLM backend is composed plan-scoped from this pair, so a
+            free owner's job resolves the free-only chain and a paid owner's the
+            paid one. Passing ``None`` states "this deployment has no plans"; it
+            is not a default, because the forgotten-keyword value is the unsafe one.
         config: The API config — drives the graph store's audit backend so the
             worker writes graph-mutation audit to the SAME place the API does
             (R5-D-2: worker MUST select the same backend or scaling it re-opens
@@ -199,7 +226,16 @@ def build_worker_registry(
             renderer's persist target — the SAME root the code_execution
             produced-file persister writes under).
     """
-    backend = tier_registry.get(synthesis_tier)
+    # R9-096: plan-scoped, resolved per job inside the owner scope — never once here on
+    # the paid registry. Unmetered: K2 synthesis has no owner-billing seam (no
+    # ``collect_llm_usage`` block in its handler), so wrapping it would meter nothing.
+    backend = plan_scoped_background_backend(
+        tier=synthesis_tier,
+        rls_engine=rls_engine,
+        paid_tier_registry=tier_registry,
+        free_tier_registry=free_tier_registry,
+        metered=False,
+    )
     graph_backend = PostgresGraphBackend(engine=rls_engine)
     graph_store = build_graph_store(
         engine=rls_engine,
@@ -252,16 +288,24 @@ def build_worker_registry(
         enqueue_consolidation=enqueue_consolidation,
     )
 
-    # Title refresh (R9-020): dynamic self-improving conversation titles. The
-    # backend is resolved ONCE here on the TITLE tier (P9 ``title`` surface — mid
-    # by default, ``PERSONA_API_TITLE_TIER`` overridable; the recognition
-    # precedent) and closed over, the same build-time pattern as the synthesis
-    # backend above. Registered unconditionally — the producer (the chat turn
-    # worker's threshold trigger) is already no-op without a queue, and a
+    # Title refresh (R9-020): dynamic self-improving conversation titles. The tier NAME
+    # is the TITLE tier (P9 ``title`` surface — mid by default,
+    # ``PERSONA_API_TITLE_TIER`` overridable; the recognition precedent); which registry
+    # that name resolves against is decided per job, in the owner's scope (R9-096 —
+    # a free owner's title refresh must not run on a paid model either). Unmetered:
+    # the title handler has no owner-billing seam. Registered unconditionally — the
+    # producer (the chat turn worker's threshold trigger) is already no-op without a
+    # queue, and a
     # keyless boot never reaches this root (the app catches AuthenticationError
     # around ``start_in_process_worker``). A successful refresh pings
     # ``sidebar.changed`` through the SAME channel the SSE endpoint serves.
-    title_backend = tier_registry.get(tier_for("title", override=config.title_tier))
+    title_backend = plan_scoped_background_backend(
+        tier=tier_for("title", override=config.title_tier),
+        rls_engine=rls_engine,
+        paid_tier_registry=tier_registry,
+        free_tier_registry=free_tier_registry,
+        metered=False,
+    )
     register_title_refresh_handler(
         registry,
         generator=build_title_refresh_generator(title_backend),
@@ -269,19 +313,27 @@ def build_worker_registry(
     )
 
     # Turn-into-file (R9-025b): message action -> LLM extraction (mid tier by
-    # default, PERSONA_API_FILE_EXTRACT_TIER overridable, resolved ONCE here and
-    # closed over — the SAME build-time pattern as title/synthesis above) -> a
-    # render via the doc-gen sandbox boundary. Gated on `file_extract_queue_ready`
+    # default, PERSONA_API_FILE_EXTRACT_TIER overridable, plan-scoped per job like
+    # title/synthesis above) -> a render via the doc-gen sandbox boundary.
+    # Gated on `file_extract_queue_ready`
     # (the avatar_queue_ready precedent, R9-013): registered iff BOTH a model
     # backend AND a sandbox pool are composed — the SAME predicate the route
     # consults before enqueueing, so a job is never dropped into a handler-less
     # worker. `sandbox_pool`/`workspace_root` absent (no E2B key configured, or a
     # boot with no workspace) -> the tenant is simply not registered; the route's
-    # own gate keeps the producer honest about that.
+    # own gate keeps the producer honest about that. The readiness gate reads the
+    # PAID registry deliberately: whether this PROCESS has a model configured is a
+    # process fact, not an owner fact — only the backend it hands out is per-owner.
     if file_extract_queue_ready(tier_registry=tier_registry, sandbox_pool=sandbox_pool):
         assert sandbox_pool is not None  # noqa: S101 — narrowed by the gate above
         assert workspace_root is not None  # noqa: S101 — always set alongside sandbox_pool at boot
-        file_extract_backend = tier_registry.get(config.file_extract_tier)
+        file_extract_backend = plan_scoped_background_backend(
+            tier=config.file_extract_tier,
+            rls_engine=rls_engine,
+            paid_tier_registry=tier_registry,
+            free_tier_registry=free_tier_registry,
+            metered=False,
+        )
         episodic_query = (
             build_file_extract_episodic_query(
                 memory_backend, build_audit_logger(config, rls_engine)
@@ -305,10 +357,21 @@ def build_worker_registry(
     if episodic_settings.engine_enabled and memory_backend is not None:
         # The interim tier summarizer (K8-D-10): the engine's OWN tier knob; P7 swaps in
         # behind the same Protocol later. Shared with the K9 core-block refresher below.
-        # Spec M3 (T5): wrap the summarizer's chat backend so ``collect_llm_usage``
+        # Spec M3 (T5): the summarizer's chat backend is metered so ``collect_llm_usage``
         # in the handler captures the real per-op summarizer cost for owner billing.
+        # R9-096 (THE reported defect): this used to be
+        # ``UsageCollectingBackend(tier_registry.get(...))`` — one PAID backend, built at
+        # worker startup, serving every owner. A free-plan owner with 2 personas was
+        # charged 247 credits across 3 consolidations at paid-model static pricing. The
+        # tier knob is unchanged; the registry it resolves against is now the job owner's.
         episodic_summarizer = TierSummarizer(
-            backend=UsageCollectingBackend(tier_registry.get(config.episodic_summary_tier))
+            backend=plan_scoped_background_backend(
+                tier=config.episodic_summary_tier,
+                rls_engine=rls_engine,
+                paid_tier_registry=tier_registry,
+                free_tier_registry=free_tier_registry,
+                metered=True,
+            )
         )
         episodic_engine = EpisodicConsolidationEngine(
             backend=memory_backend,
@@ -392,10 +455,18 @@ def build_worker_registry(
     # synthesis_tier precedent; Phase-1 ruling 1).
     initiative_settings = InitiativeSettings()
     if initiative_settings.enabled:
-        # Spec M3 (T5b): wrap the scan backend so ``collect_llm_usage`` in the handler
-        # captures the scan's real cost for owner billing.
-        initiative_backend = UsageCollectingBackend(
-            tier_registry.get(initiative_settings.scan_tier)
+        # Spec M3 (T5b): the scan backend is metered so ``collect_llm_usage`` in the
+        # handler captures the scan's real cost for owner billing. R9-096: plan-scoped —
+        # ``initiative_scan`` was the second surface seen billing free owners at
+        # ``estimate_static`` paid-model pricing in production. One instance is shared by
+        # the scanner, the grounding judge and the A7 event-candidate producer; all three
+        # run inside the job's owner scope, so all three follow the owner's plan.
+        initiative_backend = plan_scoped_background_backend(
+            tier=initiative_settings.scan_tier,
+            rls_engine=rls_engine,
+            paid_tier_registry=tier_registry,
+            free_tier_registry=free_tier_registry,
+            metered=True,
         )
         scanner = InitiativeScanner(
             graph=ApiScanGraphReader(graph_store),
@@ -1029,6 +1100,7 @@ def start_in_process_worker(
     rls_engine: Engine,
     embedder: Embedder,
     tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
     live_sessions: LiveSessionRegistry | None = None,
@@ -1046,6 +1118,11 @@ def start_in_process_worker(
     (the worker's loop calls it on its cadence — at most one process actually ticks
     under the advisory lock), starts the loop, and returns the handle for the
     lifespan to drain on shutdown.
+
+    ``free_tier_registry`` (R9-096) is REQUIRED, not defaulted: it is what makes every
+    background LLM backend resolve the JOB OWNER's plan instead of the process's paid
+    registry. ``None`` states "this deployment has no plans" (community / self-host);
+    the cloud lifespan passes the registry :func:`build_free_tier_registry` returned.
 
     Spec K10 (T3): REFUSES a non-Postgres engine. The worker's substrate — the
     ``PostgresGraphBackend`` it composes for synthesis/consolidation and the
@@ -1067,6 +1144,8 @@ def start_in_process_worker(
         rls_engine=rls_engine,
         embedder=embedder,
         tier_registry=tier_registry,
+        # R9-096: the plan gate's other half — background backends resolve per job owner.
+        free_tier_registry=free_tier_registry,
         config=config,
         synthesis_tier=config.synthesis_tier,
         runtime_factory=runtime_factory,

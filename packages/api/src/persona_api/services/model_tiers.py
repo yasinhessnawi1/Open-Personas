@@ -14,8 +14,19 @@ every free-plan user was silently served the PAID tiers on Telegram / Discord /
 Slack / WhatsApp / SMS / email. Keeping the decision in ONE place both processes
 import is what makes that class of drift impossible rather than merely fixed.
 
-Nothing here holds state; every function is a pure composition step over the
-resolved :class:`~persona_api.config.APIConfig` + the environment.
+R9-096 extends the same idea from *composition* to *resolution*. Building the
+free registry is only half the gate; something has to CHOOSE between it and the
+paid registry per owner. That choice used to be typed out inside
+``RuntimeFactory._plan_tier_selection`` alone, so every surface that resolved a
+backend without going through the factory (the in-process worker's background
+jobs, the voice auto-pick) silently ran on the paid tiers.
+:func:`select_plan_tier_registry` is now that one choice, and
+:class:`PlanScopedChatBackend` is the one way a long-lived composition root can
+hold a backend that still resolves per owner.
+
+Nothing here holds owner state; every function is a pure composition step over
+the resolved :class:`~persona_api.config.APIConfig` + the environment, and the
+plan-scoped backend re-reads the caller's plan on every call.
 """
 
 from __future__ import annotations
@@ -23,23 +34,40 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.backends.errors import AuthenticationError
+from persona.backends.errors import TierNotConfiguredError as BackendTierNotConfiguredError
 from persona.logging import get_logger
+from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription
 from persona_runtime.tier import free_tier_registry_from_env
 
 from persona_api.config import Edition
+from persona_api.services.llm_usage_collector import UsageCollectingBackend
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
+    from persona.backends.protocol import ChatBackend
+    from persona.backends.types import ChatResponse, StreamChunk, ToolSpec
+    from persona.schema.conversation import ConversationMessage
     from persona_runtime.tier import TierRegistry
+    from sqlalchemy import Engine
 
     from persona_api.config import APIConfig
 
 __all__ = [
+    "PlanScopedChatBackend",
     "build_free_tier_registry",
+    "plan_scoped_background_backend",
     "resolve_openrouter_subscription_mode",
+    "select_plan_tier_registry",
     "warn_if_cloud_free_registry_empty",
 ]
+
+#: What :class:`PlanScopedChatBackend`'s metadata properties report when the owner's
+#: plan has no configured tier. Only ever observable on the failure path (a ``chat``
+#: on the same backend raises), and deliberately not a real provider name.
+_UNRESOLVED = "unresolved"
 
 _LOG = get_logger("api.model_tiers")
 
@@ -155,3 +183,223 @@ def build_free_tier_registry(
     )
     warn_if_cloud_free_registry_empty(config, free_tier_registry)
     return free_tier_registry
+
+
+def select_plan_tier_registry(
+    *,
+    rls_engine: Engine,
+    paid_tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+) -> TierRegistry:
+    """The tier registry the CURRENT owner's plan entitles them to (Spec M4, D-M4-9).
+
+    THE plan gate, in one place. ``free_tier_registry`` is ``None`` when gating is off
+    (community / self-host — no plans, nothing to gate), in which case every caller
+    resolves the paid tiers, byte-identically to the pre-M4 behaviour. Otherwise the
+    owner's plan is read RLS-scoped from their ``subscription`` row (the
+    ``current_user_id`` contextvar): ``free`` resolves the free-only registry, a paid
+    plan resolves the paid one.
+
+    Fail-safe by construction: an absent row, an unreadable plan, or no owner bound at
+    all defaults to ``free`` — the restrictive set — so a lookup miss can never open the
+    paid tiers to a free user.
+
+    Args:
+        rls_engine: The owner-scoped engine the ``subscription`` row is read on.
+        paid_tier_registry: The full paid tier registry.
+        free_tier_registry: The free-only registry, or ``None`` when gating is off.
+
+    Returns:
+        The registry this owner may resolve tiers against.
+    """
+    if free_tier_registry is None:
+        return paid_tier_registry  # gating off (community / self-host)
+    from persona_api.middleware.rls_context import current_user_id
+    from persona_api.services import subscription_service
+
+    user_id = current_user_id.get()
+    plan_code = "free"
+    if user_id:
+        row = subscription_service.get_subscription(rls_engine, user_id=user_id)
+        if row is not None:
+            plan_code = str(row.get("plan_code") or "free")
+    return free_tier_registry if plan_code == "free" else paid_tier_registry
+
+
+class PlanScopedChatBackend:
+    """A :class:`ChatBackend` that resolves the CURRENT owner's plan tier per call (R9-096).
+
+    The composition-root problem this solves: a long-lived surface (the in-process
+    worker's job registry, a boot-time reconciliation sweep) resolves its backend ONCE,
+    at startup, when no owner is bound — so it can only ever hold ONE plan's models, and
+    it held the paid ones for everybody. Free-plan owners' background summarisation,
+    initiative scans and title refreshes therefore ran on paid models, which is both a
+    cost leak and a D-M4-9 violation ("a free user must NEVER reach a paid model").
+
+    This backend is the seam that fixes it without rebuilding every collaborator per
+    job: it holds the tier NAME plus both registries and defers
+    :func:`select_plan_tier_registry` to **call** time, inside the per-job / per-request
+    owner scope. No instance is ever bound to one owner's plan, so one shared instance
+    serving many owners is safe by construction.
+
+    Fail-closed: when the resolved plan's registry has no such tier (the documented
+    empty-free-registry case), ``chat`` / ``chat_stream`` raise
+    ``TierNotConfiguredError`` — the caller's existing fail-soft catch treats that as
+    "surface not wired" and skips. There is deliberately no paid fallback.
+
+    Cost: one small indexed ``subscription`` read per call. These are background /
+    create-time ops (single-digit calls per job), never the streaming chat hot path.
+    """
+
+    def __init__(
+        self,
+        *,
+        tier: str,
+        rls_engine: Engine,
+        paid_tier_registry: TierRegistry,
+        free_tier_registry: TierRegistry | None,
+    ) -> None:
+        """Bind the tier NAME and both registries; the owner is resolved per call.
+
+        Args:
+            tier: The tier name to resolve (``"small"`` / ``"mid"`` / ``"frontier"``).
+                Unchanged by this seam — the per-surface tier knobs still choose it.
+            rls_engine: The owner-scoped engine the plan is read on.
+            paid_tier_registry: The full paid registry.
+            free_tier_registry: The free-only registry, or ``None`` when gating is off.
+        """
+        self._tier = tier
+        self._engine = rls_engine
+        self._paid = paid_tier_registry
+        self._free = free_tier_registry
+
+    def _resolve(self) -> ChatBackend:
+        """Resolve this tier against the current owner's plan registry."""
+        registry = select_plan_tier_registry(
+            rls_engine=self._engine,
+            paid_tier_registry=self._paid,
+            free_tier_registry=self._free,
+        )
+        return registry.get(self._tier)
+
+    def _resolve_or_none(self) -> ChatBackend | None:
+        """Resolve, or ``None`` when the owner's plan has no configured tier.
+
+        The metadata properties must not raise: callers read ``provider_name`` from
+        inside their own ``except`` blocks (``TierSummarizer`` does exactly this), and a
+        raising property there would replace an honest domain error with a confusing one.
+        """
+        try:
+            return self._resolve()
+        except (BackendTierNotConfiguredError, RegistryTierNotConfiguredError):
+            return None
+
+    @property
+    def provider_name(self) -> str:
+        """The resolved backend's provider, or ``"unresolved"`` when the plan has none."""
+        backend = self._resolve_or_none()
+        return backend.provider_name if backend is not None else _UNRESOLVED
+
+    @property
+    def model_name(self) -> str:
+        """The resolved backend's model, or ``"unresolved"`` when the plan has none."""
+        backend = self._resolve_or_none()
+        return backend.model_name if backend is not None else _UNRESOLVED
+
+    @property
+    def supports_native_tools(self) -> bool:
+        """Whether the resolved backend uses native tool calling (``False`` if unresolved)."""
+        backend = self._resolve_or_none()
+        return backend.supports_native_tools if backend is not None else False
+
+    @property
+    def supports_vision(self) -> bool:
+        """Whether the resolved backend accepts images (``False`` if unresolved)."""
+        backend = self._resolve_or_none()
+        return backend.supports_vision if backend is not None else False
+
+    async def chat(
+        self,
+        messages: list[ConversationMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+    ) -> ChatResponse:
+        """Chat on the current owner's plan-resolved backend."""
+        return await self._resolve().chat(
+            messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            top_p=top_p,
+            top_k=top_k,
+        )
+
+    async def chat_stream(
+        self,
+        messages: list[ConversationMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream on the current owner's plan-resolved backend."""
+        async for chunk in self._resolve().chat_stream(
+            messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            top_p=top_p,
+            top_k=top_k,
+        ):
+            yield chunk
+
+
+def plan_scoped_background_backend(
+    *,
+    tier: str,
+    rls_engine: Engine,
+    paid_tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+    metered: bool,
+) -> ChatBackend:
+    """The ONE way a background surface gets a model backend (R9-096).
+
+    Composes :class:`PlanScopedChatBackend` (per-owner plan resolution) and, when
+    ``metered``, wraps it in :class:`~persona_api.services.llm_usage_collector.
+    UsageCollectingBackend` so the handler's ``collect_llm_usage`` block still captures
+    the real per-op cost for owner billing (Spec M3, T5). The wrapper is the OUTER
+    layer, exactly as it was when the inner backend came straight from the registry, so
+    metering is unchanged.
+
+    ``metered`` is required rather than defaulted: the two forgettable decisions on this
+    path — "is it plan-gated" and "is it billed" — are both stated at every call site.
+    R9-074's lesson is that a keyword with a default is a keyword that gets forgotten,
+    and the dangerous value is the one you get by forgetting.
+
+    Args:
+        tier: The tier name the surface's own knob selected.
+        rls_engine: The owner-scoped engine (the worker binds ``current_user_id`` per job).
+        paid_tier_registry: The full paid registry.
+        free_tier_registry: The free-only registry, or ``None`` when gating is off.
+        metered: Whether this surface bills the owner for the call's real cost.
+
+    Returns:
+        A backend that resolves the calling owner's plan on every call.
+    """
+    backend = PlanScopedChatBackend(
+        tier=tier,
+        rls_engine=rls_engine,
+        paid_tier_registry=paid_tier_registry,
+        free_tier_registry=free_tier_registry,
+    )
+    return UsageCollectingBackend(backend) if metered else backend

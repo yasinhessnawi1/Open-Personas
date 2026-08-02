@@ -330,6 +330,7 @@ def _registry(app_engine: Engine, embedder: Embedder, audit_root: Path) -> JobRe
         rls_engine=app_engine,
         embedder=embedder,
         tier_registry=_FakeTierRegistry(),
+        free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         # Post-R5 signature: the worker derives its audit sink from config
         # (JSONL at audit_root under the default backend — byte-equivalent).
         config=APIConfig(audit_root=str(audit_root)),

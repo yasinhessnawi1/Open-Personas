@@ -321,6 +321,7 @@ def test_initiative_tenant_registered_only_when_enabled(
             rls_engine=app_engine,
             embedder=_Emb(),  # type: ignore[arg-type]
             tier_registry=_FakeTierRegistry(),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
             config=APIConfig(audit_root=str(tmp_path)),
             synthesis_tier="small",
         )

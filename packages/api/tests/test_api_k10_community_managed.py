@@ -173,6 +173,7 @@ def test_worker_refuses_a_sqlite_engine() -> None:
             rls_engine=engine,
             embedder=object(),  # type: ignore[arg-type]  # unused — guard raises first
             tier_registry=object(),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         )
     assert exc.value.context["reason"] == "worker_requires_postgres"
     assert exc.value.context["dialect"] == "sqlite"

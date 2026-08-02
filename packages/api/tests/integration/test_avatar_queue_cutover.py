@@ -299,6 +299,7 @@ def test_registry_registers_avatar_tenant_iff_shared_gate_passes(
                 rls_engine=app_engine,
                 embedder=_Emb(),  # type: ignore[arg-type]
                 tier_registry=_TierRegistry(),  # type: ignore[arg-type]
+                free_tier_registry=None,  # R9-096: no plans here — gating off, stated
                 config=APIConfig(audit_root=str(tmp_path), avatar_via_queue=flag),
                 synthesis_tier="small",
                 image_backend=backend,  # type: ignore[arg-type]

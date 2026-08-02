@@ -298,6 +298,7 @@ async def test_recurring_task_fires_at_least_twice_on_cadence(
             rls_engine=app_engine,
             embedder=embedder,
             tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
             config=APIConfig(audit_root=str(_AUDIT)),
             synthesis_tier="small",
             runtime_factory=factory,
@@ -363,6 +364,7 @@ async def test_one_off_task_fires_exactly_once_then_terminal(
             rls_engine=app_engine,
             embedder=embedder,
             tier_registry=_ScriptedRegistry(""),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
             config=APIConfig(audit_root=str(_AUDIT)),
             synthesis_tier="small",
             runtime_factory=factory,

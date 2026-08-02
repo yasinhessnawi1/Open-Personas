@@ -745,6 +745,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 mcp_runtime=mcp_runtime,
             )
             app.state.tier_registry = tier_registry
+            # R9-096: the free-plan registry travels WITH the paid one everywhere the paid
+            # one goes. Surfaces that resolve a model outside the RuntimeFactory (the voice
+            # auto-pick) need both halves to plan-gate; publishing only the paid half is how
+            # they ended up ungated.
+            app.state.free_tier_registry = free_tier_registry
             app.state.authoring_tier = config.authoring_tier
             app.state.build_conversation_loop = runtime_factory.build_conversation_loop
             app.state.build_agentic_loop = runtime_factory.build_agentic_loop
@@ -842,6 +847,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 rls_engine=rls_engine,
                 embedder=app.state.embedder,
                 tier_registry=_worker_tier_registry,
+                # R9-096: the worker's background LLM (episodic summarize, initiative scan,
+                # title, synthesis, file-extract) resolves the JOB OWNER's plan, not this
+                # process's paid registry. Bound in the same ``rls_engine is not None`` branch
+                # this block is guarded by; ``None`` in community = gating off, stated.
+                free_tier_registry=free_tier_registry,
                 # Spec A4 (composition-root activation): the task-leg tenant + digest hook. The leg
                 # runner is the SAME AgenticLoop the chat path uses (the no-bypass guarantee); the
                 # digest publisher rides the real C0 sender. ``memory_backend`` present → digest is
@@ -942,6 +952,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await reconcile_voice_assignments(
                     config=config,
                     registry=getattr(app.state, "tier_registry", None),
+                    # R9-096: the sweep binds each persona's owner before it picks, so the
+                    # plan gate resolves per owner here too.
+                    free_tier_registry=getattr(app.state, "free_tier_registry", None),
                     sweep_engine=_sweep_engine,
                     rls_engine=rls_engine,
                 )

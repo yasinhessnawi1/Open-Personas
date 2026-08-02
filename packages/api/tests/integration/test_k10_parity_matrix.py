@@ -171,6 +171,7 @@ def _registry(rls_engine: Engine, embedder: Embedder, audit_root: str) -> object
         rls_engine=rls_engine,
         embedder=embedder,
         tier_registry=_FakeTierRegistry(),  # type: ignore[arg-type]
+        free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         config=APIConfig(audit_root=audit_root),
         synthesis_tier="small",
         memory_backend=PostgresBackend(engine=rls_engine, embedder=embedder),
@@ -452,5 +453,6 @@ def test_legacy_sqlite_worker_is_refused() -> None:
             rls_engine=engine,
             embedder=object(),  # type: ignore[arg-type]
             tier_registry=object(),  # type: ignore[arg-type]
+            free_tier_registry=None,  # R9-096: no plans here — gating off, stated
         )
     assert exc.value.context["reason"] == "worker_requires_postgres"
