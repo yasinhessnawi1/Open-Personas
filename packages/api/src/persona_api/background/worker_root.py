@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1059,6 +1060,19 @@ def _render_digest(goal: str, *, completed: bool, occurrence: bool, waiting: boo
     return f'I\'ve made progress on "{goal}".'
 
 
+# R9-093: a crashed worker loop is RESTARTED, not left dead. Mirrors the connector
+# runners' supervision (R9-073c) deliberately — same failure class, so the same
+# constants and the same shape, rather than a second dialect of "heal a dead loop".
+_WORKER_RESTART_BACKOFF_INITIAL_SECONDS = 1.0
+_WORKER_RESTART_BACKOFF_MAX_SECONDS = 60.0
+#: A loop that stayed up at least this long before crashing was genuinely healthy;
+#: its fault resets the failure count + backoff rather than counting toward the ceiling.
+_WORKER_RESTART_HEALTHY_UPTIME_SECONDS = 120.0
+#: After this many crashes IN QUICK SUCCESSION the loop is left down — a persistently
+#: broken worker must not hot-spin forever — but it IS given a real chance first.
+_WORKER_RESTART_MAX_CONSECUTIVE_FAILURES = 10
+
+
 class InProcessWorker:
     """Owns the in-process ``Worker.run()`` task (start on boot, drain on shutdown)."""
 
@@ -1067,18 +1081,73 @@ class InProcessWorker:
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
-        """Launch the claim→execute loop as a background task. Idempotent.
+        """Launch the supervised claim→execute loop as a background task. Idempotent.
 
         ``install_signal_handlers=False`` — signal ownership belongs to uvicorn
         in this hosting mode (R9-004): the worker's ``loop.add_signal_handler``
         would REPLACE uvicorn's ``signal.signal`` SIGINT/SIGTERM handlers, so ^C
         would drain the worker but the server would keep serving forever. The
         lifespan's :meth:`aclose` is the in-process drain path instead.
+
+        The loop runs under :meth:`_supervise` (R9-093). Previously this was a bare
+        ``asyncio.create_task(self._worker.run(...))`` with no done-callback and
+        nothing awaiting it until shutdown, so a raise inside ``run()`` killed the
+        task and the exception sat UNRETRIEVED in the task object: no log, no
+        health-check change, and every background surface — schedules, synthesis,
+        consolidation — stopped at once. Production showed a 65-minute window in
+        which no job of any type was created or processed, spanning a scheduled
+        fire that never happened, with ``/livez`` green throughout; the exception
+        would only have surfaced at ``aclose()``, i.e. at shutdown, hours later.
         """
         if self._task is not None:
             return
-        self._task = asyncio.create_task(self._worker.run(install_signal_handlers=False))
+        self._task = asyncio.create_task(self._supervise())
         _log.info("in-process worker started", worker_id=self._worker.worker_id)
+
+    async def _supervise(self) -> None:
+        """Run the loop; restart a CRASH with backoff, honour a graceful exit.
+
+        A normal return means the loop drained and is done — it must NOT be
+        respawned, or ``aclose()`` could never complete. ``CancelledError``
+        propagates untouched (that is shutdown, not a fault).
+        """
+        backoff = _WORKER_RESTART_BACKOFF_INITIAL_SECONDS
+        failures = 0
+        while True:
+            started = time.monotonic()
+            try:
+                await self._worker.run(install_signal_handlers=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the whole point is to survive it
+                uptime = time.monotonic() - started
+                if uptime >= _WORKER_RESTART_HEALTHY_UPTIME_SECONDS:
+                    # It had proved itself healthy; treat this as a fresh first fault.
+                    backoff = _WORKER_RESTART_BACKOFF_INITIAL_SECONDS
+                    failures = 0
+                failures += 1
+                if failures >= _WORKER_RESTART_MAX_CONSECUTIVE_FAILURES:
+                    _log.error(
+                        "in-process worker crashed {count} times in a row ({error}) — "
+                        "leaving it DOWN; background jobs are stopped until restart",
+                        count=failures,
+                        error=str(exc),
+                        worker_id=self._worker.worker_id,
+                    )
+                    return
+                _log.exception(
+                    "in-process worker loop crashed ({error}) — restarting in {delay}s "
+                    "[failure {count}]",
+                    error=str(exc),
+                    delay=backoff,
+                    count=failures,
+                    worker_id=self._worker.worker_id,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _WORKER_RESTART_BACKOFF_MAX_SECONDS)
+                continue
+            # Graceful exit (drain requested) — done, never respawn.
+            return
 
     async def aclose(self) -> None:
         """Request a graceful drain, then await the loop's exit (shutdown)."""
