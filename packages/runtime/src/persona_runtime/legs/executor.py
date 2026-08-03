@@ -189,7 +189,13 @@ class BasicCheckpointWriter:
 
         prior_conclusions = prior.progress_conclusions if prior is not None else ()
         new_conclusions = (*prior_conclusions, run.output) if run.output else prior_conclusions
-        next_step = run.output or (prior.next_step if prior is not None else "")
+        # R9-103: EMPTY, never the leg's output — see the distiller for the full
+        # reasoning. ``next_step`` is recited to the successor as ``NEXT STEP: …``, so
+        # assigning ``run.output`` handed it a finished answer as an instruction and
+        # closed a loop the task could never escape. This stand-in writer is likewise
+        # deterministic and cannot generate a real next action; empty makes the
+        # successor replan from the contract, which is the honest fallback.
+        next_step = ""
         return _Checkpoint(
             task_id=task.id,
             leg_id=leg_id,

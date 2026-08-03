@@ -57,7 +57,25 @@ class CompactingCheckpointWriter:
             leg_id=leg_id,
             checkpoint_seq=seq,
             progress_conclusions=tuple(conclusions),
-            next_step=run.output or (prior.next_step if prior is not None else ""),
+            # R9-103: EMPTY, never the leg's output. ``next_step`` is defined as "the
+            # single concrete action this leg's successor runs first", and
+            # ``reconstruction`` recites it verbatim as ``NEXT STEP: …``. Assigning
+            # ``run.output`` therefore handed the successor a finished ANSWER as its
+            # INSTRUCTION, so it re-derived the same answer and wrote it back as the
+            # next ``next_step`` — a closed loop. Observed in production: a recurring
+            # task emitted byte-identical output every hour, its progress log filled
+            # with copies of one paragraph, and it paid full price each fire to repeat
+            # an answer it already had. The ``or prior.next_step`` fallback compounded
+            # it, propagating a bad value forward indefinitely.
+            #
+            # This writer is DETERMINISTIC (the module docstring's "live floor"), so it
+            # cannot GENERATE a next action — that is the model-backed semantic
+            # distiller named as the additive refinement, which has not landed. Until
+            # it does, empty is strictly better than an echo: ``reconstruction`` omits
+            # the block entirely when it is falsy, so the successor plans afresh from
+            # the contract plus ``progress_conclusions`` (which still carry every
+            # finding). Empty loses continuity; the echo guaranteed repetition.
+            next_step="",
             open_questions=prior.open_questions if prior is not None else (),
             artifact_pointers=prior.artifact_pointers if prior is not None else (),
             event_log_cursor=run.id,  # the durable run record holds the compacted detail

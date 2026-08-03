@@ -90,3 +90,58 @@ def test_basic_writer_would_overflow_proving_the_distiller_is_needed() -> None:
             overflowed = True
             break
     assert overflowed, "BasicCheckpointWriter should overflow — that's why the distiller exists"
+
+
+def test_next_step_never_echoes_the_leg_output() -> None:
+    """THE loop regression (R9-103): an answer must never become an instruction.
+
+    ``next_step`` is defined as "the single concrete action this leg's successor
+    runs first", and ``reconstruction`` recites it verbatim as ``NEXT STEP: …``.
+    Assigning ``run.output`` handed the successor a finished ANSWER as its
+    INSTRUCTION, so it re-derived the same answer and wrote it back -- a closed
+    loop the task could never escape. Production: a recurring task emitted
+    byte-identical output every hour and its progress log filled with copies of
+    one paragraph, at full price per fire.
+    """
+    answer = "Here is a curated list of notable GitHub repositories related to AI personas."
+    cp = CompactingCheckpointWriter(token_budget=2000).write(
+        task=_task(),
+        prior=None,
+        run=_run(answer),
+        leg_id="t1:leg:0",
+        seq=0,
+        now=_NOW,
+    )
+    assert cp.next_step != answer, "the leg's answer must not become the successor's instruction"
+    assert not cp.next_step, (
+        "a DETERMINISTIC writer cannot generate a next action, so it must emit empty -- "
+        "reconstruction then omits the NEXT STEP block and the successor replans from "
+        "the contract, instead of being told to repeat itself"
+    )
+    # The finding itself is still preserved; only the misuse as an instruction is gone.
+    assert answer in cp.progress_conclusions
+
+
+def test_a_bad_next_step_cannot_propagate_forward() -> None:
+    """The ``or prior.next_step`` fallback let one bad value persist indefinitely.
+
+    Once an answer landed in ``next_step`` it was carried into every later
+    checkpoint, so the loop survived even legs that produced no output.
+    """
+    poisoned = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="Here is a curated list of notable GitHub repositories.",
+        updated_at=_NOW,
+    )
+    cp = CompactingCheckpointWriter(token_budget=2000).write(
+        task=_task(),
+        prior=poisoned,
+        run=_run(""),  # this leg produced nothing to append
+        leg_id="t1:leg:1",
+        seq=1,
+        now=_NOW,
+    )
+    assert not cp.next_step, "a poisoned next_step must not be carried forward"
