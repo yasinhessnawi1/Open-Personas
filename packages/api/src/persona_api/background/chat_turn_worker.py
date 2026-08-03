@@ -49,6 +49,7 @@ from persona_api.sandbox import (
     reset_sandbox_request_context,
     set_sandbox_request_context,
 )
+from persona_api.services.user_facing_errors import user_facing_error_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -387,7 +388,15 @@ class ChatTurnRegistry:
                     "chat turn {cid} failed: {err}", cid=handle.conversation_id, err=str(exc)
                 )
                 status = "error"
-                error_message = str(exc)
+                # R9-097: the FULL exception is logged above and stays the
+                # diagnostic record; what reaches the user is sanitised. A tier
+                # exhaustion stringifies to the provider names, model ids, tier
+                # and error classes it tried — our vendor mix and routing
+                # strategy, shown to anyone who hits a busy moment, and useless
+                # to them besides. Unmapped exceptions pass through unchanged.
+                error_message = user_facing_error_message(
+                    exc, on_free_plan=self._on_free_plan(handle.owner_id)
+                ) or str(exc)
 
             # R9-033 defense-in-depth: a "complete" turn whose accumulated
             # content is empty must NEVER persist as a silent empty assistant
@@ -475,6 +484,29 @@ class ChatTurnRegistry:
     def _had_tool_activity(handle: ChatTurnHandle) -> bool:
         """``True`` iff the turn's event log records at least one tool dispatch (R9-033)."""
         return any(ev.get("type") in {"tool_calling", "tool_result"} for ev in handle.event_log)
+
+    def _on_free_plan(self, owner_id: str) -> bool:
+        """Whether ``owner_id`` is on the free plan (R9-097 message selection).
+
+        Only reached on the error path, so the extra indexed read costs nothing
+        in the normal case. **Fail-safe is ``False``**: if the plan cannot be
+        determined we show the neutral "models are busy" line rather than the
+        free-tier one, because telling a paying customer that "the free models
+        are busy" is simply false, while showing a free user the neutral line
+        merely omits the upgrade hint.
+        """
+        if self._engine is None:
+            return False
+        try:
+            from persona_api.services import subscription_service  # noqa: PLC0415
+
+            row = subscription_service.get_subscription(self._engine, user_id=owner_id)
+        except Exception as exc:  # noqa: BLE001 — never let message selection break the turn
+            _log.warning("plan lookup for the failure message failed: {err}", err=str(exc))
+            return False
+        if row is None:
+            return True  # no subscription row IS the free plan (the D-M4-9 default)
+        return str(row.get("plan_code") or "free") == "free"
 
     def _release_op_slot(self, handle: ChatTurnHandle) -> None:
         if self._engine is None or handle.op_token is None:
