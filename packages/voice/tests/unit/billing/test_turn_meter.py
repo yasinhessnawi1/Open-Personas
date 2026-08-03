@@ -430,6 +430,29 @@ class TestExhaustionSignal:
         asyncio.run(meter.bill_turn(1))
         assert fired == []  # fully captured, balance remains → no cutoff
 
+    def test_an_unarmed_meter_bills_through_exhaustion_without_cutting_off(self) -> None:
+        """Metering-only: exhaustion is recorded, nothing acts on it.
+
+        This is the property COMMUNITY now relies on. Community voice does meter
+        (it bypasses the api's UnlimitedCreditsPolicy seam and calls the core
+        ledger directly, per D-M3-core-seam), but it must never arm the mid-call
+        cutoff: a self-hosted user has no Stripe, no top-up and no paywall, so a
+        cutoff would end their calls permanently with no remedy. The runner
+        therefore leaves ``on_exhausted`` unset off-cloud, and this pins that the
+        unset shape survives the real deduct-to-exhaustion chain rather than
+        raising or half-firing.
+        """
+        meter = _meter(
+            _FixedLedger(captured=3, new_balance=0),
+            streamed_seconds=[60.0],
+            on_exhausted=None,
+        )
+        meter.note_tts_chars(1000)
+        asyncio.run(meter.bill_turn(1))  # must not raise: exhausted, but unarmed
+        # A second exhausted turn is equally inert (no latent fire-once state).
+        meter.note_tts_chars(1000)
+        asyncio.run(meter.bill_turn(2))
+
     def test_fires_exactly_once_across_multiple_exhausted_turns(self) -> None:
         fired: list[int] = []
 

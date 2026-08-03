@@ -1049,13 +1049,34 @@ async def build_agent_session(
             )
         )
 
-    turn_billing_meter.set_on_exhausted(
-        VoiceExhaustionCutoff(
-            delete_room=_delete_room_on_exhaustion,
-            speak_notice=_speak_exhaustion_notice,
-            on_fallback=ended.set,
-        ).trigger
-    )
+    # The mid-call cutoff is a CLOUD enforcement mechanism, so community never
+    # arms it. Leaving ``on_exhausted`` unset is the meter's own documented
+    # "metering-only" shape, so community keeps its local spend VISIBLE while
+    # nothing can ever act on it.
+    #
+    # Why this gate exists: community voice does meter. It bypasses the api's
+    # ``UnlimitedCreditsPolicy`` edition seam entirely and calls the core ledger
+    # directly, which is what D-M3-core-seam authorises for latency, so
+    # D-M4-community-noop ("community is unmetered") describes the api's shape
+    # and not this path. UnGated, a self-hosted user drew down the 100_000
+    # credits ``ensure_balance`` seeds and then hit the cutoff, which deletes the
+    # room and ends the call — with no Stripe, no top-up and no paywall in
+    # community to resolve it. A large buffer followed by local voice breaking
+    # permanently, with no remedy. The buffer is why it was not urgent; it is not
+    # why it was harmless.
+    #
+    # Deliberately NOT changing the deduct itself: metering is useful local
+    # visibility for a self-hoster, and rewriting the ledger path would change
+    # M3 billing behaviour well beyond this fix. Enforcement is the harm; the
+    # bookkeeping is not.
+    if config.is_cloud:
+        turn_billing_meter.set_on_exhausted(
+            VoiceExhaustionCutoff(
+                delete_room=_delete_room_on_exhaustion,
+                speak_notice=_speak_exhaustion_notice,
+                on_fallback=ended.set,
+            ).trigger
+        )
 
     # --- V9 (V9-D-5): the durable call-record writer over a DEDICATED RLS engine ---
     # Separate from the session engine on purpose: the clean-hangup path fires
