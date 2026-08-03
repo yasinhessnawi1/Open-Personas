@@ -25,10 +25,30 @@ __all__ = [
     "LegBoxLimit",
 ]
 
-#: Default per-leg step bound — below the chat loop's 20 so a step-heavy leg can't blow
-#: the wall-clock (D-A2-2). Passed to ``AgenticLoop(max_steps=...)`` (the loop enforces it
-#: natively; the box mirrors it for the cooperative check).
-DEFAULT_LEG_MAX_STEPS = 10
+#: Default per-leg step bound. Passed to ``AgenticLoop(max_steps=...)`` (the loop enforces
+#: it natively; the box mirrors it for the cooperative check).
+#:
+#: Raised 10 → 20 (R9-102), matching the loop's own default. The original 10 was set
+#: "below the chat loop's 20 so a step-heavy leg can't blow the wall-clock (D-A2-2)", and
+#: that reasoning is backwards for background work: a chat turn has a person waiting, so
+#: wall-clock is expensive there and it got 20; a leg has NOBODY waiting, so wall-clock is
+#: nearly free, and it got half. The surface that could most afford to think was the one
+#: rationed.
+#:
+#: It also could not finish. Production: an hourly "brief Hacker News" leg spent all 10
+#: steps fetching one story URL each (8-12k tokens apiece), never reached synthesis, and
+#: was cancelled with ZERO output after ~100k tokens — charged in full. A task needing
+#: N fetches plus a synthesis step can never complete on a budget of N.
+#:
+#: Raising this is cost-POSITIVE, not a spend increase: a leg cancelled at the ceiling
+#: bills the full retrieval and delivers nothing, while a leg that finishes bills slightly
+#: more and delivers the answer. The waste was the truncation, not the steps.
+#:
+#: This does NOT fix the underlying inefficiency — the model fetches serially, one URL per
+#: step, when the loop already supports several tool calls in a single step. Batched
+#: retrieval is the real fix and stays open; this stops a solvable task being guillotined
+#: while that is built.
+DEFAULT_LEG_MAX_STEPS = 20
 
 #: Default per-leg wall-clock bound (seconds) — a ≥30s margin below A0's 270s drain so the
 #: checkpoint commit lands inside the drain window (D-A2-2 / D-A0-5).

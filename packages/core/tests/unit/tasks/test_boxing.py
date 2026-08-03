@@ -8,6 +8,8 @@ cheap operation. The box is pure config + pure predicates; the runtime trips the
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from persona.tasks import (
     DEFAULT_LEG_MAX_STEPS,
@@ -22,12 +24,36 @@ _A0_DRAIN_SECONDS = 270.0
 
 
 def test_defaults_match_the_decision() -> None:
-    assert DEFAULT_LEG_MAX_STEPS == 10
+    assert DEFAULT_LEG_MAX_STEPS == 20
     assert DEFAULT_LEG_WALL_CLOCK_SECONDS == 180.0
     box = LegBox()
-    assert box.max_steps == 10
+    assert box.max_steps == DEFAULT_LEG_MAX_STEPS
     assert box.wall_clock_seconds == 180.0
     assert box.budget_micros is None  # no spend cap unless configured
+
+
+def test_a_leg_is_not_rationed_below_a_chat_turn() -> None:
+    """R9-102: the surface with nobody waiting must not get the smaller budget.
+
+    The original 10 was chosen "below the chat loop's 20 so a step-heavy leg
+    can't blow the wall-clock", which inverts the cost: a chat turn has a person
+    waiting, a background leg does not. In production that ceiling guillotined a
+    solvable task -- an hourly Hacker News brief spent all 10 steps fetching one
+    story per step, never reached synthesis, and was cancelled with zero output
+    after ~100k tokens, charged in full. A task needing N fetches plus a
+    synthesis step cannot complete on a budget of N.
+
+    Pins the RELATIONSHIP, not the number, so the budget stays tunable while a
+    silent regression to rationing background work does not.
+    """
+    from persona_runtime.agentic.loop import AgenticLoop
+
+    chat_default = inspect.signature(AgenticLoop.__init__).parameters["max_steps"].default
+    assert chat_default <= DEFAULT_LEG_MAX_STEPS, (
+        f"a background leg gets {DEFAULT_LEG_MAX_STEPS} steps against a chat turn's "
+        f"{chat_default}, yet nobody is waiting on the leg -- the surface that can most "
+        "afford to think is the one being rationed"
+    )
 
 
 def test_wall_clock_sits_inside_the_a0_drain_with_margin() -> None:
