@@ -92,10 +92,10 @@ class TestCapabilityMatrix:
         assert _native_tools_supported("groq", "whisper-large-v3") is False
 
     def test_nvidia_is_frozenset_with_launch_models(self) -> None:
-        # Spec 20 T09 / D-20-1 launch set — three Nemotron models advertise
-        # native tool calling at launch. Unlisted nvidia models fall through
-        # to the prompt-based shim (same allow-list semantics as groq /
-        # deepseek).
+        # Spec 20 T09 / D-20-1 launch set — three Nemotron models advertised
+        # native tool calling at launch; R9-105 added the 550B Ultra when it
+        # became the frontier model. Unlisted nvidia models fall through to the
+        # prompt-based shim (same allow-list semantics as groq / deepseek).
         cap = _NATIVE_TOOLS_CAPABILITY["nvidia"]
         assert isinstance(cap, frozenset)
         assert cap == frozenset(
@@ -103,8 +103,26 @@ class TestCapabilityMatrix:
                 "nvidia/llama-3.3-nemotron-super-49b-v1.5",
                 "nvidia/nemotron-3-super-120b-a12b",
                 "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                "nvidia/nemotron-3-ultra-550b-a55b",
             }
         )
+
+    def test_every_served_nvidia_model_is_priced_and_tool_capable(self) -> None:
+        """R9-105: a serving model missing from EITHER table fails silently.
+
+        Absent from the capability matrix, a model resolves
+        ``supports_native_tools=False`` and every tool call degrades to the text
+        shim -- on the frontier tier that is where all agentic work happens.
+        Absent from the price table, its spend is unpriced. Neither failure
+        raises, so nothing surfaces them; this pins the pairing instead.
+        """
+        from persona.backends.metadata.nvidia import MODELS as NVIDIA_MODELS
+
+        for model_id in _NATIVE_TOOLS_CAPABILITY["nvidia"]:
+            assert model_id in NVIDIA_MODELS, (
+                f"{model_id} advertises native tools but has no price entry -- "
+                "its spend would be unpriced"
+            )
 
     def test_supported_nvidia_listed_model(self) -> None:
         assert _native_tools_supported("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1.5") is True

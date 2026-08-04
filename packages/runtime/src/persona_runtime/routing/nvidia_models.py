@@ -75,6 +75,12 @@ _TIER_ONLY_FIELDS: dict[str, _TierOnly] = {
     "nvidia/llama-3.3-nemotron-super-49b-v1.5": _TierOnly(45.0, "strong", False),
     "nvidia/nemotron-3-super-120b-a12b": _TierOnly(30.0, "strong", True),
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": _TierOnly(55.0, "strong", True),
+    # R9-105: the 550B Ultra frontier model. Hybrid Transformer-Mamba MoE with 55B
+    # active of 550B, so throughput is closer to a mid-size dense model than the
+    # parameter count suggests; reasoning_capable per its published extended-reasoning
+    # support. The cost / latency / context numbers are NOT repeated here — they derive
+    # from the core table, which is the point of this split (D-23-X-metadata-placement).
+    "nvidia/nemotron-3-ultra-550b-a55b": _TierOnly(25.0, "strong", True),
 }
 
 

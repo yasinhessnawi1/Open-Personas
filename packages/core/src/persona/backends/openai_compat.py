@@ -101,6 +101,12 @@ _NATIVE_TOOLS_CAPABILITY: dict[str, frozenset[str] | Literal["all"]] = {
             "nvidia/llama-3.3-nemotron-super-49b-v1.5",
             "nvidia/nemotron-3-super-120b-a12b",
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+            # R9-105: the frontier model. Publishes tool calling + structured output.
+            # LOAD-BEARING, not bookkeeping: a model absent from this set resolves
+            # ``supports_native_tools=False``, which sends every tool call down the text
+            # shim — so the tier where all agentic work happens would quietly lose native
+            # tool calling. That mismatch is also what produced R9-068.
+            "nvidia/nemotron-3-ultra-550b-a55b",
         }
     ),
     # Spec 22 D-22-10f: the OpenRouter row ships EMPTY. OpenRouter model

@@ -43,6 +43,28 @@ MODELS: dict[str, ModelMetadata] = {
         context_length=131_072,
         cost_verified_at_deploy=False,
     ),
+    # R9-105: the FRONTIER model. 550B MoE (55B active), hybrid Transformer-Mamba,
+    # 1M context, ~66k max output. Supports tool calling + structured output, so it is
+    # also listed in the native-tools capability matrix (openai_compat) — without that
+    # entry every frontier tool call silently degrades to the text shim.
+    #
+    # Price sourced 2026-08-04 from published provider rates: median $0.37/M input and
+    # $1.08/M output across providers (OpenRouter lists $0.50 / $2.20). Recorded here as
+    # 0.04 / 0.11 cents per 1k, i.e. the median rounded UP — deliberately conservative for
+    # the business without repeating R9-104's overcharge of its users. `cost_verified_at_
+    # deploy` stays False because this is a published-rate lookup, NOT a deploy-time probe
+    # against the account actually being billed; that flag means what it says and must not
+    # be set by hand. Re-check when NIM publishes account-specific rates.
+    "nvidia/nemotron-3-ultra-550b-a55b": ModelMetadata(
+        cost_input_per_1k_tokens=0.04,
+        cost_output_per_1k_tokens=0.11,
+        latency_p50_ms=900.0,
+        quality_benchmark=0.88,
+        tools_supported=True,
+        vision_supported=False,
+        context_length=1_000_000,
+        cost_verified_at_deploy=False,
+    ),
     # Long-context + reasoning (enable_thinking) — 1M context, flagship.
     # R9-104: was 1.50 / 7.50 — i.e. $15/M input and $75/M output, Claude-Opus-class
     # pricing for a mid-tier Nemotron. Published rates are a median $0.30/M input and

@@ -25,11 +25,22 @@ from pydantic import ValidationError
 class TestNvidiaLaunchModelMetadata:
     """The D-20-1 launch set must be present + each entry well-formed."""
 
-    def test_launch_set_has_three_models(self) -> None:
-        # D-20-1 launch set: 49b-v1.5 chat + 120b-a12b long-context/reasoning
-        # + nano-omni-30b reasoning+vision (imagegen FLUX.2-klein-4b is NOT
-        # in this chat-side registry; lives under Spec 20 T16 image-backend).
-        assert len(NVIDIA_LAUNCH_MODEL_METADATA) == 3
+    def test_registry_covers_every_priced_nvidia_model(self) -> None:
+        # Was `len(...) == 3` for the D-20-1 launch set (49b-v1.5 chat +
+        # 120b-a12b long-context/reasoning + nano-omni-30b reasoning+vision;
+        # imagegen FLUX.2-klein-4b is NOT in this chat-side registry, it lives
+        # under Spec 20 T16's image-backend). R9-105 added the 550B Ultra as the
+        # frontier model, so a bare count now just says "somebody added a row".
+        #
+        # Pins the INVARIANT instead: this registry and the core price table
+        # describe the same set of models. A model in one but not the other is
+        # the actual defect -- routing metadata without a price, or a priced
+        # model the router cannot rank.
+        from persona.backends.metadata.nvidia import MODELS as CORE_MODELS
+
+        assert set(NVIDIA_LAUNCH_MODEL_METADATA) == set(CORE_MODELS), (
+            "the routing registry and the core price table have diverged"
+        )
 
     def test_chat_primary_present(self) -> None:
         assert "nvidia/llama-3.3-nemotron-super-49b-v1.5" in NVIDIA_LAUNCH_MODEL_METADATA
