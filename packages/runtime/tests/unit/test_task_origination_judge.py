@@ -206,3 +206,64 @@ async def test_unrepresentable_cadence_fallback_carries_the_honest_note() -> Non
     note = result.draft.schedule.cadence_note
     assert "couldn't set that exact cadence" in note
     assert "every 5, 10, 15, 20, 30 or 60 minutes" in note
+
+
+class TestDanglingReferenceGuard:
+    """R9-095: a contract must never point at detail it does not carry.
+
+    Production: `goal="search GitHub repos related to AI personas and the
+    specified repo description"`, `scope="search only repos matching the
+    description"` -- with no description stored anywhere. A leg sees ONLY goal
+    and scope, never the conversation, so that task was unexecutable by
+    construction. It spent 0 micros (never tried) and parked waiting on the
+    user. Unlike a missing goal, it fails QUIETLY: it looks complete, gets
+    confirmed, and only dies when the leg runs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_production_contract_is_refused(self) -> None:
+        result = await _judge(
+            '{"verdict": "standing", '
+            '"goal": "search GitHub repos related to AI personas and the specified '
+            'repo description", '
+            '"scope": "search only repos matching the description"}'
+        )
+        assert result.verdict is StandingVerdict.AMBIGUOUS, (
+            "a contract referring to a description it does not contain must ask, "
+            "not persist an unexecutable task"
+        )
+        assert result.draft is None
+
+    @pytest.mark.asyncio
+    async def test_a_dangling_reference_in_scope_alone_is_refused(self) -> None:
+        """Scope carries the constraints, so it can strand the task by itself."""
+        result = await _judge(
+            '{"verdict": "standing", "goal": "brief me on Hacker News", '
+            '"scope": "only the topics listed above"}'
+        )
+        assert result.verdict is StandingVerdict.AMBIGUOUS
+
+    @pytest.mark.asyncio
+    async def test_a_self_contained_contract_still_passes(self) -> None:
+        """The guard must not tax ordinary phrasing.
+
+        This is the failure mode that would make the guard worse than the bug:
+        rejecting workable contracts turns every task into an interrogation.
+        """
+        result = await _judge(
+            '{"verdict": "standing", '
+            '"goal": "search GitHub for repos about AI personas with typed memory", '
+            '"scope": "only repos updated in the last year, with over 100 stars"}'
+        )
+        assert result.verdict is StandingVerdict.STANDING
+        assert result.draft is not None
+
+    @pytest.mark.asyncio
+    async def test_the_word_description_alone_is_not_a_dangling_reference(self) -> None:
+        """The bare noun is fine; only REFERRING uses are refused."""
+        result = await _judge(
+            '{"verdict": "standing", '
+            '"goal": "write a description of each new repo I star", '
+            '"scope": "one paragraph per repo"}'
+        )
+        assert result.verdict is StandingVerdict.STANDING

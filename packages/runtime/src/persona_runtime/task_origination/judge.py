@@ -68,9 +68,18 @@ morning at 8" -> "FREQ=DAILY;BYHOUR=8;BYMINUTE=0"; "every 15 minutes" -> \
 single future moment ("next Monday at 9"), give a one-time ISO-8601 local datetime. Times are in \
 the user's local timezone. If no time is stated, omit both — do NOT invent a cadence.
 
+The goal and scope must be SELF-CONTAINED. Whoever runs this task later sees ONLY these two \
+fields — never this conversation. So never point at information you have not written down: no \
+"the specified X", "the description above", "as described", "the given list". If the user gave \
+you the detail that makes the task doable — a description to match, a list, a source, a format, \
+a name — put that detail IN the goal or scope, in full. Prefer a longer goal that can be acted \
+on over a short one that refers to something the runner cannot see.
+
 Reply with ONLY a JSON object, no prose:
-{"verdict": "standing"|"now_work"|"ambiguous", "goal": "<short goal in your words>", \
-"scope": "<optional constraints>", "spend_cap_kr": <number if a spending limit was offered>, \
+{"verdict": "standing"|"now_work"|"ambiguous", \
+"goal": "<the objective, self-contained, in your words>", \
+"scope": "<constraints + any detail the runner needs, self-contained>", \
+"spend_cap_kr": <number if a spending limit was offered>, \
 "spend_note": "<one short line restating the spend permission, if any>", \
 "recurrence_rrule": "<an RFC-5545 RRULE if recurring, else omit>", \
 "one_time_at": "<ISO-8601 local datetime if a single future moment, else omit>"}
@@ -80,6 +89,42 @@ For "now_work" or "ambiguous", reply with just {"verdict": "now_work"} or \
 
 _MAX_TOKENS = 400
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+#: Phrases that point AT detail rather than carrying it (R9-095). A leg sees only
+#: ``goal`` + ``scope``, never the conversation that produced them, so any of these
+#: describes something the runner cannot resolve.
+#:
+#: Deliberately NARROW. Each pattern requires a demonstrative or definite-article
+#: form that is doing referring work ("the specified X", "as described"), so ordinary
+#: phrasing survives: "search repos with a description matching AI personas" carries
+#: its detail and must NOT be rejected. A false positive costs one clarifying question;
+#: a false negative persists a contract that can never run. Both are bad, which is why
+#: this errs toward letting an ambiguous phrasing through rather than over-matching.
+_DANGLING_REFERENCE_RE = re.compile(
+    r"\b(?:"
+    r"the\s+(?:specified|aforementioned|given|provided|above|foregoing)\b"
+    r"|as\s+(?:described|specified|outlined|stated|mentioned)\b"
+    r"|(?:described|specified|mentioned|listed)\s+above\b"
+    r"|the\s+(?:description|list|criteria|details|instructions)\s+(?:above|provided|given)\b"
+    r"|(?:this|that|these|those)\s+(?:description|list|criteria|spec)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def dangling_reference(text: str) -> bool:
+    """Whether ``text`` points at detail it does not itself contain (R9-095).
+
+    Args:
+        text: A drafted ``goal`` or ``scope``.
+
+    Returns:
+        ``True`` when the text refers to information the runner cannot see, so the
+        contract is unexecutable however complete it looks.
+    """
+    return bool(_DANGLING_REFERENCE_RE.search(text))
+
+
 _MICROS_PER_KR = 10_000
 
 
@@ -161,11 +206,29 @@ class ModelStandingIntentJudge:
             # STANDING without a goal is not actionable — do not guess; ask.
             _logger.info("standing verdict without a goal; degrading to ambiguous")
             return StandingJudgment(verdict=StandingVerdict.AMBIGUOUS)
+        scope = str(payload.get("scope", "")).strip()
+        # R9-095: a contract that POINTS at detail it does not contain is not
+        # actionable either, and fails far more quietly than a missing goal — it
+        # looks complete, gets confirmed, and only dies when the leg runs. Observed
+        # in production: `goal="search GitHub repos related to AI personas and the
+        # specified repo description"` / `scope="search only repos matching the
+        # description"`, with no description stored anywhere. The task spent 0
+        # micros (it never even tried) and parked waiting on the user.
+        #
+        # The runner sees ONLY goal + scope, never the conversation, so a dangling
+        # reference is unresolvable BY CONSTRUCTION. Degrade to AMBIGUOUS and ask —
+        # the same discipline the missing-goal branch above already applies, for the
+        # same reason: do not guess, and never persist an unexecutable contract.
+        if dangling_reference(goal) or dangling_reference(scope):
+            _logger.info(
+                "standing draft references detail it does not carry; degrading to ambiguous"
+            )
+            return StandingJudgment(verdict=StandingVerdict.AMBIGUOUS)
         return StandingJudgment(
             verdict=StandingVerdict.STANDING,
             draft=ContractDraft(
                 goal=goal,
-                scope=str(payload.get("scope", "")).strip(),
+                scope=scope,
                 grants=self._spend_grant(payload),
                 schedule=self._build_schedule(payload),
             ),
