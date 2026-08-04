@@ -24,6 +24,15 @@ __all__ = ["MODELS"]
 
 MODELS: dict[str, ModelMetadata] = {
     # Chat primary — 128k context, native tools, NOT a dedicated reasoning model.
+    # R9-104 UNVERIFIED: every entry in this file carries `cost_verified_at_deploy=False`,
+    # and it is the ONLY provider table where that is true — anthropic / deepseek / google /
+    # groq / openai are all verified. One of these prices (nemotron-3-super-120b) proved to be
+    # ~50-94x the published rate and drained a paid account in hours before it was caught.
+    # The two remaining entries below are still unverified and are very likely high on the
+    # same pattern ($3/M and $1.50/M input against a NVIDIA catalogue whose blended average is
+    # ~$0.85/M). They are NOT corrected here because no per-model source was confirmed for
+    # them, and guessing a price is how this defect was introduced. Verify against the live
+    # catalogue before either is put on a serving chain.
     "nvidia/llama-3.3-nemotron-super-49b-v1.5": ModelMetadata(
         cost_input_per_1k_tokens=0.30,
         cost_output_per_1k_tokens=0.60,
@@ -35,9 +44,16 @@ MODELS: dict[str, ModelMetadata] = {
         cost_verified_at_deploy=False,
     ),
     # Long-context + reasoning (enable_thinking) — 1M context, flagship.
+    # R9-104: was 1.50 / 7.50 — i.e. $15/M input and $75/M output, Claude-Opus-class
+    # pricing for a mid-tier Nemotron. Published rates are a median $0.30/M input and
+    # $0.80/M output (as low as $0.10/$0.50 on some hosts), so the table overcharged by
+    # ~50× on input and ~94× on output. This is the model the PAID frontier chain
+    # actually serves, so every background leg was billed against it: the owner's 6000
+    # credits were consumed in ~9 hours at ~240/leg when the real cost was nearer 3-5.
+    # `cost_verified_at_deploy=False` was flagging this the whole time.
     "nvidia/nemotron-3-super-120b-a12b": ModelMetadata(
-        cost_input_per_1k_tokens=1.50,
-        cost_output_per_1k_tokens=7.50,
+        cost_input_per_1k_tokens=0.03,
+        cost_output_per_1k_tokens=0.08,
         latency_p50_ms=600.0,
         quality_benchmark=0.82,
         tools_supported=True,
