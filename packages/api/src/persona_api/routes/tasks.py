@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from persona.errors import TaskNotFoundError, TaskStateError
+from persona.logging import get_logger
 from persona.tasks import TaskState, is_terminal
 from persona.tasks.reader import IntrospectionStatus, project_task_state, summarise_task
 from persona.tasks.reports import (
@@ -65,6 +66,9 @@ _CHECKPOINT_LIMIT = 10
 _MAX_EXTEND_MICROS = PLATFORM_DEFAULT_BUDGET_MICROS
 
 
+_log = get_logger("api.routes.tasks")
+
+
 def _kill_switch(engine: Engine) -> KillSwitchStore:
     return KillSwitchStore(
         engine,
@@ -75,6 +79,37 @@ def _kill_switch(engine: Engine) -> KillSwitchStore:
             schedule_store=ScheduleStore(engine),
         ),
     )
+
+
+def _mirror_schedule_pause(engine: Engine, owner_id: str, task: Task, *, paused: bool) -> None:
+    """Stop (or restart) the task's SCHEDULE alongside its ``paused`` overlay (R9-108).
+
+    The leg handler already honours ``task.paused`` and skips the work, so pausing
+    stopped anything running. But nothing stopped the schedule FIRING: production
+    showed 47 fires against a paused task, each enqueueing a job that was
+    immediately discarded, while the calendar still presented the task as live. The
+    owner reasonably read that as "pause did nothing".
+
+    Routed through :class:`ScheduleStore`'s own API rather than writing the table
+    here: A10-D-9 permits exactly one schedule write path, and a second one is the
+    very drift this is fixing. Best-effort — a task whose schedule is already gone,
+    or a mirror that fails, must never block the task control the user pressed.
+    """
+    if task.schedule_id is None:
+        return
+    now = datetime.now(UTC)
+    try:
+        store = ScheduleStore(engine)
+        if paused:
+            store.pause(owner_id, task.schedule_id, now=now)
+        else:
+            store.resume(owner_id, task.schedule_id, now=now)
+    except Exception as exc:  # noqa: BLE001 — the task control already succeeded
+        _log.warning(
+            "task {task_id}: schedule pause mirror failed ({error})",
+            task_id=task.id,
+            error=str(exc),
+        )
 
 
 def _command_result(
@@ -322,6 +357,7 @@ async def pause_task(
         return _command_result(task, changed=False, note="Already paused.")
     try:
         updated = store.pause(user.id, task_id, now=datetime.now(UTC))  # audits task.pause
+        _mirror_schedule_pause(engine, user.id, updated, paused=True)
     except TaskStateError:  # terminal → nothing to pause; reflect the durable truth
         return _command_result(
             store.get(user.id, task_id), changed=False, note="This task has already finished."
@@ -345,6 +381,7 @@ async def resume_task(
     if not task.paused:
         return _command_result(task, changed=False, note="Not paused.")
     updated = store.unpause(user.id, task_id, now=datetime.now(UTC))  # audits task.unpause
+    _mirror_schedule_pause(engine, user.id, updated, paused=False)
     owner_paused = _kill_switch(engine).is_owner_autonomy_paused(user.id)
     note = (
         "Resumed — but your autonomy is paused, so it won't run until you resume autonomy."
@@ -370,6 +407,7 @@ async def cancel_task(
     if is_terminal(task.state):  # already done/cancelled → the durable truth, no error
         return _command_result(task, changed=False, note="This task has already finished.")
     _kill_switch(engine).cancel_task(user.id, task_id, now=datetime.now(UTC))  # audits task.cancel
+    _mirror_schedule_pause(engine, user.id, task, paused=True)  # terminal: stop firing
     return _command_result(
         store.get(user.id, task_id),
         changed=True,
