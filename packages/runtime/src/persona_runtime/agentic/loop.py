@@ -302,6 +302,21 @@ class AgenticLoop:
         for step_num in range(self._max_steps):
             if cancel_token is not None and cancel_token.is_cancelled:
                 status = RunStatus.CANCELLED
+                # R9-109: salvage the work before stopping. Max-steps already summarises
+                # (see this loop's ``else`` branch); cancellation is the same situation,
+                # real work done and a terminal condition reached, but it used to discard
+                # everything. In production a task leg is cancelled by its wall-clock box,
+                # and every such leg left ``output`` empty: ~200s and 9 to 19 tool calls of
+                # genuine research, thrown away. Worse, the checkpoint accumulates progress
+                # ONLY from ``run.output``, so an empty output meant leg N+1 inherited
+                # nothing and reran the same searches; the task could never advance.
+                #
+                # Two guards. Cancellation before any step has run has nothing to salvage,
+                # so it must not spend a model call. And a summary that fails must not turn
+                # a salvageable cancellation into an error, so on failure ``output`` stays
+                # None and the run terminates exactly as it did before this change.
+                if steps:
+                    output = await self._safe_best_effort_summary(context)
                 await self._emit(on_event, RunEvent.cancelled(step_num))
                 break
 
@@ -634,6 +649,24 @@ class AgenticLoop:
         prompt = [self._system(_SUMMARISE_INSTRUCTION), self._user(rendered)]
         response = await backend.chat(prompt)
         return response.content.strip()
+
+    async def _safe_best_effort_summary(self, context: list[ConversationMessage]) -> str | None:
+        """:meth:`_best_effort_summary`, but a failure yields ``None`` instead of raising.
+
+        Used on the cancellation path (R9-109), where the run is already ending and the
+        summary is pure upside: salvaging ~200s of tool work is worth one extra model
+        call, but a failed salvage must never convert a cancellation into an error, and
+        cancellation is exactly when the environment is least healthy (a tripped
+        wall-clock box, a draining worker). Max-steps keeps the unguarded call, because
+        there the summary IS the deliverable and a failure should surface.
+        """
+        try:
+            return await self._best_effort_summary(context)
+        except Exception as exc:  # noqa: BLE001 - salvage is strictly optional
+            _logger.info(
+                "cancellation summary failed; ending without one ({error})", error=str(exc)
+            )
+            return None
 
     async def _best_effort_summary(self, context: list[ConversationMessage]) -> str:
         """Best-effort summary at max-steps, generated on the frontier tier (§4.1)."""

@@ -67,7 +67,10 @@ class Run(BaseModel):
         status: The run's :class:`RunStatus`.
         steps: The ordered plan-act-reflect cycle history.
         output: The final deliverable, or the best-effort summary at
-            ``MAX_STEPS_REACHED``. ``None`` while running or on early error.
+            ``MAX_STEPS_REACHED`` / ``CANCELLED`` (R9-109: a cancelled leg carries
+            its work forward too, since the checkpoint accumulates progress from
+            this field alone). ``None`` while running, on early error, when a run
+            is cancelled before its first step, or when the salvage summary fails.
         error: The error description; set only when ``status == ERROR``.
         started_at: tz-aware UTC start time.
         finished_at: tz-aware UTC end time; ``None`` while running.
