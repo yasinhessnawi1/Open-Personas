@@ -48,7 +48,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol
 
 from persona.billing import BillingConfig, credits_charged
-from persona.errors import CheckpointTooLargeError
+from persona.errors import CheckpointTooLargeError, CreditsExhaustedError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.tasks import (
@@ -441,6 +441,24 @@ class TaskLegHandler:
         if is_terminal(task.state) or task.paused:
             _log.info("task leg skipped (terminal/paused)", task_id=task.id, state=task.state.value)
             return
+        # R9-108: no credits, no leg. The leg path had only a post-hoc CAPTURE
+        # (``capture_up_to_idempotent``), never a pre-flight gate, so an owner at zero
+        # kept running work that billed nothing: production showed 61 legs in 24h
+        # against ``balance=0``, each capturing 0 and consuming provider quota anyway.
+        # The chat path has gated on ``require_credits`` all along; this brings the
+        # background path to the same rule.
+        #
+        # SKIP, do not fail: an empty balance is transient (a top-up, or the monthly
+        # allowance reset), so the task stays exactly as it is and its next fire runs
+        # normally once there is credit. Marking it failed would turn a billing state
+        # into a lost task. Community is unaffected — ``UnlimitedCreditsPolicy``
+        # returns a constant and never raises.
+        if self._credits_policy is not None and self._rls_engine is not None:
+            try:
+                self._credits_policy.require_credits(rls_engine=self._rls_engine, user_id=owner)
+            except CreditsExhaustedError:
+                _log.info("task leg skipped (no credits)", task_id=task.id, state=task.state.value)
+                return
         # The job firing IS the trigger arriving — resume a waiting task (one resume point).
         if task.state == TaskState.WAITING:
             task = self._tasks.resume(owner, payload.task_id, now=now)

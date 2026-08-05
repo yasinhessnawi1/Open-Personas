@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from persona.errors import GatedActionProposedError
+from persona.errors import CreditsExhaustedError, GatedActionProposedError
 from persona.tasks import Contract, ScheduledFire, SpendKind, Task
 from persona_api.db.community import (
     create_community_schema,
@@ -372,3 +372,79 @@ async def test_no_engine_wired_keeps_the_bare_handler_shape(
     )
     assert _run_rows(engine) == []
     assert tasks.get(_OWNER, _TASK).run_ids == ()
+
+
+class _ExhaustedPolicy:
+    """A CreditsPolicy whose pre-flight gate refuses: the owner is at zero."""
+
+    def __init__(self) -> None:
+        self.checked = False
+
+    def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:  # noqa: ARG002
+        self.checked = True
+        raise CreditsExhaustedError("no credits", context={"user_id": user_id})
+
+
+class _FundedPolicy:
+    """A CreditsPolicy with balance; capture is a no-op so the leg is unbilled but allowed."""
+
+    def __init__(self) -> None:
+        self.checked = False
+
+    def require_credits(self, *, rls_engine: Engine, user_id: str) -> int:  # noqa: ARG002
+        self.checked = True
+        return 500
+
+    def capture_up_to_idempotent(self, **_kwargs: object) -> object:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_leg_does_not_run_when_the_owner_is_out_of_credits(
+    engine: Engine, tasks: TaskStore
+) -> None:
+    """THE regression (R9-108): the leg path had no pre-flight credit gate.
+
+    It only CAPTURED after the fact, so an owner at zero kept running work that
+    billed nothing -- production showed 61 legs in 24h against balance=0, each
+    capturing 0 and consuming provider quota anyway. The chat path has gated on
+    require_credits all along.
+    """
+    runner = _Runner(_completed_run())
+    policy = _ExhaustedPolicy()
+    handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=_Sink(),  # type: ignore[arg-type]
+        runner_builder=_RunnerBuilder(runner),
+        rls_engine=engine,
+        credits_policy=policy,  # type: ignore[arg-type]
+    )
+    await handler.handle(_payload(), _Context())
+    assert policy.checked is True, "the leg must consult the credit gate before running"
+    assert runner.calls == 0, "an owner at zero must not have work executed on their behalf"
+    assert _run_rows(engine) == [], "no run record either -- the leg never started"
+
+
+@pytest.mark.asyncio
+async def test_a_funded_owner_still_runs(engine: Engine, tasks: TaskStore) -> None:
+    """The gate must not block a paying owner -- otherwise it trades one bug for a worse one."""
+    runner = _Runner(_completed_run())
+    policy = _FundedPolicy()
+    handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=_Sink(),  # type: ignore[arg-type]
+        runner_builder=_RunnerBuilder(runner),
+        rls_engine=engine,
+        credits_policy=policy,  # type: ignore[arg-type]
+    )
+    await handler.handle(_payload(), _Context())
+    assert policy.checked is True
+    assert runner.calls == 1, "a funded owner's leg must run normally"
+
+
+@pytest.mark.asyncio
+async def test_an_unmetered_deployment_is_unaffected(engine: Engine, tasks: TaskStore) -> None:
+    """No credits_policy wired (community / plain A2) => no gate, byte-identical behaviour."""
+    runner = _Runner(_completed_run())
+    await _handler(engine, tasks, runner).handle(_payload(), _Context())
+    assert runner.calls == 1
