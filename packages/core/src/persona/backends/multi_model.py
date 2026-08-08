@@ -32,11 +32,13 @@ import random
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Final
 
+from persona.backends.degenerate import is_degenerate_repetition
 from persona.backends.errors import (
     AllModelsFailedError,
     AuthenticationError,
     BackendTimeoutError,
     BackendVisionNotSupportedError,
+    DegenerateCompletionError,
     EmptyCompletionError,
     ModelNotFoundError,
     ModelUnavailableError,
@@ -59,6 +61,11 @@ if TYPE_CHECKING:
 __all__ = ["AllModelsFailedError", "AttemptRecord", "MultiModelChatBackend"]
 
 _LOG = get_logger("backends.multi_model")
+
+#: How many delta chunks between repetition checks on a stream (R9-090). The
+#: measure is O(words), and a collapse runs for thousands of tokens, so checking
+#: every chunk would cost far more than it buys.
+_DEGENERATE_CHECK_EVERY = 50
 
 # D-20-10 lock — single same-model retry budget per backend.
 _DEFAULT_MAX_RETRIES_PER_BACKEND: Final[int] = 1
@@ -349,6 +356,17 @@ class MultiModelChatBackend:
                 # chunks are discarded: they carried no user-visible reply).
                 committed = False
                 pending: list[StreamChunk] = []
+                # R9-090: the streamed half of the repetition guard. Once text has
+                # been yielded it cannot be taken back, so unlike the non-streaming
+                # path this CANNOT fail over -- the honest intervention is to stop
+                # digging. A model cycling to its 4096-token cap sends the user
+                # thousands of tokens of salad in the persona's voice and bills for
+                # every one; cutting the stream at the point the collapse is certain
+                # leaves a short, obviously-wrong reply instead of a long one, and
+                # stops paying for the rest. Truncating garbage is never worse than
+                # more garbage, which is why this needs no fallback decision.
+                seen: list[str] = []
+                degenerate = False
                 try:
                     async for chunk in backend.chat_stream(
                         messages,
@@ -368,6 +386,27 @@ class MultiModelChatBackend:
                                 yield held
                             pending.clear()
                         yield chunk
+                        if chunk.delta:
+                            seen.append(chunk.delta)
+                            # The check is O(words), so it runs on a cadence rather
+                            # than per token; the collapse runs for thousands of
+                            # tokens, so a coarse cadence still catches it early.
+                            if len(seen) % _DEGENERATE_CHECK_EVERY == 0 and (
+                                is_degenerate_repetition("".join(seen))
+                            ):
+                                degenerate = True
+                                break
+                    if degenerate:
+                        words = "".join(seen).split()
+                        _LOG.warning(
+                            "stream cut: completion collapsed into repetition "
+                            "provider={provider} model={model} words={words} distinct={distinct}",
+                            provider=backend.provider_name,
+                            model=backend.model_name,
+                            words=len(words),
+                            distinct=len(set(words)),
+                        )
+                        return
                     if committed:
                         # Stream completed cleanly — done with the whole wrapper.
                         return
@@ -457,6 +496,23 @@ class MultiModelChatBackend:
                         context={
                             "provider": backend.provider_name,
                             "model": backend.model_name,
+                        },
+                    )
+                # R9-090: the opposite failure with the same worthlessness. A model
+                # that collapses into a repetition loop runs to the output cap and
+                # the result is delivered in the persona's own voice, which reads
+                # as the product being broken rather than busy. Raised into the
+                # same classifier as an empty completion so the next model in the
+                # chain answers instead.
+                if is_degenerate_repetition(response.content):
+                    words = response.content.split()
+                    raise DegenerateCompletionError(
+                        "backend returned a completion that collapsed into repetition",
+                        context={
+                            "provider": backend.provider_name,
+                            "model": backend.model_name,
+                            "words": str(len(words)),
+                            "distinct_words": str(len(set(words))),
                         },
                     )
                 return response
@@ -553,6 +609,14 @@ class MultiModelChatBackend:
         # Never SURFACE: nothing-at-all must not flow onward as a reply.
         if isinstance(exc, EmptyCompletionError):
             return _RETRY_THEN_FALLBACK
+
+        # R9-090: a repetition collapse is a property of the MODEL, not of the
+        # moment -- the same prompt on the same model collapses again. So unlike
+        # an empty completion it does NOT retry the same backend; it falls
+        # straight through to the next one. Retrying would pay a second full-cap
+        # generation to receive the same garbage.
+        if isinstance(exc, DegenerateCompletionError):
+            return _FALLBACK_NO_RETRY
 
         # Rate limits split by Retry-After cutoff + monetary-reason context.
         if isinstance(exc, RateLimitError):

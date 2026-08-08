@@ -62,6 +62,7 @@ __all__ = [
     "BackendTimeoutError",
     "BackendVisionNotSupportedError",
     "BudgetExceededError",
+    "DegenerateCompletionError",
     "EmptyCompletionError",
     "IncompleteTierConfigError",
     "IntelligentRoutingError",
@@ -169,6 +170,26 @@ class EmptyCompletionError(ProviderError):
 
     ``context`` carries ``provider`` and ``model`` (the standard
     :class:`ProviderError` fields) so fallback logs stay structured.
+    """
+
+
+class DegenerateCompletionError(ProviderError):
+    """Raised when a completion collapsed into a repetition loop (R9-090).
+
+    A sibling of :class:`EmptyCompletionError`, and for the same reason: a reply
+    that is not a reply is a provider failure, not content. Where "empty" is
+    nothing at all, this is the opposite failure with the same worthlessness --
+    the model cycling until it hits the output cap. Observed live 2026-08-01: a
+    free-tier model returned roughly 4000 tokens of salad in the persona's own
+    voice, which reads to the user as the product being broken rather than busy.
+
+    Raising it engages the same retry-then-fallback walk any transient
+    :class:`ProviderError` triggers, so the turn is answered by the next model in
+    the chain instead of delivering the garbage.
+
+    ``context`` carries ``provider`` and ``model`` (the standard
+    :class:`ProviderError` fields) plus ``words`` / ``distinct_words``, so a log
+    line shows how badly the completion collapsed without quoting the text back.
     """
 
 
