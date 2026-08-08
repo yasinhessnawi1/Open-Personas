@@ -27,13 +27,22 @@ this only per error class, with the same "is this safe AND useful" test.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from persona.backends import AllModelsFailedError
+from persona.logging import get_logger
+
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
 
 __all__ = [
     "CAPACITY_BUSY_FREE_MESSAGE",
     "CAPACITY_BUSY_MESSAGE",
+    "owner_on_free_plan",
     "user_facing_error_message",
 ]
+
+_log = get_logger("services.user_facing_errors")
 
 #: Capacity exhaustion, paid plan. Names the condition, says what to do, and
 #: does not imply the reader did anything wrong.
@@ -68,3 +77,40 @@ def user_facing_error_message(exc: Exception, *, on_free_plan: bool = False) -> 
     if isinstance(exc, AllModelsFailedError):
         return CAPACITY_BUSY_FREE_MESSAGE if on_free_plan else CAPACITY_BUSY_MESSAGE
     return None
+
+
+def owner_on_free_plan(engine: Engine | None, owner_id: str) -> bool:
+    """Whether ``owner_id`` is on the free plan, for message selection only.
+
+    Lives here rather than on one worker because THREE surfaces now render the
+    same failure (chat turns, agentic runs, task legs) and each needs the same
+    choice between the two capacity messages. A second copy is how the messages
+    would drift apart.
+
+    Only ever reached on an error path, so the extra indexed read costs nothing
+    in the normal case.
+
+    **Fail-safe is ``False``.** If the plan cannot be determined we show the
+    neutral "models are busy" line rather than the free-tier one, because telling
+    a paying customer that "the free models are busy" is simply false, while
+    showing a free user the neutral line merely omits the upgrade hint.
+
+    Args:
+        engine: The RLS engine, or ``None`` in a deployment without one.
+        owner_id: The affected owner.
+
+    Returns:
+        ``True`` when the owner is known to be on the free plan.
+    """
+    if engine is None:
+        return False
+    try:
+        from persona_api.services import subscription_service  # noqa: PLC0415
+
+        row = subscription_service.get_subscription(engine, user_id=owner_id)
+    except Exception as exc:  # noqa: BLE001 - message selection must never break the caller
+        _log.warning("plan lookup for the failure message failed: {err}", err=str(exc))
+        return False
+    if row is None:
+        return True  # no subscription row IS the free plan (the D-M4-9 default)
+    return str(row.get("plan_code") or "free") == "free"

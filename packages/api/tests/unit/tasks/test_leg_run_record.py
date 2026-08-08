@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from persona.backends import AllModelsFailedError
 from persona.errors import CreditsExhaustedError, GatedActionProposedError
 from persona.tasks import Contract, ScheduledFire, SpendKind, Task
 from persona_api.db.community import (
@@ -35,6 +36,7 @@ from persona_api.db.community import (
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
 from persona_api.errors import RunPersonaOwnerMismatchError
+from persona_api.services.user_facing_errors import CAPACITY_BUSY_FREE_MESSAGE
 from persona_api.tasks import TaskLegHandler, TaskLegPayload, TaskStore
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.run import Run, RunStatus
@@ -448,3 +450,35 @@ async def test_an_unmetered_deployment_is_unaffected(engine: Engine, tasks: Task
     runner = _Runner(_completed_run())
     await _handler(engine, tasks, runner).handle(_payload(), _Context())
     assert runner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_tier_exhaustion_is_sanitised_before_it_reaches_the_run_row(
+    engine: Engine, tasks: TaskStore
+) -> None:
+    """R9-097 (remainder): a leg's ``runs.error`` is shown to the user too.
+
+    The chat path stopped printing our provider names, model ids and routing
+    strategy on a busy moment; the leg path still wrote ``str(exc)`` into a column
+    the task's run list renders. Same leak, different door.
+
+    A0 still sees the real failure: the exception re-raises unchanged, which is
+    what its retry and dead-letter accounting reads.
+    """
+    exhausted = AllModelsFailedError(
+        "every backend in MultiModelChatBackend exhausted",
+        context={
+            "tier": "frontier",
+            "attempts_json": '[{"provider": "openrouter", "model": "openai/gpt-oss-20b:free"}]',
+            "final_error_class": "RateLimitError",
+        },
+    )
+    handler = _handler(engine, tasks, _Runner(_completed_run()), sink=_Sink(fails_with=exhausted))
+
+    with pytest.raises(AllModelsFailedError):
+        await handler.handle(_payload(), _Context())
+
+    stored = str(_run_rows(engine)[0]["error"])
+    assert stored == CAPACITY_BUSY_FREE_MESSAGE  # no subscription row IS the free plan
+    for leaked in ("openrouter", "gpt-oss-20b", "MultiModelChatBackend"):
+        assert leaked not in stored, f"{leaked!r} reached the user through a leg's runs.error"

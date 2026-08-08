@@ -42,6 +42,7 @@ from persona_api.sandbox import (
 from persona_api.services import notifications_service, run_record
 from persona_api.services.persona_service import persona_name_from_yaml
 from persona_api.services.synthesis_trigger import enqueue_run_synthesis
+from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
 
 # Spec P6 (D4-c): terminal run status → (bell level, i18n key). Copy is stored
 # locale-neutral (P6-D-5); the web resolves the key. A status not here is not
@@ -377,7 +378,20 @@ class RunRegistry:
             await self._maybe_originate(handle, run)
         except Exception as exc:  # noqa: BLE001 — a background task must never crash silently
             _log.error("agentic run {rid} failed: {err}", rid=handle.run_id, err=str(exc))
-            self._persist_error(handle.run_id, str(exc))
+            # R9-097 (remainder): ``runs.error`` is rendered on the run page, so it
+            # is a USER surface, not only a diagnostic one. A tier exhaustion
+            # stringifies to our provider names, model ids and routing strategy;
+            # the chat path stopped showing that and this path had not. The full
+            # exception is in the log line directly above, which is where diagnosis
+            # belongs. Exceptions this module does not rewrite pass through
+            # unchanged, so nothing already-useful is genericised away.
+            self._persist_error(
+                handle.run_id,
+                user_facing_error_message(
+                    exc, on_free_plan=owner_on_free_plan(self._engine, handle.owner_id)
+                )
+                or str(exc),
+            )
         finally:
             reset_sandbox_request_context(sandbox_token)
             # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path

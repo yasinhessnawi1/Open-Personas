@@ -315,7 +315,7 @@ class SharedInboundFlow:
             # Best-effort: even the apology send is guarded — a transport that is ALSO
             # down must not turn one bad turn into a second, unhandled crash.
             with contextlib.suppress(Exception):
-                await transport.send_system(conversation_key=chat, text=TURN_FAILED_MESSAGE)
+                await transport.send_system(conversation_key=chat, text=_failure_text(exc))
             return
 
         # Spec A7 (T6): a delivered turn is a connector.message_received event — emit it (best-
@@ -337,3 +337,23 @@ class SharedInboundFlow:
                 )
             except Exception:  # noqa: BLE001 — emission is additive; never fail the delivered turn
                 _log.warning("connector.message_received emit failed", platform=platform)
+
+
+def _failure_text(exc: Exception) -> str:
+    """The apology to send, preferring the worker's own sanitised sentence (R9-097).
+
+    The api marks a failure message it has already made safe to show a person, and
+    that message is strictly better than the generic line: "the models are busy,
+    give it a minute" tells the user the fault is transient and that retrying
+    works, where "something went wrong on my end" reads as the product being
+    broken. The web app has said the specific thing since R9-097; a connector user
+    hitting the identical blip got the vague one.
+
+    Anything NOT marked keeps the generic text, because an unmarked detail is the
+    raw exception, whose whole problem is that it names our providers and models.
+    """
+    context = getattr(exc, "context", None)
+    if not isinstance(context, dict) or context.get("user_facing") != "true":
+        return TURN_FAILED_MESSAGE
+    detail = str(context.get("detail") or "").strip()
+    return detail or TURN_FAILED_MESSAGE

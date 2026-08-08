@@ -49,7 +49,7 @@ from persona_api.sandbox import (
     reset_sandbox_request_context,
     set_sandbox_request_context,
 )
-from persona_api.services.user_facing_errors import user_facing_error_message
+from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -307,6 +307,7 @@ class ChatTurnRegistry:
         routing: dict[str, object] | None = None
         last_chunk: StreamChunk | None = None
         error_message: str | None = None
+        error_is_user_facing = False
         originated: Mapping[str, Any] | None = None
         steered: Mapping[str, Any] | None = None
         rescheduled: Mapping[str, Any] | None = None
@@ -394,9 +395,20 @@ class ChatTurnRegistry:
                 # and error classes it tried — our vendor mix and routing
                 # strategy, shown to anyone who hits a busy moment, and useless
                 # to them besides. Unmapped exceptions pass through unchanged.
-                error_message = user_facing_error_message(
+                safe = user_facing_error_message(
                     exc, on_free_plan=self._on_free_plan(handle.owner_id)
-                ) or str(exc)
+                )
+                # R9-097 (remainder): whether the text is SHOWABLE travels with it.
+                # A consumer outside this process cannot re-derive it from the
+                # string, and the connector proved why that matters: it received
+                # this message and, unable to tell a sanitised sentence from a raw
+                # exception, discarded every one in favour of generic copy. So a
+                # capacity blip on Telegram read "something went wrong on my end"
+                # while the same blip in the web app said the models were busy and
+                # to try again shortly. The flag lets a remote surface forward the
+                # good sentence and keep falling back for everything else.
+                error_message = safe or str(exc)
+                error_is_user_facing = safe is not None
 
             # R9-033 defense-in-depth: a "complete" turn whose accumulated
             # content is empty must NEVER persist as a silent empty assistant
@@ -451,7 +463,14 @@ class ChatTurnRegistry:
                 )
             elif status == "error":
                 await handle.events.put(
-                    ("error", {"error": "turn_failed", "message": error_message or "turn failed"})
+                    (
+                        "error",
+                        {
+                            "error": "turn_failed",
+                            "message": error_message or "turn failed",
+                            "user_facing": error_is_user_facing,
+                        },
+                    )
                 )
         finally:
             reset_sandbox_request_context(sandbox_token)
@@ -488,25 +507,11 @@ class ChatTurnRegistry:
     def _on_free_plan(self, owner_id: str) -> bool:
         """Whether ``owner_id`` is on the free plan (R9-097 message selection).
 
-        Only reached on the error path, so the extra indexed read costs nothing
-        in the normal case. **Fail-safe is ``False``**: if the plan cannot be
-        determined we show the neutral "models are busy" line rather than the
-        free-tier one, because telling a paying customer that "the free models
-        are busy" is simply false, while showing a free user the neutral line
-        merely omits the upgrade hint.
+        Delegates to the shared helper: agentic runs and task legs render the
+        same two capacity messages, so the plan lookup that chooses between them
+        belongs beside the messages rather than on this one worker.
         """
-        if self._engine is None:
-            return False
-        try:
-            from persona_api.services import subscription_service  # noqa: PLC0415
-
-            row = subscription_service.get_subscription(self._engine, user_id=owner_id)
-        except Exception as exc:  # noqa: BLE001 — never let message selection break the turn
-            _log.warning("plan lookup for the failure message failed: {err}", err=str(exc))
-            return False
-        if row is None:
-            return True  # no subscription row IS the free plan (the D-M4-9 default)
-        return str(row.get("plan_code") or "free") == "free"
+        return owner_on_free_plan(self._engine, owner_id)
 
     def _release_op_slot(self, handle: ChatTurnHandle) -> None:
         if self._engine is None or handle.op_token is None:

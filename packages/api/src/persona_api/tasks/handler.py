@@ -64,6 +64,7 @@ from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
 
 from persona_api.services import run_record
+from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -506,7 +507,19 @@ class TaskLegHandler:
             # The leg blew up (A0 will re-deliver). Record the failure before re-raising —
             # an invisible failed run is half of why the missing record mattered.
             if record is not None:
-                record.fail(str(exc))
+                # R9-097 (remainder): the same sanitisation the chat and run paths
+                # apply. This row is shown on the task's run list, so a tier
+                # exhaustion here would print our provider names and model ids to
+                # the user exactly as it once did in chat. The unsanitised cause is
+                # preserved where it is actually needed: the exception re-raises
+                # immediately below, so A0's retry and dead-letter accounting still
+                # see the real failure.
+                record.fail(
+                    user_facing_error_message(
+                        exc, on_free_plan=owner_on_free_plan(self._rls_engine, owner)
+                    )
+                    or str(exc)
+                )
             raise
         # The run finished (COMPLETED / CONTINUE / FAILED), or the A3 gate ended the leg with
         # no run at all — settle the durable record either way, before anything downstream

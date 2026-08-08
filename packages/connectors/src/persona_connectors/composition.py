@@ -289,12 +289,19 @@ async def _collect_reply(handle: ChatTurnHandle) -> str:
         elif kind == "done":
             break
         elif kind == "error":
-            detail = cast("Mapping[str, object]", payload).get("message")
+            frame = cast("Mapping[str, object]", payload)
+            detail = frame.get("message")
+            # R9-097 (remainder): the worker marks whether its message is safe to
+            # show a person. Only a marked one is carried through to the reply --
+            # an unmarked ``detail`` is the raw stringified exception, which is
+            # exactly the vendor mix and routing internals we stopped showing in
+            # chat. Unmarked keeps the generic apology, as before.
             raise TurnFailedError(
                 "the persona turn failed",
                 context={
                     "conversation_id": handle.conversation_id,
                     "detail": str(detail) if detail is not None else "",
+                    "user_facing": "true" if frame.get("user_facing") is True else "false",
                 },
             )
     return "".join(parts)
