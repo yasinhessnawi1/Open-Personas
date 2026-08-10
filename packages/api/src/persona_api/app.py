@@ -114,6 +114,7 @@ from persona_api.services.model_tiers import (
 )
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
+from persona_api.services.verb_service_composition import build_conversational_verb_services
 from persona_api.storage import build_file_storage
 
 if TYPE_CHECKING:
@@ -447,57 +448,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         origination_service = _a4_services.origination
         task_steering_service = _a4_services.steering
-    # Spec A8 (T6): the WORKER side of the conversational reschedule verb — applies a user-confirmed
-    # reschedule through the one CAS-guarded door (owner-scoped via the worker's injected owner_id).
-    task_reschedule_service = None
-    if rls_engine is not None:
-        from persona_api.schedules.store import ScheduleStore
-        from persona_api.services.task_reschedule_service import TaskRescheduleService
-        from persona_api.tasks.store import TaskStore
-
-        task_reschedule_service = TaskRescheduleService(
-            task_reader=TaskStore(rls_engine),
-            schedule_store=ScheduleStore(rls_engine),
-            engine=rls_engine,
-        )
-    # Spec A5 (T10): the worker side of the initiative-verb family — dial writes
-    # (+ the lazy schedule ensure) and the LEDGER-anchored confirm/decline. Built
-    # only when initiative is enabled (PERSONA_INITIATIVE_ENABLED, default OFF).
-    initiative_verb_service = None
-    if rls_engine is not None:
-        from persona.initiative import InitiativeSettings as _InitiativeSettings
-
-        _initiative_settings = _InitiativeSettings()
-        if _initiative_settings.enabled:
-            from persona.config import PersonaCoreConfig
-
-            from persona_api.initiative.delivery import InitiativeDeliveryExecutor
-            from persona_api.initiative.store import DeclineStore, InitiativeLedger
-            from persona_api.initiative.verb_service import InitiativeVerbService
-            from persona_api.schedules.store import ScheduleStore as _A5ScheduleStore
-            from persona_api.schedules.tombstones import ScheduleTombstoneStore as _A5TombstoneStore
-            from persona_api.tasks.store import TaskStore as _A5TaskStore
-
-            _a5_ledger = InitiativeLedger(rls_engine)
-            initiative_verb_service = InitiativeVerbService(
-                rls_engine=rls_engine,
-                schedules=_A5ScheduleStore(rls_engine),
-                ledger=_a5_ledger,
-                declines=DeclineStore(rls_engine),
-                executor=InitiativeDeliveryExecutor(
-                    ledger=_a5_ledger,
-                    tasks=_A5TaskStore(rls_engine),
-                    schedules=_A5ScheduleStore(rls_engine),
-                    timezone_for=PersonaCoreConfig().default_timezone,
-                    rls_engine=rls_engine,
-                ),
-                settings=_initiative_settings,
-                # R9-037: the dial verb's own lazy ensure refuses a recently
-                # user-deleted scan schedule too (the same shared function the
-                # provisioner sweep gates).
-                tombstones=_A5TombstoneStore(rls_engine),
-                tombstone_window_days=config.schedule_tombstone_window_days,
-            )
+    # Spec A8 (T6) + Spec A5 (T10): the worker sides of the reschedule and initiative
+    # verbs. R9-081: built through the SHARED builder the connector root also calls, so
+    # the two processes cannot drift — the connector had these at ``None`` while its
+    # runtime happily emitted the verbs, and a user's confirmation did nothing.
+    _verb_services = build_conversational_verb_services(rls_engine=rls_engine, config=config)
+    task_reschedule_service = _verb_services.reschedule
+    initiative_verb_service = _verb_services.initiative
     # R9-079: composed through the SHARED builder the connector service also uses,
     # so the billing set (policy / gateway / floor / proportional / ceiling /
     # markup / queue) is derived from the same APIConfig by the same code on both

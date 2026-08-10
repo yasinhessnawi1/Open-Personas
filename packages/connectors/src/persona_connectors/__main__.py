@@ -48,7 +48,10 @@ from persona_api.services.model_tiers import (
     resolve_openrouter_subscription_mode,
 )
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_api.services.task_steering_service import TaskSteeringService
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
+from persona_api.services.verb_service_composition import build_conversational_verb_services
+from persona_api.tasks.store import TaskStore
 from persona_runtime.tier import tier_registry_from_env
 from websockets.asyncio.client import connect as ws_connect
 
@@ -911,6 +914,17 @@ async def _amain() -> None:
     # so a connector turn also enqueues turn-boundary synthesis like a web turn.
     credits_policy = build_credits_policy(api_config)
     runtime_factory = _build_runtime_factory(api_config, rls_engine, credits_policy=credits_policy)
+    # R9-081: the worker side of the conversational verbs. The runtime this process
+    # builds emits them unconditionally, so without these a persona confirmed a task
+    # over Telegram, said "Done, I've set that up", and nothing was created. Reschedule
+    # and initiative come from the SAME builder app.py uses, so the two roots cannot
+    # drift apart the way the billing set once did (R9-074 / R9-079).
+    _verb_services = build_conversational_verb_services(rls_engine=rls_engine, config=api_config)
+    # Steering is built here rather than in the shared builder because the api gives it
+    # a failure notifier and this process has none: pause / resume / cancel all take
+    # effect, and only the narration of a cancel that did NOT take is unavailable (it
+    # still logs). That is a real difference, so it is stated rather than hidden.
+    task_steering_service = TaskSteeringService(tasks=TaskStore(rls_engine))
     run_turn = build_reply_runner(
         runtime_factory=runtime_factory,
         rls_engine=rls_engine,
@@ -919,6 +933,9 @@ async def _amain() -> None:
         credits_policy=credits_policy,
         gateway=build_stripe_gateway(api_config),
         job_queue=JobQueue(dispatch_engine),
+        task_steering_service=task_steering_service,
+        task_reschedule_service=_verb_services.reschedule,
+        initiative_verb_service=_verb_services.initiative,
     )
     list_persona_names = build_persona_name_lister(
         rls_engine=rls_engine, owner_scope=composition.owner_scope

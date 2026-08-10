@@ -30,8 +30,10 @@ fail if the fix were reverted.
 from __future__ import annotations
 
 import contextlib
+import pathlib
 from typing import TYPE_CHECKING, Any
 
+import persona_connectors
 import pytest
 from fastapi.testclient import TestClient
 from persona.backends import BackendConfig
@@ -46,7 +48,10 @@ from persona_api.jobs import JobQueue
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services.model_tiers import build_free_tier_registry
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_api.services.task_steering_service import TaskSteeringService
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
+from persona_api.services.verb_service_composition import build_conversational_verb_services
+from persona_api.tasks.store import TaskStore
 from persona_connectors.composition import build_reply_runner
 from persona_runtime.tier import TierConfig, TierRegistry
 from sqlalchemy import insert
@@ -145,7 +150,13 @@ def _connector_engine(tmp_path: Path) -> Engine:
 
 
 def _build_connector_runner(config: APIConfig, engine: Engine) -> None:
-    """Compose the connector reply runner exactly as ``__main__._amain`` does."""
+    """Compose the connector reply runner exactly as ``__main__._amain`` does.
+
+    R9-081: the verb services are built here the same way the service entry builds
+    them. If this drifted from ``_amain`` the wiring assertions below would pass
+    while production stayed unwired, which is the exact failure they exist to catch.
+    """
+    verb_services = build_conversational_verb_services(rls_engine=engine, config=config)
     build_reply_runner(
         runtime_factory=_FakeRuntimeFactory(),  # type: ignore[arg-type]
         rls_engine=engine,
@@ -154,6 +165,9 @@ def _build_connector_runner(config: APIConfig, engine: Engine) -> None:
         credits_policy=build_credits_policy(config),
         gateway=build_stripe_gateway(config),
         job_queue=JobQueue(engine),
+        task_steering_service=TaskSteeringService(tasks=TaskStore(engine)),
+        task_reschedule_service=verb_services.reschedule,
+        initiative_verb_service=verb_services.initiative,
     )
 
 
@@ -228,25 +242,42 @@ def test_a_community_connector_turn_stays_unbilled(
     assert call["gateway"] is None  # no Stripe anywhere near a self-host install
 
 
-def test_the_connector_leaves_the_conversational_verb_services_unwired_deliberately(
+def test_the_connector_wires_the_verbs_it_can_actually_apply(
     tmp_path: Path, recorder: _RegistryRecorder
 ) -> None:
-    """The A4/A5/A8 worker services are a STATED gap, not a silent omission.
+    """R9-081 THE regression: a verb the runtime emits must reach a worker that applies it.
 
-    They are passed explicitly as ``None`` (see ``build_reply_runner``'s docstring): the
-    connector process has no A11 live-session registry and no C0 delivery seam wired at
-    that point, so wiring them half-way would be worse than leaving the gap visible. This
-    test pins the decision so a future change has to be deliberate.
+    The connector's ``RuntimeFactory`` builds the loop-side interpreters
+    unconditionally, so a persona confirms a reschedule or a steering verb over
+    Telegram whatever this worker holds. With these at ``None`` the confirmation was
+    dropped and the user still read "Done, I've set that up" -- a silent lie rather
+    than an error, because the reply text is produced before the worker call and
+    independently of it.
     """
     config = _config(tmp_path)
     _build_connector_runner(config, _connector_engine(tmp_path))
 
     assert len(recorder.calls) == 1, recorder.calls  # it went through the SHARED builder
     call = recorder.calls[0]
-    assert call["origination_service"] is None
-    assert call["task_steering_service"] is None
-    assert call["task_reschedule_service"] is None
-    assert call["initiative_verb_service"] is None
+    assert call["task_steering_service"] is not None, "pause / resume / cancel go nowhere"
+    assert call["task_reschedule_service"] is not None, "a confirmed reschedule goes nowhere"
+
+
+def test_the_connector_leaves_origination_unwired_deliberately(
+    tmp_path: Path, recorder: _RegistryRecorder
+) -> None:
+    """Origination alone stays a STATED gap, and the reason is specific to it.
+
+    Its failure notifier narrates "I could not create that after all" through the C0
+    delivery seam to an open web tab, which a connector process does not have, so a
+    failed origination would be persisted and never seen. That needs a decision about
+    where a connector-raised failure account is delivered, not a wiring change. This
+    pins the boundary so closing it has to be deliberate.
+    """
+    config = _config(tmp_path)
+    _build_connector_runner(config, _connector_engine(tmp_path))
+
+    assert recorder.calls[0]["origination_service"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -403,3 +434,24 @@ def test_the_connector_runtime_factory_arms_gating_and_threads_the_openrouter_mo
     assert recorded["free_tier_registry"] is not None  # gating ARMED on the connector
     assert recorded["paid_registry_mode"] == "free"  # the mode reaches the paid builder too
     assert isinstance(recorded["credits_policy"], MeteredCreditsPolicy)
+
+
+def test_the_service_entry_actually_passes_the_verb_services() -> None:
+    """The wiring test above builds the services itself, so it cannot see this.
+
+    ``_build_connector_runner`` calls ``build_reply_runner`` directly. That proves the
+    forwarding, but a green suite would still be compatible with ``__main__._amain``
+    never passing them -- the fix would be unreachable in production while every test
+    passed. This reads the real call site, in the spirit of the A10-D-9 grep guard.
+    """
+    entry = pathlib.Path(persona_connectors.__file__).parent / "__main__.py"
+    source = entry.read_text()
+    # Slice to the call's own closing paren (a bare ")" at the call's indent), not the
+    # first ")" -- nested calls like build_stripe_gateway(api_config) sit inside it.
+    call = source.split("run_turn = build_reply_runner(", 1)[1].split("\n    )", 1)[0]
+    for kwarg in (
+        "task_steering_service=",
+        "task_reschedule_service=",
+        "initiative_verb_service=",
+    ):
+        assert kwarg in call, f"the service entry never passes {kwarg!r}; the wiring is dead code"

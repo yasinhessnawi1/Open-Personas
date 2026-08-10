@@ -47,8 +47,11 @@ if TYPE_CHECKING:
     from persona_api.billing import StripeGateway
     from persona_api.config import APIConfig
     from persona_api.editions.credits_policy import CreditsPolicy
+    from persona_api.initiative.verb_service import InitiativeVerbService
     from persona_api.jobs.queue import JobQueue
     from persona_api.services.runtime_factory import RuntimeFactory
+    from persona_api.services.task_reschedule_service import TaskRescheduleService
+    from persona_api.services.task_steering_service import TaskSteeringService
     from sqlalchemy.engine import Engine
 
     from persona_connectors.config import ConnectorConfig
@@ -316,6 +319,9 @@ def build_reply_runner(
     credits_policy: CreditsPolicy,
     gateway: StripeGateway | None,
     job_queue: JobQueue | None,
+    task_steering_service: TaskSteeringService | None = None,
+    task_reschedule_service: TaskRescheduleService | None = None,
+    initiative_verb_service: InitiativeVerbService | None = None,
 ) -> Callable[[TurnRequest], Awaitable[str]]:
     """Build the ``run_turn`` callable: run a turn through api's OWN chat-turn path.
 
@@ -352,15 +358,22 @@ def build_reply_runner(
     (community's ``UnlimitedCreditsPolicy``) must be a stated decision, never a
     forgotten keyword.
 
-    The four conversational-verb worker services (A4 origination / A4 steering /
-    A8 reschedule / A5 initiative) are deliberately left at ``None``. They are a
-    coherent group that belongs to a DIFFERENT gap from this one: the connector's
-    ``RuntimeFactory`` does build the loop-side interpreters, so a persona can
-    confirm a task contract over Telegram while this worker drops it — a real
-    defect, but one whose fix needs its own decisions (the failure notifier
-    originates through the C0 delivery seam, and the A11 live-session registry
-    that carries an originated account to an open tab lives in the API process,
-    not here). Wiring them half-way would be worse than leaving the gap visible.
+    R9-081 — the conversational-verb worker services. The connector's
+    ``RuntimeFactory`` builds the loop-side interpreters unconditionally, so a persona
+    CAN confirm a task contract, reschedule, or answer an initiative dial over
+    Telegram; with the worker side at ``None`` the confirmation was silently dropped
+    and the user still read "Done, I've set that up". Steering, reschedule and
+    initiative are now injected by the service entry and this path applies them.
+
+    ``origination_service`` remains unwired, and that is the honest boundary rather
+    than an oversight. Its failure notifier narrates "I could not create that after
+    all" through the C0 delivery seam to an open web tab, and a connector process has
+    neither the A11 live-session registry nor (at this point in its startup) its own
+    delivery router — so a failed origination would be persisted and never seen. That
+    needs a decision about where a connector-raised failure account is delivered, not
+    a wiring change. Steering is wired WITHOUT its optional notifier for the same
+    reason: pause, resume and cancel all take effect, and only the narration of a
+    cancel that failed to take is unavailable (it still logs).
 
     ``request.persona_id`` is not passed down: ``start_chat_turn`` derives the persona
     from the conversation ROW, and the connector's conversation store creates one
@@ -386,6 +399,10 @@ def build_reply_runner(
             is not active.
         job_queue: The durable queue for the turn-boundary synthesis enqueue;
             ``None`` makes it a no-op.
+        task_steering_service: Worker side of the A4 steering verbs (pause / resume /
+            cancel). ``None`` keeps the pre-R9-081 drop-on-the-floor behaviour.
+        task_reschedule_service: Worker side of the A8 reschedule verb.
+        initiative_verb_service: Worker side of the A5 initiative verbs.
 
     Returns:
         The ``run_turn`` callable the connector flows inject.
@@ -398,11 +415,12 @@ def build_reply_runner(
         credits_policy=credits_policy,
         gateway=gateway,
         job_queue=job_queue,
-        # R9-079: see the note above — the A4/A5/A8 verb services are a separate gap.
+        # R9-081: see the note above. Origination alone stays None, pending the
+        # decision about where a connector-raised failure account is delivered.
         origination_service=None,
-        task_steering_service=None,
-        task_reschedule_service=None,
-        initiative_verb_service=None,
+        task_steering_service=task_steering_service,
+        task_reschedule_service=task_reschedule_service,
+        initiative_verb_service=initiative_verb_service,
     )
     locks = _ConversationLocks()
 
