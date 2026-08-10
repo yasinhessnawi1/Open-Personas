@@ -865,3 +865,82 @@ class TestReconcileVoiceAssignments:
             )
         )
         assert counts == {"scanned": 1, "remapped": 0, "skipped": 0, "failed": 1}
+
+
+class TestReconcileStopsOnAnAuthRefusal:
+    """R9-111: one futile catalogue call per BOOT, not one per persona.
+
+    The boot pass has no caller, so it forwards no bearer token. Against an
+    auth-required (cloud) voice service every fetch is a guaranteed 401 and the
+    outcome is identical for every remaining persona. In production a deploy issued
+    one 401 per mismatched persona, logged a warning for each, and delayed readiness
+    enough that Fly marked the release FAILED and reported intermittent failures on
+    the public ports -- all to accomplish nothing.
+    """
+
+    @staticmethod
+    def _refusing_fetch(status: int, calls: list[int]) -> Callable[..., Awaitable[object]]:
+        request = httpx.Request("GET", "http://voice/v1/voices")
+        response = httpx.Response(status, request=request)
+
+        async def _f(*_: object, **__: object) -> object:
+            calls.append(1)
+            raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+        return _f
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_a_refused_catalogue_costs_exactly_one_call_however_many_personas(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        """THE regression: five mismatched personas used to mean five 401s."""
+        calls: list[int] = []
+        monkeypatch.setattr(vas, "_fetch_catalogue", self._refusing_fetch(status, calls))
+        monkeypatch.setattr(vas.persona_service, "set_voice", _araise())
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id=f"p{i}", owner_id="owner-1", yaml=_YAML_WITH_VOICE) for i in range(5)]
+        )
+
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                free_tier_registry=None,
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+
+        assert len(calls) == 1, f"{len(calls)} futile catalogue calls; the point was to stop at 1"
+        # Every persona is accounted for, so the counts still describe the whole sweep.
+        assert counts["scanned"] == 5
+        assert counts["remapped"] == 0
+
+    def test_a_non_auth_failure_still_tries_every_persona(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard is narrow on purpose.
+
+        A 503 or a timeout may be transient for one persona and not the next, so it
+        stays per-persona and fail-soft exactly as before. Widening the short-circuit
+        to any error would turn one unlucky moment into a whole skipped sweep.
+        """
+        calls: list[int] = []
+        monkeypatch.setattr(vas, "_fetch_catalogue", self._refusing_fetch(503, calls))
+        monkeypatch.setattr(vas.persona_service, "set_voice", _araise())
+        sweep = _FakeSweepEngine(
+            [_FakeRow(id=f"p{i}", owner_id="owner-1", yaml=_YAML_WITH_VOICE) for i in range(3)]
+        )
+
+        counts = asyncio.run(
+            vas.reconcile_voice_assignments(
+                config=_reconcile_config(voice_tts_provider="elevenlabs"),
+                registry=SimpleNamespace(get=lambda _t: _FakeBackend("el1")),
+                free_tier_registry=None,
+                sweep_engine=sweep,
+                rls_engine=object(),
+            )
+        )
+
+        assert len(calls) > 1, "a transient failure must not abandon the whole sweep"
+        assert counts["scanned"] == 3

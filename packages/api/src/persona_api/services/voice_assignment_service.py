@@ -573,6 +573,7 @@ async def reconcile_voice_assignments(
     if not getattr(config, "voice_service_url", ""):
         return counts
     active_provider = getattr(config, "voice_tts_provider", "cartesia")
+    auth_checked = False
 
     try:
         with sweep_engine.begin() as conn:
@@ -602,6 +603,34 @@ async def reconcile_voice_assignments(
         if voice is not None and voice.provider == active_provider:
             counts["skipped"] += 1
             continue
+
+        # R9-111: one futile call per BOOT, not one per persona. The boot pass has no
+        # caller, so it forwards no bearer; against an auth-required (cloud) voice
+        # service every fetch is a guaranteed 401 and the outcome is identical for
+        # every remaining persona. A deploy issued one 401 per mismatched persona,
+        # logged a warning for each, and delayed readiness enough that Fly marked the
+        # release failed and reported intermittent failures on the public ports, all to
+        # accomplish nothing. Checked LAZILY, at the first persona that actually needs
+        # the network, so a boot where everything already matches still pays zero
+        # catalogue fetches (the property the two cheap-skip tests pin). Only an AUTH
+        # refusal short-circuits: any other failure stays per-persona and fail-soft,
+        # since it may be transient for one persona and not the next.
+        if not auth_checked:
+            auth_checked = True
+            try:
+                await _fetch_catalogue(
+                    getattr(config, "voice_service_url", ""), bearer=None, language=None
+                )
+            except Exception as exc:  # noqa: BLE001 - classified here; never blocks boot
+                if getattr(getattr(exc, "response", None), "status_code", None) in {401, 403}:
+                    _LOG.info(
+                        "voice remap reconciliation stopped: the catalogue requires a "
+                        "caller token this boot pass does not have (scanned={scanned})",
+                        scanned=counts["scanned"],
+                    )
+                    counts["skipped"] += len(rows) - counts["scanned"] + 1
+                    counts["scanned"] = len(rows)
+                    return counts
 
         token = current_user_id.set(row.owner_id)
         try:
