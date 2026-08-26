@@ -98,6 +98,8 @@ import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from persona.logging import get_logger
+
 from persona_voice.loop.streaming import Transcript
 from persona_voice.stt.errors import (
     STTAudioFormatError,
@@ -117,6 +119,14 @@ __all__ = ["DeepgramStreamingSTT", "transcribe_prerecorded"]
 
 
 _DEEPGRAM_INBOUND_SAMPLE_RATE_HZ: int = 16_000
+
+_logger = get_logger("stt.deepgram")
+
+#: Handshake attempts before giving up (R9-117). Small: audio is arriving while
+#: we retry, so this must not become a stall of its own.
+_CONNECT_ATTEMPTS = 3
+#: Linear backoff base; attempt N waits N * this.
+_CONNECT_BACKOFF_S = 0.25
 """Sample rate Deepgram Nova-3 accepts natively. Matches V1's D-V1-6
 ``AUDIO_INBOUND_SAMPLE_RATE`` — zero transcoding per R-V2-3."""
 
@@ -207,7 +217,7 @@ class DeepgramStreamingSTT:
                 },
             )
         if not self._connected:
-            await self._open_connection()
+            await self._open_connection_with_retry()
         try:
             connection = self._connection
             assert connection is not None  # guarded by self._connected
@@ -315,6 +325,46 @@ class DeepgramStreamingSTT:
     # ------------------------------------------------------------------
     # private — connection lifecycle + event handlers
     # ------------------------------------------------------------------
+
+    async def _open_connection_with_retry(self) -> None:
+        """Open the stream, retrying a transient handshake failure (R9-117).
+
+        A single ``timed out during opening handshake`` used to end the CALL, not
+        just the stream: the exception propagated out of ``push_audio`` into the
+        audio pipeline, and seconds later the LiveKit session was gone with a
+        broken pipe and a ``StateMismatch`` on resume. A provider blip should not
+        disconnect a person mid-sentence.
+
+        Bounded on purpose. The retries are short and few because audio is still
+        arriving while we are in here, so this must not become a stall of its own;
+        after the last attempt the original error is raised exactly as before, so
+        a genuinely unreachable provider still fails loudly rather than silently
+        swallowing every frame.
+        """
+        last: Exception | None = None
+        for attempt in range(_CONNECT_ATTEMPTS):
+            try:
+                await self._open_connection()
+            except Exception as exc:  # noqa: BLE001 - retried, then re-raised below
+                last = exc
+                if attempt + 1 >= _CONNECT_ATTEMPTS:
+                    break
+                _logger.warning(
+                    "deepgram stream handshake failed; retrying "
+                    "(attempt={attempt} of {total}): {err}",
+                    attempt=attempt + 1,
+                    total=_CONNECT_ATTEMPTS,
+                    err=str(exc)[:200],
+                )
+                await asyncio.sleep(_CONNECT_BACKOFF_S * (attempt + 1))
+            else:
+                if attempt:
+                    _logger.info(
+                        "deepgram stream recovered on attempt {attempt}", attempt=attempt + 1
+                    )
+                return
+        assert last is not None  # the loop only breaks after an exception
+        raise last
 
     async def _open_connection(self) -> None:
         """Open the Deepgram WebSocket and wire event handlers.

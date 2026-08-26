@@ -821,3 +821,88 @@ async def test_transcribe_prerecorded_maps_generic_failure_to_stream_failure_err
     config = StreamingSTTConfig(provider="deepgram", api_key="dg-secret")
     with pytest.raises(STTStreamFailureError):
         await transcribe_prerecorded(b"pcm-bytes", config=config)
+
+
+# ---------- R9-117: a transient handshake failure must not end the call -------
+
+
+class _FlakyStart:
+    """Makes a connection's ``start`` fail N times, then behave normally.
+
+    Models the production incident: one ``timed out during opening handshake``
+    used to propagate out of ``push_audio``, and seconds later the whole LiveKit
+    session was gone with a broken pipe and a StateMismatch on resume.
+    """
+
+    def __init__(self, connection: _FakeConnection, failures: int) -> None:
+        self._connection = connection
+        self._remaining = failures
+        self._real_start = connection.start
+        self.attempts = 0
+
+    async def __call__(self, options: Any) -> bool:
+        self.attempts += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            msg = "timed out during opening handshake"
+            raise TimeoutError(msg)
+        return await self._real_start(options)
+
+
+def _flaky(
+    monkeypatch: pytest.MonkeyPatch, connection: _FakeConnection, failures: int
+) -> _FlakyStart:
+    """Install a flaky ``start`` and remove the retry backoff from the clock."""
+    from persona_voice.stt import deepgram_backend
+
+    flaky = _FlakyStart(connection, failures)
+    monkeypatch.setattr(connection, "start", flaky)
+    monkeypatch.setattr(deepgram_backend, "_CONNECT_BACKOFF_S", 0.0)
+    return flaky
+
+
+@pytest.mark.asyncio
+async def test_a_transient_handshake_timeout_is_retried_not_fatal(
+    fake_connection: _FakeConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE regression: one provider blip used to disconnect a person mid-sentence."""
+    flaky = _flaky(monkeypatch, fake_connection, failures=1)
+    backend = DeepgramStreamingSTT(StreamingSTTConfig(provider="deepgram", api_key="dg-secret"))
+
+    await backend.push_audio(b"\x00\x00" * 320, 16000)
+
+    assert flaky.attempts == 2, "the handshake was not retried"
+    assert fake_connection.sent, "audio never reached the provider after recovery"
+
+
+@pytest.mark.asyncio
+async def test_a_persistently_dead_provider_still_fails_loudly(
+    fake_connection: _FakeConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry is bounded, not a way to swallow every frame silently.
+
+    A genuinely unreachable provider has to surface, or a call would run on with
+    no transcription and nothing to explain the silence.
+    """
+    from persona_voice.stt import deepgram_backend
+
+    flaky = _flaky(monkeypatch, fake_connection, failures=99)
+    backend = DeepgramStreamingSTT(StreamingSTTConfig(provider="deepgram", api_key="dg-secret"))
+
+    with pytest.raises(STTStreamFailureError):
+        await backend.push_audio(b"\x00\x00" * 320, 16000)
+
+    assert flaky.attempts == deepgram_backend._CONNECT_ATTEMPTS  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_handshake_is_not_retried(
+    fake_connection: _FakeConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The happy path is untouched: exactly one attempt, no added latency."""
+    flaky = _flaky(monkeypatch, fake_connection, failures=0)
+    backend = DeepgramStreamingSTT(StreamingSTTConfig(provider="deepgram", api_key="dg-secret"))
+
+    await backend.push_audio(b"\x00\x00" * 320, 16000)
+
+    assert flaky.attempts == 1
