@@ -967,15 +967,65 @@ def _memory_count(request: Request, owner_id: str, persona_id: str) -> int:
     return int(row.n) if row is not None else 0
 
 
+async def _remap_voice_after_response(
+    request: Request, *, owner_id: str, persona_id: str, yaml_str: str
+) -> None:
+    """Re-pick a stale-provider voice after the read response is already sent (R9-113).
+
+    Mirrors the create-time background hook exactly, including the cloud RLS re-bind:
+    ``BackgroundTasks`` runs after request teardown has reset ``current_user_id``, and
+    the pool checkout listener reads that contextvar to set ``app.current_user_id``, so
+    without re-binding it the write would fail closed and silently touch zero rows.
+
+    Fail-soft end to end: ``maybe_remap_voice`` never raises, and this swallows anything
+    that escapes anyway, because a read must never be harmed by an optional repair.
+    """
+    reset_token = None
+    edition = getattr(getattr(request.app.state, "config", None), "edition", None)
+    if edition is Edition.cloud:
+        reset_token = current_user_id.set(owner_id)
+    try:
+        await voice_assignment_service.maybe_remap_voice(
+            request, owner_id=owner_id, persona_id=persona_id, yaml_str=yaml_str
+        )
+    except Exception:  # noqa: BLE001 - an optional repair must never surface
+        _LOG.warning("lazy voice remap failed persona_id={pid}", pid=persona_id)
+    finally:
+        if reset_token is not None:
+            current_user_id.reset(reset_token)
+
+
 @router.get("/{persona_id}", response_model=PersonaDetail)
 async def get_persona(
     persona_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaDetail:
     """Get a persona's YAML + metadata (404 if not the caller's)."""
     rls_engine = request.app.state.rls_engine
     row = persona_service.get_persona(rls_engine=rls_engine, persona_id=persona_id)
+    # R9-113: the LAZY auto-remap trigger. V14 built the remap and left "who calls
+    # this, and when" to the caller, and no caller was ever added, so a persona whose
+    # voice belongs to a since-replaced TTS provider fell to the shared default
+    # FOREVER -- ``voice_resolution`` calls that fall-soft a backstop "until the
+    # auto-remap re-picks it", and nothing ever did. The boot sweep cannot help in
+    # cloud (it has no caller token, R9-111), but a request does, so the honest
+    # trigger is the moment an owner opens the persona: it carries the bearer the
+    # catalogue needs, and it precedes the persona being used.
+    #
+    # Deferred to BackgroundTasks like the create-time assign, so a read never waits
+    # on a catalogue fetch or a model pick, and a failure can never surface to an
+    # already-sent response. ``maybe_remap_voice`` pre-checks the active provider with
+    # a plain string compare before any network call, so an already-correct persona --
+    # every persona, in steady state -- costs nothing at all here.
+    background_tasks.add_task(
+        _remap_voice_after_response,
+        request,
+        owner_id=user.id,
+        persona_id=persona_id,
+        yaml_str=str(row["yaml"]),
+    )
     count = persona_service.conversation_count_for(rls_engine=rls_engine, persona_id=persona_id)
     return _persona_detail(
         row,

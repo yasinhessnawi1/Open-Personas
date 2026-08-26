@@ -494,6 +494,17 @@ async def maybe_remap_voice(
     except Exception:  # noqa: BLE001 — defensive only
         return False
 
+    # R9-113: the cheap check BEFORE any network call, so this is free to call on a
+    # hot read path. ``_remap_voice_for`` fetches the catalogue first and compares
+    # after, which is right for the boot sweep (whose caller has already filtered) but
+    # would put an HTTP hop on every persona read. The active provider is a plain env
+    # mirror, and the persona's own provider is parsed from YAML already in hand, so a
+    # persona that already matches costs one string compare and returns.
+    voice = persona.identity.voice
+    active_provider = getattr(config, "voice_tts_provider", "") if config is not None else ""
+    if voice is not None and active_provider and voice.provider == active_provider:
+        return False
+
     bearer = request.headers.get("authorization")
     return await _remap_voice_for(
         persona,
