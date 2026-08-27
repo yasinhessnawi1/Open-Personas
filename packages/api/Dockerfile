@@ -11,6 +11,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv
+# uv's download ceiling. The 30s default is fine on a fast native builder and not
+# fine on an emulated cross-build or a slow link: torch and pydantic-core are big
+# enough that one transient stall fails the entire sync. Raises the ceiling only;
+# a healthy download is unaffected.
+ENV UV_HTTP_TIMEOUT=300
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
