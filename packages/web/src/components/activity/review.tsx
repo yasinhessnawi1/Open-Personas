@@ -310,7 +310,7 @@ function DoneCard({
               ) : (
                 <span className="text-foreground">{item.title}</span>
               )}
-              {item.detail ? <> — {item.detail}</> : null}
+              {item.detail ? <> · {item.detail}</> : null}
               {item.ran_because ? (
                 <span className="text-muted-foreground/70">
                   {" "}

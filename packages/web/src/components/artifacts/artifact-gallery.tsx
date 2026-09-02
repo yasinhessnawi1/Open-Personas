@@ -422,6 +422,7 @@ function FilePreview({
   personaId: string;
   item: ArtifactItem;
 }) {
+  const tr = useTranslations("artifacts");
   const { getToken } = useAuth();
   const [state, setState] = useState<PreviewState>({ kind: "loading" });
 
@@ -501,7 +502,7 @@ function FilePreview({
     );
   }
   if (state.kind === "text") {
-    const t = displayName(item);
+    const fileName = displayName(item);
     return (
       <div className="max-h-[68vh] overflow-auto bg-muted/20">
         <pre className="whitespace-pre-wrap px-5 py-4 font-mono text-xs leading-relaxed text-foreground">
@@ -509,7 +510,7 @@ function FilePreview({
         </pre>
         {state.truncated ? (
           <p className="type-caption normal-case tracking-normal border-border border-t px-5 py-2 text-center text-muted-foreground">
-            {`preview truncated · download ${t} for the full file`}
+            {tr("previewTruncated", { name: fileName })}
           </p>
         ) : null}
       </div>

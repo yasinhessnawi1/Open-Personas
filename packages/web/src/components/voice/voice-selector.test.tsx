@@ -39,7 +39,7 @@ const messages = {
     voicesUnavailable: "Voice selection is unavailable right now.",
     voicesError: "Couldn't load voices.",
     voiceProviderMismatch:
-      "This persona's saved voice isn't available from the current voice provider — choose one below to update it.",
+      "This persona's saved voice isn't available from the current voice provider. Choose one below to update it.",
   },
 };
 
@@ -97,7 +97,7 @@ describe("VoiceSelector (C2)", () => {
     );
     expect(
       screen.getByText(
-        "This persona's saved voice isn't available from the current voice provider — choose one below to update it.",
+        "This persona's saved voice isn't available from the current voice provider. Choose one below to update it.",
       ),
     ).toBeInTheDocument();
   });

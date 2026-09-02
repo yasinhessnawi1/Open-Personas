@@ -38,11 +38,14 @@ function normalize(raw: string): string | null {
 }
 
 /**
- * A short warning if the declared language isn't serviceable, else null. Silent
- * while the field is blank so it doesn't nag mid-typing.
+ * The declared language, when the voice providers can't serve it; null when
+ * they can (or while the field is blank, so it doesn't nag mid-typing). The
+ * caller renders `author.voiceLanguageWarning` around it, so the sentence
+ * lives in the message catalogue rather than here.
  */
-export function voiceLanguageWarning(languageDefault: string): string | null {
-  if (languageDefault.trim() === "") return null;
-  if (normalize(languageDefault) !== null) return null;
-  return `Voice calls for this persona will be spoken in English — "${languageDefault}" isn't supported by the current voice providers.`;
+export function unservedVoiceLanguage(languageDefault: string): string | null {
+  const trimmed = languageDefault.trim();
+  if (trimmed === "") return null;
+  if (normalize(trimmed) !== null) return null;
+  return trimmed;
 }

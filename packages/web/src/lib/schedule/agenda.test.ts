@@ -8,6 +8,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import messages from "@/i18n/messages/en.json";
+
 import {
   type FireEvent,
   fireStatusLabel,
@@ -65,6 +67,12 @@ describe("occurrenceTime", () => {
   });
 });
 
+/** The real `schedule.calendar` copy, resolved the way next-intl would. */
+const t = (key: string, values?: Record<string, string | number>): string => {
+  const raw = (messages.schedule.calendar as Record<string, string>)[key];
+  return raw.replace(/\{(\w+)\}/g, (_, name) => String(values?.[name] ?? ""));
+};
+
 describe("truncationNotice", () => {
   const base: OccurrencesResult = {
     occurrences: [],
@@ -75,25 +83,30 @@ describe("truncationNotice", () => {
   };
 
   it("returns null when the full window fit (never an infinite calendar)", () => {
-    expect(truncationNotice(base, "Europe/Oslo")).toBeNull();
+    expect(truncationNotice(base, "Europe/Oslo", t)).toBeNull();
   });
 
   it("names the effective horizon when truncated (bar 2)", () => {
     const notice = truncationNotice(
       { ...base, truncated: true },
       "Europe/Oslo",
+      t,
     );
     expect(notice).toContain("Showing through");
     expect(notice).toContain("2026"); // the effective window_to, honestly (locale-robust)
-    expect(notice).toContain("narrow the range");
+    expect(notice).toContain("Narrow the range");
   });
 });
 
 describe("fireStatusLabel", () => {
   it("maps audit-backed statuses honestly — no synthesis (bar 6)", () => {
-    expect(fireStatusLabel("ran")).toBe("Ran");
-    expect(fireStatusLabel("ran_late")).toBe("Ran (late)");
-    expect(fireStatusLabel("missed")).toBe("Missed");
+    expect(fireStatusLabel("ran", t)).toBe(messages.schedule.calendar.fireRan);
+    expect(fireStatusLabel("ran_late", t)).toBe(
+      messages.schedule.calendar.fireRanLate,
+    );
+    expect(fireStatusLabel("missed", t)).toBe(
+      messages.schedule.calendar.fireMissed,
+    );
   });
 });
 

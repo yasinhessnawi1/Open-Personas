@@ -10,9 +10,20 @@
  * component renders the calm loading state (the brand shell + spinner) INSTEAD
  * of throwing — and still renders the real form once the signal is ready.
  */
-import { render, screen } from "@testing-library/react";
+import { render as rtlRender, screen } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import { isAuthSignalReady } from "./auth-ready.cloud";
+
+/** The branded auth copy lives in `auth.*`; render it the way the app does. */
+const render = (ui: ReactNode) =>
+  rtlRender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      {ui}
+    </NextIntlClientProvider>,
+  );
 
 // --- Clerk hook + router mocks ----------------------------------------------
 // The flow components import these from `@clerk/nextjs`; the test controls what

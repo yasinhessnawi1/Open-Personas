@@ -38,7 +38,7 @@ const messages = {
         label: "Turn into file",
         formatMenu: "Choose file format",
         toast: "Creating file…",
-        errorToast: "Couldn't start the file — try again",
+        errorToast: "Couldn't start the file. Try again",
         format: {
           pdf: "PDF",
           md: "Markdown",

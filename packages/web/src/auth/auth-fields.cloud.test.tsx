@@ -9,12 +9,14 @@
 import {
   act,
   fireEvent,
-  render,
   renderHook,
+  render as rtlRender,
   screen,
 } from "@testing-library/react";
-import { useState } from "react";
+import { NextIntlClientProvider } from "next-intl";
+import { type ReactNode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import {
   ErrorAlert,
   Field,
@@ -24,6 +26,14 @@ import {
   useResendCooldown,
 } from "./auth-fields.cloud";
 import { dedupeFieldError } from "./auth-flow.cloud";
+
+/** The control copy lives in `auth.*` now; render with the real catalogue. */
+const render = (ui: ReactNode) =>
+  rtlRender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      {ui}
+    </NextIntlClientProvider>,
+  );
 
 /**
  * Mirrors how the forms compose the banner + a deduped field error: the same

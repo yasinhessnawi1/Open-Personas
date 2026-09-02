@@ -71,7 +71,7 @@ export async function MemoryStores({
         desc={t("worldviewDesc")}
         emptyLabel={t("none")}
         items={worldview.map((w) =>
-          w.epistemic ? `${w.claim} — ${w.epistemic}` : w.claim,
+          w.epistemic ? `${w.claim} (${w.epistemic})` : w.claim,
         )}
       />
       <StoreCard

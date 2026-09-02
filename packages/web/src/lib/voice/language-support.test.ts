@@ -1,26 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { voiceLanguageWarning } from "./language-support";
+import { unservedVoiceLanguage } from "./language-support";
 
-describe("voiceLanguageWarning (Spec 32 D author-time hint)", () => {
+describe("unservedVoiceLanguage (Spec 32 D author-time hint)", () => {
   it("is silent for served languages and their variants", () => {
-    expect(voiceLanguageWarning("en")).toBeNull();
-    expect(voiceLanguageWarning("no")).toBeNull();
-    expect(voiceLanguageWarning("nb")).toBeNull(); // collapses to no
-    expect(voiceLanguageWarning("nn-NO")).toBeNull();
-    expect(voiceLanguageWarning("en-US")).toBeNull();
-    expect(voiceLanguageWarning("de-CH")).toBeNull(); // base-code fallback
-    expect(voiceLanguageWarning("ar")).toBeNull();
+    expect(unservedVoiceLanguage("en")).toBeNull();
+    expect(unservedVoiceLanguage("no")).toBeNull();
+    expect(unservedVoiceLanguage("nb")).toBeNull(); // collapses to no
+    expect(unservedVoiceLanguage("nn-NO")).toBeNull();
+    expect(unservedVoiceLanguage("en-US")).toBeNull();
+    expect(unservedVoiceLanguage("de-CH")).toBeNull(); // base-code fallback
+    expect(unservedVoiceLanguage("ar")).toBeNull();
   });
 
   it("is silent while the field is blank (don't nag mid-typing)", () => {
-    expect(voiceLanguageWarning("")).toBeNull();
-    expect(voiceLanguageWarning("   ")).toBeNull();
+    expect(unservedVoiceLanguage("")).toBeNull();
+    expect(unservedVoiceLanguage("   ")).toBeNull();
   });
 
-  it("warns for an unsupported language, naming it and the English fallback", () => {
-    const w = voiceLanguageWarning("klingon");
-    expect(w).not.toBeNull();
-    expect(w).toContain("klingon");
-    expect(w).toContain("English");
+  it("names the language when the providers can't serve it", () => {
+    // The sentence itself lives in `author.voiceLanguageWarning`; this returns
+    // only the value the caller interpolates.
+    expect(unservedVoiceLanguage("klingon")).toBe("klingon");
+    expect(unservedVoiceLanguage("  klingon  ")).toBe("klingon");
   });
 });

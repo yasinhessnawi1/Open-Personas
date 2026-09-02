@@ -5,9 +5,20 @@
  * toggle off-path revokes to "ask" (null), not decline; the warning shows only
  * when consent is granted.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import { AutonomyConsentSection } from "./autonomy-consent-section";
+
+/** The section's copy lives in `personaPage.autonomy.*` now. */
+const render = (ui: ReactNode) =>
+  rtlRender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      {ui}
+    </NextIntlClientProvider>,
+  );
 
 const base = {
   autonomy: "cautious" as const,

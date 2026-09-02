@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { VoiceCallSurface } from "@/components/voice/voice-call-surface";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
@@ -17,6 +18,7 @@ export default async function VoiceCallPage({
   params: Promise<{ conversationId: string }>;
 }) {
   const { conversationId } = await params;
+  const ta = await getTranslations("app");
   const api = await serverApi();
 
   const convRes = await api.GET("/v1/conversations/{conversation_id}", {
@@ -43,7 +45,7 @@ export default async function VoiceCallPage({
         conversationId={conversationId}
         persona={{
           id: conv.persona_id,
-          name: persona?.name ?? conv.title ?? "Persona",
+          name: persona?.name ?? conv.title ?? ta("personaFallback"),
           avatarUrl: personaRes.data?.avatar_url ?? undefined,
           role: persona?.role ?? "",
         }}

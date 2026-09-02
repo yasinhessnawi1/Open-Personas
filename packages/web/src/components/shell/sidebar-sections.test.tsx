@@ -83,9 +83,9 @@ const messages = {
       newChat: "New chat",
       presence: {
         onCall: "On a call with {name}",
-        onCallWorking: "On a call with {name} — also working",
+        onCallWorking: "On a call with {name}, also working",
         inChat: "In chat with {name}",
-        inChatWorking: "In chat with {name} — also working",
+        inChatWorking: "In chat with {name}, also working",
         working: "{name} is working",
       },
     },
@@ -583,7 +583,7 @@ describe("PersonasRail", () => {
       expect(presenceEl()).toHaveAttribute("data-working", "true");
       expect(screen.getByRole("link")).toHaveAttribute(
         "aria-label",
-        "On a call with Astrid — also working",
+        "On a call with Astrid, also working",
       );
     });
 
@@ -601,7 +601,7 @@ describe("PersonasRail", () => {
       expect(presenceEl()).toHaveAttribute("data-working", "true");
       expect(screen.getByRole("link")).toHaveAttribute(
         "aria-label",
-        "In chat with Astrid — also working",
+        "In chat with Astrid, also working",
       );
     });
 

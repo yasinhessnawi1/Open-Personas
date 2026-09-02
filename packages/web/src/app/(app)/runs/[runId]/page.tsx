@@ -33,6 +33,7 @@ export default async function RunPage({
 }) {
   const { runId } = await params;
   const t = await getTranslations("runs");
+  const ta = await getTranslations("app");
   const api = await serverApi();
 
   const runRes = await api.GET("/v1/runs/{run_id}", {
@@ -47,7 +48,7 @@ export default async function RunPage({
   const persona = personaRes.data
     ? parsePersonaYaml(personaRes.data.yaml)
     : null;
-  const personaName = persona?.name ?? "Persona";
+  const personaName = persona?.name ?? ta("personaFallback");
 
   const headerPersona = personaRes.data
     ? {

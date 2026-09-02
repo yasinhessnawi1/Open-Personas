@@ -72,7 +72,7 @@ const messages = {
     episodicGistsWord: "memories",
     episodicNoPersona: "Choose a persona",
     episodicNoPersonaHint:
-      "Episodic memory is per-persona — pick one above to browse what they've recalled.",
+      "Episodic memory is per-persona, so pick one above to browse what they've recalled.",
     episodicUnavailable: "Episodic memory isn't available here",
     episodicUnavailableHint:
       "This deployment doesn't run an episodic memory backend, so there's nothing to browse yet.",

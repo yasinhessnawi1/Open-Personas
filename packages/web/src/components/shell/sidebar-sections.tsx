@@ -435,7 +435,7 @@ export function MessagesList({
                     <Link
                       href={href}
                       onClick={onNavigate}
-                      aria-label={`${title} — ${brief}`}
+                      aria-label={`${title}: ${brief}`}
                       aria-current={active ? "page" : undefined}
                       className={cn(
                         "block rounded-full p-0.5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
@@ -572,7 +572,7 @@ export function CallsList({
                     <Link
                       href={href}
                       onClick={onNavigate}
-                      aria-label={`${title} — ${brief}`}
+                      aria-label={`${title}: ${brief}`}
                       aria-current={active ? "page" : undefined}
                       className={cn(
                         "block rounded-full p-0.5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
@@ -602,7 +602,7 @@ export function CallsList({
               href={href}
               onClick={onNavigate}
               aria-current={active ? "page" : undefined}
-              title={`${title} — ${brief}`}
+              title={`${title}: ${brief}`}
               style={{
                 ...(c.persona ? personaIdentityStyle(c.persona) : {}),
                 borderLeftColor: active ? "var(--v-id)" : "transparent",

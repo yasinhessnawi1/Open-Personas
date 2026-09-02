@@ -6,7 +6,9 @@
  * in the right-hand panel. Presentation only — no Clerk client involved.
  */
 import { render, screen } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import { AuthShell } from "./auth-shell.cloud";
 
 const BRAND = {
@@ -18,10 +20,13 @@ const BRAND = {
 
 function renderShell() {
   return render(
-    <AuthShell brand={BRAND}>
-      <h1>Welcome back</h1>
-      <button type="submit">Continue</button>
-    </AuthShell>,
+    // The store-dot labels come from `auth.stores.*` now.
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <AuthShell brand={BRAND}>
+        <h1>Welcome back</h1>
+        <button type="submit">Continue</button>
+      </AuthShell>
+    </NextIntlClientProvider>,
   );
 }
 

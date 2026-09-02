@@ -25,6 +25,7 @@
  */
 import { useSignUp } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import {
   ErrorAlert,
@@ -47,24 +48,28 @@ import { AuthShell, authStyles as s } from "./auth-shell.cloud";
 import { useInFlightGuard } from "./use-in-flight-guard.cloud";
 import { useSignedInRedirect } from "./use-signed-in-redirect.cloud";
 
-const SIGN_UP_BRAND = {
-  kicker: "Typed-memory AI",
-  tagline: "Build personas that remember.",
-  note: "One continuous identity across voice and text — with real, typed memory.",
-  compact: "Build personas that remember.",
-} as const;
-
-const VERIFY_BRAND = {
-  kicker: "One last step",
-  tagline: "Confirm it's you.",
-  note: "We sent a 6-digit code to your inbox. Enter it to finish creating your account.",
-  compact: "Enter the code we emailed you.",
-} as const;
-
 /** The two steps of the sign-up flow. */
 type Step = "start" | "verify";
 
 export function SignUp() {
+  const t = useTranslations("auth.signUp");
+  const ta = useTranslations("auth");
+  const tf = useTranslations("auth.fields");
+  const tBrand = useTranslations("auth.brand");
+  const tError = useTranslations("auth.error");
+  // The brand panel takes plain strings; build them from the catalogue.
+  const signUpBrand = {
+    kicker: tBrand("signUp.kicker"),
+    tagline: tBrand("signUp.tagline"),
+    note: tBrand("signUp.note"),
+    compact: tBrand("signUp.compact"),
+  };
+  const verifyBrand = {
+    kicker: tBrand("verify.kicker"),
+    tagline: tBrand("verify.tagline"),
+    note: tBrand("verify.note"),
+    compact: tBrand("verify.compact"),
+  };
   const { signUp, errors, fetchStatus } = useSignUp();
   const router = useRouter();
   // Redirect an already-signed-in visitor to the app instead of rendering a form
@@ -86,7 +91,7 @@ export function SignUp() {
   // An active session was detected — show the calm loading state while the
   // redirect to the app commits, never the sign-up form.
   if (redirecting) {
-    return <AuthLoading brand={SIGN_UP_BRAND} />;
+    return <AuthLoading brand={signUpBrand} />;
   }
 
   // Guard the post-logout reset window: `signUp` / `errors` can both be absent
@@ -95,7 +100,7 @@ export function SignUp() {
   // without an error boundary — blanks the whole screen. Show the calm loading
   // state inside the brand shell until the signal is safe to read.
   if (!isAuthSignalReady({ resource: signUp, errors })) {
-    return <AuthLoading brand={SIGN_UP_BRAND} />;
+    return <AuthLoading brand={signUpBrand} />;
   }
 
   const busy = fetchStatus === "fetching";
@@ -133,12 +138,12 @@ export function SignUp() {
         password,
       });
       if (error) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       const { error: sendError } = await signUp.verifications.sendEmailCode();
       if (sendError) {
-        setFormError(clerkErrorToMessage(sendError as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(sendError as ClerkErrorLike, tError));
         return;
       }
       cooldown.start();
@@ -164,13 +169,13 @@ export function SignUp() {
       });
       const alreadyComplete = signUp.status === "complete";
       if (error && !alreadyComplete) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       if (signUp.status === "complete") {
         await signUp.finalize(finishSession);
       } else {
-        setFormError(clerkErrorToMessage(null));
+        setFormError(clerkErrorToMessage(null, tError));
       }
     });
 
@@ -185,7 +190,7 @@ export function SignUp() {
     setFormError(null);
     const { error } = await signUp.verifications.sendEmailCode();
     if (error) {
-      setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+      setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
       return;
     }
     cooldown.start();
@@ -200,15 +205,16 @@ export function SignUp() {
       redirectUrl: "/sign-up/sso-callback",
       redirectCallbackUrl: "/",
     });
-    if (error) setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+    if (error)
+      setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
   };
 
   if (step === "start") {
     return (
-      <AuthShell brand={SIGN_UP_BRAND}>
+      <AuthShell brand={signUpBrand}>
         <div className={s.head}>
-          <h1>Create your account</h1>
-          <p>Start building personas in minutes.</p>
+          <h1>{t("title")}</h1>
+          <p>{t("subtitle")}</p>
         </div>
         <form
           className={s.body}
@@ -218,7 +224,7 @@ export function SignUp() {
         >
           <ErrorAlert message={formError} />
           <OAuthRow onSelect={handleOAuth} disabled={busy} />
-          <Field id="su-email" label="Email" error={emailError}>
+          <Field id="su-email" label={tf("email")} error={emailError}>
             <div className={s.control}>
               <input
                 className={s.input}
@@ -227,7 +233,7 @@ export function SignUp() {
                 type="email"
                 autoComplete="email"
                 inputMode="email"
-                placeholder="you@example.com"
+                placeholder={tf("emailPlaceholder")}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 disabled={busy}
@@ -237,8 +243,8 @@ export function SignUp() {
           </Field>
           <Field
             id="su-pw"
-            label="Password"
-            hint="At least 8 characters."
+            label={tf("password")}
+            hint={tf("passwordHint")}
             error={passwordError}
           >
             <PasswordInput
@@ -246,7 +252,7 @@ export function SignUp() {
               value={password}
               onChange={setPassword}
               autoComplete="new-password"
-              placeholder="Create a password"
+              placeholder={t("passwordPlaceholder")}
               invalid={Boolean(passwordError)}
               describedBy="su-pw-hint"
               disabled={busy}
@@ -266,26 +272,27 @@ export function SignUp() {
               {busy ? (
                 <>
                   <span className={s.spinner} aria-hidden="true" />
-                  Creating account…
+                  {t("submitting")}
                 </>
               ) : (
                 <>
-                  Create account
+                  {t("submit")}
                   <ArrowIcon />
                 </>
               )}
             </button>
           </div>
           <p className={s.legal}>
-            By creating an account you agree to the{" "}
-            <a href="/legal/terms">Terms</a> and{" "}
-            <a href="/legal/privacy">Privacy Policy</a>.
+            {t.rich("legal", {
+              terms: (chunks) => <a href="/legal/terms">{chunks}</a>,
+              privacy: (chunks) => <a href="/legal/privacy">{chunks}</a>,
+            })}
           </p>
         </form>
         <p className={s.foot}>
-          Already have an account?{" "}
+          {t("haveAccount")}{" "}
           <a className={s.link} href="/sign-in">
-            Sign in
+            {t("signIn")}
           </a>
         </p>
       </AuthShell>
@@ -295,15 +302,16 @@ export function SignUp() {
   const cooldownLabel = formatCooldown(cooldown.remaining);
 
   return (
-    <AuthShell brand={VERIFY_BRAND}>
+    <AuthShell brand={verifyBrand}>
       <div className={s.head}>
-        <h1>Check your inbox</h1>
+        <h1>{t("verifyTitle")}</h1>
         <p>
-          Enter the 6-digit code we sent to{" "}
-          <strong className={s.resendStrong}>
-            {signUp.emailAddress ?? email}
-          </strong>
-          .
+          {t.rich("verifyBody", {
+            email: signUp.emailAddress ?? email,
+            em: (chunks) => (
+              <strong className={s.resendStrong}>{chunks}</strong>
+            ),
+          })}
         </p>
       </div>
       <form
@@ -330,11 +338,11 @@ export function SignUp() {
             {busy ? (
               <>
                 <span className={s.spinner} aria-hidden="true" />
-                Verifying…
+                {t("verifying")}
               </>
             ) : (
               <>
-                Verify email
+                {t("verifyEmail")}
                 <ArrowIcon />
               </>
             )}
@@ -342,28 +350,32 @@ export function SignUp() {
         </div>
         {cooldown.isCoolingDown ? (
           <p className={s.resend}>
-            Resend code in{" "}
-            <strong className={s.resendStrong}>{cooldownLabel}</strong>
+            {ta.rich("resendIn", {
+              time: cooldownLabel,
+              em: (chunks) => (
+                <strong className={s.resendStrong}>{chunks}</strong>
+              ),
+            })}
           </p>
         ) : (
           <p className={s.resend}>
             <MailIcon />
-            Didn&apos;t get it?{" "}
+            {ta("didntGet")}{" "}
             <button
               type="button"
               className={s.link}
               onClick={resend}
               disabled={busy}
             >
-              Resend code
+              {ta("resend")}
             </button>
           </p>
         )}
       </form>
       <p className={s.foot}>
-        Wrong address?{" "}
+        {t("wrongAddress")}{" "}
         <a className={s.link} href="/sign-up">
-          Go back
+          {t("goBack")}
         </a>
       </p>
     </AuthShell>

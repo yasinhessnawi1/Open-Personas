@@ -400,7 +400,8 @@ function UserMessage({
                       workspacePath={img.workspace_path}
                       mediaType={img.media_type}
                       alt={
-                        img.workspace_path.split("/").pop() ?? "attached image"
+                        img.workspace_path.split("/").pop() ??
+                        t("attachedImageAlt")
                       }
                     />
                   ))}

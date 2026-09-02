@@ -16,10 +16,10 @@ import { PersonaModelPicker } from "./persona-model-picker";
 const messages = {
   modelPicker: {
     title: "Model",
-    tierDefault: "Use tier default — routes by task",
+    tierDefault: "Use tier default (routes by task)",
     browseAll: "Browse all models",
     pricePerM: "{in} in / {out} out per 1M tokens",
-    empty: "No models available right now — using the tier default.",
+    empty: "No models available right now, so we're using the tier default.",
     recommended: "Recommended",
   },
 };
@@ -150,7 +150,7 @@ describe("PersonaModelPicker", () => {
     await openMenu();
     expect(
       screen.getByText(
-        "No models available right now — using the tier default.",
+        "No models available right now, so we're using the tier default.",
       ),
     ).toBeInTheDocument();
     expect(

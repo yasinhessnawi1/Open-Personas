@@ -49,7 +49,7 @@ describe("validateBeforeUpload — D-F3-3 client-side pre-validation", () => {
       );
       expect(result).toMatchObject({ ok: false, reason: "oversize" });
       if (!result.ok) {
-        expect(result.detail).toContain("20.0 MB");
+        expect(result.params.limit).toBe("20.0 MB");
       }
     });
 
@@ -63,7 +63,7 @@ describe("validateBeforeUpload — D-F3-3 client-side pre-validation", () => {
         reason: "per_message_image_cap",
       });
       if (!result.ok) {
-        expect(result.detail).toContain(String(MAX_IMAGES_PER_MESSAGE));
+        expect(result.params.cap).toBe(MAX_IMAGES_PER_MESSAGE);
       }
     });
 

@@ -29,7 +29,7 @@ const messages = {
     stop: "Stop recording",
     transcribing: "Transcribing…",
     permissionDenied:
-      "Microphone access denied — allow it in your browser settings to dictate",
+      "Microphone access denied. Allow it in your browser settings to dictate",
   },
 };
 
@@ -216,7 +216,7 @@ describe("MicDictation", () => {
     await waitFor(() =>
       expect(
         screen.getByRole("button", {
-          name: "Microphone access denied — allow it in your browser settings to dictate",
+          name: "Microphone access denied. Allow it in your browser settings to dictate",
         }),
       ).toBeTruthy(),
     );

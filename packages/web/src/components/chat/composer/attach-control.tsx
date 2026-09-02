@@ -10,7 +10,11 @@ import {
   MAX_IMAGES_PER_MESSAGE,
 } from "@/lib/api/limits";
 import { cn } from "@/lib/utils";
-import { type ValidationReason, validateBeforeUpload } from "./attach-state";
+import {
+  type ValidationParams,
+  type ValidationReason,
+  validateBeforeUpload,
+} from "./attach-state";
 
 /**
  * F3 — composer attach control (T07).
@@ -38,7 +42,7 @@ export interface ComposerAttachControlProps {
   /** Document branch sink — called per accepted document file. */
   onDocumentFile: (file: File) => void;
   /** Rejection sink — typed reason + i18n-friendly detail (T16 toasts via F2 error voice). */
-  onReject: (reason: ValidationReason, detail: string) => void;
+  onReject: (reason: ValidationReason, params: ValidationParams) => void;
   /** Current attached image count for the per-message cap check. */
   currentImageCount: number;
   /** True when D-F3-X-no-vision-surface-shape (a) disables image attach. */
@@ -96,19 +100,19 @@ export function ComposerAttachControl({
     for (const file of Array.from(fileList)) {
       const result = validateBeforeUpload(file, pendingImageCount);
       if (!result.ok) {
-        onReject(result.reason, result.detail);
+        onReject(result.reason, result.params);
         continue;
       }
       if (result.kind === "image") {
         if (imageAttachDisabled) {
-          onReject("unsupported_format", t("attach.imageDisabled"));
+          onReject("image_attach_disabled", {});
           continue;
         }
         pendingImageCount += 1;
         onImageFile(file);
       } else {
         if (documentsDisabled) {
-          onReject("unsupported_format", t("attach.openConversationFirst"));
+          onReject("documents_need_conversation", {});
           continue;
         }
         onDocumentFile(file);

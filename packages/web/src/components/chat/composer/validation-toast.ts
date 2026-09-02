@@ -15,36 +15,42 @@
  */
 
 import type { useTranslations } from "next-intl";
-import type { ValidationReason } from "./attach-state";
+import type { ValidationParams, ValidationReason } from "./attach-state";
 
 export interface ToastSink {
   error: (message: string) => void;
 }
 
+/** Reason → message key, relative to the `chat.composer` namespace. The two
+ * deployment refusals reuse the tooltip copy they already share. */
+const MESSAGE_KEY: Record<ValidationReason, string> = {
+  empty_file: "validation.empty_file",
+  oversize: "validation.oversize",
+  per_message_image_cap: "validation.per_message_image_cap",
+  unsupported_format: "validation.unsupported_format",
+  image_attach_disabled: "attach.imageDisabled",
+  documents_need_conversation: "attach.openConversationFirst",
+};
+
 /**
  * Surface a typed validation failure as a toast.
  *
  * @param reason  The typed enum from validateBeforeUpload (T05).
- * @param detail  The detail string from the validation result (carries
- *                filename + actual values; surfaces honestly per F2 voice).
+ * @param params  ICU values (filename / cap / limit) for the message.
  * @param toast   sonner `toast` from useToast() (T19 passes it down).
  * @param t       next-intl translator for `chat.composer.validation.*` keys.
  *
- * The detail string from `validateBeforeUpload` already carries the
- * filename + cap value, so we use it directly. The i18n key acts as the
- * grouping label; the detail is the load-bearing user-facing prose.
+ * The whole sentence comes from the catalogue: `validation.<reason>` with the
+ * structured params interpolated, so the rejection translates with the locale
+ * instead of shipping English out of the validator.
  */
 export function surfaceValidationFailure(
-  _reason: ValidationReason,
-  detail: string,
+  reason: ValidationReason,
+  params: ValidationParams,
   toast: ToastSink,
-  // `t` resolves the i18n key when we need to override the validation
-  // detail with a translator-controlled string (currently we trust the
-  // detail string from validateBeforeUpload, but the hook is here for
-  // pseudo-locale / non-English coverage at T20).
-  _t: ReturnType<typeof useTranslations>,
+  t: ReturnType<typeof useTranslations>,
 ): void {
   // Single error toast per rejection. F2's `<ToastProvider>` is mounted
   // once in <AppShell>; toasts surface in the top-right with status colour.
-  toast.error(detail);
+  toast.error(t(MESSAGE_KEY[reason], params));
 }

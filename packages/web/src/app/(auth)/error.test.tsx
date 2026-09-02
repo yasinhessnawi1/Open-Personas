@@ -9,25 +9,40 @@
  * rather than propagating the crash.
  */
 import { render, screen } from "@testing-library/react";
+import { NextIntlClientProvider } from "next-intl";
 import { Component, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import AuthError from "./error";
+
+/** The boundary copy now lives in en.json; render it the way the app does. */
+function withIntl(node: ReactNode) {
+  return (
+    <NextIntlClientProvider locale="en" messages={messages}>
+      {node}
+    </NextIntlClientProvider>
+  );
+}
 
 describe("(auth) error boundary fallback", () => {
   it("renders the branded fallback with a reset action and a sign-in link", () => {
     const reset = vi.fn();
-    render(<AuthError error={new Error("boom")} reset={reset} />);
+    render(withIntl(<AuthError error={new Error("boom")} reset={reset} />));
 
     expect(
-      screen.getByRole("heading", { name: "Something went wrong" }),
+      screen.getByRole("heading", { name: messages.authError.title }),
     ).toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
 
-    const tryAgain = screen.getByRole("button", { name: "Try again" });
+    const tryAgain = screen.getByRole("button", {
+      name: messages.authError.retry,
+    });
     tryAgain.click();
     expect(reset).toHaveBeenCalledOnce();
 
-    const back = screen.getByRole("link", { name: "Back to sign in" });
+    const back = screen.getByRole("link", {
+      name: messages.authError.backToSignIn,
+    });
     expect(back).toHaveAttribute("href", "/sign-in");
   });
 
@@ -61,13 +76,15 @@ describe("(auth) error boundary fallback", () => {
     try {
       expect(() =>
         render(
-          <Boundary>
-            <Boom />
-          </Boundary>,
+          withIntl(
+            <Boundary>
+              <Boom />
+            </Boundary>,
+          ),
         ),
       ).not.toThrow();
       expect(
-        screen.getByRole("heading", { name: "Something went wrong" }),
+        screen.getByRole("heading", { name: messages.authError.title }),
       ).toBeInTheDocument();
     } finally {
       spy.mockRestore();

@@ -92,7 +92,7 @@ export function TierBadge({
         data-slot="tier-badge-reason"
         data-fallback={routing.model_fallback_engaged}
       >
-        {why ? `${chose} — ${why}` : chose}
+        {why ? `${chose}. ${why}` : chose}
       </p>
     </details>
   );

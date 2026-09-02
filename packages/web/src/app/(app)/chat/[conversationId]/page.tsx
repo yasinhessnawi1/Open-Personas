@@ -46,6 +46,7 @@ export default async function ChatPage({
 }) {
   const { conversationId } = await params;
   const tc = await getTranslations("chat");
+  const ta = await getTranslations("app");
   const api = await serverApi();
 
   const convRes = await api.GET("/v1/conversations/{conversation_id}", {
@@ -60,7 +61,7 @@ export default async function ChatPage({
   const persona = personaRes.data
     ? parsePersonaYaml(personaRes.data.yaml)
     : null;
-  const name = persona?.name ?? conv.title ?? "Persona";
+  const name = persona?.name ?? conv.title ?? ta("personaFallback");
   const role = persona?.role ?? "";
   const constraint = persona?.constraints[0];
   // Spec 35: the real shared-memory count for the header's "remembers N" line.

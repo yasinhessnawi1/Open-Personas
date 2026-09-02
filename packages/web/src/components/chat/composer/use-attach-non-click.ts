@@ -21,6 +21,10 @@ export interface UseDragTargetOptions {
   onFiles: (files: File[]) => void;
   /** Called when the user drags a folder / a remote URL / anything we can't accept. */
   onReject: (detail: string) => void;
+  /** The already-translated message for a folder drop — the copy lives in the
+   * caller's message catalogue (`chat.composer.attach.folderRejected`), never
+   * as English in this hook. */
+  folderRejectDetail: string;
   /** Set to true to disable the handler entirely (e.g. on touch UA or persona detail). */
   disabled?: boolean;
 }
@@ -44,7 +48,7 @@ export function useDragTarget(
   ref: RefObject<HTMLElement | null>,
   options: UseDragTargetOptions,
 ): boolean {
-  const { onFiles, onReject, disabled } = options;
+  const { onFiles, onReject, folderRejectDetail, disabled } = options;
   const [isOver, setIsOver] = useState(false);
 
   useEffect(() => {
@@ -79,7 +83,7 @@ export function useDragTarget(
         }
         const entry = item.webkitGetAsEntry?.();
         if (entry && !entry.isFile) {
-          onReject("Folder drops aren't supported — drop individual files.");
+          onReject(folderRejectDetail);
           continue;
         }
         const f = item.getAsFile();
@@ -96,7 +100,7 @@ export function useDragTarget(
       el.removeEventListener("dragleave", onDragLeave);
       el.removeEventListener("drop", onDrop);
     };
-  }, [ref, onFiles, onReject, disabled]);
+  }, [ref, onFiles, onReject, disabled, folderRejectDetail]);
 
   return isOver;
 }

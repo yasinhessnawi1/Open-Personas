@@ -1,12 +1,15 @@
 {
   "app": {
     "name": "Open Persona",
-    "tagline": "Typed-memory AI personas with a tier-routed runtime."
+    "tagline": "Typed-memory AI personas with a tier-routed runtime.",
+    "personaFallback": "Persona",
+    "description": "Build and run typed-memory AI personas with a tier-routed runtime.",
+    "close": "Close"
   },
   "profile": {
     "nameNudge": {
       "title": "What should we call you?",
-      "subtitle": "Add your name so your personas can address you. Optional — you can skip this.",
+      "subtitle": "Add your name so your personas can address you. Optional, so skip it if you like.",
       "firstLabel": "First name",
       "firstPlaceholder": "First name",
       "lastLabel": "Last name",
@@ -16,14 +19,14 @@
     }
   },
   "scaffold": {
-    "title": "Open Persona — web app",
+    "title": "Open Persona web app",
     "subtitle": "Scaffold is live. Auth, personas, chat, runs, and authoring land in the spec-09 tasks.",
     "cta": "View personas"
   },
   "home": {
     "title": "Home",
     "subtitle": "Your typed-memory agents, ready when you are.",
-    "subtitleNew": "Welcome to Open Persona — let's build your first agent.",
+    "subtitleNew": "Welcome to Open Persona. Let's build your first agent.",
     "create": "New persona",
     "jumpBackIn": "Jump back in",
     "manageAll": "Manage all personas",
@@ -45,7 +48,7 @@
     "onboarding": {
       "kicker": "Get started",
       "title": "Give your AI a self worth trusting.",
-      "body": "Describe a persona in a sentence and the authoring flow drafts the rest — a typed identity, a worldview, and episodic memory.",
+      "body": "Describe a persona in a sentence and the authoring flow drafts the rest: a typed identity, a worldview, and episodic memory.",
       "create": "Create your first persona",
       "docs": "Read the docs",
       "featuresHeading": "What you get",
@@ -54,11 +57,11 @@
     "features": {
       "identity": {
         "title": "Identity is data",
-        "body": "Name, worldview, self-facts, and constraints live in typed, versioned stores — not buried in a prompt you can't inspect."
+        "body": "Name, worldview, self-facts, and constraints live in typed, versioned stores, not buried in a prompt you can't inspect."
       },
       "tools": {
         "title": "Transparent tools",
-        "body": "Every tool call and its result stream inline, collapsed by default. Transparency without the noise — no black box."
+        "body": "Every tool call and its result stream inline, collapsed by default. Transparency without the noise, and no black box."
       },
       "runs": {
         "title": "Agentic runs",
@@ -66,7 +69,7 @@
       },
       "routing": {
         "title": "Tier-routed",
-        "body": "Each turn runs on the right model — small, mid, or frontier — so you spend on power only when a turn needs it."
+        "body": "Each turn runs on the right model (small, mid, or frontier), so you spend on power only when a turn needs it."
       }
     }
   },
@@ -101,9 +104,9 @@
       "newChat": "New chat",
       "presence": {
         "onCall": "On a call with {name}",
-        "onCallWorking": "On a call with {name} — also working",
+        "onCallWorking": "On a call with {name}, also working",
         "inChat": "In chat with {name}",
-        "inChatWorking": "In chat with {name} — also working",
+        "inChatWorking": "In chat with {name}, also working",
         "working": "{name} is working"
       }
     },
@@ -148,12 +151,12 @@
   },
   "settings": {
     "title": "Settings",
-    "subtitle": "Account, appearance, and how the instrument behaves — stored per account.",
+    "subtitle": "Account, appearance, and how the instrument behaves. Stored per account.",
     "account": "Account",
     "accountHint": "Manage your account from the avatar menu in the header.",
     "credits": "Credits",
     "creditsHint": "Credits are spent per turn, by model tier.",
-    "lowBalance": "Credits running low — top up soon.",
+    "lowBalance": "Credits running low. Top up soon.",
     "creditsExhausted": "Credits exhausted",
     "creditsExhaustedHint": "Top up your balance or contact support to keep using premium tiers.",
     "preferences": "Preferences",
@@ -172,7 +175,7 @@
     "github": "GitHub",
     "packages": "Packages",
     "usage": "Usage",
-    "usageEmpty": "No usage yet — start a conversation or a run.",
+    "usageEmpty": "No usage yet. Start a conversation or a run.",
     "usageDetailHeading": "Chat detail",
     "colWhen": "When",
     "colTier": "Tier",
@@ -197,7 +200,7 @@
     "basisFlat": "Flat rate",
     "basisUnpriced": "Unpriced",
     "basisMixed": "Mixed",
-    "basisNone": "—"
+    "basisNone": "Not recorded"
   },
   "billing": {
     "title": "Billing",
@@ -238,10 +241,10 @@
   },
   "modelPicker": {
     "title": "Model",
-    "tierDefault": "Use tier default — routes by task",
+    "tierDefault": "Use tier default (routes by task)",
     "browseAll": "Browse all models",
     "pricePerM": "{in} in / {out} out per 1M tokens",
-    "empty": "No models available right now — using the tier default.",
+    "empty": "No models available right now, so we're using the tier default.",
     "recommended": "Recommended"
   },
   "calls": {
@@ -259,12 +262,12 @@
   },
   "taskList": {
     "title": "Tasks",
-    "subtitle": "What your personas are working on — waiting on you first, then in progress, then done.",
+    "subtitle": "What your personas are working on. Waiting on you first, then in progress, then done.",
     "spend": "kr {spent} / {cap}",
     "resolve": "Resolve",
     "cancel": "Cancel",
     "emptyTitle": "No tasks yet",
-    "emptyBody": "When a persona takes on a longer job, it shows up here — with its state, spend, and anything waiting on you.",
+    "emptyBody": "When a persona takes on a longer job, it shows up here with its state, spend, and anything waiting on you.",
     "loadFailed": "Couldn't load your tasks. Try again in a moment.",
     "cancelFailed": "That didn't go through. Try again in a moment.",
     "status": {
@@ -302,15 +305,15 @@
     "loadFailed": "Couldn't load this task. Try again in a moment.",
     "commandFailed": "That didn't go through. Try again in a moment.",
     "dialLabel": "Initiative",
-    "dialDisabled": "Saved — initiative is off platform-wide, so this won't act until it's enabled.",
+    "dialDisabled": "Saved. Initiative is off platform-wide, so this won't act until it's enabled.",
     "dialFailed": "Couldn't change the dial. Try again in a moment.",
     "rescheduleFailed": "Couldn't preview that change. Try again in a moment.",
-    "rescheduleConflict": "This schedule changed since you opened it — showing the current plan.",
+    "rescheduleConflict": "This schedule changed since you opened it. Here's the current plan.",
     "budgetExtended": "Budget raised from kr {from} to kr {to}.",
     "reflect": {
       "pause": "Paused.",
       "resume": "Resumed.",
-      "cancel": "Cancelling — a running step finishes first."
+      "cancel": "Cancelling. A running step finishes first."
     },
     "status": {
       "just_created": "Just started",
@@ -356,7 +359,7 @@
   },
   "review": {
     "title": "Overnight",
-    "subtitle": "What your personas did while you slept — waiting on you first.",
+    "subtitle": "What your personas did while you slept. Waiting on you first.",
     "loadFailed": "Couldn't load your review. Try again in a moment.",
     "dateline": {
       "daypart": {
@@ -398,7 +401,7 @@
     "ownerLabel": "Autonomy",
     "statusActive": "Active",
     "statusPaused": "Paused",
-    "ownerHint": "Pausing stops all autonomy — everything your personas do on their own: new initiatives, scheduled reminders, and event reactions. Running tasks stop at their next step (anything mid-step finishes first).",
+    "ownerHint": "Pausing stops all autonomy: everything your personas do on their own, including new initiatives, scheduled reminders, and event reactions. Running tasks stop at their next step (anything mid-step finishes first).",
     "pause": "Pause",
     "resume": "Resume",
     "byPersona": "Manage each persona",
@@ -409,11 +412,11 @@
   },
   "approvals": {
     "title": "Approvals",
-    "subtitle": "Decisions your personas are waiting on — the exact action, before you approve it.",
+    "subtitle": "Decisions your personas are waiting on. You see the exact action before you approve it.",
     "needsApproval": "Needs approval",
     "review": "Review the request",
     "hideDetails": "Hide",
-    "whatWillHappen": "What will happen — {tool}",
+    "whatWillHappen": "What will happen: {tool}",
     "approve": "Approve",
     "deny": "Deny",
     "modify": "Change",
@@ -423,21 +426,22 @@
     "expiresInHours": "expires in {hours}h",
     "expiresInDays": "expires in {days} days",
     "emptyTitle": "Nothing waiting on you",
-    "emptyBody": "When a persona needs your go-ahead, it shows up here — with the exact action to approve.",
+    "emptyBody": "When a persona needs your go-ahead, it shows up here with the exact action to approve.",
     "loadFailed": "Couldn't load your approvals. Try again in a moment.",
     "decideFailed": "That didn't go through. Try again in a moment.",
     "reflection": {
       "approved": "Approved.",
       "denied": "Denied.",
-      "reconfirm": "Updated — please re-confirm the change.",
+      "reconfirm": "Updated. Please confirm the change again.",
       "alreadyHandled": "Already handled.",
       "resolvedGeneric": "Done."
-    }
+    },
+    "valueNone": "Not set"
   },
   "tasks": {
     "kicker": "Agentic runs",
     "title": "Tasks",
-    "subtitle": "Hand a job to a persona and watch it plan, act, and reflect — step by step.",
+    "subtitle": "Hand a job to a persona and watch it plan, act, and reflect, step by step.",
     "newHeading": "New task",
     "persona": "Persona",
     "personaPlaceholder": "Choose a persona…",
@@ -459,7 +463,7 @@
     "scheduleError": "Couldn't schedule the task. Check the time and try again.",
     "schedulePast": "Pick a time in the future.",
     "ctaTitle": "Hand off something new",
-    "ctaBody": "Delegate a goal to a persona — they'll work in the background.",
+    "ctaBody": "Delegate a goal to a persona. They'll work in the background.",
     "noPersonas": "Create a persona first to dispatch a task.",
     "dispatchError": "Couldn't start the task. Try again.",
     "previous": "Previous tasks",
@@ -509,7 +513,7 @@
       "files": "Files",
       "routing": "Routing",
       "routingValue": "Smart · automatic",
-      "routingHint": "Each turn is routed to a right-sized model automatically — small → frontier. The tier is never set per persona.",
+      "routingHint": "Each turn is routed to a right-sized model automatically, from small up to frontier. The tier is never set per persona.",
       "canDo": "What {name} can do",
       "canDoEmpty": "No apps enabled yet.",
       "modelNote": "Answers are routed to a right-sized model automatically."
@@ -523,18 +527,18 @@
       "fieldRole": "role",
       "fieldLanguage": "language",
       "identityMeta": "read-only · validated",
-      "identityDesc": "Who they are — name, role, language: the spine of the character.",
+      "identityDesc": "Who they are: name, role, and language. The spine of the character.",
       "selfFactsMeta": "append-only · versioned",
       "selfFactsDesc": "What the persona has learned about itself over time.",
       "worldviewMeta": "typed · epistemic",
-      "worldviewDesc": "Its stances and views — what keeps the voice consistent.",
+      "worldviewDesc": "Its stances and views. This is what keeps the voice consistent.",
       "episodicMeta": "pgvector · per-turn recall",
       "episodicDesc": "Recalled and compacted from past conversations each turn.",
       "episodicConversations": "{count, plural, =0 {No conversations yet} one {# conversation} other {# conversations}}"
     },
     "searchPlaceholder": "Search personas…",
     "count": "{count, plural, =1 {1 persona} other {# personas}}",
-    "createTileHint": "Describe one in a sentence — we'll draft the rest.",
+    "createTileHint": "Describe one in a sentence and we'll draft the rest.",
     "noMatches": "No personas match."
   },
   "artifacts": {
@@ -567,8 +571,9 @@
     "metaSize": "Size",
     "metaType": "Type",
     "metaCreated": "Created",
-    "noInlinePreview": "No inline preview for this file type — download it to open.",
-    "previewFailed": "Couldn't load a preview. Try downloading the file."
+    "noInlinePreview": "No inline preview for this file type. Download it to open.",
+    "previewFailed": "Couldn't load a preview. Try downloading the file.",
+    "previewTruncated": "Preview cut short. Download {name} to read the whole file."
   },
   "runs": {
     "backToPersona": "Back to persona",
@@ -586,7 +591,7 @@
     },
     "stepLabel": "Step {n}",
     "finalLabel": "Final",
-    "maxStepsNote": "Step budget reached — best-effort summary:",
+    "maxStepsNote": "Step budget reached. Best effort summary:",
     "answered": "Answered.",
     "answer": "Answer",
     "answerPlaceholder": "Type your answer…",
@@ -598,20 +603,20 @@
   "author": {
     "describeByline": "New persona",
     "describeTitle": "Describe your persona",
-    "describeHint": "One or two sentences. The frontier model drafts the identity, worldview, and constraints — you refine from there.",
+    "describeHint": "One or two sentences. The frontier model drafts the identity, worldview, and constraints. You refine from there.",
     "describePlaceholder": "e.g. A warm but rigorous Norwegian tenancy-law assistant who never gives binding legal advice…",
     "starterTitle": "Start from a ready-made persona",
-    "starterSubtitle": "Pick a flagship starter and make it yours, or describe your own — no waiting for a draft.",
+    "starterSubtitle": "Pick a flagship starter and make it yours, or describe your own. No waiting for a draft.",
     "directByline": "New persona",
     "directTitle": "Make it yours",
-    "directSubtitle": "Edit any field, then create. No authoring wait — your edits become the persona directly.",
+    "directSubtitle": "Edit any field, then create. No authoring wait, because your edits become the persona directly.",
     "safetyConstraintLocked": "Required safety constraint (always kept)",
     "createValidationFailed": "Fix these fields before creating: {fields}",
     "quickEyebrow": "Editable draft",
     "editableChip": "editable",
     "createNamed": "Create {name}",
     "openFullEditor": "Open full editor",
-    "quickFullEditorHint": "Add tools, skills, and voice in the full editor — your edits carry over.",
+    "quickFullEditorHint": "Add tools, skills, and voice in the full editor. Your edits carry over.",
     "quickSummary": "{self} self-facts · {world} worldview",
     "quickConstraintsCount": "{count} enforced constraints",
     "gallery": {
@@ -638,13 +643,13 @@
     },
     "generate": "Generate persona",
     "authorError": "Authoring failed. Try rephrasing your description.",
-    "rateLimited": "Too many authoring requests — wait a moment and try again.",
+    "rateLimited": "Too many authoring requests. Wait a moment and try again.",
     "loadingTitle": "Authoring your persona",
     "loadingStep1": "Shaping identity and voice…",
     "loadingStep2": "Forming worldview and self-facts…",
     "loadingStep3": "Setting constraints and capabilities…",
     "streamRegenerating": "Adjusting the draft to fit the schema…",
-    "reviewByline": "Draft — review & refine",
+    "reviewByline": "Draft: review and refine",
     "reviewTitle": "Review your persona",
     "editTitle": "Edit {name}",
     "editKicker": "Refine persona",
@@ -671,16 +676,16 @@
     "advancedTitle": "Advanced options",
     "editRawYaml": "Edit raw YAML",
     "hideRawYaml": "Hide raw YAML",
-    "yamlInvalid": "Invalid YAML — the form keeps its last valid state. {error}",
+    "yamlInvalid": "Invalid YAML. The form keeps its last valid state. {error}",
     "questionsTitle": "Refine with clarifying questions",
     "questionsHint": "Answer one to improve the persona. You can refine up to {max} times.",
     "answerPlaceholder": "Your answer…",
     "applyAnswer": "Apply",
     "refining": "Refining…",
-    "refineLimitReached": "Refinement limit reached — edit the form or YAML directly from here.",
+    "refineLimitReached": "Refinement limit reached. Edit the form or YAML directly from here.",
     "save": "Save persona",
     "saving": "Saving…",
-    "saveError": "Couldn't save — {error}",
+    "saveError": "Couldn't save. {error}",
     "saveFailed": "Something went wrong while saving.",
     "capabilitiesTitle": "Capabilities",
     "capabilityCount": "{count} of ~10 capabilities selected",
@@ -693,7 +698,7 @@
     "suggesting": "Finding the best fit…",
     "suggestionsTitle": "Suggested for this persona",
     "suggestApply": "Add",
-    "suggestEmpty": "No suggestions — the current set looks good.",
+    "suggestEmpty": "No suggestions. The current set looks good.",
     "suggestError": "Could not fetch suggestions right now.",
     "byoTitle": "Your MCP servers",
     "byoSubtitle": "Add your own MCP servers and assign them to this persona.",
@@ -720,7 +725,7 @@
     "byoAssign": "Assign",
     "byoUnassign": "Assigned",
     "byoDisabled": "disabled",
-    "byoAddError": "Could not add the server (check the URL — https only, public host).",
+    "byoAddError": "Could not add the server. Check the URL: https only, public host.",
     "voice": "Voice",
     "voiceTitle": "Voice",
     "voiceDescription": "The voice this persona speaks with on a call.",
@@ -733,11 +738,19 @@
     "avatarReplace": "Replace image",
     "avatarUploading": "Uploading…",
     "avatarHint": "PNG, JPG or WebP. A square image works best.",
-    "avatarUploadError": "Couldn't upload that image — try a different file.",
+    "avatarUploadError": "Couldn't upload that image. Try a different file.",
     "creatingTitle": "Creating your persona",
     "creatingStep1": "Saving your persona…",
     "creatingStep2": "Generating identity image…",
-    "creatingStep3": "Bringing your persona to life…"
+    "creatingStep3": "Bringing your persona to life…",
+    "epistemicLabel": "Epistemic marker",
+    "epistemic": {
+      "fact": "fact",
+      "belief": "belief",
+      "hypothesis": "hypothesis",
+      "contested": "contested"
+    },
+    "voiceLanguageWarning": "Calls with this persona will be spoken in English. The current voice providers don't support \"{language}\"."
   },
   "chat": {
     "placeholder": "Message {name}…",
@@ -784,9 +797,9 @@
         "label": "Turn into file",
         "formatMenu": "Choose file format",
         "toast": "Creating your file…",
-        "errorToast": "Couldn't start the file — try again",
-        "successToast": "File created — added to Files",
-        "timeoutToast": "Still working on your file — check Files in a moment",
+        "errorToast": "Couldn't start the file. Try again",
+        "successToast": "File created and added to Files",
+        "timeoutToast": "Still working on your file. Check Files in a moment",
         "format": {
           "pdf": "PDF",
           "md": "Markdown",
@@ -807,18 +820,20 @@
         },
         "remove": "Remove attachment",
         "retry": "Retry upload",
-        "sendBlocked": "{count, plural, one {# image failed to upload} other {# images failed to upload}} — retry or remove"
+        "sendBlocked": "{count, plural, one {# image failed to upload} other {# images failed to upload}}. Retry or remove",
+        "folderRejected": "Folder drops aren't supported. Drop the files themselves."
       },
       "validation": {
-        "empty_file": "{filename} is empty",
-        "oversize": "{filename} exceeds the 20.0 MB upload limit",
-        "per_message_image_cap": "You can attach at most {cap} images per message",
-        "unsupported_format": "{filename} isn't a supported format"
+        "empty_file": "{filename} is empty.",
+        "oversize": "{filename} is over the {limit} upload limit.",
+        "per_message_image_cap": "You can attach at most {cap} images per message.",
+        "unsupported_format": "{filename} isn't a format we can read. Attach an image, or a PDF, docx, xlsx, csv, txt, md, or code file."
       },
       "upload": {
         "uploading": "Uploading {filename}…",
         "uploaded": "{filename}",
-        "failed": "Upload failed: {reason}"
+        "failed": "Upload failed: {reason}",
+        "unavailable": "Image unavailable"
       },
       "documents": {
         "panelTitle": "Documents in this conversation",
@@ -876,7 +891,8 @@
         "diagramError": "Could not render diagram",
         "emptyTable": "No rows",
         "menu": "More actions"
-      }
+      },
+      "invalidPath": "Invalid path"
     },
     "kindBuiltin": "Built-in",
     "kindSkill": "Skill",
@@ -888,16 +904,17 @@
       "whyCost": "cheapest model that fit",
       "whyQuality": "best quality fit",
       "whyLatency": "fastest model",
-      "whyFallback": "tier default — live model data was unavailable"
+      "whyFallback": "tier default, because live model data was unavailable"
     },
     "budget": {
       "label": "Budget",
       "session": "{spent} of {cap}¢ this session",
       "sessionNoCap": "{spent}¢ this session",
-      "approaching": "Approaching the session cap — favouring cheaper models",
+      "approaching": "Approaching the session cap, so we're favouring cheaper models",
       "perTurnCap": "Per-turn cap {cap}¢",
       "perDayUnenforced": "Per-day cap set but not enforced yet"
-    }
+    },
+    "attachedImageAlt": "Attached image"
   },
   "voice": {
     "talk": "Talk to {name}",
@@ -1007,7 +1024,7 @@
     "voicesLoading": "Loading voices…",
     "voicesUnavailable": "Voice selection is unavailable right now.",
     "voicesError": "Couldn’t load voices.",
-    "voiceProviderMismatch": "This persona's saved voice isn't available from the current voice provider — choose one below to update it."
+    "voiceProviderMismatch": "This persona's saved voice isn't available from the current voice provider. Choose one below to update it."
   },
   "work": {
     "indicator": {
@@ -1034,15 +1051,85 @@
       "deleteConfirmBody": "This can't be undone.",
       "deleteFailed": "Couldn't delete this reminder. Try again.",
       "conflictTitle": "Already fired",
-      "conflictBody": "This reminder already ran — create a new one instead.",
+      "conflictBody": "This reminder already ran. Create a new one instead.",
       "rescheduleFailed": "Couldn't update this reminder. Try again.",
-      "previewFailed": "Couldn't preview this change. Try again."
+      "previewFailed": "Couldn't preview this change. Try again.",
+      "loadFailed": "Couldn't load your schedule. Try again.",
+      "loading": "Loading your schedule…",
+      "newRoutine": "New routine",
+      "panelWindowPersona": "{name}'s next {days} days · {count} runs. ",
+      "panelWindow": "Next {days} days · {count} runs. ",
+      "openFull": "Open the full calendar",
+      "forGridViews": "for week and month views.",
+      "kicker": "Schedule",
+      "heading": "Calendar",
+      "timesIn": "Times in {timezone}",
+      "viewAgenda": "Agenda",
+      "viewWeek": "Week",
+      "viewMonth": "Month",
+      "emptyWindow": "Nothing scheduled in this window.",
+      "createFirst": "Create your first routine",
+      "rescheduleRow": "Reschedule: {what}",
+      "moreCount": "+{count} more",
+      "rescheduleTitle": "Reschedule",
+      "quietOffer": "(that's inside your quiet hours. Move it to {edge}?)",
+      "truncationNotice": "Showing through {date}. Narrow the range to see more.",
+      "fireRan": "Ran",
+      "fireRanLate": "Ran late",
+      "fireMissed": "Missed"
+    },
+    "recurrence": {
+      "cadence": "Cadence",
+      "kind": {
+        "once": "Once",
+        "daily": "Every day",
+        "weekly": "Weekly",
+        "monthly_day": "Monthly",
+        "hourly": "Hourly"
+      },
+      "at": "At",
+      "every": "Every",
+      "hoursSuffix": "hours (wall clock, at these local times in {timezone})",
+      "localTimeHint": "(your local time, shown on the calendar in {timezone})",
+      "on": "On",
+      "onDay": "On day",
+      "lastDayHint": "(use -1 for the last day of the month)",
+      "weekday": {
+        "MO": "Mon",
+        "TU": "Tue",
+        "WE": "Wed",
+        "TH": "Thu",
+        "FR": "Fri",
+        "SA": "Sat",
+        "SU": "Sun"
+      }
+    },
+    "create": {
+      "title": "New routine",
+      "intro": "Tell a persona what to do, and when. You'll preview it before it's set.",
+      "subjectLabel": "What should I do for you?",
+      "subjectPlaceholder": "e.g. stretch for five minutes",
+      "whoLabel": "Who should run it?",
+      "whoPlaceholder": "Choose a persona…",
+      "notify": "Notify me in the bell when it runs",
+      "quietTitle": "That's inside your quiet hours.",
+      "quietMove": "Move to {edge}",
+      "quietOr": "or confirm to keep your time.",
+      "previewFailed": "Couldn't preview this reminder. Check the time and try again.",
+      "createFailed": "Couldn't create the reminder. Try again."
+    },
+    "common": {
+      "cancel": "Cancel",
+      "confirm": "Confirm",
+      "preview": "Preview",
+      "whenLabel": "When:",
+      "nextRun": "next run {when}"
     }
   },
   "notifications": {
     "open": "Notifications",
     "title": "Notifications",
-    "empty": "Nothing yet — run results and alerts will show up here.",
+    "empty": "Nothing yet. Run results and alerts will show up here.",
     "clear": "Clear all",
     "unreadLabel": "{count} unread",
     "deleted": "{name} deleted",
@@ -1065,14 +1152,14 @@
     "schedule": {
       "fired": "{persona} ran your reminder: {subject}",
       "firedNoSubject": "{persona} ran your reminder.",
-      "executor_missing": "A reminder was paused — its persona is no longer available",
-      "taskPaused": "A reminder was paused — its schedule was removed"
+      "executor_missing": "A reminder was paused because its persona is no longer available",
+      "taskPaused": "A reminder was paused because its schedule was removed"
     }
   },
   "apps": {
     "title": "Apps",
     "titleCombined": "Apps & Tools",
-    "subtitle": "Apps your persona can use — each one a real integration running real code.",
+    "subtitle": "Apps your persona can use. Each one is a real integration running real code.",
     "searchPlaceholder": "Search apps",
     "searchCombined": "Search apps & tools",
     "empty": "No apps or tools available.",
@@ -1082,7 +1169,7 @@
     "providerBuiltin": "Built-in",
     "providerOptional": "Optional",
     "defaultBadge": "default",
-    "capability": "Adds tools your persona can use — available once enabled.",
+    "capability": "Adds tools your persona can use, available once enabled.",
     "toolsHeading": "What this app adds",
     "detail": {
       "noDescription": "No description provided by the catalog."
@@ -1179,13 +1266,13 @@
     },
     "needsSetup": {
       "heading": "Needs a credential",
-      "branchA": "Needs {env}. You'll provide it when you set this app up on a persona — it's stored encrypted and the persona never sees it.",
-      "branchB": "This app isn't run per-user here. If your operator has enabled it on the deployment's MCP gateway, its {env} key is managed there — not in this app.",
-      "branchBSecretless": "This app isn't run per-user here. If your operator has enabled it on the deployment's MCP gateway, its key is managed there — not in this app.",
-      "branchD": "Set up by your operator in the deployment environment — not something you add here."
+      "branchA": "Needs {env}. You'll provide it when you set this app up on a persona. It's stored encrypted and the persona never sees it.",
+      "branchB": "This app isn't run per-user here. If your operator has enabled it on the deployment's MCP gateway, its {env} key is managed there, not in this app.",
+      "branchBSecretless": "This app isn't run per-user here. If your operator has enabled it on the deployment's MCP gateway, its key is managed there, not in this app.",
+      "branchD": "Set up by your operator in the deployment environment, not something you add here."
     },
     "setupForm": {
-      "intro": "Set this app up for this persona. You provide the credential directly — it is stored securely and the persona never sees it.",
+      "intro": "Set this app up for this persona. You provide the credential directly. It's stored securely and the persona never sees it.",
       "credentialLabel": "{env}",
       "credentialPlaceholder": "Paste your token",
       "submit": "Set up & connect",
@@ -1196,7 +1283,7 @@
       "errorNotVetted": "This app is not available to add on this deployment."
     },
     "connect": {
-      "intro": "Connect this app for this persona. You authenticate with the provider — no token handling here, and the persona never sees your credentials.",
+      "intro": "Connect this app for this persona. You authenticate with the provider, so there's no token handling here and the persona never sees your credentials.",
       "connect": "Connect",
       "connecting": "Connecting…",
       "error": "Could not start the connection. Please try again."
@@ -1204,7 +1291,7 @@
     "unavailable": {
       "heading": "No longer available",
       "summary": "This app was enabled for the persona but has been removed from the catalog.",
-      "tombstone": "{name} — no longer available (removed from the catalog).",
+      "tombstone": "{name} is no longer available (removed from the catalog).",
       "note": "The persona keeps running; this capability is simply gone."
     },
     "connection": {
@@ -1246,16 +1333,16 @@
   },
   "memory": {
     "title": "Memory",
-    "subtitle": "What your personas know — yours to shape",
-    "firstVisit": "Everything your personas have learned about you, from your conversations — drawn as a living map. Correct anything. Delete anything — and it's gone from every persona.",
+    "subtitle": "What your personas know, yours to shape",
+    "firstVisit": "Everything your personas have learned about you, from your conversations, drawn as a living map. Correct anything. Delete anything, and it's gone from every persona.",
     "empty": "Your memory starts here",
-    "emptyHint": "As you talk with your personas, what they learn about you grows into a map here — yours to explore, correct, and prune.",
+    "emptyHint": "As you talk with your personas, what they learn about you grows into a map here, yours to explore, correct, and prune.",
     "unavailable": "Memory isn't available here",
     "unavailableHint": "This deployment doesn't run a knowledge-graph, so there's no memory map to show. It's available on graph-backed (Postgres) deployments.",
     "loading": "Drawing your map…",
     "nodesWord": "memories",
     "linksWord": "links",
-    "searchPlaceholder": "Search your memory — by meaning or term…",
+    "searchPlaceholder": "Search your memory by meaning or term…",
     "searchLabel": "Search your knowledge graph",
     "flyToHint": "⏎ fly to",
     "zoomIn": "Zoom in",
@@ -1265,7 +1352,7 @@
     "legendLabel": "Legend",
     "legendConnections": "Connections",
     "legendCategories": "Categories",
-    "legendSensitive": "Sensitive — marked with care, yours to remove",
+    "legendSensitive": "Sensitive: marked with care, yours to remove",
     "linkType": {
       "semantic": "Semantic",
       "entity": "Entity",
@@ -1293,7 +1380,7 @@
     "loadingDetail": "Opening this memory…",
     "loadError": "Couldn't open this memory. Please try again.",
     "whatsKnown": "What's known",
-    "whatsKnownHint": "Edit to correct — re-indexed across your personas",
+    "whatsKnownHint": "Edit to correct. It's re-indexed across your personas",
     "openConversation": "Open conversation",
     "editing": "You're editing this memory.",
     "saveCorrection": "Save correction",
@@ -1301,12 +1388,12 @@
     "savedBody": "Re-indexed across your personas.",
     "saveError": "Couldn't save your correction. Please try again.",
     "careTitle": "Marked sensitive",
-    "careBody": "This touches a personal subject. Your personas hold it gently — and you can remove it any time. It's here because you shared it, and it's yours.",
+    "careBody": "This touches a personal subject. Your personas hold it gently, and you can remove it any time. It's here because you shared it, and it's yours.",
     "provenanceHead": "Where this came from",
     "you": "YOU",
     "editedByYou": "edited by you",
     "learnedBy": "learned by {name}",
-    "provUser": "You corrected this yourself — the most trustworthy source this memory has.",
+    "provUser": "You corrected this yourself, the most trustworthy source this memory has.",
     "provSource": {
       "persona_self": "Learned by your personas, from your conversations.",
       "user": "You told your personas this yourself.",
@@ -1321,7 +1408,7 @@
     "connectedHead": "Connected to {count, plural, =0 {nothing yet} one {# memory} other {# memories}}",
     "delete": "Delete",
     "deleteTitle": "Delete “{label}”?",
-    "deleteBody": "This permanently removes it from what all your personas know — across every conversation, by voice and text. It also drops {count, plural, one {# connection} other {# connections}}. This can't be undone.",
+    "deleteBody": "This permanently removes it from what all your personas know, across every conversation, by voice and text. It also drops {count, plural, one {# connection} other {# connections}}. This can't be undone.",
     "deleteConfirm": "Delete everywhere",
     "deleted": "Deleted everywhere",
     "deletedBody": "Gone from every persona.",
@@ -1335,7 +1422,7 @@
     "episodicPersonaPlaceholder": "Select a persona",
     "episodicGistsWord": "memories",
     "episodicNoPersona": "Choose a persona",
-    "episodicNoPersonaHint": "Episodic memory is per-persona — pick one above to browse what they've recalled.",
+    "episodicNoPersonaHint": "Episodic memory is per-persona, so pick one above to browse what they've recalled.",
     "episodicUnavailable": "Episodic memory isn't available here",
     "episodicUnavailableHint": "This deployment doesn't run an episodic memory backend, so there's nothing to browse yet.",
     "episodicEmpty": "Nothing recalled yet",
@@ -1358,20 +1445,20 @@
     "episodicForgetConfirm": "Forget",
     "episodicManagerTitle": "What they've recalled",
     "forgetDialogTitle": "Also forget these {count, plural, one {# memory} other {# memories}}?",
-    "forgetDialogBody": "Deleting this would leave behind conversation memory that could recreate it. Choose what to forget too — deselect anything you'd rather keep.",
+    "forgetDialogBody": "Deleting this would leave behind conversation memory that could recreate it. Choose what to forget too, and deselect anything you'd rather keep.",
     "forgetDialogCancel": "Cancel",
     "forgetDialogConfirm": "Forget everywhere"
   },
   "specialities": {
     "title": "Specialities",
-    "subtitle": "Expertise your persona can follow — separate from apps, which run real code.",
+    "subtitle": "Expertise your persona can follow. Separate from apps, which run real code.",
     "searchPlaceholder": "Search specialities",
     "empty": "No specialities available.",
     "searchEmpty": "No specialities match “{query}”.",
     "loading": "Loading specialities…",
     "loadError": "Could not load specialities.",
     "open": "Open {name}",
-    "capability": "Adds expertise your persona will follow — available once enabled.",
+    "capability": "Adds expertise your persona will follow, available once enabled.",
     "whenToUse": "Use when: {text}",
     "state": {
       "available": "Available",
@@ -1396,10 +1483,10 @@
       "sourceCommit": "From {project} @ {commit}"
     },
     "consent": {
-      "disclosure": "This speciality is instructions your persona will follow — {tier} content from {source} that Open Persona hasn't reviewed. Most specialities are helpful, but because one could include hidden instructions that steer your persona in ways you didn't intend, enable it only if you trust the source. You can disable it anytime.",
+      "disclosure": "This speciality is instructions your persona will follow: {tier} content from {source} that Open Persona hasn't reviewed. Most specialities are helpful, but because one could include hidden instructions that steer your persona in ways you didn't intend, enable it only if you trust the source. You can disable it anytime.",
       "regate": "This speciality changed since you enabled it. Review it and enable again to keep it active.",
       "deferred": "You'll confirm consent after saving this persona.",
-      "grant": "Enable — I trust this source",
+      "grant": "Enable, I trust this source",
       "regrant": "Review & enable again",
       "granting": "Enabling…",
       "error": "Could not record consent. Try again."
@@ -1411,13 +1498,13 @@
   },
   "connectors": {
     "title": "Reach your personas anywhere.",
-    "subtitle": "Connect the apps you already live in. A message to any of them reaches the same persona — same memory, same voice.",
-    "intro": "Connect a platform and your personas become reachable there — message one by name to talk to it, and it can reach you back.",
+    "subtitle": "Connect the apps you already live in. A message to any of them reaches the same persona, with the same memory and the same voice.",
+    "intro": "Connect a platform and your personas become reachable there. Message one by name to talk to it, and it can reach you back.",
     "notConnectedHint": "Not connected yet.",
     "linkedOn": "Linked {date}",
     "firstConnection": {
       "title": "Get started",
-      "body": "You haven't connected anything yet. Connect a platform and your personas become reachable there — name one to talk to it, and it can reach you back. Start with {platforms} — the quickest to set up.",
+      "body": "You haven't connected anything yet. Connect a platform and your personas become reachable there. Name one to talk to it, and it can reach you back. Start with {platforms}, the quickest to set up.",
       "or": "or"
     },
     "state": {
@@ -1464,7 +1551,7 @@
       "emailInstruction": "Email this code to {destination} to finish linking.",
       "codeInstructionNoDest": "Send this code from {platform} to finish.",
       "confirmed": "Connected",
-      "confirmedBody": "{platform} is connected — your personas can reach you there now.",
+      "confirmedBody": "{platform} is connected. Your personas can reach you there now.",
       "expiredTitle": "That expired",
       "expiredBody": "This code or link is no longer valid. Generate a fresh one to try again.",
       "reissue": "Try again",
@@ -1484,7 +1571,7 @@
     },
     "disconnect": {
       "title": "Disconnect {platform}?",
-      "description": "{platform} ({identity}) will be unlinked — your personas will no longer be reachable there, and messages from that account will stop reaching them. You can reconnect anytime.",
+      "description": "{platform} ({identity}) will be unlinked. Your personas will no longer be reachable there, and messages from that account will stop reaching them. You can reconnect anytime.",
       "done": "Disconnected {platform}.",
       "failed": "Couldn't disconnect {platform}. Please try again."
     },
@@ -1517,13 +1604,13 @@
     "start": "Dictate with your voice",
     "stop": "Stop recording",
     "transcribing": "Transcribing…",
-    "permissionDenied": "Microphone access denied — allow it in your browser settings to dictate"
+    "permissionDenied": "Microphone access denied. Allow it in your browser settings to dictate"
   },
   "personaPage": {
     "back": "Personas",
     "saving": "Saving…",
     "saved": "All changes saved",
-    "saveFailed": "Couldn't save — check the fields.",
+    "saveFailed": "Couldn't save. Check the fields.",
     "unnamed": "Unnamed persona",
     "message": "Message",
     "call": "Call",
@@ -1536,21 +1623,21 @@
     "voiceCall": "Voice call",
     "duplicate": "Duplicate",
     "duplicateTitle": "Duplicate {name}?",
-    "duplicateBody": "Copies the definition — identity, worldview, constraints, capabilities. Memory and conversations start fresh.",
+    "duplicateBody": "Copies the definition: identity, worldview, constraints, capabilities. Memory and conversations start fresh.",
     "duplicated": "Duplicated {name}",
     "duplicateFailed": "Couldn't duplicate. Try again.",
     "files": "Files",
     "dangerZone": "Danger zone",
-    "deleteHint": "Deleting removes {name} and all their typed memory — everywhere, by voice and text. This can't be undone.",
+    "deleteHint": "Deleting removes {name} and all their typed memory, everywhere, by voice and text. This can't be undone.",
     "deletePersona": "Delete persona",
     "deleteTitle": "Delete {name}?",
-    "deleteBody": "{name} and all their typed memory will be removed — everywhere, by voice and text. This can't be undone.",
+    "deleteBody": "{name} and all their typed memory will be removed, everywhere, by voice and text. This can't be undone.",
     "delete": "Delete",
     "deleteFailed": "Couldn't delete. Try again.",
     "memories": "Memories",
     "tasksRun": "Tasks run",
     "filesTitle": "{name}'s files",
-    "filesEmpty": "Nothing here yet — files this persona produces or you share with it will show up here.",
+    "filesEmpty": "Nothing here yet. Files this persona produces or you share with it will show up here.",
     "avatar": {
       "edit": "Edit avatar",
       "title": "Avatar",
@@ -1558,8 +1645,8 @@
       "uploading": "Uploading…",
       "regenerate": "Regenerate",
       "regenerating": "Regenerating…",
-      "regenHint": "Regenerating drafts a new portrait from the persona's identity. It takes a moment — the new image appears when it's ready.",
-      "regenTimeout": "Still working — check back in a moment.",
+      "regenHint": "Regenerating drafts a new portrait from the persona's identity. It takes a moment, and the new image appears when it's ready.",
+      "regenTimeout": "Still working. Check back in a moment.",
       "regenFailed": "Couldn't start regeneration. Try again.",
       "uploadFailed": "Couldn't upload that image. Try another file.",
       "done": "Done"
@@ -1569,10 +1656,150 @@
       "openGraph": "Open the graph",
       "loadFailed": "Couldn't load memories. Try again.",
       "unavailable": "Memory isn't available in this deployment.",
-      "empty": "No memories yet — they grow from conversations.",
+      "empty": "No memories yet. They grow from conversations.",
       "openConversation": "Open the conversation",
       "more": "+{count} more in the graph",
       "close": "Close"
+    },
+    "autonomy": {
+      "heading": "Autonomy",
+      "hint": "How readily this persona asks clarifying questions and acts on its own.",
+      "cautious": "Cautious",
+      "cautiousDesc": "Asks often. Checks in on any ambiguity before acting.",
+      "balanced": "Balanced",
+      "balancedDesc": "Asks on structural ambiguity; assumes reasonable defaults on minor details.",
+      "decisive": "Decisive",
+      "decisiveDesc": "Asks rarely, only on safety-critical gaps. Otherwise it proceeds.",
+      "autoTasks": "Automatic tasks",
+      "autoTasksHint": "Let this persona start tasks on your behalf without asking each time.",
+      "on": "On",
+      "off": "Off",
+      "consentWarning": "Turning this off stops future automatic tasks only. Tasks already running or completed are not affected. You'll be asked again the next time this persona wants to start a task, and every task appears in the activity log."
     }
+  },
+  "authError": {
+    "title": "Sign-in didn't load",
+    "body": "We hit a snag loading the sign-in screen. It usually clears on its own, so try again or head back to sign in.",
+    "retry": "Try again",
+    "backToSignIn": "Back to sign in"
+  },
+  "auth": {
+    "brand": {
+      "signIn": {
+        "kicker": "Typed-memory AI",
+        "tagline": "The persona you talk to is the one you type to.",
+        "note": "Sign in to personas that remember you, by voice and in text.",
+        "compact": "Sign in to personas that remember you."
+      },
+      "mfa": {
+        "kicker": "One more step",
+        "tagline": "Confirm it's you.",
+        "note": "We sent a 6-digit code to your inbox. Enter it to finish signing in.",
+        "compact": "Enter the code we emailed you."
+      },
+      "signUp": {
+        "kicker": "Typed-memory AI",
+        "tagline": "Build personas that remember.",
+        "note": "One identity across voice and text, with real typed memory.",
+        "compact": "Build personas that remember."
+      },
+      "verify": {
+        "kicker": "One last step",
+        "tagline": "Confirm it's you.",
+        "note": "We sent a 6-digit code to your inbox. Enter it to finish creating your account.",
+        "compact": "Enter the code we emailed you."
+      },
+      "reset": {
+        "kicker": "Account recovery",
+        "tagline": "Let's get you back in.",
+        "note": "We'll email a 6-digit code to confirm it's you, then you can set a new password.",
+        "compact": "Reset your password."
+      }
+    },
+    "stores": {
+      "identity": "identity",
+      "self": "self",
+      "worldview": "worldview",
+      "episodic": "episodic"
+    },
+    "loading": {
+      "title": "Just a moment",
+      "body": "Getting things ready…"
+    },
+    "error": {
+      "generic": "Something went wrong. Try again in a moment.",
+      "lockout": "Too many attempts. Wait a moment before trying again, or reset your password."
+    },
+    "oauth": {
+      "google": "Continue with Google",
+      "github": "Continue with GitHub"
+    },
+    "fields": {
+      "email": "Email",
+      "emailPlaceholder": "you@example.com",
+      "password": "Password",
+      "passwordHint": "At least 8 characters.",
+      "hidePassword": "Hide password",
+      "showPassword": "Show password",
+      "verificationCode": "Verification code"
+    },
+    "signIn": {
+      "title": "Welcome back",
+      "startSubtitle": "Sign in to continue to Open Persona.",
+      "passwordSubtitle": "Enter your password to continue.",
+      "continue": "Continue",
+      "continuing": "Continuing…",
+      "submit": "Sign in",
+      "submitting": "Signing in…",
+      "change": "Change",
+      "forgot": "Forgot password?",
+      "passwordPlaceholder": "Enter your password",
+      "newHere": "New to Open Persona?",
+      "createAccount": "Create an account",
+      "mfaTitle": "Verify it's you",
+      "mfaBody": "Enter the 6-digit code we sent to <em>{email}</em>.",
+      "verify": "Verify code",
+      "verifying": "Verifying…",
+      "wrongAccount": "Wrong account?",
+      "startOver": "Start over"
+    },
+    "signUp": {
+      "title": "Create your account",
+      "subtitle": "Start building personas in minutes.",
+      "passwordPlaceholder": "Create a password",
+      "submit": "Create account",
+      "submitting": "Creating account…",
+      "legal": "By creating an account you agree to the <terms>Terms</terms> and <privacy>Privacy Policy</privacy>.",
+      "haveAccount": "Already have an account?",
+      "signIn": "Sign in",
+      "verifyTitle": "Check your inbox",
+      "verifyBody": "Enter the 6-digit code we sent to <em>{email}</em>.",
+      "verifyEmail": "Verify email",
+      "verifying": "Verifying…",
+      "wrongAddress": "Wrong address?",
+      "goBack": "Go back"
+    },
+    "reset": {
+      "requestTitle": "Forgot your password?",
+      "requestBody": "Enter your email and we'll send a reset code.",
+      "sendCode": "Send reset code",
+      "sending": "Sending code…",
+      "codeTitle": "Check your inbox",
+      "codeBody": "Enter the 6-digit code we sent to <em>{email}</em>.",
+      "verifyCode": "Verify code",
+      "verifying": "Verifying…",
+      "newTitle": "Set a new password",
+      "newBody": "Choose a strong password you haven't used before.",
+      "newPasswordLabel": "New password",
+      "newPasswordPlaceholder": "Create a new password",
+      "setPassword": "Set new password",
+      "updating": "Updating…",
+      "remembered": "Remembered it?",
+      "backToSignIn": "Back to sign in"
+    },
+    "resendIn": "Resend code in <em>{time}</em>",
+    "didntGet": "Didn't get it?",
+    "resend": "Resend code",
+    "or": "or"
   }
 }

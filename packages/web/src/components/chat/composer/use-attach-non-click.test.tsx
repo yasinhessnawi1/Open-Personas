@@ -1,7 +1,11 @@
 import { fireEvent, render } from "@testing-library/react";
 import { useRef } from "react";
 import { describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import { useDragTarget, usePasteImage } from "./use-attach-non-click";
+
+/** The folder-drop copy is the caller's now; the harness supplies the real one. */
+const FOLDER_REJECT = messages.chat.composer.attach.folderRejected;
 
 /**
  * F3 T08 — drag-and-drop + paste handlers (desktop-only enhancements).
@@ -17,7 +21,12 @@ function DragHarness({
   disabled?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const isOver = useDragTarget(ref, { onFiles, onReject, disabled });
+  const isOver = useDragTarget(ref, {
+    onFiles,
+    onReject,
+    folderRejectDetail: FOLDER_REJECT,
+    disabled,
+  });
   return (
     <div
       ref={ref}
@@ -97,7 +106,7 @@ describe("useDragTarget", () => {
       ]),
     );
     expect(onReject).toHaveBeenCalled();
-    expect(onReject.mock.calls[0][0]).toContain("Folder");
+    expect(onReject.mock.calls[0][0]).toBe(FOLDER_REJECT);
   });
 
   it("silently skips remote-URL drags (kind=string)", () => {

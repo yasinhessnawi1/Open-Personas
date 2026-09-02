@@ -1,5 +1,7 @@
 "use client";
 
+import { useTranslations } from "next-intl";
+
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -18,28 +20,12 @@ import { cn } from "@/lib/utils";
  */
 export type AutonomyLevel = "cautious" | "balanced" | "decisive";
 
-const AUTONOMY_OPTIONS: {
-  level: AutonomyLevel;
-  title: string;
-  description: string;
-}[] = [
-  {
-    level: "cautious",
-    title: "Cautious",
-    description: "Asks frequently — checks in on any ambiguity before acting.",
-  },
-  {
-    level: "balanced",
-    title: "Balanced",
-    description:
-      "Asks on structural ambiguity; assumes reasonable defaults on minor details.",
-  },
-  {
-    level: "decisive",
-    title: "Decisive",
-    description:
-      "Asks rarely — only on safety-critical gaps; otherwise proceeds.",
-  },
+/** The three levels in display order; title + description come from
+ * `personaPage.autonomy.<level>` / `<level>Desc`. */
+const AUTONOMY_LEVELS: readonly AutonomyLevel[] = [
+  "cautious",
+  "balanced",
+  "decisive",
 ];
 
 export function AutonomyConsentSection({
@@ -56,6 +42,7 @@ export function AutonomyConsentSection({
   onConsentChange: (granted: boolean | null) => void;
   pending?: boolean;
 }) {
+  const t = useTranslations("personaPage.autonomy");
   const granted = consent === true;
 
   return (
@@ -64,30 +51,27 @@ export function AutonomyConsentSection({
       data-slot="autonomy-consent-section"
     >
       <div className="flex flex-col gap-2" data-slot="autonomy-selector">
-        <h3 className="type-body font-medium">Autonomy</h3>
-        <p className="type-caption text-muted-foreground">
-          How readily this persona asks clarifying questions and acts on its
-          own.
-        </p>
+        <h3 className="type-body font-medium">{t("heading")}</h3>
+        <p className="type-caption text-muted-foreground">{t("hint")}</p>
         <div className="mt-1 flex flex-col gap-1.5">
-          {AUTONOMY_OPTIONS.map((opt) => (
+          {AUTONOMY_LEVELS.map((level) => (
             <button
-              key={opt.level}
+              key={level}
               type="button"
               disabled={pending}
-              aria-pressed={autonomy === opt.level}
-              onClick={() => onAutonomyChange(opt.level)}
+              aria-pressed={autonomy === level}
+              onClick={() => onAutonomyChange(level)}
               className={cn(
                 "flex flex-col items-start gap-0.5 rounded-md border p-3 text-left transition-colors",
-                autonomy === opt.level
+                autonomy === level
                   ? "border-primary bg-primary/5"
                   : "border-border hover:bg-muted/50",
               )}
               data-slot="autonomy-option"
             >
-              <span className="type-body font-medium">{opt.title}</span>
+              <span className="type-body font-medium">{t(level)}</span>
               <span className="type-caption text-muted-foreground">
-                {opt.description}
+                {t(`${level}Desc`)}
               </span>
             </button>
           ))}
@@ -97,10 +81,9 @@ export function AutonomyConsentSection({
       <div className="flex flex-col gap-2" data-slot="consent-toggle">
         <div className="flex items-center justify-between gap-3">
           <div className="flex flex-col">
-            <h3 className="type-body font-medium">Automatic tasks</h3>
+            <h3 className="type-body font-medium">{t("autoTasks")}</h3>
             <p className="type-caption text-muted-foreground">
-              Let this persona start tasks on your behalf without asking each
-              time.
+              {t("autoTasksHint")}
             </p>
           </div>
           <button
@@ -117,7 +100,7 @@ export function AutonomyConsentSection({
             )}
             data-slot="consent-switch"
           >
-            {granted ? "On" : "Off"}
+            {granted ? t("on") : t("off")}
           </button>
         </div>
         {granted ? (
@@ -125,10 +108,7 @@ export function AutonomyConsentSection({
             className="type-caption rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-muted-foreground"
             data-slot="consent-warning"
           >
-            Turning this off stops future automatic tasks only — tasks already
-            running or completed are not affected. You'll be asked again the
-            next time this persona wants to start a task. Every task appears in
-            the activity log.
+            {t("consentWarning")}
           </p>
         ) : null}
       </div>

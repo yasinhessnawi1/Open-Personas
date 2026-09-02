@@ -31,8 +31,11 @@ interface ApprovalCardProps {
 }
 
 /** Render a value verbatim as TEXT — never HTML (a safety surface; React escapes strings). */
-function renderValue(value: JsonValue): string {
-  if (value === null) return "—";
+function renderValue(
+  value: JsonValue,
+  t: ReturnType<typeof useTranslations>,
+): string {
+  if (value === null) return t("valueNone");
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
 }
@@ -218,7 +221,7 @@ export function ApprovalCard({
                           />
                         ) : (
                           <dd className="whitespace-pre-wrap break-words text-sm">
-                            {renderValue(value)}
+                            {renderValue(value, t)}
                           </dd>
                         )}
                       </div>

@@ -12,6 +12,7 @@
  * once per dialog-open (A10-D-6): double-clicks converge, two deliberate opens stay distinct.
  */
 
+import { useTranslations } from "next-intl";
 import { useMemo, useState } from "react";
 
 import { useAuth } from "@/auth";
@@ -71,6 +72,8 @@ export function CreateReminderDialog({
   onClose,
   onCreated,
 }: CreateReminderDialogProps) {
+  const t = useTranslations("schedule.create");
+  const tCommon = useTranslations("schedule.common");
   const { getToken } = useAuth();
   const [subject, setSubject] = useState("");
   const [personaId, setPersonaId] = useState(lockedPersona?.id ?? "");
@@ -101,7 +104,7 @@ export function CreateReminderDialog({
         }),
       );
     } catch {
-      setError("Couldn't preview this reminder. Check the time and try again.");
+      setError(t("previewFailed"));
     } finally {
       setBusy(false);
     }
@@ -130,7 +133,7 @@ export function CreateReminderDialog({
       });
       await onCreated();
     } catch {
-      setError("Couldn't create the reminder. Please try again.");
+      setError(t("createFailed"));
       setBusy(false);
     }
   }
@@ -139,21 +142,19 @@ export function CreateReminderDialog({
     <div
       className="v-create-reminder"
       role="dialog"
-      aria-label="New routine"
+      aria-label={t("title")}
       data-testid="create-reminder-dialog"
     >
-      <h2 className="v-dialog-title">New routine</h2>
-      <p className="v-dialog-sub">
-        Tell a persona what to do, and when. You'll preview before it's set.
-      </p>
+      <h2 className="v-dialog-title">{t("title")}</h2>
+      <p className="v-dialog-sub">{t("intro")}</p>
 
       <label htmlFor="reminder-subject">
-        What should I do for you?
+        {t("subjectLabel")}
         <Input
           id="reminder-subject"
           value={subject}
           maxLength={500}
-          placeholder="e.g. stretch for five minutes"
+          placeholder={t("subjectPlaceholder")}
           onChange={(e) => {
             setSubject(e.target.value);
             setPreview(null);
@@ -166,7 +167,7 @@ export function CreateReminderDialog({
           panel the executor is LOCKED to the panel persona (kit): a fixed
           identity row, no picker. */}
       <div className="flex flex-col gap-2">
-        <span className="text-sm font-medium">Who should run it?</span>
+        <span className="text-sm font-medium">{t("whoLabel")}</span>
         {lockedPersona ? (
           <div
             className="flex h-10 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 text-sm"
@@ -181,8 +182,8 @@ export function CreateReminderDialog({
             personas={personas}
             value={personaId}
             onSelect={setPersonaId}
-            label="Who should run it?"
-            placeholder="Choose a persona…"
+            label={t("whoLabel")}
+            placeholder={t("whoPlaceholder")}
           />
         )}
       </div>
@@ -205,46 +206,49 @@ export function CreateReminderDialog({
             setNotifyOnFire(e.target.checked);
           }}
         />
-        Notify me in the bell when it runs
+        {t("notify")}
       </label>
 
       {/* The confirm echo — the SAME engine-framed clause the reschedule twin shows. */}
       {preview && (
         <p className="v-create-preview" data-testid="create-preview">
-          <b>When:</b> {preview.human_terms} · {preview.timezone}
+          <b>{tCommon("whenLabel")}</b> {preview.human_terms} ·{" "}
+          {preview.timezone}
           {preview.next_fire &&
-            ` — next run ${new Intl.DateTimeFormat(undefined, {
-              timeZone: defaultTimezone,
-              weekday: "short",
-              day: "numeric",
-              month: "short",
-              hour: "2-digit",
-              minute: "2-digit",
-            }).format(new Date(preview.next_fire))}`}
+            `, ${tCommon("nextRun", {
+              when: new Intl.DateTimeFormat(undefined, {
+                timeZone: defaultTimezone,
+                weekday: "short",
+                day: "numeric",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              }).format(new Date(preview.next_fire)),
+            })}`}
         </p>
       )}
       {preview?.quiet_hours_offer && (
         <p className="v-create-quiet" data-testid="quiet-offer">
-          That&apos;s inside your quiet hours.
+          {t("quietTitle")}
           <Button
             type="button"
             variant="outline"
             onClick={() => acceptEdge(preview.quiet_hours_offer as string)}
           >
-            Move to {preview.quiet_hours_offer}
+            {t("quietMove", { edge: preview.quiet_hours_offer })}
           </Button>
-          — or confirm to keep your time.
+          {t("quietOr")}
         </p>
       )}
       {error && <p className="v-create-error">{error}</p>}
 
       <div className="v-create-actions">
         <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
-          Cancel
+          {tCommon("cancel")}
         </Button>
         {preview ? (
           <Button type="button" onClick={doCreate} disabled={busy || !ready}>
-            Confirm
+            {tCommon("confirm")}
           </Button>
         ) : (
           <Button
@@ -252,7 +256,7 @@ export function CreateReminderDialog({
             onClick={() => runPreview()}
             disabled={busy || !ready}
           >
-            Preview
+            {tCommon("preview")}
           </Button>
         )}
       </div>

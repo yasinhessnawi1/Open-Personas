@@ -7,17 +7,22 @@
  * exercised by the user's real-browser pass.
  */
 import { describe, expect, it } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import {
   clerkErrorToMessage,
   dedupeFieldError,
   formatCooldown,
-  GENERIC_ERROR_MESSAGE,
   isLockoutError,
-  LOCKOUT_MESSAGE,
   OAUTH_PROVIDERS,
   OAUTH_PROVIDERS_ALL,
   RESEND_COOLDOWN_SECONDS,
 } from "./auth-flow.cloud";
+
+// The fallback copy lives in `auth.error.*` now; the mapper takes a resolver so
+// it stays pure. This stub is what next-intl hands it at runtime.
+const t = (key: "generic" | "lockout") => messages.auth.error[key];
+const GENERIC_ERROR_MESSAGE = messages.auth.error.generic;
+const LOCKOUT_MESSAGE = messages.auth.error.lockout;
 
 describe("OAuth provider gate (D-34-3)", () => {
   it("ships OFF by default — no dead provider button reaches users", () => {
@@ -31,51 +36,53 @@ describe("OAuth provider gate (D-34-3)", () => {
     ]);
     for (const provider of OAUTH_PROVIDERS_ALL) {
       expect(provider.strategy.startsWith("oauth_")).toBe(true);
-      expect(provider.label.length).toBeGreaterThan(0);
+      expect(messages.auth.oauth[provider.labelKey].length).toBeGreaterThan(0);
     }
   });
 });
 
 describe("clerkErrorToMessage", () => {
   it("falls back to the generic message for a null/undefined error", () => {
-    expect(clerkErrorToMessage(null)).toBe(GENERIC_ERROR_MESSAGE);
-    expect(clerkErrorToMessage(undefined)).toBe(GENERIC_ERROR_MESSAGE);
+    expect(clerkErrorToMessage(null, t)).toBe(GENERIC_ERROR_MESSAGE);
+    expect(clerkErrorToMessage(undefined, t)).toBe(GENERIC_ERROR_MESSAGE);
   });
 
   it("prefers longMessage over message", () => {
     expect(
-      clerkErrorToMessage({
-        code: "form_password_incorrect",
-        message: "Password is incorrect.",
-        longMessage: "That password is incorrect. Try again.",
-      }),
+      clerkErrorToMessage(
+        {
+          code: "form_password_incorrect",
+          message: "Password is incorrect.",
+          longMessage: "That password is incorrect. Try again.",
+        },
+        t,
+      ),
     ).toBe("That password is incorrect. Try again.");
   });
 
   it("falls back to message when longMessage is absent/blank", () => {
     expect(
-      clerkErrorToMessage({ code: "x", message: "Something specific." }),
+      clerkErrorToMessage({ code: "x", message: "Something specific." }, t),
     ).toBe("Something specific.");
     expect(
-      clerkErrorToMessage({
-        code: "x",
-        message: "Only this.",
-        longMessage: "   ",
-      }),
+      clerkErrorToMessage(
+        { code: "x", message: "Only this.", longMessage: "   " },
+        t,
+      ),
     ).toBe("Only this.");
   });
 
   it("uses the calm lockout copy for rate-limit / locked codes", () => {
     for (const code of ["too_many_requests", "user_locked", "account_locked"]) {
       expect(
-        clerkErrorToMessage({ code, message: "raw provider string" }),
+        clerkErrorToMessage({ code, message: "raw provider string" }, t),
       ).toBe(LOCKOUT_MESSAGE);
     }
   });
 
   it("never surfaces a raw empty string", () => {
     expect(
-      clerkErrorToMessage({ code: "z", message: "", longMessage: "" }),
+      clerkErrorToMessage({ code: "z", message: "", longMessage: "" }, t),
     ).toBe(GENERIC_ERROR_MESSAGE);
   });
 });

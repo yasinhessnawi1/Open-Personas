@@ -14,6 +14,7 @@
  * No `@clerk/*` import — this stays edition-agnostic and the community build's
  * Clerk-free guarantee is unaffected.
  */
+import { useTranslations } from "next-intl";
 import { useEffect } from "react";
 import styles from "./error.module.css";
 
@@ -24,6 +25,7 @@ export default function AuthError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const t = useTranslations("authError");
   useEffect(() => {
     // Surface the boundary trip in the console for diagnosis (the digest links
     // a client error to its server-side log entry in production).
@@ -33,17 +35,14 @@ export default function AuthError({
   return (
     <div className={styles.wrap} role="alert">
       <div className={styles.card}>
-        <h1 className={styles.title}>Something went wrong</h1>
-        <p className={styles.body}>
-          We hit a snag loading the sign-in screen. This usually clears on its
-          own — try again, or head back to sign in.
-        </p>
+        <h1 className={styles.title}>{t("title")}</h1>
+        <p className={styles.body}>{t("body")}</p>
         <div className={styles.actions}>
           <button type="button" className={styles.primary} onClick={reset}>
-            Try again
+            {t("retry")}
           </button>
           <a className={styles.secondary} href="/sign-in">
-            Back to sign in
+            {t("backToSignIn")}
           </a>
         </div>
       </div>

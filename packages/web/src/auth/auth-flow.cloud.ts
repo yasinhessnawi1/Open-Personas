@@ -28,8 +28,8 @@ export type OAuthStrategyId = `oauth_${string}`;
 export interface OAuthProvider {
   /** Clerk OAuth strategy id, e.g. `"oauth_google"`. */
   readonly strategy: OAuthStrategyId;
-  /** Button label, e.g. `"Continue with Google"`. */
-  readonly label: string;
+  /** Key under `auth.oauth.*` for the button label. */
+  readonly labelKey: "google" | "github";
   /** Which inline brand icon to render. */
   readonly icon: "google" | "github";
 }
@@ -51,8 +51,8 @@ export const OAUTH_PROVIDERS: readonly OAuthProvider[] = [];
  * the UI by default (see `OAUTH_PROVIDERS`); referenced when OAuth is turned on.
  */
 export const OAUTH_PROVIDERS_ALL: readonly OAuthProvider[] = [
-  { strategy: "oauth_google", label: "Continue with Google", icon: "google" },
-  { strategy: "oauth_github", label: "Continue with GitHub", icon: "github" },
+  { strategy: "oauth_google", labelKey: "google", icon: "google" },
+  { strategy: "oauth_github", labelKey: "github", icon: "github" },
 ];
 
 /** Seconds the "Resend code" action is disabled after a send (themed countdown). */
@@ -69,9 +69,11 @@ export interface ClerkErrorLike {
   readonly longMessage?: string;
 }
 
-/** Generic, themed fallback when an error has no user-facing message. */
-export const GENERIC_ERROR_MESSAGE =
-  "Something went wrong. Please try again in a moment.";
+/**
+ * Resolves `auth.error.generic` / `auth.error.lockout`. Injected so this module
+ * stays pure and the copy lives in the message catalogue, not here.
+ */
+export type AuthErrorTranslator = (key: "generic" | "lockout") => string;
 
 /**
  * Error codes that mean the account is rate-limited / temporarily locked.
@@ -84,10 +86,6 @@ const LOCKOUT_CODES = new Set<string>([
   "form_password_pwned", // not a lockout, but warrants the same calm reset nudge
 ]);
 
-/** Themed copy for the lockout / rate-limit case. */
-export const LOCKOUT_MESSAGE =
-  "Too many attempts. For your security, wait a moment before trying again — or reset your password.";
-
 /**
  * Map a Core-3 Clerk error to a single themed message safe to show a user.
  *
@@ -97,11 +95,12 @@ export const LOCKOUT_MESSAGE =
  */
 export function clerkErrorToMessage(
   error: ClerkErrorLike | null | undefined,
+  t: AuthErrorTranslator,
 ): string {
-  if (!error) return GENERIC_ERROR_MESSAGE;
-  if (error.code && LOCKOUT_CODES.has(error.code)) return LOCKOUT_MESSAGE;
+  if (!error) return t("generic");
+  if (error.code && LOCKOUT_CODES.has(error.code)) return t("lockout");
   const text = error.longMessage?.trim() || error.message?.trim();
-  return text && text.length > 0 ? text : GENERIC_ERROR_MESSAGE;
+  return text && text.length > 0 ? text : t("generic");
 }
 
 /** True if the error code indicates a lockout / rate-limit condition. */

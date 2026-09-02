@@ -78,7 +78,7 @@ export function AskUserPrompt({
               <span className="font-medium">{opt.label}</span>
               {opt.description ? (
                 <span className="type-caption text-muted-foreground">
-                  — {opt.description}
+                  {opt.description}
                 </span>
               ) : null}
             </button>

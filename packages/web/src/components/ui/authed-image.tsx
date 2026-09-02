@@ -83,7 +83,7 @@ export function AuthedImage({
           className,
         )}
         role="img"
-        aria-label="image unavailable"
+        aria-label={t("unavailable")}
       >
         <ImageOff className="size-6" aria-hidden />
       </div>

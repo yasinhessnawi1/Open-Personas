@@ -271,6 +271,7 @@ function StoreLines({
   lockedLabel?: string;
   onChange: (list: string[]) => void;
 }) {
+  const t = useTranslations("author");
   return (
     <div className="mt-5 grid grid-cols-[auto_1fr] gap-3">
       <span
@@ -322,7 +323,7 @@ function StoreLines({
                 ) : (
                   <button
                     type="button"
-                    aria-label="Remove"
+                    aria-label={t("remove")}
                     onClick={() => onChange(items.filter((_, j) => j !== i))}
                     className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                   >

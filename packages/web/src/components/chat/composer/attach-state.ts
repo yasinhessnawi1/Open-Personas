@@ -13,7 +13,6 @@
  */
 
 import {
-  IMAGE_MEDIA_TYPES,
   isDocumentFilename,
   isImageMediaType,
   MAX_IMAGES_PER_MESSAGE,
@@ -111,11 +110,20 @@ export type ValidationReason =
   | "unsupported_format"
   | "oversize"
   | "per_message_image_cap"
-  | "empty_file";
+  | "empty_file"
+  // Deployment/context refusals raised by the attach control itself, not by
+  // `validateBeforeUpload`. They ride the same rejection channel so every
+  // refusal reads from the message catalogue.
+  | "image_attach_disabled"
+  | "documents_need_conversation";
+
+/** ICU values for the `chat.composer.validation.<reason>` message. Structured,
+ * never prose — the copy lives in the message catalogue, not in this module. */
+export type ValidationParams = Record<string, string | number>;
 
 export type ValidationResult =
   | { ok: true; kind: "image" | "document" }
-  | { ok: false; reason: ValidationReason; detail: string };
+  | { ok: false; reason: ValidationReason; params: ValidationParams };
 
 /**
  * Validate a single browser `File` before upload. Returns the routing
@@ -137,7 +145,7 @@ export function validateBeforeUpload(
     return {
       ok: false,
       reason: "empty_file",
-      detail: `${file.name} is empty`,
+      params: { filename: file.name },
     };
   }
 
@@ -145,7 +153,10 @@ export function validateBeforeUpload(
     return {
       ok: false,
       reason: "oversize",
-      detail: `${file.name} exceeds the ${formatBytes(MAX_UPLOAD_SIZE_BYTES)} upload limit`,
+      params: {
+        filename: file.name,
+        limit: formatBytes(MAX_UPLOAD_SIZE_BYTES),
+      },
     };
   }
 
@@ -156,7 +167,7 @@ export function validateBeforeUpload(
       return {
         ok: false,
         reason: "per_message_image_cap",
-        detail: `You can attach at most ${MAX_IMAGES_PER_MESSAGE} images per message`,
+        params: { cap: MAX_IMAGES_PER_MESSAGE },
       };
     }
     return { ok: true, kind: "image" };
@@ -172,9 +183,7 @@ export function validateBeforeUpload(
   return {
     ok: false,
     reason: "unsupported_format",
-    detail:
-      `${file.name} is not a supported format. Accepted: images (` +
-      `${IMAGE_MEDIA_TYPES.join(", ")}) and documents (PDF / docx / xlsx / csv / txt / md / code).`,
+    params: { filename: file.name },
   };
 }
 

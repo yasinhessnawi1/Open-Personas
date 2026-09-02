@@ -9,6 +9,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import messages from "@/i18n/messages/en.json";
 import type { ReschedulePreview } from "@/lib/api/schedule-client";
 import { applyQuietEdge, CreateReminderDialog } from "./create-reminder-dialog";
 import type { CadenceInput } from "./recurrence-builder";
@@ -36,16 +37,9 @@ const _PREVIEW: ReschedulePreview = {
 function makeDialog(onCreated = vi.fn().mockResolvedValue(undefined)) {
   const onClose = vi.fn();
   render(
-    // R11-B3: the shared PersonaPicker inside needs the intl provider.
-    <NextIntlClientProvider
-      locale="en"
-      messages={{
-        personaPicker: {
-          choosePersona: "Choose a persona",
-          empty: "No personas yet. Create one to start a chat.",
-        },
-      }}
-    >
+    // R11-B3: the shared PersonaPicker inside needs the intl provider; the
+    // dialog + builder copy now lives in en.json, so render the real catalogue.
+    <NextIntlClientProvider locale="en" messages={messages}>
       <CreateReminderDialog
         personas={[
           { id: "p1", name: "Astrid" },
@@ -236,10 +230,12 @@ describe("RecurrenceBuilder one-time kind (A10-D-5)", () => {
     const { RecurrenceBuilder } = await import("./recurrence-builder");
     const seen: CadenceInput[] = [];
     render(
-      <RecurrenceBuilder
-        timezone="Europe/Oslo"
-        onChange={(c) => seen.push(c)}
-      />,
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <RecurrenceBuilder
+          timezone="Europe/Oslo"
+          onChange={(c) => seen.push(c)}
+        />
+      </NextIntlClientProvider>,
     );
     // R11-B3: the kind selector is the kit's chip row now — click, not change.
     fireEvent.click(screen.getByRole("button", { name: "Once" }));

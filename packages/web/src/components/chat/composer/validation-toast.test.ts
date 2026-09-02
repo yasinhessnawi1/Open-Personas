@@ -1,28 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
+import messages from "@/i18n/messages/en.json";
 import { surfaceValidationFailure } from "./validation-toast";
 
+/**
+ * F3 T16 + T17 — a rejection is a CATALOGUE message, never English built in
+ * the validator. The stub resolves `chat.composer.<key>` out of en.json and
+ * fills the ICU placeholders, which is exactly what next-intl does at runtime.
+ */
+function translator() {
+  return ((key: string, values?: Record<string, string | number>) => {
+    const node = key
+      .split(".")
+      .reduce<unknown>(
+        (acc, part) => (acc as Record<string, unknown>)?.[part],
+        messages.chat.composer as unknown,
+      );
+    return String(node).replace(/\{(\w+)\}/g, (_, name) =>
+      String(values?.[name] ?? ""),
+    );
+    // biome-ignore lint/suspicious/noExplicitAny: test stub for next-intl's t
+  }) as any;
+}
+
 describe("surfaceValidationFailure — F3 T16 + T17", () => {
-  it("emits a single error toast with the detail string", () => {
+  it("emits a single error toast built from the catalogue", () => {
     const toast = { error: vi.fn() };
     surfaceValidationFailure(
       "oversize",
-      "big.png exceeds the 20.0 MB upload limit",
+      { filename: "big.png", limit: "20.0 MB" },
       toast,
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      ((key: string) => key) as any,
+      translator(),
     );
     expect(toast.error).toHaveBeenCalledTimes(1);
     expect(toast.error.mock.calls[0][0]).toContain("20.0 MB");
+    expect(toast.error.mock.calls[0][0]).toContain("big.png");
   });
 
-  it("surfaces per-message cap message verbatim (T17)", () => {
+  it("surfaces the per-message cap with the real cap value (T17)", () => {
     const toast = { error: vi.fn() };
     surfaceValidationFailure(
       "per_message_image_cap",
-      "You can attach at most 4 images per message",
+      { cap: 4 },
       toast,
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      ((key: string) => key) as any,
+      translator(),
     );
     expect(toast.error.mock.calls[0][0]).toContain("4 images");
   });
@@ -31,10 +51,9 @@ describe("surfaceValidationFailure — F3 T16 + T17", () => {
     const toast = { error: vi.fn() };
     surfaceValidationFailure(
       "unsupported_format",
-      "video.mp4 is not a supported format. Accepted: images (...) and documents (...).",
+      { filename: "video.mp4" },
       toast,
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      ((key: string) => key) as any,
+      translator(),
     );
     expect(toast.error.mock.calls[0][0]).toContain("video.mp4");
     // F2 voice: NOT "upload failed" — the user sees WHY.
@@ -45,11 +64,27 @@ describe("surfaceValidationFailure — F3 T16 + T17", () => {
     const toast = { error: vi.fn() };
     surfaceValidationFailure(
       "empty_file",
-      "empty.png is empty",
+      { filename: "empty.png" },
       toast,
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      ((key: string) => key) as any,
+      translator(),
     );
     expect(toast.error.mock.calls[0][0]).toContain("empty");
+  });
+
+  it("maps the deployment refusals onto the attach tooltip copy", () => {
+    const toast = { error: vi.fn() };
+    surfaceValidationFailure("image_attach_disabled", {}, toast, translator());
+    expect(toast.error.mock.calls[0][0]).toBe(
+      messages.chat.composer.attach.imageDisabled,
+    );
+    surfaceValidationFailure(
+      "documents_need_conversation",
+      {},
+      toast,
+      translator(),
+    );
+    expect(toast.error.mock.calls[1][0]).toBe(
+      messages.chat.composer.attach.openConversationFirst,
+    );
   });
 });

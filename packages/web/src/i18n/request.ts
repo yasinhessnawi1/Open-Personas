@@ -21,12 +21,16 @@ const ACCENTS: Record<string, string> = {
   U: "Ú",
 };
 
-/** Accent letters outside ICU `{placeholders}` so interpolation still works. */
+/**
+ * Accent letters outside ICU `{placeholders}` and rich-text `<tags>` so both
+ * interpolation and `t.rich()` still resolve. Accenting a tag name would turn
+ * `<em>` into an accented tag name, which `t.rich` cannot match to its handler.
+ */
 function pseudoString(value: string): string {
   const accented = value
-    .split(/(\{[^}]*\})/) // keep {name}/{tier} tokens intact
+    .split(/(\{[^}]*\}|<\/?[a-zA-Z][a-zA-Z0-9]*>)/) // keep {name} + <tag> intact
     .map((part) =>
-      part.startsWith("{")
+      part.startsWith("{") || part.startsWith("<")
         ? part
         : part.replace(/[aeiouAEIOU]/g, (c) => ACCENTS[c] ?? c),
     )

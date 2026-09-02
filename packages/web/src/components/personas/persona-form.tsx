@@ -21,7 +21,7 @@ import {
 } from "@/lib/persona-draft";
 import { SAFETY_CONSTRAINT } from "@/lib/persona-safety";
 import { cn } from "@/lib/utils";
-import { voiceLanguageWarning } from "@/lib/voice/language-support";
+import { unservedVoiceLanguage } from "@/lib/voice/language-support";
 import { AppsChooser } from "./apps-chooser";
 import { CollapsibleSection } from "./collapsible-section";
 import type { McpConnectionStatus } from "./mcp-connection-label";
@@ -204,9 +204,13 @@ export function PersonaForm({
               )
             }
           />
-          {voiceLanguageWarning(identity.language_default) !== null ? (
+          {unservedVoiceLanguage(identity.language_default) !== null ? (
             <output className="type-caption mt-1 block text-amber-600">
-              {voiceLanguageWarning(identity.language_default)}
+              {t("voiceLanguageWarning", {
+                language: unservedVoiceLanguage(
+                  identity.language_default,
+                ) as string,
+              })}
             </output>
           ) : null}
         </Field>
@@ -753,16 +757,17 @@ function EpistemicChip({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const t = useTranslations("author");
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      aria-label="epistemic marker"
+      aria-label={t("epistemicLabel")}
       className="type-caption mt-0.5 h-6 shrink-0 rounded-full border border-border bg-background px-2 text-muted-foreground"
     >
       {EPISTEMIC_OPTIONS.map((opt) => (
         <option key={opt} value={opt}>
-          {opt}
+          {t(`epistemic.${opt}`)}
         </option>
       ))}
     </select>

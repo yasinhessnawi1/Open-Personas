@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 /**
  * Shared branded auth form controls (Spec 34, Cluster A) — cloud-only.
  *
@@ -79,6 +80,7 @@ export function OAuthRow({
   onSelect: (strategy: string) => void;
   disabled?: boolean;
 }) {
+  const t = useTranslations("auth");
   if (OAUTH_PROVIDERS.length === 0) return null;
   return (
     <>
@@ -92,11 +94,11 @@ export function OAuthRow({
             disabled={disabled}
           >
             {provider.icon === "google" ? <GoogleIcon /> : <GitHubIcon />}
-            {provider.label}
+            {t(`oauth.${provider.labelKey}`)}
           </button>
         ))}
       </div>
-      <div className={s.divider}>or</div>
+      <div className={s.divider}>{t("or")}</div>
     </>
   );
 }
@@ -112,6 +114,7 @@ export function OAuthRow({
  * (not `display:none` / not `aria-hidden`) but is removed from the visual flow.
  */
 export function HiddenUsernameField({ value }: { value: string }) {
+  const t = useTranslations("auth.fields");
   return (
     <input
       className={s.visuallyHidden}
@@ -119,7 +122,7 @@ export function HiddenUsernameField({ value }: { value: string }) {
       name="username"
       autoComplete="username"
       tabIndex={-1}
-      aria-label="Email"
+      aria-label={t("email")}
       value={value}
       readOnly
     />
@@ -200,6 +203,7 @@ export function PasswordInput({
   describedBy?: string;
   disabled?: boolean;
 }) {
+  const tf = useTranslations("auth.fields");
   const [reveal, setReveal] = useState(false);
   return (
     <div className={`${s.control} ${s.controlPw}`}>
@@ -219,7 +223,7 @@ export function PasswordInput({
       <button
         type="button"
         className={s.pwToggle}
-        aria-label={reveal ? "Hide password" : "Show password"}
+        aria-label={reveal ? tf("hidePassword") : tf("showPassword")}
         onClick={() => setReveal((r) => !r)}
         disabled={disabled}
       >
@@ -253,6 +257,7 @@ export function OtpInput({
   invalid?: boolean;
   disabled?: boolean;
 }) {
+  const t = useTranslations("auth.fields");
   const groupId = useId();
   const refs = useRef<(HTMLInputElement | null)[]>([]);
   const digits = Array.from({ length: OTP_LENGTH }, (_, i) => value[i] ?? "");
@@ -306,7 +311,7 @@ export function OtpInput({
   return (
     <fieldset
       className={`${s.field} ${invalid ? s.fieldError : ""}`}
-      aria-label="Verification code"
+      aria-label={t("verificationCode")}
     >
       <div className={s.otp}>
         {digits.map((digit, i) => (

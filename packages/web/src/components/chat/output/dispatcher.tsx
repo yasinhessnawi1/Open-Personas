@@ -1,5 +1,7 @@
 "use client";
 
+import { useTranslations } from "next-intl";
+
 import type { OutputContent } from "@/lib/api/output-content";
 import { cn } from "@/lib/utils";
 
@@ -58,13 +60,14 @@ export function OutputDispatcher({
   onViewLarger,
   className,
 }: OutputDispatcherProps) {
+  const t = useTranslations("chat.output");
   switch (output.kind) {
     case "inline-image": {
       if (hasPathTraversal(output.workspace_path)) {
         return (
           <FailureCard
             operation="render"
-            error_message="Invalid path"
+            error_message={t("invalidPath")}
             className={className}
           />
         );
@@ -92,7 +95,7 @@ export function OutputDispatcher({
         return (
           <FailureCard
             operation="render"
-            error_message="Invalid path"
+            error_message={t("invalidPath")}
             className={className}
           />
         );
@@ -123,7 +126,7 @@ export function OutputDispatcher({
         return (
           <FailureCard
             operation="render"
-            error_message="Invalid path"
+            error_message={t("invalidPath")}
             className={className}
           />
         );
@@ -145,7 +148,7 @@ export function OutputDispatcher({
         return (
           <FailureCard
             operation="render"
-            error_message="Invalid path"
+            error_message={t("invalidPath")}
             className={className}
           />
         );

@@ -55,7 +55,7 @@ export default function GlobalError({
               opacity: 0.8,
             }}
           >
-            An unexpected error occurred. Please try again.
+            Something broke on our side, not yours. Try again.
           </p>
           <button
             type="button"

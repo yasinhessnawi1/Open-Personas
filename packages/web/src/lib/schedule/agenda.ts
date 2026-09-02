@@ -103,12 +103,22 @@ export function groupByDay(occurrences: Occurrence[], tz: string): DayGroup[] {
 }
 
 /**
+ * The `schedule.calendar` message getter (next-intl's `t`), passed in so these
+ * stay pure functions that never reach for a React hook.
+ */
+export type ScheduleTranslator = (
+  key: string,
+  values?: Record<string, string | number>,
+) => string;
+
+/**
  * The honest truncation notice, or null when the full window fit (never an infinite-looking
  * calendar). "Showing through <date>" names the effective horizon the server clamped to.
  */
 export function truncationNotice(
   result: OccurrencesResult,
   tz: string,
+  t: ScheduleTranslator,
 ): string | null {
   if (!result.truncated) return null;
   const through = formatInTz(result.window_to, tz, {
@@ -116,18 +126,21 @@ export function truncationNotice(
     month: "short",
     year: "numeric",
   });
-  return `Showing through ${through} — narrow the range to see more.`;
+  return t("truncationNotice", { date: through });
 }
 
 /** The honest fire-history label straight from the audit-backed API status (no synthesis). */
-export function fireStatusLabel(status: FireStatus): string {
+export function fireStatusLabel(
+  status: FireStatus,
+  t: ScheduleTranslator,
+): string {
   switch (status) {
     case "ran":
-      return "Ran";
+      return t("fireRan");
     case "ran_late":
-      return "Ran (late)";
+      return t("fireRanLate");
     case "missed":
-      return "Missed";
+      return t("fireMissed");
   }
 }
 

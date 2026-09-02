@@ -16,7 +16,7 @@ const messages = {
     forgetDialogTitle:
       "Also forget these {count, plural, one {# memory} other {# memories}}?",
     forgetDialogBody:
-      "Deleting this would leave behind conversation memory that could recreate it. Choose what to forget too — deselect anything you'd rather keep.",
+      "Deleting this would leave behind conversation memory that could recreate it. Choose what to forget too, and deselect anything you'd rather keep.",
     forgetDialogCancel: "Cancel",
     forgetDialogConfirm: "Forget everywhere",
   },

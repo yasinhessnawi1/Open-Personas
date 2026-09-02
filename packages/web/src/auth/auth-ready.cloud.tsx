@@ -25,6 +25,7 @@
  * the guard never shows a blank canvas. Both are pure / presentational and
  * never import `@clerk/*`, so the file is cloud-scoped by name only.
  */
+import { useTranslations } from "next-intl";
 import type { BrandCopy } from "./auth-shell.cloud";
 import { AuthShell, authStyles as s } from "./auth-shell.cloud";
 
@@ -66,11 +67,12 @@ export function isAuthSignalReady({
  * live region announce the state to assistive tech.
  */
 export function AuthLoading({ brand }: { brand: BrandCopy }) {
+  const t = useTranslations("auth.loading");
   return (
     <AuthShell brand={brand}>
       <div className={s.head}>
-        <h1>Just a moment</h1>
-        <p>Getting things ready…</p>
+        <h1>{t("title")}</h1>
+        <p>{t("body")}</p>
       </div>
       {/* `<output>` carries an implicit `role="status"` + polite live region,
           so assistive tech announces the loading state without an explicit

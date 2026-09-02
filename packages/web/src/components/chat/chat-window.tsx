@@ -26,6 +26,7 @@ import { CHAT_STREAMING_EVENT } from "./chat-presence-orb";
 import { ComposerAttachControl } from "./composer/attach-control";
 import {
   attachmentsBlockSend,
+  type ValidationParams,
   type ValidationReason,
   validateBeforeUpload,
 } from "./composer/attach-state";
@@ -212,12 +213,12 @@ export function ChatWindow({
   const imageAttachDisabled = capabilities?.vision === false;
 
   const handleReject = useCallback(
-    (reason: ValidationReason, detail: string) => {
+    (reason: ValidationReason, params: ValidationParams) => {
       // Transient: routes through useNotify but stays out of the bell. The sink
       // shim adapts notify to the { error } shape the helper expects.
       surfaceValidationFailure(
         reason,
-        detail,
+        params,
         {
           error: (msg) =>
             notify({ level: "error", title: msg, persist: false }),
@@ -234,15 +235,12 @@ export function ChatWindow({
       for (const f of files) {
         const result = validateBeforeUpload(f, attach.attachedImages.length);
         if (!result.ok) {
-          handleReject(result.reason, result.detail);
+          handleReject(result.reason, result.params);
           continue;
         }
         if (result.kind === "image") {
           if (imageAttachDisabled) {
-            handleReject(
-              "unsupported_format",
-              t("composer.attach.imageDisabled"),
-            );
+            handleReject("image_attach_disabled", {});
             continue;
           }
           attach.attachImage(f);
@@ -253,11 +251,12 @@ export function ChatWindow({
     },
     onReject: (detail) =>
       notify({ level: "error", title: detail, persist: false }),
+    folderRejectDetail: t("composer.attach.folderRejected"),
   });
   usePasteImage(textareaRef, {
     onFile: (file) => {
       if (imageAttachDisabled) {
-        handleReject("unsupported_format", t("composer.attach.imageDisabled"));
+        handleReject("image_attach_disabled", {});
         return;
       }
       attach.attachImage(file);

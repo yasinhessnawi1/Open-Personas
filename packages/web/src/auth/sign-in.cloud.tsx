@@ -31,6 +31,7 @@
  */
 import { useSignIn } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import {
   ErrorAlert,
@@ -54,24 +55,28 @@ import { AuthShell, authStyles as s } from "./auth-shell.cloud";
 import { useInFlightGuard } from "./use-in-flight-guard.cloud";
 import { useSignedInRedirect } from "./use-signed-in-redirect.cloud";
 
-const SIGN_IN_BRAND = {
-  kicker: "Typed-memory AI",
-  tagline: "The persona you talk to is the one you type to.",
-  note: "Sign in to personas that remember you — across voice and text.",
-  compact: "Sign in to personas that remember you.",
-} as const;
-
-const MFA_BRAND = {
-  kicker: "One more step",
-  tagline: "Confirm it's you.",
-  note: "We sent a 6-digit code to your inbox. Enter it to finish signing in.",
-  compact: "Enter the code we emailed you.",
-} as const;
-
 /** The steps of the email→password (→ email-code second factor) sign-in flow. */
 type Step = "start" | "password" | "mfa";
 
 export function SignIn() {
+  const t = useTranslations("auth.signIn");
+  const ta = useTranslations("auth");
+  const tf = useTranslations("auth.fields");
+  const tBrand = useTranslations("auth.brand");
+  const tError = useTranslations("auth.error");
+  // The brand panel takes plain strings; build them from the catalogue.
+  const signInBrand = {
+    kicker: tBrand("signIn.kicker"),
+    tagline: tBrand("signIn.tagline"),
+    note: tBrand("signIn.note"),
+    compact: tBrand("signIn.compact"),
+  };
+  const mfaBrand = {
+    kicker: tBrand("mfa.kicker"),
+    tagline: tBrand("mfa.tagline"),
+    note: tBrand("mfa.note"),
+    compact: tBrand("mfa.compact"),
+  };
   const { signIn, errors, fetchStatus } = useSignIn();
   const router = useRouter();
   // Redirect an already-signed-in visitor to the app instead of rendering a form
@@ -96,7 +101,7 @@ export function SignIn() {
   // An active session was detected — show the calm loading state while the
   // redirect to the app commits, never the sign-in form.
   if (redirecting) {
-    return <AuthLoading brand={SIGN_IN_BRAND} />;
+    return <AuthLoading brand={signInBrand} />;
   }
 
   // Guard the post-logout reset window: the typed-non-null `signIn` / `errors`
@@ -105,7 +110,7 @@ export function SignIn() {
   // an error boundary — blanks the whole screen. Show the calm loading state
   // inside the brand shell instead until the signal is safe to read.
   if (!isAuthSignalReady({ resource: signIn, errors })) {
-    return <AuthLoading brand={SIGN_IN_BRAND} />;
+    return <AuthLoading brand={signInBrand} />;
   }
 
   const busy = fetchStatus === "fetching";
@@ -140,7 +145,7 @@ export function SignIn() {
       setFormError(null);
       const { error } = await signIn.create({ identifier: email.trim() });
       if (error) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       setStep("password");
@@ -164,7 +169,7 @@ export function SignIn() {
       const handled =
         signIn.status === "complete" || signIn.status === "needs_second_factor";
       if (error && !handled) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       if (signIn.status === "complete") {
@@ -174,7 +179,9 @@ export function SignIn() {
       if (signIn.status === "needs_second_factor") {
         const { error: sendError } = await signIn.mfa.sendEmailCode();
         if (sendError) {
-          setFormError(clerkErrorToMessage(sendError as ClerkErrorLike));
+          setFormError(
+            clerkErrorToMessage(sendError as ClerkErrorLike, tError),
+          );
           return;
         }
         cooldown.start();
@@ -184,7 +191,7 @@ export function SignIn() {
       }
       // needs_client_trust / needs_new_password etc. are not part of the v1
       // email+password config; surface a calm prompt rather than silently stall.
-      setFormError(clerkErrorToMessage(null));
+      setFormError(clerkErrorToMessage(null, tError));
     });
   };
 
@@ -203,13 +210,13 @@ export function SignIn() {
       const { error } = await signIn.mfa.verifyEmailCode({ code: value });
       const alreadyComplete = signIn.status === "complete";
       if (error && !alreadyComplete) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       if (signIn.status === "complete") {
         await signIn.finalize(finishSession);
       } else {
-        setFormError(clerkErrorToMessage(null));
+        setFormError(clerkErrorToMessage(null, tError));
       }
     });
 
@@ -224,7 +231,7 @@ export function SignIn() {
     setFormError(null);
     const { error } = await signIn.mfa.sendEmailCode();
     if (error) {
-      setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+      setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
       return;
     }
     cooldown.start();
@@ -250,7 +257,8 @@ export function SignIn() {
       redirectUrl: "/sign-in/sso-callback",
       redirectCallbackUrl: "/",
     });
-    if (error) setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+    if (error)
+      setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
   };
 
   const startForgot = () => router.push("/reset-password");
@@ -261,15 +269,16 @@ export function SignIn() {
   if (step === "mfa") {
     const cooldownLabel = formatCooldown(cooldown.remaining);
     return (
-      <AuthShell brand={MFA_BRAND}>
+      <AuthShell brand={mfaBrand}>
         <div className={s.head}>
-          <h1>Verify it's you</h1>
+          <h1>{t("mfaTitle")}</h1>
           <p>
-            Enter the 6-digit code we sent to{" "}
-            <strong className={s.resendStrong}>
-              {signIn.identifier ?? email}
-            </strong>
-            .
+            {t.rich("mfaBody", {
+              email: signIn.identifier ?? email,
+              em: (chunks) => (
+                <strong className={s.resendStrong}>{chunks}</strong>
+              ),
+            })}
           </p>
         </div>
         <form
@@ -296,11 +305,11 @@ export function SignIn() {
               {busy ? (
                 <>
                   <span className={s.spinner} aria-hidden="true" />
-                  Verifying…
+                  {t("verifying")}
                 </>
               ) : (
                 <>
-                  Verify code
+                  {t("verify")}
                   <ArrowIcon />
                 </>
               )}
@@ -308,33 +317,37 @@ export function SignIn() {
           </div>
           {cooldown.isCoolingDown ? (
             <p className={s.resend}>
-              Resend code in{" "}
-              <strong className={s.resendStrong}>{cooldownLabel}</strong>
+              {ta.rich("resendIn", {
+                time: cooldownLabel,
+                em: (chunks) => (
+                  <strong className={s.resendStrong}>{chunks}</strong>
+                ),
+              })}
             </p>
           ) : (
             <p className={s.resend}>
               <MailIcon />
-              Didn&apos;t get it?{" "}
+              {ta("didntGet")}{" "}
               <button
                 type="button"
                 className={s.link}
                 onClick={resendMfa}
                 disabled={busy}
               >
-                Resend code
+                {ta("resend")}
               </button>
             </p>
           )}
         </form>
         <p className={s.foot}>
-          Wrong account?{" "}
+          {t("wrongAccount")}{" "}
           <button
             type="button"
             className={s.link}
             onClick={changeIdentifier}
             disabled={busy}
           >
-            Start over
+            {t("startOver")}
           </button>
         </p>
       </AuthShell>
@@ -342,14 +355,10 @@ export function SignIn() {
   }
 
   return (
-    <AuthShell brand={SIGN_IN_BRAND}>
+    <AuthShell brand={signInBrand}>
       <div className={s.head}>
-        <h1>Welcome back</h1>
-        <p>
-          {step === "start"
-            ? "Sign in to continue to Open Persona."
-            : "Enter your password to continue."}
-        </p>
+        <h1>{t("title")}</h1>
+        <p>{step === "start" ? t("startSubtitle") : t("passwordSubtitle")}</p>
       </div>
 
       {step === "start" ? (
@@ -361,7 +370,7 @@ export function SignIn() {
         >
           <ErrorAlert message={formError} />
           <OAuthRow onSelect={handleOAuth} disabled={busy} />
-          <Field id="si-email" label="Email" error={emailError}>
+          <Field id="si-email" label={tf("email")} error={emailError}>
             <div className={s.control}>
               <input
                 className={s.input}
@@ -370,7 +379,7 @@ export function SignIn() {
                 type="email"
                 autoComplete="email"
                 inputMode="email"
-                placeholder="you@example.com"
+                placeholder={tf("emailPlaceholder")}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 disabled={busy}
@@ -388,11 +397,11 @@ export function SignIn() {
               {busy ? (
                 <>
                   <span className={s.spinner} aria-hidden="true" />
-                  Continuing…
+                  {t("continuing")}
                 </>
               ) : (
                 <>
-                  Continue
+                  {t("continue")}
                   <ArrowIcon />
                 </>
               )}
@@ -421,12 +430,12 @@ export function SignIn() {
               aria-disabled={busy}
               disabled={busy}
             >
-              Change
+              {t("change")}
             </button>
           </div>
           <Field
             id="si-pw"
-            label="Password"
+            label={tf("password")}
             error={passwordError}
             rowExtra={
               <button
@@ -435,7 +444,7 @@ export function SignIn() {
                 onClick={startForgot}
                 disabled={busy}
               >
-                Forgot password?
+                {t("forgot")}
               </button>
             }
           >
@@ -444,7 +453,7 @@ export function SignIn() {
               value={password}
               onChange={setPassword}
               autoComplete="current-password"
-              placeholder="Enter your password"
+              placeholder={t("passwordPlaceholder")}
               invalid={Boolean(passwordError)}
               disabled={busy}
             />
@@ -459,11 +468,11 @@ export function SignIn() {
               {busy ? (
                 <>
                   <span className={s.spinner} aria-hidden="true" />
-                  Signing in…
+                  {t("submitting")}
                 </>
               ) : (
                 <>
-                  Sign in
+                  {t("submit")}
                   <ArrowIcon />
                 </>
               )}
@@ -473,9 +482,9 @@ export function SignIn() {
       )}
 
       <p className={s.foot}>
-        New to Open Persona?{" "}
+        {t("newHere")}{" "}
         <a className={s.link} href="/sign-up">
-          Create an account
+          {t("createAccount")}
         </a>
       </p>
     </AuthShell>

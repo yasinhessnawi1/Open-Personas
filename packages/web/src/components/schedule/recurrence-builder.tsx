@@ -15,28 +15,24 @@
  * ships one, this swaps behind the same props.
  */
 
+import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import type { RecurrencePatternInput } from "@/lib/api/schedule-client";
 
-const WEEKDAYS: readonly { token: string; label: string }[] = [
-  { token: "MO", label: "Mon" },
-  { token: "TU", label: "Tue" },
-  { token: "WE", label: "Wed" },
-  { token: "TH", label: "Thu" },
-  { token: "FR", label: "Fri" },
-  { token: "SA", label: "Sat" },
-  { token: "SU", label: "Sun" },
-];
+/** RRULE weekday tokens; the visible label comes from
+ * `schedule.recurrence.weekday.<token>` so it translates with the locale. */
+const WEEKDAYS: readonly string[] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 
-/** The cadence chip row (kit `.chips`) — the humane vocabulary, one chip each. */
-const KINDS: readonly { kind: string; label: string }[] = [
-  { kind: "once", label: "Once" },
-  { kind: "daily", label: "Every day" },
-  { kind: "weekly", label: "Weekly" },
-  { kind: "monthly_day", label: "Monthly" },
-  { kind: "hourly", label: "Hourly" },
+/** The cadence chip row (kit `.chips`) — the humane vocabulary, one chip each.
+ * Labels live in `schedule.recurrence.kind.<kind>`. */
+const KINDS: readonly string[] = [
+  "once",
+  "daily",
+  "weekly",
+  "monthly_day",
+  "hourly",
 ];
 
 /** The builder's output: exactly one of a recurring pattern or a one-time instant (ISO UTC). */
@@ -57,6 +53,7 @@ export function RecurrenceBuilder({
   timezone,
   onChange,
 }: RecurrenceBuilderProps) {
+  const t = useTranslations("schedule.recurrence");
   const [kind, setKind] = useState<Kind>("daily");
   const [interval, setInterval] = useState(1);
   const [weekdays, setWeekdays] = useState<string[]>(["MO"]);
@@ -111,12 +108,8 @@ export function RecurrenceBuilder({
 
   function toggleWeekday(token: string) {
     const next = weekdays.includes(token)
-      ? weekdays.filter((t) => t !== token)
-      : [
-          ...WEEKDAYS.map((w) => w.token).filter(
-            (t) => weekdays.includes(t) || t === token,
-          ),
-        ];
+      ? weekdays.filter((d) => d !== token)
+      : [...WEEKDAYS.filter((d) => weekdays.includes(d) || d === token)];
     if (next.length === 0) return; // weekly needs at least one day
     setWeekdays(next);
     emit({ weekdays: next });
@@ -126,8 +119,8 @@ export function RecurrenceBuilder({
     <div className="v-recur-builder" data-testid="recurrence-builder">
       {/* R11-B3: the kit's cadence chips replace the select — same kinds, same emit. */}
       <fieldset className="v-recur-chips">
-        <legend className="v-recur-label">Cadence</legend>
-        {KINDS.map(({ kind: k, label }) => (
+        <legend className="v-recur-label">{t("cadence")}</legend>
+        {KINDS.map((k) => (
           <button
             key={k}
             type="button"
@@ -137,14 +130,14 @@ export function RecurrenceBuilder({
               emit({ kind: k as Kind });
             }}
           >
-            {label}
+            {t(`kind.${k}`)}
           </button>
         ))}
       </fieldset>
 
       {kind === "once" && (
         <label htmlFor="recur-once">
-          At
+          {t("at")}
           <Input
             id="recur-once"
             type="datetime-local"
@@ -154,15 +147,13 @@ export function RecurrenceBuilder({
               emit({ onceAt: e.target.value });
             }}
           />
-          <span className="v-recur-tz">
-            (your local time — shown on the calendar in {timezone})
-          </span>
+          <span className="v-recur-tz">{t("localTimeHint", { timezone })}</span>
         </label>
       )}
 
       {kind === "hourly" && (
         <label htmlFor="recur-interval">
-          Every
+          {t("every")}
           <Input
             id="recur-interval"
             type="number"
@@ -175,13 +166,13 @@ export function RecurrenceBuilder({
               emit({ interval: iv });
             }}
           />
-          hours (wall-clock — at these local times, {timezone})
+          {t("hoursSuffix", { timezone })}
         </label>
       )}
 
       {kind !== "hourly" && kind !== "once" && (
         <label htmlFor="recur-time">
-          At
+          {t("at")}
           <Input
             id="recur-time"
             type="time"
@@ -197,25 +188,28 @@ export function RecurrenceBuilder({
 
       {kind === "weekly" && (
         <fieldset className="v-recur-weekdays">
-          <legend>On</legend>
-          {WEEKDAYS.map((w) => (
-            <button
-              key={w.token}
-              type="button"
-              aria-pressed={weekdays.includes(w.token)}
-              aria-label={w.label}
-              title={w.label}
-              onClick={() => toggleWeekday(w.token)}
-            >
-              {w.label[0]}
-            </button>
-          ))}
+          <legend>{t("on")}</legend>
+          {WEEKDAYS.map((token) => {
+            const label = t(`weekday.${token}`);
+            return (
+              <button
+                key={token}
+                type="button"
+                aria-pressed={weekdays.includes(token)}
+                aria-label={label}
+                title={label}
+                onClick={() => toggleWeekday(token)}
+              >
+                {label[0]}
+              </button>
+            );
+          })}
         </fieldset>
       )}
 
       {kind === "monthly_day" && (
         <label htmlFor="recur-monthday">
-          On day
+          {t("onDay")}
           <Input
             id="recur-monthday"
             type="number"
@@ -228,7 +222,7 @@ export function RecurrenceBuilder({
               emit({ monthDay: md });
             }}
           />
-          <span>(-1 = the last day of the month)</span>
+          <span>{t("lastDayHint")}</span>
         </label>
       )}
     </div>

@@ -59,7 +59,9 @@ const WINDOW_DAYS = 45;
 const MONTH_CELL_CAP = 3;
 type View = "agenda" | "week" | "month";
 
-const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+/** RRULE weekday tokens for the grid head; labels come from
+ * `schedule.recurrence.weekday.<token>` (shared with the recurrence builder). */
+const DOW = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] as const;
 
 /** Identity style per occurrence; a persona-less schedule reads NEUTRAL — the
  * root identity default is the terracotta primary, and a page of accent-orange
@@ -103,6 +105,7 @@ export function CalendarView({
   variant = "full",
   panelPersona,
 }: CalendarViewProps) {
+  const t = useTranslations("schedule.calendar");
   const { getToken } = useAuth();
   const refreshSidebar = useSidebarRefresh();
   const [data, setData] = useState<OccurrencesResult | null>(null);
@@ -123,21 +126,18 @@ export function CalendarView({
       setData(await fetchOccurrences(await getToken(), from, to, personaId));
       setError(null);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to load your schedule.",
-      );
+      setError(e instanceof Error ? e.message : t("loadFailed"));
     }
-  }, [getToken, from, to, personaId]);
+  }, [getToken, from, to, personaId, t]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   if (error) return <p className="v-schedule-error">{error}</p>;
-  if (!data)
-    return <p className="v-schedule-loading">Loading your schedule…</p>;
+  if (!data) return <p className="v-schedule-loading">{t("loading")}</p>;
 
-  const notice = truncationNotice(data, DISPLAY_TZ);
+  const notice = truncationNotice(data, DISPLAY_TZ, t);
   const byDay = occurrencesByDay(data.occurrences, DISPLAY_TZ);
   const hist = historyByDay(data.history, DISPLAY_TZ);
   const today = dayKey(from.toISOString(), DISPLAY_TZ);
@@ -153,18 +153,25 @@ export function CalendarView({
           className="w-full"
           onClick={() => setCreating(true)}
         >
-          New routine
+          {t("newRoutine")}
         </Button>
         <output className="v-schedule-truncation">
           <Info className="size-4 shrink-0" aria-hidden="true" />
           <span>
             {panelPersona
-              ? `${panelPersona.name}'s next ${WINDOW_DAYS} days · ${data.occurrences.length} runs. `
-              : `Next ${WINDOW_DAYS} days · ${data.occurrences.length} runs. `}
+              ? t("panelWindowPersona", {
+                  name: panelPersona.name,
+                  days: WINDOW_DAYS,
+                  count: data.occurrences.length,
+                })
+              : t("panelWindow", {
+                  days: WINDOW_DAYS,
+                  count: data.occurrences.length,
+                })}
             <a href="/schedule" className="underline underline-offset-2">
-              Open the full calendar
+              {t("openFull")}
             </a>{" "}
-            for week &amp; month views.
+            {t("forGridViews")}
           </span>
         </output>
         <AgendaView
@@ -206,17 +213,19 @@ export function CalendarView({
     <section className="v-schedule">
       <header className="v-schedule-head">
         <div>
-          <p className="v-schedule-kicker">Schedule</p>
-          <h1>Calendar</h1>
+          <p className="v-schedule-kicker">{t("kicker")}</p>
+          <h1>{t("heading")}</h1>
         </div>
-        <span className="v-schedule-tz">Times in {DISPLAY_TZ}</span>
+        <span className="v-schedule-tz">
+          {t("timesIn", { timezone: DISPLAY_TZ })}
+        </span>
       </header>
 
       <div className="v-schedule-toolbar">
         {/* Spec A10 (T5): the user's direct create door (A10-D-9 — preview→confirm IS
             the one explicit confirmation; the write path stays A8's ScheduleStore). */}
         <Button type="button" onClick={() => setCreating(true)}>
-          New routine
+          {t("newRoutine")}
         </Button>
         <div className="v-schedule-views">
           {(["agenda", "week", "month"] as const).map((v) => (
@@ -226,7 +235,11 @@ export function CalendarView({
               aria-pressed={view === v}
               onClick={() => setView(v)}
             >
-              {v[0].toUpperCase() + v.slice(1)}
+              {v === "agenda"
+                ? t("viewAgenda")
+                : v === "week"
+                  ? t("viewWeek")
+                  : t("viewMonth")}
             </button>
           ))}
         </div>
@@ -302,6 +315,7 @@ export function CalendarView({
 
 /** A small honest fire-status marker for a day (ran / ran-late / missed), or nothing. */
 function DayStatus({ statuses }: { statuses: FireStatus[] | undefined }) {
+  const t = useTranslations("schedule.calendar");
   if (!statuses || statuses.length === 0) return null;
   const worst: FireStatus = statuses.includes("missed")
     ? "missed"
@@ -310,7 +324,7 @@ function DayStatus({ statuses }: { statuses: FireStatus[] | undefined }) {
       : "ran";
   return (
     <span className={`v-day-status v-day-status--${worst}`}>
-      {fireStatusLabel(worst)}
+      {fireStatusLabel(worst, t)}
     </span>
   );
 }
@@ -328,13 +342,14 @@ function OccurrenceRow({
   name: string | null;
   onEdit: (o: Occurrence) => void;
 }) {
+  const t = useTranslations("schedule.calendar");
   return (
     <button
       type="button"
       className="v-occurrence-card"
       style={_cellStyle(occ)}
       onClick={() => onEdit(occ)}
-      aria-label={`Reschedule: ${occLabel(occ)}`}
+      aria-label={t("rescheduleRow", { what: occLabel(occ) })}
       title={occ.human_terms}
     >
       <span className="v-occurrence-time">
@@ -367,13 +382,14 @@ function AgendaView({
   onEdit: (o: Occurrence) => void;
   onCreate: () => void;
 }) {
+  const t = useTranslations("schedule.calendar");
   const groups = groupByDay(data.occurrences, DISPLAY_TZ);
   if (groups.length === 0)
     return (
       <p className="v-schedule-empty">
-        Nothing scheduled in this window.{" "}
+        {t("emptyWindow")}{" "}
         <Button type="button" variant="outline" onClick={onCreate}>
-          Create your first routine
+          {t("createFirst")}
         </Button>
       </p>
     );
@@ -416,6 +432,8 @@ function GridView({
   today: string;
   onEdit: (o: Occurrence) => void;
 }) {
+  const t = useTranslations("schedule.calendar");
+  const tw = useTranslations("schedule.recurrence");
   const normalized = cells.map((c) =>
     typeof c === "string" ? { day: c, inMonth: true } : c,
   );
@@ -423,7 +441,7 @@ function GridView({
     <div>
       <div className="v-dowhead" aria-hidden="true">
         {DOW.map((d) => (
-          <span key={d}>{d}</span>
+          <span key={d}>{tw(`weekday.${d}`)}</span>
         ))}
       </div>
       <div className={`v-grid v-grid--${variant}`}>
@@ -457,7 +475,9 @@ function GridView({
                 </button>
               ))}
               {more > 0 ? (
-                <span className="v-grid-more">+{more} more</span>
+                <span className="v-grid-more">
+                  {t("moreCount", { count: more })}
+                </span>
               ) : null}
             </div>
           );
@@ -491,6 +511,7 @@ function RescheduleDialog({
   const confirm = useConfirm();
   const refreshSidebar = useSidebarRefresh();
   const t = useTranslations("schedule.calendar");
+  const tCommon = useTranslations("schedule.common");
   const tc = useTranslations("confirm");
   const [cadence, setCadence] = useState<CadenceInput | null>(null);
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
@@ -572,10 +593,10 @@ function RescheduleDialog({
     <div
       className="v-reschedule-dialog"
       role="dialog"
-      aria-label="Reschedule"
+      aria-label={t("rescheduleTitle")}
       style={_cellStyle(occurrence)}
     >
-      <h2 className="v-dialog-title">Reschedule</h2>
+      <h2 className="v-dialog-title">{t("rescheduleTitle")}</h2>
       <p className="v-dialog-sub">
         {occurrence.persona_id ? (
           <span className="v-iddot" aria-hidden="true" />
@@ -587,21 +608,24 @@ function RescheduleDialog({
       {/* The confirm echo — the SAME full clause chat re-echoes, from the engine preview. */}
       {preview && (
         <p className="v-reschedule-preview">
-          <b>When:</b> {preview.human_terms} · {preview.timezone}
+          <b>{tCommon("whenLabel")}</b> {preview.human_terms} ·{" "}
+          {preview.timezone}
           {preview.next_fire &&
-            ` — next run ${new Intl.DateTimeFormat(undefined, {
-              timeZone: tz,
-              weekday: "short",
-              day: "numeric",
-              month: "short",
-            }).format(new Date(preview.next_fire))}`}
+            `, ${tCommon("nextRun", {
+              when: new Intl.DateTimeFormat(undefined, {
+                timeZone: tz,
+                weekday: "short",
+                day: "numeric",
+                month: "short",
+              }).format(new Date(preview.next_fire)),
+            })}`}
           {preview.quiet_hours_offer &&
-            ` (that's in your quiet hours — ${preview.quiet_hours_offer} instead?)`}
+            ` ${t("quietOffer", { edge: preview.quiet_hours_offer })}`}
         </p>
       )}
       <div className="v-reschedule-actions">
         <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
-          Cancel
+          {tCommon("cancel")}
         </Button>
         <Button
           type="button"
@@ -613,11 +637,11 @@ function RescheduleDialog({
         </Button>
         {preview ? (
           <Button type="button" onClick={doApply} disabled={busy || !cadence}>
-            Confirm
+            {tCommon("confirm")}
           </Button>
         ) : (
           <Button type="button" onClick={doPreview} disabled={busy || !cadence}>
-            Preview
+            {tCommon("preview")}
           </Button>
         )}
       </div>

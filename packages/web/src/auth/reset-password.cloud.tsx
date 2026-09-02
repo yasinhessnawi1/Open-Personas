@@ -25,6 +25,7 @@
  */
 import { useSignIn } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import {
   ErrorAlert,
@@ -45,17 +46,22 @@ import { AuthLoading, isAuthSignalReady } from "./auth-ready.cloud";
 import { AuthShell, authStyles as s } from "./auth-shell.cloud";
 import { useInFlightGuard } from "./use-in-flight-guard.cloud";
 
-const RESET_BRAND = {
-  kicker: "Account recovery",
-  tagline: "Let's get you back in.",
-  note: "We'll email a 6-digit code to confirm it's you, then you can set a new password.",
-  compact: "Reset your password.",
-} as const;
-
 /** The three steps of the reset flow. */
 type Step = "request" | "code" | "newPassword";
 
 export function ResetPassword() {
+  const t = useTranslations("auth.reset");
+  const ta = useTranslations("auth");
+  const tf = useTranslations("auth.fields");
+  const tBrand = useTranslations("auth.brand");
+  const tError = useTranslations("auth.error");
+  // The brand panel takes plain strings; build them from the catalogue.
+  const resetBrand = {
+    kicker: tBrand("reset.kicker"),
+    tagline: tBrand("reset.tagline"),
+    note: tBrand("reset.note"),
+    compact: tBrand("reset.compact"),
+  };
   const { signIn, errors, fetchStatus } = useSignIn();
   const router = useRouter();
 
@@ -76,7 +82,7 @@ export function ResetPassword() {
   // without an error boundary — blanks the whole screen. Show the calm loading
   // state inside the brand shell until the signal is safe to read.
   if (!isAuthSignalReady({ resource: signIn, errors })) {
-    return <AuthLoading brand={RESET_BRAND} />;
+    return <AuthLoading brand={resetBrand} />;
   }
 
   const busy = fetchStatus === "fetching";
@@ -110,13 +116,15 @@ export function ResetPassword() {
         identifier: email.trim(),
       });
       if (createError) {
-        setFormError(clerkErrorToMessage(createError as ClerkErrorLike));
+        setFormError(
+          clerkErrorToMessage(createError as ClerkErrorLike, tError),
+        );
         return;
       }
       const { error: sendError } =
         await signIn.resetPasswordEmailCode.sendCode();
       if (sendError) {
-        setFormError(clerkErrorToMessage(sendError as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(sendError as ClerkErrorLike, tError));
         return;
       }
       cooldown.start();
@@ -141,7 +149,7 @@ export function ResetPassword() {
       });
       const advanced = signIn.status === "needs_new_password";
       if (error && !advanced) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       if (signIn.status === "needs_new_password") {
@@ -164,13 +172,13 @@ export function ResetPassword() {
       });
       const alreadyComplete = signIn.status === "complete";
       if (error && !alreadyComplete) {
-        setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+        setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
       }
       if (signIn.status === "complete") {
         await signIn.finalize(finishSession);
       } else {
-        setFormError(clerkErrorToMessage(null));
+        setFormError(clerkErrorToMessage(null, tError));
       }
     });
   };
@@ -181,7 +189,7 @@ export function ResetPassword() {
     setFormError(null);
     const { error } = await signIn.resetPasswordEmailCode.sendCode();
     if (error) {
-      setFormError(clerkErrorToMessage(error as ClerkErrorLike));
+      setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
       return;
     }
     cooldown.start();
@@ -191,12 +199,12 @@ export function ResetPassword() {
   const cooldownLabel = formatCooldown(cooldown.remaining);
 
   return (
-    <AuthShell brand={RESET_BRAND}>
+    <AuthShell brand={resetBrand}>
       {step === "request" ? (
         <>
           <div className={s.head}>
-            <h1>Forgot your password?</h1>
-            <p>Enter your email and we'll send a reset code.</p>
+            <h1>{t("requestTitle")}</h1>
+            <p>{t("requestBody")}</p>
           </div>
           <form
             className={s.body}
@@ -205,7 +213,7 @@ export function ResetPassword() {
             noValidate
           >
             <ErrorAlert message={formError} />
-            <Field id="rp-email" label="Email" error={emailError}>
+            <Field id="rp-email" label={tf("email")} error={emailError}>
               <div className={s.control}>
                 <input
                   className={s.input}
@@ -214,7 +222,7 @@ export function ResetPassword() {
                   type="email"
                   autoComplete="email"
                   inputMode="email"
-                  placeholder="you@example.com"
+                  placeholder={tf("emailPlaceholder")}
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   disabled={busy}
@@ -232,11 +240,11 @@ export function ResetPassword() {
                 {busy ? (
                   <>
                     <span className={s.spinner} aria-hidden="true" />
-                    Sending code…
+                    {t("sending")}
                   </>
                 ) : (
                   <>
-                    Send reset code
+                    {t("sendCode")}
                     <ArrowIcon />
                   </>
                 )}
@@ -249,13 +257,14 @@ export function ResetPassword() {
       {step === "code" ? (
         <>
           <div className={s.head}>
-            <h1>Check your inbox</h1>
+            <h1>{t("codeTitle")}</h1>
             <p>
-              Enter the 6-digit code we sent to{" "}
-              <strong className={s.resendStrong}>
-                {signIn.identifier ?? email}
-              </strong>
-              .
+              {t.rich("codeBody", {
+                email: signIn.identifier ?? email,
+                em: (chunks) => (
+                  <strong className={s.resendStrong}>{chunks}</strong>
+                ),
+              })}
             </p>
           </div>
           <form
@@ -282,11 +291,11 @@ export function ResetPassword() {
                 {busy ? (
                   <>
                     <span className={s.spinner} aria-hidden="true" />
-                    Verifying…
+                    {t("verifying")}
                   </>
                 ) : (
                   <>
-                    Verify code
+                    {t("verifyCode")}
                     <ArrowIcon />
                   </>
                 )}
@@ -294,19 +303,23 @@ export function ResetPassword() {
             </div>
             {cooldown.isCoolingDown ? (
               <p className={s.resend}>
-                Resend code in{" "}
-                <strong className={s.resendStrong}>{cooldownLabel}</strong>
+                {ta.rich("resendIn", {
+                  time: cooldownLabel,
+                  em: (chunks) => (
+                    <strong className={s.resendStrong}>{chunks}</strong>
+                  ),
+                })}
               </p>
             ) : (
               <p className={s.resend}>
-                Didn&apos;t get it?{" "}
+                {ta("didntGet")}{" "}
                 <button
                   type="button"
                   className={s.link}
                   onClick={resend}
                   disabled={busy}
                 >
-                  Resend code
+                  {ta("resend")}
                 </button>
               </p>
             )}
@@ -317,8 +330,8 @@ export function ResetPassword() {
       {step === "newPassword" ? (
         <>
           <div className={s.head}>
-            <h1>Set a new password</h1>
-            <p>Choose a strong password you haven't used before.</p>
+            <h1>{t("newTitle")}</h1>
+            <p>{t("newBody")}</p>
           </div>
           <form
             className={s.body}
@@ -333,8 +346,8 @@ export function ResetPassword() {
             <HiddenUsernameField value={signIn.identifier ?? email} />
             <Field
               id="rp-pw"
-              label="New password"
-              hint="At least 8 characters."
+              label={t("newPasswordLabel")}
+              hint={tf("passwordHint")}
               error={passwordError}
             >
               <PasswordInput
@@ -342,7 +355,7 @@ export function ResetPassword() {
                 value={password}
                 onChange={setPassword}
                 autoComplete="new-password"
-                placeholder="Create a new password"
+                placeholder={t("newPasswordPlaceholder")}
                 invalid={Boolean(passwordError)}
                 describedBy="rp-pw-hint"
                 disabled={busy}
@@ -358,11 +371,11 @@ export function ResetPassword() {
                 {busy ? (
                   <>
                     <span className={s.spinner} aria-hidden="true" />
-                    Updating…
+                    {t("updating")}
                   </>
                 ) : (
                   <>
-                    Set new password
+                    {t("setPassword")}
                     <ArrowIcon />
                   </>
                 )}
@@ -373,9 +386,9 @@ export function ResetPassword() {
       ) : null}
 
       <p className={s.foot}>
-        Remembered it?{" "}
+        {t("remembered")}{" "}
         <button type="button" className={s.link} onClick={backToSignIn}>
-          Back to sign in
+          {t("backToSignIn")}
         </button>
       </p>
     </AuthShell>

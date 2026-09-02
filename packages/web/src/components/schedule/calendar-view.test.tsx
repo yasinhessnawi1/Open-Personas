@@ -15,6 +15,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import enMessages from "@/i18n/messages/en.json";
 // Resolves through the mock below (which spreads `...actual`) — the REAL
 // ScheduleApiError class, so `instanceof` checks in calendar-view.tsx hold.
 import { ScheduleApiError } from "@/lib/api/schedule-client";
@@ -61,28 +62,9 @@ vi.mock("@/lib/api/schedule-client", async (importOriginal) => {
   };
 });
 
-const messages = {
-  schedule: {
-    calendar: {
-      deleteButton: "Delete",
-      deleteConfirmTitle: "Delete this reminder?",
-      deleteConfirmBody: "This can't be undone.",
-      deleteFailed: "Couldn't delete this reminder. Try again.",
-      conflictTitle: "Already fired",
-      conflictBody: "This reminder already ran — create a new one instead.",
-      rescheduleFailed: "Couldn't update this reminder. Try again.",
-      previewFailed: "Couldn't preview this change. Try again.",
-    },
-  },
-  confirm: {
-    cancel: "Cancel",
-    confirm: "Confirm",
-    delete: "Delete",
-    duplicate: "Duplicate",
-    deleteTitle: "Delete {name}?",
-    duplicateTitle: "Duplicate {name}?",
-  },
-};
+// The calendar's copy lives in en.json now, so render the real catalogue (the
+// component reads schedule.calendar + schedule.common + schedule.recurrence).
+const messages = enMessages;
 
 function inTwoDays(): string {
   return new Date(Date.now() + 2 * 86_400_000).toISOString();
@@ -191,7 +173,7 @@ describe("CalendarView — R9-024 persona scoping", () => {
         expect.objectContaining({
           level: "error",
           title: "Already fired",
-          body: "This reminder already ran — create a new one instead.",
+          body: "This reminder already ran. Create a new one instead.",
         }),
       ),
     );

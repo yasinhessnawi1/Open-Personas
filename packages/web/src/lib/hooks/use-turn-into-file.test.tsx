@@ -44,9 +44,9 @@ const messages = {
     actions: {
       turnIntoFile: {
         toast: "Creating your file…",
-        errorToast: "Couldn't start the file — try again",
-        successToast: "File created — added to Files",
-        timeoutToast: "Still working on your file — check Files in a moment",
+        errorToast: "Couldn't start the file. Try again",
+        successToast: "File created and added to Files",
+        timeoutToast: "Still working on your file. Check Files in a moment",
       },
     },
   },
@@ -152,7 +152,7 @@ describe("useTurnIntoFile — R9-050 persistent loading", () => {
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL); // tick 2 — the file landed
     });
     expect(toastFns.success).toHaveBeenCalledWith(
-      "File created — added to Files",
+      "File created and added to Files",
       { id: toastId },
     );
     expect(toastFns.error).not.toHaveBeenCalled();
@@ -178,7 +178,7 @@ describe("useTurnIntoFile — R9-050 persistent loading", () => {
     });
 
     expect(toastFns.warning).toHaveBeenCalledWith(
-      "Still working on your file — check Files in a moment",
+      "Still working on your file. Check Files in a moment",
       { id: toastId },
     );
     expect(toastFns.error).not.toHaveBeenCalled();
@@ -197,7 +197,7 @@ describe("useTurnIntoFile — R9-050 persistent loading", () => {
     const toastId = toastFns.loading.mock.results[0]?.value;
 
     expect(toastFns.error).toHaveBeenCalledWith(
-      "Couldn't start the file — try again",
+      "Couldn't start the file. Try again",
       { id: toastId },
     );
 

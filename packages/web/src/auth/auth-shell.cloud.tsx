@@ -13,6 +13,7 @@
  * enters the community module graph.
  */
 import Image from "next/image";
+import { useTranslations } from "next-intl";
 import type { ReactNode } from "react";
 import styles from "./auth-shell.module.css";
 
@@ -28,15 +29,17 @@ export interface BrandCopy {
   readonly compact: string;
 }
 
-/** The four typed-memory stores rendered as labelled colour dots. */
+/** The four typed-memory stores rendered as labelled colour dots; the labels
+ * come from `auth.stores.<key>` so the panel translates with the locale. */
 const STORE_DOTS = [
-  { label: "identity", color: "#2bb6aa" },
-  { label: "self", color: "#5bb05a" },
-  { label: "worldview", color: "#8f8bf2" },
-  { label: "episodic", color: "#e873a6" },
+  { key: "identity", color: "#2bb6aa" },
+  { key: "self", color: "#5bb05a" },
+  { key: "worldview", color: "#8f8bf2" },
+  { key: "episodic", color: "#e873a6" },
 ] as const;
 
 function BrandPanel({ copy }: { copy: BrandCopy }) {
+  const t = useTranslations("auth.stores");
   return (
     <aside className={styles.brand}>
       <div className={styles.brandTop}>
@@ -69,9 +72,9 @@ function BrandPanel({ copy }: { copy: BrandCopy }) {
 
       <div className={styles.stores}>
         {STORE_DOTS.map((store) => (
-          <span key={store.label}>
+          <span key={store.key}>
             <i className={styles.dot} style={{ background: store.color }} />
-            {store.label}
+            {t(store.key)}
           </span>
         ))}
       </div>
