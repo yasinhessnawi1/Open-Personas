@@ -66,7 +66,7 @@ def _app() -> FastAPI:
         # R9-023: a one-time re-arm attempt on an already-fired schedule. Pre-fix this
         # exception had no specific handler and fell through the catch-all _domain_500.
         raise ScheduleStateError(
-            "one-time schedule already fired — create a new schedule",
+            "one-time schedule already fired; create a new schedule",
             context={"schedule_id": "s1"},
         )
 
@@ -155,7 +155,7 @@ def test_schedule_state_conflict_carries_the_message_and_schedule_id(client: Tes
     """R9-023: the 409 body carries the clear, user-facing message + the schedule id context."""
     resp = client.get("/schedule-state")
     body = resp.json()
-    assert body["detail"] == "one-time schedule already fired — create a new schedule"
+    assert body["detail"] == "one-time schedule already fired; create a new schedule"
     assert body["context"] == {"schedule_id": "s1"}
 
 

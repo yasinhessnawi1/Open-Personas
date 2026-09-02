@@ -171,7 +171,7 @@ def test_every_n_minutes_reads_as_the_cadence_with_the_daily_volume() -> None:
         freq=RecurrenceFreq.DAILY, byhour=tuple(range(24)), byminute=(0, 15, 30, 45)
     )
     assert render_recurrence_terms(rule) == (
-        "every 15 minutes, around the clock — 96 times a day, your time"
+        "every 15 minutes, around the clock, 96 times a day, your time"
     )
 
 

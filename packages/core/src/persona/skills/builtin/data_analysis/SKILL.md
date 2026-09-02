@@ -3,7 +3,7 @@ name: data_analysis
 description: Analyse an uploaded dataset (CSV/XLSX) and produce a clear finding paired with the right chart, run via the code_execution sandbox.
 when_to_use: >
   Use this skill when the user uploads a dataset (CSV, XLSX, TSV) and asks
-  an analysis question — what's the trend, what correlates, what does this
+  an analysis question: what's the trend, what correlates, what does this
   show. Skip for quick factual questions or for analysis you can answer
   from already-loaded context without running code.
 tools_required:
@@ -14,8 +14,8 @@ tools_required:
 
 A procedure for analysing an uploaded dataset and producing a finding
 paired with the right chart. The dataset is staged at
-`/workspace/in/<filename>` by the runtime. The value is **insight** —
-finish with prose that explains what the chart shows.
+`/workspace/in/<filename>` by the runtime. The value is **insight**,
+so finish with prose that explains what the chart shows.
 
 ## When to use
 
@@ -27,7 +27,7 @@ calculations, modelling / prediction (out of scope for v0.1).
 
 ## The procedure
 
-### Step 1 — Load and re-load
+### Step 1: Load and re-load
 
 On the **first analysis turn**, read the dataset and cache it as parquet
 for fast re-load on later turns:
@@ -41,7 +41,7 @@ df = pd.read_csv("/workspace/in/<dataset>.csv")
 df.to_parquet("intermediate/df.parquet")
 ```
 
-On **every subsequent turn**, re-load from the parquet cache — DO NOT
+On **every subsequent turn**, re-load from the parquet cache, and DO NOT
 re-read the source CSV:
 
 ```python
@@ -56,7 +56,7 @@ re-reading the source CSV is wasteful and signals you didn't understand
 the session model. Use the parameterised path `intermediate/<doc_ref>.parquet`
 when more than one dataset is in play.
 
-### Step 2 — Profile the data
+### Step 2: Profile the data
 
 Before computing anything, understand the data:
 
@@ -69,20 +69,20 @@ print(df.head())
 Note the shape, column types, missing-value counts, and basic ranges.
 Use the **resident MB** number in the next step.
 
-### Step 3 — Triage by size
+### Step 3: Triage by size
 
 The sandbox has a 512 MB memory ceiling. Apply this rule based on the
 resident MB from Step 2:
 
-- **< 100 MB** — full analysis on the whole dataset.
-- **100 MB ≤ size < 500 MB** — sample to 100,000 rows:
+- **< 100 MB**: full analysis on the whole dataset.
+- **100 MB ≤ size < 500 MB**: sample to 100,000 rows:
   ```python
   df = df.sample(n=100_000, random_state=0)
   ```
   Tell the user in your finding: "Sampled 100,000 of N rows for analysis
   (~M MB resident); full-data computations available via column-filter
   or row-filter at upload time."
-- **≥ 500 MB** — refuse: tell the user the dataset is too large
+- **≥ 500 MB**: refuse, tell the user the dataset is too large
   (~M MB resident vs the 512 MB ceiling), and ask them to pre-filter
   (drop unused columns, restrict to a date range, aggregate upstream)
   and re-upload.
@@ -90,7 +90,7 @@ resident MB from Step 2:
 See `supplements/large_datasets.md` for the dtype-aware profile snippet,
 sampling helpers, and the full banner copy.
 
-### Step 4 — Compute
+### Step 4: Compute
 
 Pick the right statistic for the question:
 
@@ -101,9 +101,9 @@ Pick the right statistic for the question:
 - "by category" → `df.groupby("category")[metric].agg(["mean","median","count"])`
 
 Print the numeric finding before charting. The number IS part of the
-answer — don't bury it in the chart.
+answer, so don't bury it in the chart.
 
-### Step 5 — Choose the right chart
+### Step 5: Choose the right chart
 
 Match the chart family to the question. Wrong chart misleads.
 
@@ -116,12 +116,12 @@ Match the chart family to the question. Wrong chart misleads.
 | Multi-series categorical comparison | Grouped bar | `ax.bar(x+offset, y, width)` per series |
 
 **Never a pie chart.** Bar always reads more accurately. Never bar for a
-time-series — line carries the continuous-time semantics.
+time-series; line carries the continuous-time semantics.
 
 For the full family-by-family judgement with worked snippets, read
 `supplements/chart_families.md`.
 
-### Step 6 — Render with clarity
+### Step 6: Render with clarity
 
 A default matplotlib chart is functional but ugly. Apply this floor:
 
@@ -132,7 +132,7 @@ from pathlib import Path
 Path("charts").mkdir(parents=True, exist_ok=True)
 fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
 ax.plot(x, y)
-ax.set_title("Monthly sales 2020–2025")
+ax.set_title("Monthly sales 2020-2025")
 ax.set_xlabel("Month")
 ax.set_ylabel("Sales (NOK)")
 ax.grid(True, alpha=0.3)
@@ -146,10 +146,10 @@ explicit (default is too small), `dpi=150`, `tight_layout()`, `bbox_inches="tigh
 For axis formatting (thousands separators, percent, currency), legend
 discipline, and font sizes, read `supplements/styling.md`.
 
-### Step 7 — Explain in prose
+### Step 7: Explain in prose
 
 Finish with a one-paragraph finding naming the chart's shape and what it
-means ("Sales grew 18% YoY 2020–2024 then plateaued; inflection is the
+means ("Sales grew 18% YoY 2020-2024 then plateaued; inflection is the
 August 2024 launch."). Bare image = incomplete. Bare prose when a chart
 was asked = incomplete.
 
@@ -157,11 +157,11 @@ was asked = incomplete.
 
 Three top-level directories, three meanings:
 
-- **`charts/<name>.png`** — produced charts shown **inline** to the user.
-- **`uploads/<name>.<ext>`** — files offered as **download** chips.
-- **`intermediate/<name>.parquet`** — cross-turn **cache**, not shown.
+- **`charts/<name>.png`**: produced charts shown **inline** to the user.
+- **`uploads/<name>.<ext>`**: files offered as **download** chips.
+- **`intermediate/<name>.parquet`**: cross-turn **cache**, not shown.
 
-`Path("<dir>").mkdir(parents=True, exist_ok=True)` before saving — the
+`Path("<dir>").mkdir(parents=True, exist_ok=True)` before saving; the
 sandbox does not auto-create subdirectories.
 
 ## Quality checks before done

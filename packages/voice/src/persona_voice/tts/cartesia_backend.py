@@ -333,7 +333,7 @@ class CartesiaStreamingTTS:
             # raw provider exception. Callers depend on the TTSError hierarchy
             # (never raw provider types), so map it to a domain stream failure.
             raise TTSStreamFailureError(
-                "failed to open the Cartesia TTS stream — check the provider "
+                "failed to open the Cartesia TTS stream; check the provider "
                 "credits/quota and connectivity",
                 context={"provider": _PROVIDER_NAME, "error": repr(exc)[:200]},
             ) from exc

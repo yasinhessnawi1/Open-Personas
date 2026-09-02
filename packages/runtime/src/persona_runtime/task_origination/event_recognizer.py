@@ -79,10 +79,10 @@ class EventTriggerIntentJudge(Protocol):
 # Per-language clarify ("I can watch for that — which sender or what should I look for?"). EN is the
 # fallback. The 3+1 shape reuses the Spec-21 rail so the reply rides the existing answer path.
 _CLARIFY_TEXT: dict[str, str] = {
-    "en": "I can watch for that — which sender or what exactly should I look for?",
-    "nb": "Det kan jeg følge med på — hvilken avsender eller hva nøyaktig skal jeg se etter?",
-    "no": "Det kan jeg følge med på — hvilken avsender eller hva nøyaktig skal jeg se etter?",
-    "ar": "يمكنني مراقبة ذلك — أي مُرسِل أو ما الذي يجب أن أبحث عنه بالضبط؟",
+    "en": "I can watch for that. Which sender or what exactly should I look for?",
+    "nb": "Det kan jeg følge med på. Hvilken avsender eller hva nøyaktig skal jeg se etter?",
+    "no": "Det kan jeg følge med på. Hvilken avsender eller hva nøyaktig skal jeg se etter?",
+    "ar": "يمكنني مراقبة ذلك. أي مُرسِل أو ما الذي يجب أن أبحث عنه بالضبط؟",
 }
 _CLARIFY_OPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str], tuple[str, str]]] = {
     "en": (

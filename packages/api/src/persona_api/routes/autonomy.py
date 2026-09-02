@@ -123,7 +123,7 @@ async def pause_autonomy(
     return AutonomyStateOut(
         paused=True,
         changed=True,
-        note="Autonomy paused — no persona will start new work until you resume.",
+        note="Autonomy paused. No persona will start new work until you resume.",
     )
 
 
@@ -179,7 +179,7 @@ async def suspend_persona(
         persona_id=persona_id,
         suspended=True,
         changed=True,
-        note="Suspended — this persona starts no new work until you resume it.",
+        note="Suspended. This persona starts no new work until you resume it.",
     )
 
 
@@ -258,7 +258,7 @@ async def set_persona_initiative_dial(
     set_initiative_dial(engine, user.id, persona_id, requested, now=datetime.now(UTC))
     note = ""
     if not enabled and requested is not InitiativeDial.OFF:
-        note = "Saved — initiative is off platform-wide, so this persona won't act until enabled."
+        note = "Saved. Initiative is off platform-wide, so this persona won't act until enabled."
     return InitiativeDialOut(
         persona_id=persona_id,
         dial=requested.value,
@@ -301,7 +301,7 @@ async def decline_initiative(
         opportunity_key=notice.opportunity_key,
         declined=True,
         changed=changed,
-        note="" if changed else "You'd already declined this — it stays suppressed.",
+        note="" if changed else "You'd already declined this, so it stays suppressed.",
     )
 
 

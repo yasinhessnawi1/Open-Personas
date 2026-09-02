@@ -124,9 +124,9 @@ def render_reschedule_echo(
     edge as an alternative the user may take or override — it never silently shifts the time. The
     echo invites only what is wired (a plain yes/no confirm).
     """
-    clause = f'For "{task_goal}" — When: {human_terms} · {timezone} — next run {next_fire_phrase}.'
+    clause = f'For "{task_goal}". When: {human_terms} · {timezone}, next run {next_fire_phrase}.'
     if quiet_hours_offer is not None:
-        clause += f" (That's inside your quiet hours — want {quiet_hours_offer} instead?)"
+        clause += f" (That's inside your quiet hours. Want {quiet_hours_offer} instead?)"
     return f"{clause} Apply that?"
 
 

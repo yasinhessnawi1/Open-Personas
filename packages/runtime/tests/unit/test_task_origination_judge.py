@@ -187,7 +187,7 @@ async def test_every_15_minutes_becomes_a_recurring_schedule_with_the_volume_lin
     assert result.draft.schedule is not None
     assert result.draft.schedule.recurrence is not None
     assert result.draft.schedule.cadence_note == ""
-    assert "every 15 minutes, around the clock — 96 times a day" in (
+    assert "every 15 minutes, around the clock, 96 times a day" in (
         result.draft.schedule.human_terms
     )
 

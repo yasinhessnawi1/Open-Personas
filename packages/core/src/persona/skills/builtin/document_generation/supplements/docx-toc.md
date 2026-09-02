@@ -15,7 +15,7 @@ walk the document, find paragraphs with the Heading 1 / 2 / 3 styles,
 build the TOC text here."*
 
 python-docx 1.1.2 writes the **field shell** (the instruction). It does
-NOT execute the instruction. Word executes it on open — but **only
+NOT execute the instruction. Word executes it on open, but **only
 after** the user hits **F9** or right-clicks → **Update Field**. (Word
 2016+ usually prompts to update fields on open; recent Word for Mac
 does not always prompt.)
@@ -70,14 +70,14 @@ in xml`) passes because `fldChar` is in the XML.
 
 The instr field is a TOC field with switches. The useful ones:
 
-- `\o "1-3"` — include Heading 1 through Heading 3 (most common). `"1-9"` for all heading levels.
-- `\h` — render entries as hyperlinks (so the user can ctrl-click to navigate).
-- `\z` — hide tab leaders in Web Layout view.
-- `\u` — use outline-level paragraphs (not just named-style headings).
+- `\o "1-3"`: include Heading 1 through Heading 3 (most common). `"1-9"` for all heading levels.
+- `\h`: render entries as hyperlinks (so the user can ctrl-click to navigate).
+- `\z`: hide tab leaders in Web Layout view.
+- `\u`: use outline-level paragraphs (not just named-style headings).
 
 Default to `\o "1-3" \h \z \u`. Wider ranges produce noisier TOCs.
 
-## The "Update Field" gotcha — what to tell the user
+## The "Update Field" gotcha: what to tell the user
 
 When the document opens for the first time after generation, Word
 shows a placeholder like *"Right-click here to update field"* OR
@@ -85,7 +85,7 @@ nothing visible at all. Tell the user **explicitly**, in your reply:
 
 > "I've put a Table of Contents at the top. **Word will show it as
 > empty until you press F9** (or right-click → Update Field). This is
-> normal for any docx with a generated TOC — Word fills it on first
+> normal for any docx with a generated TOC; Word fills it on first
 > update, not at write time."
 
 LibreOffice Writer fills the TOC on first open without user action.
@@ -112,9 +112,9 @@ enhancement; document it in the close-out if you implement it.
 
 ## Common pitfalls
 
-- **Calling `add_toc` before any headings exist** — the field shell is fine. Word builds the TOC from the headings present at open time, not at write time. Order does not matter as long as headings have named styles.
-- **Headings with ad-hoc bold + size instead of `Heading 1` style** — they are invisible to the TOC field walker. The named style is what Word reads. Re-emphasised here: named styles, always.
-- **No `TOC Heading` paragraph above the field** — the TOC entries render, but there is no "Table of Contents" label. Add the label paragraph above.
-- **Using `\\o "1-3"` (escaped backslashes in a regular string)** — that produces `\\o "1-3"` literally in the field instr, which Word does not parse. Use a raw string `r' TOC \o "1-3" \h '` or escape once `' TOC \\o "1-3" \\h '`. The example above uses a regular f-string where the single backslashes survive (`\o` → `\o` since `\o` is not a Python escape).
-- **No `\h` switch** — the entries are still clickable in Word (Ctrl+Click) but only because Word's default behaviour adds hyperlinks; explicit `\h` is portable across Word versions and LibreOffice.
-- **Generating TOCs in a one-page document** — Word still renders the field, but the document looks silly. Skip TOCs for ≤3-section / ≤2-page documents.
+- **Calling `add_toc` before any headings exist**: the field shell is fine. Word builds the TOC from the headings present at open time, not at write time. Order does not matter as long as headings have named styles.
+- **Headings with ad-hoc bold + size instead of `Heading 1` style**: they are invisible to the TOC field walker. The named style is what Word reads. Re-emphasised here: named styles, always.
+- **No `TOC Heading` paragraph above the field**: the TOC entries render, but there is no "Table of Contents" label. Add the label paragraph above.
+- **Using `\\o "1-3"` (escaped backslashes in a regular string)**: that produces `\\o "1-3"` literally in the field instr, which Word does not parse. Use a raw string `r' TOC \o "1-3" \h '` or escape once `' TOC \\o "1-3" \\h '`. The example above uses a regular f-string where the single backslashes survive (`\o` → `\o` since `\o` is not a Python escape).
+- **No `\h` switch**: the entries are still clickable in Word (Ctrl+Click) but only because Word's default behaviour adds hyperlinks; explicit `\h` is portable across Word versions and LibreOffice.
+- **Generating TOCs in a one-page document**: Word still renders the field, but the document looks silly. Skip TOCs for ≤3-section / ≤2-page documents.

@@ -317,7 +317,7 @@ def render_digest_message(digest: MorningDigest) -> str:
             name = digest.persona_names.get(item.persona_id, item.persona_id)
             line = f"  · {name}: {item.title}"
             if item.detail:
-                line += f" — {item.detail}"
+                line += f": {item.detail}"
             if item.ran_because:
                 line += f" (ran because: {item.ran_because})"
             lines.append(line)
@@ -329,4 +329,4 @@ def render_digest_message(digest: MorningDigest) -> str:
             name = digest.persona_names.get(u.persona_id or "", u.persona_id or "")
             suffix = f" ({name})" if name else ""
             lines.append(f"  · {u.label}{suffix}")
-    return "\n".join(lines) if lines else "Nothing to report — a quiet night."
+    return "\n".join(lines) if lines else "Nothing to report: a quiet night."

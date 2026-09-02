@@ -33,7 +33,7 @@ def client() -> TestClient:
         # reset is deterministic regardless of how long the suite takes to reach this test — a
         # module-level constant made the countdown shrink with suite duration (a load-flake).
         raise DailySpendCapExceededError(
-            "Daily spend cap reached — this resets at UTC midnight.",
+            "Daily spend cap reached. This resets at UTC midnight.",
             context={
                 "cap": "10000",
                 "spent": "9950",

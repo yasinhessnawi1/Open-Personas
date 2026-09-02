@@ -159,7 +159,7 @@ def render_schedule_correction() -> str:
     explicit confirm flow — honest about what did NOT happen, concrete about what to do.
     """
     return (
-        "To be clear — I haven't actually created a schedule just now. "
+        "To be clear: I haven't actually created a schedule just now. "
         "You can set one up yourself from your calendar (Schedule → New reminder), "
         "or tell me exactly what to schedule and when, and I'll set it up once you confirm."
     )

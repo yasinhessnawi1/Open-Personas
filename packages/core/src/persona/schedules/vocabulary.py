@@ -370,7 +370,7 @@ def render_recurrence_terms(rule: RecurrenceRule) -> str:
         if minute_step is not None and tuple(rule.byhour) == tuple(range(24)):
             per_day = 24 * len(rule.byminute)
             base = (
-                f"every {minute_step} minutes, around the clock — {per_day} times a day, your time"
+                f"every {minute_step} minutes, around the clock, {per_day} times a day, your time"
             )
             return _with_bound(base, rule)
         # every-N-hours (wall-clock) — name the interval AND the local marks (A8-D-8), so it

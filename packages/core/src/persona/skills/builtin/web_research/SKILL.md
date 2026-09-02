@@ -5,8 +5,8 @@ when_to_use: >
   Use this skill when the user asks to research a topic, investigate
   something, gather evidence from multiple sources, produce a report drawn
   from web content, or SUMMARISE/CONDENSE researched material into a brief
-  (summarisation is folded into this skill's synthesis step — there is no
-  separate summarise skill). Do not use for single factual lookups — call
+  (summarisation is folded into this skill's synthesis step; there is no
+  separate summarise skill). Do not use for single factual lookups. Call
   the web_search tool directly for those.
 tools_required:
   - web_search
@@ -32,9 +32,9 @@ Activate this skill for questions like:
 
 Do not activate this skill for:
 
-- Single factual lookups ("What's the capital of Norway?") — call
+- Single factual lookups ("What's the capital of Norway?"): call
   `web_search` directly.
-- Local file operations — use `file_read` / `file_write` directly.
+- Local file operations: use `file_read` / `file_write` directly.
 - Questions that don't benefit from external sources.
 
 ## Procedure
@@ -78,7 +78,7 @@ to fetch in full. Prefer:
 - Official / primary sources (legislation, court rulings, statistics
   agencies) over secondary commentary.
 - Recent pages (check publication or update date in the snippet).
-- Diverse domains — three different newspaper articles on the same event
+- Diverse domains: three different newspaper articles on the same event
   add less than one newspaper + one government page + one academic paper.
 
 Avoid:
@@ -96,7 +96,7 @@ note that the extraction is best-effort and may include some navigation
 noise on poorly-formatted pages.
 
 If a fetch returns an error (HTTP 4xx/5xx, timeout, SSL issue), do not
-retry — log the failure mentally and move to the next URL. The fetch
+retry; log the failure mentally and move to the next URL. The fetch
 tool already handles redirects and timeouts; a failure means the page
 isn't accessible.
 
@@ -107,7 +107,7 @@ with a larger `max_chars` parameter.
 
 ### Step 5: Synthesise
 
-Now you have 6-12 pages of source text. Synthesise — do not summarise
+Now you have 6-12 pages of source text. Synthesise, do not summarise
 each source one by one.
 
 Structure your synthesis around the **sub-queries** from step 1, not the
@@ -129,7 +129,7 @@ If the user asked for a document (report, summary, briefing memo), call
 `research-<topic>.md` unless the user specified.
 
 If the user asked for an inline answer, write the synthesis directly in
-your response — same structure, same citations.
+your response, same structure, same citations.
 
 ## Quality checks
 
@@ -140,7 +140,7 @@ Before completing the task, verify:
 - [ ] Conflicting sources are surfaced, not hidden.
 - [ ] Facts and opinions are distinguished.
 - [ ] Publication dates noted for time-sensitive claims.
-- [ ] No fabricated citations — every URL is one you actually fetched.
+- [ ] No fabricated citations: every URL is one you actually fetched.
 
 If any check fails, return to the relevant step and fix before producing
 final output.
@@ -154,7 +154,7 @@ often more informative than sources that agree.
 
 **The "summarise sources" trap.** You write "Source A says X. Source B
 says Y. Source C says Z." That's a list, not a synthesis. The user wants
-an answer to the question, supported by sources — not a tour of the
+an answer to the question, supported by sources, not a tour of the
 sources.
 
 **The "stale data" trap.** A 2018 page about Norwegian tenancy law might
@@ -168,7 +168,7 @@ sourced. If you can't find a citation for a claim, mark it as
 
 **The "paywalled abstract" trap.** Many academic papers and news
 articles are paywalled; `web_fetch` returns the abstract or paywall
-prompt. Don't cite an abstract as if it were the full paper — abstracts
+prompt. Don't cite an abstract as if it were the full paper; abstracts
 omit caveats and methodology. Note explicitly when you only have the
 abstract.
 
@@ -192,7 +192,7 @@ and ask whether they want the larger investigation.
 
 ## Examples
 
-### Example 1 — small question
+### Example 1: small question
 
 User: "Is mould a landlord responsibility in Norwegian rental law?"
 
@@ -205,7 +205,7 @@ recent court ruling summary.
 
 Output: 2-3 paragraphs, 4-5 citations.
 
-### Example 2 — medium question
+### Example 2: medium question
 
 User: "Research the current state of LLM evaluation harnesses."
 
@@ -219,7 +219,7 @@ posts from labs.
 
 Output: structured report, 1500-2000 words, ~15 citations.
 
-### Example 3 — large question
+### Example 3: large question
 
 User: "Write a briefing memo on AI agent skill systems."
 
@@ -243,8 +243,8 @@ only to find the others.
 
 **Authority.** Is the author or organisation a credible voice on this
 topic? A government statistics agency on demographics, a peer-reviewed
-journal on biology, a recognised practitioner on engineering practice
-— each carries weight in its domain. A random blogger on a topic outside
+journal on biology, a recognised practitioner on engineering practice:
+each carries weight in its domain. A random blogger on a topic outside
 their stated expertise does not.
 
 **Recency.** When was this published or last updated? For fast-moving
@@ -256,7 +256,7 @@ recent source before citing as current.
 funding? A company white paper on its own product is useful for technical
 detail but biased on comparison. An academic paper that lists funders
 is more trustworthy than one that doesn't. NGO advocacy pages have a
-stated position — useful when you want their position, less useful for
+stated position, useful when you want their position, less useful for
 balanced overview.
 
 **Reproducibility.** Can you reach the source's underlying claims? A
@@ -267,20 +267,20 @@ beats one that paraphrases anonymously.
 ## Handling ambiguity in the user's question
 
 Sometimes the user's question is ambiguous in a way that changes what
-you should research. Don't paper over the ambiguity — surface it.
+you should research. Don't paper over the ambiguity. Surface it.
 
-For example: "Is X expensive?" — expensive compared to what? Per unit,
+For example: "Is X expensive?" Expensive compared to what? Per unit,
 per outcome, per year of operation? Pause and ask, unless the context
 makes the comparison obvious.
 
 Other examples:
 
-- "What's the best way to do Y?" — best by what metric? Speed, cost,
+- "What's the best way to do Y?" Best by what metric? Speed, cost,
   reliability, simplicity? Each implies a different research path.
-- "Is Z safe?" — safe for whom, under what conditions, by what standard?
+- "Is Z safe?" Safe for whom, under what conditions, by what standard?
   Regulatory bodies have specific definitions; the colloquial meaning
   may differ.
-- "Compare A and B." — on what dimensions? Performance, price, ecosystem,
+- "Compare A and B." On what dimensions? Performance, price, ecosystem,
   vendor lock-in? Ask, then research the requested dimensions.
 
 If asking would slow the user down, make a reasonable assumption and
@@ -292,7 +292,7 @@ if you meant Z and I'll re-scope."
 If the question is about a non-English topic (Norwegian tenancy law, German
 case law, French regulation), the most authoritative sources will often
 be in the local language. The model can read most major European
-languages. Don't avoid local sources just because they're not English —
+languages. Don't avoid local sources just because they're not English:
 they're frequently the primary sources. Cite them in their original
 language and provide a brief translation of the relevant quote in your
 synthesis.
@@ -309,7 +309,7 @@ A high-quality research synthesis has these properties:
    consistently. The reader can click through to verify any claim.
 
 3. **Disagreements among sources are surfaced.** If two authoritative
-   sources contradict, the synthesis says so explicitly — "Source A
+   sources contradict, the synthesis says so explicitly: "Source A
    says X; source B says Y; the dispute appears to be about Z."
 
 4. **Confidence is calibrated.** Strong claims ("the statute states

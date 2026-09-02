@@ -451,7 +451,7 @@ class TestVoiceToolsConversational:
         out = await _drain(producer)
 
         assert "Let me look that up." in out  # preamble still spoken
-        assert "This is taking a moment — I'll follow up on that shortly." in out  # bound hit
+        assert "This is taking a moment. I'll follow up on that shortly." in out  # bound hit
 
 
 class TestVoiceActivitySeam:

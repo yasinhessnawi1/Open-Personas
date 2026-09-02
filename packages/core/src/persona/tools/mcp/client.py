@@ -163,7 +163,7 @@ class MCPClient:
         except ImportError as e:
             self._emit_audit(action="server_unavailable", error=type(e).__name__)
             if strict:
-                msg = "mcp SDK not installed — pip install mcp"
+                msg = "mcp SDK not installed; pip install mcp"
                 raise MCPServerUnavailableError(
                     msg,
                     context={

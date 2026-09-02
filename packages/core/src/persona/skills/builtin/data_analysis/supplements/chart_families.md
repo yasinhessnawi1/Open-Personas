@@ -34,7 +34,7 @@ monthly = df.groupby(pd.Grouper(key="date", freq="M"))["sales"].sum()
 
 fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
 ax.plot(monthly.index, monthly.values, color="#1f77b4", linewidth=1.8)
-ax.set_title("Monthly sales 2020–2025")
+ax.set_title("Monthly sales 2020-2025")
 ax.set_xlabel("Month")
 ax.set_ylabel("Sales (NOK)")
 ax.grid(True, alpha=0.3)
@@ -70,7 +70,7 @@ plt.close(fig)
 ```
 
 `bins=30` is the default rule-of-thumb; raise to 50 for high-resolution
-distributions, drop to 10–15 for noisy small samples. `edgecolor="white"`
+distributions, drop to 10-15 for noisy small samples. `edgecolor="white"`
 gives a clean look that reads better than no edge.
 
 **Failure mode:** showing a density plot when you should show a histogram.
@@ -102,7 +102,7 @@ keeps the markers small enough to read. Drop a regression line via
 `np.polyfit` + `ax.plot` if it adds insight.
 
 **Failure mode:** using a line plot to show a relationship. Lines
-connect adjacent points in some order; scatter has no order — the
+connect adjacent points in some order; scatter has no order, and the
 relationship shape is what matters.
 
 ---
@@ -123,7 +123,7 @@ fig.savefig("charts/region-comparison.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 ```
 
-**Horizontal, not vertical** — category labels read more naturally
+**Horizontal, not vertical**: category labels read more naturally
 along the y-axis. `sort_values()` orders bars by magnitude (the eye
 catches the pattern faster than alphabetical order). `figsize` height
 scales with the number of categories.
@@ -161,7 +161,7 @@ plt.close(fig)
 ```
 
 For >3 series, switch to small multiples (one chart per series,
-arranged in a grid) — grouped bars become hard to read above 3 series.
+arranged in a grid); grouped bars become hard to read above 3 series.
 
 ---
 
@@ -183,6 +183,6 @@ plt.close(fig)
 ```
 
 **Never a pie.** Bar (stacked or grouped) always reads more accurately
-than pie — humans estimate length better than area. The only place pie
+than pie; humans estimate length better than area. The only place pie
 arguably works is "two slices of dramatically unequal size", and even
 there a single number ("82%") is clearer.

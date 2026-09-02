@@ -93,7 +93,7 @@ ECHO_PROMPT_VOICE = (
 
 #: The schedule line when no cadence is attached at all — the authoritative one-off statement that
 #: promises no recurrence (rare now that every confirmed task is schedule-backed, but kept honest).
-_NO_SCHEDULE_WHEN = "runs once — no recurring schedule"
+_NO_SCHEDULE_WHEN = "runs once, with no recurring schedule"
 
 #: Offered on a ONE-TIME task — honest now that schedule-attach works: replying with a cadence makes
 #: the task recurring (the amendment path re-parses it against the schedule's timezone).
@@ -103,7 +103,9 @@ _GRANULARITY_HUMAN: dict[UpdateGranularity, str] = {
     UpdateGranularity.EVERY_LEG: "after every step",
     UpdateGranularity.MILESTONES: "at milestones (and when it's done)",
     UpdateGranularity.COMPLETION_ONLY: "only when it's done",
-    UpdateGranularity.QUIET: "quietly — I'll only reach out if I need you or something goes wrong",
+    UpdateGranularity.QUIET: (
+        "quietly, and I'll only reach out if I need you or something goes wrong"
+    ),
 }
 
 #: The VOICE granularity phrasings (A9-D-2) — no parentheticals or em-dashes (the V11 register:
@@ -237,7 +239,7 @@ def _render_clause_voice(draft: ContractDraft, clause: Clause) -> str:
             # The honest degradation rider (R4, BUG A) — spoken too, never silent.
             return f"When: {when}. {sched.cadence_note}"
         if sched.recurrence is None:  # one-time — the now-honest recurring upgrade, spoken plainly
-            return f"When: {when}. It runs once — tell me if you'd like it recurring."
+            return f"When: {when}. It runs once. Tell me if you'd like it recurring."
         return f"When: {when}."
     if clause is Clause.BOUNDS:
         return _render_bounds_voice(draft)

@@ -1,4 +1,4 @@
-# PDF Generation — Pagination (detailed reference)
+# PDF Generation: Pagination (detailed reference)
 
 Verbose reference for page breaks, page numbers, headers, footers, and
 multi-page table layout in `reportlab`. Read from inside your code:
@@ -20,8 +20,8 @@ next page (calling the page-level callback), and resumes flowing.
 
 Two callbacks let you draw onto each page outside the main frame:
 
-- `onFirstPage(canvas, doc)` — called once, before any flowable on page 1.
-- `onLaterPages(canvas, doc)` — called for every page **after** the first.
+- `onFirstPage(canvas, doc)`: called once, before any flowable on page 1.
+- `onLaterPages(canvas, doc)`: called for every page **after** the first.
 
 `canvas` is a low-level drawing surface (`reportlab.pdfgen.canvas.Canvas`);
 `doc` is the `SimpleDocTemplate` instance and exposes `doc.page` (the
@@ -50,7 +50,7 @@ def _footer(canvas, doc) -> None:
 doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
 ```
 
-Always wrap `canvas` mutations in `saveState()` / `restoreState()` — the
+Always wrap `canvas` mutations in `saveState()` / `restoreState()`; the
 canvas is shared with the flowable rendering; leaving state mutated
 (font, colour, transform) bleeds into the next page's content.
 
@@ -73,7 +73,7 @@ def _body_page(canvas, doc) -> None:
 doc.build(story, onFirstPage=_cover_page, onLaterPages=_body_page)
 ```
 
-### "Page X of Y" — the two-pass trick
+### "Page X of Y": the two-pass trick
 
 `doc.page` knows the current page; it does **not** know the total. To
 print "Page X of Y," you need two passes: build once to learn the total,
@@ -89,10 +89,10 @@ count = _PageCountCanvas()
 def _count_pages(canvas, doc) -> None:
     count.total = max(count.total, doc.page)
 
-# Pass 1 — count
+# Pass 1: count
 doc.build(list(story), onFirstPage=_count_pages, onLaterPages=_count_pages)
 
-# Pass 2 — render with total
+# Pass 2: render with total
 def _footer_xof(canvas, doc) -> None:
     canvas.saveState()
     canvas.setFont("Helvetica", 9)
@@ -100,7 +100,7 @@ def _footer_xof(canvas, doc) -> None:
                            f"Page {doc.page} of {count.total}")
     canvas.restoreState()
 
-doc = SimpleDocTemplate(...)  # rebuild — the previous doc is consumed
+doc = SimpleDocTemplate(...)  # rebuild, the previous doc is consumed
 doc.build(story, onFirstPage=_footer_xof, onLaterPages=_footer_xof)
 ```
 
@@ -109,7 +109,7 @@ pattern that handles this in one pass; for most v0.1 reports the
 two-pass trick is simpler and the cost (a brief in-memory rebuild) is
 negligible.
 
-## Headers — running document title
+## Headers: running document title
 
 Same pattern, top of page:
 
@@ -135,8 +135,8 @@ second is shorter.
 
 ## `PageBreak` and `CondPageBreak`
 
-- `PageBreak()` — unconditional. Next flowable starts on a new page.
-- `CondPageBreak(height)` — conditional. Inserts a break **only** if
+- `PageBreak()`: unconditional. Next flowable starts on a new page.
+- `CondPageBreak(height)`: conditional. Inserts a break **only** if
   less than `height` remains on the current page.
 
 ```python
@@ -167,7 +167,7 @@ headers, use `repeatRows=2`.
 `LongTable` splits between rows, not within a row. If a single row's
 content is taller than the remaining frame, the row is moved entire to
 the next page. If a single row is taller than a full page (e.g., a cell
-contains a 50-line `Paragraph`), reportlab raises `LayoutError` —
+contains a 50-line `Paragraph`), reportlab raises `LayoutError`;
 either shrink the cell content or wrap the cell `Paragraph` in
 `KeepInFrame`.
 
@@ -249,22 +249,22 @@ skip this; add only if the user explicitly asks for navigation.
 
 ## Common mistakes
 
-1. **Forgetting `saveState`/`restoreState`** in the page callback — the
+1. **Forgetting `saveState`/`restoreState`** in the page callback, and the
    font / colour you set bleeds into the flowable rendering on the
    following page.
 
-2. **Mutating `story` between `build()` calls** in the two-pass trick —
+2. **Mutating `story` between `build()` calls** in the two-pass trick:
    pass a `list(story)` copy to pass 1 so flowable state doesn't
    contaminate pass 2.
 
-3. **Drawing into the content frame** from a page callback — the callback
+3. **Drawing into the content frame** from a page callback: the callback
    runs **before** flowable rendering on that page; whatever you draw is
    drawn under the flowables. Use it for headers / footers in the margin
    region, not for in-frame content.
 
-4. **`CondPageBreak` with a `height` larger than the frame** — never
+4. **`CondPageBreak` with a `height` larger than the frame**: never
    triggers; reportlab silently treats it as a no-op.
 
-5. **A flowable taller than the page** — `LayoutError`. The fix is one of:
+5. **A flowable taller than the page**: `LayoutError`. The fix is one of:
    shrink the flowable (smaller font, smaller image), split it
    (multiple paragraphs instead of one), or wrap in `KeepInFrame`.

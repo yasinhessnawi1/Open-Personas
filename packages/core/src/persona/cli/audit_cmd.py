@@ -85,7 +85,7 @@ def audit(
         return
 
     for event in events:
-        chunk_summary = f"{len(event.chunk_ids)} chunk(s)" if event.chunk_ids else "—"
+        chunk_summary = f"{len(event.chunk_ids)} chunk(s)" if event.chunk_ids else "-"
         typer.echo(
             f"{event.timestamp.isoformat()} "
             f"{event.action.value:<15} "

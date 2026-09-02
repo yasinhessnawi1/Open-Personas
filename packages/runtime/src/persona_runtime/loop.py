@@ -322,29 +322,29 @@ def _aggregate_round_usage(round_usages: list[TokenUsage]) -> _AggregatedUsage:
 
 #: The persona's reply on a confirmed contract (Spec A4). The actual task create happens api-side
 #: off the emitted event; this is the immediate, honest acknowledgement.
-_CONTRACT_CONFIRMED_TEXT = "Done — I've set that up. I'll keep you posted."
+_CONTRACT_CONFIRMED_TEXT = "Done. I've set that up. I'll keep you posted."
 
 #: Steering acknowledgements (Spec A4, T9b). The actual mutation happens api-side off the event.
 # Spec A5 (T10): the initiative-verb acknowledgements (module constants; A5-R-1 tunes tone).
-_INITIATIVE_CONFIRMED_TEXT = "On it — I'll get started and let you know."
-_INITIATIVE_DECLINED_TEXT = "Understood — I'll leave it and won't bring it up again."
+_INITIATIVE_CONFIRMED_TEXT = "On it. I'll get started and let you know."
+_INITIATIVE_DECLINED_TEXT = "Understood. I'll leave it and won't bring it up again."
 _INITIATIVE_DIAL_TEXT = {
-    InitiativeVerb.DIAL_OFF: "Done — I'll stop suggesting things on my own.",
-    InitiativeVerb.DIAL_PROPOSE_ONLY: "Done — I'll suggest things but always ask before acting.",
+    InitiativeVerb.DIAL_OFF: "Done. I'll stop suggesting things on my own.",
+    InitiativeVerb.DIAL_PROPOSE_ONLY: "Done. I'll suggest things but always ask before acting.",
     InitiativeVerb.DIAL_ACT: (
-        "Done — I'll handle safe things on my own and still ask before anything consequential."
+        "Done. I'll handle safe things on my own and still ask before anything consequential."
     ),
 }
 
-_STEER_PAUSED_TEXT = "Paused — just say the word when you want it going again."
-_STEER_RESUMED_TEXT = "Done — it's running again."
-_STEER_CANCELLED_TEXT = "Cancelled — I've stopped that task."
+_STEER_PAUSED_TEXT = "Paused. Just say the word when you want it going again."
+_STEER_RESUMED_TEXT = "Done. It's running again."
+_STEER_CANCELLED_TEXT = "Cancelled. I've stopped that task."
 
 #: Reschedule acknowledgements (Spec A8, T6). The actual retime/rerule happens api-side off the
 #: emitted event, through the CAS-guarded door; this is the immediate honest ack.
-_RESCHEDULE_APPLIED_TEXT = "Done — I've moved it. The next run is at the new time."
+_RESCHEDULE_APPLIED_TEXT = "Done. I've moved it. The next run is at the new time."
 _RESCHEDULE_DECLINE_TEXT = (
-    "I couldn't set that cadence reliably — want to try a fixed daily or weekly time instead?"
+    "I couldn't set that cadence reliably. Want to try a fixed daily or weekly time instead?"
 )
 
 
@@ -381,7 +381,7 @@ def _render_amendment(before: ContractDraft, after: ContractDraft) -> str:
 
     if classify_amendment_materiality(before, after) is Materiality.MATERIAL:
         return (
-            "That's a bigger change — here's the updated plan:\n"
+            "That's a bigger change. Here's the updated plan:\n"
             f"{render_echo(after)}\n\nShall I go ahead?"
         )
     clauses = changed_clauses(before, after) or (Clause.GOAL,)
@@ -429,7 +429,7 @@ def _render_pending_clarify(pending: ContractDraft) -> str:
     clarify restates the pending terms and names every real exit: confirm, adjust, drop.
     """
     return (
-        "Just to be sure I don't set up the wrong thing — here's what I have pending:\n"
+        "Just to be sure I don't set up the wrong thing, here's what I have pending:\n"
         f"{render_echo(pending)}\n\n"
         "Say 'yes' to set it up, tell me what to change (for example 'make it 9:30'), "
         "or say 'never mind' to drop it."
@@ -966,7 +966,7 @@ class ConversationLoop:
                         goal = next(
                             (s.goal for s in summaries if s.task_id == intent.task_id), "this task"
                         )
-                        prompt = f'Just to confirm — cancelling this stops "{goal}". Cancel it?'
+                        prompt = f'Just to confirm: cancelling this stops "{goal}". Cancel it?'
                         yield _text_chunk(prompt)
                         now_cp = datetime.now(UTC)
                         conversation.messages.append(
@@ -1044,7 +1044,7 @@ class ConversationLoop:
                     )
                     if resolution.kind is RescheduleResolutionKind.AMBIGUOUS:
                         goals = "; ".join(f'"{g}"' for g in resolution.candidate_goals)
-                        ask = f"Which one do you mean — {goals}?"
+                        ask = f"Which one do you mean: {goals}?"
                         yield _text_chunk(ask)
                         now_ra = datetime.now(UTC)
                         conversation.messages.append(

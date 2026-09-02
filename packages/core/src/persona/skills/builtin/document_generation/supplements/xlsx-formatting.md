@@ -1,11 +1,11 @@
-# XLSX formatting — depth supplement
+# XLSX formatting: depth supplement
 
 Read this when the lean SKILL.md body's formatting coverage isn't
 enough. Covers `number_format` strings (currency / date / percent /
 custom), column-width sizing strategies, conditional formatting, borders,
 merged cells, row heights, and freeze-pane / split-pane combinations.
 
-## `number_format` — the centre of the format universe
+## `number_format`: the centre of the format universe
 
 `number_format` is a string that controls how a numeric cell is
 **displayed** (the underlying value is unchanged). Set it on the cell:
@@ -60,15 +60,15 @@ for row in ws.iter_rows(min_row=2, min_col=2, max_col=14):
 ```
 
 Note: `ws.column_dimensions["B"].number_format = …` does **not** apply
-to existing cells — it's a default for newly added cells only.
+to existing cells; it's a default for newly added cells only.
 
-## Column widths — sizing strategies
+## Column widths: sizing strategies
 
 Three approaches:
 
 ### Fixed widths
 
-The simplest — set widths to known good values:
+The simplest: set widths to known good values:
 
 ```python
 from openpyxl.utils import get_column_letter
@@ -159,12 +159,12 @@ for row in ws.iter_rows(min_row=1, max_row=5, min_col=1, max_col=14):
 
 ## Merged cells
 
-Use sparingly — merged cells break sorting, filtering, and many formula
+Use sparingly; merged cells break sorting, filtering, and many formula
 patterns. Useful for headers that span columns:
 
 ```python
 ws.merge_cells("A1:N1")
-ws["A1"].value = "Annual budget — 2026"
+ws["A1"].value = "Annual budget 2026"
 ws["A1"].alignment = Alignment(horizontal="center")
 ws["A1"].font = Font(bold=True, size=14)
 ```
@@ -175,7 +175,7 @@ implicitly empty.
 ## Freeze panes vs split panes
 
 `ws.freeze_panes = "B2"` freezes everything **above and to the left** of
-B2 — row 1 (header) and column A (labels) stay visible while the user
+B2: row 1 (header) and column A (labels) stay visible while the user
 scrolls.
 
 | Freeze target | Locks | Use when… |
@@ -202,4 +202,4 @@ Two cells with the same `value` but different `number_format` look
 different but compare equal in formulas. Two cells with the same
 **displayed** value but different underlying values compare unequal. If
 the user is going to copy-paste-special "values only", they get the raw
-number — make sure that's what you want them to read.
+number, so make sure that's what you want them to read.

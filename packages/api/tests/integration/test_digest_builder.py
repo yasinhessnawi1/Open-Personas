@@ -166,7 +166,7 @@ def test_empty_digest_reads_as_a_quiet_night(migrated_engine: Engine, app_engine
     _seed_persona(migrated_engine)
     digest = build_morning_digest(app_engine, owner_id="u", config=_CONFIG, now=_NOW)
     assert digest.sections == ()
-    assert render_digest_message(digest) == "Nothing to report — a quiet night."
+    assert render_digest_message(digest) == "Nothing to report: a quiet night."
 
 
 def test_ran_because_renders_from_the_event_fired_audit_provenance(

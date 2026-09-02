@@ -185,7 +185,7 @@ class DelegatedTurnHandler:
             name = self._persona_name(persona_id)
             return (
                 DelegatedTurnOutcome.BLOCKED_ON_APPROVAL,
-                f"I've started it — it needs your OK in your chat with {name}.",
+                f"I've started it. It needs your OK in your chat with {name}.",
             )
         # A9-T7: a spoken STEERING ask — the frontier emitted a ``task_steering`` (pause/resume)
         # that rides the SAME delegation crossing. Apply it through the unchanged steering door.
@@ -200,14 +200,14 @@ class DelegatedTurnHandler:
                 }
             )
             verb = str(steer.get("verb", "updated"))
-            return DelegatedTurnOutcome.SUCCEEDED, f"Done — I've {_verb_past(verb)} that task."
+            return DelegatedTurnOutcome.SUCCEEDED, f"Done. I've {_verb_past(verb)} that task."
         # A cancel / reschedule the frontier surfaced as a pending confirmation (destructive, so it
         # asks first). Voice is a poor medium for that confirm — hand back the honest-incomplete
         # line so the user resolves it in chat (A9-D-4 applied to destructive steering).
         if _pending_confirm(conversation):
             return (
                 DelegatedTurnOutcome.BLOCKED_ON_APPROVAL,
-                "I've teed that change up — confirm it in your chat with "
+                "I've teed that change up. Confirm it in your chat with "
                 f"{self._persona_name(persona_id)} and I'll apply it.",
             )
         # A standing intent: the frontier echoed a pending contract proposal. Voice already
@@ -226,7 +226,7 @@ class DelegatedTurnHandler:
             result = await self._origination.originate(dict(event.data))
             if result.status in (OriginationStatus.CREATED, OriginationStatus.IDEMPOTENT):
                 goal = result.task.contract.goal if result.task is not None else draft.goal
-                return DelegatedTurnOutcome.SUCCEEDED, f"Done — I've set that up: {goal}."
+                return DelegatedTurnOutcome.SUCCEEDED, f"Done. I've set that up: {goal}."
             return (
                 DelegatedTurnOutcome.FAILED,
                 "I couldn't set that up just now, so nothing was scheduled.",

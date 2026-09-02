@@ -273,7 +273,7 @@ def render_approval_message(kind: str, proposal: ActionProposal) -> str:
     desc = (d[0].lower() + d[1:]) if d else f"run {proposal.tool_name}"
     lines = {
         "ask": f"I'd like to {desc}. Reply to approve, deny, or tell me what to change.",
-        "reconfirm": f"Updated — I'd now {desc}. Approve the change, or deny.",
+        "reconfirm": f"Updated. I'd now {desc}. Approve the change, or deny.",
         "clarify": f"To be sure: should I go ahead and {desc}? Please reply yes or no.",
         "remind": f"Still waiting on you: I'd like to {desc}.",
         "expired": f"The request to {desc} expired, so I did not do it.",

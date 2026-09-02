@@ -104,7 +104,7 @@ def test_minutely_divisor_normalizes_to_the_pinned_daily_grid() -> None:
     assert parsed.recurrence.freq is RecurrenceFreq.DAILY
     assert parsed.recurrence.byhour == tuple(range(24))
     assert parsed.recurrence.byminute == (0, 15, 30, 45)
-    assert parsed.human_terms == ("every 15 minutes, around the clock — 96 times a day, your time")
+    assert parsed.human_terms == ("every 15 minutes, around the clock, 96 times a day, your time")
 
 
 def test_hourly_divisor_normalizes_to_pinned_hours() -> None:

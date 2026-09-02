@@ -1,7 +1,7 @@
 # Images in python-docx 1.1.2
 
-Read this when you need to embed an image — a logo, a screenshot, a
-chart produced by Spec 17 — into the document body.
+Read this when you need to embed an image (a logo, a screenshot, a
+chart produced by Spec 17) into the document body.
 
 ## Supported formats
 
@@ -21,10 +21,10 @@ doc.add_picture("/workspace/in/diagram.png", width=Inches(4.0))
 
 `width=` is **not optional in practice**. Without it, python-docx uses
 the image's intrinsic pixel size at 96 dpi, which for a typical 1200-px
-chart is ~12.5 inches — past the page margin, clipped on the right.
+chart is ~12.5 inches, past the page margin, clipped on the right.
 
 The quality bar (`100_000 <= doc.inline_shapes[0].width.emu <=
-5_000_000` — that is roughly 0.1 to 5.5 inches in EMUs) passes when you
+5_000_000`, that is roughly 0.1 to 5.5 inches in EMUs) passes when you
 size between 1 and 6 inches. The sweet spot for a body-width chart is
 `Inches(4)` to `Inches(5.5)`.
 
@@ -49,7 +49,7 @@ para = doc.paragraphs[-1]   # the paragraph add_picture just appended
 para.alignment = 1          # WD_ALIGN_PARAGRAPH.CENTER
 ```
 
-Floating images (text wraps around) are a manual XML manipulation —
+Floating images (text wraps around) are a manual XML manipulation,
 out of scope here; for v0.1 prefer inline centred.
 
 ## Embedding a Spec 17 chart (D-16-5 contract)
@@ -108,8 +108,8 @@ review.
 
 ## Common pitfalls
 
-- **No `width=`** — image overflows page margin (most common failure).
-- **JPEG photo on white background** — embed as PNG; JPEG compresses photographs but introduces blocky artefacts around chart text and axes.
-- **`add_picture(io.BytesIO(...))`** — works, but only if you have already written the bytes; safer for v0.1 to write the PNG to `/workspace/out/charts/<id>.png` first and pass the path.
-- **`UnrecognizedImageError`** — the file's header is not one of PNG / JPEG / GIF / BMP / TIFF (even if the extension says so). Re-save with `PIL.Image.open(src).save(dst, "PNG")` first.
-- **Embedding the same image twice** — fine; python-docx writes the bytes twice in the package. For a logo used on every page, render once via the section header (out of scope here) rather than re-embed per page.
+- **No `width=`**: image overflows page margin (most common failure).
+- **JPEG photo on white background**: embed as PNG; JPEG compresses photographs but introduces blocky artefacts around chart text and axes.
+- **`add_picture(io.BytesIO(...))`**: works, but only if you have already written the bytes; safer for v0.1 to write the PNG to `/workspace/out/charts/<id>.png` first and pass the path.
+- **`UnrecognizedImageError`**: the file's header is not one of PNG / JPEG / GIF / BMP / TIFF (even if the extension says so). Re-save with `PIL.Image.open(src).save(dst, "PNG")` first.
+- **Embedding the same image twice**: fine; python-docx writes the bytes twice in the package. For a logo used on every page, render once via the section header (out of scope here) rather than re-embed per page.

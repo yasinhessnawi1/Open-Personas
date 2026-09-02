@@ -24,7 +24,7 @@ _POSITIVES = [
     "I've set that up. You're all good.",
     # The deterministic confirm voice is a claim BY DESIGN: in ordinary generation it
     # would be false (the real confirm branch early-returns and never reaches the seam).
-    "Done — I've set that up. I'll keep you posted.",
+    "Done. I've set that up. I'll keep you posted.",
     "I've added it to your calendar.",
     "I've added a reminder to your schedule.",
     "I've created a reminder for every morning.",

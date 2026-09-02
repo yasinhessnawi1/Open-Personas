@@ -149,7 +149,7 @@ def account_for_cancel_failure(task_id: str, *, cause: str) -> FailureAccount:
     return FailureAccount(
         kind=FailureKind.CANCEL_FAILED,
         task_id=task_id,
-        headline="I couldn't cancel that task — it's still running.",
+        headline="I couldn't cancel that task. It's still running.",
         cause=cause.strip() or "the cancel didn't go through just now",
         options=("ask me to cancel it again", "pause it instead"),
         priority=MessagePriority.FAILURE,

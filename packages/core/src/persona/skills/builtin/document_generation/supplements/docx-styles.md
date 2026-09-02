@@ -67,7 +67,7 @@ doc.add_paragraph("Numbered item", style="List Number")
 ```
 
 `List Bullet 2` / `List Number 2` give the indented second-level
-variants. python-docx does not produce a "nested list" automatically —
+variants. python-docx does not produce a "nested list" automatically;
 each paragraph carries its own list style; visual nesting comes from the
 list style itself, not from a parent / child relationship.
 
@@ -103,7 +103,7 @@ para.alignment = 1    # WD_ALIGN_PARAGRAPH.CENTER = 1
 The quality bar (`any("PAGE" in p._p.xml for p in
 doc.sections[0].footer.paragraphs)`) passes once the field is in the XML.
 Word renders "Page 1", "Page 2", … on open with no user action needed
-(unlike TOC — see `supplements/toc.md`).
+(unlike TOC, see `supplements/toc.md`).
 
 ## Page setup
 
@@ -125,7 +125,7 @@ section.right_margin = Mm(25)
 Set this **before** adding content. Changing page size mid-document
 requires section breaks (rare; usually not needed for v0.1).
 
-## Paragraph spacing — the consistent-spacing trap
+## Paragraph spacing: the consistent-spacing trap
 
 The quality-bar row "Paragraph spacing consistent" fails when two
 blank `add_paragraph("")` calls leave back-to-back empty paragraphs.
@@ -136,7 +136,7 @@ p = doc.add_paragraph("Some prose.")
 p.paragraph_format.space_after = Pt(12)
 ```
 
-Never write `doc.add_paragraph("\n\n")` — `\n` is a line break inside
+Never write `doc.add_paragraph("\n\n")`; `\n` is a line break inside
 the run, not a paragraph break, and the result is ragged. New paragraphs
 come from new `add_paragraph` calls.
 

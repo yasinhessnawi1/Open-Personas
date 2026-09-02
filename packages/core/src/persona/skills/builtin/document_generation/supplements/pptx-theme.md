@@ -1,9 +1,9 @@
-# Theme — typography, colour, master consistency
+# Theme: typography, colour, master consistency
 
 The `pptx_generation` SKILL.md body sets the floor: title ≥28pt, body
 ≥18pt, one font family per deck. This file covers the cases where you
-need finer control — weight, colour, accent palette, master-level
-overrides — and how to map a persona's `identity.visual_style` onto
+need finer control (weight, colour, accent palette, master-level
+overrides) and how to map a persona's `identity.visual_style` onto
 the deck's theme.
 
 Read this from inside your code when the persona has a declared
@@ -57,7 +57,7 @@ first, then iterate runs.
 ## Accent colour for emphasis
 
 Use one accent colour for emphasis (a chart's highlighted bar, a
-callout box). One accent — not two. Two accents means the audience
+callout box). One accent, not two. Two accents means the audience
 doesn't know which is the focus.
 
 ```python
@@ -96,7 +96,7 @@ is a free-form string like:
 - `"Norwegian state aesthetic, deep navy + gold accent, formal"`
 
 The skill body says *"prefer those aesthetic hints over generic
-defaults."* The mapping is interpretive — there is no schema. Read the
+defaults."* The mapping is interpretive; there is no schema. Read the
 hint, pick reasonable concrete values:
 
 | Hint phrase | Title font | Body font | Accent | Notes |
@@ -131,7 +131,7 @@ for r in p.runs:
     r.font.size = Pt(14)
 ```
 
-Don't centre-align body text — centre alignment is for titles and
+Don't centre-align body text; centre alignment is for titles and
 section headers only. Left-align body is the default and the right
 choice in 95% of cases.
 
@@ -154,7 +154,7 @@ for p in title_ph.text_frame.paragraphs:
 ```
 
 The change propagates to every layout that inherits the master's title
-placeholder. **Confirm visually after master edits** — some layouts
+placeholder. **Confirm visually after master edits**: some layouts
 override the master and your change won't appear there.
 
 ---

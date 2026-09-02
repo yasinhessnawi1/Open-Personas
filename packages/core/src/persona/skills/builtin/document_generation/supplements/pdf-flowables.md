@@ -1,4 +1,4 @@
-# PDF Generation — Flowables (detailed reference)
+# PDF Generation: Flowables (detailed reference)
 
 Verbose reference for `reportlab.platypus` flowables. Read this from
 inside your code when the SKILL.md body's overview isn't enough.
@@ -32,7 +32,7 @@ The flowables you will use most:
 | `KeepInFrame` | Shrink content to fit a frame | `reportlab.platypus.KeepInFrame` |
 | `HRFlowable` | Horizontal rule | `reportlab.platypus.HRFlowable` |
 
-## `Paragraph` — the workhorse
+## `Paragraph`: the workhorse
 
 `Paragraph(text, style)` accepts a subset of HTML-like inline markup:
 `<b>`, `<i>`, `<u>`, `<font name=… size=… color=…>`, `<br/>`,
@@ -58,15 +58,15 @@ para = Paragraph(
 
 ### Paragraph style fields you'll set most
 
-- `fontName` — `"Helvetica"`, `"Times-Roman"`, `"Courier"` ship by default.
-- `fontSize` — points. Body ≥ 10. Headings 12-18 typically.
-- `leading` — line height in points. Rule of thumb: `1.3 * fontSize`.
-- `spaceBefore` / `spaceAfter` — vertical spacing around the paragraph.
-- `leftIndent` / `rightIndent` / `firstLineIndent` — indentation in pts.
-- `alignment` — 0 / 1 / 2 / 4 (LEFT/CENTER/RIGHT/JUSTIFY).
-- `textColor` — `colors.black`, `colors.HexColor("#…")`, etc.
+- `fontName`: `"Helvetica"`, `"Times-Roman"`, `"Courier"` ship by default.
+- `fontSize`: points. Body ≥ 10. Headings 12-18 typically.
+- `leading`: line height in points. Rule of thumb: `1.3 * fontSize`.
+- `spaceBefore` / `spaceAfter`: vertical spacing around the paragraph.
+- `leftIndent` / `rightIndent` / `firstLineIndent`: indentation in pts.
+- `alignment`: 0 / 1 / 2 / 4 (LEFT/CENTER/RIGHT/JUSTIFY).
+- `textColor`: `colors.black`, `colors.HexColor("#…")`, etc.
 
-## `Spacer` — vertical whitespace
+## `Spacer`: vertical whitespace
 
 ```python
 from reportlab.platypus import Spacer
@@ -113,9 +113,9 @@ table = LongTable(data, repeatRows=1,
 
 `repeatRows=1` repeats the first row (the header) on every continuation
 page. `repeatRows=2` repeats the first two. Without this, only the first
-page shows the header — the rest of the table looks unlabelled.
+page shows the header, and the rest of the table looks unlabelled.
 
-### `TableStyle` — the styling DSL
+### `TableStyle`: the styling DSL
 
 `TableStyle` takes a list of styling tuples. Each tuple is
 `(command, start_cell, end_cell, *args)`. Cells are `(col, row)`,
@@ -155,7 +155,7 @@ unpredictable splits) and strongly recommended for `Table`. Values are
 points by default; multiply by `cm` or `inch` from `reportlab.lib.units`
 for readable code.
 
-`rowHeights` is rarely needed — let the table size rows from content.
+`rowHeights` is rarely needed; let the table size rows from content.
 
 ## `Image`
 
@@ -170,7 +170,7 @@ story.append(img)
 ```
 
 **Always pass `width` and `height` in cm or inch units.** Raw `Image(path)`
-without sizing renders pixels-as-points — a 1200×800 chart becomes
+without sizing renders pixels-as-points, so a 1200×800 chart becomes
 16 × 11 inches, off-page. Maintain the original aspect ratio: divide
 target width by source pixel-width, multiply source pixel-height by the
 same factor.
@@ -238,7 +238,7 @@ Horizontal rule between sections. Subtler than a heavy `Spacer`.
    "Var", parent=body, fontSize=12)`.
 
 2. **Reusing a `Paragraph` instance.** A flowable carries layout state
-   after being drawn — appending the same instance twice produces
+   after being drawn, so appending the same instance twice produces
    undefined output. Build a fresh `Paragraph` for each occurrence.
 
 3. **Empty `data` rows in `Table`.** A row that is `[]` (rather than

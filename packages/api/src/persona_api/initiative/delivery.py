@@ -108,7 +108,7 @@ def render_proposal(candidate: InitiativeCandidate) -> str:
     ask = ask[0].lower() + ask[1:] if ask else ask
     return (
         f"From your notes: {candidate.observation} {candidate.why_now}\n"
-        f"Want me to {ask}? Say yes and I'll get started — or tell me to leave it."
+        f"Want me to {ask}? Say yes and I'll get started, or tell me to leave it."
     )
 
 

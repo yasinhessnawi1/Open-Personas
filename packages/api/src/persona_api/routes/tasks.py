@@ -384,7 +384,7 @@ async def resume_task(
     _mirror_schedule_pause(engine, user.id, updated, paused=False)
     owner_paused = _kill_switch(engine).is_owner_autonomy_paused(user.id)
     note = (
-        "Resumed — but your autonomy is paused, so it won't run until you resume autonomy."
+        "Resumed, but your autonomy is paused, so it won't run until you resume autonomy."
         if owner_paused
         else ""
     )
@@ -445,7 +445,7 @@ async def extend_budget(
         old_cap_micros=old_cap,
         new_cap_micros=budget.effective_cap(user.id, after),
         state=budget.check(user.id, after).value,
-        note="" if applied else "This task isn't paused at its budget cap — nothing to extend.",
+        note="" if applied else "This task isn't paused at its budget cap: nothing to extend.",
     )
 
 

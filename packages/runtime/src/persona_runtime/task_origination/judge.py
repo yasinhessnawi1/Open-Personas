@@ -258,13 +258,13 @@ class ModelStandingIntentJudge:
             _logger.info("cadence not representable; falling back to run-once (noted honestly)")
             alternative = exc.context.get("alternative", "a fixed daily or weekly time")
             note = (
-                "I couldn't set that exact cadence — the closest I can hold is "
+                "I couldn't set that exact cadence. The closest I can hold is "
                 f"{alternative}. Tell me one and I'll make it recurring."
             )
         except ValueError:
             _logger.info("cadence unparseable; falling back to run-once (noted honestly)")
             note = (
-                "I couldn't read that cadence exactly — tell me one like 'every 15 minutes' "
+                "I couldn't read that cadence exactly. Tell me one like 'every 15 minutes' "
                 "or 'every weekday at 8am' and I'll make it recurring."
             )
         fallback = parse_one_time(now, tz, phrase="run once")

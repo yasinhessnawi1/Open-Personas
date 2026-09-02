@@ -92,7 +92,7 @@ async def test_succeeded_speaks_the_grounded_content() -> None:
     engine = _FakeEngine(
         job_state="succeeded",
         outcome={
-            "content": "Done — I've set that up: track morning fares.",
+            "content": "Done. I've set that up: track morning fares.",
             "outcome": "succeeded",
         },
     )
@@ -108,7 +108,7 @@ async def test_succeeded_speaks_the_grounded_content() -> None:
 
 async def test_blocked_on_approval_speaks_the_honest_incomplete_line() -> None:
     sink = _Sink()
-    honest = "I've started it — it needs your OK in your chat with Astrid."
+    honest = "I've started it. It needs your OK in your chat with Astrid."
     engine = _FakeEngine(
         job_state="succeeded",
         outcome={"content": honest, "outcome": "blocked_on_approval"},

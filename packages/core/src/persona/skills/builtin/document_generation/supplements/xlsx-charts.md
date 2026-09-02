@@ -1,14 +1,14 @@
-# XLSX charts — depth supplement
+# XLSX charts: depth supplement
 
 Read this when the lean SKILL.md body's chart guidance isn't enough.
-Covers `openpyxl`-native charts (the strong default — data-linked,
+Covers `openpyxl`-native charts (the strong default: data-linked,
 in-cell, no raster handoff), chart types and when to use each, axes /
 titles / legends / styling, multi-series charts, and a tail note on the
 Spec 17 raster-embed path for the rare case you want a pre-rendered PNG.
 
 ## Why openpyxl-native is the default
 
-openpyxl writes **real Excel charts** — backed by the cell range you
+openpyxl writes **real Excel charts**, backed by the cell range you
 supply, updating when the underlying cells change, zoomable without
 pixelation, and editable by the user in Excel/LibreOffice. This is
 almost always what you want.
@@ -17,7 +17,7 @@ A PNG embedded as an image is **frozen** at the resolution you saved it
 at, doesn't update when data changes, and can't be edited. Use a raster
 embed only when the chart was produced by a different tool (e.g., Spec
 17's matplotlib-based chart skill) and you want to preserve its exact
-appearance — see the tail note.
+appearance; see the tail note.
 
 ## The three chart types you'll use 90% of the time
 
@@ -74,13 +74,13 @@ chart.set_categories(months)
 ws.add_chart(chart, "P2")
 ```
 
-`from_rows=True` says "each row of the data range is one series" — what
+`from_rows=True` says "each row of the data range is one series", which is what
 you want when each category (Rent, Salaries, …) is a row and the months
 are columns.
 
 ### Pie chart
 
-Show parts of a whole. Use sparingly — pie charts are hard to read for
+Show parts of a whole. Use sparingly; pie charts are hard to read for
 more than 5 slices. A bar chart is almost always better.
 
 ```python
@@ -132,11 +132,11 @@ For a workbook the user will scroll through, leave at least 2 empty
 columns between the data and the chart anchor so the chart doesn't
 overlap the data.
 
-## Styling — palettes and themes
+## Styling: palettes and themes
 
 `chart.style = N` picks one of 48 built-in palette+style combinations.
-Styles 1–12 are the saturated colour set; 13–24 are pastel; 25–36 are
-darker variants; 37–48 are monochrome. For a persona with a declared
+Styles 1-12 are the saturated colour set; 13-24 are pastel; 25-36 are
+darker variants; 37-48 are monochrome. For a persona with a declared
 `visual_style` palette, you'll usually want to override individual
 series colours instead:
 
@@ -159,7 +159,7 @@ chart.y_axis.majorUnit = 20000        # gridline spacing
 chart.y_axis.number_format = "#,##0"  # axis label format
 ```
 
-Starting the y-axis above zero is a classic chart lie — it exaggerates
+Starting the y-axis above zero is a classic chart lie; it exaggerates
 small differences. Almost always start at zero for value comparisons.
 
 ## Legend + data labels
@@ -172,7 +172,7 @@ chart.legend.position = "b"   # bottom; "t" top, "l" left, "r" right, "tr" top-r
 chart.legend = None           # remove the legend entirely
 ```
 
-Data labels turn a chart into a chart-plus-table — useful for handouts,
+Data labels turn a chart into a chart-plus-table, useful for handouts,
 distracting on dense charts. Decide per use case.
 
 ## When the chart is wrong
@@ -192,7 +192,7 @@ If a Spec 17 chart was already produced **in the same session** and you
 want to embed it as a raster image rather than recompute the chart
 natively in xlsx, the path convention is
 `/workspace/out/charts/<id>.png` per D-16-5 (PNG raster confirmed across
-all three document engines — see Spec 16 `research.md` §5).
+all three document engines; see Spec 16 `research.md` §5).
 
 ```python
 from openpyxl.drawing.image import Image
@@ -203,7 +203,7 @@ ws.add_image(img, "P2")
 ```
 
 **Caveat (Spec 16 state.md A2):** cross-session persona-workspace
-persistence is not in scope for v0.1 — the chart file from Spec 17 is
+persistence is not in scope for v0.1; the chart file from Spec 17 is
 reachable only within the **same sandbox session**. Across sessions, the
 file is gone and the embed will fail with `FileNotFoundError`.
 

@@ -1,4 +1,4 @@
-# XLSX formulas — depth supplement
+# XLSX formulas: depth supplement
 
 Read this when the lean SKILL.md body's formula coverage isn't enough.
 Covers composition, relative vs absolute references, cross-sheet
@@ -8,12 +8,12 @@ references, named ranges, and the `SUMIF` / `SUMIFS` / `VLOOKUP` /
 ## How openpyxl writes formulas
 
 `openpyxl` writes formulas as **strings starting with `=`** into cell
-values. The formula is **not evaluated** at write time — Excel /
+values. The formula is **not evaluated** at write time; Excel /
 LibreOffice evaluates on open. If you need the computed value baked into
 the workbook (e.g., for a `data_only=True` re-read in a test), open the
 saved file in Excel / LibreOffice and re-save it, OR pre-compute the
 value in Python and write both the formula and the computed value (the
-latter via `cell.value` after `cell.formula = …` — not supported by
+latter via `cell.value` after `cell.formula = …`, not supported by
 openpyxl directly; the simplest path is the Excel re-save).
 
 ```python
@@ -21,7 +21,7 @@ ws.cell(row=2, column=14, value="=SUM(B2:M2)")     # formula
 ws.cell(row=2, column=14, value=sum(row_values))   # constant
 ```
 
-## Relative vs absolute references — the cell of cells
+## Relative vs absolute references: the cell of cells
 
 Excel references come in four shapes:
 
@@ -43,11 +43,11 @@ row past the first. Always absolute the column-range references in
 Two valid forms:
 
 ```python
-# Bare sheet name — only safe when the name contains no spaces or
+# Bare sheet name: only safe when the name contains no spaces or
 # special characters.
 "=SUM(Months!B2:M2)"
 
-# Quoted sheet name — required if the name has spaces, hyphens, or
+# Quoted sheet name: required if the name has spaces, hyphens, or
 # starts with a digit.
 "=SUM('Year 2026'!B2:M2)"
 ```
@@ -57,7 +57,7 @@ Two valid forms:
 every formula referencing `Sheet1!` breaks with `#REF!`. The cheapest
 hedge is the **named range** (see below).
 
-## Named ranges — formulas that survive sheet rename
+## Named ranges: formulas that survive sheet rename
 
 Named ranges decouple formulas from sheet names. After defining a named
 range, formulas reference the name, not the address.
@@ -75,7 +75,7 @@ wb.defined_names["MonthsTotal"] = DefinedName(
     attr_text="Months!$N$2:$N$5",
 )
 
-# Now Summary formulas use the names — robust to Months sheet rename.
+# Now Summary formulas use the names, robust to Months sheet rename.
 summary.cell(row=2, column=2,
              value="=SUMIF(Categories, A2, MonthsTotal)")
 ```
@@ -84,26 +84,26 @@ Named ranges are workbook-scoped by default; pass `localSheetId=<index>`
 to scope to a single sheet. For most multi-sheet workbooks the workbook
 scope is what you want.
 
-## SUMIF — the workhorse cross-sheet aggregation
+## SUMIF: the workhorse cross-sheet aggregation
 
 `SUMIF(range, criteria, sum_range)`:
 
-- `range` — where to look for the match.
-- `criteria` — what to match. Can be a literal (`"Rent"`), a cell
+- `range`: where to look for the match.
+- `criteria`: what to match. Can be a literal (`"Rent"`), a cell
   reference (`A2`), or an expression (`">100"`, `"<="&B1`).
-- `sum_range` — what to sum when the match is found. Same shape as
+- `sum_range`: what to sum when the match is found. Same shape as
   `range`.
 
 Common pitfalls:
 
-- **Mismatched range shapes.** `SUMIF(A:A, "Rent", B:C)` — the sum_range
+- **Mismatched range shapes.** `SUMIF(A:A, "Rent", B:C)`: the sum_range
   has two columns but range has one; Excel will sum only column `B`.
   Keep the shapes parallel.
 - **Non-absolute lookup columns.** See the relative-vs-absolute section.
 - **Hidden whitespace.** `"Rent "` (trailing space) doesn't match
   `"Rent"`. If your categories come from user input, normalise on write.
 
-## SUMIFS — multi-condition aggregation
+## SUMIFS: multi-condition aggregation
 
 `SUMIFS(sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], …)`:
 
@@ -112,10 +112,10 @@ Common pitfalls:
 '=SUMIFS(Months!$N:$N, Months!$A:$A, "Rent", Months!$B:$B, ">="&DATE(2026,1,1), Months!$B:$B, "<="&DATE(2026,6,30))'
 ```
 
-Argument order differs from `SUMIF` — **`sum_range` comes first**, then
+Argument order differs from `SUMIF`: **`sum_range` comes first**, then
 pairs of (criteria_range, criteria). This trips everyone the first time.
 
-## VLOOKUP / XLOOKUP — row lookups
+## VLOOKUP / XLOOKUP: row lookups
 
 `VLOOKUP(lookup_value, table_array, col_index, [range_lookup])`:
 
@@ -139,7 +139,7 @@ source of bugs.
 returns `#N/A` when the value isn't found, and supports left-of-key
 lookups. Prefer it when the target environment supports it.
 
-## INDEX / MATCH — when VLOOKUP isn't flexible enough
+## INDEX / MATCH: when VLOOKUP isn't flexible enough
 
 For lookups where the return column is **left** of the key column, or
 where you want exact-match control:
@@ -167,5 +167,5 @@ print(wb["Summary"]["B2"].value)
 
 If the value is `None` or a different formula, you wrote it wrong; fix
 in code and re-save. To see evaluated values, you need the file
-round-tripped through Excel / LibreOffice once — openpyxl alone cannot
+round-tripped through Excel / LibreOffice once; openpyxl alone cannot
 evaluate formulas.

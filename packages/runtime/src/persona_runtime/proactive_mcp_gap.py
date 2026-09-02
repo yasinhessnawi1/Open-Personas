@@ -139,8 +139,8 @@ def build_mcp_gap_question(signal: MCPGapSignal) -> ProactiveQuestion:
     capability = signal.capability.rstrip(".")
     if signal.required_env:
         enable_detail = (
-            f"Configure the `{signal.server_name}` MCP server — requires "
-            f"{', '.join(signal.required_env)} in the environment — and try again."
+            f"Configure the `{signal.server_name}` MCP server (requires "
+            f"{', '.join(signal.required_env)} in the environment) and try again."
         )
     else:
         enable_detail = (

@@ -1,4 +1,4 @@
-# Charts — embedding visuals in a deck
+# Charts: embedding visuals in a deck
 
 The `pptx_generation` SKILL.md body teaches the basics of
 `add_picture` for a Spec-17 chart at
@@ -17,14 +17,14 @@ editable in PowerPoint" requirement.
 
 Two paths exist:
 
-1. **Raster embed** — Spec 17 (or your own matplotlib code) produces a
+1. **Raster embed**: Spec 17 (or your own matplotlib code) produces a
    PNG; `add_picture` places it on the slide. This is the **D-16-5
    default**: works across all engines, no editability, sharp at the
    intended size, fuzzy if resized.
 
-2. **Native python-pptx chart** — build the chart inline with
+2. **Native python-pptx chart**: build the chart inline with
    `slide.shapes.add_chart(...)`. Editable in PowerPoint, smaller file,
-   but limited chart types (bar / line / pie / scatter — no boxplots,
+   but limited chart types (bar / line / pie / scatter, with no boxplots,
    no heatmaps, no custom annotations).
 
 | Need | Choose |
@@ -40,10 +40,10 @@ editability.
 
 ---
 
-## Raster embed — the D-16-5 contract
+## Raster embed: the D-16-5 contract
 
 Spec 17 writes charts to `/workspace/out/charts/<id>.png` (sandbox
-path). Same-session only — the file is gone across sessions (see
+path). Same-session only; the file is gone across sessions (see
 SKILL.md §Step 5 and the same-session reachability note).
 
 ```python
@@ -105,10 +105,10 @@ width) / 2 = 0.5`.
 
 ---
 
-## Resolution — making the embed sharp
+## Resolution: making the embed sharp
 
 Spec 17's matplotlib charts default to `dpi=100`. At full-slide width
-(11"), that's 1100 px wide — fine for screen, soft for projection.
+(11"), that's 1100 px wide, fine for screen, soft for projection.
 
 Two sharpness improvements:
 
@@ -116,7 +116,7 @@ Two sharpness improvements:
    upstream. `plt.savefig(path, format="png", dpi=150)` produces a
    1650-px-wide PNG; embeds sharp on a projector. python-pptx accepts
    the larger PNG without complaint; the .pptx file grows by
-   ~50–150 KB per chart.
+   ~50-150 KB per chart.
 
 2. **Don't resize the PNG larger than its source.** If the PNG is
    800 px wide and you place it at `Inches(11)`, the embed is
@@ -169,7 +169,7 @@ Supported chart types (the useful subset):
 | `XL_CHART_TYPE.PIE` | Single series of ≤6 categories totalling 100% |
 | `XL_CHART_TYPE.XY_SCATTER` | Two numeric axes (correlation) |
 
-`XL_CHART_TYPE.XL_AREA`, doughnut, radar — supported but rarely the
+`XL_CHART_TYPE.XL_AREA`, doughnut, radar: supported but rarely the
 right choice; prefer column/line for most cases.
 
 ---
@@ -188,7 +188,7 @@ fill.solid()
 fill.fore_color.rgb = RGBColor(0xC8, 0x1D, 0x25)  # deep red
 ```
 
-Apply this once per series. Don't colour every category cell — that's
+Apply this once per series. Don't colour every category cell; that's
 visual noise.
 
 ---

@@ -1054,9 +1054,9 @@ def _render_digest(goal: str, *, completed: bool, occurrence: bool, waiting: boo
     if completed:
         return f"I've finished the task you set up: {goal}."
     if occurrence:  # a recurring occurrence done — the task keeps going, so this is progress
-        return f'Done this time on "{goal}" — I\'ll run it again on schedule.'
+        return f'Done this time on "{goal}". I\'ll run it again on schedule.'
     if waiting:
-        return f'Progress on "{goal}" — I\'ve paused until the next scheduled check.'
+        return f'Progress on "{goal}". I\'ve paused until the next scheduled check.'
     return f'I\'ve made progress on "{goal}".'
 
 
@@ -1213,7 +1213,7 @@ def start_in_process_worker(
     """
     if rls_engine.dialect.name != "postgresql":
         raise CommunityDbError(
-            "the in-process worker requires a Postgres engine — its graph store and durable "
+            "the in-process worker requires a Postgres engine: its graph store and durable "
             "job queue are Postgres-only. The community legacy-SQLite path has neither. Set "
             "PERSONA_COMMUNITY_DB_MODE=auto to run on the bundled managed Postgres, or unset "
             "PERSONA_API_IN_PROCESS_WORKER.",

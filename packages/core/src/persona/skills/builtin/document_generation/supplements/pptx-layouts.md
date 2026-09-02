@@ -1,4 +1,4 @@
-# Layouts — non-default slide patterns
+# Layouts: non-default slide patterns
 
 The `pptx_generation` SKILL.md body covers the title slide and the
 title+content slide. This file covers the layouts you reach for when
@@ -19,24 +19,24 @@ default master.
 | N | Name | Use it for |
 |---|---|---|
 | 0 | Title Slide | The deck's cover slide. Has a title placeholder + a subtitle. |
-| 1 | Title and Content | Standard content slide — title + a body text-frame for bullets. |
+| 1 | Title and Content | Standard content slide, with a title + a body text-frame for bullets. |
 | 2 | Section Header | Visual divider between deck sections. Title + a small subtitle. |
 | 3 | Two Content | Title + two side-by-side body text-frames (left/right comparison). |
 | 4 | Comparison | Title + two title-content pairs (left/right with sub-headings). |
 | 5 | Title Only | Title placeholder only. Use when the body is a chart or image. |
-| 6 | Blank | No placeholders. Avoid for content slides — placeholders give consistency. |
+| 6 | Blank | No placeholders. Avoid for content slides; placeholders give consistency. |
 | 7 | Content with Caption | Body + caption text below. Good for image+caption. |
 | 8 | Picture with Caption | Picture placeholder + caption. Use the picture placeholder, not `add_picture` floating. |
 
 `len(prs.slide_layouts)` is 11 in the default master; layouts 9 and 10
 are duplicates of 1 / 5 with different background formatting and
-rarely the right choice. Stick with 0–8 for normal decks.
+rarely the right choice. Stick with 0-8 for normal decks.
 
 ---
 
 ## Pattern: two-column comparison
 
-Pre-2024 vs post-2024, before vs after — the comparison layout (4) is
+Pre-2024 vs post-2024, before vs after: the comparison layout (4) is
 designed for this. Layout 3 is a leaner alternative without
 sub-headings.
 
@@ -77,7 +77,7 @@ s = prs.slides.add_slide(prs.slide_layouts[7])
 s.shapes.title.text = "Norway, tenant complaints 2025"
 
 # placeholders[1] = the content area (use add_picture into the slide,
-# anchored where the placeholder sits — keep within its bounds)
+# anchored where the placeholder sits, keeping within its bounds)
 # placeholders[2] = caption text frame
 
 s.shapes.add_picture(
@@ -86,7 +86,7 @@ s.shapes.add_picture(
     width=Inches(7.0), height=Inches(4.5),
 )
 s.placeholders[2].text_frame.text = (
-    "Source: Statistics Norway, Q1–Q4 2025."
+    "Source: Statistics Norway, Q1-Q4 2025."
 )
 ```
 
@@ -103,11 +103,11 @@ subtitle, generous whitespace.
 
 ```python
 s = prs.slides.add_slide(prs.slide_layouts[2])  # Section Header
-s.shapes.title.text = "Part II — Post-2024 framework"
+s.shapes.title.text = "Part II: Post-2024 framework"
 s.placeholders[1].text = "The four amendments and their effective dates"
 ```
 
-Don't use section headers in a deck under 8 slides — the divider
+Don't use section headers in a deck under 8 slides; the divider
 overhead isn't earned.
 
 ---
@@ -129,7 +129,7 @@ s.shapes.add_picture(
 )
 ```
 
-Centre the image horizontally if the deck width is 13.333" — see the
+Centre the image horizontally if the deck width is 13.333"; see the
 sizing table in `charts.md`.
 
 ---
@@ -148,8 +148,8 @@ comes from defaulting to layout 0 or 1 for everything. The rule:
 6. Title + one large visual → layout 5.
 7. Anything else → layout 1 (Title + Content) as the default.
 
-If you find yourself reaching for layout 6 (Blank), stop and reconsider
-— blank slides skip the master's typography and look amateur.
+If you find yourself reaching for layout 6 (Blank), stop and reconsider;
+blank slides skip the master's typography and look amateur.
 
 ---
 
@@ -194,7 +194,7 @@ tf.text = "Custom body content."
   five placeholders. Print `[ph.placeholder_format.idx for ph in
   s.placeholders]` once when adapting a layout you haven't used before.
 - **`title` is always `s.shapes.title`, not `s.placeholders[0]`.** Use
-  the explicit `shapes.title` accessor — it's the same object but
+  the explicit `shapes.title` accessor; it's the same object but
   the named accessor is clearer and won't break if the layout's title
   placeholder isn't at index 0.
 - **A placeholder's `text_frame.text = "..."` replaces *all* paragraphs.**

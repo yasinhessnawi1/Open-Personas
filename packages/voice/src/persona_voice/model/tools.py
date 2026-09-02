@@ -147,9 +147,9 @@ class VoiceToolNarrator:
             "Give me a second to pull that up.",
         ),
         deferral_line: str = "I'll prepare that and have it ready for you after our call.",
-        overflow_line: str = "This is taking a moment — I'll follow up on that shortly.",
+        overflow_line: str = "This is taking a moment. I'll follow up on that shortly.",
         async_artifact_line: str = (
-            "Let me put that together — it'll appear on your screen in a moment."
+            "Let me put that together. It'll appear on your screen in a moment."
         ),
     ) -> None:
         if not preambles:

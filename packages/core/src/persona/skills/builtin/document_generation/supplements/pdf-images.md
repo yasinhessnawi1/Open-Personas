@@ -1,4 +1,4 @@
-# PDF Generation — Images and embedded charts (detailed reference)
+# PDF Generation: Images and embedded charts (detailed reference)
 
 Verbose reference for embedding PNG / JPEG images in reportlab PDFs,
 including the Spec 17 chart-embedding contract. Read from inside your
@@ -14,7 +14,7 @@ detail = Path(
 ## Supported formats
 
 `reportlab.platypus.Image` accepts the formats Python Imaging Library
-(PIL / Pillow) decodes — primarily PNG, JPEG, GIF, BMP, TIFF. **SVG is
+(PIL / Pillow) decodes: primarily PNG, JPEG, GIF, BMP, TIFF. **SVG is
 not supported** by the `Image` flowable at reportlab 4.2.5; it would
 require `svglib`, which is not in the Spec 12 sandbox image manifest
 (see Spec 16 D-16-5-rejection-SVG for the rationale).
@@ -51,14 +51,14 @@ SKILL.md body's failure-modes list reiterates this.
 
 If the orchestrator enables sandbox session mode (D-12-1 scaled scope),
 filesystem state persists across `docker exec` calls *within* one
-session — the chart from call N is still there at call N+1 in the same
+session, so the chart from call N is still there at call N+1 in the same
 session. Across sessions, nothing persists in v0.1.
 
 ## Sizing
 
 **Always pass `width` and `height` in cm or inch units.** Raw
 `Image(path)` without sizing interprets the PNG's pixel dimensions as
-points (one point = 1/72 inch) — a 1200×800 chart becomes a 16 × 11
+points (one point = 1/72 inch), so a 1200×800 chart becomes a 16 × 11
 inch flowable, which is off-page on A4.
 
 ```python
@@ -147,7 +147,7 @@ img = Image(path, width=14 * cm, height=8 * cm)
 img.hAlign = "CENTER"   # or "LEFT" / "RIGHT"
 ```
 
-`vAlign` exists but is rarely useful at the flowable level — vertical
+`vAlign` exists but is rarely useful at the flowable level; vertical
 position is determined by the flow.
 
 ## Image with a caption
@@ -182,7 +182,7 @@ data = [
 ]
 ```
 
-Use small target sizes — table cells get cramped quickly. Match the row
+Use small target sizes; table cells get cramped quickly. Match the row
 height implied by the image to the column widths you set.
 
 ## Backgrounds and watermarks
@@ -215,7 +215,7 @@ call. `mask="auto"` honours transparency in the source PNG.
 
 3. **Embedding a chart from a different `code_execution` call.** The
    `/workspace/out/` directory is cleaned between executions. The chart
-   does not survive — produce the chart in the same call as the PDF, or
+   does not survive, so produce the chart in the same call as the PDF, or
    use session mode if the orchestrator enables it.
 
 4. **JPEG with transparency expected.** JPEG does not support an alpha

@@ -440,7 +440,7 @@ class Schedule(BaseModel):
         """
         if next_fire_at is not None and self.is_one_time and self.fire_count > 0:
             raise ScheduleStateError(
-                "one-time schedule already fired — create a new schedule",
+                "one-time schedule already fired; create a new schedule",
                 context={"schedule_id": self.id, "operation": "with_next_fire"},
             )
         return self.model_copy(

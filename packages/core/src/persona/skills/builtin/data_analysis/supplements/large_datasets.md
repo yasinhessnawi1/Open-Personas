@@ -24,7 +24,7 @@ print(f"na_counts: {na_counts}")
 
 **Why `deep=True`.** Without it, pandas reports object columns as a flat
 pointer cost (8 bytes per cell). With `deep=True`, it recursively
-measures the actual string storage — typically 10–50× more memory than
+measures the actual string storage, typically 10-50× more memory than
 the flat estimate suggests. A "1 GB" CSV is often 5 GB resident when
 loaded naively. The triage rule is calibrated against deep-memory.
 
@@ -36,11 +36,11 @@ overspecified types:
 ```python
 import numpy as np
 
-# Float downcast — float64 → float32 halves memory if precision allows
+# Float downcast: float64 → float32 halves memory if precision allows
 float_cols = df.select_dtypes(include=["float64"]).columns
 df[float_cols] = df[float_cols].astype("float32")
 
-# Integer downcast — int64 → int32/int16 if range fits
+# Integer downcast: int64 → int32/int16 if range fits
 int_cols = df.select_dtypes(include=["int64"]).columns
 for col in int_cols:
     df[col] = pd.to_numeric(df[col], downcast="integer")
@@ -56,7 +56,7 @@ the dataset into a smaller triage tier. Common wins: a 250 MB string-heavy
 CSV becomes 60 MB after category conversion → full path instead of
 sampling.
 
-## The sampling helper (100–500 MB tier)
+## The sampling helper (100-500 MB tier)
 
 When the dataset lands in the sampling tier (between 100 and 500 MB
 resident), sample deterministically:
@@ -74,7 +74,7 @@ banner = (
 print(banner)
 ```
 
-`random_state=0` makes the sample reproducible across turns — turn 2's
+`random_state=0` makes the sample reproducible across turns; turn 2's
 analysis sees the same 100,000 rows turn 1 sampled. **Include the banner
 in your prose finding** so the user knows the answer is sample-based.
 
@@ -94,14 +94,14 @@ OOM-kill:
 
 ```python
 print(
-    f"This dataset is ~{resident_mb:.0f} MB resident — too large for "
+    f"This dataset is ~{resident_mb:.0f} MB resident, too large for "
     f"the analysis sandbox (512 MB ceiling). Please pre-filter (drop "
     "unused columns, restrict to a date range, or aggregate upstream) "
     "and re-upload."
 )
 ```
 
-Then stop — DO NOT proceed to compute or chart. The user sees the
+Then stop: DO NOT proceed to compute or chart. The user sees the
 refusal, filters upstream, re-uploads. **Refusal is the correct outcome**;
 producing a chart on a near-OOM dataframe is the wrong outcome.
 

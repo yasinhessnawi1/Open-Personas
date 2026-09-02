@@ -90,15 +90,15 @@ MAX_VOICE_AMENDMENT_ROUNDS: int = 1
 # the chat pipeline's, off this loop; a "done" here would be a confabulated success — A9-D-6/D-7).
 # The grounded "what was actually done" summary comes later, on the hand-back (T6).
 _DELEGATING_TEXT = (
-    "Got it — I'm setting that up in the background. I'll let you know when it's ready."
+    "Got it. I'm setting that up in the background. I'll let you know when it's ready."
 )
 _REDIRECT_TO_CHAT_TEXT = (
-    "Let's finish the details in chat — I've noted it, and you can fine-tune it there."
+    "Let's finish the details in chat. I've noted it, and you can fine-tune it there."
 )
 #: The spoken ack for a delegated STEERING/reschedule ask (T7). No voice-side echo/confirm: the
 #: frontier applies pause/resume immediately, and a confirm-needed action (cancel / reschedule)
 #: comes back via the honest-incomplete hand-back. The grounded result is spoken later (poller, T6).
-_STEERING_ACK = "On it — let me take care of that in the background."
+_STEERING_ACK = "On it. Let me take care of that in the background."
 
 
 @dataclass(frozen=True)

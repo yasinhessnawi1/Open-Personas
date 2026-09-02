@@ -6,7 +6,7 @@ sink, and loader all run for real):
 
 1. "hello, can you schedule a task for me every 15 min, to check my email inbox"
    → the echo now carries the REAL recurring cadence with the honest volume line
-   ("every 15 minutes, around the clock — 96 times a day") — not the silent once-fallback.
+   ("every 15 minutes, around the clock, 96 times a day") — not the silent once-fallback.
 2. The turn is persisted via the real ``MessagesTurnSink`` and the conversation RELOADED
    via the real ``_load_conversation`` — the pending proposal survives the turn boundary
    (the B-1 fix; before it, this hop erased the rail).
@@ -217,7 +217,7 @@ async def test_the_live_transcript_now_runs_correctly_end_to_end(engine: Engine)
     # --- Turn 1: "every 15 min" → the honest recurring echo (BUG A fixed) --------------
     conversation = _reload(engine)
     echo, events_1 = await _turn(loop, conversation, _TURN_1)
-    assert "every 15 minutes, around the clock — 96 times a day" in echo  # the volume line
+    assert "every 15 minutes, around the clock, 96 times a day" in echo  # the volume line
     assert "Europe/Oslo" in echo
     assert "once," not in echo  # never the silent once-fallback the transcript showed
     assert all(getattr(ev, "type", "") != "task_originated" for ev in events_1)

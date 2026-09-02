@@ -29,7 +29,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--host",
         default=DEFAULT_BIND_HOST,
-        help=f"Bind address (default {DEFAULT_BIND_HOST}; loopback only — D-27-12).",
+        help=f"Bind address (default {DEFAULT_BIND_HOST}; loopback only, D-27-12).",
     )
     parser.add_argument("--port", type=int, required=True, help="TCP port to bind.")
     args = parser.parse_args(argv)

@@ -105,7 +105,7 @@ def test_render_clause_schedule_unset_states_one_off_and_promises_no_cadence() -
     # that plainly (the authoritative one-off framing) and must NOT invite a recurrence the backend
     # can't yet attach — so it neutralises even a judge goal that reads "brief you every morning".
     line = render_clause(ContractDraft(goal="brief me every morning"), Clause.SCHEDULE)
-    assert line == "When: runs once — no recurring schedule"
+    assert line == "When: runs once, with no recurring schedule"
     assert "recurring" in line  # the cadence is explicitly denied, not merely omitted
 
 
@@ -176,7 +176,7 @@ def test_render_clause_cadence_note_is_spoken_never_silent() -> None:
         timezone="Europe/Oslo",
         human_terms="once, on Friday 02 January at 09:00 your time",
         cadence_note=(
-            "I couldn't set that exact cadence — the closest I can hold is "
+            "I couldn't set that exact cadence. The closest I can hold is "
             "every 5, 10, 15, 20, 30 or 60 minutes. Tell me one and I'll make it recurring."
         ),
     )

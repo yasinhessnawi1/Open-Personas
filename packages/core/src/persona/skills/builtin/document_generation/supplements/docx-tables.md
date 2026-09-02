@@ -7,10 +7,10 @@ of plain text.
 
 A `python-docx` table is a `docx.table.Table`. The model you write to:
 
-- `table = doc.add_table(rows=R, cols=C)` — creates a `R × C` grid of empty cells.
+- `table = doc.add_table(rows=R, cols=C)`: creates a `R × C` grid of empty cells.
 - `table.style = "Light Grid Accent 1"` (or `"Table Grid"` for the unstyled black-border default).
-- `cell = table.cell(row_idx, col_idx)` — 0-indexed access.
-- `cell.text = "value"` — sets the cell to a single paragraph.
+- `cell = table.cell(row_idx, col_idx)`: 0-indexed access.
+- `cell.text = "value"`: sets the cell to a single paragraph.
 - For multi-paragraph or styled cell content, manipulate `cell.paragraphs[0]` and add runs.
 - Append rows after creation with `table.add_row()` (returns the new `Row`).
 
@@ -52,7 +52,7 @@ when there is one header row + at least two data rows.
 
 `python-docx` does not automatically size columns from content. Word
 honours `cell.width` *per cell* (the OOXML model has no shared
-"column" width — each cell carries the width).
+"column" width; each cell carries the width).
 
 ```python
 from docx.shared import Inches
@@ -68,7 +68,7 @@ the table-level default and need their own pass.
 
 ## Merged cells
 
-Horizontal merge across a row — e.g. a "Summary" header spanning all
+Horizontal merge across a row, e.g. a "Summary" header spanning all
 three columns:
 
 ```python
@@ -112,7 +112,7 @@ table grows past one page.
 
 ## Cell shading (alternating row colour)
 
-`cell.fill` does not exist in python-docx — apply shading via raw XML:
+`cell.fill` does not exist in python-docx; apply shading via raw XML:
 
 ```python
 from docx.oxml import OxmlElement
@@ -142,7 +142,7 @@ for i, row in enumerate(table.rows[1:], start=1):
 - `table.style` must be a style name that exists in the document's
   template. The default template ships `Table Grid`, `Light Grid Accent
   1..6`, `Medium Shading 1..2 Accent 1..6`. Custom names raise `KeyError`.
-- Merged cells survive in the underlying XML — querying
+- Merged cells survive in the underlying XML, so querying
   `len(table.rows[0].cells)` may return the original column count even
   after a merge, but iterating returns the merge target multiple times
   (one per original cell). Iterate by index when widths matter.

@@ -537,7 +537,7 @@ def deduct(
             if booked is None:
                 spent = _current_day_spent(conn, user_id=user_id)
                 raise DailySpendCapExceededError(
-                    "Daily spend cap reached — this resets at UTC midnight.",
+                    "Daily spend cap reached. This resets at UTC midnight.",
                     context={
                         "cap": str(daily_cap),
                         "spent": str(spent),
@@ -632,7 +632,7 @@ def capture_up_to(
             if booked is None:
                 spent = _current_day_spent(conn, user_id=user_id)
                 raise DailySpendCapExceededError(
-                    "Daily spend cap reached — this resets at UTC midnight.",
+                    "Daily spend cap reached. This resets at UTC midnight.",
                     context={
                         "cap": str(daily_cap),
                         "spent": str(spent),
@@ -712,7 +712,7 @@ def deduct_idempotent(
             if booked is None:
                 spent = _current_day_spent(conn, user_id=user_id)
                 raise DailySpendCapExceededError(
-                    "Daily spend cap reached — this resets at UTC midnight.",
+                    "Daily spend cap reached. This resets at UTC midnight.",
                     context={
                         "cap": str(daily_cap),
                         "spent": str(spent),
@@ -793,7 +793,7 @@ def capture_up_to_idempotent(
             if booked is None:
                 spent = _current_day_spent(conn, user_id=user_id)
                 raise DailySpendCapExceededError(
-                    "Daily spend cap reached — this resets at UTC midnight.",
+                    "Daily spend cap reached. This resets at UTC midnight.",
                     context={
                         "cap": str(daily_cap),
                         "spent": str(spent),

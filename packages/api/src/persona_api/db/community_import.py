@@ -315,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         engine.dispose()
     if report is None:
-        sys.stdout.write("no legacy community store found — nothing to import\n")
+        sys.stdout.write("no legacy community store found, nothing to import\n")
         return 0
     sys.stdout.write(
         f"import complete={report.journal_complete} imported={report.units_imported} "

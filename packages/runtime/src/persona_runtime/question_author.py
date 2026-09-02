@@ -112,22 +112,22 @@ class TemplateQuestionAuthor:
         element = signal.missing_element
         if norwegian:
             return ProactiveQuestion(
-                question=f"Jeg trenger litt mer for å gå videre — hva er {self._no_word(element)}?",
+                question=f"Jeg trenger litt mer for å gå videre. Hva er {self._no_word(element)}?",
                 options=_opts("Jeg oppgir det", "Bruk ditt beste skjønn", "Vent litt foreløpig"),
             )
         return ProactiveQuestion(
-            question=f"I need one more detail to proceed — what's the {element}?",
+            question=f"I need one more detail to proceed. What's the {element}?",
             options=_opts("I'll specify it", "Use your best judgment", "Hold off for now"),
         )
 
     def _vague(self, *, norwegian: bool) -> ProactiveQuestion:
         if norwegian:
             return ProactiveQuestion(
-                question="Før jeg starter — kan du si litt om hva fokuset skal være?",
+                question="Før jeg starter, kan du si litt om hva fokuset skal være?",
                 options=_opts("Jeg beskriver det", "Bruk ditt beste skjønn", "La meg avgrense det"),
             )
         return ProactiveQuestion(
-            question="Before I start — can you tell me what the focus should be?",
+            question="Before I start, can you tell me what the focus should be?",
             options=_opts("I'll describe it", "Use your best judgment", "Let me narrow it down"),
         )
 
