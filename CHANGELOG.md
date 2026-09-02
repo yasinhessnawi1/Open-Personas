@@ -108,8 +108,8 @@ Per-spec entries are added by the close-out phase of each spec.
   real cost. Agentic runs meter per step and cut off on exhaustion.
 - **Sandbox execution** reclassified into the M3 schema (`infra_flat` basis,
   `cost_cents` recorded); its flat ~1-credit charge is unchanged. Embeddings /
-  connectors / MCP infra inside an enclosing op is subsumed by that op's floor —
-  no separate hot-path charge.
+  connectors / MCP infra inside an enclosing op is subsumed by that op's floor, so
+  there is no separate hot-path charge.
 - **`credit_transactions`** gains `cost_cents` (DOUBLE PRECISION, true pre-markup
   provider cost) + `cost_basis` + `billing_key` (migration 050, all additive).
 
@@ -667,7 +667,7 @@ Per-spec entries are added by the close-out phase of each spec.
   (`PERSONA_PROPOSED`; zero writes until a user-resolved apply); generic proposals deliver as
   persona-voiced C0 messages (the digest sender composition) and create NOTHING until confirmed.
 - **The verb family**: one conversational seam: dial verbs ("stop suggesting things" →
-  off/propose-only/act) + the LEDGER-anchored confirm/decline (reload-durable across requests —
+  off/propose-only/act) + the LEDGER-anchored confirm/decline (reload-durable across requests, because
   pending state is never conversation metadata); a leader-gated provisioning sweep closes the
   existing-population gap at flag-flip.
 - **The evaluation instrument**: a committed 26-scenario corpus (must-catch / must-not-fire ≥50% /
@@ -858,7 +858,7 @@ Per-spec entries are added by the close-out phase of each spec.
 > - **Name capture (our DB the source of truth)**: nullable `users.first_name`/`last_name`
 >   (migration `028`), an optional/skippable `GET`/`PATCH /v1/me/profile` endpoint, and a
 >   claims-gated **Clerk seed** (`given_name`/`family_name` seed our columns once **when null**,
->   never overwriting a set name; normalised identically to a PATCH). Name is never required —
+>   never overwriting a set name; normalised identically to a PATCH). Name is never required, and
 >   nameless accounts stay valid everywhere (null-safe).
 > - **The persona speaks the user's name**: a small identity line in the shared `PromptBuilder`
 >   ("You are speaking with {name}."), wired on **chat** (a per-turn provider closure over the
@@ -1279,8 +1279,8 @@ Per-spec entries are added by the close-out phase of each spec.
 > async lane is bounded + cancelled at call teardown.
 >
 > **Also fixed:** the voice tool policy named the dead string `image_generation` while the
-> real tool is `generate_image`, so image generation was silently never offered in voice —
-> now reachable.
+> real tool is `generate_image`, so image generation was silently never offered in voice.
+> It is reachable now.
 >
 > **Known limitations (deferred follow-ups):** in-call tool **consent** beyond
 > already-allow-listed tools (the `asking_user` visual confirm) is not yet wired; an
@@ -1703,8 +1703,8 @@ Per-spec entries are added by the close-out phase of each spec.
 - The thing that carries between legs is the **checkpoint**: durable working state recording
   *progress (conclusions), intent (plan + next step), pointers (workspace artifacts), open
   questions*: **never transcripts**. It is size-bounded (a 2000-token budget), so a long task
-  reflect-and-compacts rather than bloating. Every leg reconstructs context in a fixed order —
-  **contract → checkpoint → last-N leg summaries → live retrieval → the leg's trigger**: so it
+  reflect-and-compacts rather than bloating. Every leg reconstructs context in a fixed order:
+  **contract → checkpoint → last-N leg summaries → live retrieval → the leg's trigger**, so it
   holds yesterday's conclusions against today's knowledge.
 - `persona-core` `persona.tasks`: the frozen `TaskCheckpoint` + size-bound; the `Task` entity +
   state machine (`defined → active → waiting(until_time|on_user|on_event) → … → completed |
@@ -1739,8 +1739,8 @@ Per-spec entries are added by the close-out phase of each spec.
 #### Fixed
 - **Persona detail renders with no model key.** Capability hydration
   (`GET /v1/personas/{id}`, list, and create's returned detail) no longer
-  instantiates a live model backend just to read whether a model supports vision —
-  it resolves the answer statically from `(provider, model)`, the same lookup the
+  instantiates a live model backend just to read whether a model supports vision.
+  It resolves the answer statically from `(provider, model)`, the same lookup the
   backend itself uses. A keyless community boot used to 500 here; it now returns the
   correct capability (vision `true`/`false`) without a key.
 
@@ -1962,7 +1962,7 @@ Per-spec entries are added by the close-out phase of each spec.
 > the K0 knowledge graph usable: dense (semantic) and sparse (lexical/BM25)
 > retrieval fused so precise facts about a person are findable, dense for meaning
 > ("prefers worked examples" without the word "learning"), sparse for exact terms
-> ("metformin" decisively). **Pure orchestration over K0's landed read contract —
+> ("metformin" decisively). **Pure orchestration over K0's landed read contract:
 > zero new dependency, no K0 fork, no re-rerank.**
 
 #### Added
@@ -1973,7 +1973,7 @@ Per-spec entries are added by the close-out phase of each spec.
   paraphrase-only match survives fusion), expands one bounded **type-aware** hop
   along the typed links (ENTITY > CAUSAL ≈ TEMPORAL > SEMANTIC, augment-never-
   displace), and returns hybrid-ranked nodes within a result budget.
-- **`reciprocal_rank_fusion`** + **`HybridResult`** (`persona.graph.fusion`) —
+- **`reciprocal_rank_fusion`** + **`HybridResult`** (`persona.graph.fusion`):
   rank-based fusion (`Σ_leg weight·1/(rrf_k+rank)`, k=60, no score
   normalization) and the frozen K3-facing result shape (fused rank + per-leg
   `dense_rank`/`sparse_rank` provenance + node), which makes the no-gating
@@ -2098,7 +2098,7 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ### Added, Shared knowledge-graph store (`persona.graph`, direction-3 foundation)
 
-The user-scoped "bigger brain" all of a user's personas read from and write to —
+The user-scoped "bigger brain" all of a user's personas read from and write to. It is
 the trunk of the K-track (K1 hybrid retrieval, K2 write paths, K3 graph-aware
 prompts, K4 wellbeing, K5 graph UI build on it).
 
@@ -2133,7 +2133,7 @@ prompts, K4 wellbeing, K5 graph UI build on it).
 ### Persona-initiated messages, the origination primitive (2026-06-22)
 
 > The system-wide primitive that lets a persona **originate** a message, one it
-> produces with no preceding user turn ("I've finished the task you asked for") —
+> produces with no preceding user turn ("I've finished the task you asked for"),
 > as a first-class conversation + memory citizen, delivered through a
 > one-boundary-many-deliverers seam. The connectors track (Telegram/Discord/…) and
 > direction-4 autonomy are the *consumers* of this primitive; they drive one pipe,
@@ -2193,7 +2193,7 @@ prompts, K4 wellbeing, K5 graph UI build on it).
 ### Prebuilt Personas, editable starters, no authoring required (code-complete 2026-06-18)
 
 > The new-persona screen now leads with a curated row of **flagship, fully-structured
-> starter personas**. Pick one, edit every field in place, and create it **directly** —
+> starter personas**. Pick one, edit every field in place, and create it **directly**:
 > the edited structure posts straight to `POST /v1/personas` with **no LLM authoring
 > call and no minutes-long wait** (~1-3s). Avatar + voice are the only generated
 > assets, produced on-create by the existing async enrichment so they **follow your
