@@ -101,9 +101,10 @@ build never pulls `@clerk/*` into the bundle. CI gates and
 - **Responsive and internationalized.** Usable at 375px, dark mode by default,
   fully internationalized via `next-intl`.
 
-> The web v1 production redesign is complete: an identity spine `.v-*` design
-> system over F1 tokens (no literal colours), a rebuilt sidebar and ⌘K palette,
-> and the three signature moments (per turn tier, typed memory recall, presence).
+> The interface runs on an identity spine of `.v-*` classes over design tokens,
+> with no literal colours anywhere (a CI gate enforces it). Three moments carry
+> the product: the model tier picked for each turn, typed memory being recalled,
+> and presence during a voice call.
 
 ## Install and run
 

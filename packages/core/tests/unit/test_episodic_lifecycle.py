@@ -30,7 +30,19 @@ from persona.stores.lifecycle import (
     retention,
 )
 
-_NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+# Anchored to the real clock, NOT a frozen literal. `EpisodicStore.query()`
+# scores with `datetime.now(UTC)`, so a hardcoded _NOW makes every chunk age by
+# one real day per real day. This test file was written with _NOW frozen at
+# 2026-07-04; by 2026-09-02 the "20 day old" chunks in
+# test_recalled_memory_outranks_equally_similar_unrecalled were ~80 real days
+# old, both retentions had fallen under `ranking_floor`, `max(r, floor)`
+# clamped them to the SAME value, and the stable sort returned them in input
+# order, so the reinforced chunk lost. A time bomb, not a flake: once the
+# calendar passed the floor boundary it failed every run.
+#
+# Ages here are relative to _NOW, and the assertions that pass `now=_NOW`
+# explicitly stay exact, so tracking the real clock keeps every case honest.
+_NOW = datetime.now(UTC)
 _SETTINGS = EpisodicSettings(
     tau0_hours=168.0,
     demote_threshold=0.05,

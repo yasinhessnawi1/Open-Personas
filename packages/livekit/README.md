@@ -5,9 +5,11 @@ depending on LiveKit Cloud. Audio only. It is the **same** server image
 (`livekit/livekit-server:v1.13.1`) the community edition already runs locally via
 `docker-compose.yml` and `livekit.dev.yaml`: one config story, two deploy targets.
 
-> **Status: PREPARED, NOT DEPLOYED.** The config here is research backed, but
-> WebRTC on Fly is only proven by a real deploy plus a real browser operator pass.
-> Read the runbook before deploying. Nothing here has been browser validated.
+> **Status: deployed.** CI ships this app on every release through the
+> `deploy-livekit` job, and prod voice runs on it instead of LiveKit Cloud. The
+> app and its dedicated IPv4 are provisioned out of band; the workflow only
+> ships the image. Read the runbook before changing the config, because WebRTC
+> on Fly depends on the IPv4 and port setup as much as on the server config.
 
 ## Why a separate app
 

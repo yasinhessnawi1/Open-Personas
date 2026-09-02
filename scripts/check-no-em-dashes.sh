@@ -35,7 +35,17 @@ while IFS= read -r f; do
   [[ -f "$f" ]] || continue
   # `|| true`: grep exits 1 on no-match, which pipefail would turn into a
   # script abort. A clean file is the expected case, not an error.
-  count=$( { grep -o "$DASH" "$f" 2>/dev/null || true; } | wc -l | tr -d ' ')
+  #
+  # packages/web/COPY.md is the rule itself, so its counter-example lines have
+  # to contain the very thing they warn against. Those lines are marked with a
+  # leading "no" column; everything else in the file is still gated, so the doc
+  # cannot quietly become a place where bad copy hides.
+  if [[ "$f" == "packages/web/COPY.md" ]]; then
+    body=$(grep -vE '^no[[:space:]]{2,}' "$f" || true)
+  else
+    body=$(cat "$f")
+  fi
+  count=$( { printf '%s' "$body" | grep -o "$DASH" || true; } | wc -l | tr -d ' ')
   if [[ "$count" != "0" ]]; then
     offenders+=("$f:$count")
     violations=$((violations + count))

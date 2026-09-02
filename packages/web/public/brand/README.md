@@ -31,13 +31,30 @@ depth, continuity.
 
 ## Wiring (already done on the landing page)
 
-```html
-<link rel="icon" href="favicon.ico" sizes="any" />
-<link rel="icon" type="image/svg+xml" href="logo-mark.svg" />
-<link rel="apple-touch-icon" href="apple-touch-icon.png" />
-<meta property="og:image" content="og-image.png" />
-<meta name="twitter:card" content="summary_large_image" />
+The landing site declares these through Next.js metadata rather than raw link
+tags, serving them from `/brand/`:
+
+```ts
+export const metadata: Metadata = {
+  icons: {
+    icon: [
+      { url: "/brand/favicon-16.png", sizes: "16x16", type: "image/png" },
+      { url: "/brand/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/brand/favicon-48.png", sizes: "48x48", type: "image/png" },
+      { url: "/brand/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/brand/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: "/brand/apple-touch-icon.png",
+  },
+  openGraph: { images: ["/brand/og-image.png"] },
+  twitter: { card: "summary_large_image" },
+};
 ```
+
+There is no `logo-mark.svg`. The mark ships in three variants
+(`logo-mark-ondark.svg`, `logo-mark-dark.svg`, `logo-mark-light.svg`) because it
+needs a different fill per background, so pick the one that matches the surface
+rather than reaching for a single generic file.
 
 ## Clear space and don'ts
 
