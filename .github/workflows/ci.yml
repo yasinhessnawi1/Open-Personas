@@ -25,6 +25,9 @@ jobs:
       # (`mypy packages/api/src`) per its run-local + close-out convention.
       - run: uv run mypy packages/core/src packages/runtime/src packages/voice/src packages/connectors/src --strict
       - run: uv run mypy packages/api/src
+      # No em or en dashes in user-facing text (public markdown + the web
+      # message catalogue). They read as machine-written and cost trust.
+      - run: bash scripts/check-no-em-dashes.sh
 
   test:
     runs-on: ubuntu-latest
@@ -140,6 +143,10 @@ jobs:
       # colour literals + typography-sizing literals outside the documented
       # allowlist. See packages/web/scripts/no-literals.sh + DESIGN.md.
       - run: pnpm check:no-literals
+      # The copy gate: no em dashes and no AI-slop vocabulary in the
+      # message catalogue. User-facing words are a product surface.
+      # See packages/web/COPY.md.
+      - run: pnpm check:copy
       # `next build` initialises Clerk at module load; CI placeholders are enough
       # to type-check + bundle. Real keys are required at runtime (deploy env).
       - name: pnpm build

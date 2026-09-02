@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "check:no-literals": "bash scripts/no-literals.sh",
+    "check:copy": "node scripts/check-copy.mjs",
     "check:clerk-free": "node scripts/check-clerk-free.mjs",
     "check:clerk-free-bundle": "bash scripts/check-clerk-free-bundle.sh",
     "check:toast-facade": "node scripts/check-toast-facade.mjs",
