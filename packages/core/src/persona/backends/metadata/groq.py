@@ -15,6 +15,10 @@ from persona.backends.model_metadata import ModelMetadata
 __all__ = ["MODELS"]
 
 MODELS: dict[str, ModelMetadata] = {
+    # R9-115: the three entries below were the ENTIRE Groq table, and all three are
+    # gone from the live catalogue (verified against GET /v1/models, 2026-09-02: the
+    # account lists 14 models and none of these is among them). They are kept only as
+    # a record; nothing should route to them. The live replacements follow.
     # $0.05 / $0.08 per Mtok (groq.com/pricing "128k" context, 2026-07-12).
     # No vision. LPU serving — very low first-token latency (~840 tok/s
     # published throughput).
@@ -48,6 +52,37 @@ MODELS: dict[str, ModelMetadata] = {
         quality_benchmark=0.56,
         tools_supported=True,
         vision_supported=True,
+        context_length=128_000,
+    ),
+    # --- live models, verified against the Groq catalogue 2026-09-02 -------------
+    # $0.04 / $0.17 per Mtok (published rates, cross-checked via the OpenRouter
+    # catalogue for the same underlying model). Native tool calling CONFIRMED with a
+    # real tool-call round trip, which matters because the mid tier dispatches tools.
+    #
+    # REASONING MODEL, and this is load-bearing: it spends completion tokens on a
+    # `reasoning` field BEFORE emitting content. A probe with max_tokens=8 returned
+    # finish_reason=length and EMPTY content; at 200 it answered normally. So a caller
+    # with a tight output budget gets an empty completion, which is exactly the
+    # R9-033 EmptyCompletionError shape. Do not pair this model with a small
+    # max_tokens.
+    "groq/openai/gpt-oss-120b": ModelMetadata(
+        cost_input_per_1k_tokens=0.004,
+        cost_output_per_1k_tokens=0.017,
+        latency_p50_ms=250.0,
+        quality_benchmark=0.70,
+        tools_supported=True,
+        vision_supported=False,
+        context_length=128_000,
+    ),
+    # $0.03 / $0.13 per Mtok, same sourcing. The smaller sibling; same reasoning-token
+    # caveat as the 120b above.
+    "groq/openai/gpt-oss-20b": ModelMetadata(
+        cost_input_per_1k_tokens=0.003,
+        cost_output_per_1k_tokens=0.013,
+        latency_p50_ms=200.0,
+        quality_benchmark=0.55,
+        tools_supported=True,
+        vision_supported=False,
         context_length=128_000,
     ),
 }

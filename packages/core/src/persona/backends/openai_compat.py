@@ -93,6 +93,13 @@ _NATIVE_TOOLS_CAPABILITY: dict[str, frozenset[str] | Literal["all"]] = {
             "llama-3.1-8b-instant",
             "meta-llama/llama-4-scout-17b-16e-instruct",
             "qwen/qwen3-32b",
+            # R9-115: the live replacements. Native tool calling verified with a real
+            # tool-call round trip against each, not inferred from the model card.
+            # Absence here is silent: the model still serves, but every tool call
+            # degrades to the text shim (R9-068), which is a quality cliff nothing
+            # reports.
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
         }
     ),
     "together": frozenset(),  # opt-in only; default off
