@@ -66,6 +66,10 @@ _logger = get_logger("turn_taking.orchestrator")
 # (D-32-X-degrade-timeout-env-config).
 DEFAULT_WARMUP_TIMEOUT_S: float = 10.0
 DEFAULT_GREET_TIMEOUT_S: float = 30.0
+#: R9-119: how many times a PHANTOM turn (uncorroborated offset, no transcript) may
+#: re-arm the turn-end timer before the floor is forced back to LISTENING. Small on
+#: purpose: each re-arm is one more uncorroborated silence window with the mic gated.
+PHANTOM_TURN_REARM_LIMIT: int = 3
 
 
 @runtime_checkable
@@ -198,6 +202,8 @@ class ConversationalOrchestrator:
         # Barge-in candidate tracking.
         self._barge_in_onset: SpeechStartedEvent | None = None
         self._barge_in_resolved = False
+        # R9-119: re-arms consumed by the current phantom turn (see _on_turn_end_timer).
+        self._phantom_rearms = 0
         # The silence-wait of the most recent turn-end (T08 dual-line latency,
         # D-V4-X-eou-stamp-point) — the V4-attributable threshold cost, surfaced
         # separately from the processing round-trip.
@@ -535,7 +541,35 @@ class ConversationalOrchestrator:
             self._last_endpoint_silence_wait_ms = decision.silence_elapsed_ms
             await self._transition(TransitionTrigger.TURN_ENDED)
             await self._actions.invoke_model_for_turn(self._turn_transcript())
-        # WAIT: leave the floor with the user; graceful-degradation bounding
+            return
+        # R9-119: a WAIT verdict used to be TERMINAL here. The only place that arms this
+        # timer is ``on_speech_ended``, so a WAIT with nothing to re-arm it meant the
+        # session sat in USER_SPEAKING, mic gated, until the user made a second noise.
+        # The controller's own reason for the WAIT ("most likely a noise / false-VAD
+        # blip") is exactly the case that never produces a second offset: the noise
+        # already stopped. That was the owner's "stuck on listening", on every call,
+        # through three specs of threshold tuning that could not touch it because no
+        # threshold changes what happens AFTER a WAIT.
+        #
+        # Only the PHANTOM shape is handled here: no settled text AND an uncorroborated
+        # offset. A WAIT with real text (the mid-thought hold token) is a person still
+        # talking, and their next offset re-arms the timer as before, so it is left alone.
+        if self._is_phantom_turn():
+            if self._phantom_rearms < PHANTOM_TURN_REARM_LIMIT and self._last_offset is not None:
+                self._phantom_rearms += 1
+                self._turn_end_handle = self._scheduler.call_later(
+                    self._turn_end_delay_s(self._last_offset), self._on_turn_end_timer
+                )
+                return
+            # Bound reached and still nothing to respond to: it was noise. Give the
+            # floor back WITHOUT invoking the model (there is no turn to answer).
+            _logger.info(
+                "phantom turn abandoned after {n} silent re-arms; back to listening",
+                n=self._phantom_rearms,
+            )
+            self._reset_turn()
+            await self.force_reset()
+        # Any other WAIT: leave the floor with the user; graceful-degradation bounding
         # of a stuck hold-token is T09's concern.
 
     # ----- barge-in confirmation ---------------------------------------
@@ -615,10 +649,18 @@ class ConversationalOrchestrator:
             return self._final_transcript
         return Transcript(is_final=True, text=self._latest_text or "", confidence=1.0)
 
+    def _is_phantom_turn(self) -> bool:
+        """A turn with no transcript and no corroborated endpoint: a noise blip, not speech."""
+        if (self._latest_text or "").strip():
+            return False
+        offset = self._last_offset
+        return offset is None or not (offset.corroborates or offset.transcript_settled)
+
     def _reset_turn(self) -> None:
         self._latest_text = None
         self._final_transcript = None
         self._last_offset = None
+        self._phantom_rearms = 0
         self._cancel_turn_end()
 
     def _cancel_turn_end(self) -> None:
