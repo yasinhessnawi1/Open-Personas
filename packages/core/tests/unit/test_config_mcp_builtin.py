@@ -37,8 +37,14 @@ def test_unknown_builtin_name_fails_loud() -> None:
         PersonaCoreConfig(mcp_builtin_enabled="time,nonsense")
 
 
-def test_mcp_mirror_path_unset_defaults_none() -> None:
+def test_mcp_mirror_path_unset_defaults_none(monkeypatch: pytest.MonkeyPatch) -> None:
     # N2-D-1: unset → the bundled snapshot is used (loader override=None).
+    # R9-112: assert "unset" on this test's own terms. The api test package installs a
+    # session-autouse fixture that writes PERSONA_MCP_MIRROR_PATH into the process-global
+    # os.environ (the R9-011 belt against syncing over the committed mirror), so when the
+    # packages share one pytest process this test could never see the var unset and failed
+    # only in a combined run. A test of "unset" must not depend on nobody else having set it.
+    monkeypatch.delenv("PERSONA_MCP_MIRROR_PATH", raising=False)
     assert PersonaCoreConfig(mcp_builtin_enabled=None).mcp_mirror_path is None
 
 
