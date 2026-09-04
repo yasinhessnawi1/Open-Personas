@@ -656,6 +656,25 @@ class APIConfig(BaseSettings):
     # fail-soft). Read from ``PERSONA_API_AVATAR_GEN_TIMEOUT_S``.
     avatar_gen_timeout_s: float = Field(default=25.0, gt=0.0)
 
+    def effective_voice_service_url(self) -> str:
+        """The voice service base URL the api should call, or ``""`` for none (R9-035).
+
+        An explicit ``PERSONA_VOICE_SERVICE_URL`` always wins. Unset, the COMMUNITY
+        edition defaults to the local persona-voice uvicorn on :8001, which is where the
+        web client already looks (``packages/web/src/lib/voice/config.ts``) and where the
+        community recipe runs it. Cloud keeps ``""`` when unset, so nothing there changes.
+
+        Why: seeded and community personas came up VOICELESS because every voice path
+        (create-time auto-pick, the lazy remap, the boot sweep) returns early on an empty
+        URL, and nothing in the community setup ever set it. The web talked to :8001 for
+        calls while the api believed there was no voice service at all.
+        """
+        if self.voice_service_url:
+            return self.voice_service_url
+        if self.edition is Edition.community:
+            return "http://localhost:8001"
+        return ""
+
     def effective_in_process_worker(self, *, community_managed: bool) -> bool:
         """The effective in-process-worker switch (Spec K10 D-K10-7).
 

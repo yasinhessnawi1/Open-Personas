@@ -54,6 +54,23 @@ __all__ = [
 
 _LOG = get_logger("api.voice_assignment")
 
+
+def _voice_service_url(config: object | None) -> str:
+    """The voice service base URL for ``config``, or ``""`` (R9-035).
+
+    Prefers :meth:`APIConfig.effective_voice_service_url` (the community default lives
+    there) and falls back to the bare attribute, because this module is deliberately
+    duck-typed: tests hand it a ``SimpleNamespace`` and production hands it the real
+    ``APIConfig``. Both must keep working, and neither should learn about the other.
+    """
+    if config is None:
+        return ""
+    effective = getattr(config, "effective_voice_service_url", None)
+    if callable(effective):
+        return str(effective() or "")
+    return str(getattr(config, "voice_service_url", "") or "")
+
+
 #: Wall-clock bound on the cross-service catalogue fetch. The voice service
 #: re-fetches the full provider catalogue (with preview URLs) from Cartesia per
 #: call, which can take several seconds — and longer when its event loop is
@@ -238,7 +255,7 @@ async def maybe_assign_voice(
     """
     state = request.app.state
     config = getattr(state, "config", None)
-    base_url = getattr(config, "voice_service_url", "") if config is not None else ""
+    base_url = _voice_service_url(config)
     registry = getattr(state, "tier_registry", None)
     rls_engine = getattr(state, "rls_engine", None)
     if not base_url or registry is None or rls_engine is None:
@@ -361,7 +378,7 @@ async def _remap_voice_for(
     model auto-pick, which then records the pick as new memory via
     :func:`persona_service.set_voice`'s choke point.
     """
-    base_url = getattr(config, "voice_service_url", "") if config is not None else ""
+    base_url = _voice_service_url(config)
     if not base_url or registry is None or rls_engine is None:
         return False
 
@@ -581,7 +598,7 @@ async def reconcile_voice_assignments(
     counts = {"scanned": 0, "remapped": 0, "skipped": 0, "failed": 0}
     if config is None or registry is None or sweep_engine is None or rls_engine is None:
         return counts
-    if not getattr(config, "voice_service_url", ""):
+    if not _voice_service_url(config):
         return counts
     active_provider = getattr(config, "voice_tts_provider", "cartesia")
     auth_checked = False
@@ -629,9 +646,7 @@ async def reconcile_voice_assignments(
         if not auth_checked:
             auth_checked = True
             try:
-                await _fetch_catalogue(
-                    getattr(config, "voice_service_url", ""), bearer=None, language=None
-                )
+                await _fetch_catalogue(_voice_service_url(config), bearer=None, language=None)
             except Exception as exc:  # noqa: BLE001 - classified here; never blocks boot
                 if getattr(getattr(exc, "response", None), "status_code", None) in {401, 403}:
                     _LOG.info(
