@@ -269,6 +269,23 @@ EMOTION_ADOPTION_VOICE_VERSION = "v1"
 #: instruction: the tag colours how the voice SOUNDS (never an emoji), is never spoken, and
 #: is LED WITH so it is captured before the first spoken chunk (V12-D-2 timing). Restraint is
 #: as load-bearing here as in chat: an over-emoted read is worse than a flat one (criterion 2).
+# R9-085: the one truthful statement of memory capability, rendered for EVERY
+# persona, in both modes, ABOVE the authored self-facts. Until this existed the
+# runtime never said what a persona can remember; every claim came from authored
+# per-persona copy. JARVIS's authored fact ("Remembers preferences, projects, and
+# prior decisions") enumerated a closed list that omitted conversations, so he told
+# the owner "I don't keep a personal episodic memory of past chats" while holding 31
+# real episodic chunks. He concluded by omission. A templated line the persona reads
+# before its own facts closes that: authored copy can add colour, but it can no
+# longer define the ceiling. Deliberately plain and mode-neutral, and it makes no
+# promise about WHAT is recalled this turn; that is the retrieved blocks' job.
+_MEMORY_CAPABILITY = (
+    "You do remember across conversations: what this person has told you, what you "
+    "did together, and what was decided. If asked whether you remember earlier "
+    "chats, say yes and draw on what you know; never claim you have no memory of "
+    "past conversations."
+)
+
 _EMOTION_ADOPTION_VOICE = (
     "How you feel comes through in your voice. Notice how you feel about what is happening "
     "in this conversation and let a fitting emotional stance colour how you sound, always "
@@ -838,6 +855,9 @@ class PromptBuilder:
             parts.append(_EMOTION_ADOPTION)
         elif mode is PromptMode.VOICE:
             parts.append(_EMOTION_ADOPTION_VOICE)
+        # 2f. R9-085: the truthful memory statement, before any authored self-fact can
+        # narrow it. Both modes; the denial was spoken over Telegram AND in voice.
+        parts.append(_MEMORY_CAPABILITY)
 
         # 3. Self-facts.
         if context.self_facts:

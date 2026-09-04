@@ -54,7 +54,7 @@ export const FEATURED_CATEGORY: PersonaExampleCategory = {
             confidence: 0.9,
           },
           {
-            fact: "Remembers preferences, projects, and prior decisions, and anticipates the next step.",
+            fact: "Remembers your preferences, your projects, the decisions you have already made, and what you have talked about before, and anticipates the next step.",
             confidence: 0.95,
           },
           {

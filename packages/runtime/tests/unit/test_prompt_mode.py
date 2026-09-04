@@ -118,11 +118,22 @@ _N5_EMOTION_ADOPTION_BLOCK = (
 # the character contract); N5 adds the CHAT-only emotion-adoption block below the
 # character lock — all re-baselined here as reviewed changes; the seam itself still
 # adds nothing to chat (guarded by TestVoiceRegister.test_register_never_leaks_to_chat).
+# R9-085: the truthful memory statement, rendered for every persona above its own
+# self-facts (both modes). Frozen INLINE, like every other segment here, so this golden
+# keeps pinning the exact bytes rather than importing the constant it exists to guard.
+_R9085_MEMORY_LINE = (
+    "You do remember across conversations: what this person has told you, what you "
+    "did together, and what was decided. If asked whether you remember earlier "
+    "chats, say yes and draw on what you know; never claim you have no memory of "
+    "past conversations.\n\n"
+)
+
 _PRE_V11_CHAT_SYSTEM = (
     "You are Astrid, Norwegian tenancy law assistant.\nKnows husleieloven.\n\n"
     "You must NOT:\n1. Never give binding advice.\n\n"
     + _B1_CHARACTER_LOCK_BLOCK  # noqa: F821 — defined just above this constant
     + _N5_EMOTION_ADOPTION_BLOCK
+    + _R9085_MEMORY_LINE
     + "Relevant facts about yourself:\n- I specialise in tenancy law.\n\n"
     "Your views:\n- Tenants have strong protections. (fact)\n\n"
     "From earlier conversations:\n- Last time we discussed mould.\n\n"
