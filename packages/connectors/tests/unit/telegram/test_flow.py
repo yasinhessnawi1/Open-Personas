@@ -192,6 +192,32 @@ async def test_ignore_update_does_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unrecognised_content_sends_nothing() -> None:
+    """R9-082 THE regression: the owner's chat must not gain a reply the user never asked for.
+
+    A message whose content we cannot classify (a poll here; in production, whatever
+    Telegram sent a quarter second before each real message) used to be DECLINED with
+    "I work over text", in the user's own chat log, before every message. Driven through
+    the real flow, not the classifier alone, because the defect was the reply.
+    """
+    flow, client, connector, _store, turn = _flow()
+    update = {
+        "update_id": 1,
+        "message": {
+            "message_id": 9,
+            "from": {"id": 777},
+            "chat": {"id": int(_CHAT), "type": "private"},
+            "date": int(_NOW.timestamp()),
+            "poll": {"id": "p"},
+        },
+    }
+    await flow.handle(update)
+    assert client.messages == [], "an unrecognised update was answered"
+    assert connector.sent == []
+    assert turn.requests == []
+
+
+@pytest.mark.asyncio
 async def test_non_text_sends_a_decline() -> None:
     flow, client, connector, _store, turn = _flow()
     update = {

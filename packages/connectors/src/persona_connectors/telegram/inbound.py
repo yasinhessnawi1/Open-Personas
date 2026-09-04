@@ -229,6 +229,17 @@ def classify_update(update: dict[str, object], *, now: datetime) -> NormalisedUp
     kind = _non_text_kind(message)
     if kind is None:
         return InboundIgnore(reason="service-message")
+    if kind is NonTextKind.unknown:
+        # R9-082: a message whose content we cannot name is NOT the user talking to us,
+        # and answering it is what put "I work over text -- send me a message and I'll
+        # reply." in front of every message in the owner's chat: Telegram delivered a
+        # message with unrecognised content ~0.24s BEFORE the text, the flow declined it,
+        # then the real text arrived. A decline is right only when the user clearly sent
+        # something we cannot use (a voice note, a photo); for content we cannot even
+        # classify, the honest behaviour is the same as for a service message: log why,
+        # say nothing. The decline copy was also wrong for the case, since the user had
+        # sent text and was about to be told to send text.
+        return InboundIgnore(reason="unrecognised-content")
     return InboundNonText(
         kind=kind,
         conversation_key=conversation_key,

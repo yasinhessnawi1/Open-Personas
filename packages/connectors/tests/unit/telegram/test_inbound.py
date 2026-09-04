@@ -157,8 +157,14 @@ def test_photo_with_caption_is_still_non_text() -> None:
     assert result.kind == NonTextKind.media
 
 
-def test_unknown_content_is_declined_as_unknown() -> None:
-    """Unsupported user content (e.g. a poll) → InboundNonText(unknown) — declined, not crashed."""
+def test_unknown_content_is_ignored_not_answered() -> None:
+    """Content we cannot classify is ignored like a service message, never declined (R9-082).
+
+    Answering it is what littered the owner's chat with "I work over text" before every
+    single message: an unrecognised-content message arrived a quarter second before the
+    real text, and the flow replied to it. A decline is only right when the user clearly
+    sent something we cannot use; for content we cannot even name, say nothing.
+    """
     update = {
         "update_id": 1,
         "message": {
@@ -170,8 +176,8 @@ def test_unknown_content_is_declined_as_unknown() -> None:
         },
     }
     result = classify_update(update, now=_NOW)
-    assert isinstance(result, InboundNonText)
-    assert result.kind == NonTextKind.unknown
+    assert isinstance(result, InboundIgnore)
+    assert result.reason == "unrecognised-content"
 
 
 def test_service_message_is_ignored() -> None:
