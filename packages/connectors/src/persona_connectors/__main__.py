@@ -159,7 +159,7 @@ def _build_runtime_factory(
     else:
         memory_backend = PostgresBackend(engine=rls_engine, embedder=embedder)
     openrouter_mode = resolve_openrouter_subscription_mode()
-    return RuntimeFactory(
+    factory = RuntimeFactory(
         rls_engine=rls_engine,
         embedder=embedder,
         tier_registry=tier_registry_from_env(openrouter_subscription_mode=openrouter_mode),
@@ -173,6 +173,12 @@ def _build_runtime_factory(
         credits_policy=credits_policy,
         memory_backend=memory_backend,
     )
+    # R9-125 memory parity: the api's lifespan enables the graph store on its factory
+    # (app.py, unconditional; the factory self-guards on the engine dialect). This root
+    # never did, so every connector turn ran memoryless: a persona that knew the user's
+    # budget on the web had "no record" of it on Telegram. Same drift class as R9-074.
+    factory.enable_graph_writes(audit_root=Path(api_config.audit_root))
+    return factory
 
 
 async def _run_idle_sweep(

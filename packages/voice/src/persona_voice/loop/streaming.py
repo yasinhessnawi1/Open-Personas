@@ -623,6 +623,10 @@ class StreamingLoop:
             produced_audio = await self._speak_turn_failed(already_speaking=produced_audio)
             await self._return_floor(produced_audio)
         finally:
+            if not completed and outcome == "completed":
+                # CancelledError skips every handler above: a continuation or barge-in
+                # cut the turn. Say so, or the log reads as a reply that never played.
+                outcome = "cancelled"
             _LOG.info(
                 "voice turn ended outcome={outcome} tokens={tokens} "
                 "first_audio_ms={first} total_ms={total:.0f}",

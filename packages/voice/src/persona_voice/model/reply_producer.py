@@ -93,6 +93,10 @@ __all__ = ["VoiceModelReplyProducer"]
 _logger = get_logger("voice.reply_producer")
 
 _DEFAULT_MAX_TOKENS = 4096
+#: R9-128: the origination gate awaits its model judge ON the live path. A slow
+#: small-tier model made a caller wait 14.7s for first audio on a cue-matching turn.
+#: Past this budget the ask is handled as ordinary conversation.
+GATE_BUDGET_S: float = 4.0
 
 
 @dataclass
@@ -267,7 +271,18 @@ class VoiceModelReplyProducer:
             # ordinary generation — never a broken or stalled turn. The gate is additive; it can
             # only ever add a spoken echo, never break the conversation.
             try:
-                decision: VoiceOriginationDecision | None = await gate.on_user_turn(user_message)
+                async with asyncio.timeout(GATE_BUDGET_S):
+                    decision: VoiceOriginationDecision | None = await gate.on_user_turn(
+                        user_message
+                    )
+            except TimeoutError:
+                # R9-128: the schedule-claim correction below still stops a false
+                # "I scheduled it" on the ordinary path this falls through to.
+                _logger.warning(
+                    "voice origination gate exceeded its {s:.1f}s budget; ordinary turn",
+                    s=GATE_BUDGET_S,
+                )
+                decision = None
             except Exception:  # noqa: BLE001 — a gate failure degrades to today's clean call
                 _logger.warning("voice origination gate failed; falling through to ordinary turn")
                 decision = None

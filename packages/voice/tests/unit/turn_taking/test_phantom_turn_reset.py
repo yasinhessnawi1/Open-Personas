@@ -163,11 +163,12 @@ async def test_a_real_turn_still_ends_and_is_answered_once() -> None:
 
 @pytest.mark.asyncio
 async def test_a_mid_thought_pause_with_real_text_is_left_alone() -> None:
-    """A WAIT that carries text is a person pausing, not noise; no re-arm, no reset.
+    """A WAIT that carries text is a person pausing, not noise: no reset, no answer yet.
 
-    Their next offset re-arms the timer exactly as before this change. Widening the
-    escape to every WAIT would cut people off mid-sentence, which is the damaging
-    direction the original design was protecting against.
+    It is not the phantom path: the floor stays with the speaker and nothing is invoked
+    on this fire. What it does now (R9-127) is re-arm the timer, bounded, so the pause
+    can resolve on its own instead of waiting for the person to make another noise;
+    the bound and the eventual answer are pinned in test_turn_transcript_accumulation.
     """
     clock, sched = _Clock(), _Scheduler()
     orch, actions = _build(clock, sched)
@@ -186,4 +187,4 @@ async def test_a_mid_thought_pause_with_real_text_is_left_alone() -> None:
 
     assert orch.state is ConversationalState.USER_SPEAKING, "a real pause was reset"
     assert actions.invocations == 0
-    assert sched.live() == armed_before - 1, "a WAIT with text must not re-arm the phantom timer"
+    assert sched.live() == armed_before, "a WAIT with text re-arms exactly one bounded timer"

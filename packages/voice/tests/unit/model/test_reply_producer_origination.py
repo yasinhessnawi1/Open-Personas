@@ -18,6 +18,7 @@ Placement proofs, at the reply-producer seam:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -283,3 +284,40 @@ async def test_gate_error_falls_through_to_a_clean_ordinary_turn() -> None:
     out = "".join(await _drain(producer, "brief me every morning"))
     assert out == "Sure, here's the news."  # today's clean call — the gate failure never breaks it
     assert backend.called
+
+
+# --------------------------------------------------------------------------- #
+# R9-128: the gate's judge runs on the live path, so it gets a budget
+# --------------------------------------------------------------------------- #
+class _SlowGate:
+    """A gate whose judge never comes back in time (a slow small-tier model)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def on_user_turn(self, transcript: str) -> VoiceOriginationDecision:
+        self.calls.append(transcript)
+        await asyncio.sleep(3600)
+        return VoiceOriginationDecision(spoken="TOO LATE")
+
+    def note_spoken_turn_committed(self, *, truncated: bool) -> None: ...
+
+
+async def test_a_judge_past_its_budget_yields_an_ordinary_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller waited 14.7s for first audio while the judge thought. Past the budget
+    the turn is answered as ordinary conversation, and the gate's late verdict is
+    never spoken."""
+    from persona_voice.model import reply_producer as producer_mod
+
+    monkeypatch.setattr(producer_mod, "GATE_BUDGET_S", 0.05)
+    backend = _ScriptedBackend([StreamChunk(delta="Sure"), _final()])
+    gate = _SlowGate()
+    producer = VoiceModelReplyProducer(_context(backend, gate=gate))
+
+    out = await asyncio.wait_for(_drain(producer, "remind me every morning"), timeout=2.0)
+
+    assert out == ["Sure"]
+    assert backend.called
+    assert gate.calls == ["remind me every morning"]

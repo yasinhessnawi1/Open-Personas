@@ -71,6 +71,11 @@ DEFAULT_GREET_TIMEOUT_S: float = 30.0
 #: purpose: each re-arm is one more uncorroborated silence window with the mic gated.
 PHANTOM_TURN_REARM_LIMIT: int = 3
 
+#: R9-127: how many times a WAIT with REAL text (a trailing hold token, a silence a hair
+#: under threshold) re-arms the turn-end timer before the turn is answered anyway. Each
+#: re-arm waits one silence threshold, so the bound is a few seconds of genuine pause.
+HOLD_TURN_REARM_LIMIT: int = 3
+
 
 @runtime_checkable
 class ConversationalStateListener(Protocol):
@@ -195,6 +200,11 @@ class ConversationalOrchestrator:
         # Per-turn accumulation.
         self._latest_text: str | None = None
         self._final_transcript: Transcript | None = None
+        # R9-126: every final the STT emitted during this turn, in order, plus the
+        # newest partial riding on the end. ``_latest_text`` is their joined view.
+        self._turn_finals: list[Transcript] = []
+        self._latest_partial: str | None = None
+        self._hold_rearms = 0
         self._last_offset: SpeechEndedEvent | None = None
         # Timer handles.
         self._turn_end_handle: SchedulerHandle | None = None
@@ -273,6 +283,7 @@ class ConversationalOrchestrator:
             # The user resumed after a brief pause — that offset was a
             # mid-thought pause, not a turn end. Cancel the pending turn-end.
             self._last_offset = None
+            self._hold_rearms = 0
             self._cancel_turn_end()
         elif self._state is ConversationalState.PROCESSING:
             # D-V4-5 — the user added more before the persona spoke: a
@@ -351,10 +362,29 @@ class ConversationalOrchestrator:
     # ----- V2 transcripts ----------------------------------------------
 
     async def on_transcript(self, transcript: Transcript) -> None:
-        """Accumulate the turn's transcript (latest text + last final)."""
-        self._latest_text = transcript.text
+        """Accumulate the turn's transcript across EVERY segment the STT emits (R9-126).
+
+        A person who pauses mid-sentence gets two finals from Gladia, one per
+        utterance. Keeping only the latest handed the model the second half ("Telling
+        you to schedule every day you never did") and dropped the half that carried
+        the subject. Finals are appended for the life of the turn; the newest partial
+        rides on the end until its own final replaces it.
+        """
         if transcript.is_final:
+            if not self._turn_finals or self._turn_finals[-1].text != transcript.text:
+                self._turn_finals.append(transcript)
+            self._latest_partial = None
             self._final_transcript = transcript
+        else:
+            self._latest_partial = transcript.text
+        self._latest_text = self._joined_text()
+
+    def _joined_text(self) -> str | None:
+        parts = [t.text for t in self._turn_finals]
+        if self._latest_partial:
+            parts.append(self._latest_partial)
+        joined = " ".join(p.strip() for p in parts if p.strip())
+        return joined or None
 
     # ----- loop callbacks (T06 wires these) ----------------------------
 
@@ -569,8 +599,29 @@ class ConversationalOrchestrator:
             )
             self._reset_turn()
             await self.force_reset()
-        # Any other WAIT: leave the floor with the user; graceful-degradation bounding
-        # of a stuck hold-token is T09's concern.
+            return
+        # R9-127: a WAIT with real text used to be terminal too. The controller holds
+        # the floor for a trailing hold token ("...but") or a silence a hair under the
+        # threshold, and nothing re-decided until the person made another noise: "you
+        # will schedule but never do" sat unanswered until "Hm?" and "Yes." arrived, and
+        # then only "Yes." was answered. Re-arm a bounded number of times so the pause
+        # can resolve (a new final lands, the silence crosses threshold); past the
+        # bound, answer what was heard. A person who paused that long deserves a reply,
+        # not a wedge.
+        if self._hold_rearms < HOLD_TURN_REARM_LIMIT and self._last_offset is not None:
+            self._hold_rearms += 1
+            self._turn_end_handle = self._scheduler.call_later(
+                self._turn_end_delay_s(self._last_offset), self._on_turn_end_timer
+            )
+            return
+        _logger.info(
+            "turn held past {n} re-arms (reason={reason}); answering what was heard",
+            n=self._hold_rearms,
+            reason=decision.reason,
+        )
+        self._last_endpoint_silence_wait_ms = decision.silence_elapsed_ms
+        await self._transition(TransitionTrigger.TURN_ENDED)
+        await self._actions.invoke_model_for_turn(self._turn_transcript())
 
     # ----- barge-in confirmation ---------------------------------------
 
@@ -645,8 +696,14 @@ class ConversationalOrchestrator:
     def _turn_transcript(self) -> Transcript:
         """The transcript handed to the model — the last final, or a synthesised
         one from the latest text if no final settled (robust fallback)."""
-        if self._final_transcript is not None:
-            return self._final_transcript
+        if self._turn_finals:
+            return Transcript(
+                is_final=True,
+                text=self._latest_text or "",
+                confidence=min(t.confidence for t in self._turn_finals),
+                eou_at=self._turn_finals[-1].eou_at,
+                synthetic=any(t.synthetic for t in self._turn_finals),
+            )
         return Transcript(is_final=True, text=self._latest_text or "", confidence=1.0)
 
     def _is_phantom_turn(self) -> bool:
@@ -659,8 +716,11 @@ class ConversationalOrchestrator:
     def _reset_turn(self) -> None:
         self._latest_text = None
         self._final_transcript = None
+        self._turn_finals = []
+        self._latest_partial = None
         self._last_offset = None
         self._phantom_rearms = 0
+        self._hold_rearms = 0
         self._cancel_turn_end()
 
     def _cancel_turn_end(self) -> None:

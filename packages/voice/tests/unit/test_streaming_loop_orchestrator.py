@@ -435,3 +435,47 @@ async def test_a_healthy_turn_is_untouched_by_the_deadline() -> None:
     await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
     assert tts.text == ["Hi ", "there"]
     assert orch.calls == ["first_audio", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_logs_cancelled_not_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation or barge-in cuts the turn through CancelledError, which skips every
+    handler; the end line must say so or it reads as a reply that never played."""
+    from persona_voice.loop import streaming as streaming_mod
+
+    ends: list[str] = []
+
+    class _Recorder:
+        def info(self, template: str, **kw: object) -> None:
+            if template.startswith("voice turn ended"):
+                ends.append(template.format(**kw))
+
+        def __getattr__(self, _name: str) -> object:
+            return lambda *_a, **_kw: None
+
+    monkeypatch.setattr(streaming_mod, "_LOG", _Recorder())
+    vr, tts, orch = _voice_room_fake(), _TTS(), _FloorRecorder()
+    first_out = asyncio.Event()
+
+    async def _slow_model(_t: Transcript) -> Any:  # noqa: ANN401
+        async def _gen() -> Any:  # noqa: ANN401
+            yield "Hi "
+            first_out.set()
+            await asyncio.sleep(3600)
+
+        return _gen()
+
+    loop = StreamingLoop(
+        voice_room=vr, session=_session(), model=_slow_model, tts=tts, orchestrator=orch
+    )
+    task = asyncio.create_task(loop.invoke_model_for_turn(_turn()))
+    await asyncio.wait_for(first_out.wait(), timeout=2.0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ends, "no turn-ended line was logged"
+    assert "outcome=cancelled" in ends[-1], ends

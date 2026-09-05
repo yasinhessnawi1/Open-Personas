@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import pathlib
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import persona_connectors
@@ -414,7 +415,8 @@ def test_the_connector_runtime_factory_arms_gating_and_threads_the_openrouter_mo
 
     def _fake_runtime_factory(**kwargs: Any) -> object:  # noqa: ANN401 — verbatim capture
         recorded.update(kwargs)
-        return object()
+        # R9-125: the builder now enables the graph store on the factory it returns.
+        return SimpleNamespace(enable_graph_writes=lambda **_kw: None)
 
     def _fake_tier_registry_from_env(*, openrouter_subscription_mode: Any) -> object:  # noqa: ANN401
         recorded["paid_registry_mode"] = openrouter_subscription_mode
