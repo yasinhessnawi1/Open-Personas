@@ -37,6 +37,7 @@ from persona_api.services.delivery_router import DeliveryRouter
 from sqlalchemy import text as _sql
 
 from persona_connectors.errors import ConnectorError, TurnFailedError
+from persona_connectors.rls_guard import guard_rls_engine_role
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
@@ -109,12 +110,19 @@ class ConnectorComposition:
         """
         if self.edition is Edition.community:
             return make_community_engine(Path(self._config.community_db_path))
-        if not self._config.database_url:
+        url = self._config.app_database_url or self._config.database_url
+        if not url:
             raise ConnectorError(
                 "cloud edition requires a database_url",
                 context={"edition": self.edition.value},
             )
-        return make_rls_engine(self._config.database_url, pool_size=self._config.db_pool_size)
+        engine = make_rls_engine(url, pool_size=self._config.db_pool_size)
+        # R9-123: refuse to serve owner-scoped reads through a role Postgres exempts
+        # from RLS. Checked on the engine's first connection, so a misconfigured secret
+        # fails the first inbound loudly instead of answering it with another tenant's
+        # roster.
+        guard_rls_engine_role(engine)
+        return engine
 
     def make_dispatch_engine(self) -> Engine:
         """Build the cross-tenant dispatch engine for the pre-auth resolve/redeem reads.

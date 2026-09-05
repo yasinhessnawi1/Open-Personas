@@ -69,6 +69,13 @@ class ConnectorConfig(BaseSettings):
     # every connection via the ``current_user_id`` contextvar the composition
     # root sets per inbound message (D-C1-X-rls-spine).
     database_url: str = Field(default="")
+    # The owner-scoped (RLS) engine's own URL. It must be the non-superuser persona_app
+    # role: Postgres exempts superusers and BYPASSRLS roles from every policy, FORCE or
+    # not, so a privileged role here lists every tenant's personas to every linked user
+    # (R9-123). The dispatch engine keeps database_url, because its pre-auth
+    # resolve/redeem reads need to see across tenants. Unset falls back to database_url,
+    # and make_engine's role guard then refuses a role that bypasses RLS.
+    app_database_url: str = Field(default="")
     db_pool_size: int = Field(default=5, gt=0)
 
     # --- Community-edition local persistence (Spec 33) ---

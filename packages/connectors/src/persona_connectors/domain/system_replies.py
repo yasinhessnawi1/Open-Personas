@@ -74,6 +74,6 @@ def render_list_and_instructions(persona_names: Mapping[str, Sequence[str]]) -> 
     listed = ", ".join(display_names)
     example = display_names[0]
     return (
-        f"You can talk to: {listed}. Start your message with a persona's name — "
-        f'for example, "{example}, hello".'
+        f"You can talk to: {listed}. Start your message with a persona's name, "
+        f'for example "{example}, hello".'
     )
