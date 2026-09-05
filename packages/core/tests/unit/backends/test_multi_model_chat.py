@@ -1063,3 +1063,71 @@ class TestVisionAwareSelection:
         assert response.content == "primary-text"
         assert primary.call_count == 1
         assert vision.call_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# R9-124: a retired model walks the chain
+# --------------------------------------------------------------------------- #
+class TestRetiredModel:
+    """A model the provider withdrew must never stop the chain.
+
+    NVIDIA retired ``meta/llama-3.3-70b-instruct`` on 2026-08-26 and answered every call
+    with ``410 Gone``. That status had no fallback rule, so it SURFACED and the chain never
+    reached Claude, sitting right behind it. Every voice turn routed there died in silence
+    for ten days.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_410_gone_falls_over_to_the_next_model(self) -> None:
+        primary = _ScriptedBackend(
+            "nvidia",
+            "meta/llama-3.3-70b-instruct",
+            [ProviderError("Gone", context={"provider": "nvidia", "status_code": "410"})],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        response = await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert response.model == "claude"
+        assert primary.call_count == 1, "a retired model is never retried"
+        assert secondary.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retirement_body_without_a_usable_status_falls_over(self) -> None:
+        """Groq announces a decommission in the body of a 400; the words are the signal."""
+        primary = _ScriptedBackend(
+            "groq",
+            "llama-3.3-70b-versatile",
+            [
+                ProviderError(
+                    "The model `llama-3.3-70b-versatile` has been decommissioned",
+                    context={"provider": "groq", "status_code": "400"},
+                )
+            ],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        response = await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert response.model == "claude"
+
+    @pytest.mark.asyncio
+    async def test_the_stream_path_walks_past_a_retired_model_too(self) -> None:
+        primary = _ScriptedBackend(
+            "nvidia",
+            "meta/llama-3.3-70b-instruct",
+            [ProviderError("Gone", context={"provider": "nvidia", "status_code": "410"})],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [[_chunk("ok", is_final=True)]])
+        wrapper = MultiModelChatBackend([primary, secondary])
+        deltas = [c.delta async for c in wrapper.chat_stream([_user_msg()])]
+        assert "".join(deltas) == "ok"
+
+    @pytest.mark.asyncio
+    async def test_a_plain_bad_request_still_surfaces(self) -> None:
+        """Scope guard: a 400 with no retirement body is the caller's bug, as before."""
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [ProviderError("bad", context={"provider": "openai", "status_code": "400"})],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        with pytest.raises(ProviderError):
+            await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert secondary.call_count == 0

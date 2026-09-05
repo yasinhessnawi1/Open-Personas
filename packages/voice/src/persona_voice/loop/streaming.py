@@ -47,6 +47,7 @@ impossible.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime  # noqa: TC003 — runtime for Pydantic field validation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -73,6 +74,20 @@ if TYPE_CHECKING:
 
 
 _LOG = get_logger("voice.streaming")
+
+#: R9-124: the bound on a user turn's FIRST audio, measured from the turn-end decision.
+DEFAULT_TURN_FIRST_AUDIO_TIMEOUT_S: float = 20.0
+#: What the persona says when a turn cannot be answered (a stall, a provider failure or
+#: a bug). Short, honest, and in the persona's own voice, so a failed turn is HEARD
+#: instead of leaving the caller talking to silence.
+TURN_FAILED_SPOKEN_LINE: str = "Sorry, I lost that for a moment. Could you say it again?"
+#: Bound on speaking the line above; a TTS that is itself down must not re-hang the turn.
+_FALLBACK_SPEECH_TIMEOUT_S: float = 8.0
+
+
+async def _single_text(text: str) -> AsyncIterator[str]:
+    """A one-item token stream, so a fixed line can ride the ordinary TTS path."""
+    yield text
 
 
 __all__ = [
@@ -310,6 +325,7 @@ class StreamingLoop:
         orchestrator: TurnOrchestrator | None = None,
         turn_transcript_listener: ReplyHeardListener | None = None,
         caption_listener: VoiceCaptionListener | None = None,
+        first_audio_timeout_s: float = DEFAULT_TURN_FIRST_AUDIO_TIMEOUT_S,
     ) -> None:
         # Spec V2 D-V2-X-streaming-loop-additivity-shape — ADDITIVE
         # ``speech_activity`` injected port; backwards-compatible default
@@ -338,6 +354,7 @@ class StreamingLoop:
         # user transcript (partial+final) + the V5 persona reply text (streamed
         # verbatim) to the data-channel broadcaster; None preserves V1/V2/V5.
         self._caption_listener = caption_listener
+        self._first_audio_timeout_s = first_audio_timeout_s
         self._pipeline_task: asyncio.Task[None] | None = None
         # V1 wires the inbound dispatcher into the VoiceRoom at construction
         # so frames that arrive during connect are not dropped on the floor.
@@ -522,30 +539,57 @@ class StreamingLoop:
         produced_audio = False
         completed = False
         heard: list[str] = []
+        started = time.perf_counter()
+        first_audio_ms: float | None = None
+        outcome = "completed"
+        _LOG.info(
+            "voice turn started chars={chars} synthetic={synthetic}",
+            chars=len(final_transcript.text),
+            synthetic=final_transcript.synthetic,
+        )
         try:
-            token_stream = await self._model(final_transcript)
-            source = self._accumulate_heard(token_stream, heard)
-            # V6 A1 — tee the persona reply text to the caption broadcast as it
-            # streams (verbatim from the TTS source, per D-V6-2). The final
-            # caption is emitted in ``finally`` so it fires on the barge-in path
-            # too (heard = spoken-so-far prefix).
-            if self._caption_listener is not None:
-                source = self._tee_persona_captions(source, heard)
-            async for chunk in self._tts.synthesize(source):
-                await self._push_audio_chunk(chunk)
-                if not produced_audio:
-                    produced_audio = True
-                    # First persona audio on the rail → PROCESSING → PERSONA_SPEAKING.
-                    if self._orchestrator is not None:
-                        await self._orchestrator.notify_model_first_audio()
+            # R9-124: everything up to the FIRST audio chunk runs under one deadline. A
+            # hung provider used to hold the turn for the full request timeout, twice,
+            # in silence; the deadline turns that into a logged, spoken, bounded failure.
+            async with asyncio.timeout(self._first_audio_timeout_s):
+                token_stream = await self._model(final_transcript)
+                source = self._accumulate_heard(token_stream, heard)
+                # V6 A1: tee the persona reply text to the caption broadcast as it
+                # streams (verbatim from the TTS source, per D-V6-2). The final caption
+                # is emitted in ``finally`` so it fires on the barge-in path too
+                # (heard = spoken-so-far prefix).
+                if self._caption_listener is not None:
+                    source = self._tee_persona_captions(source, heard)
+                audio = self._tts.synthesize(source).__aiter__()
+                first_chunk = await anext(audio, None)
+            if first_chunk is not None:
+                await self._push_audio_chunk(first_chunk)
+                produced_audio = True
+                first_audio_ms = (time.perf_counter() - started) * 1000.0
+                # First persona audio on the rail: PROCESSING to PERSONA_SPEAKING.
+                if self._orchestrator is not None:
+                    await self._orchestrator.notify_model_first_audio()
+                async for chunk in audio:
+                    await self._push_audio_chunk(chunk)
             # Clean completion (not cancelled): tell V4 the turn is over so it
             # returns the floor. An empty reply (no audio) resets to LISTENING.
             completed = True
-            if self._orchestrator is not None:
-                if produced_audio:
-                    await self._orchestrator.notify_persona_finished()
-                else:
-                    await self._orchestrator.notify_processing_yielded_no_audio()
+            if not produced_audio:
+                outcome = "no_audio"
+            await self._return_floor(produced_audio)
+        except TimeoutError:
+            # The deadline expired before any audio: the stall the owner heard as
+            # "stuck on listening". asyncio.timeout already unwound the stream; now
+            # make the failure audible and give the floor back.
+            outcome = "stalled"
+            _LOG.warning(
+                "voice turn stalled: no first audio within {timeout_s}s (chars={chars}); "
+                "cancelled, speaking the fallback line and returning the floor",
+                timeout_s=self._first_audio_timeout_s,
+                chars=len(final_transcript.text),
+            )
+            produced_audio = await self._speak_turn_failed(already_speaking=produced_audio)
+            await self._return_floor(produced_audio)
         except PersonaError as exc:
             # A model/TTS PROVIDER failure (e.g. Cartesia 402 "quota_exceeded" —
             # out of credits — mapped to TTSStreamFailureError, or a network drop)
@@ -556,17 +600,37 @@ class StreamingLoop:
             # hierarchy so structural-invariant bugs (e.g. the D-V1-6 sample-rate
             # ValueError) still raise loudly, and ``CancelledError`` (a
             # BaseException) still unwinds the stream on barge-in (spec V4 §8).
+            outcome = "provider_error"
             _LOG.warning(
-                "voice turn produced no speech; the persona stays silent this turn "
-                "(check the TTS/model provider — e.g. Cartesia credits/quota): {err}",
+                "voice turn failed at the provider (class={cls}); speaking the fallback "
+                "line and returning the floor: {err}",
+                cls=type(exc).__name__,
                 err=repr(exc)[:300],
             )
-            if self._orchestrator is not None:
-                if produced_audio:
-                    await self._orchestrator.notify_persona_finished()
-                else:
-                    await self._orchestrator.notify_processing_yielded_no_audio()
+            produced_audio = await self._speak_turn_failed(already_speaking=produced_audio)
+            await self._return_floor(produced_audio)
+        except Exception as exc:  # noqa: BLE001 — a bug must not leave the caller in silence
+            # A non-domain exception is a bug and is logged as one, loudly, with its
+            # traceback. It is NOT re-raised: this coroutine runs as a task nobody
+            # awaits, so a re-raise is exactly the silent failure this handler ends.
+            # The floor comes back and the caller hears that the turn failed.
+            outcome = "bug"
+            _LOG.exception(
+                "voice turn crashed (class={cls}); speaking the fallback line and "
+                "returning the floor",
+                cls=type(exc).__name__,
+            )
+            produced_audio = await self._speak_turn_failed(already_speaking=produced_audio)
+            await self._return_floor(produced_audio)
         finally:
+            _LOG.info(
+                "voice turn ended outcome={outcome} tokens={tokens} "
+                "first_audio_ms={first} total_ms={total:.0f}",
+                outcome=outcome,
+                tokens=len(heard),
+                first=None if first_audio_ms is None else round(first_audio_ms),
+                total=(time.perf_counter() - started) * 1000.0,
+            )
             await self._session.notify(SessionLifecycleEvent.AGENT_STOPPED_SPEAKING)
             # T07 barged-over memory honesty (D-V4-4): emit what was actually
             # heard — the full reply on clean completion, the spoken-so-far
@@ -587,6 +651,43 @@ class StreamingLoop:
             # a final even when the turn was cut short.
             if self._caption_listener is not None:
                 await self._caption_listener.on_persona_text("".join(heard), is_final=True)
+
+    async def _speak_turn_failed(self, *, already_speaking: bool) -> bool:
+        """Say :data:`TURN_FAILED_SPOKEN_LINE` through V3; return whether audio hit the rail.
+
+        Best effort and bounded: a TTS that is itself down must not re-hang the turn, so
+        any failure here is logged and the caller returns a silent floor instead.
+
+        Args:
+            already_speaking: Whether this turn already put audio on the rail, so the
+                first-audio notification is not sent twice.
+
+        Returns:
+            ``True`` if any audio reached the rail during this turn.
+        """
+        if self._tts is None:
+            return already_speaking
+        spoke = already_speaking
+        try:
+            async with asyncio.timeout(_FALLBACK_SPEECH_TIMEOUT_S):
+                async for chunk in self._tts.synthesize(_single_text(TURN_FAILED_SPOKEN_LINE)):
+                    await self._push_audio_chunk(chunk)
+                    if not spoke:
+                        spoke = True
+                        if self._orchestrator is not None:
+                            await self._orchestrator.notify_model_first_audio()
+        except Exception as exc:  # noqa: BLE001 — the fallback must never raise
+            _LOG.warning("voice fallback line could not be spoken: {err}", err=repr(exc)[:200])
+        return spoke
+
+    async def _return_floor(self, produced_audio: bool) -> None:
+        """Hand the floor back to V4 after a turn ends, spoken or silent."""
+        if self._orchestrator is None:
+            return
+        if produced_audio:
+            await self._orchestrator.notify_persona_finished()
+        else:
+            await self._orchestrator.notify_processing_yielded_no_audio()
 
     @staticmethod
     async def _accumulate_heard(

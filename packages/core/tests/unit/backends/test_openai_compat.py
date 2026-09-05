@@ -1563,3 +1563,36 @@ def test_covering_is_a_noop_when_history_matches_tools() -> None:
     ]
     covered = _openai_tools_covering_history(real, messages)
     assert [d["function"]["name"] for d in covered] == ["use_skill"]
+
+
+# -----------------------------------------------------------------------------
+# R9-124: a retired model's status survives the mapping
+# -----------------------------------------------------------------------------
+class TestRetiredModelStatusMapping:
+    """NVIDIA answers a retired model with ``410 Gone`` as a bare ``APIStatusError``.
+
+    That used to map to a ``ProviderError`` with no status at all, which the chain
+    classifier could only SURFACE. The status and the model now ride along, so the
+    classifier can walk to the next model.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_bare_410_keeps_its_status_and_names_the_model(self) -> None:
+        backend = OpenAICompatibleBackend(_config("nvidia", model="meta/llama-3.3-70b-instruct"))
+        exc = openai.APIStatusError(
+            "The model has reached its end of life and is no longer available",
+            response=_fake_response(status=410),
+            body=None,
+        )
+        with (
+            patch.object(
+                backend._openai.chat.completions,  # type: ignore[union-attr]
+                "create",
+                new=AsyncMock(side_effect=exc),
+            ),
+            pytest.raises(ProviderError) as info,
+        ):
+            await backend.chat([_user("x")])
+        assert type(info.value) is ProviderError
+        assert info.value.context["status_code"] == "410"
+        assert info.value.context["model"] == "meta/llama-3.3-70b-instruct"

@@ -9,6 +9,7 @@ green.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -281,3 +282,156 @@ async def test_auto_loop_still_runs_without_orchestrator() -> None:
     assert loop._pipeline_task is not None  # noqa: SLF001
     await asyncio.wait_for(loop._pipeline_task, timeout=2.0)  # noqa: SLF001
     assert tts.text == ["Hi ", "there"]
+
+
+# --------------------------------------------------------------------------- #
+# R9-124: a turn that cannot be answered is bounded, audible and returns the floor
+# --------------------------------------------------------------------------- #
+class _FloorRecorder(_NoopOrchestrator):
+    """Records the V4 notifications a turn sends, in order."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def notify_model_first_audio(self) -> None:
+        self.calls.append("first_audio")
+
+    async def notify_persona_finished(self) -> None:
+        self.calls.append("finished")
+
+    async def notify_processing_yielded_no_audio(self) -> None:
+        self.calls.append("no_audio")
+
+
+def _turn(text: str = "can you do that?") -> Transcript:
+    return Transcript(is_final=True, text=text, confidence=0.9)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_turn_is_cut_spoken_and_returns_the_floor() -> None:
+    """THE regression (R9-124): a model that never answered held the turn for the
+    provider timeout, twice, in silence. Now the deadline cuts it, the persona says so
+    in its own voice, and the floor comes back."""
+    from persona_voice.loop.streaming import TURN_FAILED_SPOKEN_LINE
+
+    vr, tts, orch = _voice_room_fake(), _TTS(), _FloorRecorder()
+    reached_model = asyncio.Event()
+
+    async def _hanging_model(_t: Transcript) -> Any:  # noqa: ANN401
+        reached_model.set()
+        await asyncio.sleep(3600)
+
+    loop = StreamingLoop(
+        voice_room=vr,
+        session=_session(),
+        model=_hanging_model,
+        tts=tts,
+        orchestrator=orch,
+        first_audio_timeout_s=0.05,
+    )
+    await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
+
+    assert reached_model.is_set()
+    assert tts.text == [TURN_FAILED_SPOKEN_LINE]
+    assert orch.calls == ["first_audio", "finished"]
+    assert vr.capture_outbound_frame.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_provider_failure_is_spoken_not_silent() -> None:
+    from persona.backends.errors import ProviderError
+    from persona_voice.loop.streaming import TURN_FAILED_SPOKEN_LINE
+
+    vr, tts, orch = _voice_room_fake(), _TTS(), _FloorRecorder()
+
+    async def _failing_model(_t: Transcript) -> Any:  # noqa: ANN401
+        raise ProviderError("chain exhausted", context={"provider": "nvidia"})
+
+    loop = StreamingLoop(
+        voice_room=vr, session=_session(), model=_failing_model, tts=tts, orchestrator=orch
+    )
+    await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
+
+    assert tts.text == [TURN_FAILED_SPOKEN_LINE]
+    assert orch.calls == ["first_audio", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_turn_is_logged_spoken_and_returns_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A programmer error used to die inside a task nobody awaited: no log line, no
+    audio, no floor. It is now logged as a crash with its class, spoken, and the floor
+    returns. Loud in the log, honest in the ear."""
+    from persona_voice.loop import streaming as streaming_mod
+    from persona_voice.loop.streaming import TURN_FAILED_SPOKEN_LINE
+
+    crashes: list[str] = []
+
+    class _Recorder:
+        def exception(self, template: str, **kw: object) -> None:
+            crashes.append(template + " " + " ".join(f"{k}={v}" for k, v in kw.items()))
+
+        def __getattr__(self, _name: str) -> object:
+            return lambda *_a, **_kw: None
+
+    monkeypatch.setattr(streaming_mod, "_LOG", _Recorder())
+    vr, tts, orch = _voice_room_fake(), _TTS(), _FloorRecorder()
+
+    async def _buggy_model(_t: Transcript) -> Any:  # noqa: ANN401
+        raise TypeError("bug")
+
+    loop = StreamingLoop(
+        voice_room=vr, session=_session(), model=_buggy_model, tts=tts, orchestrator=orch
+    )
+    await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
+
+    assert any("cls=TypeError" in line for line in crashes), crashes
+    assert tts.text == [TURN_FAILED_SPOKEN_LINE]
+    assert orch.calls == ["first_audio", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_when_even_the_fallback_cannot_speak_the_floor_still_returns() -> None:
+    """A TTS that is itself down must not re-hang the turn: silent, but never wedged."""
+    vr, orch = _voice_room_fake(), _FloorRecorder()
+
+    class _DeadTTS:
+        async def synthesize(self, text_stream: Any) -> Any:  # noqa: ANN401
+            async for _ in text_stream:
+                raise RuntimeError("tts down")
+            yield  # pragma: no cover - makes this an async generator
+
+        async def cancel(self) -> None: ...
+
+    async def _hanging_model(_t: Transcript) -> Any:  # noqa: ANN401
+        await asyncio.sleep(3600)
+
+    loop = StreamingLoop(
+        voice_room=vr,
+        session=_session(),
+        model=_hanging_model,
+        tts=_DeadTTS(),
+        orchestrator=orch,
+        first_audio_timeout_s=0.05,
+    )
+    await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
+
+    assert orch.calls == ["no_audio"]
+    assert vr.capture_outbound_frame.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_turn_is_untouched_by_the_deadline() -> None:
+    vr, tts, orch = _voice_room_fake(), _TTS(), _FloorRecorder()
+    loop = StreamingLoop(
+        voice_room=vr,
+        session=_session(),
+        model=_model_two_tokens(),
+        tts=tts,
+        orchestrator=orch,
+        first_audio_timeout_s=5.0,
+    )
+    await asyncio.wait_for(loop.invoke_model_for_turn(_turn()), timeout=2.0)
+    assert tts.text == ["Hi ", "there"]
+    assert orch.calls == ["first_audio", "finished"]

@@ -248,9 +248,24 @@ async def test_pipeline_streams_transcript_to_tokens_to_audio() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_rejects_chunk_with_wrong_sample_rate() -> None:
-    """V3 produces an outbound chunk at the wrong rate → loop fails loud
-    (no silent resample inside the loop body)."""
+async def test_pipeline_rejects_chunk_with_wrong_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3 produces an outbound chunk at the wrong rate: the loop never resamples it
+    and never plays it. The chunk is refused, the crash is logged as a bug with its
+    class (R9-124: loud in the log, not a dead task), and the loop stays alive."""
+    from persona_voice.loop import streaming as streaming_mod
+
+    crashes: list[str] = []
+
+    class _Recorder:
+        def exception(self, template: str, **kw: object) -> None:
+            crashes.append(template + " " + " ".join(f"{k}={v}" for k, v in kw.items()))
+
+        def __getattr__(self, _name: str) -> object:
+            return lambda *_a, **_kw: None
+
+    monkeypatch.setattr(streaming_mod, "_LOG", _Recorder())
     vr = _build_voice_room_fake()
     sm = _build_session()
 
@@ -282,8 +297,9 @@ async def test_pipeline_rejects_chunk_with_wrong_sample_rate() -> None:
     await loop.start_pipeline()
     pipeline_task = loop._pipeline_task  # noqa: SLF001
     assert pipeline_task is not None
-    with pytest.raises(ValueError, match="24000 Hz"):
-        await asyncio.wait_for(pipeline_task, timeout=2.0)
+    await asyncio.wait_for(pipeline_task, timeout=2.0)
+    assert any("cls=ValueError" in line for line in crashes), crashes
+    assert vr.capture_outbound_frame.await_count == 0, "the wrong-rate chunk reached the rail"
 
 
 # ---------- V4 barge-in ----------------------------------------------------

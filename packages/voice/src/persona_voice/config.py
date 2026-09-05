@@ -128,6 +128,15 @@ class VoiceConfig(BaseSettings):
     # floor (never ring forever, D-32-3). Defaults are the researched ladder.
     greet_warmup_timeout_s: float = Field(default=10.0, gt=0.0)
     greet_timeout_s: float = Field(default=30.0, gt=0.0)
+    # --- Per-turn liveness bound (R9-124) ---
+    # A user turn must put its FIRST audio on the rail within this many seconds of the
+    # turn-end decision. Past it the generation is cancelled, the stall is logged with
+    # its diagnostics, a short spoken apology plays, and the floor returns to the user.
+    # Without it a hung provider held the turn for the 60s request timeout, twice, in
+    # silence: no audio, no log, no bill, and the UI read LISTENING throughout. Turn 0
+    # keeps its own greet_timeout_s. Sized above a slow but healthy first token (2 to
+    # 6s) and below the point where a person decides the call is dead.
+    turn_first_audio_timeout_s: float = Field(default=20.0, gt=0.0)
 
     @field_validator("jwt_algorithms", mode="before")
     @classmethod

@@ -884,6 +884,7 @@ async def build_agent_session(
         stt=stt_seam,
         tts=tts_seam,
         model=producer,
+        first_audio_timeout_s=config.turn_first_audio_timeout_s,
     )
     # The A1 data-channel broadcaster implements BOTH the V4 state-listener seam
     # (orb) AND the V6 caption-listener seam (captions) over one room+topic, so it

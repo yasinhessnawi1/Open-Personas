@@ -71,6 +71,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -108,6 +109,14 @@ _GLADIA_INBOUND_SAMPLE_RATE_HZ: int = 16_000
 
 _CONNECT_TIMEOUT_S: float = 15.0
 """Bound on session-init + WS-connect before the first frame is accepted."""
+_KEEPALIVE_INTERVAL_S: float = 5.0
+"""R9-124: Gladia closes a live session after 30s without an audio chunk (close code
+4408), and the client sends no frames while the user is silent or while the V8 cost gate
+holds them back during persona speech. One 20 ms frame of silence per idle interval
+keeps the session open at a negligible fraction of the streamed audio, so the next
+utterance is transcribed from its first syllable instead of paying a reconnect first."""
+_KEEPALIVE_FRAME: bytes = b"\x00" * (_GLADIA_INBOUND_SAMPLE_RATE_HZ * 2 * 20 // 1000)
+"""20 ms of PCM16 mono silence at the negotiated rate (640 bytes)."""
 
 _CLOSE_DRAIN_TIMEOUT_S: float = 10.0
 """How long :meth:`close` waits for Gladia to finalize + emit trailing finals
@@ -173,6 +182,7 @@ class GladiaStreamingSTT:
         *,
         open_session: Callable[[], Awaitable[tuple[str, str]]] | None = None,
         ws_connect: Callable[[str], _WebSocketCM] | None = None,
+        keepalive_interval_s: float = _KEEPALIVE_INTERVAL_S,
     ) -> None:
         if config.gladia_api_key is None or not config.gladia_api_key.get_secret_value():
             raise STTAuthenticationError(
@@ -195,6 +205,9 @@ class GladiaStreamingSTT:
         self._connect_error: BaseException | None = None
         self._closed: bool = False
         self._terminated: bool = False
+        self._keepalive_interval_s = keepalive_interval_s
+        self._keepalive_task: asyncio.Task[None] | None = None
+        self._last_push_at: float | None = None
 
     @property
     def provider_name(self) -> str:
@@ -242,6 +255,7 @@ class GladiaStreamingSTT:
         assert ws is not None  # guaranteed by _ensure_connected (else it raised)
         try:
             await ws.send(pcm)
+            self._last_push_at = time.monotonic()
         except Exception as first_exc:  # noqa: BLE001 — adapter-boundary recovery + mapping
             # The socket died between _ensure_connected and this send (idle-close
             # / drop). Drop it and make ONE transparent reconnect+resend attempt
@@ -314,6 +328,9 @@ class GladiaStreamingSTT:
         if self._closed:
             return
         self._closed = True
+        keepalive = self._keepalive_task
+        if keepalive is not None and not keepalive.done():
+            keepalive.cancel()
         ws = self._ws
         if ws is not None:
             with contextlib.suppress(Exception):
@@ -362,6 +379,26 @@ class GladiaStreamingSTT:
                 "gladia session connected without a live socket",
                 context={"provider": "gladia", "model": self._config.gladia_model},
             )
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(
+                self._keepalive_loop(), name="gladia-keepalive"
+            )
+
+    async def _keepalive_loop(self) -> None:
+        """Send one silent frame per idle interval while a socket is live (R9-124)."""
+        while not self._closed:
+            await asyncio.sleep(self._keepalive_interval_s)
+            ws = self._ws
+            if ws is None or self._closed:
+                continue
+            last = self._last_push_at
+            if last is not None and time.monotonic() - last < self._keepalive_interval_s:
+                continue
+            try:
+                await ws.send(_KEEPALIVE_FRAME)
+                self._last_push_at = time.monotonic()
+            except Exception:  # noqa: BLE001 — a dead socket reconnects on the next real frame
+                self._drop_session()
 
     async def _run_session(self) -> None:
         """Open session + socket, publish readiness, then pump inbound messages.

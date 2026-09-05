@@ -84,6 +84,29 @@ _SURFACE: Final[str] = "SURFACE"
 # session/conflict cases observed on Anthropic; 529 is Anthropic's "overloaded".
 _TRANSIENT_STATUS_CODES: Final[frozenset[int]] = frozenset({409, 500, 502, 503, 504, 529})
 
+# A model that no longer exists is a property of the SLOT, not of the moment: a 404 or
+# 410 from the provider, or a body that announces the retirement (NVIDIA: "has reached
+# its end of life ... no longer available"; Groq: "model_decommissioned"). Such an error
+# must walk to the next model, never SURFACE. Surfacing it short-circuited the whole
+# chain and left Claude, sitting right behind the dead slot, untried (R9-124).
+_RETIRED_MODEL_STATUS_CODES: Final[frozenset[int]] = frozenset({404, 410})
+_RETIRED_MODEL_MARKERS: Final[tuple[str, ...]] = (
+    "end of life",
+    "no longer available",
+    "decommissioned",
+    "has been retired",
+    "has been deprecated",
+)
+
+
+def _is_retired_model_error(exc: ProviderError) -> bool:
+    """Whether ``exc`` says the model itself is gone (404/410, or a retirement body)."""
+    status_raw = exc.context.get("status_code", "")
+    if status_raw.isdigit() and int(status_raw) in _RETIRED_MODEL_STATUS_CODES:
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _RETIRED_MODEL_MARKERS)
+
 
 @dataclass(frozen=True)
 class AttemptRecord:
@@ -677,6 +700,9 @@ class MultiModelChatBackend:
         # SURFACE-bucket overrides: explicit content policy & 422 validation.
         if ctx.get("reason") == "content_policy_violation":
             return _SURFACE
+        # R9-124: a retired model walks the chain; it is never a reason to stop.
+        if _is_retired_model_error(exc):
+            return _FALLBACK_NO_RETRY
         status_raw = ctx.get("status_code", "")
         if status_raw:
             try:

@@ -541,3 +541,64 @@ async def test_batch_oneshot_empty_transcription_returns_empty_string() -> None:
     client = _batch_client(handler)
     assert await transcribe_oneshot_batch(b"a", config=_config(), client=client) == ""
     await client.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# R9-124: the idle keepalive
+# --------------------------------------------------------------------------- #
+# Gladia closes a live session after 30s without an audio chunk (close code 4408). The
+# client sends nothing while the user is silent or while the V8 gate withholds frames
+# during persona speech, so real calls hit that close mid-conversation and paid a
+# reconnect on the next utterance. One silent frame per idle interval keeps it open.
+from persona_voice.stt.gladia_backend import _KEEPALIVE_FRAME  # noqa: E402
+
+
+def _keepalive_backend(fake: _FakeGladia, interval_s: float) -> GladiaStreamingSTT:
+    return GladiaStreamingSTT(
+        _config(),
+        open_session=fake.open_session,
+        ws_connect=fake.ws_connect,  # type: ignore[arg-type]
+        keepalive_interval_s=interval_s,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_idle_session_receives_silent_keepalive_frames() -> None:
+    ws = _FakeGladiaWS()
+    backend = _keepalive_backend(_FakeGladia([ws]), interval_s=0.02)
+    await backend.push_audio(b"\x01\x02" * 160, 16_000)
+    await asyncio.sleep(0.12)
+    try:
+        assert _KEEPALIVE_FRAME in ws.sent, "no keepalive reached an idle session"
+        assert len(_KEEPALIVE_FRAME) == 640, "20 ms of PCM16 mono at 16 kHz"
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_session_is_never_padded_with_silence() -> None:
+    """Keepalive must not interleave silence with real speech."""
+    ws = _FakeGladiaWS()
+    backend = _keepalive_backend(_FakeGladia([ws]), interval_s=0.02)
+    for _ in range(16):
+        await backend.push_audio(b"\x01\x02" * 160, 16_000)
+        await asyncio.sleep(0.005)
+    try:
+        assert _KEEPALIVE_FRAME not in ws.sent
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_close_stops_the_keepalive() -> None:
+    ws = _FakeGladiaWS()
+    backend = _keepalive_backend(_FakeGladia([ws]), interval_s=0.02)
+    await backend.push_audio(b"\x01\x02" * 160, 16_000)
+    await backend.close()
+    task = backend._keepalive_task  # noqa: SLF001
+    assert task is not None
+    await asyncio.sleep(0.05)
+    assert task.done()
+    sent_after_close = len(ws.sent)
+    await asyncio.sleep(0.06)
+    assert len(ws.sent) == sent_after_close, "keepalive kept sending after close"

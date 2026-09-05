@@ -50,6 +50,7 @@ from persona.backends.errors import (
     TierNotConfiguredError as ModelsListTierNotConfiguredError,
 )
 from persona.backends.multi_model import MultiModelChatBackend
+from persona.backends.retired import filter_retired_models
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -525,6 +526,10 @@ def tier_registry_from_env(
                 tier_name=tier_name,
                 keep_free_suffix=True,
             )
+            # R9-124: a retired model (NVIDIA's llama-3.3-70b, EOL 2026-08-26) sat in the
+            # deployed mid chain for ten days. Dropped here with a WARN, so a stale env
+            # var costs a log line at startup instead of a dead slot on every turn.
+            filtered_models = filter_retired_models(filtered_models, tier_name=tier_name)
             if not filtered_models:
                 continue
             tiers[tier_name] = _tier_config_from_models_list(
@@ -612,6 +617,7 @@ def free_tier_registry_from_env(
                 tier_name=tier_name,
                 keep_free_suffix=True,
             )
+            filtered = filter_retired_models(filtered, tier_name=tier_name)
             if not filtered:
                 continue
             tiers[tier_name] = _tier_config_from_models_list(

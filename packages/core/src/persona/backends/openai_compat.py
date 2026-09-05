@@ -982,11 +982,19 @@ class OpenAICompatibleBackend:
         if isinstance(exc, openai.APITimeoutError | openai.APIConnectionError):
             raise BackendTimeoutError(str(exc), context={"provider": provider}) from exc
 
-        # Anything else
-        raise ProviderError(
-            str(exc),
-            context={"provider": provider, "underlying": type(exc).__name__},
-        ) from exc
+        # Anything else. Keep the HTTP status when the SDK exposes one: the fallback
+        # classifier needs it to tell a RETIRED model (404/410, walk the chain) from a
+        # bad request (400, surface). NVIDIA's end-of-life 410 arrives here as a bare
+        # APIStatusError, which used to lose its status and short-circuit the chain.
+        generic_ctx: dict[str, str] = {
+            "provider": provider,
+            "model": model,
+            "underlying": type(exc).__name__,
+        }
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            generic_ctx["status_code"] = str(status_code)
+        raise ProviderError(str(exc), context=generic_ctx) from exc
 
 
 # ----------------------------------------------------------------------
