@@ -39,6 +39,9 @@ def test_subscription_checkout_enables_stripe_tax_in_subscription_mode() -> None
     params = gateway._client.checkout.sessions.create.call_args.kwargs["params"]  # noqa: SLF001
     assert params["mode"] == "subscription"
     assert params["automatic_tax"] == {"enabled": True}  # Stripe Tax on (D-M4-3)
+    # R9-139: tax needs an address; Checkout must collect it and save it back.
+    assert params["billing_address_collection"] == "required"
+    assert params["customer_update"] == {"address": "auto", "name": "auto"}
     assert params["customer"] == "cus_1"
     assert params["line_items"] == [{"price": "price_plus", "quantity": 1}]
     assert params["success_url"] == "s_url"
@@ -101,3 +104,28 @@ def test_portal_session_returns_url_with_customer_and_return_url() -> None:
     assert url == "https://portal.stripe/session_1"
     params = gateway._client.billing_portal.sessions.create.call_args.kwargs["params"]  # noqa: SLF001
     assert params == {"customer": "cus_1", "return_url": "r_url"}
+
+
+def test_payg_checkout_collects_the_address_stripe_tax_needs() -> None:
+    """The pack purchase is a first purchase for most customers, so the Customer has no
+    address yet, and Stripe refuses automatic tax without one (R9-139). The same two
+    parameters must ride on the payment-mode session as on the subscription one."""
+    gateway = _gateway_with_mock_client()
+    session = MagicMock()
+    session.url = "https://checkout.stripe/session_2"
+    gateway._client.checkout.sessions.create.return_value = session  # noqa: SLF001
+
+    gateway.create_payg_checkout(
+        customer_id="cus_1",
+        price_id="price_pack",
+        user_id="u1",
+        credit_amount=1000,
+        success_url="s_url",
+        cancel_url="c_url",
+    )
+
+    params = gateway._client.checkout.sessions.create.call_args.kwargs["params"]  # noqa: SLF001
+    assert params["mode"] == "payment"
+    assert params["automatic_tax"] == {"enabled": True}
+    assert params["billing_address_collection"] == "required"
+    assert params["customer_update"] == {"address": "auto", "name": "auto"}

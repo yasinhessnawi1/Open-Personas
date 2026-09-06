@@ -110,6 +110,11 @@ class StripeGateway:
                 "success_url": success_url,
                 "cancel_url": cancel_url,
                 "automatic_tax": {"enabled": True},
+                # R9-139: Stripe Tax needs an address, and a fresh Customer has none.
+                # Collect it in Checkout and let Stripe save it back to the Customer;
+                # without both, every first purchase failed with a 502.
+                "billing_address_collection": "required",
+                "customer_update": {"address": "auto", "name": "auto"},
                 "metadata": {"user_id": user_id},
                 "subscription_data": {"metadata": {"user_id": user_id}},
             }
@@ -144,6 +149,11 @@ class StripeGateway:
                 "success_url": success_url,
                 "cancel_url": cancel_url,
                 "automatic_tax": {"enabled": True},
+                # R9-139: Stripe Tax needs an address, and a fresh Customer has none.
+                # Collect it in Checkout and let Stripe save it back to the Customer;
+                # without both, every first purchase failed with a 502.
+                "billing_address_collection": "required",
+                "customer_update": {"address": "auto", "name": "auto"},
                 "metadata": meta,
                 "payment_intent_data": {
                     "setup_future_usage": "off_session",  # save the card (Pro auto-top-up T7b)
