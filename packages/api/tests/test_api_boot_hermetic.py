@@ -139,8 +139,13 @@ class TestOfflineBootDegrades:
         with TestClient(app) as client:
             resp = client.get("/openapi.json")
             assert resp.status_code == 200, resp.text
-            # The warmup runs in the background — wait (bounded) for its verdict.
-            deadline = time.monotonic() + 15.0
+            # The warmup runs in the background, so wait (bounded) for its verdict. 15s
+            # measured too tight on a real machine: the lazy `import sentence_transformers`
+            # inside the locked loader, plus first-time app-boot imports competing for the
+            # GIL, can alone take longer than that when this is the first test in the
+            # process to touch either. 45s keeps real headroom under the 60s outer bound
+            # below and pytest's 120s backstop, without weakening what this asserts.
+            deadline = time.monotonic() + 45.0
             while time.monotonic() < deadline:
                 if any("crisis-encoder warm-up" in line for line in loguru_capture):
                     break
