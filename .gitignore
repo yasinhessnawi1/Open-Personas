@@ -56,6 +56,9 @@ docker-compose.override.yml
 .playwright-mcp/
 .tmp_smoke_workspace/
 
+# scripts/ci-local.sh: per-run step logs (timestamped, never tracked)
+.ci-local/
+
 # Spec 16 D-16-X-3: inspection artifacts (.docx/.pptx/.xlsx/.pdf) are binary;
 # evidence at close-out is the per-row scorecard in state.md, not the binaries.
 docs/specs/phase2/spec_16/inspection/
