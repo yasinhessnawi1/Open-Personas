@@ -3,7 +3,7 @@
 The connector service verified Clerk tokens ONLY via the static-key
 ``persona.auth.jwt_verifier.make_jwt_verifier`` — pinned to one Clerk
 instance's public key, breaking on any other instance (e.g. dev vs prod) or on
-key rotation. ``_build_connector_verifier`` (``persona_connectors.__main__``)
+key rotation. ``_build_connector_verifier`` (``persona_connectors.service``)
 is the ONE selection point every ``_setup_*`` call site now goes through:
 ``PERSONA_CONNECTORS_JWT_JWKS_URL`` set → the new JWKS-based verifier
 (``make_jwks_verifier``); unset (the default) → the existing static verifier,
@@ -22,8 +22,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from jose import jwt
 from jose.backends.cryptography_backend import CryptographyRSAKey
 from persona.errors import AuthenticationError
-from persona_connectors.__main__ import _build_connector_verifier
 from persona_connectors.config import ConnectorConfig
+from persona_connectors.service import _build_connector_verifier
 from pydantic import ValidationError
 
 

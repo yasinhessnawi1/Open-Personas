@@ -50,9 +50,19 @@ def _module_stem(path: pathlib.Path) -> str:
 
 
 def _is_allowlisted(stem: str) -> bool:
-    """API-coupling is permitted only in the composition root, a service entry
-    point, or the infra adapters."""
-    return stem in {"composition", "__main__"} or stem == "infra" or stem.startswith("infra.")
+    """API-coupling is permitted only in the composition root, the service
+    composition module, a service entry point, or the infra adapters.
+
+    ``service`` joined the list at Spec I1 (D-I1-9), when the composition body moved
+    out of ``__main__`` so the api could import it to host the runners in-process.
+    The allowlist GREW by one module; it did not loosen, and the positive assertions
+    below still prove each named module is genuinely api-coupled.
+    """
+    return (
+        stem in {"composition", "service", "__main__"}
+        or stem == "infra"
+        or stem.startswith("infra.")
+    )
 
 
 def test_domain_owned_surface_is_api_free() -> None:
@@ -68,7 +78,7 @@ def test_domain_owned_surface_is_api_free() -> None:
 
 
 def test_api_coupling_is_confined_to_the_allowlist() -> None:
-    """Every persona_api-importing module is in the allowlist (composition/__main__/infra)."""
+    """Every persona_api-importing module is in the allowlist (composition/service/infra)."""
     offenders: list[str] = []
     for py_file in _PKG_DIR.rglob("*.py"):
         stem = _module_stem(py_file)
@@ -78,13 +88,24 @@ def test_api_coupling_is_confined_to_the_allowlist() -> None:
             offenders.append(stem)
     assert offenders == [], (
         f"these modules import persona_api but are not allow-listed "
-        f"(composition / __main__ / infra) — C1-D-1: {offenders}"
+        f"(composition / service / __main__ / infra), C1-D-1: {offenders}"
     )
 
 
 def test_the_composition_root_is_actually_api_coupled() -> None:
     """Sanity: composition.py genuinely imports persona_api (the guard isn't vacuous)."""
     source = (_PKG_DIR / "composition.py").read_text(encoding="utf-8")
+    assert _imports_persona_api(source)
+
+
+def test_the_service_module_is_actually_api_coupled() -> None:
+    """Sanity for the entry Spec I1 added: ``service.py`` genuinely imports persona_api.
+
+    Without this, allow-listing ``service`` would be a free pass that could later cover a
+    module that had quietly stopped being the composition seam. Same shape as the
+    composition-root assertion above.
+    """
+    source = (_PKG_DIR / "service.py").read_text(encoding="utf-8")
     assert _imports_persona_api(source)
 
 

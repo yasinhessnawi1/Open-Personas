@@ -383,6 +383,19 @@ class APIConfig(BaseSettings):
     in_process_worker: bool | None = Field(
         default=None, validation_alias="PERSONA_API_IN_PROCESS_WORKER"
     )
+    # Spec I1 (D-I1-17) — host the connector transports IN THIS PROCESS rather than on a
+    # separate machine, so one process holds one model stack instead of two. Mirrors the
+    # ``in_process_worker`` shape above, with one deliberate difference: there is NO
+    # edition-derived auto-on. Community has no connector tokens, and cloud must not flip
+    # until the operator's cutover has scaled the standalone connectors app to zero (two
+    # consumers on one Slack socket / Telegram poller / Discord token double-deliver), so
+    # the effective value is the explicit flag or ``False``. Setting this env var is the
+    # ENTIRE activation surface, which is what makes the cutover and its rollback one
+    # secret change. Downstream self-gates still apply: the lifespan also requires an RLS
+    # engine and a runtime factory, so a keyless boot never starts the runners.
+    embed_connectors: bool | None = Field(
+        default=None, validation_alias="PERSONA_API_EMBED_CONNECTORS"
+    )
     # The tier the synthesis extractor + entity judge run on (D-K2-3). The hard
     # pre-live gate #2 re-runs the extraction corpus eval on THIS tier (NOT the
     # frontier/sonnet tier). ``small`` by default (cheap reflection pass).
@@ -690,6 +703,22 @@ class APIConfig(BaseSettings):
         if self.in_process_worker is not None:
             return self.in_process_worker
         return self.edition is Edition.community and community_managed
+
+    def effective_embed_connectors(self) -> bool:
+        """Whether to host the connector transports in this process (Spec I1, D-I1-17).
+
+        The explicit ``PERSONA_API_EMBED_CONNECTORS`` or ``False``. Unlike
+        :meth:`effective_in_process_worker` there is no edition-derived default: no edition
+        is safe to flip automatically, because a cloud flip before the standalone connectors
+        app is scaled to zero would put two consumers on one Slack socket / Telegram poller /
+        Discord token and double-deliver every message.
+
+        This encodes ONLY the switch. The keyless / engineless fail-safes are separate
+        downstream gates in the lifespan (an RLS engine and a runtime factory must exist),
+        and a flag-ON boot with no platform configured logs and continues rather than
+        failing startup (D-I1-6).
+        """
+        return bool(self.embed_connectors)
 
     def stripe_billing_active(self) -> bool:
         """Whether the Stripe billing surface should be constructed (Spec M4, T2a).

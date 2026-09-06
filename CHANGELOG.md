@@ -11,6 +11,43 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Connectors fold: one process, one model stack (2026-09-06)
+
+> The connector service ran on its own machine, and almost all of that machine was
+> a duplicate of the API's model stack: torch, the embedder, the tier registry and
+> the model backends, shared with nothing. Measured, the connector code itself
+> costs under 5 MB on top of an API process. The transports can now run inside the
+> API, reusing its engines and runtime, so the duplication goes away rather than
+> moving. Off by default; the switch is one environment variable.
+
+#### Added
+- **`PERSONA_API_EMBED_CONNECTORS`** hosts the Telegram, Discord, Slack, WhatsApp,
+  SMS and email transports inside the API process. Their webhook and OAuth routes
+  are served from the API's own port, with the paths unchanged, so no provider
+  registration moves. Default off, with no edition turning it on by itself: a flip
+  before the standalone service is stopped would put two consumers on one Slack
+  socket and double deliver every message.
+- **A shared composition root** (`persona_connectors.service`) that both hosts
+  call. It returns what is needed to run the connectors and leaves *how* to run
+  them to the host, so the standalone service and the embedded one cannot drift.
+- **A cutover runbook and a secret-copy helper.** The helper is dry run by default
+  and refuses to copy the two connector database URLs, because embedded the API
+  supplies those roles itself and a second definition of them is how row-level
+  security silently stops binding.
+
+#### Changed
+- **Account linking no longer leaves the process to come back to it.** When the
+  connectors are embedded, the API's link front door calls the mounted handler
+  directly instead of forwarding to its own public hostname. Not embedded, the
+  forwarder is unchanged.
+- **The connector service exits quietly on a deploy signal** instead of printing a
+  traceback for an ordinary, successful stop.
+
+#### Fixed
+- **The owner-scoped database role is verified at startup**, not on the first
+  inbound message. The check existed but nothing called it, so a misconfigured
+  role would have been discovered by a user being served another account's data.
+
 ### Billing you can actually use (Spec M5, 2026-09-05)
 
 > M4 built a payment system and shipped almost none of it to the person paying.

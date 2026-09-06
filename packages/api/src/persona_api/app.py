@@ -872,6 +872,92 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             in_process_worker = None
     app.state.in_process_worker = in_process_worker
 
+    # Spec I1 (T2, D-I1-17): host the connector transports IN THIS PROCESS behind
+    # PERSONA_API_EMBED_CONNECTORS (default OFF). The standalone connector service runs a
+    # second machine whose memory is almost entirely a DUPLICATE model stack; folded, it
+    # reuses the engines and RuntimeFactory built above, so one process holds one stack.
+    # Import is LAZY and inside this branch (D-I1-1): persona-api declares no dependency on
+    # persona-connectors, because connectors depends on api and the reverse edge would be a
+    # cycle. Flag OFF ⇒ persona_connectors is never imported at all.
+    #
+    # RLS posture (R9-123, D-I1-18): ``rls_engine`` is the OWNER-SCOPED engine and must be a
+    # role RLS binds (the api's persona_app, already proven non-superuser by the R2-D-1
+    # probe above); ``admin_engine`` is the cross-tenant dispatch engine. Swapping them
+    # would silently serve one tenant another tenant's data.
+    embedded_connectors = None
+    # The cross-tenant engine for the pre-auth resolve/redeem reads. Community shares one
+    # engine for both roles (single owner, RLS inert), exactly as ConnectorComposition and
+    # the JobQueue above do. Cloud must NOT share: falling back to the persona_app engine
+    # would make those pre-auth reads RLS-scoped with no owner set, so every inbound would
+    # resolve to nothing and the connectors would sit there silently doing nothing. That is
+    # fail-closed rather than leaky, but silent either way, so it is refused loudly below.
+    _connector_dispatch_engine = admin_engine if admin_engine is not None else rls_engine
+    _connector_dispatch_ok = admin_engine is not None or config.edition is not Edition.cloud
+    if (
+        config.effective_embed_connectors()
+        and rls_engine is not None
+        and runtime_factory is not None
+        and app.state.job_queue is not None
+        and _connector_dispatch_ok
+        and _connector_dispatch_engine is not None
+    ):
+        from persona_api.background.connectors_host import (
+            mount_connector_routes,
+            start_embedded_connectors,
+        )
+
+        try:
+            embedded_connectors = await start_embedded_connectors(
+                config=config,
+                rls_engine=rls_engine,
+                dispatch_engine=_connector_dispatch_engine,
+                runtime_factory=runtime_factory,
+                credits_policy=app.state.credits_policy,
+                job_queue=app.state.job_queue,
+                stripe_gateway=app.state.stripe_gateway,
+            )
+        except Exception as exc:  # noqa: BLE001 — a connector fault must not down the api
+            # D-I1-6, and the same posture as the keyless in-process-worker branch above: a
+            # revoked platform token or a platform outage during composition degrades this
+            # ONE subsystem, loudly, rather than crash-looping the process that also serves
+            # the web app.
+            _LOG.error(
+                "embedded connectors failed to start ({error}); the api keeps serving without them",
+                error=str(exc),
+            )
+            embedded_connectors = None
+        else:
+            if embedded_connectors is None:
+                _LOG.warning(
+                    "PERSONA_API_EMBED_CONNECTORS is on but NO connector platform is "
+                    "configured; set a bot token (PERSONA_CONNECTORS_{TELEGRAM,DISCORD,"
+                    "SLACK}_BOT_TOKEN), a Twilio channel, or Postmark email. The api "
+                    "keeps serving; no connector transport is running."
+                )
+            elif embedded_connectors.http_app is not None:
+                # Spec I1 (T3, D-I1-11 / D-I1-15): serve the connectors' webhook + OAuth +
+                # link routes from THIS app on THIS port. The provider registrations pin
+                # the paths, so they are mounted verbatim and the cutover stays one DNS
+                # record. No second uvicorn: that would be Option B, which was not chosen.
+                _mounted = mount_connector_routes(app, embedded_connectors.http_app)
+                _LOG.info(
+                    "mounted {count} connector routes for: {platforms}",
+                    count=_mounted,
+                    platforms=", ".join(embedded_connectors.platforms),
+                )
+    elif config.effective_embed_connectors():
+        _LOG.warning(
+            "PERSONA_API_EMBED_CONNECTORS is on but the prerequisites are missing "
+            "(rls_engine={engine}, runtime_factory={factory}, job_queue={queue}, "
+            "cross_tenant_dispatch_engine={dispatch}); connectors are NOT hosted in this "
+            "process",
+            engine=rls_engine is not None,
+            factory=runtime_factory is not None,
+            queue=app.state.job_queue is not None,
+            dispatch=_connector_dispatch_ok,
+        )
+    app.state.embedded_connectors = embedded_connectors
+
     # Spec M2 (D-M2-6 + the F5 closure): warm the OpenRouter catalog + the
     # metadata index OFF the event loop at boot, then keep them TTL-fresh.
     # The turn path NEVER fetches (compute_turn_cost resolves with
@@ -976,6 +1062,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.telemetry_buffer.aclose()
         if in_process_worker is not None:
             await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
+        if embedded_connectors is not None:
+            # Spec I1 (D-I1-8): drain the connector runners HERE, before the runtime
+            # factory closes and before either engine is disposed. A transport cancelled
+            # after disposal could still be mid-turn against a dead pool; this ordering is
+            # load-bearing, and the T2 lifecycle test proves it by exiting a real
+            # TestClient context rather than asserting it in a comment.
+            await embedded_connectors.aclose()
         if run_registry is not None:
             await run_registry.aclose()  # cancel in-flight run tasks (S08-2)
         if chat_turn_registry is not None:

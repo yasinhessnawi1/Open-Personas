@@ -10,9 +10,10 @@ existing capability.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
 from enum import StrEnum
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from fastapi import APIRouter, Depends, Request
@@ -26,6 +27,11 @@ from persona_api.schemas import (
     ConnectorLinkArtifact,
 )
 from persona_api.services import connectors_service
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from starlette.responses import Response
 
 router = APIRouter(prefix="/v1/me/connectors", tags=["connectors"])
 
@@ -129,6 +135,23 @@ async def initiate_link(
     shows "temporarily unavailable" — never a dead spinner. Returns exactly the normalized
     :class:`ConnectorLinkArtifact` (``extra="forbid"``) so no upstream field leaks.
     """
+    # Spec I1 (D-I1-16): when the connectors are embedded, the route below is mounted on
+    # THIS app, so forwarding would be the process calling its own public hostname. That
+    # burns a round trip, turns a local failure into an opaque 503, and depends on DNS
+    # already being correct to serve the request the cutover exists to make correct. Call
+    # the mounted handler directly instead. Not embedded ⇒ today's forwarder, unchanged.
+    if getattr(request.app.state, "embedded_connectors", None) is not None:
+        from persona_api.background.connectors_host import find_mounted_link_endpoint
+
+        endpoint = find_mounted_link_endpoint(request.app, platform.value)
+        if endpoint is not None:
+            # The mounted handler takes the Request and derives the owner from the bearer
+            # it verifies ITSELF, exactly as it does for the standalone service. The
+            # authorization boundary is unchanged: the owner is still the token's sub,
+            # never a parameter, and this route's own auth wall has already run.
+            data = await _issue_in_process(endpoint, request, platform)
+            return _artifact_from(data, platform)
+
     base = request.app.state.config.connector_service_url.rstrip("/")
     if not base:
         raise ConnectorServiceUnavailableError(
@@ -161,8 +184,53 @@ async def initiate_link(
             "the connector service returned a malformed response",
             context={"platform": platform.value},
         ) from exc
-    # Copy ONLY the known keys — an unexpected upstream field is dropped, not leaked or
-    # errored (extra="forbid" on the schema closes the OpenAPI contract too).
+    return _artifact_from(data, platform)
+
+
+async def _issue_in_process(
+    endpoint: Callable[..., Awaitable[Response]],
+    request: Request,
+    platform: ConnectorPlatform,
+) -> object:
+    """Call the mounted link handler and decode its response (Spec I1, D-I1-16).
+
+    Maps the handler's outcome onto exactly the failure surface the forwarder produces, so
+    the web sees one honest "unavailable" either way and no caller can tell which hosting
+    served it. A non-200 is not passed through for the same reason it is not passed through
+    from the upstream: the sub-reason (a config mismatch, an unconfigured platform) is not
+    an oracle the front door should expose.
+    """
+    try:
+        response = await endpoint(request)
+    except Exception as exc:  # noqa: BLE001 — mirror the forwarder's fail-soft posture
+        raise ConnectorServiceUnavailableError(
+            "the connector service is unreachable", context={"platform": platform.value}
+        ) from exc
+    if response.status_code != httpx.codes.OK:
+        raise ConnectorServiceUnavailableError(
+            "the connector service could not issue a link", context={"platform": platform.value}
+        )
+    try:
+        return json.loads(bytes(response.body))
+    except ValueError as exc:
+        raise ConnectorServiceUnavailableError(
+            "the connector service returned a malformed response",
+            context={"platform": platform.value},
+        ) from exc
+
+
+def _artifact_from(data: object, platform: ConnectorPlatform) -> ConnectorLinkArtifact:
+    """Normalize a link payload, from either hosting, onto the closed response schema.
+
+    Copies ONLY the known keys — an unexpected field is dropped, not leaked or errored
+    (``extra="forbid"`` on the schema closes the OpenAPI contract too). Shared by both
+    paths so the embedded and forwarded responses cannot drift apart.
+    """
+    if not isinstance(data, dict):
+        raise ConnectorServiceUnavailableError(
+            "the connector service returned an unexpected link shape",
+            context={"platform": platform.value},
+        )
     try:
         return ConnectorLinkArtifact(
             deep_link=data.get("deep_link"),

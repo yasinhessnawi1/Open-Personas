@@ -43,14 +43,26 @@ what it is and what it can do before you connect it.
 
 ## Architecture
 
-`persona-connectors` runs as a separate long lived process, the third after
-`persona-api` and `persona-voice`. It reuses the API's reply producing chat flow
-and the identity tagged delivery router **in process**, with the same per user
-isolation contextvar the worker uses.
+`persona-connectors` reuses the API's reply producing chat flow and the identity
+tagged delivery router **in process**, with the same per user isolation contextvar
+the worker uses. It can be hosted two ways, and the composition is identical either
+way:
+
+- **as its own long lived process** (`python -m persona_connectors`), which serves
+  the webhook and OAuth surfaces on its own port;
+- **inside the api process**, enabled with `PERSONA_API_EMBED_CONNECTORS` (default
+  off). The transports run as supervised tasks in the api's lifespan and their
+  routes are mounted on the api's own port, so one process holds one model stack
+  instead of two. The paths are unchanged, so provider registrations do not move.
+
+`persona_connectors.service` is the shared composition root both hosts call. It
+returns everything needed to run the connectors and leaves the decision of *how* to
+run them to the host, which is why the same code serves both shapes.
 
 The owned surface (`persona_connectors.domain`) is import decoupled from
-`persona_api`. The api coupling lives only in `persona_connectors.composition`, so
-a future extraction is a dependency swap, not a reshape.
+`persona_api`. The api coupling lives only in `persona_connectors.composition` and
+`persona_connectors.service`, so a future extraction is a dependency swap, not a
+reshape.
 
 ---
 

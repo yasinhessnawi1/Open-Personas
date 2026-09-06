@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from persona_api.config import APIConfig
-from persona_connectors import __main__ as main_module
+from persona_connectors import service as service_module
 
 
 class _FakeFactory:
@@ -36,14 +36,14 @@ class _FakeFactory:
 def _quiet_composition(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace the deploy seams (torch, model backends, network probes) with fakes."""
     _FakeFactory.instances.clear()
-    monkeypatch.setattr(main_module, "RuntimeFactory", _FakeFactory)
-    monkeypatch.setattr(main_module.persona_service, "default_embedder", lambda _model: object())
-    monkeypatch.setattr(main_module, "ChromaBackend", lambda **_kw: MagicMock())
-    monkeypatch.setattr(main_module, "PostgresBackend", lambda **_kw: MagicMock())
-    monkeypatch.setattr(main_module, "resolve_openrouter_subscription_mode", lambda: None)
-    monkeypatch.setattr(main_module, "tier_registry_from_env", lambda **_kw: MagicMock())
-    monkeypatch.setattr(main_module, "build_free_tier_registry", lambda _cfg, **_kw: None)
-    monkeypatch.setattr(main_module, "PostgresTurnLogWriter", lambda _engine: MagicMock())
+    monkeypatch.setattr(service_module, "RuntimeFactory", _FakeFactory)
+    monkeypatch.setattr(service_module.persona_service, "default_embedder", lambda _model: object())
+    monkeypatch.setattr(service_module, "ChromaBackend", lambda **_kw: MagicMock())
+    monkeypatch.setattr(service_module, "PostgresBackend", lambda **_kw: MagicMock())
+    monkeypatch.setattr(service_module, "resolve_openrouter_subscription_mode", lambda: None)
+    monkeypatch.setattr(service_module, "tier_registry_from_env", lambda **_kw: MagicMock())
+    monkeypatch.setattr(service_module, "build_free_tier_registry", lambda _cfg, **_kw: None)
+    monkeypatch.setattr(service_module, "PostgresTurnLogWriter", lambda _engine: MagicMock())
 
 
 @pytest.mark.usefixtures("_quiet_composition")
@@ -53,7 +53,7 @@ def test_the_connector_runtime_enables_the_graph_store_like_the_api(
 ) -> None:
     api_config = APIConfig(edition=edition, audit_root=str(tmp_path / "audit"))
 
-    factory = main_module._build_runtime_factory(  # noqa: SLF001 — the builder under test
+    factory = service_module._build_runtime_factory(  # noqa: SLF001 — the builder under test
         api_config, MagicMock(), credits_policy=MagicMock()
     )
 

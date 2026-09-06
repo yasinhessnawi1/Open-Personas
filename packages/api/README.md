@@ -114,6 +114,15 @@ identical across editions. Community just feeds them a constant.
   enablement, so nothing is auto enabled. Knobs are `PERSONA_MCP_SYNC_*` env vars,
   and the blocking git clone is offloaded off the event loop.
 
+The api can additionally **host the chat connectors in process**, enabled with
+`PERSONA_API_EMBED_CONNECTORS` (default off). With it on, the Telegram, Discord,
+Slack, WhatsApp, SMS and email transports run as supervised tasks in the api's
+lifespan and their webhook and OAuth routes are served from the api's own port,
+reusing its engines and runtime so one process holds one model stack rather than
+two. Off, nothing from `persona-connectors` is even imported. Turning it on while a
+separate connectors process is still running would double deliver every message, so
+follow the cutover order in `docs/ops/`.
+
 The **api** runs as a single uvicorn worker by design, because its in process run
 event bus and in memory rate limiter assume one worker. The **job worker** is a
 separate process class and scales horizontally to N processes; durable job state

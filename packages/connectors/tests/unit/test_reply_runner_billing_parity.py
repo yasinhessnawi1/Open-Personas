@@ -402,14 +402,14 @@ def test_plan_gating_is_armed_in_cloud_and_off_in_community(tmp_path: Path) -> N
 def test_the_connector_runtime_factory_arms_gating_and_threads_the_openrouter_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ``__main__`` wiring itself (R9-074), with the heavy deploy seam stubbed out.
+    """The ``service`` wiring itself (R9-074), with the heavy deploy seam stubbed out.
 
     ``_build_runtime_factory`` loads torch + real model backends, so the embedder / tier
     builders are replaced with recorders; what is under test is the ARGUMENTS the entry
     point passes — the free registry being present at all, and the resolved OpenRouter
     mode reaching the paid tier builder (it previously reached neither).
     """
-    from persona_connectors import __main__ as service
+    from persona_connectors import service
 
     recorded: dict[str, Any] = {}
 
@@ -442,11 +442,13 @@ def test_the_service_entry_actually_passes_the_verb_services() -> None:
     """The wiring test above builds the services itself, so it cannot see this.
 
     ``_build_connector_runner`` calls ``build_reply_runner`` directly. That proves the
-    forwarding, but a green suite would still be compatible with ``__main__._amain``
-    never passing them -- the fix would be unreachable in production while every test
-    passed. This reads the real call site, in the spirit of the A10-D-9 grep guard.
+    forwarding, but a green suite would still be compatible with
+    ``service.build_connectors`` never passing them: the fix would be unreachable in
+    production while every test passed. This reads the real call site, in the spirit of
+    the A10-D-9 grep guard. Spec I1 moved that call site from ``__main__.py`` to
+    ``service.py``; the guard follows it, or it silently stops guarding.
     """
-    entry = pathlib.Path(persona_connectors.__file__).parent / "__main__.py"
+    entry = pathlib.Path(persona_connectors.__file__).parent / "service.py"
     source = entry.read_text()
     # Slice to the call's own closing paren (a bare ")" at the call's indent), not the
     # first ")" -- nested calls like build_stripe_gateway(api_config) sit inside it.

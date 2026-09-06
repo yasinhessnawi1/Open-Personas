@@ -32,8 +32,8 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from persona_connectors.__main__ import _setup_discord, _setup_slack, _setup_telegram, _supervised
 from persona_connectors.config import ConnectorConfig
+from persona_connectors.service import _setup_discord, _setup_slack, _setup_telegram, _supervised
 from pydantic import SecretStr
 
 if TYPE_CHECKING:
@@ -239,17 +239,17 @@ async def test_slack_setup_forwards_the_configured_scopes_into_the_authorize_url
     A spy subclass captures the constructed instance so the actual authorize URL can be
     built from it and inspected, rather than trusting that the kwargs were merely passed.
     """
-    from persona_connectors import __main__ as main_module
+    from persona_connectors import service as service_module
 
     captured: dict[str, object] = {}
-    real_cls = main_module.slack_adapter.SlackLinkingService
+    real_cls = service_module.slack_adapter.SlackLinkingService
 
     class _SpyLinkingService(real_cls):  # type: ignore[misc, valid-type]
         def __init__(self, **kwargs: object) -> None:
             super().__init__(**kwargs)  # type: ignore[arg-type]
             captured["instance"] = self
 
-    monkeypatch_target = main_module.slack_adapter
+    monkeypatch_target = service_module.slack_adapter
     original = monkeypatch_target.SlackLinkingService
     monkeypatch_target.SlackLinkingService = _SpyLinkingService  # type: ignore[misc]
     try:
@@ -407,9 +407,9 @@ async def test_supervised_resets_the_ceiling_after_a_healthy_stint(
     (then 1) and a THIRD attempt happens — without the reset it would be 2, over the
     ceiling of 1, and ``_supervised`` would give up after only 2 calls.
     """
-    from persona_connectors import __main__ as main_module
+    from persona_connectors import service as service_module
 
-    monkeypatch.setattr(main_module, "_RESTART_MAX_CONSECUTIVE_FAILURES", 1)
+    monkeypatch.setattr(service_module, "_RESTART_MAX_CONSECUTIVE_FAILURES", 1)
 
     calls = 0
     clock = iter([0.0, 1.0, 10.0, 160.0, 999.0])
