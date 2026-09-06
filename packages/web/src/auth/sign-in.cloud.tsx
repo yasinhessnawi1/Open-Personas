@@ -166,8 +166,15 @@ export function SignIn() {
     await runGuarded(async () => {
       setFormError(null);
       const { error } = await signIn.password({ password });
-      const handled =
-        signIn.status === "complete" || signIn.status === "needs_second_factor";
+      // R9-136: Clerk asks a browser it has not seen before to prove the email
+      // (`needs_client_trust`). Its runtime verifies that exactly like a second
+      // factor, so the same email-code step completes it. Before this, the status
+      // fell through to the generic error and every password sign-in on a new
+      // device died with "Something went wrong".
+      const needsEmailCode =
+        signIn.status === "needs_second_factor" ||
+        signIn.status === "needs_client_trust";
+      const handled = signIn.status === "complete" || needsEmailCode;
       if (error && !handled) {
         setFormError(clerkErrorToMessage(error as ClerkErrorLike, tError));
         return;
@@ -176,7 +183,7 @@ export function SignIn() {
         await signIn.finalize(finishSession);
         return;
       }
-      if (signIn.status === "needs_second_factor") {
+      if (needsEmailCode) {
         const { error: sendError } = await signIn.mfa.sendEmailCode();
         if (sendError) {
           setFormError(
@@ -189,8 +196,10 @@ export function SignIn() {
         setStep("mfa");
         return;
       }
-      // needs_client_trust / needs_new_password etc. are not part of the v1
-      // email+password config; surface a calm prompt rather than silently stall.
+      // Anything else (`needs_new_password`, a future status) is not part of this
+      // flow yet. Name it in the console so the next report carries the status
+      // instead of only the generic sentence (R9-136 was found blind).
+      console.warn("sign-in: unhandled status after password", signIn.status);
       setFormError(clerkErrorToMessage(null, tError));
     });
   };
