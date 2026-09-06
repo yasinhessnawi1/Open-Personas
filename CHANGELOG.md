@@ -47,6 +47,10 @@ Per-spec entries are added by the close-out phase of each spec.
 - **The owner-scoped database role is verified at startup**, not on the first
   inbound message. The check existed but nothing called it, so a misconfigured
   role would have been discovered by a user being served another account's data.
+- **The api's Fly env now carries the two non-secret connector JWT settings** (algorithm
+  list and audience) that the standalone app set as plain env; the first cutover attempt
+  missed them and the embedded start refused with an HS256 default. A test pins the two
+  env blocks equal for every connector setting.
 
 ### Billing you can actually use (Spec M5, 2026-09-05)
 

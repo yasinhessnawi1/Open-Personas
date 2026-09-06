@@ -55,6 +55,14 @@ kill_timeout = "30s"
   PERSONA_LOG_LEVEL = "INFO"
   PERSONA_API_JWT_ALGORITHMS = "RS256"
   PERSONA_API_JWT_AUDIENCE = "persona-api"
+  # Spec I1 / R9-147: the connectors hosted in this process verify the link routes'
+  # Clerk tokens with THEIR OWN prefix. The standalone connectors app carried these two
+  # as plain env, not secrets, so the cutover's secret copy never brought them over and
+  # the embedded start failed with "JWKS verifier only supports asymmetric algorithms;
+  # got ['HS256']" (the config default). Keep them equal to the connectors fly.toml;
+  # test_fly_env_parity.py pins that.
+  PERSONA_CONNECTORS_JWT_ALGORITHMS = "RS256"
+  PERSONA_CONNECTORS_JWT_AUDIENCE = "persona-api"
   # persona-voice base URL. UNSET in prod until 2026-07-31, and the default is
   # "" — which is the `not_configured` branch of routes/voice.py::
   # _voice_service_base, so EVERY voice call 503'd with
