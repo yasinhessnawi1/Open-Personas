@@ -36,6 +36,7 @@ const messages = {
     memory: "Memory",
     schedule: "Schedule",
     connectors: "Connected platforms",
+    billing: "Billing",
     settings: "Settings",
     command: {
       open: "Search and commands",
@@ -177,5 +178,16 @@ describe("CommandTrigger", () => {
     fireEvent.click(screen.getByRole("button"));
     expect(onOpen).toHaveBeenCalled();
     window.removeEventListener(OPEN_COMMAND_PALETTE_EVENT, onOpen);
+  });
+});
+
+describe("billing entry point (R9-137)", () => {
+  it("lists Billing and navigates to it", async () => {
+    renderWith(<CommandPalette data={DATA} />);
+    fireEvent(window, new Event(OPEN_COMMAND_PALETTE_EVENT));
+    await screen.findByPlaceholderText(/search personas/i);
+
+    fireEvent.click(screen.getByRole("option", { name: /Billing/ }));
+    expect(push).toHaveBeenCalledWith("/settings/billing");
   });
 });

@@ -26,6 +26,7 @@ import {
   Cable,
   CalendarClock,
   ChevronRight,
+  CreditCard,
   FolderOpen,
   ListChecks,
   MessageSquare,
@@ -295,6 +296,7 @@ export function CommandPalette({ data }: { data: SidebarData }) {
       },
       { key: "schedule", href: "/schedule", icon: CalendarClock },
       { key: "connectors", href: "/settings/connectors", icon: Cable },
+      { key: "billing", href: "/settings/billing", icon: CreditCard },
       { key: "settings", href: "/settings", icon: Settings },
     ];
     const nav: CommandItem[] = NAV.filter((n) => !n.hidden).map((n) => ({

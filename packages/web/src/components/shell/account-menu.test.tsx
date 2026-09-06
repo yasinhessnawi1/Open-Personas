@@ -20,6 +20,7 @@ vi.mock("next-themes", () => ({ useTheme: () => ({ setTheme: vi.fn() }) }));
 const messages = {
   nav: {
     settings: "Settings",
+    billing: "Billing",
     account: {
       menu: "Account",
       manageAccount: "Manage account",
@@ -122,5 +123,26 @@ describe("AccountMenu", () => {
     // Settings is always present; sign-out is cloud-only.
     expect(screen.getByText("Settings")).toBeTruthy();
     expect(screen.queryByText("Sign out")).toBeNull();
+  });
+});
+
+describe("billing entry point (R9-137)", () => {
+  it("always offers Billing next to Settings, whatever the balance", () => {
+    account = {
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut: vi.fn(),
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+
+    const billing = screen.getByRole("menuitem", { name: /Billing/ });
+    const href =
+      billing.getAttribute("href") ??
+      billing.closest("a")?.getAttribute("href");
+    expect(href).toBe("/settings/billing");
   });
 });

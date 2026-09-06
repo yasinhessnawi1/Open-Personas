@@ -13,6 +13,7 @@
 
 import {
   Cable,
+  CreditCard,
   LogOut,
   Monitor,
   Moon,
@@ -132,6 +133,12 @@ export function AccountMenu({
         <DropdownMenuItem render={<Link href="/settings" />}>
           <Settings />
           {tn("settings")}
+        </DropdownMenuItem>
+
+        <DropdownMenuItem render={<Link href="/settings/billing" />}>
+          <CreditCard />
+
+          {tn("billing")}
         </DropdownMenuItem>
 
         <DropdownMenuItem render={<Link href="/settings/connectors" />}>

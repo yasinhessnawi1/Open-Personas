@@ -73,9 +73,11 @@ async function renderPage() {
 }
 
 function billingLinks(): string[] {
-  return Array.from(
-    document.querySelectorAll('a[href="/settings/billing"]'),
-  ).map((a) => a.textContent ?? "");
+  // The warnings' CTAs only: the page nav now always carries a Billing link
+  // (R9-137), which is asserted separately below.
+  return Array.from(document.querySelectorAll('a[href="/settings/billing"]'))
+    .filter((a) => a.closest("nav") === null)
+    .map((a) => a.textContent ?? "");
 }
 
 describe("settings page credit warnings", () => {
@@ -136,5 +138,18 @@ describe("settings page credit warnings", () => {
     await renderPage();
     expect(screen.getByText(messages.settings.addCredits)).toBeTruthy();
     expect(billingLinks().join()).not.toContain("settings.");
+  });
+});
+
+describe("billing entry point (R9-137)", () => {
+  it("offers Billing from the page nav even with a healthy wallet", async () => {
+    serveBalance(500, false);
+    await renderPage();
+    // Healthy wallet: no low-balance card, no 402 cliff, so the warnings offer
+    // nothing; the nav must still lead to billing. Before this it did not.
+    expect(billingLinks()).toEqual([]);
+    const nav = document.querySelector('nav a[href="/settings/billing"]');
+    expect(nav).not.toBeNull();
+    expect(nav?.textContent).toBe("Billing");
   });
 });

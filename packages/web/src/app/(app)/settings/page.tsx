@@ -137,6 +137,14 @@ export default async function SettingsPage() {
               </a>
             </li>
             <li>
+              <Link
+                href="/settings/billing"
+                className="type-ui block border-l-2 border-transparent px-3 py-1 hover:border-primary hover:text-foreground"
+              >
+                {t("billingLabel")}
+              </Link>
+            </li>
+            <li>
               <a
                 href="#preferences"
                 className="type-ui block border-l-2 border-transparent px-3 py-1 hover:border-primary hover:text-foreground"
