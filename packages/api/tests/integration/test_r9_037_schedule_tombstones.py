@@ -419,7 +419,11 @@ async def test_dial_verb_real_chain_also_refuses(
             rls_engine=app_engine,
             owner_id=owner,
             schedule_id=sid,
-            now=_NOW,
+            # The dial verb's lazy ensure reads the REAL clock (``apply`` takes no
+            # ``now``), so the tombstone must be stamped against that same clock.
+            # Stamped at the fixed ``_NOW`` it silently aged out of the 30-day window
+            # once the calendar passed 2026-08-13, and the refusal never ran.
+            now=datetime.now(UTC),
         )
         with pytest.raises(ScheduleNotFoundError):
             schedules.get(owner, sid)

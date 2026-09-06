@@ -168,6 +168,7 @@ def _run_reconcile(migrated_engine: Engine, rls_engine: Engine) -> dict[str, int
         vas.reconcile_voice_assignments(
             config=config,
             registry=SimpleNamespace(get=lambda _t: object()),  # never reached (restore path)
+            free_tier_registry=None,  # plan gating is not what this test exercises
             sweep_engine=migrated_engine,  # the RLS-bypassing cross-tenant read
             rls_engine=rls_engine,
         )

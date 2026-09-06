@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.schema.tools import ToolCall
+from persona.tools._factory import SELF_KNOWLEDGE_TOOLS
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import persona_service, tool_consent_service
 from persona_api.services.runtime_factory import RuntimeFactory
@@ -163,8 +164,13 @@ async def test_backward_compat_only_declared_tools_advertised(
         factory = _factory(engine, embedder, audit_root)
         persona = factory._load_persona(persona_id)  # type: ignore[attr-defined]
         tb = await factory._build_toolbox(persona, scanned_skills=[])  # type: ignore[attr-defined]
-        # Exactly the declared tools are advertised — no spec-26 built-in leaks in.
-        assert set(tb.names()) == {"web_search", "file_read"}  # type: ignore[attr-defined]
+        # Exactly the declared tools are advertised, no spec-26 built-in leaks in.
+        # The self-knowledge tools (R9-075: schedule_introspect, use_skill) are
+        # auto-allowed by design and never named in a YAML allow-list, so they are
+        # subtracted rather than expected: their presence depends on composition,
+        # not on the persona.
+        advertised = set(tb.names()) - SELF_KNOWLEDGE_TOOLS  # type: ignore[attr-defined]
+        assert advertised == {"web_search", "file_read"}
     finally:
         current_user_id.reset(token)
         with engine.begin() as conn:

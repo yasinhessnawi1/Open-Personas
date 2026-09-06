@@ -213,6 +213,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     admin_engine: Engine | None = None
     memory_backend: Backend | None = None
     community_db_manager: CommunityDbManager | None = None
+    # R9-143: the managed embedded Postgres URL, kept so the in-process worker can be
+    # pointed at the SAME database the api migrated and serves. In this mode
+    # ``config.database_url`` is empty by design (D-K10-1: external URL wins, else
+    # embedded), and the worker composition fails fast without a DSN.
+    community_managed_url: str | None = None
     if config.edition is Edition.community:
         db_mode = CommunityDbMode(config.community_db_mode)
         if db_mode is CommunityDbMode.legacy_sqlite:
@@ -250,6 +255,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             managed_url = community_db_manager.start()
             run_migrations(managed_url)
+            community_managed_url = managed_url
             rls_engine = make_rls_engine(managed_url, pool_size=config.db_pool_size)
             # Spec K10 (T8, D-K10-4): auto-import a legacy SQLite + Chroma install on
             # the first managed boot — the legacy-data branching (data present →
@@ -799,8 +805,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         from persona_api.background.worker_root import start_in_process_worker
 
         try:
+            # R9-143: community-on-managed-Postgres has no DATABASE_URL to give the
+            # worker; hand it the managed URL for both roles (single owner, instance
+            # superuser by design, D-K10-2). Scoped to the worker's copy of the config
+            # so nothing else reads a database_url the operator never set.
+            worker_config = (
+                config.model_copy(
+                    update={
+                        "database_url": community_managed_url,
+                        "app_database_url": community_managed_url,
+                    }
+                )
+                if community_managed_url
+                else config
+            )
             in_process_worker = start_in_process_worker(
-                config=config,
+                config=worker_config,
                 rls_engine=rls_engine,
                 embedder=app.state.embedder,
                 tier_registry=_worker_tier_registry,

@@ -33,9 +33,11 @@ _FETCH_K = max(_TOP_K * 3, _TOP_K)  # EpisodicStore.query candidate count
 _LATENCY_BUDGET_MS = 50.0
 
 
-def test_hnsw_ann_query_under_50ms_at_10k(pg_engine: Engine, embedder: HashEmbedder384) -> None:
+def test_hnsw_ann_query_under_50ms_at_10k(
+    migrated_engine: Engine, embedder: HashEmbedder384
+) -> None:
     # Seed owner + persona (FK), then 10k chunks with deterministic vectors.
-    with pg_engine.begin() as conn:
+    with migrated_engine.begin() as conn:
         conn.execute(text("INSERT INTO users (id, email) VALUES ('u1','u1@example.com')"))
         conn.execute(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES ('p1','u1','name: p1')")
@@ -62,7 +64,7 @@ def test_hnsw_ann_query_under_50ms_at_10k(pg_engine: Engine, embedder: HashEmbed
     q = embedder.encode(["a query about something"])[0]
     q_literal = "[" + ",".join(repr(x) for x in q) + "]"
     latencies: list[float] = []
-    with pg_engine.connect() as conn:
+    with migrated_engine.connect() as conn:
         for _ in range(30):
             t0 = time.perf_counter()
             conn.execute(
