@@ -19,7 +19,13 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
     from tests.conftest import HashEmbedder384
 
-pytestmark = pytest.mark.integration
+# R9-145: this is a latency BENCHMARK, not a correctness test. It seeds 10,000 rows and
+# asserts a p95 under 50 ms, which a loaded laptop fails on timing alone; under the
+# 120 s integration timeout it died mid-query and psycopg's "cannot exit pipeline mode
+# while busy" turned that into a runner internal error (exit 3) at 49% of the leg. It
+# runs in the opt-in soak suite with its own budget; the regression it guards (a
+# missing cosine index, a seq scan from an RLS policy) is still caught there.
+pytestmark = [pytest.mark.soak, pytest.mark.timeout(900)]
 
 _N = 10_000
 _TOP_K = 3
