@@ -69,7 +69,7 @@ from persona_runtime.routing import tier_for
 
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
-from persona_api.editions.factory import build_credits_policy
+from persona_api.editions.factory import build_credits_policy, build_stripe_gateway
 from persona_api.errors import CommunityDbError
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
 from persona_api.initiative.handler import (
@@ -454,6 +454,27 @@ def build_worker_registry(
     # built-but-inert killer is the composition test over this branch). The
     # scan routes on the SMALL tier directly (no router profile — the K2
     # synthesis_tier precedent; Phase-1 ruling 1).
+    # Spec M5 (B5, D-M5-24) — the auto-top-up tenant. Voice observes a balance crossing
+    # and enqueues a durable trigger; this worker holds the Stripe gateway, so the charge
+    # decision runs HERE (D-M5-15). Registered ONLY when billing is active:
+    # ``build_stripe_gateway`` returns None on community / flag-off, so the tenant is
+    # simply absent, the ``stripe`` SDK is never imported, and the registry stays
+    # byte-identical to a pre-M5 worker. Same dependency-conditional shape the
+    # delegated-turn + avatar tenants use.
+    #
+    # At FUNCTION scope on purpose: this block first landed inside the
+    # ``initiative_settings.enabled`` branch, which is a different feature's flag and
+    # defaults OFF — so a correctly-configured billing deployment with initiative off
+    # would have registered no tenant, and every voice top-up would have dead-lettered.
+    # Billing must be gated by billing alone.
+    _stripe_gateway = build_stripe_gateway(config)
+    if _stripe_gateway is not None:
+        from persona_api.jobs.handlers.auto_topup import (  # noqa: PLC0415 — active path only
+            register_auto_topup_handler,
+        )
+
+        register_auto_topup_handler(registry, rls_engine=rls_engine, gateway=_stripe_gateway)
+
     initiative_settings = InitiativeSettings()
     if initiative_settings.enabled:
         # Spec M3 (T5b): the scan backend is metered so ``collect_llm_usage`` in the

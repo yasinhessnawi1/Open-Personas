@@ -79,6 +79,7 @@ from persona.imagegen import (
     ImageProviderError,
 )
 from persona.imagegen.result import ImageQuality, ImageSize
+from persona.logging import get_logger
 from persona.schema.persona import Persona
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -89,6 +90,8 @@ from persona_api.services import audit_service, persona_service
 
 if TYPE_CHECKING:
     from persona.imagegen.protocol import ImageBackend
+
+_log = get_logger("api.imagegen.routes")
 
 router = APIRouter(prefix="/v1/personas", tags=["imagegen"])
 
@@ -167,6 +170,36 @@ def _extract_visual_style(persona_row: dict[str, object]) -> str | None:
     return style
 
 
+def _maybe_trigger_auto_topup(request: Request, *, user_id: str, balance_before: int) -> None:
+    """Report this generation's balance change to the auto-top-up trigger (Spec M5, B5).
+
+    Best-effort and fail-soft: a completed, already-charged generation must never fail
+    because a top-up side effect did. The threshold, the eligibility gate and the charge
+    all live in ``maybe_auto_topup`` (D-M5-16), so this only reports two balances.
+
+    No gateway (community / flag-off) means no trigger at all, which keeps the community
+    path free of any billing side effect.
+    """
+    gateway = getattr(request.app.state, "stripe_gateway", None)
+    if gateway is None:
+        return
+    try:
+        from persona_api.billing.autotopup import maybe_auto_topup  # noqa: PLC0415
+
+        after = request.app.state.credits_policy.get_balance(
+            rls_engine=request.app.state.rls_engine, user_id=user_id
+        )
+        maybe_auto_topup(
+            rls_engine=request.app.state.rls_engine,
+            gateway=gateway,
+            user_id=user_id,
+            old_balance=balance_before,
+            new_balance=after,
+        )
+    except Exception:  # noqa: BLE001 — a billing side effect never breaks a finished image
+        _log.opt(exception=True).warning("imagegen auto-top-up trigger failed for {}", user_id)
+
+
 @router.post(
     "/{persona_id}/imagegen",
     status_code=status.HTTP_201_CREATED,
@@ -230,6 +263,16 @@ async def post_imagegen(
     #    layer pre-deduct: this gate catches the "user is broke" case
     #    BEFORE any deduct/refund pair is written to the ledger.
     request.app.state.credits_policy.require_credits(
+        rls_engine=request.app.state.rls_engine, user_id=user.id
+    )
+
+    # Spec M5 (B5): the balance BEFORE this generation, so the auto-top-up trigger
+    # below can report a real before/after pair. Imagegen is the second-priciest
+    # surface after voice, and it was one of the two the M4 trigger never covered
+    # (§1c.11), so a Pro user could burn through their balance here with the feature
+    # they opted into never firing. Read here rather than derived from the charge:
+    # the flow pre-deducts a ceiling then trues up, so only the endpoints are honest.
+    _balance_before = request.app.state.credits_policy.get_balance(
         rls_engine=request.app.state.rls_engine, user_id=user.id
     )
 
@@ -305,6 +348,15 @@ async def post_imagegen(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=provider_payload,
         ) from exc
+
+    # Spec M5 (B5): imagegen is the second surface the M4 auto-top-up trigger never
+    # reached (§1c.11). Fired here, AFTER the true-up, so the reported "after" is the
+    # settled balance rather than the pre-deducted ceiling. Runs in-process because
+    # imagegen already executes inside the api, which holds the Stripe gateway: the
+    # durable-job crossing exists for VOICE, which is a peer process that must never
+    # hold payment credentials (D-M5-15). Same decision code either way, so the two
+    # surfaces cannot diverge on when a top-up fires.
+    _maybe_trigger_auto_topup(request, user_id=user.id, balance_before=_balance_before)
 
     # 7. API-layer audit (SECOND deliberate emission; T12 emitted the
     #    persona-layer ToolAuditEvent inside the tool factory — but the

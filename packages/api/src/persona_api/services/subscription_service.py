@@ -32,6 +32,7 @@ __all__ = [
     "mark_past_due",
     "resolve_stripe_customer",
     "resolve_user_by_customer",
+    "set_auto_topup",
     "set_stripe_customer",
 ]
 
@@ -195,3 +196,27 @@ def mark_past_due(rls_engine: Engine, *, user_id: str) -> None:
             .where(_sub_t.c.user_id == user_id)
             .values(status="past_due", updated_at=text("now()"))
         )
+
+
+def set_auto_topup(rls_engine: Engine, *, user_id: str, enabled: bool) -> bool:
+    """Set the caller's auto-top-up opt-in; return the STORED value (Spec M5, B1).
+
+    RLS-scoped to the caller's own row (the engine is already pinned), and returns what
+    the DB actually holds rather than the requested value — so a caller with no
+    subscription row (never provisioned) reads back ``False`` instead of a phantom
+    ``True`` the engine would never honour.
+
+    Eligibility is NOT decided here: the route enforces it with the same predicate the
+    auto-top-up engine checks (D-M5-28), so the API can never persist an armed toggle
+    for a plan the engine will silently refuse.
+    """
+    with rls_engine.begin() as conn:
+        conn.execute(
+            update(_sub_t)
+            .where(_sub_t.c.user_id == user_id)
+            .values(auto_topup_enabled=enabled, updated_at=text("now()"))
+        )
+        stored = conn.execute(
+            select(_sub_t.c.auto_topup_enabled).where(_sub_t.c.user_id == user_id)
+        ).scalar_one_or_none()
+    return bool(stored)

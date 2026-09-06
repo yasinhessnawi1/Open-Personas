@@ -68,6 +68,7 @@ from persona_voice.agent.language import (
 )
 from persona_voice.agent.warmup import start_embedder_warmup
 from persona_voice.billing import VoiceExhaustionCutoff, VoiceTurnBillingMeter
+from persona_voice.billing.topup_enqueue import enqueue_auto_topup
 from persona_voice.model import (
     AsyncArtifactLane,
     VoiceHistoryCompactor,
@@ -856,10 +857,35 @@ async def build_agent_session(
     # recorder (fires the off-loop deduct on commit) via their late-binding setters,
     # before run() fires the first turn. The deduct opens its own fresh short-lived
     # RLS engine per turn (the ``_on_call_complete`` idiom) — never the audio loop.
+    # Spec M5 (B5, D-M5-22): the auto-top-up trigger, gated at CONSTRUCTION.
+    #
+    # Non-``None`` only on a cloud edition, so community is PROVABLY inert: the
+    # collaborator is absent, so no code path exists, rather than a branch evaluated on
+    # every turn. NB this is the FIRST edition check on the voice deduct path (D-M5-23) —
+    # community voice really does meter into its local DB today, so this gate is
+    # load-bearing on its own and cannot lean on an upstream one.
+    #
+    # Voice enqueues rather than charging: an auto-top-up needs Stripe credentials this
+    # process must never hold (D-M5-15). The api worker evaluates the crossing.
+    def _enqueue_topup(old_balance: int, new_balance: int, turn_seq: int) -> None:
+        engine = make_session_rls_engine(config.database_url, user_id=user_id)
+        try:
+            enqueue_auto_topup(
+                engine,
+                owner_id=user_id,
+                old_balance=old_balance,
+                new_balance=new_balance,
+                call_id=session_id,
+                turn_seq=turn_seq,
+            )
+        finally:
+            engine.dispose()
+
     turn_billing_meter = VoiceTurnBillingMeter(
         ledger=CoreCreditsLedger(),
         billing_config=BillingConfig(),
         engine_factory=lambda: make_session_rls_engine(config.database_url, user_id=user_id),
+        enqueue_topup=_enqueue_topup if config.is_cloud else None,
         user_id=user_id,
         call_id=session_id,  # per-CALL identity (unique per connection). NOT conversation_id:
         # a voice conversation persists across separate calls, so conversation_id would collide

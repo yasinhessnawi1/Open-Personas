@@ -83,6 +83,11 @@ build never pulls `@clerk/*` into the bundle. CI gates and
   last choice default on create.
 - **Settings.** Credit balance and per turn usage, theme, tier badge visibility,
   language toggle, conversations list.
+- **Billing** (`/settings/billing`). Plans, credit packs and the Stripe billing
+  portal, your balance and what renews when, your packs and when they expire, and
+  the Pro auto top up switch. Also the page Stripe returns to after checkout. In
+  the community edition it says the install is unmetered and offers nothing to
+  buy.
 - **Connectors** (`/settings/connectors`). Link messaging platforms (Telegram,
   Discord, Slack, WhatsApp, SMS, email) behind one coherent connect, step,
   progress, confirmed flow over four mechanisms (deep link, OAuth, phone code,

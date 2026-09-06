@@ -9,8 +9,11 @@ T2b adds checkout + portal, T3 the webhook — all behind the same gate.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, TypeVar
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from persona.billing import get_payg_pack
+from persona.billing import PAYG_PACKS, all_plans, get_payg_pack, payg_pack_code
+from persona.logging import get_logger
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.billing import (
@@ -19,14 +22,28 @@ from persona_api.billing import (
     WebhookVerificationError,
     verify_and_dispatch,
 )
+from persona_api.billing.autotopup import (
+    AUTO_TOPUP_AMOUNT_CREDITS,
+    AUTO_TOPUP_THRESHOLD_CREDITS,
+)
+from persona_api.errors import BillingProviderUnavailableError
 from persona_api.schemas import (
     BillingConfigResponse,
     CheckoutRequest,
     CheckoutSessionResponse,
     PackCheckoutRequest,
+    PaygPackOut,
+    PlanOut,
     PortalSessionResponse,
 )
 from persona_api.services import subscription_service
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+_T = TypeVar("_T")
+
+_log = get_logger("api.billing.routes")
 
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
 
@@ -47,18 +64,78 @@ def require_billing_gateway(request: Request) -> StripeGateway:
     return gateway
 
 
+_STRIPE_UNAVAILABLE_DETAIL = "the payment provider is unavailable; nothing was charged"
+
+
+def _stripe_call(what: str, call: Callable[[], _T]) -> _T:
+    """Run one Stripe-backed call, converting a provider failure into a clean 502.
+
+    Spec M5 (T3-fix). Every Stripe call in this module goes through here. Without it a
+    Stripe outage (or a bad key) escapes as a **500 with a stack trace** — leaking
+    internals and giving the web no structured error, so the purchase button spins
+    forever instead of saying nothing was charged.
+
+    Catch-at-the-boundary is deliberate (ENGINEERING_STANDARDS §1): the provider SDK's
+    exceptions stop at the seam that owns the provider. ``502`` rather than a 4xx because
+    the caller did nothing wrong — the dependency is down. No session is created when
+    this fires, so there is no partial state and nothing to reconcile.
+    """
+    try:
+        return call()
+    except Exception as exc:  # noqa: BLE001 — the provider seam: ANY SDK failure maps here
+        _log.warning(
+            "stripe call failed ({what}); returning 502: {err}", what=what, err=repr(exc)[:200]
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=_STRIPE_UNAVAILABLE_DETAIL
+        ) from BillingProviderUnavailableError(_STRIPE_UNAVAILABLE_DETAIL)
+
+
 @router.get("/config", response_model=BillingConfigResponse)
 async def get_billing_config(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — auth-gated read
 ) -> BillingConfigResponse:
-    """The client-side billing config (the web needs the publishable key for Stripe.js).
+    """The client-side billing config + the plan/pack catalog (Spec M4 T2a; M5 B3).
 
     404 when billing is disabled (community / flag-off). Never returns the secret key —
     only the client-safe publishable key.
+
+    The catalog (D-M5-25) is projected straight from ``persona.billing.plans``, the
+    owner-locked single source of truth, so the web renders prices and allowances it can
+    never hardcode and can never drift from when the owner changes a number. It
+    describes the OFFERING only — caller state lives on ``GET /v1/me/wallet``
+    (D-M5-12), so the two responses cannot disagree about the same fact.
     """
     gateway = require_billing_gateway(request)
-    return BillingConfigResponse(enabled=True, publishable_key=gateway.publishable_key)
+    return BillingConfigResponse(
+        enabled=True,
+        publishable_key=gateway.publishable_key,
+        plans=[
+            PlanOut(
+                code=str(plan.code),
+                monthly_price_credits=plan.monthly_price_credits,
+                included_allowance_credits=plan.included_allowance_credits,
+                auto_topup_eligible=plan.auto_topup_eligible,
+                is_default=plan.is_default,
+            )
+            for plan in all_plans()
+        ],
+        # ``payg_pack_code`` is the inverse of the ``get_payg_pack`` lookup the pack
+        # checkout route uses, so a rendered pack posts straight back to
+        # ``/v1/billing/checkout/pack`` with no client-side code mapping to drift.
+        packs=[
+            PaygPackOut(
+                code=payg_pack_code(pack),
+                price_credits=pack.price_credits,
+                granted_credits=pack.granted_credits,
+                expiry_months=pack.expiry_months,
+            )
+            for pack in PAYG_PACKS
+        ],
+        auto_topup_threshold_credits=AUTO_TOPUP_THRESHOLD_CREDITS,
+        auto_topup_amount_credits=AUTO_TOPUP_AMOUNT_CREDITS,
+    )
 
 
 @router.post("/checkout", response_model=CheckoutSessionResponse)
@@ -84,15 +161,21 @@ async def create_checkout(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"plan {body.plan_code!r} is not purchasable (no Stripe Price configured)",
         )
-    customer_id = subscription_service.resolve_stripe_customer(
-        request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+    customer_id = _stripe_call(
+        "resolve_customer",
+        lambda: subscription_service.resolve_stripe_customer(
+            request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+        ),
     )
-    url = gateway.create_subscription_checkout(
-        customer_id=customer_id,
-        price_id=price_id,
-        success_url=config.stripe_checkout_success_url,
-        cancel_url=config.stripe_checkout_cancel_url,
-        user_id=user.id,
+    url = _stripe_call(
+        "create_subscription_checkout",
+        lambda: gateway.create_subscription_checkout(
+            customer_id=customer_id,
+            price_id=price_id,
+            success_url=config.stripe_checkout_success_url,
+            cancel_url=config.stripe_checkout_cancel_url,
+            user_id=user.id,
+        ),
     )
     return CheckoutSessionResponse(url=url)
 
@@ -120,16 +203,22 @@ async def create_pack_checkout(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"pack {body.pack!r} is not purchasable (no Stripe Price configured)",
         )
-    customer_id = subscription_service.resolve_stripe_customer(
-        request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+    customer_id = _stripe_call(
+        "resolve_customer",
+        lambda: subscription_service.resolve_stripe_customer(
+            request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+        ),
     )
-    url = gateway.create_payg_checkout(
-        customer_id=customer_id,
-        price_id=price_id,
-        credit_amount=pack.granted_credits,
-        user_id=user.id,
-        success_url=config.stripe_checkout_success_url,
-        cancel_url=config.stripe_checkout_cancel_url,
+    url = _stripe_call(
+        "create_payg_checkout",
+        lambda: gateway.create_payg_checkout(
+            customer_id=customer_id,
+            price_id=price_id,
+            credit_amount=pack.granted_credits,
+            user_id=user.id,
+            success_url=config.stripe_checkout_success_url,
+            cancel_url=config.stripe_checkout_cancel_url,
+        ),
     )
     return CheckoutSessionResponse(url=url)
 
@@ -147,11 +236,17 @@ async def create_portal(
     """
     gateway = require_billing_gateway(request)
     config = request.app.state.config
-    customer_id = subscription_service.resolve_stripe_customer(
-        request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+    customer_id = _stripe_call(
+        "resolve_customer",
+        lambda: subscription_service.resolve_stripe_customer(
+            request.app.state.rls_engine, user_id=user.id, email=user.email, gateway=gateway
+        ),
     )
-    url = gateway.create_portal_session(
-        customer_id=customer_id, return_url=config.stripe_portal_return_url
+    url = _stripe_call(
+        "create_portal_session",
+        lambda: gateway.create_portal_session(
+            customer_id=customer_id, return_url=config.stripe_portal_return_url
+        ),
     )
     return PortalSessionResponse(url=url)
 

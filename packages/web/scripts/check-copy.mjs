@@ -34,22 +34,49 @@ const CATALOGUE = join(WEB_ROOT, "src/i18n/messages/en.json");
 
 /** Words that almost always replace a concrete fact with a vibe. */
 const BANNED_WORDS = [
-  "seamless", "seamlessly", "empower", "empowers", "empowering",
-  "delve", "supercharge", "supercharged", "effortless", "effortlessly",
-  "unlock", "unlocks", "unleash", "elevate", "revolutionary",
-  "revolutionize", "revolutionise", "cutting-edge", "game-changing",
-  "game changer", "best-in-class", "world-class", "state-of-the-art",
-  "next-level", "take it to the next level", "look no further",
-  "dive into", "in today's fast-paced", "we've got you covered",
-  "transform your", "boost your", "streamline",
+  "seamless",
+  "seamlessly",
+  "empower",
+  "empowers",
+  "empowering",
+  "delve",
+  "supercharge",
+  "supercharged",
+  "effortless",
+  "effortlessly",
+  "unlock",
+  "unlocks",
+  "unleash",
+  "elevate",
+  "revolutionary",
+  "revolutionize",
+  "revolutionise",
+  "cutting-edge",
+  "game-changing",
+  "game changer",
+  "best-in-class",
+  "world-class",
+  "state-of-the-art",
+  "next-level",
+  "take it to the next level",
+  "look no further",
+  "dive into",
+  "in today's fast-paced",
+  "we've got you covered",
+  "transform your",
+  "boost your",
+  "streamline",
 ];
 
 /** Constructions that read as generated even when every word is ordinary. */
 const BANNED_PATTERNS = [
   // Matches the contraction and the spelled-out form: "it's not just",
   // "its not just", "it is not just", "isn't just", "is not just".
-  { re: /\b(it'?s|it is|isn'?t|is not)\s+(not\s+)?just\b/i, why: "the \"not just X, it's Y\" construction" },
-  { re: /\bwhether you'?re\b/i, why: "the \"whether you're X or Y\" hedge" },
+  {
+    re: /\b(it'?s|it is|isn'?t|is not)\s+(not\s+)?just\b/i,
+    why: 'the "not just X, it\'s Y" construction',
+  },
+  { re: /\bwhether you'?re\b/i, why: 'the "whether you\'re X or Y" hedge' },
   { re: /[—–]/, why: "em or en dash" },
 ];
 
@@ -108,4 +135,6 @@ if (unique.length > 0) {
   process.exit(1);
 }
 
-console.log("Copy gate clean. No AI-slop vocabulary or dashes in the catalogue.");
+console.log(
+  "Copy gate clean. No AI-slop vocabulary or dashes in the catalogue.",
+);

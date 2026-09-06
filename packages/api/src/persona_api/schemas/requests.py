@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 __all__ = [
     "ApprovalDecisionRequest",
     "AuthorPersonaRequest",
+    "AutoTopupRequest",
     "BudgetExtendRequest",
     "ChannelContext",
     "CreateConversationRequest",
@@ -489,6 +490,17 @@ class ApprovalDecisionRequest(_Input):
     decision: Literal["approve", "deny", "modify"]
     edited_arguments: dict[str, JsonValue] | None = None
     note: str = Field(default="", max_length=2000)
+
+
+class AutoTopupRequest(_Input):
+    """Turn Pro auto-top-up on or off for the caller (Spec M5, B1).
+
+    Carries the INTENT only. The threshold and the top-up amount are owner-locked
+    constants (D-M4-R5) resolved server-side, never sent by the client — a client that
+    could name its own top-up amount would be naming its own charge.
+    """
+
+    enabled: bool
 
 
 class CheckoutRequest(_Input):

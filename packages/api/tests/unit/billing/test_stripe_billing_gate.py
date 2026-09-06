@@ -109,7 +109,15 @@ def test_billing_config_route_returns_publishable_key_when_enabled() -> None:
     )
     resp = client.get("/v1/billing/config", headers=_auth())
     assert resp.status_code == 200
-    assert resp.json() == {"enabled": True, "publishable_key": "pk_test_web"}
+    # Spec M5 (B3, D-M5-25) made this response additive — it now also carries the
+    # plan/pack catalog. Assert the M4 contract BY FIELD rather than by whole-body
+    # equality, so this test keeps guarding exactly what it was written to guard (the
+    # publishable key is served when billing is enabled) without re-breaking whenever
+    # the catalog gains a field. The catalog's own contract lives in
+    # ``test_m5_billing_catalog.py``.
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["publishable_key"] == "pk_test_web"
 
 
 def test_billing_config_never_leaks_the_secret_key() -> None:

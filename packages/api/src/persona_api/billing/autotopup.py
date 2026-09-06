@@ -69,6 +69,67 @@ def _hourly_idempotency_key(user_id: str, now: datetime) -> str:
     return f"autotopup:{user_id}:{now:%Y-%m-%d-%H}"
 
 
+#: The outcomes a USER must hear about, and the notification each maps to (Spec M5, B2).
+#:
+#: Only the two that need a human. ``CHARGED`` is silent by design: the credits simply
+#: appear, and a notification for every successful top-up would train people to ignore
+#: the bell before the one that matters arrives. ``NOT_CROSSED`` / ``NOT_ELIGIBLE`` /
+#: ``DISABLED`` are non-events. ``ERROR`` is a transient provider failure the next
+#: crossing retries, so it stays in the log rather than alarming the user about a
+#: hiccup they cannot act on.
+_NOTIFIED_OUTCOMES: dict[str, tuple[str, str]] = {
+    # (level, message_key). REQUIRES_ACTION is the load-bearing one: the charge genuinely
+    # needs the cardholder, and silence here means a top-up that never completes and a
+    # balance that runs out with no explanation.
+    "requires_action": ("warning", "notifications.autoTopup.requiresAction"),
+    "no_customer": ("warning", "notifications.autoTopup.noCustomer"),
+}
+
+
+def _notify_outcome(
+    rls_engine: Engine, *, user_id: str, outcome: AutoTopupOutcome, now: datetime
+) -> None:
+    """Tell the user when an auto-top-up needs them (Spec M5, B2 — D-M5-26).
+
+    Durable notifications, not the live event stream: this fires from a detached
+    background thread after a turn, when the user may have no stream open. A dropped
+    message here is exactly the user whose card silently stopped working.
+
+    Idempotent per user per hour via the ``ref_id`` — the same hour the outbound Stripe
+    key uses (:func:`_hourly_idempotency_key`), so a retried trigger for one crossing
+    produces ONE bell entry, not one per attempt.
+
+    Best-effort: a feed-write failure must never break the caller's completed turn, which
+    is the same discipline every other server-authored notification write follows.
+    """
+    mapped = _NOTIFIED_OUTCOMES.get(str(outcome))
+    if mapped is None:
+        return
+    level, message_key = mapped
+    try:
+        from persona_api.middleware.rls_context import current_user_id  # noqa: PLC0415
+        from persona_api.services import notifications_service  # noqa: PLC0415
+
+        token = current_user_id.set(user_id)
+        try:
+            with rls_engine.begin() as conn:
+                notifications_service.create_notification(
+                    conn=conn,
+                    owner_id=user_id,
+                    kind="auto_topup",
+                    ref_id=_hourly_idempotency_key(user_id, now),
+                    level=level,
+                    message_key=message_key,
+                    params={},
+                )
+        finally:
+            current_user_id.reset(token)
+    except Exception:  # noqa: BLE001 — a bell write must never break a completed turn
+        logger.opt(exception=True).warning(
+            "auto-top-up outcome notification failed for user {}", user_id
+        )
+
+
 def maybe_auto_topup(
     *,
     rls_engine: Engine,
@@ -106,6 +167,8 @@ def maybe_auto_topup(
     customer_id = sub.get("stripe_customer_id")
     if not customer_id or not isinstance(customer_id, str):
         # Opted in but no saved card/customer — can't charge off-session; prompt on-session.
+        # B2: the user asked for this and it cannot happen, so they are told (D-M5-26).
+        _notify_outcome(rls_engine, user_id=user_id, outcome=AutoTopupOutcome.NO_CUSTOMER, now=now)
         return AutoTopupOutcome.NO_CUSTOMER
 
     # 4. The off-session charge (idempotent per hourly crossing). The GRANT is the webhook's.
@@ -119,7 +182,12 @@ def maybe_auto_topup(
     except Exception as exc:  # noqa: BLE001 — a billing side effect must NEVER break the turn
         if getattr(exc, "code", None) == "authentication_required":
             # 3DS: off-session can't complete the challenge → on-session top-up prompt.
+            # B2: THE outcome that most needs a human. Without this the charge never
+            # completes and the balance runs out with no explanation (D-M5-26).
             logger.info("auto-top-up needs 3DS for user {}; falling back on-session", user_id)
+            _notify_outcome(
+                rls_engine, user_id=user_id, outcome=AutoTopupOutcome.REQUIRES_ACTION, now=now
+            )
             return AutoTopupOutcome.REQUIRES_ACTION
         logger.opt(exception=True).warning("auto-top-up charge failed for user {}", user_id)
         return AutoTopupOutcome.ERROR

@@ -87,7 +87,11 @@ describe("LowBalanceWatcher", () => {
     );
     const probe = screen.getByTestId("probe");
     expect(probe).toHaveAttribute("data-level", "warning");
-    expect(probe).toHaveAttribute("data-href", "/settings");
+    // Spec M5 (T6): retargeted from `/settings`, which only SHOWS the balance, to
+    // `/settings/billing`, where credits can actually be bought. Warning a user and
+    // sending them somewhere that cannot fix it is the dead end D-M5-7 closes, so
+    // this assertion is what keeps the link pointed at a page that resolves it.
+    expect(probe).toHaveAttribute("data-href", "/settings/billing");
     expect(toastFns.warning).toHaveBeenCalledTimes(1);
     // It read the REAL endpoint, not a static trigger.
     expect(getCredits).toHaveBeenCalledWith("/v1/me/credits");

@@ -1541,6 +1541,46 @@
         }
       }
     },
+    "/v1/me/billing/auto-topup": {
+      "patch": {
+        "tags": ["me"],
+        "summary": "Set Auto Topup",
+        "description": "Turn Pro auto-top-up on or off for the caller (Spec M5, B1).\n\nM4 shipped the auto-top-up ENGINE and the column it reads, but no way to set it \u2014\nso the feature was unreachable: the engine faithfully checked a flag nothing could\never turn on (\u00a71c.5).\n\n**Eligibility is enforced with the SAME predicate the engine checks**\n(``_is_auto_topup_eligible``, D-M5-28). If the route had its own copy, the API could\npersist ``auto_topup_enabled=True`` for a Free user, the UI would show an armed\ntoggle, and the engine would silently return ``NOT_ELIGIBLE`` for ever \u2014 recreating\nthe exact built-but-unreachable disease this spec exists to cure. Sharing the\npredicate makes that divergence impossible rather than merely unlikely.\n\nTurning OFF is always allowed: a user must be able to disarm automatic spending even\nif their plan lapsed, since the alternative is a charge they cannot switch off.\n\n409 when the caller's plan does not offer it; 404 when billing is disabled.",
+        "operationId": "set_auto_topup_v1_me_billing_auto_topup_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoTopupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoTopupResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/usage": {
       "get": {
         "tags": ["me"],
@@ -2154,7 +2194,7 @@
       "get": {
         "tags": ["health"],
         "summary": "Healthz",
-        "description": "Liveness + DB connectivity check.",
+        "description": "Readiness: DB connectivity + background-worker liveness.",
         "operationId": "healthz_healthz_get",
         "responses": {
           "200": {
@@ -4705,7 +4745,7 @@
       "get": {
         "tags": ["billing"],
         "summary": "Get Billing Config",
-        "description": "The client-side billing config (the web needs the publishable key for Stripe.js).\n\n404 when billing is disabled (community / flag-off). Never returns the secret key \u2014\nonly the client-safe publishable key.",
+        "description": "The client-side billing config + the plan/pack catalog (Spec M4 T2a; M5 B3).\n\n404 when billing is disabled (community / flag-off). Never returns the secret key \u2014\nonly the client-safe publishable key.\n\nThe catalog (D-M5-25) is projected straight from ``persona.billing.plans``, the\nowner-locked single source of truth, so the web renders prices and allowances it can\nnever hardcode and can never drift from when the owner changes a number. It\ndescribes the OFFERING only \u2014 caller state lives on ``GET /v1/me/wallet``\n(D-M5-12), so the two responses cannot disagree about the same fact.",
         "operationId": "get_billing_config_v1_billing_config_get",
         "responses": {
           "200": {
@@ -5231,6 +5271,40 @@
         "title": "AuthoringDraft",
         "description": "The draft envelope returned by ``/author`` and ``/author/refine`` (D-10-2).\n\nA draft is NOT a persona row \u2014 the user reviews/refines it, then saves via\n``POST /v1/personas`` (which creates the row). ``errors`` is populated only\nwhen validation retries are exhausted (best-effort YAML returned for the form\nto fix, \u00a73.3); ``None`` on success."
       },
+      "AutoTopupRequest": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["enabled"],
+        "title": "AutoTopupRequest",
+        "description": "Turn Pro auto-top-up on or off for the caller (Spec M5, B1).\n\nCarries the INTENT only. The threshold and the top-up amount are owner-locked\nconstants (D-M4-R5) resolved server-side, never sent by the client \u2014 a client that\ncould name its own top-up amount would be naming its own charge."
+      },
+      "AutoTopupResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "threshold_credits": {
+            "type": "integer",
+            "title": "Threshold Credits"
+          },
+          "amount_credits": {
+            "type": "integer",
+            "title": "Amount Credits"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["enabled", "threshold_credits", "amount_credits"],
+        "title": "AutoTopupResponse",
+        "description": "The stored auto-top-up state after a set (Spec M5, B1).\n\n``enabled`` is what the DB HOLDS, not what was asked for, so the UI renders the\ntruth even when the two differ. ``threshold_credits`` / ``amount_credits`` are echoed\nso the toggle can state exactly what it just armed instead of hardcoding \"$2/$10\"."
+      },
       "AutonomyStateOut": {
         "properties": {
           "paused": {
@@ -5275,13 +5349,39 @@
           "publishable_key": {
             "type": "string",
             "title": "Publishable Key"
+          },
+          "plans": {
+            "items": {
+              "$ref": "#/components/schemas/PlanOut"
+            },
+            "type": "array",
+            "title": "Plans",
+            "default": []
+          },
+          "packs": {
+            "items": {
+              "$ref": "#/components/schemas/PaygPackOut"
+            },
+            "type": "array",
+            "title": "Packs",
+            "default": []
+          },
+          "auto_topup_threshold_credits": {
+            "type": "integer",
+            "title": "Auto Topup Threshold Credits",
+            "default": 0
+          },
+          "auto_topup_amount_credits": {
+            "type": "integer",
+            "title": "Auto Topup Amount Credits",
+            "default": 0
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": ["enabled", "publishable_key"],
         "title": "BillingConfigResponse",
-        "description": "The client-side billing config the web needs to boot Stripe.js (Spec M4, T2a).\n\nOnly reachable when billing is active (cloud + flag + key); a community / flag-off\ninstall 404s the whole ``/v1/billing`` surface. Never carries the secret key \u2014\nonly the client-safe publishable key."
+        "description": "The client-side billing config the web needs to render billing (Spec M4 T2a; M5 B3).\n\nOnly reachable when billing is active (cloud + flag + key); a community / flag-off\ninstall 404s the whole ``/v1/billing`` surface. Never carries the secret key \u2014\nonly the client-safe publishable key.\n\nSpec M5 (B3, D-M5-25) extends this with the owner-locked catalog rather than adding\na second endpoint: additive (generated clients are unaffected), one round trip on\npage load, and the catalog is static so it caches identically. Everything the client\nneeds to RENDER billing stays one coherent response.\n\n**Scope boundary (D-M5-12): this describes the OFFERING only.** Caller state \u2014 which\nplan you are on, your balance, your lots, your auto-top-up setting \u2014 comes from\n``GET /v1/me/wallet``. Neither duplicates the other, so they cannot disagree.\n\nEvery value is read from ``persona.billing.plans``, the single source of truth, so\nthe web can never hardcode an economic number and drift from it when the owner\nchanges one (\u00a71c.7)."
       },
       "Body_create_upload_v1_personas__persona_id__uploads_post": {
         "properties": {
@@ -7810,6 +7910,36 @@
         "title": "PaygLotOut",
         "description": "One live PAYG lot in the wallet, FIFO order (oldest-expiring first; Spec M4 T8)."
       },
+      "PaygPackOut": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "price_credits": {
+            "type": "integer",
+            "title": "Price Credits"
+          },
+          "granted_credits": {
+            "type": "integer",
+            "title": "Granted Credits"
+          },
+          "expiry_months": {
+            "type": "integer",
+            "title": "Expiry Months"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "price_credits",
+          "granted_credits",
+          "expiry_months"
+        ],
+        "title": "PaygPackOut",
+        "description": "One PAYG credit pack (Spec M5, B3).\n\n``expiry_months`` is exposed deliberately (D-M5-13): a purchased lot really does\nexpire, and the term belongs on screen at the moment of purchase rather than being\ndiscovered after the credits vanish."
+      },
       "PersonaCapabilities": {
         "properties": {
           "vision": {
@@ -8211,6 +8341,41 @@
         "required": ["text"],
         "title": "PersonaTTSRequest",
         "description": "Body for ``POST /v1/personas/{persona_id}/tts``. The persona's\nconfigured voice is resolved server-side \u2014 the caller supplies only the\ntext."
+      },
+      "PlanOut": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "monthly_price_credits": {
+            "type": "integer",
+            "title": "Monthly Price Credits"
+          },
+          "included_allowance_credits": {
+            "type": "integer",
+            "title": "Included Allowance Credits"
+          },
+          "auto_topup_eligible": {
+            "type": "boolean",
+            "title": "Auto Topup Eligible"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "monthly_price_credits",
+          "included_allowance_credits",
+          "auto_topup_eligible",
+          "is_default"
+        ],
+        "title": "PlanOut",
+        "description": "One purchasable plan in the catalog (Spec M5, B3) \u2014 the OFFERING, not the caller.\n\nPrices and allowances are in credits (1 credit = 1\u00a2), the same unit the wallet\nreports, so the client formats both with one helper and never converts."
       },
       "PortalSessionResponse": {
         "properties": {
@@ -9861,6 +10026,28 @@
           "low_balance_threshold": {
             "type": "integer",
             "title": "Low Balance Threshold"
+          },
+          "current_period_end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Period End"
+          },
+          "cancel_at_period_end": {
+            "type": "boolean",
+            "title": "Cancel At Period End",
+            "default": false
+          },
+          "subscription_status": {
+            "type": "string",
+            "title": "Subscription Status",
+            "default": "active"
           }
         },
         "additionalProperties": false,
@@ -9876,7 +10063,7 @@
           "low_balance_threshold"
         ],
         "title": "WalletResponse",
-        "description": "The two-bucket dollar-wallet (Spec M4, T8) \u2014 the settings billing surface.\n\n``total_balance`` = ``allowance_balance`` + \u03a3 live PAYG lot remainders (the only\nnumber spend checks use); ``allowance_period`` is the UTC ``YYYY-MM`` month stamp\nof the last allowance reset (``None`` = never reset). ``payg_lots`` lists the live\nlots in the FIFO spend order. ``plan_code`` / ``auto_topup_enabled`` come from the\ncaller's subscription row (absent \u2192 ``free`` / ``False``). ``low_balance`` compares\n``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's\nincluded allowance). Community (unmetered) reports the sentinel balance with no\nlots and ``low_balance=False``."
+        "description": "The two-bucket dollar-wallet (Spec M4, T8) \u2014 the settings billing surface.\n\n``total_balance`` = ``allowance_balance`` + \u03a3 live PAYG lot remainders (the only\nnumber spend checks use); ``allowance_period`` is the UTC ``YYYY-MM`` month stamp\nof the last allowance reset (``None`` = never reset). ``payg_lots`` lists the live\nlots in the FIFO spend order. ``plan_code`` / ``auto_topup_enabled`` come from the\ncaller's subscription row (absent \u2192 ``free`` / ``False``). ``low_balance`` compares\n``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's\nincluded allowance). Community (unmetered) reports the sentinel balance with no\nlots and ``low_balance=False``.\n\nSpec M5 (B4 + B6, D-M5-27) adds the three renewal/status fields. All three are\nEXPOSE-ONLY: the columns already exist and the Stripe webhook already writes them\n(``customer.subscription.updated`` \u2192 ``subscription_service.upsert_subscription``;\n``invoice.payment_failed`` \u2192 ``mark_past_due``). No new webhook events, no\nmigration \u2014 the data was simply unreadable. ``subscription_status`` is what lets\nthe billing page tell a ``past_due`` user their payment failed and their allowance\nwill not renew until it is fixed (D-M5-14), instead of leaving them to wonder why\nthey are running dry."
       }
     }
   }

@@ -54,7 +54,13 @@ identical across editions. Community just feeds them a constant.
   `PERSONA_ALLOW_PER_TENANT_MCP`), and code execution via the E2B Code Interpreter
   sandbox (lazy imported, absent without a key).
 - **Credits and usage.** Balance plus per turn usage (`/me`), pre deduct and refund
-  in cloud, an unlimited no-op in community.
+  in cloud, an unlimited no-op in community. The wallet also reports the plan, its
+  renewal date and payment status, and the live credit packs with their expiry.
+- **Billing** (`/v1/billing`, cloud plus flag plus key only, else the whole surface
+  404s). The plan and pack catalog the web renders from, Stripe Checkout and
+  billing portal sessions, and the webhook that grants credits. Pro auto top up is
+  armed through `/v1/me/billing/auto-topup` and enforced by the same eligibility
+  rule the charge engine applies.
 - **Safety guard.** A community or no-auth process refuses to start on a non
   loopback bind unless `PERSONA_ALLOW_PUBLIC_NOAUTH=1` is set, so an open
   unauthenticated instance can't quietly burn the operator's model keys.

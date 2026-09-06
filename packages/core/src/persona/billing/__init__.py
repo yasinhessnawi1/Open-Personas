@@ -31,6 +31,7 @@ from persona.billing.plans import (
     format_dollars,
     get_payg_pack,
     get_plan,
+    payg_pack_code,
 )
 from persona.billing.pricing_registry import (
     PRICING_ROWS,
@@ -71,6 +72,7 @@ __all__ = [
     "format_dollars",
     "get_payg_pack",
     "get_plan",
+    "payg_pack_code",
     "infra_rate_cents",
     "livekit_infra_cents",
     "registry_keys",

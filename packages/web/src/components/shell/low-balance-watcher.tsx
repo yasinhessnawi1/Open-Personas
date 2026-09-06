@@ -6,8 +6,8 @@
  * A headless island mounted once in the app shell (inside NotificationProvider).
  * On load it reads `GET /v1/me/credits` and, if the caller is under the
  * server-computed `low_balance` threshold *and* still has a positive balance,
- * emits a persistent low-priority notification through `useNotify()` — deep-
- * linking to billing (`/settings`) — **at most once per session**.
+ * emits a persistent low-priority notification through `useNotify()`, deep-linking
+ * to billing (`/settings/billing`), **at most once per session**.
  *
  * Design (per the decisions):
  *   - Reuses the server `low_balance` flag (single source of truth, threshold in
@@ -30,8 +30,15 @@ import { createApiClient, unwrap } from "@/lib/api/client";
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 /** Guard key: once set, we don't re-check or re-nag for the rest of the session. */
 const SESSION_KEY = "open-persona:low-balance-notified";
-/** Billing lives on the settings page (the low-balance card + credit balance). */
-const BILLING_HREF = "/settings";
+/**
+ * Where the notification sends you (Spec M5, T6).
+ *
+ * This pointed at `/settings`, which SHOWS the balance but has never been able to
+ * change it: the user was told they were running out and handed a page with no
+ * way to buy anything (§1c.2). `/settings/billing` is where credits are actually
+ * purchased, so the warning now leads somewhere that resolves it.
+ */
+const BILLING_HREF = "/settings/billing";
 
 export function LowBalanceWatcher() {
   const { getToken } = useAuth();

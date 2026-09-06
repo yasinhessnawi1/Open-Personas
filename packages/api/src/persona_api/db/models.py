@@ -1898,8 +1898,11 @@ notifications = Table(
         # 'event_trigger_dropped' = the A7-D-8 storm-drop bell (A7's migration, merged 042).
         # 'schedule_deleted_task_paused' = the R9-037 task-bridge bell (migration 049) —
         # a schedule-backed task's schedule was user-deleted; the task was paused.
+        # 'auto_topup' = the Spec M5 B2 bell (migration 053): an auto-top-up that needs
+        # the cardholder (3DS, or no saved card) and cannot complete without them.
         "kind IN ('run_terminal', 'persona_ready', 'schedule_executor_missing', "
-        "'schedule_fired', 'event_trigger_dropped', 'schedule_deleted_task_paused')",
+        "'schedule_fired', 'event_trigger_dropped', 'schedule_deleted_task_paused', "
+        "'auto_topup')",
         name="notifications_kind_check",
     ),
     CheckConstraint(

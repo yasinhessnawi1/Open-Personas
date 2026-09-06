@@ -574,6 +574,15 @@ class WalletResponse(_Output):
     ``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's
     included allowance). Community (unmetered) reports the sentinel balance with no
     lots and ``low_balance=False``.
+
+    Spec M5 (B4 + B6, D-M5-27) adds the three renewal/status fields. All three are
+    EXPOSE-ONLY: the columns already exist and the Stripe webhook already writes them
+    (``customer.subscription.updated`` → ``subscription_service.upsert_subscription``;
+    ``invoice.payment_failed`` → ``mark_past_due``). No new webhook events, no
+    migration — the data was simply unreadable. ``subscription_status`` is what lets
+    the billing page tell a ``past_due`` user their payment failed and their allowance
+    will not renew until it is fixed (D-M5-14), instead of leaving them to wonder why
+    they are running dry.
     """
 
     total_balance: int
@@ -584,18 +593,87 @@ class WalletResponse(_Output):
     auto_topup_enabled: bool
     low_balance: bool
     low_balance_threshold: int
+    #: When the current subscription period ends (= when the allowance renews).
+    #: ``None`` for a free/never-subscribed caller.
+    current_period_end: datetime | None = None
+    #: Whether the subscription is set to stop at ``current_period_end``.
+    cancel_at_period_end: bool = False
+    #: ``active`` | ``past_due`` | … — the subscription lifecycle state. A caller with
+    #: no subscription row reports ``active`` (a free user is not "past due").
+    subscription_status: str = "active"
+
+
+class PlanOut(_Output):
+    """One purchasable plan in the catalog (Spec M5, B3) — the OFFERING, not the caller.
+
+    Prices and allowances are in credits (1 credit = 1¢), the same unit the wallet
+    reports, so the client formats both with one helper and never converts.
+    """
+
+    code: str
+    monthly_price_credits: int
+    included_allowance_credits: int
+    auto_topup_eligible: bool
+    is_default: bool
+
+
+class PaygPackOut(_Output):
+    """One PAYG credit pack (Spec M5, B3).
+
+    ``expiry_months`` is exposed deliberately (D-M5-13): a purchased lot really does
+    expire, and the term belongs on screen at the moment of purchase rather than being
+    discovered after the credits vanish.
+    """
+
+    code: str
+    price_credits: int
+    granted_credits: int
+    expiry_months: int
+
+
+class AutoTopupResponse(_Output):
+    """The stored auto-top-up state after a set (Spec M5, B1).
+
+    ``enabled`` is what the DB HOLDS, not what was asked for, so the UI renders the
+    truth even when the two differ. ``threshold_credits`` / ``amount_credits`` are echoed
+    so the toggle can state exactly what it just armed instead of hardcoding "$2/$10".
+    """
+
+    enabled: bool
+    threshold_credits: int
+    amount_credits: int
 
 
 class BillingConfigResponse(_Output):
-    """The client-side billing config the web needs to boot Stripe.js (Spec M4, T2a).
+    """The client-side billing config the web needs to render billing (Spec M4 T2a; M5 B3).
 
     Only reachable when billing is active (cloud + flag + key); a community / flag-off
     install 404s the whole ``/v1/billing`` surface. Never carries the secret key —
     only the client-safe publishable key.
+
+    Spec M5 (B3, D-M5-25) extends this with the owner-locked catalog rather than adding
+    a second endpoint: additive (generated clients are unaffected), one round trip on
+    page load, and the catalog is static so it caches identically. Everything the client
+    needs to RENDER billing stays one coherent response.
+
+    **Scope boundary (D-M5-12): this describes the OFFERING only.** Caller state — which
+    plan you are on, your balance, your lots, your auto-top-up setting — comes from
+    ``GET /v1/me/wallet``. Neither duplicates the other, so they cannot disagree.
+
+    Every value is read from ``persona.billing.plans``, the single source of truth, so
+    the web can never hardcode an economic number and drift from it when the owner
+    changes one (§1c.7).
     """
 
     enabled: bool
     publishable_key: str
+    plans: list[PlanOut] = []
+    packs: list[PaygPackOut] = []
+    #: The balance at which auto-top-up fires, in credits (D-M4-R5: 200 = $2). Exposed so
+    #: the UI can state the exact behavior it enables instead of hardcoding "$2".
+    auto_topup_threshold_credits: int = 0
+    #: The credits an auto-top-up buys (D-M4-R5: 1000 = $10).
+    auto_topup_amount_credits: int = 0
 
 
 class CheckoutSessionResponse(_Output):

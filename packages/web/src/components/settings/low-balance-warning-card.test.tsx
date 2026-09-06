@@ -53,4 +53,54 @@ describe("LowBalanceWarningCard", () => {
       container.querySelector('[data-slot="settings-low-balance-warning"]'),
     ).toBeNull();
   });
+
+  // --- Spec M5 (T6): the warning became something you can act on -------------
+
+  it("renders the action the caller passes", () => {
+    // D-M5-7: this card used to state the problem and stop. The CTA is what turns
+    // "you are running out" into something the user can resolve.
+    const { container } = render(
+      <LowBalanceWarningCard
+        credits={{ balance: 500, low_balance: true }}
+        {...COPY}
+        action={<a href="/settings/billing">Add credits</a>}
+      />,
+    );
+    const slot = container.querySelector(
+      '[data-slot="settings-low-balance-action"]',
+    );
+    expect(slot).not.toBeNull();
+    expect(slot?.querySelector("a")?.getAttribute("href")).toBe(
+      "/settings/billing",
+    );
+  });
+
+  it("renders exactly as before when no action is passed", () => {
+    // The slot is optional so the card stays usable where a CTA would be wrong,
+    // and so every existing caller keeps working untouched.
+    const { container } = render(
+      <LowBalanceWarningCard
+        credits={{ balance: 500, low_balance: true }}
+        {...COPY}
+      />,
+    );
+    expect(
+      container.querySelector('[data-slot="settings-low-balance-warning"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="settings-low-balance-action"]'),
+    ).toBeNull();
+  });
+
+  it("shows no action when the card itself is hidden", () => {
+    // A CTA must not leak out of a card that is not rendering.
+    const { container } = render(
+      <LowBalanceWarningCard
+        credits={{ balance: 0, low_balance: true }}
+        {...COPY}
+        action={<a href="/settings/billing">Add credits</a>}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
 });

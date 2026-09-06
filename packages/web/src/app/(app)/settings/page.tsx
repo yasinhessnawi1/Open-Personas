@@ -1,4 +1,5 @@
 import { Package } from "lucide-react";
+import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { currentUser } from "@/auth/server";
 import { PageBody, PageHeader, Stack } from "@/components/layout";
@@ -25,6 +26,13 @@ import {
  *   - `credits.balance` (D-11-12 zero-guard surfaces via the `exhausted`
  *     branch below);
  *   - `<PreferencesCard>` consumer of `useTheme` + `useBoolSetting` + `LOCALE_COOKIE`.
+ *
+ * Spec M5 (T6) — ADDITIVE ONLY. Both credit warnings on this page used to state
+ * the problem and stop (§1c.2, §1c.3): a user was told they were running out, or
+ * had run out, on a page with nothing to do about it. `/settings/billing` now
+ * exists, so each gets a link there. Nothing in the DO-NOT-TOUCH plumbing above
+ * changes: the same reads, the same `exhausted` zero-guard branch, the same
+ * components. Only a CTA is added inside each.
  *
  * Low-balance (D-11-12): `credits.low_balance` is surfaced inline via
  * `<LowBalanceWarningCard>` above the credits card when the backend flips the
@@ -177,6 +185,14 @@ export default async function SettingsPage() {
             credits={credits}
             title={t("lowBalance")}
             hint={t("creditsHint")}
+            action={
+              <Link
+                className="type-ui underline underline-offset-4"
+                href="/settings/billing"
+              >
+                {t("addCredits")}
+              </Link>
+            }
           />
 
           {exhausted ? (
@@ -185,6 +201,17 @@ export default async function SettingsPage() {
               copy={{
                 title: t("creditsExhausted"),
                 description: t("creditsExhaustedHint"),
+                // The 402 is the hard cliff: nothing works until credits exist,
+                // so this is the one place a user most needs a way out. The slot
+                // has been on ErrorState since T22 and was simply never filled.
+                action: (
+                  <Link
+                    className="type-ui underline underline-offset-4"
+                    href="/settings/billing"
+                  >
+                    {t("addCredits")}
+                  </Link>
+                ),
               }}
             />
           ) : (

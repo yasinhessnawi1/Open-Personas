@@ -18,7 +18,32 @@ import BillingPage from "./page";
 const configGet = vi.fn();
 
 vi.mock("@/lib/api/server", () => ({
-  serverApi: () => Promise.resolve({ GET: configGet }),
+  serverApi: () =>
+    Promise.resolve({
+      // T2c added a second server-side read (`/v1/me/wallet`). This suite is about the
+      // ROUTE + capability gate, so only the config probe is driven here; the wallet
+      // resolves empty and its own behaviour is covered by billing-wallet.test.tsx /
+      // subscription-status-card.test.tsx.
+      GET: (path: string) =>
+        path === "/v1/billing/config"
+          ? configGet(path)
+          : Promise.resolve({ data: null }),
+    }),
+}));
+
+// The billing page composes client components that call `useApi()` → Clerk's `useAuth`,
+// which throws outside a <ClerkProvider>. Stubbed here so this suite stays a test of the
+// page's own composition + capability gate; each is exercised in its own file and, more
+// to the point, in a real browser (the T2c/T3 community + cloud passes).
+//
+// NB: the disabled-path tests below (which assert ZERO buttons) still render the REAL
+// page, because neither child is mounted when billing is off — so the capability gate is
+// not hollowed out by these stubs.
+vi.mock("@/components/settings/billing-wallet", () => ({
+  BillingWallet: () => null,
+}));
+vi.mock("@/components/settings/billing-plans", () => ({
+  BillingPlans: () => null,
 }));
 
 vi.mock("next-intl/server", () => ({

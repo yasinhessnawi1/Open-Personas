@@ -21,6 +21,7 @@ from persona_api.realtime.stream import stream_user_events
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.schemas import (
+    AutoTopupResponse,
     CreditsResponse,
     LedgerEntry,
     NavCountsResponse,
@@ -32,7 +33,11 @@ from persona_api.schemas import (
     UserProfileResponse,
     WalletResponse,
 )
-from persona_api.schemas.requests import ScheduleCreateRequest, ScheduleRescheduleRequest
+from persona_api.schemas.requests import (
+    AutoTopupRequest,
+    ScheduleCreateRequest,
+    ScheduleRescheduleRequest,
+)
 from persona_api.services import (
     calendar_reschedule_service,
     nav_counts_service,
@@ -122,6 +127,71 @@ async def get_wallet(
         auto_topup_enabled=bool(sub.get("auto_topup_enabled")) if sub is not None else False,
         low_balance=total < plan.low_balance_threshold_credits,
         low_balance_threshold=plan.low_balance_threshold_credits,
+        # Spec M5 (B4 + B6, D-M5-27) — expose-only: columns the webhook already writes.
+        # No subscription row ⇒ a free caller: no renewal date, not cancelling, and
+        # ``active`` (never ``past_due`` — they owe nothing).
+        current_period_end=(
+            cast("datetime | None", sub.get("current_period_end")) if sub is not None else None
+        ),
+        cancel_at_period_end=(bool(sub.get("cancel_at_period_end")) if sub is not None else False),
+        subscription_status=str(sub.get("status") or "active") if sub is not None else "active",
+    )
+
+
+@router.patch("/billing/auto-topup", response_model=AutoTopupResponse)
+async def set_auto_topup(
+    request: Request,
+    body: AutoTopupRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AutoTopupResponse:
+    """Turn Pro auto-top-up on or off for the caller (Spec M5, B1).
+
+    M4 shipped the auto-top-up ENGINE and the column it reads, but no way to set it —
+    so the feature was unreachable: the engine faithfully checked a flag nothing could
+    ever turn on (§1c.5).
+
+    **Eligibility is enforced with the SAME predicate the engine checks**
+    (``_is_auto_topup_eligible``, D-M5-28). If the route had its own copy, the API could
+    persist ``auto_topup_enabled=True`` for a Free user, the UI would show an armed
+    toggle, and the engine would silently return ``NOT_ELIGIBLE`` for ever — recreating
+    the exact built-but-unreachable disease this spec exists to cure. Sharing the
+    predicate makes that divergence impossible rather than merely unlikely.
+
+    Turning OFF is always allowed: a user must be able to disarm automatic spending even
+    if their plan lapsed, since the alternative is a charge they cannot switch off.
+
+    409 when the caller's plan does not offer it; 404 when billing is disabled.
+    """
+    from persona_api.billing.autotopup import (  # noqa: PLC0415 — active path only
+        AUTO_TOPUP_AMOUNT_CREDITS,
+        AUTO_TOPUP_THRESHOLD_CREDITS,
+        _is_auto_topup_eligible,
+    )
+
+    if getattr(request.app.state, "stripe_gateway", None) is None:
+        # Community / flag-off: there is no card and no charge, so there is nothing to
+        # arm. 404 keeps the surface conceptually absent, matching /v1/billing.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="billing is not enabled")
+
+    engine = request.app.state.rls_engine
+    sub = subscription_service.ensure_subscription(engine, user_id=user.id)
+
+    if body.enabled:
+        # Ask the ENGINE's own predicate whether this row would be honoured, with the
+        # flag hypothetically on — so "can I arm it?" is answered by the same code that
+        # later decides "is it armed?".
+        probe = {**dict(sub), "auto_topup_enabled": True}
+        if not _is_auto_topup_eligible(probe):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="auto top-up is available on the Pro plan with an active subscription",
+            )
+
+    stored = subscription_service.set_auto_topup(engine, user_id=user.id, enabled=body.enabled)
+    return AutoTopupResponse(
+        enabled=stored,
+        threshold_credits=AUTO_TOPUP_THRESHOLD_CREDITS,
+        amount_credits=AUTO_TOPUP_AMOUNT_CREDITS,
     )
 
 

@@ -42,6 +42,7 @@ _log = get_logger("api.errors")
 
 __all__ = [
     "AuthenticationError",
+    "BillingProviderUnavailableError",
     "CloudConfigRefusedError",
     "CommunityDbError",
     "ConcurrencyCappedError",
@@ -103,6 +104,26 @@ class PublicNoAuthRefusedError(PersonaError):
     that would burn the operator's model keys. ``context`` carries the offending
     ``host``. Set ``PERSONA_ALLOW_PUBLIC_NOAUTH=1`` to override, or run the
     ``cloud`` edition for a public/shared deploy.
+    """
+
+
+class BillingProviderUnavailableError(PersonaError):
+    """Raised when the Stripe API call behind a billing route fails (Spec M5, T3-fix).
+
+    The checkout + portal routes call Stripe over the network, and any Stripe error
+    (auth, rate limit, connection, provider outage) previously escaped the route raw
+    and surfaced as a **500 with a stack trace**. That leaks internals on a dependency
+    outage and gives the web no structured error to render, so the user sees a dead
+    spinner instead of "nothing was charged".
+
+    Catching at the route boundary and re-raising as a domain error is the standard
+    adapter-boundary discipline (ENGINEERING_STANDARDS §1): provider exceptions never
+    travel past the seam that owns the provider. The route maps this to a 502, which
+    says truthfully that the payment provider is unreachable and NOT that the caller
+    did something wrong (a 4xx would blame the user for an outage).
+
+    Nothing is charged when this is raised: the session was never created, so there is
+    no partial state to reconcile.
     """
 
 

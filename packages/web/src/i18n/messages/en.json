@@ -200,7 +200,8 @@
     "basisFlat": "Flat rate",
     "basisUnpriced": "Unpriced",
     "basisMixed": "Mixed",
-    "basisNone": "Not recorded"
+    "basisNone": "Not recorded",
+    "addCredits": "Add credits"
   },
   "billing": {
     "title": "Billing",
@@ -212,7 +213,42 @@
     "successBody": "Thank you. Your credits are being added right now and will show on your balance within a few seconds.",
     "cancelTitle": "Checkout cancelled",
     "cancelBody": "No payment was taken and nothing changed. Come back whenever you are ready.",
-    "backToSettings": "Back to settings"
+    "backToSettings": "Back to settings",
+    "balanceLabel": "Credits",
+    "balanceHint": "{allowance} from your monthly allowance, {payg} from credit packs.",
+    "walletLoading": "Checking your balance.",
+    "walletUnavailable": "We could not load your balance just now. Refresh to try again.",
+    "grantPending": "Your credits are on the way. This page updates the moment they land.",
+    "grantSlow": "This is taking longer than usual. Your payment went through, so the credits will arrive shortly. Refresh in a minute.",
+    "lowBalance": "You are running low. Top up to keep your personas working.",
+    "renewsLabel": "Renews",
+    "endsLabel": "Ends",
+    "renewalUnknown": "We do not have a renewal date for this plan yet.",
+    "cancellingNote": "Your plan is set to stop on this date. You keep everything until then.",
+    "pastDueTitle": "Your last payment did not go through",
+    "pastDueBody": "Your plan is on hold, so your monthly credits will not renew until the payment is sorted. Updating your card fixes it right away.",
+    "managePayment": "Update payment method",
+    "plansLabel": "Plans",
+    "planName": "{plan, select, free {Free} plus {Plus} pro {Pro} other {{plan}}}",
+    "planTerms": "${price} a month, {credits} credits included.",
+    "currentPlanTag": "(your plan)",
+    "choosePlan": "Choose",
+    "manageSubscription": "Manage subscription",
+    "opening": "Opening Stripe.",
+    "packsLabel": "Credit packs",
+    "packsHint": "A one-time top-up. No subscription, no commitment.",
+    "packLabel": "${price} for {credits} credits",
+    "packExpiryNote": "Credits from a pack last {months} months from the day you buy them.",
+    "checkoutUnavailable": "We could not open checkout just now. Nothing was charged. Try again in a moment.",
+    "autoTopupLabel": "Auto top-up",
+    "autoTopupExplain": "When your balance drops below ${threshold}, we add ${amount} automatically so your personas keep working. Turn it off any time.",
+    "autoTopupProOnly": "Auto top-up comes with the Pro plan. Until then you can add credits whenever you like.",
+    "autoTopupFailed": "We could not change that just now. Nothing was charged.",
+    "lotsLabel": "Your credit packs",
+    "lotsHint": "Packs are spent oldest first, so the one closest to expiring goes first.",
+    "lotRemaining": "{remaining} of {total} credits left",
+    "lotExpires": "Expires {date}",
+    "lotExpiringSoon": "{days, plural, =0 {Expires today} one {# day left} other {# days left}}"
   },
   "conversations": {
     "title": "Conversations",
@@ -1154,6 +1190,10 @@
       "firedNoSubject": "{persona} ran your reminder.",
       "executor_missing": "A reminder was paused because its persona is no longer available",
       "taskPaused": "A reminder was paused because its schedule was removed"
+    },
+    "autoTopup": {
+      "requiresAction": "Your bank needs to approve the top-up. Add credits once and your card is confirmed.",
+      "noCustomer": "Auto top-up is on, but there is no card saved yet. Add credits once to set one up."
     }
   },
   "apps": {

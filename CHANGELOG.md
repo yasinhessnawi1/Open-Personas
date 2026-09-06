@@ -11,6 +11,47 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Billing you can actually use (Spec M5, 2026-09-05)
+
+> M4 built a payment system and shipped almost none of it to the person paying.
+> Prod ran live Stripe keys whose return URL pointed at a route that did not
+> exist, so a completed payment landed on a 404. M5 closes the gap between the
+> machinery and the user.
+
+#### Added
+- **A billing page**: `/settings/billing` is the billing home, the Stripe
+  success/cancel landing and the portal return target. Capability-gated, so a
+  community install renders an unmetered note and no purchase affordances at all.
+- **Plans, credit packs and the portal**, rendered entirely from the API's
+  catalog rather than hardcoded prices, so the owner changes one number in the
+  plan catalog and the page follows. Free renders as a tier, never a button that
+  errors. Pack purchase states the 12-month expiry up front.
+- **The auto top-up switch M4 never shipped.** The engine and its column existed;
+  nothing could set it. The route enforces eligibility with the same predicate the
+  engine checks, so the API cannot store an armed toggle the engine will refuse.
+- **Auto top-up reaches voice and image generation**, the two priciest surfaces,
+  which the M4 trigger never covered. Voice bills in its own process and must
+  never hold payment credentials, so it enqueues a durable job the API worker
+  runs.
+- **Your credit packs and when they lapse**, in the order they will be spent,
+  with a warning while there is still time to act. Bought credits no longer
+  vanish silently.
+- **Renewal date, cancellation state and payment status** on the wallet. A failed
+  subscription payment now says so, instead of leaving the user to guess why
+  their allowance stopped renewing.
+
+#### Fixed
+- **Every credit warning leads somewhere.** The low-balance card, the shell
+  notification and the credits-exhausted state each told the user about a problem
+  and offered no way to resolve it. All three now link to billing.
+- **A Stripe outage returns a clean 502 instead of a 500 with a stack trace.**
+  The checkout and portal routes called Stripe with nothing wrapping the call, so
+  a provider failure leaked internals and left the purchase button spinning.
+- **Auto top-up was registered inside an unrelated feature flag** that defaults
+  off, so on a default deployment the durable trigger dead-lettered and no top-up
+  ever fired.
+
+
 ### Background runs are visible (2026-08-01)
 
 #### Fixed

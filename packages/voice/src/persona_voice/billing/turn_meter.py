@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from persona.billing import (
     BillingConfig,
+    ChargeResult,
     MeteredBilling,
     livekit_infra_cents,
     voice_stt_cents,
@@ -165,6 +166,7 @@ class VoiceTurnBillingMeter:
         cost_source: CostSource | None = None,
         floor: int = 1,
         on_exhausted: Callable[[], Awaitable[None]] | None = None,
+        enqueue_topup: Callable[[int, int, int], None] | None = None,
     ) -> None:
         self._billing = MeteredBilling(ledger=ledger, config=billing_config)
         self._billing_config = billing_config
@@ -184,6 +186,13 @@ class VoiceTurnBillingMeter:
         # after this meter). ``None`` ⇒ metering-only (no cutoff).
         self._on_exhausted = on_exhausted
         self._exhausted_fired = False
+        # Spec M5 (B5, D-M5-22): the auto-top-up trigger, injected as an optional
+        # collaborator and non-``None`` ONLY on a cloud edition. Gating at CONSTRUCTION
+        # rather than inside the deduct keeps every edition check out of the hot path:
+        # community is PROVABLY inert (the collaborator is absent, so no code path
+        # exists) rather than conditionally inert (a branch evaluated every turn).
+        # Signature: ``(old_balance, new_balance, turn_seq) -> None``.
+        self._enqueue_topup = enqueue_topup
 
     def set_on_exhausted(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Late-bind the exhaustion cutoff (Spec M3, T6b-2).
@@ -261,7 +270,9 @@ class VoiceTurnBillingMeter:
             if provider_cents <= 0.0:
                 return  # no real metered cost this turn → charge nothing
             billing_key = f"voice:{self._call_id}:{turn_seq}"
-            exhausted = await asyncio.to_thread(self._charge_turn, provider_cents, billing_key)
+            exhausted = await asyncio.to_thread(
+                self._charge_turn, provider_cents, billing_key, turn_seq
+            )
             # Spec M3 (T6b-2): the balance ran out on THIS deduct → end the call,
             # once. Fired on the loop (the cutoff speaks + deletes the room); the
             # DB write already happened off-loop above.
@@ -276,7 +287,7 @@ class VoiceTurnBillingMeter:
                 err=repr(exc)[:200],
             )
 
-    def _charge_turn(self, provider_cents: float, billing_key: str) -> bool:
+    def _charge_turn(self, provider_cents: float, billing_key: str, turn_seq: int) -> bool:
         """Capture the turn's charge off-loop; return whether it EXHAUSTED the balance.
 
         Exhausted ⇔ the balance is now at/below zero. Do NOT infer exhaustion from
@@ -302,9 +313,47 @@ class VoiceTurnBillingMeter:
                 mode="capture",  # a completed turn captures what's affordable, never negative
                 billing_key=billing_key,
             )
+            self._maybe_enqueue_topup(result, turn_seq)
         finally:
             engine.dispose()
         return result.new_balance <= 0
+
+    def _maybe_enqueue_topup(self, result: ChargeResult, turn_seq: int) -> None:
+        """Report this deduct's balance change so the api can decide about a top-up.
+
+        Spec M5 (B5, D-M5-15/16/17/18). Runs INSIDE ``_charge_turn``, which is already
+        the ``asyncio.to_thread`` target, so the enqueue is off the audio loop by
+        construction with no extra task. That is a deliberate divergence from the A9
+        fire-and-forget template (D-M5-18): a task would be cancelled at teardown, and a
+        crossing detected on the final turn would silently lose its trigger. A missed
+        top-up is fail-soft; a double charge is not, so the design with fewer moving
+        parts wins on a money path.
+
+        ``old_balance`` is reconstructed as ``new_balance + captured``, never
+        ``+ charged``: on a short capture ``captured < charged``, so using ``charged``
+        would overstate the pre-deduct balance and manufacture a crossing that never
+        happened. It also defuses the idempotent-no-op trap by arithmetic — a re-used
+        ``billing_key`` returns ``captured == 0`` with a healthy balance, giving
+        ``old == new``, and the api's crossing guard requires ``old > new``, so a
+        duplicate tick is structurally unable to trigger a charge.
+
+        Fail-soft: an enqueue failure is logged and swallowed. The turn is the work;
+        billing is enrichment.
+        """
+        if self._enqueue_topup is None:
+            return  # community, or metering-only: no trigger exists at all
+        captured = result.captured or 0
+        if captured <= 0:
+            return  # a no-op or zero capture cannot be a crossing
+        try:
+            self._enqueue_topup(result.new_balance + captured, result.new_balance, turn_seq)
+        except Exception as exc:  # noqa: BLE001 — never break the turn over a top-up trigger
+            _LOG.warning(
+                "voice auto-top-up enqueue failed (fail-soft) call={call} turn={seq}: {err}",
+                call=self._call_id,
+                seq=turn_seq,
+                err=repr(exc)[:200],
+            )
 
     async def bill_call_infra(self, duration_s: int) -> None:
         """Bill the call's LiveKit infra (per-min) at teardown, off-loop + idempotent.

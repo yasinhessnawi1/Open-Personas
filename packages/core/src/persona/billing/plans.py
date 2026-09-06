@@ -35,6 +35,7 @@ __all__ = [
     "format_dollars",
     "get_payg_pack",
     "get_plan",
+    "payg_pack_code",
 ]
 
 #: Cents per dollar — the ledger unit is 1 credit = 1¢ (M3), so 1 dollar = 100 credits.
@@ -265,3 +266,15 @@ def default_plan() -> Plan:
 def get_payg_pack(key: str) -> PaygPack | None:
     """The PAYG pack for a dollar key (``'5'`` / ``'10'`` / ``'25'`` / ``'50'``), else ``None``."""
     return _PAYG_PACKS_BY_KEY.get(key)
+
+
+def payg_pack_code(pack: PaygPack) -> str:
+    """The registry key for ``pack`` — the inverse of :func:`get_payg_pack` (Spec M5, B3).
+
+    The catalog endpoint has to tell a client which key to post back to
+    ``/v1/billing/checkout/pack``, and that key is derived from the price. Deriving it
+    here rather than in the api keeps the code↔pack mapping in ONE place: this function
+    and :data:`_PAYG_PACKS_BY_KEY` are built from the same expression, so a future change
+    to the key scheme cannot leave a caller minting keys the lookup no longer resolves.
+    """
+    return str(pack.price_credits // _CENTS_PER_DOLLAR)

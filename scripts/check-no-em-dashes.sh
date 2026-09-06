@@ -20,7 +20,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DASH='[—–]'
+# An ALTERNATION of the two literal characters, never a bracket expression.
+# `[—–]` is a set of BYTES wherever grep is not running under a UTF-8 locale, so it
+# matched the shared lead bytes of every other U+20xx character (curly quotes,
+# ellipses) and counted each real dash three times, once per byte. On a shell with
+# no LANG/LC_ALL set that reported ~3500 violations against a repo with none, and
+# under UTF-8 the same script reported clean: a copy gate whose verdict depended on
+# the ambient locale. Alternation matches each whole multi-byte character in either
+# locale, so the count is the true one.
+DASH='—|–'
 violations=0
 report() {
   local file="$1" count="$2"
@@ -45,7 +53,7 @@ while IFS= read -r f; do
   else
     body=$(cat "$f")
   fi
-  count=$( { printf '%s' "$body" | grep -o "$DASH" || true; } | wc -l | tr -d ' ')
+  count=$( { printf '%s' "$body" | grep -oE "$DASH" || true; } | wc -l | tr -d ' ')
   if [[ "$count" != "0" ]]; then
     offenders+=("$f:$count")
     violations=$((violations + count))

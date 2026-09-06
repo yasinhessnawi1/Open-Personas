@@ -10,6 +10,12 @@ See ``docs/specs/phase3/spec_A0/`` for the spec, decisions, and research.
 
 from __future__ import annotations
 
+from persona.jobs.autotopup import (
+    AUTO_TOPUP_JOB_TYPE,
+    AutoTopupPayload,
+    auto_topup_idempotency_key,
+    make_auto_topup_payload,
+)
 from persona.jobs.delegation import (
     DELEGATED_TURN_JOB_TYPE,
     PROVENANCE_VOICE,
@@ -49,6 +55,7 @@ from persona.jobs.title import (
 __all__ = [
     "CHANNEL_CHAT",
     "CHANNEL_VOICE",
+    "AUTO_TOPUP_JOB_TYPE",
     "DELEGATED_TURN_JOB_TYPE",
     "LONG_LEASE",
     "MEDIUM_LEASE",
@@ -57,6 +64,7 @@ __all__ = [
     "SYNTHESIS_JOB_TYPE",
     "TERMINAL_STATES",
     "TITLE_REFRESH_JOB_TYPE",
+    "AutoTopupPayload",
     "DelegatedTurnPayload",
     "Job",
     "JobContext",
@@ -70,9 +78,11 @@ __all__ = [
     "SynthesisJobPayload",
     "TitleRefreshJobPayload",
     "can_transition",
+    "auto_topup_idempotency_key",
     "delegated_turn_idempotency_key",
     "is_terminal",
     "make_conversation_synthesis_payload",
+    "make_auto_topup_payload",
     "make_delegated_turn_payload",
     "synthesis_idempotency_key",
     "title_refresh_idempotency_key",

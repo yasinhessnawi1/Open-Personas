@@ -801,6 +801,42 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/billing/auto-topup": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Set Auto Topup
+     * @description Turn Pro auto-top-up on or off for the caller (Spec M5, B1).
+     *
+     *     M4 shipped the auto-top-up ENGINE and the column it reads, but no way to set it —
+     *     so the feature was unreachable: the engine faithfully checked a flag nothing could
+     *     ever turn on (§1c.5).
+     *
+     *     **Eligibility is enforced with the SAME predicate the engine checks**
+     *     (``_is_auto_topup_eligible``, D-M5-28). If the route had its own copy, the API could
+     *     persist ``auto_topup_enabled=True`` for a Free user, the UI would show an armed
+     *     toggle, and the engine would silently return ``NOT_ELIGIBLE`` for ever — recreating
+     *     the exact built-but-unreachable disease this spec exists to cure. Sharing the
+     *     predicate makes that divergence impossible rather than merely unlikely.
+     *
+     *     Turning OFF is always allowed: a user must be able to disarm automatic spending even
+     *     if their plan lapsed, since the alternative is a charge they cannot switch off.
+     *
+     *     409 when the caller's plan does not offer it; 404 when billing is disabled.
+     */
+    patch: operations["set_auto_topup_v1_me_billing_auto_topup_patch"];
+    trace?: never;
+  };
   "/v1/me/usage": {
     parameters: {
       query?: never;
@@ -1174,7 +1210,7 @@ export interface paths {
     };
     /**
      * Healthz
-     * @description Liveness + DB connectivity check.
+     * @description Readiness: DB connectivity + background-worker liveness.
      */
     get: operations["healthz_healthz_get"];
     put?: never;
@@ -2499,10 +2535,16 @@ export interface paths {
     };
     /**
      * Get Billing Config
-     * @description The client-side billing config (the web needs the publishable key for Stripe.js).
+     * @description The client-side billing config + the plan/pack catalog (Spec M4 T2a; M5 B3).
      *
      *     404 when billing is disabled (community / flag-off). Never returns the secret key —
      *     only the client-safe publishable key.
+     *
+     *     The catalog (D-M5-25) is projected straight from ``persona.billing.plans``, the
+     *     owner-locked single source of truth, so the web renders prices and allowances it can
+     *     never hardcode and can never drift from when the owner changes a number. It
+     *     describes the OFFERING only — caller state lives on ``GET /v1/me/wallet``
+     *     (D-M5-12), so the two responses cannot disagree about the same fact.
      */
     get: operations["get_billing_config_v1_billing_config_get"];
     put?: never;
@@ -2844,6 +2886,34 @@ export interface components {
       errors?: string[] | null;
     };
     /**
+     * AutoTopupRequest
+     * @description Turn Pro auto-top-up on or off for the caller (Spec M5, B1).
+     *
+     *     Carries the INTENT only. The threshold and the top-up amount are owner-locked
+     *     constants (D-M4-R5) resolved server-side, never sent by the client — a client that
+     *     could name its own top-up amount would be naming its own charge.
+     */
+    AutoTopupRequest: {
+      /** Enabled */
+      enabled: boolean;
+    };
+    /**
+     * AutoTopupResponse
+     * @description The stored auto-top-up state after a set (Spec M5, B1).
+     *
+     *     ``enabled`` is what the DB HOLDS, not what was asked for, so the UI renders the
+     *     truth even when the two differ. ``threshold_credits`` / ``amount_credits`` are echoed
+     *     so the toggle can state exactly what it just armed instead of hardcoding "$2/$10".
+     */
+    AutoTopupResponse: {
+      /** Enabled */
+      enabled: boolean;
+      /** Threshold Credits */
+      threshold_credits: number;
+      /** Amount Credits */
+      amount_credits: number;
+    };
+    /**
      * AutonomyStateOut
      * @description The owner's autonomy-pause state — the durable presence read, reflect never error (B4).
      *
@@ -2874,17 +2944,50 @@ export interface components {
     };
     /**
      * BillingConfigResponse
-     * @description The client-side billing config the web needs to boot Stripe.js (Spec M4, T2a).
+     * @description The client-side billing config the web needs to render billing (Spec M4 T2a; M5 B3).
      *
      *     Only reachable when billing is active (cloud + flag + key); a community / flag-off
      *     install 404s the whole ``/v1/billing`` surface. Never carries the secret key —
      *     only the client-safe publishable key.
+     *
+     *     Spec M5 (B3, D-M5-25) extends this with the owner-locked catalog rather than adding
+     *     a second endpoint: additive (generated clients are unaffected), one round trip on
+     *     page load, and the catalog is static so it caches identically. Everything the client
+     *     needs to RENDER billing stays one coherent response.
+     *
+     *     **Scope boundary (D-M5-12): this describes the OFFERING only.** Caller state — which
+     *     plan you are on, your balance, your lots, your auto-top-up setting — comes from
+     *     ``GET /v1/me/wallet``. Neither duplicates the other, so they cannot disagree.
+     *
+     *     Every value is read from ``persona.billing.plans``, the single source of truth, so
+     *     the web can never hardcode an economic number and drift from it when the owner
+     *     changes one (§1c.7).
      */
     BillingConfigResponse: {
       /** Enabled */
       enabled: boolean;
       /** Publishable Key */
       publishable_key: string;
+      /**
+       * Plans
+       * @default []
+       */
+      plans: components["schemas"]["PlanOut"][];
+      /**
+       * Packs
+       * @default []
+       */
+      packs: components["schemas"]["PaygPackOut"][];
+      /**
+       * Auto Topup Threshold Credits
+       * @default 0
+       */
+      auto_topup_threshold_credits: number;
+      /**
+       * Auto Topup Amount Credits
+       * @default 0
+       */
+      auto_topup_amount_credits: number;
     };
     /** Body_create_upload_v1_personas__persona_id__uploads_post */
     Body_create_upload_v1_personas__persona_id__uploads_post: {
@@ -4552,6 +4655,24 @@ export interface components {
       expires_at: string;
     };
     /**
+     * PaygPackOut
+     * @description One PAYG credit pack (Spec M5, B3).
+     *
+     *     ``expiry_months`` is exposed deliberately (D-M5-13): a purchased lot really does
+     *     expire, and the term belongs on screen at the moment of purchase rather than being
+     *     discovered after the credits vanish.
+     */
+    PaygPackOut: {
+      /** Code */
+      code: string;
+      /** Price Credits */
+      price_credits: number;
+      /** Granted Credits */
+      granted_credits: number;
+      /** Expiry Months */
+      expiry_months: number;
+    };
+    /**
      * PersonaCapabilities
      * @description Deployment-derived capability flags surfaced with the persona detail.
      *
@@ -4789,6 +4910,25 @@ export interface components {
     PersonaTTSRequest: {
       /** Text */
       text: string;
+    };
+    /**
+     * PlanOut
+     * @description One purchasable plan in the catalog (Spec M5, B3) — the OFFERING, not the caller.
+     *
+     *     Prices and allowances are in credits (1 credit = 1¢), the same unit the wallet
+     *     reports, so the client formats both with one helper and never converts.
+     */
+    PlanOut: {
+      /** Code */
+      code: string;
+      /** Monthly Price Credits */
+      monthly_price_credits: number;
+      /** Included Allowance Credits */
+      included_allowance_credits: number;
+      /** Auto Topup Eligible */
+      auto_topup_eligible: boolean;
+      /** Is Default */
+      is_default: boolean;
     };
     /**
      * PortalSessionResponse
@@ -5581,6 +5721,15 @@ export interface components {
      *     ``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's
      *     included allowance). Community (unmetered) reports the sentinel balance with no
      *     lots and ``low_balance=False``.
+     *
+     *     Spec M5 (B4 + B6, D-M5-27) adds the three renewal/status fields. All three are
+     *     EXPOSE-ONLY: the columns already exist and the Stripe webhook already writes them
+     *     (``customer.subscription.updated`` → ``subscription_service.upsert_subscription``;
+     *     ``invoice.payment_failed`` → ``mark_past_due``). No new webhook events, no
+     *     migration — the data was simply unreadable. ``subscription_status`` is what lets
+     *     the billing page tell a ``past_due`` user their payment failed and their allowance
+     *     will not renew until it is fixed (D-M5-14), instead of leaving them to wonder why
+     *     they are running dry.
      */
     WalletResponse: {
       /** Total Balance */
@@ -5599,6 +5748,18 @@ export interface components {
       low_balance: boolean;
       /** Low Balance Threshold */
       low_balance_threshold: number;
+      /** Current Period End */
+      current_period_end?: string | null;
+      /**
+       * Cancel At Period End
+       * @default false
+       */
+      cancel_at_period_end: boolean;
+      /**
+       * Subscription Status
+       * @default active
+       */
+      subscription_status: string;
     };
   };
   responses: never;
@@ -6717,6 +6878,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["WalletResponse"];
+        };
+      };
+    };
+  };
+  set_auto_topup_v1_me_billing_auto_topup_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AutoTopupRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AutoTopupResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };
