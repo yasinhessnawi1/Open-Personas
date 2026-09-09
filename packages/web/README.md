@@ -16,6 +16,10 @@ generated client, with every auth touch isolated behind a swappable `@/auth` sea
 
 ## What it is and where it fits
 
+![What ships today and what is planned, as the user sees it: personas, chat with tools, memory, voice, autonomy, channels, billing and the community edition, then the roadmap.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/capabilities.png)
+
+*What the web app puts in front of people today, and what is planned next.*
+
 The browser front end: Next.js 16 (App Router), TypeScript in strict mode,
 Tailwind v4, shadcn/ui, an OpenAPI generated client against `persona-api`, and
 Biome, Vitest, and Playwright as the verification surface. SSE streams (chat,

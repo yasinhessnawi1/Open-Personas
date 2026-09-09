@@ -37,6 +37,10 @@ Clone it, set one model key, and run the whole product locally. No Docker, no si
 
 ## What your personas can do
 
+![What ships today and what is planned: personas, chat with tools, memory, voice, autonomy, channels, billing and the community edition on the left; the roadmap on the right](assets/readme/diagrams/capabilities.png)
+
+*Left: shipped and in use today. Right: planned, no dates, subject to change. Three more diagrams, the whole system, one turn and how memory works, are in [Architecture](#architecture).*
+
 ### 🧠 Memory that's a data structure, not a vibe
 
 A persona is a typed YAML document with four separate, versioned memory stores: **identity** (immutable at runtime), **self facts**, **worldview** (with epistemic tags), and **episodic**. The mutable stores never overwrite anything. Updates append new versions, with full history and rollback in one call, and every write carries its source (`system` / `user` / `persona_self`) and lands in an audit log. Episodic memory runs as a pyramid: raw turns compact into gists, gists into summaries, so a persona recalls last week's details without dragging last week's transcripts into context.
@@ -205,7 +209,14 @@ For all environment variables (provider keys, Postgres URLs, voice credentials, 
 
 ## Architecture
 
+![The whole system: web app, hosted service with the background worker and the chat connectors inside it, voice service, runtime engine and core engine, one Postgres database, and the outside services around them. The dashed regions mark the MIT engine and the source available app.](assets/readme/diagrams/whole-system.png)
+
+*Four layers, each talking only to the one below it. The engine, the runtime and voice are MIT; the app, the web and the connectors are source available. One database, one service process, and the worker and the six chat transports live inside it.*
+
 Four layers, each talking only to the one below it, plus a voice trunk and a connector trunk that attach at the API layer and reuse the same persona, memory, and runtime surface.
+
+<details>
+<summary>Text version of the system diagram</summary>
 
 ```
    ┌──────────────────────────────────────────────────────────────────────┐
@@ -244,6 +255,23 @@ Four layers, each talking only to the one below it, plus a voice trunk and a con
       │  cloud: Postgres + RLS  │      │  Ollama · local HuggingFace    │
       └─────────────────────────┘      └────────────────────────────────┘
 ```
+
+</details>
+
+### One persona, one turn
+
+![One turn as a sequence: a typed message or a spoken sentence arrives as the same turn, memory is recalled, a model is picked by tier, tools run, the reply streams, and only afterwards the turn is remembered, metered and handed to the background worker](assets/readme/diagrams/one-turn.png)
+
+*A chat message and a spoken sentence run the same loop. Memory writes and cost metering happen after you already have the answer, and the background worker picks up the slow work.*
+
+### How memory works
+
+![Memory as a data flow: conversations and your own edits feed four typed stores, facts are lifted into a shared graph and made sense of off the reply path, recall assembles what this turn needs, and the memory map and forget are yours to change](assets/readme/diagrams/how-memory-works.png)
+
+*Four typed stores, versioned and never overwritten. Facts are lifted into one graph per account, made sense of later, and come back ranked. You can see the graph drawn, correct it in place, and forget something everywhere at once.*
+
+The interactive originals (pan, zoom, search, light and dark) are kept with the project's private design notes; the exports above are the same renders with the grid removed.
+
 
 | Layer | Package | What it is | License |
 | --- | --- | --- | --- |
@@ -288,12 +316,13 @@ Shipped and load bearing:
 - [x] Model selection per persona with live price tags + honest cost accounting per turn
 - [x] Specialities, MCP catalog, bring your own MCP, sandboxed execution
 - [x] 60 starter personas written by hand
+- [x] Unified forget: one deletion that reaches every memory layer, graph and episodic alike
+- [x] Chat connectors hosted inside the service process, one model stack instead of two
 
-Coming:
+Coming (the planned region of the [capabilities diagram](#what-your-personas-can-do) carries the longer list):
 
-- [ ] Discord & Slack connectors go live (adapters built, OAuth mounting in progress)
+- [ ] Discord & Slack open for linking from the web (the transports and their OAuth callbacks already run inside the service)
 - [ ] Managed embedded Postgres becomes the community default (automatic import from SQLite)
-- [ ] Unified forget: one deletion that reaches every memory layer, graph and episodic alike
 - [ ] Autonomy defaults maturing from opt in feature gates toward safe defaults
 - [ ] Voice: tier visibility per turn and continued latency work
 

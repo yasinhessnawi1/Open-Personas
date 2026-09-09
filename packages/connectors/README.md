@@ -12,6 +12,10 @@ identical to the web app's.
 
 ## What the framework owns
 
+![The whole system, with the chat connectors drawn inside the hosted service boundary and the six chat channels outside it.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/whole-system.png)
+
+*The connectors sit inside the service boundary: a message addressed to a persona by name is handed to the same turn the web app uses.*
+
 Everything shared across platforms lives in the framework, so each adapter is only
 its platform's glue:
 

@@ -11,6 +11,10 @@ voice persona *is* the persona. It is never a thin prompt bypass.
 
 ## What it is and where it fits
 
+![One turn, shared by chat and voice: a spoken sentence is delegated to the same audited turn a typed message runs.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/one-turn.png)
+
+*A spoken sentence and a typed message run the same turn; the call delegates anything consequential and never acts alone.*
+
 `persona-voice` runs **in process with `persona-core`** (no separate language, no
 cross process IPC), so the typed memory stores, the audit log, and the credits
 service compose directly. Since V5 it also composes

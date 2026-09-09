@@ -11,6 +11,10 @@ depends on nothing else in the project.
 
 ## What it is
 
+![How memory works in the engine: four typed stores that are versioned and never overwritten, a shared graph made sense of off the reply path, ranked recall, and forget that reaches every layer.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/how-memory-works.png)
+
+*Four typed stores, versioned and never overwritten; one graph per account; recall that brings back what the turn needs; forget that reaches every layer.*
+
 A persona is a single typed YAML document: identity, constraints, self facts,
 worldview claims with epistemic tags, tools, skills, routing preferences.
 `persona-core` reads that document and gives you an agent you can drive from

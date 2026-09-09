@@ -13,6 +13,10 @@ the in process runtime.
 
 ## What it is and where it fits
 
+![The whole system with the hosted service in the middle: the background worker and the chat connectors run inside it, the voice service hands work to it, and one Postgres database sits underneath.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/whole-system.png)
+
+*The service is the only network facing process in the text stack; the worker and the six chat transports run inside it, on one database.*
+
 The API is the only network facing process in the text stack. It owns everything
 the runtime deliberately does not: HTTP transport, persistence, request ownership,
 credits, the agentic run event bus, the code execution sandbox pool, and produced

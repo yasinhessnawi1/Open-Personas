@@ -12,6 +12,10 @@ no secrets.
 
 ## What it is
 
+![One turn through the runtime: the message arrives, memory is recalled, a model is picked by tier, tools run, the reply streams, and the writes and metering happen afterwards.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/one-turn.png)
+
+*The one turn the runtime owns, from arrival to the writes that happen after the reply.*
+
 The runtime owns the per turn lifecycle and the agentic loop, and nothing else.
 Every collaborator (the persona registry, the model tiers, the toolbox, the
 conversation object) is injected by the composition root: the API in production,
