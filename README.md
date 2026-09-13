@@ -318,6 +318,7 @@ Shipped and load bearing:
 - [x] 60 starter personas written by hand
 - [x] Unified forget: one deletion that reaches every memory layer, graph and episodic alike
 - [x] Chat connectors hosted inside the service process, one model stack instead of two
+- [x] Work that carries on: a persona sees its own stalled work and picks it back up, a task that needs you stops and asks, and every leg hands the next one its plan and what it already looked up
 
 Coming (the planned region of the [capabilities diagram](#what-your-personas-can-do) carries the longer list):
 
