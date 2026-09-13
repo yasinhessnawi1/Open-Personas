@@ -45,14 +45,15 @@ gated on Spec 13's T11) dispatches by content-type to either
 documents are conversation-scoped, images are persona-scoped per Spec 13
 §7 — but the dispatcher boundary is uniform.
 
-**Vision-handoff-required (T13/T21 interim contract per user T13 framing):**
-When :class:`~persona.documents.ingest.IngestStrategy.VISION_HANDOFF_REQUIRED`
-fires (a scanned PDF, ``parse_result.needs_vision_handoff=True``), this
-service deletes the workspace original (no orphans) and raises
-:class:`~persona.documents.errors.VisionHandoffRequiredError`. T17 catches
-this and returns a clean 422 *"vision_handoff_required"* — Spec 13 fail-
-loud discipline applied at Spec 14's interim state. T21 changes this:
-the ingest path dispatches to vision; the exception goes away.
+**Scanned PDFs (T21, Spec 13's PDF contract):** when
+:class:`~persona.documents.ingest.IngestStrategy.VISION_HANDOFF_REQUIRED`
+fires (``parse_result.needs_vision_handoff=True``, so there is no text to
+extract), this service rasterises the pages, persists each page PNG through
+the storage backend, and returns a :class:`DocumentRef` whose ``images``
+carry them as :class:`~persona.schema.content.ImageContent` references with
+``strategy=VISION_HANDOFF``. The upload succeeds; the conversation message
+carries the page images so the router sends the turn to a vision-capable
+tier. The interim exception this path used to raise no longer exists.
 """
 
 from __future__ import annotations
@@ -138,8 +139,10 @@ class DocumentRef(BaseModel):
     strategy: IngestStrategy
     """The ingestion path taken. ``WHOLE_INJECT`` means T14 reads the
     full text; ``RETRIEVAL`` means T15 queries the
-    :class:`DocumentStore`; ``VISION_HANDOFF_REQUIRED`` cannot persist —
-    :func:`upload` raises before writing the sidecar."""
+    :class:`DocumentStore`; ``VISION_HANDOFF`` means the pages were
+    rasterised and are carried on :attr:`images`. A persisted ref never
+    reads ``VISION_HANDOFF_REQUIRED``: :func:`upload` completes the handoff
+    and records the outcome."""
 
     token_count: int = Field(ge=0)
     """cl100k_base estimate of the full document text."""
@@ -195,7 +198,10 @@ def upload(
             path (T03).
 
     Returns:
-        :class:`DocumentRef` with the strategy + metadata.
+        :class:`DocumentRef` with the strategy + metadata. A scanned PDF
+        returns like any other document: its pages are rasterised and carried
+        on ``images`` with ``strategy=VISION_HANDOFF`` (Spec 13's PDF
+        contract), never raised as an error.
 
     Raises:
         UnsupportedFormatError: Extension not in
@@ -203,10 +209,6 @@ def upload(
         CorruptDocumentError: Parser couldn't read the file.
         MissingDependencyError: A parser library isn't installed
             (for the ``[documents]`` extra interim state).
-        VisionHandoffRequiredError: PDF needs vision processing but T21
-            isn't wired yet (interim per the user's T13 framing). The
-            workspace original is deleted before this raises (no
-            orphans).
     """
     extension = Path(filename).suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:

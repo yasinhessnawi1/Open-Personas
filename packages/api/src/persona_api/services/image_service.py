@@ -74,6 +74,7 @@ if TYPE_CHECKING:
 Image.MAX_IMAGE_PIXELS = 50_000_000
 
 __all__ = [
+    "ATTACHMENT_MEDIA_TYPES",
     "DOWNSCALE_CEILING_PX",
     "HARD_REJECT_PX",
     "MAX_PIXELS",
@@ -496,6 +497,18 @@ def _gif_dims(file_bytes: bytes) -> tuple[int, int]:
     return int(width), int(height)
 
 
+#: The three OOXML document types (R9-149). Named once so the serve map and the
+#: route's attachment rule cannot drift apart: a browser renders none of them
+#: inline, so they are handed over as downloads rather than sniffed.
+_DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+#: Media types that must never be offered for inline rendering.
+ATTACHMENT_MEDIA_TYPES: frozenset[str] = frozenset(
+    {_DOCX_MEDIA_TYPE, _PPTX_MEDIA_TYPE, _XLSX_MEDIA_TYPE}
+)
+
 #: Spec 28 — rich-output render-set extensions served via this same route
 #: (D-28-10 reuses the uploads serve surface). The image map above stays
 #: image-only; the WorkspacePersister writes these text/diagram/doc types and
@@ -516,6 +529,13 @@ _RICH_OUTPUT_MEDIA_BY_EXT: dict[str, str] = {
     ".gv": "text/vnd.graphviz",
     ".pdf": "application/pdf",
     ".svg": "image/svg+xml",
+    # R9-149: the office documents Spec 24 generates. ``routes/artifacts.py``
+    # has always LISTED them with these exact types, so the file card showed a
+    # spreadsheet the user could click; without them here the derivation
+    # returned ``None`` and the same file 404'd on open and on download.
+    ".docx": _DOCX_MEDIA_TYPE,
+    ".pptx": _PPTX_MEDIA_TYPE,
+    ".xlsx": _XLSX_MEDIA_TYPE,
     ".py": "text/plain",
     ".ts": "text/plain",
     ".tsx": "text/plain",

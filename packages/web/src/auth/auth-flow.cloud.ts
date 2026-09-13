@@ -12,8 +12,9 @@
  * is a `ClerkError` with `code` / `message` / `longMessage`, plus an
  * `errors.fields.<field>` / `errors.global` projection. `isClerkAPIResponseError`
  * (re-exported from `@clerk/nextjs`) narrows a thrown error to one carrying an
- * `errors: ClerkAPIError[]` array. We surface `longMessage` first, then
- * `message`, then a themed fallback — never a raw stack.
+ * `errors: ClerkAPIError[]` array. For the codes we have written copy for, that
+ * copy is what the user reads; for anything else we surface `longMessage`, then
+ * `message`, then a themed fallback. A raw stack is never shown.
  */
 
 /**
@@ -69,11 +70,20 @@ export interface ClerkErrorLike {
   readonly longMessage?: string;
 }
 
+/** The `auth.error.*` keys this module can ask the catalogue for. */
+export type AuthErrorKey =
+  | "generic"
+  | "lockout"
+  | "wrongPassword"
+  | "socialAccount"
+  | "noAccount"
+  | "breachedPassword";
+
 /**
- * Resolves `auth.error.generic` / `auth.error.lockout`. Injected so this module
- * stays pure and the copy lives in the message catalogue, not here.
+ * Resolves `auth.error.<key>`. Injected so this module stays pure and the copy
+ * lives in the message catalogue, not here.
  */
-export type AuthErrorTranslator = (key: "generic" | "lockout") => string;
+export type AuthErrorTranslator = (key: AuthErrorKey) => string;
 
 /**
  * Error codes that mean the account is rate-limited / temporarily locked.
@@ -83,22 +93,47 @@ const LOCKOUT_CODES = new Set<string>([
   "too_many_requests",
   "user_locked",
   "account_locked",
-  "form_password_pwned", // not a lockout, but warrants the same calm reset nudge
 ]);
+
+/**
+ * The Clerk rejection reasons a person can actually act on (R9-135).
+ *
+ * Clerk answers a failed sign-in with a 422 whose `errors[0].code` says exactly
+ * what went wrong, and we used to flatten all of them into Clerk's own English
+ * or the generic sentence, so "wrong password", "that email signs in with
+ * Google" and "no account here at all" read identically. Each of these four
+ * needs a different next move from the user, so each gets its own sentence.
+ * Anything not listed keeps the old behaviour: Clerk's `longMessage`, then
+ * `message`, then the generic line.
+ */
+const COPY_KEY_BY_CODE: Record<string, AuthErrorKey> = {
+  form_password_incorrect: "wrongPassword",
+  strategy_for_user_invalid: "socialAccount",
+  form_identifier_not_found: "noAccount",
+  // Clerk refuses a breached password on sign-in when HIBP is enforced, and on
+  // sign-up / reset when one is chosen. It used to borrow the lockout copy,
+  // which told the user to wait for something that was never going to change.
+  form_password_pwned: "breachedPassword",
+};
 
 /**
  * Map a Core-3 Clerk error to a single themed message safe to show a user.
  *
- * Order: lockout/rate-limit codes get the calm lockout copy; otherwise prefer
- * the localizable `longMessage`, then `message`, then the generic fallback. A
- * raw provider stack is never surfaced.
+ * Order: a code we have written copy for wins; then lockout/rate-limit codes
+ * get the calm lockout copy; otherwise prefer the localizable `longMessage`,
+ * then `message`, then the generic fallback. A raw provider stack is never
+ * surfaced.
  */
 export function clerkErrorToMessage(
   error: ClerkErrorLike | null | undefined,
   t: AuthErrorTranslator,
 ): string {
   if (!error) return t("generic");
-  if (error.code && LOCKOUT_CODES.has(error.code)) return t("lockout");
+  if (error.code) {
+    const copyKey = COPY_KEY_BY_CODE[error.code];
+    if (copyKey) return t(copyKey);
+    if (LOCKOUT_CODES.has(error.code)) return t("lockout");
+  }
   const text = error.longMessage?.trim() || error.message?.trim();
   return text && text.length > 0 ? text : t("generic");
 }

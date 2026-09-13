@@ -8,7 +8,7 @@ test("author a draft, refine it, edit, and save creates the persona", async ({
 }) => {
   await page.goto("/personas/new");
   await expect(
-    page.getByRole("heading", { name: "Describe your persona" }),
+    page.getByRole("heading", { name: "Describe your persona", exact: true }),
   ).toBeVisible({ timeout: 30_000 });
 
   await page
@@ -26,7 +26,7 @@ test("author a draft, refine it, edit, and save creates the persona", async ({
 
   // The DRAFT returns (no persona row yet) and the structured form populates.
   await expect(
-    page.getByRole("heading", { name: "Review your persona" }),
+    page.getByRole("heading", { name: "Review your persona", exact: true }),
   ).toBeVisible({ timeout: 120_000 });
   await expect(page.getByLabel("Name")).not.toHaveValue("");
 

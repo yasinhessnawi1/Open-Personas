@@ -32,8 +32,16 @@ type Status =
   | "needs_new_password"
   | "complete";
 
-/** A scripted sign-in resource: `afterPassword` is the status Clerk returns. */
-function fakeSignIn(afterPassword: Status) {
+/**
+ * A scripted sign-in resource: `afterPassword` is the status Clerk returns.
+ * `passwordError` scripts a REJECTED password call instead (R9-135): Clerk
+ * answers 422, the status stays on the first factor, and the form has to say
+ * which of the four rejections it was.
+ */
+function fakeSignIn(
+  afterPassword: Status,
+  passwordError: { code: string } | null = null,
+) {
   const calls: string[] = [];
   const resource = {
     status: "needs_identifier" as Status,
@@ -46,6 +54,7 @@ function fakeSignIn(afterPassword: Status) {
     },
     async password() {
       calls.push("password");
+      if (passwordError) return { error: passwordError };
       resource.status = afterPassword;
       return { error: null };
     },
@@ -159,5 +168,35 @@ describe("custom sign-in after a correct password", () => {
       expect.stringContaining("unhandled status"),
       "needs_new_password",
     );
+  });
+});
+
+/**
+ * R9-135: every Clerk rejection used to read "Something went wrong", so a wrong
+ * password, a Google-only account and an email with no account at all were
+ * indistinguishable. Each code now renders its own sentence, through the real
+ * component and the real catalogue.
+ */
+describe("custom sign-in when Clerk rejects the password", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["form_password_incorrect", messages.auth.error.wrongPassword],
+    ["strategy_for_user_invalid", messages.auth.error.socialAccount],
+    ["form_identifier_not_found", messages.auth.error.noAccount],
+    ["form_password_pwned", messages.auth.error.breachedPassword],
+  ])("tells the user what %s actually means", async (code, sentence) => {
+    const { resource } = fakeSignIn("needs_first_factor", { code });
+    useSignInMock.mockReturnValue({
+      signIn: resource,
+      errors: { fields: {} },
+      fetchStatus: "idle",
+    });
+    render(wrap(<SignIn />));
+
+    await signInWith("whatever they typed");
+
+    await screen.findByText(sentence);
+    expect(screen.queryByText(messages.auth.error.generic)).toBeNull();
   });
 });

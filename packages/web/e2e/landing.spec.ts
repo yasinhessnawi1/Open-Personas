@@ -19,6 +19,6 @@ test("root renders the fast-launch dashboard for a signed-in user", async ({
   // The fast-launch dashboard surfaces a "Jump back in" section with one-click
   // entry points (distinct from the `/personas` management grid).
   await expect(
-    page.getByRole("heading", { name: "Jump back in" }),
+    page.getByRole("heading", { name: "Jump back in", exact: true }),
   ).toBeVisible();
 });

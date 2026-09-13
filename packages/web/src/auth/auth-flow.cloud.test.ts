@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import messages from "@/i18n/messages/en.json";
 import {
+  type AuthErrorKey,
   clerkErrorToMessage,
   dedupeFieldError,
   formatCooldown,
@@ -20,7 +21,7 @@ import {
 
 // The fallback copy lives in `auth.error.*` now; the mapper takes a resolver so
 // it stays pure. This stub is what next-intl hands it at runtime.
-const t = (key: "generic" | "lockout") => messages.auth.error[key];
+const t = (key: AuthErrorKey) => messages.auth.error[key];
 const GENERIC_ERROR_MESSAGE = messages.auth.error.generic;
 const LOCKOUT_MESSAGE = messages.auth.error.lockout;
 
@@ -47,11 +48,11 @@ describe("clerkErrorToMessage", () => {
     expect(clerkErrorToMessage(undefined, t)).toBe(GENERIC_ERROR_MESSAGE);
   });
 
-  it("prefers longMessage over message", () => {
+  it("prefers longMessage over message for a code we have no copy for", () => {
     expect(
       clerkErrorToMessage(
         {
-          code: "form_password_incorrect",
+          code: "form_param_nil",
           message: "Password is incorrect.",
           longMessage: "That password is incorrect. Try again.",
         },
@@ -78,6 +79,30 @@ describe("clerkErrorToMessage", () => {
         clerkErrorToMessage({ code, message: "raw provider string" }, t),
       ).toBe(LOCKOUT_MESSAGE);
     }
+  });
+
+  // R9-135: the four rejections a person can act on. Each one needs a different
+  // next move, so each gets its own sentence instead of Clerk's English or the
+  // generic line. Our copy wins even when Clerk sends a longMessage.
+  it.each([
+    ["form_password_incorrect", messages.auth.error.wrongPassword],
+    ["strategy_for_user_invalid", messages.auth.error.socialAccount],
+    ["form_identifier_not_found", messages.auth.error.noAccount],
+    ["form_password_pwned", messages.auth.error.breachedPassword],
+  ])("says what went wrong for %s", (code, expected) => {
+    expect(
+      clerkErrorToMessage(
+        { code, message: "raw", longMessage: "Clerk's own sentence." },
+        t,
+      ),
+    ).toBe(expected);
+    expect(expected).not.toBe(GENERIC_ERROR_MESSAGE);
+  });
+
+  it("a breached password no longer borrows the wait-and-retry lockout copy", () => {
+    expect(clerkErrorToMessage({ code: "form_password_pwned" }, t)).not.toBe(
+      LOCKOUT_MESSAGE,
+    );
   });
 
   it("never surfaces a raw empty string", () => {

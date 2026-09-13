@@ -1803,7 +1803,11 @@
     },
     "error": {
       "generic": "Something went wrong. Try again in a moment.",
-      "lockout": "Too many attempts. Wait a moment before trying again, or reset your password."
+      "lockout": "Too many attempts. Wait a moment before trying again, or reset your password.",
+      "wrongPassword": "That password does not match this account. Try again, or reset your password if you are not sure.",
+      "socialAccount": "That account signs in with Google, not with a password. Use the same option you signed up with.",
+      "noAccount": "We could not find an account for that email. Check the spelling, or create a new account.",
+      "breachedPassword": "This password has appeared in a data breach. Choose a new one to continue."
     },
     "oauth": {
       "google": "Continue with Google",

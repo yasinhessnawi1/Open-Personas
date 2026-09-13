@@ -31,8 +31,9 @@ of scope here.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
@@ -55,6 +56,27 @@ router = APIRouter(prefix="/v1/personas", tags=["uploads"])
 # the route surface treats all upload-input failures as client validation errors.
 # ``not_found`` is the sole 404 path (existence-disclosure-safe).
 _NOT_FOUND_REASONS: frozenset[str] = frozenset({"not_found"})
+
+
+def _download_name(ref: str) -> str:
+    """The plain ``filename=`` value to offer for a downloaded artifact.
+
+    Takes the ref's last path segment and keeps only ASCII characters that
+    cannot break the quoted parameter (quotes, backslashes, control characters
+    and newlines are dropped). ASCII-only is not fussiness: header values are
+    encoded latin-1, so a model-chosen name like ``rapport_日本.xlsx`` would
+    turn a working download into a 500. The full name still reaches the browser
+    through the ``filename*`` parameter the caller adds beside this one.
+
+    Args:
+        ref: The workspace-relative ref the caller asked for.
+
+    Returns:
+        A quoted-string-safe filename, or ``download`` if nothing survives.
+    """
+    base = PurePosixPath(ref).name
+    cleaned = "".join(c for c in base if c.isascii() and c.isprintable() and c not in '"\\')[:120]
+    return cleaned or "download"
 
 
 def _ensure_persona_visible(request: Request, persona_id: str) -> None:
@@ -148,10 +170,10 @@ async def create_upload(
 
     Cross-tenant persona id → 404 (persona pre-flight); cross-tenant
     conversation_id → 404 (chat_service.get_conversation under RLS).
-    Validation errors → 422 with structured body. Scanned PDFs raise
-    :exc:`VisionHandoffRequiredError` → 422 ``"vision_handoff_required"``
-    (T13 / T21 interim contract — Spec 13 fail-loud at Spec 14's interim
-    state).
+    Validation errors → 422 with structured body. A scanned PDF is not one of
+    them: T21 rasterises its pages and the returned
+    :class:`document_service.DocumentRef` carries them as ``ImageContent``
+    references for the vision tier (Spec 13's PDF contract).
     """
     _ensure_persona_visible(request, persona_id)
 
@@ -267,10 +289,11 @@ def _handle_document_upload(
     the document service runs the parse → ingest pipeline and returns a
     :class:`DocumentRef`.
 
-    The interim ``VisionHandoffRequiredError`` → 422
-    ``"vision_handoff_required"`` translation lives here. **TODO(T21):**
-    remove the catch + the exception class when the scanned-PDF → vision
-    handoff is wired.
+    A scanned PDF is not rejected here. T21 wired the real vision handoff, so
+    the document service rasterises the pages and the returned
+    :class:`DocumentRef` carries them as ``ImageContent`` references (Spec 13's
+    PDF contract); the interim exception and the catch that translated it to a
+    422 are both gone, as the comment further down records.
     """
     # 404 on cross-tenant conversation_id (RLS-scoped via chat_service).
     chat_service.get_conversation(
@@ -355,10 +378,18 @@ async def get_upload(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Response:
-    """Read an uploaded image by its workspace-relative ref.
+    """Read an uploaded or generated file by its workspace-relative ref.
+
+    Serves every artifact the workspace holds, whatever produced it: uploads,
+    generated images, charts, the Spec 28 rich-output set, and the office
+    documents Spec 24 generates (R9-149).
 
     Cross-tenant access returns 404 by design (existence-disclosure-safe).
     Path-traversal attempts (``..``) reject as 404 via the sandbox resolver.
+
+    The response always carries ``X-Content-Type-Options: nosniff``. Office
+    documents (docx / pptx / xlsx) additionally come back as an attachment: no
+    browser renders them inline, so a download is the only honest offer.
     """
     _ensure_persona_visible(request, persona_id)
 
@@ -379,6 +410,18 @@ async def get_upload(
     decision = getattr(request.state, "rate_limit_decision", None)
     if decision is not None:
         headers = decision.headers()
+
+    # The served type is derived from the extension, so tell the browser to
+    # trust it rather than sniff the bytes into something executable.
+    headers["X-Content-Type-Options"] = "nosniff"
+    if media_type in image_service.ATTACHMENT_MEDIA_TYPES:
+        # Both parameters per RFC 6266: the quoted ASCII name every client
+        # understands, and the percent-encoded UTF-8 name modern browsers
+        # prefer, so a non-ASCII filename survives the download intact.
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{_download_name(ref)}"; '
+            f"filename*=UTF-8''{quote(PurePosixPath(ref).name, safe='')}"
+        )
 
     return Response(content=file_bytes, media_type=media_type, headers=headers)
 
