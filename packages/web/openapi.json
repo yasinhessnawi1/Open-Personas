@@ -1265,7 +1265,7 @@
       "post": {
         "tags": ["runs"],
         "summary": "Start Run",
-        "description": "Start an agentic run (returns the run_id immediately; runs in background).",
+        "description": "Dispatch a one-off: an ad hoc task whose first leg the worker runs (Spec W1, D-W1-1).\n\nThe path and the pre-flight guards are unchanged; what starts is a task, not an\nin-process run, so the one-off gets checkpoints, continuation and the category gate by\nconstruction. The response names the task; its runs appear on the task detail as the\nworker opens them.",
         "operationId": "start_run_v1_personas__persona_id__runs_post",
         "parameters": [
           {
@@ -1294,7 +1294,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunStatusResponse"
+                  "$ref": "#/components/schemas/WorkDispatchResponse"
                 }
               }
             }
@@ -1377,7 +1377,7 @@
       "get": {
         "tags": ["runs"],
         "summary": "Stream Events",
-        "description": "Stream the run's events as SSE (live, from the in-process event bus).",
+        "description": "Stream the run's events as SSE: the in-process bus, or a tail of the run row (W1).",
         "operationId": "stream_events_v1_runs__run_id__events_get",
         "parameters": [
           {
@@ -1460,7 +1460,7 @@
       "post": {
         "tags": ["runs"],
         "summary": "Cancel",
-        "description": "Cancel a running run (stops at the next step boundary \u2192 cancelled).",
+        "description": "Cancel from the run viewer: the run's TASK when it has one, else the in-process run.\n\nSpec W1 (D-W1-1 / D-W1-14): one control set. A run that belongs to a task is one of its\nexecutions, so cancelling it cancels the task (terminal, schedule stopped); a legacy\nin-process run still flips its own token. A running leg finishes its current step and\nthen stops (the external cancel seam is T6, D-W1-21).",
         "operationId": "cancel_v1_runs__run_id__cancel_post",
         "parameters": [
           {
@@ -4558,6 +4558,139 @@
         }
       }
     },
+    "/v1/tasks/{task_id}/pickup": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Pickup Task",
+        "description": "Pick up a task that waits on you (Spec W1, T6): its next leg runs on the worker.\n\nCross-tenant ids are not found (RLS). A paused task, a paused owner or a suspended persona\nis refused with the reason (D-W1-10). Idempotent: a second pickup dedups to the one job.",
+        "operationId": "pickup_task_v1_tasks__task_id__pickup_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/reply": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Reply To Task",
+        "description": "Answer a task that waits on you (Spec W1, T6; D-W1-4): the reply rides into its next leg.\n\nA task whose wait is a pending approval answers 409 and names the approval.",
+        "operationId": "reply_to_task_v1_tasks__task_id__reply_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskReplyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}/retry": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Retry Task",
+        "description": "Run a finished task again as a NEW task with the same contract (Spec W1, T6).\n\nThe response names the successor; the old task stays as the record of what happened.",
+        "operationId": "retry_task_v1_tasks__task_id__retry_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tasks/{task_id}/budget/extend": {
       "post": {
         "tags": ["tasks"],
@@ -6016,6 +6149,25 @@
               }
             ],
             "title": "Ran Because"
+          },
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Actions",
+            "default": []
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           }
         },
         "type": "object",
@@ -7674,6 +7826,10 @@
             "type": "integer",
             "title": "Active Tasks"
           },
+          "attention": {
+            "type": "integer",
+            "title": "Attention"
+          },
           "schedules": {
             "type": "integer",
             "title": "Schedules"
@@ -7687,6 +7843,7 @@
           "calls",
           "memory_nodes",
           "active_tasks",
+          "attention",
           "schedules"
         ],
         "title": "NavCountsResponse",
@@ -8685,6 +8842,17 @@
             "type": "string",
             "title": "Task"
           },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -8740,6 +8908,17 @@
             "type": "string",
             "title": "Task"
           },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -8766,7 +8945,7 @@
         "type": "object",
         "required": ["id", "persona_id", "task", "status", "started_at"],
         "title": "RunSummary",
-        "description": "A run in the Tasks index \u2014 a light projection without the steps JSON."
+        "description": "A run in a list \u2014 a light projection without the steps JSON."
       },
       "STTProxyResponse": {
         "properties": {
@@ -9180,6 +9359,17 @@
             "type": "string",
             "title": "Note",
             "default": ""
+          },
+          "successor_task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Task Id"
           }
         },
         "additionalProperties": false,
@@ -9205,6 +9395,10 @@
           "scope": {
             "type": "string",
             "title": "Scope"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
           },
           "status": {
             "type": "string",
@@ -9332,6 +9526,13 @@
             "type": "array",
             "title": "Run Ids"
           },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "type": "array",
+            "title": "Runs"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -9350,6 +9551,7 @@
           "persona_id",
           "goal",
           "scope",
+          "kind",
           "status",
           "paused",
           "grants",
@@ -9367,11 +9569,26 @@
           "conversation_id",
           "schedule_id",
           "run_ids",
+          "runs",
           "created_at",
           "updated_at"
         ],
         "title": "TaskDetailOut",
         "description": "The task, above the run viewer: contract + grants, state, ledger, budget, report, waits."
+      },
+      "TaskReplyRequest": {
+        "properties": {
+          "reply": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reply"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["reply"],
+        "title": "TaskReplyRequest",
+        "description": "Answer a task that is waiting on you (Spec W1, T6): the reply lands in its next leg."
       },
       "TaskReportOut": {
         "properties": {
@@ -9426,6 +9643,10 @@
             "type": "string",
             "title": "Goal"
           },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -9465,6 +9686,7 @@
           "task_id",
           "persona_id",
           "goal",
+          "kind",
           "status",
           "paused",
           "spent_micros",
@@ -10064,6 +10286,31 @@
         ],
         "title": "WalletResponse",
         "description": "The two-bucket dollar-wallet (Spec M4, T8) \u2014 the settings billing surface.\n\n``total_balance`` = ``allowance_balance`` + \u03a3 live PAYG lot remainders (the only\nnumber spend checks use); ``allowance_period`` is the UTC ``YYYY-MM`` month stamp\nof the last allowance reset (``None`` = never reset). ``payg_lots`` lists the live\nlots in the FIFO spend order. ``plan_code`` / ``auto_topup_enabled`` come from the\ncaller's subscription row (absent \u2192 ``free`` / ``False``). ``low_balance`` compares\n``total_balance`` against the per-plan ``low_balance_threshold`` (20% of the plan's\nincluded allowance). Community (unmetered) reports the sentinel balance with no\nlots and ``low_balance=False``.\n\nSpec M5 (B4 + B6, D-M5-27) adds the three renewal/status fields. All three are\nEXPOSE-ONLY: the columns already exist and the Stripe webhook already writes them\n(``customer.subscription.updated`` \u2192 ``subscription_service.upsert_subscription``;\n``invoice.payment_failed`` \u2192 ``mark_past_due``). No new webhook events, no\nmigration \u2014 the data was simply unreadable. ``subscription_status`` is what lets\nthe billing page tell a ``past_due`` user their payment failed and their allowance\nwill not renew until it is fixed (D-M5-14), instead of leaving them to wonder why\nthey are running dry."
+      },
+      "WorkDispatchResponse": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "persona_id": {
+            "type": "string",
+            "title": "Persona Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["task_id", "persona_id", "kind", "state"],
+        "title": "WorkDispatchResponse",
+        "description": "A one-off dispatch: the task that now carries the work (Spec W1, D-W1-1 / D-W1-3).\n\nA bare run used to answer with a run id. Under \"a run is an execution of a task\" the\ndurable identity is the task: the worker opens the run row when it claims the first leg,\nand the task detail lists every run as they land. ``state`` is the task state at dispatch\n(``active``); ``kind`` is ``ad_hoc``."
       }
     }
   }

@@ -33,11 +33,11 @@ from typing import TYPE_CHECKING, Any
 
 from persona.jobs import JobState
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.engine import rls_connection
-from persona_api.db.models import jobs
+from persona_api.db.models import jobs, jobs_archive
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine, RowMapping
@@ -403,6 +403,45 @@ class JobQueue:
         return self._terminate(
             job_id=job_id, worker_id=worker_id, new_state=JobState.FAILED, error=error
         )
+
+    def count_spent_attempts(self, *, owner_id: str, idempotency_key: str) -> int:
+        """How many jobs at ``idempotency_key`` (or its ``:retry:N`` successors) are SPENT.
+
+        Spec W1 (D-W1-20, amended D-W1-29): the suffix a resume appends. A spent row at the
+        CURRENT head is one that ended without advancing the head: dead-lettered, permanently
+        failed, or **succeeded without running** (the claim-side skip of a paused task and the
+        over-budget park both CONSUME the job). Any of them would absorb a later enqueue at
+        that head through the duplicate guard, so all of them count. A genuinely completed leg
+        advanced the head, so its succeeded row sits at an older key and never matters.
+
+        Counts the hot table AND the archive (the sweep ages terminal rows out after a day; the
+        count must not reset when it does). Owner-scoped (RLS + the explicit predicate).
+        Read-only (CQS).
+        """
+        terminal = ("succeeded", "dead", "failed")
+        successors = f"{idempotency_key}:retry:%"
+        hot = (
+            select(func.count())
+            .select_from(jobs)
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.state.in_(terminal),
+                (jobs.c.idempotency_key == idempotency_key)
+                | jobs.c.idempotency_key.like(successors),
+            )
+        )
+        cold = (
+            select(func.count())
+            .select_from(jobs_archive)
+            .where(
+                jobs_archive.c.owner_id == owner_id,
+                jobs_archive.c.state.in_(terminal),
+                (jobs_archive.c.idempotency_key == idempotency_key)
+                | jobs_archive.c.idempotency_key.like(successors),
+            )
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            return int(conn.execute(hot).scalar_one()) + int(conn.execute(cold).scalar_one())
 
     def dead_letters(self, *, limit: int = 50, offset: int = 0) -> list[JobRecord]:
         """List dead-lettered jobs (newest first) — the A3/A6 observability seam.

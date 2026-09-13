@@ -158,7 +158,7 @@ async def test_the_salvage_reaches_the_next_leg_through_the_checkpoint() -> None
         created_at=_NOW,
         updated_at=_NOW,
     )
-    checkpoint = CompactingCheckpointWriter().write(
+    checkpoint = await CompactingCheckpointWriter().write(
         task=task, prior=None, run=run, leg_id="leg-1", seq=1, now=_NOW
     )
 

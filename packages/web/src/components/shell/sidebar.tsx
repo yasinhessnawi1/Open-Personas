@@ -234,7 +234,9 @@ export function Sidebar({ data }: { data: SidebarData }) {
             counts={{
               personas: data.counts.personas,
               calls: data.counts.calls,
-              activity: data.counts.activeTasks,
+              // Spec W1 (D-W1-5): the badge counts what NEEDS you, which is exactly the
+              // review list's length, not the working set that runs on its own.
+              activity: data.counts.attention,
               memory: data.counts.memoryNodes,
               schedule: data.counts.schedules,
             }}

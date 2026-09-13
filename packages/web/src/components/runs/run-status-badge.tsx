@@ -12,6 +12,8 @@ import { cn } from "@/lib/utils";
 
 const STATUS_CLASS: Record<RunStatus, string> = {
   running: "border-primary/40 text-primary",
+  // Spec W1: waiting on a person, the same amber the review page uses for "needs you".
+  awaiting_user: "border-amber-500/45 text-amber-600 dark:text-amber-500",
   completed: "border-tier-small/50 text-tier-small",
   cancelled: "border-border text-muted-foreground",
   max_steps_reached: "border-tier-mid/50 text-tier-mid",

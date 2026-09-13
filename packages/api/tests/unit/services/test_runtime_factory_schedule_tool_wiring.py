@@ -83,9 +83,10 @@ async def test_schedule_introspect_adds_exactly_one_registered_tool() -> None:
     registered = set(toolbox._tools)  # noqa: SLF001 — the registry IS the assertion
     assert _TOOL in registered
     # The pre-R9-075 composition on this path: 11 build_default_toolbox built-ins +
-    # ``task_introspect`` = 12 registered. ``schedule_introspect`` makes 13. (Production
-    # adds record_user_fact + the runtime-wired tools whose backends are absent here.)
-    assert len(registered) == 13, sorted(registered)
+    # ``task_introspect`` = 12 registered. ``schedule_introspect`` makes 13, and Spec W1's
+    # ``task_pickup`` 14. (Production adds record_user_fact + the runtime-wired tools whose
+    # backends are absent here.)
+    assert len(registered) == 14, sorted(registered)
 
 
 @pytest.mark.asyncio
@@ -116,3 +117,26 @@ async def test_off_request_dispatch_fails_closed() -> None:
 
     assert result.is_error is True
     assert "calendar access" in result.content
+
+
+@pytest.mark.parametrize("tool_name", ["task_introspect", "task_pickup"])
+@pytest.mark.asyncio
+async def test_the_persona_can_actually_reach_its_own_work(tool_name: str) -> None:
+    """Spec W1 (T9): both halves of the persona's window onto its own tasks are ADVERTISED.
+
+    ``task_introspect`` shipped with A4 and was never auto-allowed, so it hit exactly the
+    failure this file was written about: composed, registered, counted in
+    ``extra_tool_count``, and then filtered straight back out for every persona with a
+    non-empty allow-list — which is every persona, since the default floor is three tools. It
+    is absent from the catalog too, so no YAML could name it either. The window a persona had
+    onto its own work was never actually open, and "how's the research going?" was answered
+    from imagination by a persona that had a grounded answer sitting right there.
+
+    ``task_pickup`` is the write half and would have inherited the same fate.
+    """
+    persona = _make_persona(tools=["file_read", "code_execution", "web_search"])
+    toolbox = await _make_factory()._build_toolbox(persona, scanned_skills=[])  # type: ignore[attr-defined]
+
+    assert tool_name not in persona.tools  # no persona's YAML names it (it is not a capability)
+    assert toolbox.is_allowed(tool_name), f"{tool_name} is registered but gated out"
+    assert tool_name in toolbox.names()  # and it is actually advertised to the model

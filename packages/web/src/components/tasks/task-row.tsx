@@ -33,9 +33,17 @@ interface TaskRowProps {
   personaName: string;
   busy: boolean;
   onCancel: () => void;
+  /** Spec W1 (T7): carry a stalled task on from here; omitted where pickup cannot apply. */
+  onPickup?: () => void;
 }
 
-export function TaskRow({ task, personaName, busy, onCancel }: TaskRowProps) {
+export function TaskRow({
+  task,
+  personaName,
+  busy,
+  onCancel,
+  onPickup,
+}: TaskRowProps) {
   const t = useTranslations("taskList");
   const stuck = STUCK_STATUSES.has(task.status) && task.stuck_cause !== null;
   const cap = task.budget_cap_micros;
@@ -79,6 +87,15 @@ export function TaskRow({ task, personaName, busy, onCancel }: TaskRowProps) {
           >
             {t(`status.${task.status}`)}
           </Badge>
+          {task.kind === "ad_hoc" ? (
+            <span
+              className="type-caption text-muted-foreground"
+              data-slot="task-kind"
+              data-kind="ad_hoc"
+            >
+              {t("oneOff")}
+            </span>
+          ) : null}
           <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
             {t("spend", { spent: kr(task.spent_micros), cap: kr(cap) })}
           </span>
@@ -96,7 +113,28 @@ export function TaskRow({ task, personaName, busy, onCancel }: TaskRowProps) {
               <span>{task.stuck_cause}</span>
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button render={<Link href={href} />} size="sm">
+              {/* Spec W1 (T7): a task parked waiting on you can be carried on from the list
+                  itself, the same seam the review page's Pick up uses. A terminal task gets
+                  no pickup: it is finished, and the honest verb there is a fresh run. */}
+              {onPickup && task.status === "waiting_on_user" ? (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  data-verb="pickup"
+                  onClick={onPickup}
+                >
+                  {t("pickUp")}
+                </Button>
+              ) : null}
+              <Button
+                render={<Link href={href} />}
+                size="sm"
+                variant={
+                  onPickup && task.status === "waiting_on_user"
+                    ? "outline"
+                    : "default"
+                }
+              >
                 {t("resolve")}
               </Button>
               <Button

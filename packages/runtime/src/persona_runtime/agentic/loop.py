@@ -59,8 +59,10 @@ from persona.skills import (
 from persona.skills.composition import AdmissionResult, SkillCompositionState
 from persona.tools import format_tool_result
 
+from persona_runtime.agentic.call_ledger import CallLedger
 from persona_runtime.agentic.compactor import StepHistoryCompactor
 from persona_runtime.agentic.events import RunEvent
+from persona_runtime.agentic.pruner import PROTECTED_STEPS, ToolResultPruner
 from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
 from persona_runtime.agentic.step import Step, StepType
 from persona_runtime.errors import TierNotConfiguredError
@@ -136,6 +138,17 @@ _SUMMARISE_INSTRUCTION = (
 _ASK_USER_HEURISTIC_MAX_CHARS = 300
 
 
+def _protected_boundary(context: list[ConversationMessage], step_message_counts: list[int]) -> int:
+    """Index where the last :data:`PROTECTED_STEPS` steps begin (Spec W1, D-W1-41).
+
+    Never 0: the floor is protected by the pruner itself, and a boundary of 0 would claim
+    the whole context is old. With fewer steps than that on record, everything after the
+    floor is recent, which is the honest answer for a run that has barely started.
+    """
+    protected = sum(step_message_counts[-PROTECTED_STEPS:])
+    return max(1, len(context) - protected)
+
+
 def _backend_max_tokens(backend: ChatBackend) -> int:
     """Best-effort context budget (mirrors the conversation loop's helper)."""
     value = getattr(backend, "max_tokens", None)
@@ -163,6 +176,7 @@ class AgenticLoop:
         router: Router,
         tier_registry: TierRegistry,
         compactor: StepHistoryCompactor | None = None,
+        pruner: ToolResultPruner | None = None,
         max_steps: int = 20,
         force_frontier_tier: bool = False,
         question_author: QuestionAuthor | None = None,
@@ -170,7 +184,15 @@ class AgenticLoop:
         skill_consent: SkillConsentPort | None = None,
         audit_logger: AuditLogger | None = None,
         crisis_encoder: CrisisScorer | None = None,
+        park_on_question: bool = False,
     ) -> None:
+        # Spec W1 (D-W1-34): what to do when the model asks and there is nobody here to
+        # answer. The default is the long-standing behaviour: proceed with best judgment,
+        # which is right for a run whose caller is not present (an initiative, a scheduled
+        # nudge). A TASK LEG sets this: its user IS reachable, just not synchronously, so
+        # the honest move is to stop and let the task park on the question until they
+        # answer. Off, this file behaves exactly as it did before.
+        self._park_on_question = park_on_question
         self._persona = persona
         self._stores = stores
         self._toolbox = toolbox
@@ -200,6 +222,13 @@ class AgenticLoop:
         self._router = router  # reserved for chat-style routing; step-tier is _tier_for_step
         self._tiers = tier_registry
         self._compactor = compactor or StepHistoryCompactor()
+        # Spec W1 (D-W1-13): the cost-keyed pruner, alongside and independent of the
+        # window-keyed compactor above. The composition root passes one carrying the
+        # configured ceiling; the default is the ruled 12,000 tokens.
+        self._pruner = pruner or ToolResultPruner()
+        # Spec W1 (D-W1-11): what this run has already tried. Replaced at each run()
+        # entry, like the question registry: a ledger never outlives its run.
+        self._ledger = CallLedger()
         self._max_steps = max_steps
         self._force_frontier = force_frontier_tier
         # M1a per-step deferred input_files (D-16-2, D-16-2-state-location).
@@ -280,6 +309,9 @@ class AgenticLoop:
         # step regardless (D-21-15).
         self._question_registry = QuestionRegistry()
         self._questions_asked = 0
+        # Spec W1 (D-W1-11): a fresh ledger per run. Nothing a previous run learned about
+        # a tool is true now, so nothing carries over.
+        self._ledger = CallLedger()
         level = resolve_autonomy(
             self._persona,
             self._stores["self_facts"].get_all(persona_id, include_superseded=True),
@@ -298,6 +330,11 @@ class AgenticLoop:
         context = await self._build_initial_context(persona_id, task, on_event)
 
         last_bad_tool: str | None = None  # for the hallucinated-twice escalation (§5.2)
+        # Spec W1 (D-W1-41): how many messages each step appended, newest last. The pruner
+        # protects whole STEPS, and only the loop knows where one begins: a step that batches
+        # six lookups is six or seven messages, and a tail counted in messages would cut the
+        # oldest results of a step the model has not been sent yet.
+        step_message_counts: list[int] = []
 
         for step_num in range(self._max_steps):
             if cancel_token is not None and cancel_token.is_cancelled:
@@ -324,6 +361,7 @@ class AgenticLoop:
             backend = self._tiers.get(tier)
 
             await self._emit(on_event, RunEvent.thinking(step_num))
+            context_before_step = len(context)
             step_started = time.perf_counter()
             response = await backend.chat(context, tools=self._toolbox.get_specs())
             latency_ms = (time.perf_counter() - step_started) * 1000.0
@@ -358,7 +396,7 @@ class AgenticLoop:
                 )
                 steps.append(step)
             elif self._is_ask_user(response):
-                step, context = await self._handle_ask_user(
+                step, context, parked = await self._handle_ask_user(
                     step_num,
                     response,
                     context,
@@ -369,8 +407,15 @@ class AgenticLoop:
                     on_event,
                 )
                 steps.append(step)
+                if parked:
+                    # Spec W1 (D-W1-34): stop cleanly ON the question. The step carries it,
+                    # unanswered, and NO output is set: a question is not a deliverable, and
+                    # writing one into ``output`` is how the raw marker used to reach the
+                    # user's own conclusions.
+                    status = RunStatus.AWAITING_USER
+                    break
             elif self._is_final(response):
-                output = self._strip_marker(response.content, _FINAL_MARKER)
+                output = self._clean_output(response.content)
                 steps.append(
                     Step(
                         type=StepType.FINAL,
@@ -404,10 +449,23 @@ class AgenticLoop:
                 )
                 await self._emit(on_event, RunEvent.reasoning(step_num, response.content))
 
-            context = await self._maybe_compact(context, backend)
+            step_message_counts.append(max(0, len(context) - context_before_step))
+            compacted = await self._maybe_compact(context, backend)
+            if compacted is not context:
+                # The compactor rewrote history into a summary, so the counts no longer
+                # describe this context. What survived IS the recent tail, so treat it as
+                # one step: nothing of it is prunable until the run moves on.
+                context = compacted
+                step_message_counts = [max(0, len(context) - 1)]
+            context = await self._maybe_prune(
+                context,
+                step_num,
+                on_event,
+                protect_from=_protected_boundary(context, step_message_counts),
+            )
         else:
             status = RunStatus.MAX_STEPS_REACHED
-            output = await self._best_effort_summary(context)
+            output = self._clean_output(await self._best_effort_summary(context))
             await self._emit(on_event, RunEvent.max_steps(self._max_steps, output))
 
         run = Run(
@@ -517,7 +575,7 @@ class AgenticLoop:
         latency_ms: float,
         user_respond: Callable[[str], Awaitable[str]] | None,
         on_event: Callable[[RunEvent], Awaitable[None]] | None,
-    ) -> tuple[Step, list[ConversationMessage]]:
+    ) -> tuple[Step, list[ConversationMessage], bool]:
         """Ask the user a question and fold their answer back into context (§4.2).
 
         Spec 21 T07: the question carries 3+1 options (D-21-9), and is bounded by
@@ -526,6 +584,13 @@ class AgenticLoop:
         it proceeds with best judgment (the D-21-18 stated-assumption analogue) —
         but still records an ``ASK_USER`` step (a question consumes a step,
         D-21-15). The model-initiated ``[ASK_USER]`` marker path is preserved.
+
+        Returns:
+            The step, the next context, and whether the loop should PARK on this question
+            (Spec W1, D-W1-34). Parking needs ``park_on_question`` AND no ``user_respond``
+            AND a question that was not suppressed: a capped or repeated question keeps its
+            ruled behaviour (proceed with best judgment), so a persona cannot strand its own
+            task by asking the same thing forever.
         """
         question = self._strip_marker(response.content, _ASK_USER_MARKER)
         suppressed = self._questions_asked >= self._question_cap or self._question_registry.seen(
@@ -552,6 +617,7 @@ class AgenticLoop:
                     latency_ms=latency_ms,
                 ),
                 new_context,
+                False,  # capped or repeated: the ruled behaviour is to carry on
             )
 
         pq = await self._question_author.default(
@@ -567,11 +633,16 @@ class AgenticLoop:
         self._question_registry.record(question)
         new_context = [*context, self._assistant(response.content)]
         answer: str | None = None
+        parked = False
         if user_respond is not None:
             answer = await user_respond(question)
             new_context.append(self._user(answer))
             await self._emit(on_event, RunEvent.user_responded(step_num))
             self._question_registry.record(question, answer)
+        elif self._park_on_question:
+            # Spec W1 (D-W1-34): the user is reachable, just not right now. Stop here and
+            # let the caller park on the question rather than answering it on their behalf.
+            parked = True
         else:
             new_context.append(self._user(_NO_CALLBACK_REPLY))
         step = Step(
@@ -582,7 +653,7 @@ class AgenticLoop:
             tokens=tokens,
             latency_ms=latency_ms,
         )
-        return step, new_context
+        return step, new_context, parked
 
     # ----- classification (§4.2; markers primary, heuristic fallback) ------
 
@@ -600,6 +671,20 @@ class AgenticLoop:
     @staticmethod
     def _strip_marker(content: str, marker: str) -> str:
         return content.replace(marker, "").strip()
+
+    @staticmethod
+    def _clean_output(text: str) -> str:
+        """Strip EVERY control marker from text a person will read (Spec W1, D-W1-34).
+
+        The markers steer the loop; they are not prose. A run that asked a question the cap
+        suppressed, or that summarised a context containing one, used to carry the raw
+        ``[ASK_USER]`` into its output, from there into the checkpoint's conclusions, and
+        from there onto the review page and the task report, where it read as gibberish.
+        Stripped once, at the two places an output is set.
+        """
+        for marker in (_FINAL_MARKER, _ASK_USER_MARKER):
+            text = text.replace(marker, "")
+        return text.strip()
 
     # ----- tier policy (D-06-6) --------------------------------------------
 
@@ -638,6 +723,37 @@ class AgenticLoop:
             return context
         summary = await self._summarise(middle)
         return self._compactor.compact_if_needed(context, budget, summary=summary)
+
+    async def _maybe_prune(
+        self,
+        context: list[ConversationMessage],
+        step_num: int,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None,
+        *,
+        protect_from: int,
+    ) -> list[ConversationMessage]:
+        """Trim old tool results once the step's context gets expensive (Spec W1, D-W1-13).
+
+        Separate from :meth:`_maybe_compact` on purpose: that one keys off the model's
+        window and summarises history, this one keys off cost and only shortens tool
+        output. A run can cross the cost ceiling many times over without ever approaching
+        the window, which is exactly the case this exists for.
+
+        ``protect_from`` is where the last two steps begin (D-W1-41): a result is never
+        trimmed before the model has been sent it whole at least once.
+        """
+        if not self._pruner.should_prune(context):
+            return context
+        before = self._pruner.size(context)
+        pruned = self._pruner.prune(context, protect_from=protect_from)
+        after = self._pruner.size(pruned)
+        if after == before:
+            return context  # nothing was long enough to be worth cutting
+        await self._emit(
+            on_event,
+            RunEvent.context_pruned(step_num, before_tokens=before, after_tokens=after),
+        )
+        return pruned
 
     async def _summarise(self, messages: list[ConversationMessage]) -> str:
         """Summarise an excerpt on the background tier (the one async summary call).
@@ -790,7 +906,47 @@ class AgenticLoop:
         step_num: int = -1,
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
     ) -> ToolResult:
-        """Dispatch a tool call, converting structural failures to is_error results.
+        """The one door a tool call goes through: the guards, then the tool itself.
+
+        Three things can answer a call without running it. A call the provider truncated
+        mid-JSON gets actionable guidance (dispatching it with empty args yields a cryptic
+        "Field required" and an identical-retry loop). A repeat of a call that already
+        failed, and an allowlisted read that already succeeded, are answered from the
+        run's ledger (Spec W1, D-W1-11). Everything else reaches :meth:`_dispatch_now`.
+        """
+        from persona.schema.tools import truncated_tool_call_message
+
+        if call.truncated:
+            return ToolResult(
+                tool_name=call.name,
+                call_id=call.call_id,
+                is_error=True,
+                content=truncated_tool_call_message(call.name),
+            )
+
+        # Spec W1 (D-W1-11): the ledger answers before anything is dispatched. A repeat of
+        # a call that already failed gets the original error plus the instruction to change
+        # something; an allowlisted read that already succeeded gets its stored result. Both
+        # cost nothing, and the trace says so.
+        hit = self._ledger.check(call)
+        if hit is not None:
+            await self._emit(
+                on_event, RunEvent.call_skipped(step_num, tool=call.name, guard=hit.kind)
+            )
+            return hit.result
+
+        result = await self._dispatch_now(call, step_num=step_num, on_event=on_event)
+        self._ledger.remember(call, result)
+        return result
+
+    async def _dispatch_now(
+        self,
+        call: ToolCall,
+        *,
+        step_num: int,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None,
+    ) -> ToolResult:
+        """Run the tool, converting structural failures to is_error results.
 
         A not-allowed / not-registered tool raises (spec 03); we convert to
         ``ToolResult(is_error=True, content=...)`` so the model can recover
@@ -804,24 +960,11 @@ class AgenticLoop:
         emitting additively during the migration (P2-D-3 keep-both).
         """
         from persona.errors import ToolExecutionError, ToolNotAllowedError
-        from persona.schema.tools import truncated_tool_call_message
 
         # Lazy import: persona_runtime.activity imports persona_runtime.agentic.events,
         # which pulls persona_runtime.agentic.__init__ → this module; a top-level import
         # would be a partially-initialised cycle. Imported here (like the errors above).
         from persona_runtime.activity import dispatch_with_activity
-
-        # The provider truncated the call mid-JSON (finish_reason="length" or
-        # unparseable arguments). Dispatching with empty args yields the cryptic
-        # "Field required" and an identical-retry loop; return actionable
-        # guidance so the model shortens/splits instead.
-        if call.truncated:
-            return ToolResult(
-                tool_name=call.name,
-                call_id=call.call_id,
-                is_error=True,
-                content=truncated_tool_call_message(call.name),
-            )
 
         try:
             return await dispatch_with_activity(

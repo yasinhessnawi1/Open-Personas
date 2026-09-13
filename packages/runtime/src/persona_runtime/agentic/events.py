@@ -40,8 +40,8 @@ class RunEvent(BaseModel):
             ``memory_recall``, ``tool_calling``, ``tool_result``,
             ``activity_start``, ``activity_end`` (P2 — the unified "using <X>…"
             activity contract), ``asking_user``, ``user_responded``,
-            ``reasoning``, ``completed``, ``cancelled``, ``max_steps``,
-            ``error``, ``finished``.
+            ``reasoning``, ``call_skipped``, ``context_pruned``, ``completed``,
+            ``cancelled``, ``max_steps``, ``error``, ``finished``.
         step: The zero-based step index the event belongs to (``-1`` for
             run-level events that precede the first step, e.g. ``started``).
         data: Event-type-specific JSON-safe payload built by the constructor.
@@ -380,6 +380,36 @@ class RunEvent(BaseModel):
         """The step budget was exhausted; ``summary`` is the best-effort output."""
         return cls(
             type="max_steps", step=step, data={"summary": summary}, timestamp=datetime.now(UTC)
+        )
+
+    @classmethod
+    def call_skipped(cls, step: int, *, tool: str, guard: str) -> RunEvent:
+        """A tool call the ledger answered instead of dispatching (Spec W1, D-W1-11).
+
+        ``guard`` is ``"repeat_error"`` (this exact call already failed) or ``"cached_read"``
+        (this exact read already succeeded and nothing has changed since). The step trace shows
+        the call happened and that it cost nothing, so a run that looks idle is explained
+        rather than mysterious.
+        """
+        return cls(
+            type="call_skipped",
+            step=step,
+            data={"tool": tool, "guard": guard},
+            timestamp=datetime.now(UTC),
+        )
+
+    @classmethod
+    def context_pruned(cls, step: int, *, before_tokens: int, after_tokens: int) -> RunEvent:
+        """Old tool results were trimmed to keep the per-step cost flat (Spec W1, D-W1-13).
+
+        Carries what the context cost before and after, so the trace shows the saving rather
+        than the model quietly losing detail.
+        """
+        return cls(
+            type="context_pruned",
+            step=step,
+            data={"before_tokens": before_tokens, "after_tokens": after_tokens},
+            timestamp=datetime.now(UTC),
         )
 
     @classmethod

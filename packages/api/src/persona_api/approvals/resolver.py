@@ -363,6 +363,11 @@ class ApprovalResolver:
             next_step=prior.next_step if prior is not None else "",
             open_questions=prior.open_questions if prior is not None else (),
             artifact_pointers=prior.artifact_pointers if prior is not None else (),
+            # Spec W1 (D-W1-16): an approval decision is not a leg and asks the world
+            # nothing, so it carries both ledgers forward untouched. Dropping them here
+            # would make every approved task re-run every search it had already run.
+            queries_run=prior.queries_run if prior is not None else (),
+            sources_seen=prior.sources_seen if prior is not None else (),
             blocked_on=None,
             updated_at=now,
         )

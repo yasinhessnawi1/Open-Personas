@@ -7,6 +7,10 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/auth";
 import {
+  AttentionActions,
+  isActionable,
+} from "@/components/activity/attention-actions";
+import {
   type NewTaskAction,
   NewTaskDialog,
   type NewTaskPersona,
@@ -186,16 +190,42 @@ function ItemAction({
   );
 }
 
+/**
+ * Spec W1 (T7): the line acts where it is read. A task line carries its own verbs (Reply,
+ * Pick up, Cancel, Try again) and runs them here; an approval line keeps its link into the
+ * inbox, where the proposal it would grant is actually visible. `onActed` re-reads the
+ * digest, so the list and the badge move together from the durable truth (D-W1-5).
+ */
+function ItemVerbs({
+  item,
+  onActed,
+  t,
+  fallbackLabel,
+  primary = false,
+}: {
+  item: DigestItem;
+  onActed: () => void;
+  t: ReturnType<typeof useTranslations>;
+  fallbackLabel: string;
+  primary?: boolean;
+}) {
+  if (isActionable(item))
+    return <AttentionActions item={item} onActed={onActed} t={t} />;
+  return <ItemAction ref_={item.ref} label={fallbackLabel} primary={primary} />;
+}
+
 /** Waiting on you: an attention-rail card — the persona's own words (Fraunces
  * italic), the detail in the mono register, the action inline (Ledger triage). */
 function WaitingCard({
   item,
   name,
   t,
+  onActed,
 }: {
   item: DigestItem;
   name: string;
   t: ReturnType<typeof useTranslations>;
+  onActed: () => void;
 }) {
   return (
     <RailCard
@@ -220,9 +250,11 @@ function WaitingCard({
             {item.ran_because}
           </p>
         ) : null}
-        <ItemAction
-          ref_={item.ref}
-          label={
+        <ItemVerbs
+          item={item}
+          onActed={onActed}
+          t={t}
+          fallbackLabel={
             item.ref?.kind === "approval"
               ? t("reviewInApprovals")
               : t("resolve")
@@ -239,10 +271,12 @@ function StuckCard({
   item,
   name,
   t,
+  onActed,
 }: {
   item: DigestItem;
   name: string;
   t: ReturnType<typeof useTranslations>;
+  onActed: () => void;
 }) {
   return (
     <RailCard
@@ -272,7 +306,13 @@ function StuckCard({
             {item.ran_because}
           </p>
         ) : null}
-        <ItemAction ref_={item.ref} label={t("resolve")} primary />
+        <ItemVerbs
+          item={item}
+          onActed={onActed}
+          t={t}
+          fallbackLabel={t("resolve")}
+          primary
+        />
       </div>
     </RailCard>
   );
@@ -424,7 +464,13 @@ export function Review({
 
       {/* the spine: sections in the fixed priority order (waiting → stuck → done → initiatives) */}
       {digest.sections.map((section) => (
-        <Section key={section.kind} section={section} name={name} t={t} />
+        <Section
+          key={section.kind}
+          section={section}
+          name={name}
+          t={t}
+          onActed={load}
+        />
       ))}
 
       {digest.upcoming.length > 0 ? (
@@ -471,10 +517,13 @@ function Section({
   section,
   name,
   t,
+  onActed,
 }: {
   section: DigestSection;
   name: (id: string | null) => string;
   t: ReturnType<typeof useTranslations>;
+  /** Re-read the digest after a verb acted (Spec W1, T7). */
+  onActed: () => void;
 }) {
   return (
     <section
@@ -494,6 +543,7 @@ function Section({
             item={item}
             name={name(item.persona_id)}
             t={t}
+            onActed={onActed}
           />
         ))
       ) : section.kind === "stuck" ? (
@@ -503,6 +553,7 @@ function Section({
             item={item}
             name={name(item.persona_id)}
             t={t}
+            onActed={onActed}
           />
         ))
       ) : section.kind === "done" ? (

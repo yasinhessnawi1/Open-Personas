@@ -21,7 +21,8 @@ import pytest
 from persona_api.background.chat_turn_worker import ChatTurnHandle, ChatTurnRegistry
 from persona_api.background.run_worker import RunHandle, RunRegistry
 from persona_api.errors import ConcurrencyCappedError
-from persona_api.services import chat_service, run_service
+from persona_api.jobs.queue import JobQueue
+from persona_api.services import chat_service, work_dispatch_service
 from sqlalchemy import text
 
 if TYPE_CHECKING:
@@ -97,31 +98,26 @@ async def test_chat_entry_over_cap_raises_before_persist(seeded_engine: Engine) 
     assert _count(engine, "inflight_ops", f"user_id='{_USER}' AND op_class='chat'") == cap
 
 
-@pytest.mark.asyncio
-async def test_agentic_entry_over_cap_raises_before_persist(seeded_engine: Engine) -> None:
-    """A user at the agentic long-op cap → ConcurrencyCappedError, and NO run row is
-    persisted (the refusal fires before the ``runs`` INSERT)."""
+def test_one_off_dispatch_does_not_take_the_agentic_long_op_slot(seeded_engine: Engine) -> None:
+    """Spec W1 (D-W1-24): a one-off is an ad hoc task on the worker, bounded by the worker's
+    per-user claim cap and the leg box, not by the interactive long-op slot. A user at the
+    old agentic cap still dispatches, no inflight row is written, and no run row exists yet
+    (the worker opens it when it claims the leg)."""
     engine = seeded_engine
     cap = 3
     _fill_inflight(engine, "agentic", cap)
 
-    registry = MagicMock()
-    loop_builder = AsyncMock()
-
-    with pytest.raises(ConcurrencyCappedError) as ei:
-        await run_service.start_run(
-            rls_engine=engine,
-            registry=registry,
-            loop_builder=loop_builder,
-            owner_id=_USER,
-            persona_id=_PERSONA,
-            task="do it",
-            max_concurrent_long_ops=cap,
-        )
-    assert ei.value.context["user_id"] == _USER
-    loop_builder.assert_not_awaited()
-    registry.start.assert_not_called()
-    assert _count(engine, "runs", f"owner_id='{_USER}'") == 0, "no orphan run row persisted"
+    dispatched = work_dispatch_service.dispatch_ad_hoc(
+        rls_engine=engine,
+        queue=JobQueue(engine),
+        owner_id=_USER,
+        persona_id=_PERSONA,
+        brief="do it",
+    )
+    assert dispatched.kind == "ad_hoc"
+    assert _count(engine, "inflight_ops", f"user_id='{_USER}' AND op_class='agentic'") == cap
+    assert _count(engine, "runs", f"owner_id='{_USER}'") == 0
+    assert _count(engine, "jobs", f"owner_id='{_USER}' AND type='task_leg'") == 1
 
 
 def test_chat_worker_finally_release_frees_slot(seeded_engine: Engine) -> None:

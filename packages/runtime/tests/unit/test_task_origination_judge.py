@@ -11,10 +11,13 @@ from typing import Any
 
 import pytest
 from persona.backends.types import ChatResponse, TokenUsage
+from persona.tasks import Deliverable, DeliverableFormat
 from persona.tools.categories import ActionCategory
 from persona_runtime.task_origination import (
+    ContractDraft,
     ModelStandingIntentJudge,
     StandingVerdict,
+    build_contract,
 )
 
 
@@ -267,3 +270,64 @@ class TestDanglingReferenceGuard:
             '"scope": "one paragraph per repo"}'
         )
         assert result.verdict is StandingVerdict.STANDING
+
+
+# --- the deliverable (Spec W1, T11) -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_judge_carries_the_shape_the_user_asked_for() -> None:
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "compare the three cheapest fibre plans", '
+        '"scope": "Norwegian providers", "deliverable_format": "table"}'
+    )
+
+    assert judgment.draft is not None  # type: ignore[attr-defined]
+    assert judgment.draft.deliverable.format is DeliverableFormat.TABLE  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_file_deliverable_keeps_its_filename() -> None:
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "keep a rolling brief on fibre pricing", '
+        '"deliverable_format": "file", "deliverable_filename": "fibre-brief.md"}'
+    )
+
+    deliverable = judgment.draft.deliverable  # type: ignore[attr-defined]
+    assert deliverable.format is DeliverableFormat.FILE
+    assert deliverable.filename == "fibre-brief.md"
+
+
+@pytest.mark.asyncio
+async def test_a_filename_on_a_non_file_shape_is_dropped() -> None:
+    """Otherwise the contract would claim a file exists that nothing ever writes."""
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "brief me on fibre pricing", '
+        '"deliverable_format": "prose", "deliverable_filename": "stray.md"}'
+    )
+
+    deliverable = judgment.draft.deliverable  # type: ignore[attr-defined]
+    assert deliverable.format is DeliverableFormat.PROSE
+    assert deliverable.filename == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ['"deliverable_format": "md"', ""])
+async def test_an_unknown_or_missing_shape_falls_back_to_findings_markdown(raw: str) -> None:
+    """A preference nobody stated, or one a model spelled its own way, is not worth losing a
+    whole task over. The default is the right answer for research either way."""
+    payload = (
+        '{"verdict": "standing", "goal": "track the rules"' + (f", {raw}" if raw else "") + "}"
+    )
+    judgment = await _judge(payload)
+
+    assert judgment.draft.deliverable == Deliverable()  # type: ignore[attr-defined]
+
+
+def test_the_draft_shape_reaches_the_frozen_contract() -> None:
+    """The draft is the conversational artifact; the contract is what every leg re-reads."""
+    draft = ContractDraft(
+        goal="compare fibre plans", deliverable=Deliverable(format=DeliverableFormat.TABLE)
+    )
+
+    assert build_contract(draft).deliverable.format is DeliverableFormat.TABLE

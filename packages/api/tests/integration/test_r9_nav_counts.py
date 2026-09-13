@@ -113,7 +113,7 @@ def _seed_owner_rows(su: Engine, uid: str) -> None:
             conn.execute(
                 text(
                     "INSERT INTO tasks (id, owner_id, persona_id, contract_json, state, wait_kind) "
-                    "VALUES (:id, :uid, :pid, '{}', :state, :wk)"
+                    'VALUES (:id, :uid, :pid, \'{"goal": "g"}\', :state, :wk)'
                 ),
                 {
                     "id": f"{uid}_task_{state}",
@@ -164,6 +164,7 @@ def test_fresh_account_reads_all_zero(client: TestClient) -> None:
         "calls": 0,
         "memory_nodes": 0,
         "active_tasks": 0,
+        "attention": 0,
         "schedules": 0,
     }
 
@@ -179,6 +180,9 @@ def test_counts_pinned_semantics(client: TestClient, su_engine: Engine) -> None:
     assert body["conversations"] == 2  # chat-born only; the call-born thread excluded
     assert body["calls"] == 1
     assert body["active_tasks"] == 3  # defined + active + waiting; terminal trio excluded
+    # Spec W1 (D-W1-5): the Activity badge counts ATTENTION: the task waiting on the user
+    # and the failed one; the working set and the completed/cancelled history do not count.
+    assert body["attention"] == 2
     assert body["schedules"] == 1  # ROWS: fire_count=5 never inflates the count
     assert body["memory_nodes"] == 0  # this owner has no graph nodes
 
@@ -217,6 +221,7 @@ def test_cross_tenant_isolation(client: TestClient, su_engine: Engine) -> None:
         "calls": 0,
         "memory_nodes": 0,
         "active_tasks": 0,
+        "attention": 0,
         "schedules": 0,
     }
     # …while A still sees exactly its own.

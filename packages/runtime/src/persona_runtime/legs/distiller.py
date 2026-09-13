@@ -21,7 +21,15 @@ from typing import TYPE_CHECKING
 from persona.skills import count_tokens
 from persona.tasks import DEFAULT_CHECKPOINT_TOKEN_BUDGET, TaskCheckpoint
 
+from persona_runtime.legs.ledger import (
+    LEDGER_TOKEN_SHARE,
+    fold_oldest,
+    queries_from_run,
+    sources_from_run,
+)
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from persona.tasks import Task
@@ -37,8 +45,12 @@ class CompactingCheckpointWriter:
     def __init__(self, *, token_budget: int = DEFAULT_CHECKPOINT_TOKEN_BUDGET) -> None:
         # Compact to a margin under the store's hard gate so the append always fits.
         self._target = int(token_budget * 0.8)
+        # Spec W1 (D-W1-16): the query and source ledgers joined the accumulating core, so
+        # they are inside the same gate. Each gets a small share and the conclusions get
+        # what is left, which keeps the old behaviour when a task does no searching at all.
+        self._ledger_target = int(token_budget * LEDGER_TOKEN_SHARE)
 
-    def write(
+    async def write(
         self,
         *,
         task: Task,
@@ -51,7 +63,22 @@ class CompactingCheckpointWriter:
         prior_conclusions = list(prior.progress_conclusions) if prior is not None else []
         if run.output:
             prior_conclusions.append(run.output)
-        conclusions = self._compact(prior_conclusions)
+        # Spec W1 (D-W1-16): what this leg asked and read, appended to what earlier legs did,
+        # deduplicated so a query asked on three legs occupies one line.
+        queries = fold_oldest(
+            _merge(prior.queries_run if prior is not None else (), queries_from_run(run)),
+            target_tokens=self._ledger_target,
+            noun="queries",
+        )
+        sources = fold_oldest(
+            _merge(prior.sources_seen if prior is not None else (), sources_from_run(run)),
+            target_tokens=self._ledger_target,
+            noun="sources",
+        )
+        # The ledgers are counted in the same core as the conclusions, so the conclusions
+        # compact against what is actually left rather than against the whole budget.
+        spent = count_tokens(" ".join((*queries, *sources)))
+        conclusions = self._compact(prior_conclusions, target=self._target - spent)
         return TaskCheckpoint(
             task_id=task.id,
             leg_id=leg_id,
@@ -76,26 +103,36 @@ class CompactingCheckpointWriter:
             # the contract plus ``progress_conclusions`` (which still carry every
             # finding). Empty loses continuity; the echo guaranteed repetition.
             next_step="",
+            queries_run=queries,
+            sources_seen=sources,
             open_questions=prior.open_questions if prior is not None else (),
             artifact_pointers=prior.artifact_pointers if prior is not None else (),
             event_log_cursor=run.id,  # the durable run record holds the compacted detail
             updated_at=now,
         )
 
-    def _compact(self, conclusions: list[str]) -> list[str]:
+    def _compact(self, conclusions: list[str], *, target: int) -> list[str]:
         """Fold the oldest conclusions into a marker until the core fits the target budget.
 
         Keeps the most recent conclusions verbatim (recency) and replaces the dropped prefix
-        with one ``[N earlier findings compacted]`` line — bounded, restorable, never truncated
+        with one ``[N earlier findings compacted]`` line: bounded, restorable, never truncated
         mid-thought.
         """
-        if count_tokens(" ".join(conclusions)) <= self._target:
+        if count_tokens(" ".join(conclusions)) <= target:
             return conclusions
         compacted = 0
         kept = list(conclusions)
-        while len(kept) > 1 and count_tokens(" ".join(kept)) > self._target:
+        while len(kept) > 1 and count_tokens(" ".join(kept)) > target:
             kept.pop(0)
             compacted += 1
         if compacted:
-            return [f"[{compacted} earlier findings compacted — see run records]", *kept]
+            return [f"[{compacted} earlier findings compacted, see run records]", *kept]
         return kept
+
+
+def _merge(prior: Sequence[str], fresh: Sequence[str]) -> list[str]:
+    """Earlier entries first, this leg's next, each entry once."""
+    seen: dict[str, None] = {}
+    for entry in (*prior, *fresh):
+        seen.setdefault(entry, None)
+    return list(seen)

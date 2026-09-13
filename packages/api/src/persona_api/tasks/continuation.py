@@ -39,7 +39,12 @@ from persona.tasks import (
 )
 from persona_runtime.legs import LegDisposition
 
-from persona_api.tasks.handler import TASK_LEG_JOB_TYPE, enqueue_task_leg
+from persona_api.tasks.handler import (
+    TASK_LEG_JOB_TYPE,
+    TaskLegPayload,
+    enqueue_task_leg,
+    task_leg_idempotency_key,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -155,6 +160,15 @@ class TaskContinuation:
                 proposal_id=outcome.proposal_id,
             )
             return
+        if outcome.disposition == LegDisposition.WAITING_USER:
+            # Spec W1 (D-W1-34): the leg stopped ON a question. Unlike the approval park it
+            # DID work, so its checkpoint is already appended (the head moved) with the
+            # question in ``open_questions`` — which is what the attention surface reads to
+            # say why this waits and to show the question. Nothing is enqueued: the reply
+            # route resumes from this head with the answer in the next leg's trigger.
+            self.wait_on_user(owner_id, task.id, now=now)
+            _log.info("task waiting(on_user) — question", task_id=task.id)
+            return
         if outcome.disposition == LegDisposition.FAILED:
             raise TaskLegFailedError("task leg failed; retry", context={"task_id": task.id})
         # CONTINUE — another leg follows this checkpoint.
@@ -210,14 +224,25 @@ class TaskContinuation:
         durable transition happens at pickup.
         """
         task = self._tasks.get(owner_id, task_id)
+        # Spec W1 (D-W1-20 / D-W1-29): a resume at a head whose job died, failed, or was
+        # consumed without running (a paused task's leg skipped at claim, an over-budget park)
+        # would re-key to that spent row's key and be absorbed (R9-130, R9-146); count the
+        # spent attempts at this head and suffix the key.
+        base = task_leg_idempotency_key(
+            TaskLegPayload(
+                task_id=task_id, predecessor_seq=task.head_checkpoint_seq, trigger=trigger
+            )
+        )
+        retry = self._queue.count_spent_attempts(owner_id=owner_id, idempotency_key=base)
         enqueue_task_leg(
             self._queue,
             owner_id=owner_id,
             task_id=task_id,
             predecessor_seq=task.head_checkpoint_seq,
             trigger=trigger,
+            retry=retry,
         )
-        _log.info("task resume enqueued", task_id=task_id, trigger=trigger.kind)
+        _log.info("task resume enqueued", task_id=task_id, trigger=trigger.kind, retry=retry)
 
     # --- failure (A0 dead-letter → waiting(on_user)) + cancellation ---------
 

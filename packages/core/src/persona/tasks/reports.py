@@ -17,13 +17,16 @@ These are **pure projections** (no new storage): the inputs — ``task.ledger`` 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from persona.tasks.checkpoint import ArtifactPointer  # noqa: TC001 — Pydantic field type
-from persona.tasks.contract import AcceptanceCriterion  # noqa: TC001 — Pydantic field type
+from persona.tasks.contract import (  # noqa: TC001 (Pydantic field types)
+    AcceptanceCriterion,
+    Deliverable,
+)
 
 if TYPE_CHECKING:
     from persona.tasks.checkpoint import TaskCheckpoint
@@ -54,6 +57,10 @@ class CompletionReport(BaseModel):
     task_id: str
     goal: str
     conclusions: tuple[str, ...]
+    # Spec W1 (T11): the shape the contract agreed. Carried on the report so the finished
+    # message can say what was produced and where, rather than leaving the user to guess
+    # whether the prose IS the deliverable or a note about it.
+    deliverable: Deliverable = Deliverable()
     artifacts: tuple[ArtifactPointer, ...]
     acceptance_criteria: tuple[AcceptanceCriterion, ...]
     model_micros: int
@@ -68,6 +75,61 @@ class CompletionReport(BaseModel):
         return _ensure_utc(value)
 
 
+#: How long a transient failure is left alone before anything picks it up again (Spec W1,
+#: D-W1-8). Long enough that a rate limit or a provider wobble has passed, short enough that
+#: the user is not left waiting on a machine to notice.
+TRANSIENT_RETRY_AFTER = timedelta(minutes=15)
+
+#: Causes that are the world being briefly unavailable: the same work, tried later, can
+#: succeed. Matched case-insensitively as substrings of the cause the leg actually recorded.
+_TRANSIENT_CAUSE_MARKERS: Final = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "capacity",
+    "overloaded",
+    "temporarily unavailable",
+    "503",
+    "502",
+    "timeout",
+    "timed out",
+    "empty completion",
+    "empty response",
+    "connection",
+    "every backend",  # every provider in the tier was unreachable at once
+)
+
+#: Causes that are the work itself being wrong. Trying again changes nothing, so these are
+#: OFFERED to the user and never picked up automatically. Checked FIRST: a deterministic
+#: marker wins over a transient one, because "over budget after a timeout" is still over budget.
+_DETERMINISTIC_CAUSE_MARKERS: Final = (
+    "budget",
+    "not allowed",
+    "not permitted",
+    "forbidden",
+    "unauthorized",
+    "invalid",
+    "contract",
+    "cancelled",
+    "checkpoint too large",
+)
+
+
+def classify_retryable(cause: str) -> bool:
+    """Is this failure worth trying again on its own? (Spec W1, D-W1-8.)
+
+    Transient means the world was briefly unavailable; deterministic means the work is wrong
+    and would fail the same way forever. The default when a cause matches neither is **False**:
+    an unrecognised failure is offered to the user, never retried behind their back. That is
+    the fail-closed direction, because a wrong automatic retry spends the owner's credits on
+    work that cannot succeed.
+    """
+    lowered = cause.lower()
+    if any(marker in lowered for marker in _DETERMINISTIC_CAUSE_MARKERS):
+        return False
+    return any(marker in lowered for marker in _TRANSIENT_CAUSE_MARKERS)
+
+
 class StuckReport(BaseModel):
     """An honest failure record: cause / where-it-stood / what's-next. NEVER a completion."""
 
@@ -80,11 +142,23 @@ class StuckReport(BaseModel):
     next_step: str
     total_micros: int
     stuck_at: datetime
+    #: Spec W1 (D-W1-8): whether this cause is the kind that can succeed on a later try. The
+    #: offer the user is voiced says so either way; only a retryable one may be picked up
+    #: automatically, once, after ``retry_after``.
+    retryable: bool = False
+    #: When a retryable failure becomes eligible to be picked up again. ``None`` when the cause
+    #: is deterministic: there is no later moment at which it would work.
+    retry_after: datetime | None = None
 
     @field_validator("stuck_at", mode="after")
     @classmethod
     def _tz(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
+
+    @field_validator("retry_after", mode="after")
+    @classmethod
+    def _tz_retry_after(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _ensure_utc(value)
 
 
 class CancellationSummary(BaseModel):
@@ -116,6 +190,7 @@ def build_completion_report(
         task_id=task.id,
         goal=task.contract.goal,
         conclusions=checkpoint.progress_conclusions if checkpoint is not None else (),
+        deliverable=task.contract.deliverable,
         artifacts=checkpoint.artifact_pointers if checkpoint is not None else (),
         acceptance_criteria=task.contract.acceptance_criteria,
         model_micros=task.ledger.model_micros,
@@ -129,7 +204,12 @@ def build_completion_report(
 def build_stuck_report(
     task: Task, checkpoint: TaskCheckpoint | None, *, cause: str, now: datetime
 ) -> StuckReport:
-    """Project an honest :class:`StuckReport` (the real ``cause`` + the actual progress)."""
+    """Project an honest :class:`StuckReport` (the real ``cause`` + the actual progress).
+
+    Spec W1 (D-W1-8): the cause is classified here, once, so every reader — the voiced offer,
+    the review line, the revival sweep — agrees on whether trying again could ever work.
+    """
+    retryable = classify_retryable(cause)
     return StuckReport(
         task_id=task.id,
         cause=cause,
@@ -138,6 +218,8 @@ def build_stuck_report(
         next_step=checkpoint.next_step if checkpoint is not None else "",
         total_micros=task.ledger.total_micros,
         stuck_at=now,
+        retryable=retryable,
+        retry_after=now + TRANSIENT_RETRY_AFTER if retryable else None,
     )
 
 

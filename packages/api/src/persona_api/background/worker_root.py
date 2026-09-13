@@ -65,8 +65,10 @@ from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 from persona_runtime.legs import CompactingCheckpointWriter
+from persona_runtime.legs.semantic_distiller import SemanticCheckpointWriter
 from persona_runtime.routing import tier_for
 
+from persona_api.approvals import ApprovalStore
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
 from persona_api.editions.factory import build_credits_policy, build_stripe_gateway
@@ -123,7 +125,12 @@ from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
-from persona_api.tasks.handler import RunnableGuard, register_task_leg_handler
+from persona_api.tasks.handler import (
+    DEFAULT_RECENT_LEG_SUMMARIES,
+    RunnableGuard,
+    register_task_leg_handler,
+)
+from persona_api.tasks.leg_retrieval import LegRetrieval
 from persona_api.tasks.leg_runner import RuntimeFactoryLegRunnerBuilder
 from persona_api.tasks.scheduled_fire import register_scheduled_task_fire_handler
 from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -133,11 +140,12 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from persona.audit import AuditLogger
+    from persona.backends import ChatBackend
     from persona.imagegen.protocol import ImageBackend
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
     from persona.tasks import ResumeTrigger, StuckReport, Task
-    from persona_runtime.legs import LegOutcome
+    from persona_runtime.legs import CheckpointWriter, LegOutcome
     from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
@@ -154,6 +162,7 @@ if TYPE_CHECKING:
     from persona_api.services.web_deliverer import LiveSessionRegistry
     from persona_api.storage import FileStorage
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
+    from persona_api.tasks.revival_sweep import RevivalSweeper
 
 __all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
 
@@ -445,6 +454,17 @@ def build_worker_registry(
             # chat/run paths use; the per-leg floor from config.
             credits_policy=build_credits_policy(config),
             agentic_floor=config.agentic_credit_floor,
+            # Spec W1 (T12): the continuity window, from the knob .env.example has
+            # documented since A2 and nothing read until now.
+            recent_leg_summaries=config.task_recent_leg_summaries,
+            # Spec W1 (T14, D-W1-18): the distiller rides its own flag, default OFF. The
+            # backend resolves per job inside the owner scope (R9-096), never once here.
+            writer=_checkpoint_writer(
+                config,
+                rls_engine=rls_engine,
+                tier_registry=tier_registry,
+                free_tier_registry=free_tier_registry,
+            ),
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -673,6 +693,47 @@ def build_worker_registry(
     return registry
 
 
+def _checkpoint_writer(
+    config: APIConfig,
+    *,
+    rls_engine: Engine,
+    tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+) -> CheckpointWriter:
+    """The leg's checkpoint writer, chosen by the flag (Spec W1, T14; D-W1-17, D-W1-18).
+
+    Off (the default) is the deterministic writer, which is what every leg has used in
+    production. On is the semantic distiller over the configured tier, with that same
+    deterministic writer as its fallback, so the flag can only ever ADD an attempt to think:
+    every failure path inside the distiller ends in the floor.
+
+    The backend is resolved per write through ``plan_scoped_background_backend``, inside the
+    owner scope the worker binds per job (R9-096), never once at composition time.
+    """
+    floor = CompactingCheckpointWriter()
+    if not config.task_semantic_distiller_enabled:
+        return floor
+
+    def _backend() -> ChatBackend:
+        return plan_scoped_background_backend(
+            tier=config.task_semantic_distiller_tier,
+            rls_engine=rls_engine,
+            paid_tier_registry=tier_registry,
+            free_tier_registry=free_tier_registry,
+            # Metered (D-W1-44): the call happens because this leg ran, so it is billed
+            # with the leg. The wrapper records into the handler's ``collect_llm_usage``
+            # sink, which folds the totals into the leg's own accumulator, so it rides the
+            # SAME per-leg deduct rather than becoming a second charge.
+            metered=True,
+        )
+
+    return SemanticCheckpointWriter(
+        backend_provider=_backend,
+        fallback=floor,
+        timeout_s=config.task_semantic_distiller_timeout_seconds,
+    )
+
+
 def _register_task_leg_tenant(
     registry: JobRegistry,
     *,
@@ -688,6 +749,8 @@ def _register_task_leg_tenant(
     runnable_guard: RunnableGuard | None = None,
     credits_policy: CreditsPolicy | None = None,
     agentic_floor: int = 1,
+    recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
+    writer: CheckpointWriter | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
 
@@ -753,13 +816,26 @@ def _register_task_leg_tenant(
         registry,
         task_store=task_store,
         checkpoint_store=CheckpointStore(rls_engine),
-        runner_builder=RuntimeFactoryLegRunnerBuilder(runtime_factory),
+        # Spec W1 (D-W1-1): the leg runner builds the loop over A3's policy-gated toolbox,
+        # recording gated proposals in the ApprovalStore. Until W1 no production module
+        # constructed the gate, so every leg ran ungated; this is the wiring A3 named.
+        runner_builder=RuntimeFactoryLegRunnerBuilder(
+            runtime_factory, recorder=ApprovalStore(rls_engine)
+        ),
         continuation=continuation,
         # R9-005 (Spec A2, T12): the live path runs the reflect-and-compact distiller, NEVER the
         # BasicCheckpointWriter stand-in — the stand-in accumulates unboundedly and, after a
         # SUCCESSFUL run, deterministically trips the store's budget gate (3× model re-spend,
         # then dead-letter). Explicit here (belt) on top of the handler's default (suspenders).
-        writer=CompactingCheckpointWriter(),
+        # Spec W1 (T14): the semantic distiller when the flag is on, the deterministic
+        # writer otherwise. The choice is made here, once, so no other caller can end up
+        # with a writer the operator did not ask for.
+        writer=writer if writer is not None else CompactingCheckpointWriter(),
+        # Spec W1 (T12): the two reconstruction slots A2 left empty. The window comes from
+        # the checkpoint store; the memory comes from the same recall the chat loop uses,
+        # fetched off-loop and skipped on timeout so a slow recall never delays a leg.
+        recent_leg_summaries=recent_leg_summaries,
+        retrieval=LegRetrieval(recall_for=runtime_factory.build_task_recall),
         on_milestone=on_milestone,
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
@@ -1372,6 +1448,34 @@ def start_in_process_worker(
             notifier=notifier,
         )
 
+    # Spec W1 (T8) — the revival sweep, leader-gated on REVIVAL_SWEEP_LOCK_KEY (its own key).
+    # Always wired: the shapes it fixes (a leg consumed without running, a transient failure
+    # nobody picked up) leave a task alive with nothing running, and no per-control code
+    # rescues them. It needs no memory backend: it moves work, it does not voice.
+    def _revival_sweep_builder(
+        dispatch_engine: Engine, worker_rls_engine: Engine
+    ) -> RevivalSweeper | None:
+        from persona_api.approvals.kill_switch import KillSwitchStore
+        from persona_api.schedules.leadership import SchedulerLeader
+        from persona_api.tasks.revival_sweep import REVIVAL_SWEEP_LOCK_KEY, RevivalSweeper
+
+        def _emit_task_updated(owner: str, task_id: str, state: str) -> None:
+            publish_task_updated(event_channel, owner_id=owner, task_id=task_id, state=state)
+
+        return RevivalSweeper(
+            continuation=TaskContinuation(
+                task_store=TaskStore(worker_rls_engine),
+                queue=JobQueue(worker_rls_engine),
+                checkpoint_store=CheckpointStore(worker_rls_engine),
+                on_state_change=_emit_task_updated,
+            ),
+            dispatch_engine=dispatch_engine,
+            rls_engine=worker_rls_engine,
+            task_store=TaskStore(worker_rls_engine),
+            kill_switch=KillSwitchStore(worker_rls_engine),
+            leader=SchedulerLeader(dispatch_engine, lock_key=REVIVAL_SWEEP_LOCK_KEY),
+        )
+
     def _initiative_provisioner_builder(
         dispatch_engine: Engine, worker_rls_engine: Engine
     ) -> InitiativeProvisioner | None:
@@ -1402,6 +1506,7 @@ def start_in_process_worker(
         initiative_provisioner_builder=_initiative_provisioner_builder,
         approval_sweep_builder=_approval_sweep_builder,
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
+        revival_sweep_builder=_revival_sweep_builder,
     )
     handle = InProcessWorker(worker)
     handle.start()

@@ -22,19 +22,15 @@ from typing import TYPE_CHECKING, Literal
 from persona_runtime.questions import ProactiveQuestion, QuestionOption
 from persona_runtime.task_detector import TaskDetection, default_registry
 
-from persona_api.services import consent_service, run_service
+from persona_api.services import consent_service
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from persona.schema.persona import Persona
-    from persona_runtime.agentic.loop import AgenticLoop
     from sqlalchemy.engine import Engine
 
-    from persona_api.background.run_worker import RunRegistry
+    from persona_api.jobs.queue import JobQueue
     from persona_api.services.consent_service import ConsentState
 
-    LoopBuilder = Callable[[str], Awaitable[AgenticLoop]]
 
 __all__ = [
     "DispatchOutcome",
@@ -64,7 +60,7 @@ class DispatchResult:
 
     outcome: DispatchOutcome
     detection: TaskDetection | None = None
-    run_id: str | None = None
+    task_id: str | None = None  # Spec W1: the ad hoc task, not a bare run
     question: ProactiveQuestion | None = None
 
 
@@ -129,8 +125,7 @@ def parse_consent_answer(answer: str) -> Literal["grant", "decline", "modify"]:
 async def auto_dispatch(
     *,
     rls_engine: Engine,
-    registry: RunRegistry,
-    loop_builder: LoopBuilder,
+    queue: JobQueue,
     owner_id: str,
     persona_id: str,
     persona: Persona,
@@ -152,15 +147,20 @@ async def auto_dispatch(
     consent = consent_service.read_consent(rls_engine=rls_engine, persona_id=persona_id)
     outcome = decide(detection, consent)
     if outcome == "dispatch":
-        run_id = await run_service.start_run(
+        # Spec W1 (D-W1-1): a chat-detected one-off is an ad hoc TASK now, not a bare run.
+        # Imported here: the dispatch service reaches the task handler, which reaches this
+        # package's ``user_facing_errors`` through ``persona_api.services`` (a cycle at
+        # import time otherwise; the run_service ``PLC0415`` precedent).
+        from persona_api.services import work_dispatch_service  # noqa: PLC0415
+
+        dispatched = work_dispatch_service.dispatch_ad_hoc(
             rls_engine=rls_engine,
-            registry=registry,
-            loop_builder=loop_builder,
+            queue=queue,
             owner_id=owner_id,
             persona_id=persona_id,
-            task=message,
+            brief=message,
         )
-        return DispatchResult("dispatch", detection=detection, run_id=run_id)
+        return DispatchResult("dispatch", detection=detection, task_id=dispatched.task_id)
     if outcome == "ask_consent":
         return DispatchResult(
             "ask_consent", detection=detection, question=consent_question(message)

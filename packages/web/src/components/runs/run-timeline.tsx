@@ -17,15 +17,22 @@ export function RunTimeline({
   view,
   onAnswer,
   personaId,
+  answerHref,
 }: {
   view: RunView;
   onAnswer: (answer: string) => Promise<void>;
   /** F4 T11: drilled down from RunView → StepCard for the byte-load auth. */
   personaId: string;
+  /** Spec W1: where a task-linked run takes its answer (the task page), if anywhere. */
+  answerHref?: string;
 }) {
   const t = useTranslations("runs");
   const running = view.status === "running";
-  const awaitingStep = running
+  // Spec W1 (D-W1-34): a leg that stopped ON a question ends `awaiting_user`, not `running`.
+  // The unanswered question is exactly what the reader can act on, so the affordance follows
+  // the QUESTION in both states; the working tail below still follows `running` alone.
+  const answerable = running || view.status === "awaiting_user";
+  const awaitingStep = answerable
     ? view.steps.find((s) => s.question && !s.answered)?.step
     : undefined;
 
@@ -59,6 +66,7 @@ export function RunTimeline({
             last={i === view.steps.length - 1 && !tailWorking}
             onAnswer={onAnswer}
             personaId={personaId}
+            answerHref={answerHref}
           />
         ))}
       </ol>

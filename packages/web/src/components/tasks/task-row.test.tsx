@@ -20,6 +20,7 @@ function task(overrides: Partial<TaskSummary>): TaskSummary {
     task_id: "t1",
     persona_id: "kai",
     goal: "Book the dentist",
+    kind: "standing",
     status: "progressing",
     paused: false,
     spent_micros: 200_000,
@@ -32,12 +33,19 @@ function task(overrides: Partial<TaskSummary>): TaskSummary {
 
 function renderRow(t: TaskSummary) {
   const onCancel = vi.fn();
+  const onPickup = vi.fn();
   const utils = render(
     <NextIntlClientProvider locale="en" messages={messages}>
-      <TaskRow task={t} personaName="Kai" busy={false} onCancel={onCancel} />
+      <TaskRow
+        task={t}
+        personaName="Kai"
+        busy={false}
+        onCancel={onCancel}
+        onPickup={onPickup}
+      />
     </NextIntlClientProvider>,
   );
-  return { ...utils, onCancel };
+  return { ...utils, onCancel, onPickup };
 }
 
 describe("TaskRow", () => {
@@ -80,5 +88,57 @@ describe("ordered", () => {
       task({ task_id: "waiting", status: "waiting_on_user", stuck_cause: "y" }),
     ]).map((t) => t.task_id);
     expect(ids).toEqual(["waiting", "stuck", "active", "done"]);
+  });
+});
+
+describe("kind (Spec W1, D-W1-2)", () => {
+  it("captions a one-off calmly and leaves a standing task uncaptioned", () => {
+    const { container, rerender } = render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <TaskRow
+          task={task({ kind: "ad_hoc" })}
+          personaName="Kai"
+          busy={false}
+          onCancel={() => {}}
+        />
+      </NextIntlClientProvider>,
+    );
+    expect(
+      container.querySelector('[data-slot="task-kind"]')?.textContent,
+    ).toBe("One-off");
+    rerender(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <TaskRow
+          task={task({ kind: "standing" })}
+          personaName="Kai"
+          busy={false}
+          onCancel={() => {}}
+        />
+      </NextIntlClientProvider>,
+    );
+    expect(container.querySelector('[data-slot="task-kind"]')).toBeNull();
+  });
+});
+
+describe("pick up (Spec W1, T7)", () => {
+  it("offers Pick up on a task parked waiting on you, and carries it on", () => {
+    const { getByText, onPickup } = renderRow(
+      task({
+        status: "waiting_on_user",
+        stuck_cause: "no reply from the clinic",
+      }),
+    );
+    fireEvent.click(getByText("Pick up"));
+    expect(onPickup).toHaveBeenCalledOnce();
+  });
+
+  it("offers no pickup on a finished task: the honest verb there is a fresh run", () => {
+    // A failed task is terminal, so picking it up would do nothing. The review page offers
+    // Try again instead (a NEW task with the same contract), and the list keeps Resolve.
+    const { queryByText, getByText } = renderRow(
+      task({ status: "failed", stuck_cause: "every model refused" }),
+    );
+    expect(queryByText("Pick up")).toBeNull();
+    expect(getByText("Resolve")).toBeTruthy();
   });
 });

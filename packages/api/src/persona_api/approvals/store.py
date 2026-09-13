@@ -107,7 +107,11 @@ class ApprovalStore:
             rows = (
                 conn.execute(
                     select(proposals_t)
-                    .where(proposals_t.c.status == ProposalStatus.PENDING.value)
+                    .where(
+                        # belt and braces: explicit owner predicate + RLS (Spec W1 T5).
+                        proposals_t.c.owner_id == owner_id,
+                        proposals_t.c.status == ProposalStatus.PENDING.value,
+                    )
                     .order_by(proposals_t.c.created_at.asc())
                 )
                 .mappings()

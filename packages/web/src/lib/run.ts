@@ -26,11 +26,18 @@ import { warnUnhandledSseEvent } from "@/lib/sse-types";
 /** Mirrors persona_runtime `RunStatus` plus the API's in-flight `"running"`. */
 export type RunStatus =
   | "running"
+  | "awaiting_user"
   | "completed"
   | "cancelled"
   | "max_steps_reached"
   | "error";
 
+/**
+ * Spec W1 (D-W1-34): `awaiting_user` is stopped but NOT terminal. The leg ended on a
+ * question, so nothing more lands on this run, yet the work is not over: the answer arrives
+ * through the task's reply route and continues in a new run. Terminal drives "this is
+ * finished" affordances, and this run is not finished, it is waiting for a person.
+ */
 const TERMINAL: ReadonlySet<RunStatus> = new Set([
   "completed",
   "cancelled",
@@ -78,6 +85,13 @@ export interface RunStep {
    */
   activities?: ActivityView[];
   reasoning?: string;
+  /**
+   * Spec W1 (T10): what the run's deterministic guards did on this step, rendered as
+   * muted notes under the tool cards. A guard that fires is a call the model asked for
+   * and did not get, or output it can no longer read in full; leaving that invisible
+   * makes a run look idle or forgetful for no stated reason.
+   */
+  notes?: RunStepNote[];
   question?: string;
   /** Spec 21 (D-21-9): the 3+1 options when the ask carries them; else absent. */
   options?: QuestionOption[];
@@ -88,6 +102,14 @@ export interface RunStep {
   error?: string;
   tier?: string;
 }
+
+/**
+ * One line of guard activity on a step (Spec W1, T10). Structured rather than a string:
+ * the copy lives in the message catalogue, and this module holds no user-facing text.
+ */
+export type RunStepNote =
+  | { kind: "call_skipped"; tool: string }
+  | { kind: "context_pruned" };
 
 /** The whole run, as the viewer renders it. */
 export interface RunView {
@@ -222,6 +244,22 @@ export function runViewFromEvents(
         const st = ensure(ev.step);
         st.thinking = false;
         st.reasoning = ev.data.content;
+        break;
+      }
+      case "call_skipped": {
+        // Spec W1 (D-W1-11): the ledger answered this call. Appended, not set: a step can
+        // batch several calls and skip more than one of them.
+        const st = ensure(ev.step);
+        st.notes = [
+          ...(st.notes ?? []),
+          { kind: "call_skipped", tool: ev.data.tool },
+        ];
+        break;
+      }
+      case "context_pruned": {
+        // Spec W1 (D-W1-13): older tool output was trimmed at this step's boundary.
+        const st = ensure(ev.step);
+        st.notes = [...(st.notes ?? []), { kind: "context_pruned" }];
         break;
       }
       case "completed": {

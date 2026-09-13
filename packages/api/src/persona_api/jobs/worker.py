@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     # A1 — a worker built without a tick behaves exactly as A0 shipped.
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
+    from persona_api.tasks.revival_sweep import RevivalSweeper
 
 # Signals that initiate a graceful drain: Fly sends SIGINT by default and
 # SIGTERM when configured (we trap both — D-A0-5).
@@ -126,6 +127,8 @@ class Worker:
         approval_sweep_interval_seconds: float = 300.0,
         dead_leg_sweep: DeadLegSweeper | None = None,
         dead_leg_sweep_interval_seconds: float = 120.0,
+        revival_sweep: RevivalSweeper | None = None,
+        revival_sweep_interval_seconds: float = 300.0,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._rls_engine = rls_engine
@@ -168,6 +171,8 @@ class Worker:
         self._approval_sweep = approval_sweep
         self._approval_sweep_interval = approval_sweep_interval_seconds
         self._dead_leg_sweep = dead_leg_sweep
+        self._revival_sweep = revival_sweep
+        self._revival_sweep_interval = revival_sweep_interval_seconds
         self._dead_leg_sweep_interval = dead_leg_sweep_interval_seconds
         self._draining = asyncio.Event()
         self._in_flight: set[asyncio.Task[object]] = set()
@@ -181,6 +186,7 @@ class Worker:
         self._last_initiative_provision: float | None = None
         self._last_approval_sweep: float | None = None
         self._last_dead_leg_sweep: float | None = None
+        self._last_revival_sweep: float | None = None
         # R9-093 observability: wall-clock of the last completed loop iteration.
         # ``None`` until the loop first turns. A dead loop leaves this frozen,
         # which is what makes "the background half stopped" OBSERVABLE — the
@@ -273,6 +279,7 @@ class Worker:
             await self._maybe_run_initiative_provisioner()
             await self._maybe_run_approval_sweep()
             await self._maybe_run_dead_leg_sweep()
+            await self._maybe_run_revival_sweep()
             free = self._concurrency - len(self._in_flight)
             # Claim ONE at a time (not a batch of ``free``): the fairness count is
             # evaluated against committed state, so a batch would let all its
@@ -494,6 +501,27 @@ class Worker:
             _log.exception("dead-leg sweep failed", worker_id=self._worker_id)
         self._last_dead_leg_sweep = time.monotonic()
 
+    async def _maybe_run_revival_sweep(self) -> None:
+        """Run the W1 revival sweep if wired + its cadence has elapsed (T8).
+
+        A no-op when unwired (None). Leader-gated inside ``run_once`` on its OWN advisory key,
+        so every worker may call it safely. Puts back work that stopped for a reason that has
+        since passed: a task whose leg was consumed without running (R9-148) and a task parked
+        on a transient failure (D-W1-8). A failure is logged, never crashing the loop.
+        """
+        if self._revival_sweep is None:
+            return
+        if (
+            self._last_revival_sweep is not None
+            and time.monotonic() - self._last_revival_sweep < self._revival_sweep_interval
+        ):
+            return
+        try:
+            await self._revival_sweep.run_once(now=datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — a sweep failure must not crash the worker loop
+            _log.exception("revival sweep failed", worker_id=self._worker_id)
+        self._last_revival_sweep = time.monotonic()
+
     async def _maybe_run_skill_catalog_sync(self) -> None:
         """Run the S2 skill-catalog auto-sync if wired + its (daily-ish) cadence has elapsed.
 
@@ -587,6 +615,7 @@ def build_worker(
     | None = None,
     approval_sweep_builder: Callable[[Engine, Engine], ApprovalSweepRunner | None] | None = None,
     dead_leg_sweep_builder: Callable[[Engine, Engine], DeadLegSweeper | None] | None = None,
+    revival_sweep_builder: Callable[[Engine, Engine], RevivalSweeper | None] | None = None,
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -661,6 +690,11 @@ def build_worker(
         if dead_leg_sweep_builder is not None
         else None
     )
+    revival_sweep = (
+        revival_sweep_builder(dispatch_engine, rls_engine)
+        if revival_sweep_builder is not None
+        else None
+    )
     return Worker(
         dispatch_engine=dispatch_engine,
         rls_engine=rls_engine,
@@ -676,6 +710,8 @@ def build_worker(
         approval_sweep_interval_seconds=config.approval_sweep_interval_seconds,
         dead_leg_sweep=dead_leg_sweep,
         dead_leg_sweep_interval_seconds=config.dead_leg_sweep_interval_seconds,
+        revival_sweep=revival_sweep,
+        revival_sweep_interval_seconds=config.revival_sweep_interval_seconds,
         concurrency=config.worker_concurrency,
         poll_interval_seconds=config.worker_poll_interval_seconds,
         poll_jitter_seconds=config.worker_poll_jitter_seconds,

@@ -26,7 +26,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from persona.tasks import ScheduledFire
+from persona.tasks import Revived
 from sqlalchemy import text
 
 from persona_api.services import audit_service
@@ -86,6 +86,11 @@ class BudgetState(StrEnum):
     OK = "ok"
     APPROACHING = "approaching"
     REACHED = "reached"
+
+
+#: What a budget-extended leg is told (Spec W1, D-W1-38 amended): the cap was raised, so the
+#: work it was cut off from may continue. Not a schedule firing.
+_EXTENDED_REASON = "the user extended its budget"
 
 
 class BudgetEnforcer:
@@ -157,7 +162,10 @@ class BudgetEnforcer:
             owner_id=owner_id,
             task_id=task_id,
             predecessor_seq=task.head_checkpoint_seq,
-            trigger=ScheduledFire(schedule_id=f"self:{task_id}", fire_time=now),
+            # Spec W1 (D-W1-38, amended): the leg is told the budget was raised, not that a
+            # schedule fired. It matters: told a fire, a persona may read the wake as its
+            # recurrence rather than as permission to carry on the work it was cut off from.
+            trigger=Revived(reason=_EXTENDED_REASON, revived_at=now),
             scheduled_at=now,
         )
         _log.info("budget extended + resumed", task_id=task_id, amount_micros=amount_micros)

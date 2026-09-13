@@ -35,7 +35,9 @@ if TYPE_CHECKING:
     from persona.tasks.reader import TaskStateReader, TaskSummary
     from persona.tools.protocol import AsyncTool
 
-__all__ = ["make_task_introspection_tool"]
+__all__ = ["TASK_INTROSPECT_TOOL_NAME", "make_task_introspection_tool"]
+
+TASK_INTROSPECT_TOOL_NAME = "task_introspect"
 
 _GUIDANCE = (
     "Report on your standing tasks — your progress, status, and what you're waiting on — using "
@@ -70,7 +72,7 @@ def make_task_introspection_tool(
         persona_id: The persona introspecting (provenance only).
     """
 
-    @tool(name="task_introspect", description=_GUIDANCE)
+    @tool(name=TASK_INTROSPECT_TOOL_NAME, description=_GUIDANCE)
     async def task_introspect(task_id: str = "") -> ToolResult:
         reader = reader_provider()
         if reader is None:

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from persona.errors import TaskStateError
 from persona.tasks.contract import Contract  # noqa: TC001 — Pydantic needs runtime access
 from persona.tasks.ledger import CostLedger, SpendKind
-from persona.tasks.state import TaskState, WaitKind, is_terminal, validate_transition
+from persona.tasks.state import TaskKind, TaskState, WaitKind, is_terminal, validate_transition
 
 __all__ = ["TASK_SCHEMA_VERSION", "Task"]
 
@@ -49,6 +49,8 @@ class Task(BaseModel):
         owner_id: The tenant the task runs as — the RLS scope.
         persona_id: The persona executing the task.
         contract: The A4-authored anchor (goal/scope/criteria/bounds). Immutable here.
+        kind: ``STANDING`` (confirmed, usually scheduled) or ``AD_HOC`` (a one-off
+            dispatch with a degenerate contract). Fixed at create (Spec W1, D-W1-2).
         state: Lifecycle state (defaults to ``DEFINED``).
         paused: User-imposed overlay — no new legs while ``True`` (orthogonal to ``state``).
         wait_kind: Why the task is waiting; set iff ``state == WAITING``.
@@ -70,6 +72,7 @@ class Task(BaseModel):
     owner_id: str
     persona_id: str
     contract: Contract
+    kind: TaskKind = TaskKind.STANDING
 
     state: TaskState = TaskState.DEFINED
     paused: bool = False

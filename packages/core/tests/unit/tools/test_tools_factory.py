@@ -693,3 +693,37 @@ class TestServerGrantExpansion:
             config, persona, extra_mcp_servers={"launcher": "http://127.0.0.1:9/mcp"}
         )
         assert "mcp:launcher" not in toolbox.names()
+
+
+# Section: the toolbox factory seam (Spec W1, D-W1-1)
+
+
+class TestToolboxFactorySeam:
+    @pytest.mark.asyncio
+    async def test_default_builds_the_bare_toolbox(self, tmp_path: Path) -> None:
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        toolbox, _ = await build_default_toolbox(config, _persona(tools=["web_search"]))
+        assert type(toolbox) is Toolbox
+
+    @pytest.mark.asyncio
+    async def test_factory_substitutes_the_class_with_the_same_tools_and_allow_list(
+        self, tmp_path: Path
+    ) -> None:
+        """The factory receives exactly what the bare constructor would: tools + allow-list."""
+
+        class _Marked(Toolbox):
+            pass
+
+        seen: dict[str, object] = {}
+
+        def _factory(tools: object, *, allow_list: list[str] | None = None) -> Toolbox:
+            seen["allow_list"] = allow_list
+            return _Marked(tools, allow_list=allow_list)  # type: ignore[arg-type]
+
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        persona = _persona(tools=["web_search", "file_read"])
+        made, _ = await build_default_toolbox(config, persona, toolbox_factory=_factory)
+        bare, _ = await build_default_toolbox(config, persona)
+        assert type(made) is _Marked
+        assert seen["allow_list"] is not None
+        assert made.names() == bare.names()

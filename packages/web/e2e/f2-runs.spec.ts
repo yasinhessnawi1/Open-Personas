@@ -88,8 +88,18 @@ async function seedPersonaAndRun(page: Page): Promise<string> {
     },
   });
   if (!runRes.ok()) throw new Error(`run start failed: ${runRes.status()}`);
-  const { id } = await runRes.json();
-  return id as string;
+  // Spec W1: the dispatch names the TASK; the worker opens the run when it claims the leg.
+  const { task_id: taskId } = (await runRes.json()) as { task_id: string };
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const detail = await page.request.get(`${API}/v1/tasks/${taskId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const runs = ((await detail.json()) as { runs: { id: string }[] }).runs;
+    if (runs.length > 0) return runs[0].id;
+    await page.waitForTimeout(1_000);
+  }
+  throw new Error(`no run opened for task ${taskId} within 60s`);
 }
 
 test.describe("F2 T30 run viewer", () => {

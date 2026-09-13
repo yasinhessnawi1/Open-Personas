@@ -640,7 +640,12 @@ export interface paths {
     put?: never;
     /**
      * Start Run
-     * @description Start an agentic run (returns the run_id immediately; runs in background).
+     * @description Dispatch a one-off: an ad hoc task whose first leg the worker runs (Spec W1, D-W1-1).
+     *
+     *     The path and the pre-flight guards are unchanged; what starts is a task, not an
+     *     in-process run, so the one-off gets checkpoints, continuation and the category gate by
+     *     construction. The response names the task; its runs appear on the task detail as the
+     *     worker opens them.
      */
     post: operations["start_run_v1_personas__persona_id__runs_post"];
     delete?: never;
@@ -698,7 +703,7 @@ export interface paths {
     };
     /**
      * Stream Events
-     * @description Stream the run's events as SSE (live, from the in-process event bus).
+     * @description Stream the run's events as SSE: the in-process bus, or a tail of the run row (W1).
      */
     get: operations["stream_events_v1_runs__run_id__events_get"];
     put?: never;
@@ -740,7 +745,12 @@ export interface paths {
     put?: never;
     /**
      * Cancel
-     * @description Cancel a running run (stops at the next step boundary → cancelled).
+     * @description Cancel from the run viewer: the run's TASK when it has one, else the in-process run.
+     *
+     *     Spec W1 (D-W1-1 / D-W1-14): one control set. A run that belongs to a task is one of its
+     *     executions, so cancelling it cancels the task (terminal, schedule stopped); a legacy
+     *     in-process run still flips its own token. A running leg finishes its current step and
+     *     then stops (the external cancel seam is T6, D-W1-21).
      */
     post: operations["cancel_v1_runs__run_id__cancel_post"];
     delete?: never;
@@ -2405,6 +2415,73 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/tasks/{task_id}/pickup": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Pickup Task
+     * @description Pick up a task that waits on you (Spec W1, T6): its next leg runs on the worker.
+     *
+     *     Cross-tenant ids are not found (RLS). A paused task, a paused owner or a suspended persona
+     *     is refused with the reason (D-W1-10). Idempotent: a second pickup dedups to the one job.
+     */
+    post: operations["pickup_task_v1_tasks__task_id__pickup_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/reply": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Reply To Task
+     * @description Answer a task that waits on you (Spec W1, T6; D-W1-4): the reply rides into its next leg.
+     *
+     *     A task whose wait is a pending approval answers 409 and names the approval.
+     */
+    post: operations["reply_to_task_v1_tasks__task_id__reply_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/tasks/{task_id}/retry": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Retry Task
+     * @description Run a finished task again as a NEW task with the same contract (Spec W1, T6).
+     *
+     *     The response names the successor; the old task stays as the record of what happened.
+     */
+    post: operations["retry_task_v1_tasks__task_id__retry_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/tasks/{task_id}/budget/extend": {
     parameters: {
       query?: never;
@@ -3412,6 +3489,13 @@ export interface components {
       ref?: components["schemas"]["DigestRef"] | null;
       /** Ran Because */
       ran_because?: string | null;
+      /**
+       * Actions
+       * @default []
+       */
+      actions: string[];
+      /** Reason */
+      reason?: string | null;
     };
     /**
      * DigestRef
@@ -4535,6 +4619,8 @@ export interface components {
       memory_nodes: number;
       /** Active Tasks */
       active_tasks: number;
+      /** Attention */
+      attention: number;
       /** Schedules */
       schedules: number;
     };
@@ -5101,6 +5187,8 @@ export interface components {
       persona_id: string;
       /** Task */
       task: string;
+      /** Task Id */
+      task_id?: string | null;
       /** Status */
       status: string;
       /** Steps */
@@ -5114,7 +5202,7 @@ export interface components {
     };
     /**
      * RunSummary
-     * @description A run in the Tasks index — a light projection without the steps JSON.
+     * @description A run in a list — a light projection without the steps JSON.
      */
     RunSummary: {
       /** Id */
@@ -5123,6 +5211,8 @@ export interface components {
       persona_id: string;
       /** Task */
       task: string;
+      /** Task Id */
+      task_id?: string | null;
       /** Status */
       status: string;
       /**
@@ -5343,6 +5433,8 @@ export interface components {
        * @default
        */
       note: string;
+      /** Successor Task Id */
+      successor_task_id?: string | null;
     };
     /**
      * TaskDetailOut
@@ -5357,6 +5449,8 @@ export interface components {
       goal: string;
       /** Scope */
       scope: string;
+      /** Kind */
+      kind: string;
       /** Status */
       status: string;
       /** Paused */
@@ -5388,6 +5482,8 @@ export interface components {
       schedule_id: string | null;
       /** Run Ids */
       run_ids: string[];
+      /** Runs */
+      runs: components["schemas"]["RunSummary"][];
       /**
        * Created At
        * Format: date-time
@@ -5398,6 +5494,14 @@ export interface components {
        * Format: date-time
        */
       updated_at: string;
+    };
+    /**
+     * TaskReplyRequest
+     * @description Answer a task that is waiting on you (Spec W1, T6): the reply lands in its next leg.
+     */
+    TaskReplyRequest: {
+      /** Reply */
+      reply: string;
     };
     /**
      * TaskReportOut
@@ -5438,6 +5542,8 @@ export interface components {
       persona_id: string;
       /** Goal */
       goal: string;
+      /** Kind */
+      kind: string;
       /** Status */
       status: string;
       /** Paused */
@@ -5760,6 +5866,25 @@ export interface components {
        * @default active
        */
       subscription_status: string;
+    };
+    /**
+     * WorkDispatchResponse
+     * @description A one-off dispatch: the task that now carries the work (Spec W1, D-W1-1 / D-W1-3).
+     *
+     *     A bare run used to answer with a run id. Under "a run is an execution of a task" the
+     *     durable identity is the task: the worker opens the run row when it claims the first leg,
+     *     and the task detail lists every run as they land. ``state`` is the task state at dispatch
+     *     (``active``); ``kind`` is ``ad_hoc``.
+     */
+    WorkDispatchResponse: {
+      /** Task Id */
+      task_id: string;
+      /** Persona Id */
+      persona_id: string;
+      /** Kind */
+      kind: string;
+      /** State */
+      state: string;
     };
   };
   responses: never;
@@ -6680,7 +6805,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["RunStatusResponse"];
+          "application/json": components["schemas"]["WorkDispatchResponse"];
         };
       };
       /** @description Validation Error */
@@ -9019,6 +9144,103 @@ export interface operations {
     };
   };
   cancel_task_v1_tasks__task_id__cancel_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  pickup_task_v1_tasks__task_id__pickup_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reply_to_task_v1_tasks__task_id__reply_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TaskReplyRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["TaskCommandResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  retry_task_v1_tasks__task_id__retry_post: {
     parameters: {
       query?: never;
       header?: never;

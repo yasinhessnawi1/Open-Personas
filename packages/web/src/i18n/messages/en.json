@@ -303,6 +303,9 @@
     "subtitle": "What your personas are working on. Waiting on you first, then in progress, then done.",
     "spend": "kr {spent} / {cap}",
     "resolve": "Resolve",
+    "pickUp": "Pick up",
+    "pickedUp": "Picked up. They're back on it.",
+    "pickUpFailed": "That didn't go through. Try again in a moment.",
     "cancel": "Cancel",
     "emptyTitle": "No tasks yet",
     "emptyBody": "When a persona takes on a longer job, it shows up here with its state, spend, and anything waiting on you.",
@@ -317,7 +320,8 @@
       "completed": "Done",
       "failed": "Stuck",
       "cancelled": "Cancelled"
-    }
+    },
+    "oneOff": "One-off"
   },
   "taskDetail": {
     "title": "Task",
@@ -387,7 +391,11 @@
       "allow": "allowed",
       "gate": "asks first",
       "deny": "blocked"
-    }
+    },
+    "runs": "Runs",
+    "runsEmpty": "No runs yet. The first one starts as soon as a worker picks it up.",
+    "runStarted": "Started {time}",
+    "runLive": "Running now"
   },
   "activity": {
     "area": "Activity",
@@ -431,6 +439,24 @@
       "stuck": "Stuck",
       "done": "Done overnight",
       "initiatives": "Noticed"
+    },
+    "actions": {
+      "reply": "Reply",
+      "pickup": "Pick up",
+      "cancel": "Cancel",
+      "retry": "Try again",
+      "send": "Send",
+      "dismiss": "Never mind",
+      "replyLabel": "Your answer",
+      "replyPlaceholder": "Answer in your own words",
+      "noChange": "Nothing to do here.",
+      "failed": "That didn't go through. Try again in a moment.",
+      "done": {
+        "reply": "Sent. They'll pick it up from here.",
+        "pickup": "Picked up. They're back on it.",
+        "cancel": "Cancelled.",
+        "retry": "Started again as a new task."
+      }
     }
   },
   "autonomyControls": {
@@ -622,6 +648,7 @@
     "statusLabel": "Run status",
     "status": {
       "running": "Running",
+      "awaiting_user": "Waiting on you",
       "completed": "Completed",
       "cancelled": "Cancelled",
       "max_steps_reached": "Max steps",
@@ -636,7 +663,13 @@
     "tierLabel": "Model tier: {tier}",
     "cancel": "Cancel run",
     "working": "Working…",
-    "noSteps": "No steps recorded."
+    "noSteps": "No steps recorded.",
+    "backToTask": "Back to the task",
+    "partOfTask": "Part of a task",
+    "noteCallSkipped": "Reused this run's earlier {tool} result instead of running it again.",
+    "noteContextPruned": "Trimmed older tool output to keep this run affordable.",
+    "answerOnTask": "This one is waiting for you. Answer on its task page.",
+    "answerOnTaskLink": "Open the task"
   },
   "author": {
     "describeByline": "New persona",

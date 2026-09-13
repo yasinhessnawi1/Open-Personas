@@ -217,6 +217,62 @@ describe("runViewFromEvents — P2 activity no-double-render", () => {
   });
 });
 
+describe("runViewFromEvents: W1 guard notes", () => {
+  const skipped = (step: number, tool: string, guard: string): RunEvent => ({
+    type: "call_skipped",
+    step,
+    data: { tool, guard },
+    timestamp: TS,
+  });
+  const pruned = (step: number): RunEvent => ({
+    type: "context_pruned",
+    step,
+    data: { before_tokens: 9000, after_tokens: 4000 },
+    timestamp: TS,
+  });
+
+  it("carries a skipped call onto the step it happened on", () => {
+    const view = runViewFromEvents(
+      [ev.started("Research"), skipped(0, "web_search", "cached_read")],
+      { task: "fallback" },
+    );
+
+    expect(view.steps[0].notes).toEqual([
+      { kind: "call_skipped", tool: "web_search" },
+    ]);
+  });
+
+  it("keeps every skipped call on a step that batched several", () => {
+    const view = runViewFromEvents(
+      [
+        ev.started("Research"),
+        skipped(0, "web_search", "cached_read"),
+        skipped(0, "file_read", "repeat_error"),
+      ],
+      { task: "fallback" },
+    );
+
+    expect(view.steps[0].notes).toHaveLength(2);
+  });
+
+  it("carries a pruned context onto its step", () => {
+    const view = runViewFromEvents([ev.started("Research"), pruned(1)], {
+      task: "fallback",
+    });
+
+    expect(view.steps[0].notes).toEqual([{ kind: "context_pruned" }]);
+  });
+
+  it("leaves steps without guard activity with no notes at all", () => {
+    const view = runViewFromEvents(
+      [ev.started("Research"), ev.toolResult(0, "web_search", "found it")],
+      { task: "fallback" },
+    );
+
+    expect(view.steps[0].notes).toBeUndefined();
+  });
+});
+
 describe("runViewFromSnapshot", () => {
   it("reduces a running snapshot (RunEvent event-log shape)", () => {
     const snap: RunStatusResponse = {

@@ -23,6 +23,7 @@ from persona_api.services.origination_adapters import (
     make_persona_tag_resolver,
 )
 from persona_api.services.origination_service import OriginationService
+from persona_api.services.task_control_service import TaskControlMutator
 from persona_api.services.task_steering_service import TaskSteeringService
 from persona_api.tasks.store import TaskStore
 
@@ -82,8 +83,10 @@ def compose_task_origination_services(
         # fails visibly rather than dropping). EventTriggerStore satisfies the TriggerCreator shape.
         triggers=EventTriggerStore(rls_engine) if EventTriggerSettings().enabled else None,
     )
+    # Spec W1 (R9-146): the chat verbs pause / resume / cancel through the SAME controls the
+    # routes use, never the bare store (the bare unpause left a paused task stalled forever).
     steering = TaskSteeringService(
-        tasks=tasks,
+        tasks=TaskControlMutator(rls_engine),
         notifier=notifier,
         persona_tag_resolver=make_persona_tag_resolver(rls_engine),
     )

@@ -53,15 +53,28 @@ the CLI for local use, the tests in CI. The loop itself is stateless per request
 - **`AgenticLoop`**, the plan, act, reflect cycle. One model decides at each step
   whether to call a tool, ask the user, or produce a final answer, with step history
   compaction at the tier budget, a cancel token boundary, and an authoritative
-  terminal status (`completed` / `max_steps_reached` / `cancelled` / `error`).
+  terminal status (`completed` / `max_steps_reached` / `cancelled` / `error` /
+  `awaiting_user`). Two deterministic guards keep a long run from paying twice for
+  the same answer: a per run **call ledger** refuses a repeat of a call that failed
+  (handing the model the original error and telling it to change something) and
+  serves a repeat of an allowlisted read from what the run already has, and a cost
+  keyed **tool result pruner** trims output older than the last two steps to a
+  readable head once a step's context passes a ceiling. Both report themselves on
+  the step trace.
 - **`persona_runtime.legs`**, the leg executor for the autonomous task model. One
   leg is one bounded run of the **unmodified** `AgenticLoop`, book-ended by context
   reconstruction and a checkpoint write. It enforces the leg box (a wall clock trip
   at a step boundary, never mid step), writes the checkpoint through a sink port
-  (the api's compare and set append), distils episodic memory at **milestone**
-  granularity rather than spamming per leg, and uses the token bounded
-  `CompactingCheckpointWriter` so a many leg task never overflows the checkpoint
-  budget.
+  (the api's compare and set append), and distils episodic memory at **milestone**
+  granularity rather than spamming per leg. The checkpoint writer is async and comes
+  in two: the token bounded `CompactingCheckpointWriter`, which cannot reason and so
+  writes no plan, and the model backed `SemanticCheckpointWriter`, which reads the
+  leg and returns merged conclusions, lessons, a plan and one next action. The
+  deterministic one is always underneath: any timeout, refusal, malformed answer or
+  over budget distillation delegates to it, so a leg never loses its checkpoint. A
+  leg also carries what it already asked (the queries run and sources read), reads
+  its own recent legs and memory before working, and records its measured shape
+  (steps, tool calls, distinct questions, tokens, wall clock) beside its spend.
 - **Safety, in the loop itself.** **Character adherence** is a never break rule with
   researched carve-outs: the persona never claims to be human when sincerely asked,
   and never roleplays through a wellbeing signal. The **turn time crisis gate** takes

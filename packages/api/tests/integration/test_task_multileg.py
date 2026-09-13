@@ -82,7 +82,7 @@ class _Builder:
     def __init__(self, runner: _ScriptedRunner) -> None:
         self._runner = runner
 
-    def build(self, task_id, persona_id, box) -> _ScriptedRunner:
+    def build(self, task_id, persona_id, box, *, task=None) -> _ScriptedRunner:
         return self._runner
 
 

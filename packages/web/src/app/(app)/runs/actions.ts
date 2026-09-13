@@ -14,11 +14,13 @@ export async function startTask(formData: FormData) {
   const task = String(formData.get("task") ?? "").trim();
   if (!personaId || !task) return; // the form disables submit on empty input.
   const api = await serverApi();
-  const run = await unwrap(
+  const dispatched = await unwrap(
     await api.POST("/v1/personas/{persona_id}/runs", {
       params: { path: { persona_id: personaId } },
       body: { task },
     }),
   );
-  redirect(`/runs/${run.id}`);
+  // Spec W1 (D-W1-3): a one-off is an ad hoc task; its detail hosts the run as the worker
+  // opens it, so the dialog lands there rather than on a run that does not exist yet.
+  redirect(`/activity/tasks/${dispatched.task_id}`);
 }

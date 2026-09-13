@@ -257,6 +257,12 @@ class EditMessageRequest(_Input):
     content: str = Field(min_length=1)
 
 
+class TaskReplyRequest(_Input):
+    """Answer a task that is waiting on you (Spec W1, T6): the reply lands in its next leg."""
+
+    reply: str = Field(min_length=1)
+
+
 class StartRunRequest(_Input):
     """Start an agentic run for a task (§5.3)."""
 

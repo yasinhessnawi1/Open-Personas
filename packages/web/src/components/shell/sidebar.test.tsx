@@ -144,6 +144,7 @@ describe("Sidebar layout contract", () => {
         calls: 5,
         memoryNodes: 0,
         activeTasks: 2,
+        attention: 4,
         schedules: 3,
       },
       memoryAvailable: true,
@@ -158,7 +159,10 @@ describe("Sidebar layout contract", () => {
     // data.personas is empty here, yet the badge reads 12).
     expect(rowText("Personas")).toContain("12");
     expect(rowText("Calls")).toContain("5");
-    expect(rowText("Activity")).toContain("2");
+    // Spec W1 (D-W1-5): the Activity badge is what NEEDS you (4), never the working set (2).
+    // The two are deliberately different here, so a badge wired back to the active count fails.
+    expect(rowText("Activity")).toContain("4");
+    expect(rowText("Activity")).not.toContain("2");
     expect(rowText("Schedule")).toContain("3");
     // Zero-hidden: the Memory row renders, its zero count does not.
     expect(rowText("Memory")).toBe("Memory");

@@ -26,7 +26,7 @@ from persona.approvals import (
     ProposalStatus,
     RawInterpretation,
 )
-from persona.tasks import Contract, Task
+from persona.tasks import Contract, Task, TaskCheckpoint
 from persona.tools import ActionCategory
 from persona_api.approvals import ApprovalResolver, ApprovalStore, InboxDecision
 from persona_api.tasks.continuation import TaskContinuation
@@ -92,6 +92,12 @@ class _FakeQueue:
 
     def __init__(self) -> None:
         self.enqueued: list[dict] = []
+
+    def count_spent_attempts(self, **_: object) -> int:
+        """Spec W1 (D-W1-29): the resume seam asks how many attempts are spent at the head.
+        Every resume here lands on a fresh head (the resolver wrote a resolution checkpoint
+        first), so the answer is always none, and the key carries no suffix."""
+        return 0
 
     def enqueue(self, **kwargs: object) -> None:
         self.enqueued.append(kwargs)
@@ -163,6 +169,49 @@ def _resolver(engine: Engine, interp: _FakeInterpreter, **extra: object) -> tupl
 
 def _approve() -> _FakeInterpreter:
     return _FakeInterpreter(RawInterpretation(intent=InterpretedIntent.APPROVE, confidence=0.95))
+
+
+# --- what the resolution carries forward (Spec W1, D-W1-16) -----------------
+
+
+async def test_the_resolution_checkpoint_carries_the_query_and_source_ledgers(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """An approval decision is not a leg: it asks the world nothing, so what earlier legs
+    already searched and read must survive it untouched.
+
+    Dropping them here would be invisible and expensive: every approved task would come
+    back with empty ledgers and re-run every search it had already run, while its
+    conclusions still claimed the work was done.
+    """
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, checkpoints, _e, _n, _q = _resolver(app_engine, _approve())
+    tasks = TaskStore(app_engine)
+    _waiting_task(tasks, owner="user_a", persona="persona_a", task_id="t1")
+    task = tasks.get("user_a", "t1")
+    checkpoints.append(
+        task,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:0",
+            checkpoint_seq=0,
+            progress_conclusions=("the board rules in writing",),
+            queries_run=("husleieloven deposit interest",),
+            sources_seen=("https://lovdata.no/a",),
+            updated_at=_NOW,
+        ),
+        spend={},
+        now=_NOW,
+    )
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes send it", "telegram", now=_NOW)
+
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert head.leg_id.startswith("t1:approval:")  # the resolution, not the leg
+    assert head.queries_run == ("husleieloven deposit interest",)
+    assert head.sources_seen == ("https://lovdata.no/a",)
 
 
 # --- verbatim proposal-replay -----------------------------------------------

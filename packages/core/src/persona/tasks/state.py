@@ -18,12 +18,26 @@ from persona.errors import TaskStateError
 
 __all__ = [
     "TERMINAL_STATES",
+    "TaskKind",
     "TaskState",
     "WaitKind",
     "can_transition",
     "is_terminal",
     "validate_transition",
 ]
+
+
+class TaskKind(StrEnum):
+    """What kind of work a task is (Spec W1, D-W1-2).
+
+    ``STANDING`` is the A4/A8 shape: a contract the user confirmed, usually with a
+    schedule or an event trigger behind it. ``AD_HOC`` is a one-off "just run this"
+    dispatch: the same entity with a degenerate contract, so a bare run belongs to a task
+    and is reachable from the work list (D-W1-1). The kind never changes after create.
+    """
+
+    STANDING = "standing"
+    AD_HOC = "ad_hoc"
 
 
 class TaskState(StrEnum):

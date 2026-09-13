@@ -54,6 +54,7 @@ from persona.logging import get_logger
 from persona.tasks import (
     EventFire,
     LegBox,
+    RecentLegSummary,
     ResumeTrigger,
     ScheduledFire,
     TaskState,
@@ -64,13 +65,16 @@ from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
 
 from persona_api.services import run_record
+from persona_api.services.llm_usage_collector import collect_llm_usage
 from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
+from persona_api.tasks.leg_profile import leg_profile
+from persona_api.tasks.leg_retrieval import LegRetrieval  # noqa: TC001 (a constructor arg)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from persona.jobs import JobContext, JobRegistry
-    from persona.tasks import StuckReport, Task
+    from persona.tasks import StuckReport, Task, TaskCheckpoint
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.agentic.run import CancelToken, Run, StepUsage
     from persona_runtime.cost import CostSource
@@ -79,6 +83,7 @@ if TYPE_CHECKING:
 
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
+    from persona_api.services.llm_usage_collector import UsageTotals
     from persona_api.tasks.continuation import TaskContinuation
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
@@ -102,6 +107,15 @@ TASK_LEG_JOB_TYPE = "task_leg"
 
 _log = get_logger("api.tasks.handler")
 
+#: How many earlier legs the reconstruction's continuity window carries, when nothing
+#: configures it. Three is what ``PERSONA_TASK_RECENT_LEG_SUMMARIES`` has documented since
+#: A2; until Spec W1 T12 nothing read it.
+DEFAULT_RECENT_LEG_SUMMARIES = 3
+
+#: The documented ceiling. The window sits between the contract and the live retrieval, and
+#: a long tail of old leg summaries pushes both away from the model's attention.
+MAX_RECENT_LEG_SUMMARIES = 5
+
 
 class TaskLegPayload(JobPayload):
     """Which leg to run: the task, the job-fixed predecessor anchor, and the trigger.
@@ -117,15 +131,22 @@ class TaskLegPayload(JobPayload):
     trigger: ResumeTrigger
 
 
-def task_leg_idempotency_key(payload: TaskLegPayload) -> str:
+def task_leg_idempotency_key(payload: TaskLegPayload, *, retry: int = 0) -> str:
     """``task:{task_id}:after:{predecessor_seq}`` — dedups duplicate ENQUEUES of one leg.
 
     Deterministic in ``(task_id, predecessor_seq)`` so a double-enqueue (a double fire, a
     re-scheduled continuation) collapses to one A0 job. Re-DELIVERY of the same job is
     handled by the store CAS, not this key (the two layers, like A1 over A0).
+
+    ``retry`` (Spec W1, D-W1-20): a leg re-enqueued after the SAME head dead-lettered gets the
+    suffix ``:retry:{n}``, ``n`` = the number of prior dead attempts at that head. Without it a
+    pickup, or an approval answered after the park, collided with the dead row's key and was
+    silently absorbed until the archive sweep freed it a day later (R9-130). A double enqueue
+    of the same retry still dedups; a re-delivery still no-ops at the store CAS.
     """
     anchor = "init" if payload.predecessor_seq is None else str(payload.predecessor_seq)
-    return f"task:{payload.task_id}:after:{anchor}"
+    base = f"task:{payload.task_id}:after:{anchor}"
+    return base if retry <= 0 else f"{base}:retry:{retry}"
 
 
 class LegRunnerBuilder(Protocol):
@@ -135,7 +156,9 @@ class LegRunnerBuilder(Protocol):
     wall-clock trip; the step bound is the loop's own — D-A2-2).
     """
 
-    def build(self, task_id: str, persona_id: str, box: LegBox) -> AgenticRunner: ...
+    def build(
+        self, task_id: str, persona_id: str, box: LegBox, *, task: Task | None = None
+    ) -> AgenticRunner: ...
 
 
 class RunnableGuard(Protocol):
@@ -178,6 +201,30 @@ class _LegBillingAccumulator:
         if basis != "unpriced" or self._basis is None:
             self._basis = basis
 
+    async def add_distillation(self, totals: UsageTotals) -> None:
+        """Fold the checkpoint distiller's model call into this leg's cost (D-W1-44).
+
+        Priced exactly like a step, because that is what it is: a model call made because
+        this leg ran. Zero usage (the deterministic writer, an unmetered install, a
+        distillation that never reached a model) adds nothing and leaves the basis alone,
+        so a leg that did not distil bills exactly what it billed before.
+        """
+        if not totals.prompt_tokens and not totals.completion_tokens:
+            return
+        # Priced through the same function as a step, but NOT fabricated as one: a
+        # ``StepUsage`` carries a step index, and this call belongs to no step of the run.
+        cost_cents, basis = compute_turn_cost(
+            provider=totals.provider,
+            model=totals.model,
+            prompt_tokens=totals.prompt_tokens,
+            completion_tokens=totals.completion_tokens,
+            actual_cost_usd=totals.cost_usd,
+            source=self._cost_source,
+        )
+        self._total_cents += cost_cents
+        if basis != "unpriced" or self._basis is None:
+            self._basis = basis
+
     def result(self) -> tuple[float, str | None]:
         """``(total_cost_cents, cost_basis)`` — basis ``None`` iff no step ran."""
         return self._total_cents, self._basis
@@ -202,11 +249,14 @@ class _LegRunRecord:
     the checkpoint + task ledger stay exactly-once via the store CAS.
     """
 
-    def __init__(self, engine: Engine, *, owner_id: str, persona_id: str, task_text: str) -> None:
+    def __init__(
+        self, engine: Engine, *, owner_id: str, persona_id: str, task_id: str, task_text: str
+    ) -> None:
         self.run_id = f"run_{uuid.uuid4().hex}"
         self._engine = engine
         self._owner = owner_id
         self._persona_id = persona_id
+        self._task_id = task_id
         self._task_text = task_text
         #: The run the wrapped runner returned — available even when ``run_leg`` went on
         #: to raise (the over-budget checkpoint path: the run finished, the write did not).
@@ -220,6 +270,7 @@ class _LegRunRecord:
             owner_id=self._owner,
             persona_id=self._persona_id,
             task=self._task_text,
+            task_id=self._task_id,  # Spec W1 (D-W1-1): the run names its task
             started_at=now,
         )
 
@@ -272,6 +323,58 @@ class _LegRunRecord:
                 rid=self.run_id,
                 err=str(exc),
             )
+
+
+class _ControlledRunner:
+    """Wraps the leg's :class:`AgenticRunner` so the user's controls reach a RUNNING leg.
+
+    Spec W1 (D-W1-21, R9-129): the executor's cancel token was documented as "wired by the
+    worker's cancel signal at deploy" and never was, so a cancel or a pause let the running
+    leg finish its whole box. This wrapper reads the durable task row at every step boundary
+    (the loop's ``thinking`` event, one indexed read per model call) and trips the token the
+    executor handed the loop when the task is terminal or paused. Durable, not in-memory: it
+    works whichever process pressed the control, and the loop still salvages the leg's work
+    into the checkpoint (R9-109) before stopping at the next boundary.
+    """
+
+    def __init__(
+        self, inner: AgenticRunner, *, tasks: TaskStore, owner_id: str, task_id: str
+    ) -> None:
+        self._inner = inner
+        self._tasks = tasks
+        self._owner = owner_id
+        self._task_id = task_id
+        #: True once a control (cancel / pause) tripped the leg; the handler then withholds
+        #: the continuation instead of enqueueing a leg the claim would only skip.
+        self.tripped = False
+
+    async def run(
+        self,
+        task: str,
+        *,
+        on_event: Callable[[RunEvent], Awaitable[None]],
+        cancel_token: CancelToken,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
+    ) -> Run:
+        async def _on_event(event: RunEvent) -> None:
+            await on_event(event)
+            if event.type == "thinking" and not cancel_token.is_cancelled:
+                current = self._tasks.get(self._owner, self._task_id)
+                if is_terminal(current.state) or current.paused:
+                    self.tripped = True
+                    _log.info(
+                        "leg stopped by a control at a step boundary",
+                        task_id=self._task_id,
+                        state=current.state.value,
+                        paused=current.paused,
+                    )
+                    cancel_token.cancel()
+
+        if on_step_usage is not None:
+            return await self._inner.run(
+                task, on_event=_on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+            )
+        return await self._inner.run(task, on_event=_on_event, cancel_token=cancel_token)
 
 
 class _RecordingRunner:
@@ -332,6 +435,8 @@ class TaskLegHandler:
         cost_source: CostSource | None = None,
         billing_config: BillingConfig | None = None,
         agentic_floor: int = 1,
+        recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
+        retrieval: LegRetrieval | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -345,6 +450,12 @@ class TaskLegHandler:
         # The A3 kill-switch guard (T11): persona-suspend / global-pause prevent the next leg
         # (terminal/budget-paused are checked inline). Optional — a plain A2 worker wires none.
         self._runnable_guard = runnable_guard
+        # Spec W1 (T12): the two reconstruction slots that were never filled. ``recent_legs``
+        # is the last-N continuity window read from the checkpoint store; ``retrieval`` is the
+        # persona's own memory for the contract goal, fetched off-loop and skipped on timeout.
+        # Zero summaries and a ``None`` retrieval are the pre-W1 behaviour exactly.
+        self._recent_leg_summaries = max(0, min(recent_leg_summaries, MAX_RECENT_LEG_SUMMARIES))
+        self._retrieval = retrieval
         # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
         # continuation applies. Optional + best-effort; a plain A2 worker wires none.
         self._on_milestone = on_milestone
@@ -428,6 +539,43 @@ class TaskLegHandler:
                 err=str(exc),
             )
 
+    def _recent_legs(
+        self, owner: str, task_id: str, prior: TaskCheckpoint | None
+    ) -> tuple[RecentLegSummary, ...]:
+        """The last few legs, oldest first, as the continuity window (Spec W1, T12).
+
+        Read from the checkpoint store, which is the only durable per-leg record there is.
+        The newest checkpoint is SKIPPED: it is ``prior``, and the reconstruction already
+        renders it in full as the CHECKPOINT block. Repeating it as a summary would spend
+        the window on something the leg is reading anyway.
+
+        The summary is that leg's own contribution (the last conclusion it appended) rather
+        than everything known by then, and the outcome is read off the checkpoint rather
+        than invented: a checkpoint that recorded what it was blocked on says so.
+        """
+        if self._recent_leg_summaries <= 0:
+            return ()
+        try:
+            # One extra, because the newest is ``prior`` and is about to be dropped.
+            checkpoints = self._checkpoints.list_recent(
+                owner, task_id, limit=self._recent_leg_summaries + 1
+            )
+        except Exception as exc:  # noqa: BLE001 - context is never a precondition for work
+            _log.info("recent-leg window unavailable task_id={tid}: {err}", tid=task_id, err=exc)
+            return ()
+        newest_seq = prior.checkpoint_seq if prior is not None else None
+        window = [c for c in checkpoints if c.checkpoint_seq != newest_seq]
+        summaries = [
+            RecentLegSummary(
+                leg_id=c.leg_id,
+                summary=c.progress_conclusions[-1] if c.progress_conclusions else "(nothing new)",
+                outcome=f"blocked: {c.blocked_on}" if c.blocked_on else "worked",
+            )
+            for c in window[: self._recent_leg_summaries]
+        ]
+        summaries.reverse()  # oldest first: the window reads forward, like the work did
+        return tuple(summaries)
+
     async def handle(self, payload: TaskLegPayload, context: JobContext) -> None:
         owner = context.owner_id
         now = datetime.now(UTC)
@@ -466,8 +614,19 @@ class TaskLegHandler:
 
         prior = self._checkpoints.get_latest(owner, payload.task_id)
         seq = 0 if payload.predecessor_seq is None else payload.predecessor_seq + 1
+        # Spec W1 (T12): what the last few legs concluded, and what this persona already
+        # knows about the goal. Both are best-effort context for the reconstruction, so both
+        # degrade to empty rather than failing a leg that could otherwise run.
+        recent_legs = self._recent_legs(owner, payload.task_id, prior)
+        retrieval = (
+            await self._retrieval.snippets(task.persona_id, task.contract.goal)
+            if self._retrieval is not None
+            else ()
+        )
 
-        runner = self._runner_builder.build(task.id, task.persona_id, self._box)
+        # Spec W1 (D-W1-1): the task travels with the build so the runner can gate the
+        # leg's toolbox on THIS task's category policy (A3's gate, wired here at last).
+        runner = self._runner_builder.build(task.id, task.persona_id, self._box, task=task)
         # The leg's agentic run is a first-class Spec-08 run: open its ``runs`` row and link
         # it to the task BEFORE the loop starts, then snapshot progress through the wrapped
         # runner. Without this a scheduled leg spent real money and left nothing viewable.
@@ -475,52 +634,67 @@ class TaskLegHandler:
         record = self._open_run_record(owner, task, now)
         if record is not None:
             runner = record.wrap(runner)
+        # Spec W1 (D-W1-21): the user's cancel / pause reaches this leg at its next boundary.
+        control = _ControlledRunner(runner, tasks=self._tasks, owner_id=owner, task_id=task.id)
+        runner = control
         executor = LegExecutor(runner=runner, writer=self._writer, sink=self._checkpoints)
         # Spec M3 (T4b): meter the leg's real per-step cost for the owner-billed deduct.
         # None when billing is unwired → the run_leg call stays byte-identical.
         accumulator = _LegBillingAccumulator(self._cost_source) if self._billing_enabled() else None
-        try:
-            outcome = await executor.run_leg(
-                task=task,
-                trigger=payload.trigger,
-                prior_checkpoint=prior,
-                seq=seq,
-                box=self._box,
-                now=now,
-                on_step_usage=accumulator.on_step_usage if accumulator is not None else None,
-            )
-        except CheckpointTooLargeError as exc:
-            # The RUN itself finished — settle its record from what the wrapped runner
-            # captured, so an over-budget checkpoint never costs the run's visibility.
-            if record is not None:
-                self._settle_run_record(record, run=record.captured_run, cause=str(exc), now=now)
-            # R9-005: the run FINISHED but its checkpoint cannot land within the store's budget
-            # (D-A2-1's post-compaction fail-fast). This is deterministic — re-raising would burn
-            # A0's retries re-running the whole leg (full model spend) into the same write
-            # failure, then dead-letter. Instead: park the task honestly (react_to_dead_leg's
-            # stuck shape — waiting(on_user) with the real cause), voice it, and let the job
-            # SUCCEED. Exactly one execution; the user resumes or cancels. The leg's model spend
-            # is not ledgered (no append landed) — the lesser cost vs. 3× re-spend.
-            await self._park_stuck(owner, task, cause=str(exc), now=now)
-            return
-        except Exception as exc:
-            # The leg blew up (A0 will re-deliver). Record the failure before re-raising —
-            # an invisible failed run is half of why the missing record mattered.
-            if record is not None:
-                # R9-097 (remainder): the same sanitisation the chat and run paths
-                # apply. This row is shown on the task's run list, so a tier
-                # exhaustion here would print our provider names and model ids to
-                # the user exactly as it once did in chat. The unsanitised cause is
-                # preserved where it is actually needed: the exception re-raises
-                # immediately below, so A0's retry and dead-letter accounting still
-                # see the real failure.
-                record.fail(
-                    user_facing_error_message(
-                        exc, on_free_plan=owner_on_free_plan(self._rls_engine, owner)
-                    )
-                    or str(exc)
+        # Spec W1 (D-W1-44): the checkpoint distiller's model call happens INSIDE the leg,
+        # so it is billed with the leg rather than absorbed. It runs on the cheapest tier
+        # and usually disappears into the per-leg floor, but a per-leg provider call kept
+        # outside the ledger is the shape M3 exists to end. The sink is inert unless a
+        # usage-collecting backend is wired (the worker root wires one for the distiller),
+        # so the deterministic writer and an unmetered install record nothing here.
+        with collect_llm_usage() as distillation:
+            try:
+                outcome = await executor.run_leg(
+                    task=task,
+                    trigger=payload.trigger,
+                    prior_checkpoint=prior,
+                    recent_legs=recent_legs,
+                    retrieval=retrieval,
+                    seq=seq,
+                    box=self._box,
+                    now=now,
+                    on_step_usage=accumulator.on_step_usage if accumulator is not None else None,
                 )
-            raise
+            except CheckpointTooLargeError as exc:
+                # The RUN itself finished — settle its record from what the wrapped runner
+                # captured, so an over-budget checkpoint never costs the run's visibility.
+                if record is not None:
+                    self._settle_run_record(
+                        record, run=record.captured_run, cause=str(exc), now=now
+                    )
+                # R9-005: the run FINISHED but its checkpoint cannot land within the store's budget
+                # (D-A2-1's post-compaction fail-fast). This is deterministic: re-raising
+                # would burn A0's retries re-running the whole leg (full model spend) into
+                # the same write
+                # failure, then dead-letter. Instead: park the task honestly (react_to_dead_leg's
+                # stuck shape — waiting(on_user) with the real cause), voice it, and let the job
+                # SUCCEED. Exactly one execution; the user resumes or cancels. The leg's model spend
+                # is not ledgered (no append landed) — the lesser cost vs. 3× re-spend.
+                await self._park_stuck(owner, task, cause=str(exc), now=now)
+                return
+            except Exception as exc:
+                # The leg blew up (A0 will re-deliver). Record the failure before re-raising —
+                # an invisible failed run is half of why the missing record mattered.
+                if record is not None:
+                    # R9-097 (remainder): the same sanitisation the chat and run paths
+                    # apply. This row is shown on the task's run list, so a tier
+                    # exhaustion here would print our provider names and model ids to
+                    # the user exactly as it once did in chat. The unsanitised cause is
+                    # preserved where it is actually needed: the exception re-raises
+                    # immediately below, so A0's retry and dead-letter accounting still
+                    # see the real failure.
+                    record.fail(
+                        user_facing_error_message(
+                            exc, on_free_plan=owner_on_free_plan(self._rls_engine, owner)
+                        )
+                        or str(exc)
+                    )
+                raise
         # The run finished (COMPLETED / CONTINUE / FAILED), or the A3 gate ended the leg with
         # no run at all — settle the durable record either way, before anything downstream
         # (metering, billing, the continuation) can raise and strand it in ``running``.
@@ -538,6 +712,10 @@ class TaskLegHandler:
                 "task_id": payload.task_id,
                 "checkpoint_seq": str(seq),
                 "disposition": outcome.disposition.value,
+                # Spec W1 (T14): the leg's measured shape, so the close-out can argue about
+                # the bounds (§2.4) from what legs actually do rather than from the one
+                # datapoint that arrived by accident. No bound moves in W1.
+                **leg_profile(outcome),
             },
         )
         _log.info(
@@ -547,17 +725,41 @@ class TaskLegHandler:
             disposition=outcome.disposition.value,
         )
         # Spec M3 (T4b): OWNER-bill the leg's real cost, RIDING the CAS-committed
-        # append. Only the CONTINUE / COMPLETED dispositions appended a checkpoint
+        # append. Only the dispositions that appended a checkpoint are billed
         # (FAILED / WAITING_APPROVAL do not; the CheckpointTooLargeError park returned
         # above) — so we bill exactly the committed-work dispositions. Keyed
         # ``{task_id}:leg:{seq}`` (the checkpoint's identity), so a re-delivered leg
         # is a no-op via ``ON CONFLICT (billing_key) DO NOTHING`` — the deduct NEVER
         # rides ``context.meter`` (which fires on every at-least-once execution).
+        # Spec W1 (D-W1-34): WAITING_USER belongs here. The approval park bills nothing
+        # because it executed nothing; a leg that stopped on a question ran real steps,
+        # appended their checkpoint, and spent real model credits doing it.
+        if accumulator is not None:
+            # The distillation rides the SAME leg charge (one billing_key, one deduct), not a
+            # second row: it is part of what this leg cost, not a surface of its own.
+            await accumulator.add_distillation(distillation.totals())
         if accumulator is not None and outcome.disposition in (
             LegDisposition.CONTINUE,
             LegDisposition.COMPLETED,
+            LegDisposition.WAITING_USER,
         ):
             await self._bill_leg(owner, payload.task_id, seq, accumulator)
+        # Spec W1 (D-W1-21): a leg a control stopped enqueues nothing further. Its checkpoint
+        # landed above (the salvage rode the CAS append) and the task row already carries the
+        # user's decision; a continuation would only create a job the claim skips.
+        # The leg may also have COMPLETED on the very call the cancel raced (no boundary was
+        # left to trip): the durable row is the user's decision either way, and driving the
+        # state machine from it (cancelled → completed) would raise, A0 would re-run the leg
+        # for nothing, and the job would dead-letter. Re-read, and settle without a transition.
+        settled = self._tasks.get(owner, task.id)
+        if control.tripped or is_terminal(settled.state):
+            _log.info(
+                "leg ended under a control; no continuation",
+                task_id=task.id,
+                state=settled.state.value,
+                tripped=control.tripped,
+            )
+            return
         # Disposition → state machine (continuation / completion / waiting); raises on FAILED
         # so A0 re-delivers (transient). Skipped when no continuation is wired (idempotency-only).
         # A ScheduledFire's fire_time is the recurrence anchor — "is there a fire after THIS one?" —
@@ -637,6 +839,7 @@ class TaskLegHandler:
             self._rls_engine,
             owner_id=owner,
             persona_id=task.persona_id,
+            task_id=task.id,
             task_text=task.contract.goal,
         )
         record.open(now=now)
@@ -734,6 +937,8 @@ def register_task_leg_handler(
     cost_source: CostSource | None = None,
     billing_config: BillingConfig | None = None,
     agentic_floor: int = 1,
+    recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
+    retrieval: LegRetrieval | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -758,6 +963,8 @@ def register_task_leg_handler(
                 cost_source=cost_source,
                 billing_config=billing_config,
                 agentic_floor=agentic_floor,
+                recent_leg_summaries=recent_leg_summaries,
+                retrieval=retrieval,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=TASK_LEG_RETRY_POLICY,
@@ -774,6 +981,7 @@ def enqueue_task_leg(
     predecessor_seq: int | None,
     trigger: ResumeTrigger,
     scheduled_at: datetime | None = None,
+    retry: int = 0,
 ) -> None:
     """Enqueue a leg job (a schedule fire, a self-continuation, or a resume).
 
@@ -787,6 +995,6 @@ def enqueue_task_leg(
         type=TASK_LEG_JOB_TYPE,
         owner_id=owner_id,
         payload=payload.model_dump(mode="json"),
-        idempotency_key=task_leg_idempotency_key(payload),
+        idempotency_key=task_leg_idempotency_key(payload, retry=retry),
         scheduled_at=scheduled_at,
     )

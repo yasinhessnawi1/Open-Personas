@@ -20,11 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from persona.tasks.state import WaitKind
 
 __all__ = [
+    "AutoRetry",
     "EventFire",
+    "Revived",
     "EventTrigger",
     "ResumeTrigger",
     "ScheduledFire",
     "TaskResumer",
+    "UserDispatch",
     "UserReply",
     "wait_kind_for",
 ]
@@ -65,6 +68,71 @@ class UserReply(BaseModel):
     kind: Literal["user_reply"] = "user_reply"
     reply: str
     in_reply_to: str | None = None
+
+
+class UserDispatch(BaseModel):
+    """A one-off the user dispatched directly: "just run this" (Spec W1, D-W1-1).
+
+    The first leg of an ad hoc task. Nothing was waited on: the task was created and
+    started in the same breath, so the trigger carries only when the user asked. The
+    brief itself is the contract's goal (D-W1-7), which the reconstruction already leads
+    with, so it is not repeated here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["user_dispatch"] = "user_dispatch"
+    dispatched_at: datetime
+
+    @field_validator("dispatched_at", mode="after")
+    @classmethod
+    def _dispatched_at_tz_aware(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+
+class AutoRetry(BaseModel):
+    """The system trying a failed leg again on its own (Spec W1, D-W1-8).
+
+    A leg that died because the world was briefly unavailable is picked up once by the revival
+    sweep. That is NOT the user replying, and saying so would be a lie the persona then reasons
+    from: told "the user replied", it looks for an answer that was never given and may treat
+    the open question as settled. This trigger says what actually happened and carries the
+    cause, so the next leg knows what failed and can retry that step rather than restart.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["auto_retry"] = "auto_retry"
+    #: The failure this is a second attempt at, verbatim from the dead leg.
+    cause: str
+    retried_at: datetime
+
+    @field_validator("retried_at", mode="after")
+    @classmethod
+    def _retried_at_tz_aware(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+
+class Revived(BaseModel):
+    """Work put back because nothing was running it (Spec W1, D-W1-38).
+
+    The sibling of :class:`AutoRetry`: that one is a second attempt at a leg that FAILED, this
+    one is a leg that never got to run at all — its job was consumed while a pause held, or a
+    control stopped it mid-flight and enqueued no continuation. Nothing failed and no schedule
+    fired, so saying either would be untrue. ``reason`` is the honest one-liner the next leg
+    reads, so it knows it is resuming rather than starting and that nobody has answered it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["revived"] = "revived"
+    reason: str
+    revived_at: datetime
+
+    @field_validator("revived_at", mode="after")
+    @classmethod
+    def _revived_at_tz_aware(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
 
 
 class EventTrigger(BaseModel):
@@ -114,19 +182,34 @@ class EventFire(BaseModel):
 #: A leg's trigger — a discriminated union over the wait kinds (Pydantic keys on ``kind``). The
 #: final element of context reconstruction (D-A2-3). ``EventFire`` is A7's on-event producer.
 ResumeTrigger = Annotated[
-    ScheduledFire | UserReply | EventTrigger | EventFire,
+    ScheduledFire | UserReply | UserDispatch | AutoRetry | Revived | EventTrigger | EventFire,
     Field(discriminator="kind"),
 ]
 
 _WAIT_KIND_BY_TRIGGER: dict[str, WaitKind] = {
     "scheduled_fire": WaitKind.UNTIL_TIME,
     "user_reply": WaitKind.ON_USER,
+    "user_dispatch": WaitKind.ON_USER,  # the user's own hand, like a reply
+    # An automatic retry un-parks a task that was waiting on the user for a failure they were
+    # offered and did not get to; the wait it resolves is that same on-user wait.
+    "auto_retry": WaitKind.ON_USER,
+    # Being put back does not resolve a wait on anyone: the task was never waiting, it was
+    # stopped. ON_USER is the closest honest reading (a person's pause is what held it).
+    "revived": WaitKind.ON_USER,
     "event": WaitKind.ON_EVENT,
     "event_fire": WaitKind.ON_EVENT,
 }
 
 
-def wait_kind_for(trigger: ScheduledFire | UserReply | EventTrigger | EventFire) -> WaitKind:
+def wait_kind_for(
+    trigger: ScheduledFire
+    | UserReply
+    | UserDispatch
+    | AutoRetry
+    | Revived
+    | EventTrigger
+    | EventFire,
+) -> WaitKind:
     """Return the :class:`WaitKind` a ``trigger`` resolves (the wait it un-parks)."""
     return _WAIT_KIND_BY_TRIGGER[trigger.kind]
 
@@ -141,5 +224,13 @@ class TaskResumer(Protocol):
     """
 
     def resume_task(
-        self, task_id: str, trigger: ScheduledFire | UserReply | EventTrigger | EventFire
+        self,
+        task_id: str,
+        trigger: ScheduledFire
+        | UserReply
+        | UserDispatch
+        | AutoRetry
+        | Revived
+        | EventTrigger
+        | EventFire,
     ) -> None: ...

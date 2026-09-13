@@ -76,7 +76,13 @@ test("run viewer streams an agentic run to a terminal status", async ({
     );
   await page.getByRole("button", { name: "Start task" }).click();
 
-  // Redirect into the run viewer (first nav compiles the route in dev).
+  // Spec W1 (D-W1-3): the dispatch lands on the ad hoc task's detail; its run history links
+  // into the viewer once the worker has opened the run.
+  await page.waitForURL("**/activity/tasks/**", { timeout: 30_000 });
+  await page
+    .locator('[data-slot="run-history-row"] a')
+    .first()
+    .click({ timeout: 60_000 });
   await page.waitForURL("**/runs/**", { timeout: 30_000 });
   await expect(page.getByText("agentic run")).toBeVisible({ timeout: 30_000 });
 

@@ -30,14 +30,23 @@ __all__ = ["CancelToken", "Run", "RunStatus", "StepUsage"]
 class RunStatus(StrEnum):
     """The terminal (or in-flight) status of a run (spec §7).
 
-    ``RUNNING`` is the only non-terminal value. The four terminal values are
-    distinct so a caller (or an automated pipeline) never mistakes a
+    ``RUNNING`` is the only value that means the loop is still executing. The five
+    stopped values are distinct so a caller (or an automated pipeline) never mistakes a
     ``MAX_STEPS_REACHED`` or ``ERROR`` outcome for ``COMPLETED`` (D-06-2): a
     best-effort max-steps summary is an *output*, not a success signal.
+
+    ``AWAITING_USER`` is the one stopped value that is not an ENDING (Spec W1, D-W1-34):
+    the loop asked the user a question and had no one to ask, so it stopped cleanly with
+    the question as its last step. Nothing further will be appended to THIS run; the work
+    continues in a new run once the answer arrives. Only a loop built with
+    ``park_on_question`` can produce it, which today means a task leg: the task parks
+    ``waiting(on_user)`` and the answer comes back through the durable reply route, never
+    an in-process queue.
 
     Values:
         RUNNING: The loop is executing.
         COMPLETED: The model produced a final answer (``[FINAL]``).
+        AWAITING_USER: The model asked the user a question and the loop parked on it.
         CANCELLED: The caller cancelled via the :class:`CancelToken`.
         MAX_STEPS_REACHED: The step budget was exhausted; ``output`` holds a
             best-effort summary.
@@ -47,6 +56,7 @@ class RunStatus(StrEnum):
 
     RUNNING = "running"
     COMPLETED = "completed"
+    AWAITING_USER = "awaiting_user"
     CANCELLED = "cancelled"
     MAX_STEPS_REACHED = "max_steps_reached"
     ERROR = "error"

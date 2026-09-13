@@ -15,6 +15,8 @@ export interface TaskSummary {
   task_id: string;
   persona_id: string;
   goal: string;
+  /** `standing` (confirmed, usually scheduled) or `ad_hoc` (a one-off; Spec W1). */
+  kind: string;
   status: string; // just_created | progressing | waiting_on_user | scheduled | paused | completed | failed | cancelled
   paused: boolean;
   spent_micros: number;
@@ -32,6 +34,8 @@ export interface TaskCommandResult {
   changed: boolean;
   owner_autonomy_paused: boolean;
   note: string;
+  /** Spec W1 (T6): a retry runs a finished task again as a NEW task; this names it. */
+  successor_task_id?: string | null;
 }
 
 /** The result of a budget extension — bounded, at-most-once, with the old → new cap (B2). */
@@ -91,11 +95,24 @@ export interface TaskReport {
 }
 
 /** The full task detail above the run viewer (contract + grants, budget, ledger, checkpoints). */
+/** One of a task's runs, in the light projection (no steps; the viewer loads those). */
+export interface TaskRun {
+  id: string;
+  persona_id: string;
+  task: string;
+  task_id: string | null;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface TaskDetail {
   task_id: string;
   persona_id: string;
   goal: string;
   scope: string;
+  /** `standing` or `ad_hoc` (Spec W1). */
+  kind: string;
   status: string;
   paused: boolean;
   grants: Grant[];
@@ -113,6 +130,8 @@ export interface TaskDetail {
   conversation_id: string | null;
   schedule_id: string | null;
   run_ids: string[];
+  /** The task's runs, newest first (Spec W1, D-W1-3): the detail is their home. */
+  runs: TaskRun[];
   created_at: string;
   updated_at: string;
 }
@@ -171,6 +190,38 @@ export const resumeTask = (t: string | null | undefined, id: string) =>
 /** Cancel a task (terminal) — a running step finishes first; idempotent on a terminal task. */
 export const cancelTask = (t: string | null | undefined, id: string) =>
   command(t, id, "cancel");
+
+/**
+ * Spec W1 (T6) — the attention verbs. Each rides the same durable seam the review page and the
+ * task detail share, so acting from either place does the same thing.
+ *
+ * `pickup` carries "carry on where you left off" into the next leg; `reply` carries the user's
+ * own words; `retry` runs a finished task again as a NEW task (the old one stays as the record
+ * of what failed). All three are calm on a no-op: `changed: false` with a note, never an error.
+ */
+export const pickupTask = (t: string | null | undefined, id: string) =>
+  authFetch<TaskCommandResult>(
+    `/v1/tasks/${encodeURIComponent(id)}/pickup`,
+    t,
+    { method: "POST" },
+  );
+
+/** Answer a task that is waiting on you; the text lands in the next leg's trigger. */
+export const replyToTask = (
+  t: string | null | undefined,
+  id: string,
+  reply: string,
+) =>
+  authFetch<TaskCommandResult>(`/v1/tasks/${encodeURIComponent(id)}/reply`, t, {
+    method: "POST",
+    body: JSON.stringify({ reply }),
+  });
+
+/** Run a finished task again as a new task with the same contract. */
+export const retryTask = (t: string | null | undefined, id: string) =>
+  authFetch<TaskCommandResult>(`/v1/tasks/${encodeURIComponent(id)}/retry`, t, {
+    method: "POST",
+  });
 
 /** Raise a budget-paused task's cap (bounded, at-most-once). Returns the old → new cap. */
 export function extendBudget(

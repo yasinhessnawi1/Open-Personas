@@ -74,7 +74,7 @@ class _FakeRunnerBuilder:
     def __init__(self, runner: _FakeRunner) -> None:
         self._runner = runner
 
-    def build(self, task_id: str, persona_id: str, box) -> _FakeRunner:
+    def build(self, task_id: str, persona_id: str, box, *, task: object = None) -> _FakeRunner:
         return self._runner
 
 
@@ -633,6 +633,89 @@ async def test_over_budget_checkpoint_park_bills_the_owner_nothing(
         TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
     )
     # The task parked (over-budget checkpoint never landed) → no committed leg → no owner bill.
+    assert _task_leg_ledger(migrated_engine, "user_a") == []
+
+
+class _AskingBillableRunner(_BillableRunner):
+    """A leg that spent real money and THEN stopped to ask (Spec W1, D-W1-34)."""
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
+        self.calls += 1
+        await on_event(RunEvent.thinking(0))
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="openai/gpt-5.4-image-2",
+                    prompt_tokens=100,
+                    completion_tokens=1000,
+                    cost_usd=0.03,
+                )
+            )
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=RunStatus.AWAITING_USER,
+            steps=[
+                Step(type=StepType.REASONING, content="checked the clinics", tokens=1100),
+                Step(type=StepType.ASK_USER, question="Which day?", user_answer=None),
+            ],
+            output=None,
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_stopped_on_a_question_bills_the_owner(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Spec W1 (D-W1-34): a park that DID work is billed like any committed leg.
+
+    The two parks are not alike, and the difference is what this pins. The approval gate
+    ends the leg with no run and no checkpoint: it executed nothing, so it owes nothing. A
+    leg that stopped on a question ran real steps, spent real model credits and appended
+    their checkpoint, so the cost is owed exactly as for a leg that continued. Dropping
+    ``WAITING_USER`` from the billed set gives the owner free model calls whenever a persona
+    asks something.
+    """
+    _seed_active_task(migrated_engine)
+    handler = _billing_handler(app_engine, migrated_engine, _AskingBillableRunner())
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
+
+    rows = _task_leg_ledger(migrated_engine, "user_a")
+    assert len(rows) == 1, "a leg that spent real money is billed even though it parked"
+    assert rows[0][0] == -3  # the same real cost a continuing leg is charged
+    assert rows[0][3] == "t1:leg:0"  # keyed on the checkpoint it committed
+    # The reason it is billed: the checkpoint COMMITTED, so the work is durable. (This
+    # harness wires no continuation, so the waiting transition itself belongs to the real
+    # chain in test_attention_actions.py.)
+    assert TaskStore(app_engine).get("user_a", "t1").head_checkpoint_seq == 0
+
+
+@pytest.mark.asyncio
+async def test_the_approval_park_still_bills_nothing(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The contrast that makes the rule a rule: A3's gate ends the leg with no run and no
+    checkpoint, having executed nothing, so there is nothing to bill."""
+
+    class _GatedBillableRunner(_GatedRunner):
+        """The gate, through the billing handler (which hands every runner the usage hook)."""
+
+        async def run(
+            self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None
+        ) -> Run:
+            return await super().run(task, on_event=on_event, cancel_token=cancel_token)
+
+    _seed_active_task(migrated_engine)
+    handler = _billing_handler(app_engine, migrated_engine, _GatedBillableRunner())
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _FakeContext("user_a")
+    )
     assert _task_leg_ledger(migrated_engine, "user_a") == []
 
 

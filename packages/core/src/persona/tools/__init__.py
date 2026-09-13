@@ -62,7 +62,7 @@ from persona.tools.kind import ToolKind, resolve_tool_kind
 from persona.tools.mcp.adapter import MCPToolAdapter
 from persona.tools.mcp.client import MCPClient, load_mcp_clients
 from persona.tools.protocol import AsyncTool, ToolDescriptor, tool
-from persona.tools.toolbox import Toolbox
+from persona.tools.toolbox import Toolbox, ToolboxFactory
 
 __all__ = [
     # Action-category taxonomy + policy matrix (A3)
@@ -98,6 +98,7 @@ __all__ = [
     "ToolNotAllowedError",
     # Registry
     "Toolbox",
+    "ToolboxFactory",
     # Factory + composer
     "build_default_toolbox",
     "catalog_entry",

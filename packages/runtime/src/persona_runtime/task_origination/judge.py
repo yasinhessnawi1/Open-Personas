@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
 from persona.schema.conversation import ConversationMessage
+from persona.tasks import Deliverable, DeliverableFormat
 from persona.tools.categories import ActionCategory
 
 from persona_runtime.errors import ScheduleParseError
@@ -42,7 +43,7 @@ __all__ = ["JUDGE_PROMPT_VERSION", "ModelStandingIntentJudge"]
 
 _logger = get_logger("runtime.task_origination")
 
-JUDGE_PROMPT_VERSION = "a4-judge-v2"
+JUDGE_PROMPT_VERSION = "a4-judge-v3"
 
 _SYSTEM_PROMPT = """\
 You decide whether a user's message is asking YOU to take on a STANDING task — ongoing or \
@@ -68,6 +69,12 @@ morning at 8" -> "FREQ=DAILY;BYHOUR=8;BYMINUTE=0"; "every 15 minutes" -> \
 single future moment ("next Monday at 9"), give a one-time ISO-8601 local datetime. Times are in \
 the user's local timezone. If no time is stated, omit both — do NOT invent a cadence.
 
+State the DELIVERABLE: the shape the finished work should take. One of \
+"findings_markdown" (findings with their sources, the default and the right answer for \
+research), "prose" (a short written answer), "table" (rows and columns, for a comparison or \
+a list), or "file" (something the user opens; give the filename). Use what the user asked \
+for; when they did not say, use "findings_markdown".
+
 The goal and scope must be SELF-CONTAINED. Whoever runs this task later sees ONLY these two \
 fields — never this conversation. So never point at information you have not written down: no \
 "the specified X", "the description above", "as described", "the given list". If the user gave \
@@ -81,6 +88,8 @@ Reply with ONLY a JSON object, no prose:
 "scope": "<constraints + any detail the runner needs, self-contained>", \
 "spend_cap_kr": <number if a spending limit was offered>, \
 "spend_note": "<one short line restating the spend permission, if any>", \
+"deliverable_format": "findings_markdown"|"prose"|"table"|"file", \
+"deliverable_filename": "<the filename, only for the file format>", \
 "recurrence_rrule": "<an RFC-5545 RRULE if recurring, else omit>", \
 "one_time_at": "<ISO-8601 local datetime if a single future moment, else omit>"}
 For "now_work" or "ambiguous", reply with just {"verdict": "now_work"} or \
@@ -110,6 +119,26 @@ _DANGLING_REFERENCE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _deliverable_from(payload: dict[str, object]) -> Deliverable:
+    """The agreed shape, read conservatively from the judge's JSON (Spec W1, T11).
+
+    An unknown or missing format falls back to the default rather than failing the draft:
+    the shape is a preference, and losing a whole task because a model wrote "md" would be
+    a worse trade than producing findings markdown when prose was asked for. A filename is
+    kept only for the format that has one, so a stray filename on a prose task cannot make
+    the contract claim a file exists.
+    """
+    raw = str(payload.get("deliverable_format", "")).strip().lower()
+    try:
+        fmt = DeliverableFormat(raw)
+    except ValueError:
+        return Deliverable()
+    filename = str(payload.get("deliverable_filename", "")).strip()
+    if fmt is not DeliverableFormat.FILE:
+        return Deliverable(format=fmt)
+    return Deliverable(format=fmt, filename=filename)
 
 
 def dangling_reference(text: str) -> bool:
@@ -231,6 +260,7 @@ class ModelStandingIntentJudge:
                 scope=scope,
                 grants=self._spend_grant(payload),
                 schedule=self._build_schedule(payload),
+                deliverable=_deliverable_from(payload),
             ),
         )
 

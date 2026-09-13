@@ -60,13 +60,20 @@ export default async function RunPage({
 
   return (
     <PageBody>
+      {/* Spec W1 (D-W1-14): a run that belongs to a task goes back to that task; a legacy
+          bare run keeps its persona link. */}
       <Link
-        href={`/personas/${run.persona_id}`}
+        href={
+          run.task_id
+            ? `/activity/tasks/${encodeURIComponent(run.task_id)}`
+            : `/personas/${run.persona_id}`
+        }
         className="type-ui mb-6 inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
         data-slot="back-link"
+        data-target={run.task_id ? "task" : "persona"}
       >
         <ArrowLeft className="size-4" aria-hidden="true" />
-        {t("backToPersona")}
+        {run.task_id ? t("backToTask") : t("backToPersona")}
       </Link>
 
       <header
@@ -82,6 +89,7 @@ export default async function RunPage({
             data-slot="run-byline"
           >
             {t("runByline", { name: personaName })}
+            {run.task_id ? ` · ${t("partOfTask")}` : null}
           </p>
           <h1 className="type-heading mt-1" data-slot="run-task-title">
             {run.task}

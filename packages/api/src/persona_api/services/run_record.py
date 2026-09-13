@@ -71,6 +71,7 @@ def insert_run(
     persona_id: str,
     task: str,
     started_at: datetime,
+    task_id: str | None = None,
 ) -> None:
     """INSERT the run row in ``running`` state, before the loop starts.
 
@@ -81,6 +82,8 @@ def insert_run(
         persona_id: The persona executing the run — MUST belong to ``owner_id``.
         task: The task text shown in the run viewer.
         started_at: The run's start instant (tz-aware UTC).
+        task_id: The task this run executes (Spec W1, D-W1-1). ``None`` only for the
+            legacy in-process path, which retires with T2; a leg always passes it.
 
     Raises:
         RunPersonaOwnerMismatchError: If ``(persona_id, owner_id)`` violates the
@@ -97,6 +100,7 @@ def insert_run(
                     owner_id=owner_id,
                     persona_id=persona_id,
                     task=task,
+                    task_id=task_id,
                     status="running",
                     started_at=started_at,
                 )

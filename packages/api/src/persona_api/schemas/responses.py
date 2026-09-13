@@ -483,6 +483,8 @@ class RunStatusResponse(_Output):
     id: str
     persona_id: str
     task: str
+    #: The task this run executes (Spec W1, D-W1-1); ``None`` only for a legacy bare run.
+    task_id: str | None = None
     status: str
     steps: list[dict[str, object]] = Field(default_factory=list)
     output: str | None = None
@@ -490,14 +492,31 @@ class RunStatusResponse(_Output):
 
 
 class RunSummary(_Output):
-    """A run in the Tasks index — a light projection without the steps JSON."""
+    """A run in a list — a light projection without the steps JSON."""
 
     id: str
     persona_id: str
     task: str
+    #: The task this run executes (Spec W1, D-W1-1); ``None`` only for a legacy bare run.
+    task_id: str | None = None
     status: str
     started_at: datetime
     finished_at: datetime | None = None
+
+
+class WorkDispatchResponse(_Output):
+    """A one-off dispatch: the task that now carries the work (Spec W1, D-W1-1 / D-W1-3).
+
+    A bare run used to answer with a run id. Under "a run is an execution of a task" the
+    durable identity is the task: the worker opens the run row when it claims the first leg,
+    and the task detail lists every run as they land. ``state`` is the task state at dispatch
+    (``active``); ``kind`` is ``ad_hoc``.
+    """
+
+    task_id: str
+    persona_id: str
+    kind: str
+    state: str
 
 
 class RunListResponse(_Output):
@@ -800,6 +819,9 @@ class NavCountsResponse(_Output):
     calls: int
     memory_nodes: int
     active_tasks: int
+    #: What needs the user: pending approvals + tasks waiting on the user + FAILED tasks in
+    #: the digest window (Spec W1, D-W1-5). Equals the review page's list by construction.
+    attention: int
     schedules: int
 
 
@@ -1438,6 +1460,8 @@ class TaskSummaryOut(_Output):
     task_id: str
     persona_id: str
     goal: str
+    #: ``standing`` (confirmed, usually scheduled) or ``ad_hoc`` (a one-off; Spec W1, D-W1-2).
+    kind: str
     status: str  # IntrospectionStatus (just_created/progressing/waiting_on_user/scheduled/…)
     paused: bool
     spent_micros: int
@@ -1456,6 +1480,8 @@ class TaskDetailOut(_Output):
     persona_id: str
     goal: str
     scope: str
+    #: ``standing`` or ``ad_hoc`` (Spec W1, D-W1-2).
+    kind: str
     status: str
     paused: bool
     grants: list[GrantOut]  # the contract's category policy — what you authorised
@@ -1473,6 +1499,9 @@ class TaskDetailOut(_Output):
     conversation_id: str | None
     schedule_id: str | None
     run_ids: list[str]  # the Spec 08 runs the leg timeline drills into
+    #: The task's runs, newest first (Spec W1, D-W1-3): the task detail is the home of its
+    #: run history, so a dispatched run stays reachable after navigating away.
+    runs: list[RunSummary]
     created_at: datetime
     updated_at: datetime
 
@@ -1497,6 +1526,8 @@ class TaskCommandResult(_Output):
     #: run until autonomy resumes (reflect the pause, never silently arm).
     owner_autonomy_paused: bool = False
     note: str = ""  # an honest server-side note (the in-flight fate / the no-op reason)
+    #: Spec W1 (T6): a retry of a finished task creates a NEW task; this names it.
+    successor_task_id: str | None = None
 
 
 class BudgetExtendResult(_Output):

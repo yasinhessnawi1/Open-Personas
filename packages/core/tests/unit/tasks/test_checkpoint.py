@@ -9,6 +9,8 @@ boundary that forces conclusions-not-transcripts.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -163,6 +165,74 @@ def test_token_count_covers_the_accumulating_core() -> None:
     # the count is the conclusions+decisions(+rationale)+lessons text; spacing/join
     # may differ so allow a small tokenizer slack, but it must be in the ballpark.
     assert abs(checkpoint_token_count(cp) - expected) <= 3
+
+
+def test_token_count_covers_the_query_and_source_ledgers() -> None:
+    """Spec W1 (D-W1-16): the two ledgers joined the accumulating core, so they are inside
+    the same gate. A ledger outside the cap would grow without one, which is precisely the
+    unbounded accumulation the cap exists to prevent."""
+    lean = _checkpoint(progress_conclusions=("one short conclusion",))
+    with_ledgers = _checkpoint(
+        progress_conclusions=("one short conclusion",),
+        queries_run=("husleieloven deposit interest", "husleietvistutvalget statistics"),
+        sources_seen=("https://lovdata.no/dokument/NL/lov/1999-03-26-17",),
+    )
+
+    assert checkpoint_token_count(with_ledgers) > checkpoint_token_count(lean)
+
+
+def test_the_ledgers_can_push_a_checkpoint_over_its_budget() -> None:
+    """The gate has to be reachable through them, or being "in the core" means nothing."""
+    fat = _checkpoint(
+        progress_conclusions=("short",),
+        queries_run=tuple(f"a reasonably wordy search query number {i}" for i in range(200)),
+    )
+
+    with pytest.raises(CheckpointTooLargeError):
+        enforce_checkpoint_budget(fat, token_budget=200)
+
+
+def test_a_checkpoint_written_before_the_ledgers_existed_still_reads_back() -> None:
+    """Every checkpoint already in a database was hashed WITHOUT the two W1 fields. Without
+    the pre-ledger hash path each of them would read back as tampered and every running
+    task would break on its next leg."""
+    current = _checkpoint(progress_conclusions=("found it",))
+    blob = current.model_dump(mode="json")
+    legacy = {k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen"}}
+    payload = json.dumps(
+        {k: v for k, v in legacy.items() if k not in {"content_hash", "updated_at"}},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    legacy["content_hash"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    restored = TaskCheckpoint.model_validate(legacy)
+
+    assert restored.progress_conclusions == ("found it",)
+    assert restored.queries_run == ()
+
+
+def test_the_pre_ledger_path_does_not_excuse_a_tampered_checkpoint() -> None:
+    """It applies only to the exact shape a pre-W1 row deserializes into, so it can never
+    become a way to edit a checkpoint's content and keep its old hash."""
+    current = _checkpoint(progress_conclusions=("found it",))
+    blob = current.model_dump(mode="json")
+    legacy = {k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen"}}
+    payload = json.dumps(
+        {k: v for k, v in legacy.items() if k not in {"content_hash", "updated_at"}},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    legacy["content_hash"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    tampered = {**legacy, "progress_conclusions": ["edited by someone"]}
+
+    with pytest.raises(ValidationError):
+        TaskCheckpoint.model_validate(tampered)
+
+    # And a checkpoint that HAS ledgers gets no such grace: the current hash is the only one.
+    with_ledger = {**legacy, "queries_run": ["a query"]}
+    with pytest.raises(ValidationError):
+        TaskCheckpoint.model_validate(with_ledger)
 
 
 def test_token_count_excludes_plan_and_pointers() -> None:

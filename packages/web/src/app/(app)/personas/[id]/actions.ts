@@ -18,16 +18,17 @@ export async function startChat(personaId: string) {
   redirect(`/chat/${conv.id}`);
 }
 
-// Start an agentic run for a task and jump to the run viewer (T07).
+// Dispatch a one-off for the persona and land on its task (T07; Spec W1 D-W1-3).
 export async function startRun(personaId: string, formData: FormData) {
   const task = String(formData.get("task") ?? "").trim();
   if (!task) return; // empty briefs are a no-op (the form disables submit).
   const api = await serverApi();
-  const run = await unwrap(
+  const dispatched = await unwrap(
     await api.POST("/v1/personas/{persona_id}/runs", {
       params: { path: { persona_id: personaId } },
       body: { task },
     }),
   );
-  redirect(`/runs/${run.id}`);
+  // Spec W1 (D-W1-3): the one-off is an ad hoc task; land on its detail, which hosts its runs.
+  redirect(`/activity/tasks/${dispatched.task_id}`);
 }

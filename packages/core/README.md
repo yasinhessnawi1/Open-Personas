@@ -59,9 +59,13 @@ Python or from the terminal. It ships:
   transcripts) plus the `Task` state machine
   (`defined → active → waiting(…) → … → completed | failed | cancelled`), the cost
   ledger, the monotonic checkpoint sequence idempotency anchor, the A4 authored
-  `Contract`, the pure context reconstruction ordering, the leg box, the resume
-  trigger seam, and the outcome reports (the leg executor and the durable stores
-  live in `persona-runtime` and `persona-api`).
+  `Contract` (goal, scope, acceptance criteria, permission matrix, and the agreed
+  `Deliverable` shape), the pure context reconstruction ordering (contract, method,
+  checkpoint, recent legs, retrieval, trigger, recite), the per leg findings ledger
+  (the queries run and sources seen, capped and folded like every other
+  accumulating field), the leg box, the resume trigger seam, and the outcome reports
+  (the leg executor and the durable stores live in `persona-runtime` and
+  `persona-api`).
 
 ## Install
 

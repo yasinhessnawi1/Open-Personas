@@ -284,6 +284,7 @@ async def get_nav_counts(
         calls=counts["calls"],
         memory_nodes=counts["memory_nodes"],
         active_tasks=counts["active_tasks"],
+        attention=counts["attention"],
         schedules=counts["schedules"],
     )
 

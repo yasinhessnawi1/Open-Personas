@@ -1,7 +1,6 @@
 "use client";
 
 import { ChevronDown } from "lucide-react";
-import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 
@@ -27,10 +26,15 @@ import { useTaskSignal } from "@/lib/task-signal";
 import { cn } from "@/lib/utils";
 
 import { InitiativeDialControl } from "./initiative-dial-control";
+import { RunHistory } from "./run-history";
 import { TaskReschedule } from "./task-reschedule";
 import { kr } from "./task-row";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+/** How often the detail re-reads while a run is live (D-W1-3); off otherwise. */
+const LIVE_RUN_POLL_MS = 3000;
+/** Task statuses under which a worker may open or advance a run at any moment. */
+const LIVE_TASK_STATUSES = new Set(["just_created", "progressing"]);
 
 function statusVariant(
   status: string,
@@ -82,6 +86,20 @@ export function TaskDetail({
   useTaskSignal((signal) => {
     if (signal.taskId === taskId) void refetch();
   });
+  // Spec W1 (D-W1-3): while the task is being worked (a leg may open a run at any moment,
+  // and a run may be live), refetch on a short poll so the run history appears and flips
+  // without a reload; the durable row stays the truth (A6-R-4). Off once parked or done.
+  const hasLiveRun =
+    detail !== null &&
+    detail !== "error" &&
+    !detail.paused &&
+    (LIVE_TASK_STATUSES.has(detail.status) ||
+      detail.runs.some((r) => r.status === "running"));
+  useEffect(() => {
+    if (!hasLiveRun) return;
+    const timer = setInterval(() => void refetch(), LIVE_RUN_POLL_MS);
+    return () => clearInterval(timer);
+  }, [hasLiveRun, refetch]);
 
   const runCommand = useCallback(
     async (
@@ -404,21 +422,12 @@ export function TaskDetail({
             </div>
           ) : null}
           <InitiativeDialControl personaId={detail.persona_id} />
-          {detail.run_ids.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {detail.run_ids.map((runId) => (
-                <Button
-                  key={runId}
-                  variant="link"
-                  size="sm"
-                  className="-ml-2"
-                  render={<Link href={`/runs/${encodeURIComponent(runId)}`} />}
-                >
-                  {t("openRun")}
-                </Button>
-              ))}
-            </div>
-          ) : null}
+          <section className="flex flex-col gap-2" data-slot="task-runs">
+            <h2 className="type-caption font-mono text-muted-foreground uppercase">
+              {t("runs")}
+            </h2>
+            <RunHistory runs={detail.runs} />
+          </section>
         </CardContent>
       </Card>
     </Stack>

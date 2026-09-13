@@ -348,7 +348,14 @@ runs = Table(
     Column("id", Text, primary_key=True, server_default=_uuid_pk),
     Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("persona_id", Text, nullable=False),
+    # The human label the run viewer shows (free text). NOT the association: that is
+    # ``task_id`` below (Spec W1, D-W1-1). Kept as-is so legacy rows read unchanged.
     Column("task", Text, nullable=False),
+    # Spec W1 (D-W1-1): a run is an execution of a task. The FK closes the R9-100
+    # asymmetry (a task could enumerate its runs via ``tasks.run_ids``; a run could not
+    # name its task). Nullable: legacy runs keep NULL and are archive (D-W1-15, no
+    # backfill); ``SET NULL`` on task delete keeps the run row viewable.
+    Column("task_id", Text),
     Column("status", Text, nullable=False, server_default=text("'running'")),
     Column("steps", _json(), nullable=False, server_default=text("'[]'")),
     Column("output", Text),
@@ -367,7 +374,15 @@ runs = Table(
         ondelete="CASCADE",
         name="fk_runs_persona_owner",
     ),
+    ForeignKeyConstraint(
+        ["task_id"],
+        ["tasks.id"],
+        ondelete="SET NULL",
+        name="fk_runs_task",
+    ),
     Index("idx_runs_owner", "owner_id"),
+    # The task → run history read (task detail, D-W1-3) is ``WHERE task_id = ?``.
+    Index("idx_runs_task", "task_id"),
 )
 
 # Spec A0 (durable execution) — the Postgres-backed job queue.
@@ -1631,6 +1646,9 @@ tasks = Table(
     # create, never updated by any leg path — immutability is app-enforced (only A4's
     # amendment flow writes it; out of scope here). Stored whole as JSONB.
     Column("contract_json", _json(), nullable=False),
+    # Spec W1 (D-W1-2): ``standing`` (confirmed, usually scheduled) or ``ad_hoc`` (a
+    # one-off dispatch). Fixed at create; the default keeps every pre-W1 row standing.
+    Column("kind", Text, nullable=False, server_default=text("'standing'")),
     Column("state", Text, nullable=False, server_default=text("'defined'")),
     Column("paused", Boolean, nullable=False, server_default=text("false")),
     # Set iff state='waiting' (the wait kind); enforced by tasks_wait_kind_iff_waiting.
@@ -1654,6 +1672,7 @@ tasks = Table(
         "state IN ('defined','active','waiting','completed','failed','cancelled')",
         name="tasks_state_check",
     ),
+    CheckConstraint("kind IN ('standing','ad_hoc')", name="tasks_kind_check"),
     CheckConstraint(
         "wait_kind IS NULL OR wait_kind IN ('until_time','on_user','on_event')",
         name="tasks_wait_kind_check",

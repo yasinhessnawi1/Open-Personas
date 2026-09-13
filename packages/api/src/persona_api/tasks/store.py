@@ -96,10 +96,21 @@ class TaskStore:
         return row_to_task(row)
 
     def list_for_owner(self, owner_id: str) -> list[Task]:
-        """All of the owner's tasks, newest first (RLS-scoped read)."""
+        """All of the owner's tasks, newest first.
+
+        Belt and braces (the nav-counts rule, Spec W1 T5): the explicit ``owner_id`` predicate
+        is the only scoping on the community engine (no RLS there), and under RLS the policy
+        enforces it again even if a future edit dropped the predicate.
+        """
         with rls_connection(self._engine, owner_id) as conn:
             rows = (
-                conn.execute(select(tasks_t).order_by(tasks_t.c.created_at.desc())).mappings().all()
+                conn.execute(
+                    select(tasks_t)
+                    .where(tasks_t.c.owner_id == owner_id)
+                    .order_by(tasks_t.c.created_at.desc())
+                )
+                .mappings()
+                .all()
             )
         return [row_to_task(r) for r in rows]
 

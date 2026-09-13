@@ -16,9 +16,12 @@ from typing import TYPE_CHECKING
 import pytest
 from persona.errors import GatedActionProposedError
 from persona.tasks import (
+    AutoRetry,
     Contract,
     LegBox,
     LegBoxLimit,
+    Revived,
+    ScheduledFire,
     SpendKind,
     Task,
     TaskCheckpoint,
@@ -324,3 +327,252 @@ async def test_gate_yields_waiting_approval_and_does_not_append() -> None:
     assert outcome.spend == {}
     assert sink.calls == []  # the sink was never touched (no append, no double-write)
     assert outcome.task.head_checkpoint_seq is None  # task unadvanced
+
+
+class _AskingRunner:
+    """Mimics a loop that stopped ON a question (Spec W1, D-W1-34).
+
+    The leg DID work first (a reasoning step), then asked and parked, so unlike the gate
+    path there is a real run to checkpoint and meter.
+    """
+
+    def __init__(self, question: str = "Which dentist, and which day?") -> None:
+        self._question = question
+
+    async def run(
+        self,
+        task: str,
+        *,
+        on_event: Callable[[RunEvent], Awaitable[None]],
+        cancel_token: CancelToken,  # noqa: ARG002
+    ) -> Run:
+        await on_event(RunEvent.thinking(0))
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=RunStatus.AWAITING_USER,
+            steps=[
+                Step(type=StepType.REASONING, content="checked the clinics", tokens=40),
+                Step(type=StepType.ASK_USER, question=self._question, user_answer=None),
+            ],
+            output=None,
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_stopped_on_a_question_waits_on_the_user_and_appends() -> None:
+    """Unlike the approval park, this leg ran real steps: its checkpoint IS appended, so the
+    head advances and the next leg resumes from the work already done."""
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    outcome = await _executor(_AskingRunner(), sink, clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        prior_checkpoint=None,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+
+    assert outcome.disposition is LegDisposition.WAITING_USER
+    assert outcome.run is not None
+    assert len(sink.calls) == 1  # appended, unlike WAITING_APPROVAL
+    assert outcome.task.head_checkpoint_seq == 0
+
+
+@pytest.mark.asyncio
+async def test_the_question_lands_in_the_checkpoints_open_questions() -> None:
+    """The checkpoint is where a task's open questions live, and it is what the attention
+    surface reads to say WHY this waits and to show the question itself."""
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    outcome = await _executor(_AskingRunner(), sink, clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        prior_checkpoint=None,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == ("Which dentist, and which day?",)
+    assert sink.calls[0][0].open_questions == ("Which dentist, and which day?",)
+    # A question is not progress: nothing is invented as a conclusion.
+    assert outcome.checkpoint.progress_conclusions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_question_is_not_duplicated_when_it_is_already_open() -> None:
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    question = "Which dentist, and which day?"
+    prior = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="",
+        open_questions=(question,),
+        updated_at=_NOW,
+    )
+    outcome = await _executor(_AskingRunner(question), sink, clock).run_leg(
+        task=_task().advance_checkpoint(0, now=_NOW),
+        trigger=_TRIGGER,
+        prior_checkpoint=prior,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == (question,)
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_did_not_park_keeps_its_checkpoint_untouched() -> None:
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, sink, clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        prior_checkpoint=None,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.disposition is LegDisposition.COMPLETED
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_clears_the_question_it_answered() -> None:
+    """Spec W1 (D-W1-35): every writer copies ``prior.open_questions`` forward and nothing
+    removed one, so an answered question lived forever and the review line kept offering it.
+    A leg resumed by a reply starts from nothing open."""
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    prior = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="",
+        open_questions=("Which dentist, and which day?",),
+        updated_at=_NOW,
+    )
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, sink, clock).run_leg(
+        task=_task().advance_checkpoint(0, now=_NOW),
+        trigger=UserReply(reply="Dr Lie, Tuesday."),
+        prior_checkpoint=prior,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_second_question_replaces_the_answered_one() -> None:
+    """The shape the oracle hit: park on Q1, the user answers, the persona asks Q2 and parks
+    again. What is open is Q2 alone — never both, and never the resolved Q1."""
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    prior = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="",
+        open_questions=("Which dentist, and which day?",),
+        updated_at=_NOW,
+    )
+    outcome = await _executor(_AskingRunner("Morning or afternoon?"), sink, clock).run_leg(
+        task=_task().advance_checkpoint(0, now=_NOW),
+        trigger=UserReply(reply="Dr Lie, Tuesday."),
+        prior_checkpoint=prior,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.disposition is LegDisposition.WAITING_USER
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == ("Morning or afternoon?",)
+
+
+@pytest.mark.asyncio
+async def test_a_question_survives_a_leg_that_no_one_answered() -> None:
+    """Only an ANSWER clears a question. A scheduled fire is not an answer, so a question
+    still waiting on the user is still open when the clock wakes the task."""
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    prior = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="",
+        open_questions=("Which dentist, and which day?",),
+        updated_at=_NOW,
+    )
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, sink, clock).run_leg(
+        task=_task().advance_checkpoint(0, now=_NOW),
+        trigger=ScheduledFire(schedule_id="s1", fire_time=_NOW),
+        prior_checkpoint=prior,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == ("Which dentist, and which day?",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        AutoRetry(cause="429 rate limit", retried_at=_NOW),
+        Revived(reason="nothing was running it", revived_at=_NOW),
+    ],
+    ids=["auto_retry", "revived"],
+)
+async def test_the_system_putting_work_back_does_not_answer_the_open_questions(
+    trigger: AutoRetry | Revived,
+) -> None:
+    """Only a REPLY clears what was open (Spec W1, D-W1-35).
+
+    The sweep putting a task back is not an answer: the question is still unanswered, and
+    clearing it would drop it from the review page and tell the next leg it was settled. The
+    property is asserted directly here rather than resting on the trigger's type, because a
+    mutation adding an ``isinstance`` for these triggers blew up on a TYPE_CHECKING-only import
+    instead of failing the assertion, which proves nothing.
+    """
+    clock = _FakeClock()
+    sink = _RecordingSink()
+    question = "Which dentist, and which day?"
+    prior = TaskCheckpoint(
+        task_id="t1",
+        leg_id="t1:leg:0",
+        checkpoint_seq=0,
+        progress_conclusions=(),
+        next_step="",
+        open_questions=(question,),
+        updated_at=_NOW,
+    )
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, sink, clock).run_leg(
+        task=_task().advance_checkpoint(0, now=_NOW),
+        trigger=trigger,
+        prior_checkpoint=prior,
+        recent_legs=(),
+        retrieval=(),
+        now=_NOW,
+    )
+    assert outcome.checkpoint is not None
+    assert outcome.checkpoint.open_questions == (question,)

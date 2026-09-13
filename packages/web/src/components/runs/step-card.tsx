@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { ActivityState } from "@/components/activity-state";
 import { OutputList } from "@/components/chat/output/dispatcher";
@@ -31,6 +32,7 @@ export function StepCard({
   awaiting,
   last,
   onAnswer,
+  answerHref,
   personaId,
 }: {
   step: RunStep;
@@ -38,6 +40,8 @@ export function StepCard({
   /** Last step in the timeline — suppresses the trailing connector line. */
   last?: boolean;
   onAnswer: (answer: string) => Promise<void>;
+  /** Spec W1: a task-linked run answers on its task page instead of inline. */
+  answerHref?: string;
   /**
    * F4 T11: passed through to the OutputList → OutputDispatcher so the
    * Bearer-auth byte loader (`useAuthedImageBlobUrl`) can resolve images
@@ -114,6 +118,26 @@ export function StepCard({
           />
         ) : null}
 
+        {/* Spec W1 (T10): what the run's deterministic guards did on this step. A call the
+            ledger answered, or older output trimmed at the cost ceiling, is something the
+            model asked for and did not get in full; muted, but never invisible. */}
+        {step.notes?.length ? (
+          <ul className="flex flex-col gap-1" data-slot="step-notes">
+            {step.notes.map((note, i) => (
+              <li
+                key={`${note.kind}-${i}`}
+                className="type-caption text-muted-foreground"
+                data-slot="step-note"
+                data-note={note.kind}
+              >
+                {note.kind === "call_skipped"
+                  ? t("noteCallSkipped", { tool: note.tool })
+                  : t("noteContextPruned")}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
         {step.reasoning ? (
           <p
             className="v-run-step__detail whitespace-pre-wrap"
@@ -125,7 +149,24 @@ export function StepCard({
 
         {step.question ? (
           <div className="flex flex-col gap-2">
-            {awaiting ? (
+            {awaiting && answerHref ? (
+              <div
+                className="rounded-md border bg-muted/40 p-3"
+                data-slot="step-answer-on-task"
+              >
+                <p className="type-body font-medium">{step.question}</p>
+                <p className="type-caption mt-1 text-muted-foreground">
+                  {t("answerOnTask")}
+                </p>
+                <Link
+                  href={answerHref}
+                  className="type-ui mt-2 inline-flex text-primary underline-offset-4 hover:underline"
+                  data-slot="step-answer-on-task-link"
+                >
+                  {t("answerOnTaskLink")}
+                </Link>
+              </div>
+            ) : awaiting ? (
               <AskUserPrompt
                 question={step.question}
                 options={step.options}

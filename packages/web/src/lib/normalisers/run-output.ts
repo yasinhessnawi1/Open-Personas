@@ -59,6 +59,10 @@ export function runEventToOutputContent(event: RunEvent): OutputContent[] {
     case "asking_user":
     case "user_responded":
     case "reasoning":
+    // Spec W1 (T10): the guard notes are step-trace state for runViewFromEvents
+    // (step.notes), never capability output.
+    case "call_skipped":
+    case "context_pruned":
     case "completed":
     case "cancelled":
     case "max_steps":

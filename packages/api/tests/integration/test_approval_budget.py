@@ -179,6 +179,12 @@ def test_extension_raises_cap_and_resumes(migrated_engine: Engine, app_engine: E
     assert len(queue.enqueued) == 1  # the next leg re-enqueued
     # The effective cap rose by the extension (1000 + 500).
     assert enforcer.effective_cap("user_a", tasks.get("user_a", "t1")) == 1500
+    # Spec W1 (D-W1-38, amended): the resumed leg is told the BUDGET was raised. A self
+    # scheduled fire had it believe its own schedule woke it, which is a different thing: the
+    # leg was cut off mid-work and is being let carry on, not fired afresh by the clock.
+    trigger = dict(queue.enqueued[0]["payload"])["trigger"]
+    assert trigger["kind"] == "revived"
+    assert trigger["reason"] == "the user extended its budget"
 
 
 def test_duplicated_extension_does_not_double_extend(

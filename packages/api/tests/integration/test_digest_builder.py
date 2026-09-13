@@ -20,8 +20,9 @@ from persona.tools import ActionCategory
 from persona_api.approvals import ApprovalStore
 from persona_api.config import APIConfig
 from persona_api.digest import DeferredDigestItem, build_morning_digest, render_digest_message
+from persona_api.jobs.queue import JobQueue
 from persona_api.services import audit_service
-from persona_api.tasks.store import TaskStore
+from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -211,3 +212,77 @@ def test_ran_because_renders_from_the_event_fired_audit_provenance(
     assert "ran because: an email from landlord@example.com arrived" in render_digest_message(
         digest
     )
+
+
+# --- Spec W1 (T5): one attention query feeds the review and the badge -------------------------
+
+
+def _dead_letter_a_leg(su: Engine, task_id: str, cause: str) -> None:
+    """Leave a REAL dead-lettered leg job the way A0 does: enqueue → claim → run → dead."""
+    from persona.tasks import ScheduledFire
+    from persona_api.tasks.handler import enqueue_task_leg
+
+    queue = JobQueue(su)
+    enqueue_task_leg(
+        queue,
+        owner_id="u",
+        task_id=task_id,
+        predecessor_seq=None,
+        trigger=ScheduledFire(schedule_id="sched", fire_time=_NOW),
+    )
+    claimed = queue.claim(worker_id="w-digest", lease_seconds=60, limit=1)
+    assert len(claimed) == 1
+    job = claimed[0]
+    assert queue.mark_running(job_id=job.id, worker_id="w-digest")
+    assert queue.mark_dead(job_id=job.id, worker_id="w-digest", error=cause)
+
+
+def test_waiting_and_dead_lettered_tasks_reach_the_review_and_the_badge_matches(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The R9-099 fixture: a task waiting on the user, a dead-lettered task, a FAILED task and
+    an approval, plus a working task. The review's waiting + stuck sections show all four and
+    the nav badge equals their number, because ONE query feeds both (D-W1-5 / D-W1-6)."""
+    from persona.tasks import WaitKind
+    from persona_api.services import nav_counts_service
+    from persona_api.tasks.continuation import TaskContinuation
+
+    _seed_persona(migrated_engine)
+    tasks = TaskStore(app_engine)
+    _task(tasks, "t_wait_q", "book the dentist")
+    tasks.begin_wait("u", "t_wait_q", WaitKind.ON_USER, now=_NOW)
+    _task(tasks, "t_dead", "brief hacker news")
+    _dead_letter_a_leg(migrated_engine, "t_dead", "every backend exhausted")
+    # The REAL sweep reaction over the REAL dead-letter queue parks the task on the user.
+    continuation = TaskContinuation(
+        task_store=tasks, queue=JobQueue(app_engine), checkpoint_store=CheckpointStore(app_engine)
+    )
+    assert continuation.sweep_dead_legs(JobQueue(migrated_engine), now=_NOW) == 1
+    _task(tasks, "t_failed", "renew the permit")
+    tasks.fail("u", "t_failed", now=_NOW)
+    _task(tasks, "t_approval", "reply to the landlord")
+    tasks.begin_wait("u", "t_approval", WaitKind.ON_USER, now=_NOW)
+    _pending(
+        ApprovalStore(app_engine), "p9", "t_approval", "Reply to the landlord about the deposit"
+    )
+    _task(tasks, "t_working", "summarise the newsletters")
+
+    digest = build_morning_digest(app_engine, owner_id="u", config=_CONFIG, now=_NOW)
+    by_kind = {s.kind: s for s in digest.sections}
+    waiting_ids = [(i.ref.kind, i.ref.id) for i in by_kind["waiting"].items if i.ref is not None]
+    assert ("approval", "p9") in waiting_ids
+    assert ("task", "t_wait_q") in waiting_ids
+    assert ("task", "t_dead") in waiting_ids
+    assert ("task", "t_approval") not in waiting_ids  # once, as the approval
+    dead_item = next(i for i in by_kind["waiting"].items if i.ref and i.ref.id == "t_dead")
+    assert dead_item.detail == "every backend exhausted"  # the dead job's real cause
+    assert dead_item.actions == ("pickup", "cancel")
+    assert dead_item.reason == "stuck"
+    stuck_ids = [i.ref.id for i in by_kind["stuck"].items if i.ref is not None]
+    assert stuck_ids == ["t_failed"]
+    assert by_kind["stuck"].items[0].actions == ("retry",)
+    assert "t_working" not in {i.ref.id for s in digest.sections for i in s.items if i.ref}
+
+    listed = sum(len(s.items) + s.overflow for k, s in by_kind.items() if k in ("waiting", "stuck"))
+    badge = nav_counts_service.get_nav_counts(app_engine, owner_id="u", include_memory=False)
+    assert badge["attention"] == listed == 4

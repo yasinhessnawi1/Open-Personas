@@ -24,12 +24,16 @@ from persona.tasks.reports import build_completion_report, build_stuck_report
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
-from persona_api.approvals.store import ApprovalStore
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import personas as personas_t
 from persona_api.initiative.store import InitiativeLedger
 from persona_api.services import occurrences_service
+from persona_api.services.attention_service import (
+    TERMINAL_WINDOW,
+    AttentionKind,
+    list_attention,
+)
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from persona_api.textline import LINE_BUDGET, one_line
@@ -55,7 +59,6 @@ __all__ = [
 #: Per-section item caps — the under-a-minute bound (A6-R-1). Over the cap → an honest overflow.
 _SECTION_CAP = {"waiting": 6, "stuck": 6, "done": 6, "initiatives": 3}
 _UPCOMING_CAP = 6
-_TERMINAL_LIMIT = 25
 _UPCOMING_HORIZON = timedelta(days=2)
 #: The A7 fired-audit action; its ``target`` is the task_id and ``metadata["human"]`` is the one
 #: canonical "ran because: {human}" string A6 renders (A7-D-9, route (a)).
@@ -96,6 +99,11 @@ class DigestItem(BaseModel):
     #: A7 provenance ("ran because: …") from the ``event_trigger.fired`` audit ``human`` (A7-D-9);
     #: ``None`` when the item's task never ran from an event trigger.
     ran_because: str | None = None
+    #: Spec W1 (D-W1-6): the verbs this item offers (approve / decline / reply / pickup /
+    #: cancel). Empty for a done or noticed line, which needs nothing from the user.
+    actions: tuple[str, ...] = ()
+    #: Spec W1: why a waiting item waits (approval / question / stuck / waiting), for the surface.
+    reason: str | None = None
 
 
 class DigestSection(BaseModel):
@@ -195,20 +203,45 @@ def build_morning_digest(
     """
     # Every title/detail below passes through _line — the digest promises one
     # calm line per item, whatever the executor/persona wrote (R11-B2 fix).
+    # Spec W1 (D-W1-5 / D-W1-6): "waiting" and "stuck" come from the ONE attention query the
+    # nav badge also counts, so the badge equals this list. Approvals, tasks waiting on the
+    # user (a question, a stuck leg, a dead-lettered offer) and FAILED tasks in the window.
+    attention = list_attention(engine, owner_id=owner_id, now=now)
     waiting = [
         DigestItem(
-            persona_id=p.persona_id,
-            title=_line(p.description),
-            ref=DigestRef(kind="approval", id=p.proposal_id),
+            persona_id=a.persona_id,
+            title=_line(a.title),
+            detail=_line(a.detail),
+            ref=(
+                DigestRef(kind="approval", id=a.proposal_id)
+                if a.kind is AttentionKind.APPROVAL and a.proposal_id is not None
+                else DigestRef(kind="task", id=a.task_id)
+                if a.task_id is not None
+                else None
+            ),
+            actions=a.actions,
+            reason=a.reason.value,
         )
-        for p in ApprovalStore(engine).list_pending_for_owner(owner_id)
+        for a in attention
+        if a.kind is not AttentionKind.FAILED
+    ]
+    stuck = [
+        DigestItem(
+            persona_id=a.persona_id,
+            title=_line(a.title),
+            detail=_line(a.detail),
+            ref=DigestRef(kind="task", id=a.task_id) if a.task_id is not None else None,
+            actions=a.actions,
+            reason=a.reason.value,
+        )
+        for a in attention
+        if a.kind is AttentionKind.FAILED
     ]
 
     reader = APITaskStateReader(TaskStore(engine), CheckpointStore(engine), owner_id)
     done: list[DigestItem] = []
-    stuck: list[DigestItem] = []
     spent = 0
-    terminal_tasks = list(reader.list_recent_terminal(limit=_TERMINAL_LIMIT))
+    terminal_tasks = list(reader.list_recent_terminal(limit=TERMINAL_WINDOW))
     # A7 provenance (A7-D-9): the "ran because: {human}" for any of these that ran from an event
     # trigger — one RLS-scoped audit read keyed by task_id (absent ⇒ ``ran_because`` stays None).
     ran_because = _ran_because_for_tasks(engine, owner_id, [t.id for t in terminal_tasks])
@@ -227,18 +260,16 @@ def build_morning_digest(
                 )
             )
         elif task.state is TaskState.FAILED:
+            # The stuck LINE comes from the attention query above; only the spend is
+            # accounted here, so the two never disagree about what is stuck.
             cause = (checkpoint.blocked_on if checkpoint is not None else None) or ""
-            stuck_report = build_stuck_report(task, checkpoint, cause=cause, now=now)
-            spent += stuck_report.total_micros
-            stuck.append(
-                DigestItem(
-                    persona_id=task.persona_id,
-                    title=_line(task.contract.goal),
-                    detail=_line(stuck_report.cause),
-                    ref=DigestRef(kind="task", id=task.id),
-                    ran_because=ran_because.get(task.id),
-                )
-            )
+            spent += build_stuck_report(task, checkpoint, cause=cause, now=now).total_micros
+    stuck = [
+        item.model_copy(update={"ran_because": ran_because.get(item.ref.id)})
+        if item.ref is not None and item.ref.id in ran_because
+        else item
+        for item in stuck
+    ]
     # secondary: the deferred chatter, as one-liners under "done" (never load-bearing).
     done.extend(DigestItem(persona_id=d.persona_id, title=_line(d.content)) for d in deferred)
 

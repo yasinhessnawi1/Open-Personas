@@ -25,6 +25,15 @@ export interface DigestItem {
   ref: DigestRef | null;
   /** A7 "ran because …" provenance — null until W8 wires it (the source now exists post-A7-merge). */
   ran_because: string | null;
+  /**
+   * Spec W1 (D-W1-6): the verbs this line offers, server-decided from what the item IS —
+   * `reply` / `pickup` / `cancel` for a task waiting on you, `retry` for a failed one,
+   * `approve` / `decline` for a pending proposal. The surface renders these, it never
+   * invents them: a line that offers no verb is a line nothing can be done to from here.
+   */
+  actions: string[];
+  /** Why a waiting line waits: `approval` | `question` | `stuck` | `waiting` (Spec W1). */
+  reason: string | null;
 }
 
 export interface DigestSection {

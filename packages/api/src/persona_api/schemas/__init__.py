@@ -24,6 +24,7 @@ from persona_api.schemas.requests import (
     SetConsentRequest,
     SetSkillConsentRequest,
     StartRunRequest,
+    TaskReplyRequest,
     TurnIntoFileRequest,
     UpdateMCPServerRequest,
     UpdatePersonaRequest,
@@ -95,6 +96,7 @@ from persona_api.schemas.responses import (
     UsageEntry,
     UserProfileResponse,
     WalletResponse,
+    WorkDispatchResponse,
 )
 
 __all__ = [
@@ -172,6 +174,8 @@ __all__ = [
     "RunStatusResponse",
     "RunSummary",
     "StartRunRequest",
+    "TaskReplyRequest",
+    "WorkDispatchResponse",
     "SetSkillConsentRequest",
     "SpecialitySummary",
     "ToolCallEvent",

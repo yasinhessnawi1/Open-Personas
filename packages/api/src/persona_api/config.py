@@ -18,6 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona_runtime.legs.semantic_distiller import DEFAULT_DISTILL_TIMEOUT_S
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -328,6 +329,13 @@ class APIConfig(BaseSettings):
     dead_leg_sweep_interval_seconds: float = Field(
         default=120.0, gt=0, validation_alias="PERSONA_DEAD_LEG_SWEEP_INTERVAL_SECONDS"
     )
+    # Spec W1 (T8): how often the revival sweep looks for work that stopped for a reason that
+    # has passed — a task whose leg was consumed without running (R9-148) and a task parked on
+    # a transient failure (D-W1-8). Nothing it finds is urgent by definition (both have already
+    # waited out a grace window), so this is deliberately slower than the dead-leg sweep.
+    revival_sweep_interval_seconds: float = Field(
+        default=300.0, gt=0, validation_alias="PERSONA_REVIVAL_SWEEP_INTERVAL_SECONDS"
+    )
     # Spec N2 — the MCP catalog auto-sync (hosted in the worker loop, leader-gated;
     # N2-D-1/2/3). A daily-ish periodic task re-pulls Docker's catalog and reconciles
     # the writable mirror (PERSONA_MCP_MIRROR_PATH). ``enabled`` is the opt-out for
@@ -578,6 +586,46 @@ class APIConfig(BaseSettings):
     # floored LLM call — this is the per-step minimum charge (infra via the floor,
     # D-M3-4 amendment), mirroring the chat per-turn floor.
     agentic_credit_floor: int = 1
+    # Spec W1 (D-W1-13): the per-step context cost above which an agentic run trims old
+    # tool results to a bounded head. A COST ceiling, not a model-window one: the window
+    # compactor keys off the tier's context size and never fires in a real leg (24.5k
+    # tokens per step against a 128k window), while the same leg's cost climbed with every
+    # step. 0 disables pruning entirely, which is the whole rollback.
+    #   PERSONA_API_AGENTIC_CONTEXT_COST_CEILING_TOKENS
+    agentic_context_cost_ceiling_tokens: int = 12_000
+    # Spec W1 (T12): how many earlier legs a task leg's reconstruction carries as its
+    # continuity window. Documented in .env.example since A2 under its own name (no
+    # PERSONA_API_ prefix) and never read by anything until now, so the alias keeps the
+    # documented spelling rather than renaming a variable people may already have set.
+    # 0 disables the window; the handler caps it at the documented maximum of 5.
+    task_recent_leg_summaries: int = Field(
+        default=3, validation_alias="PERSONA_TASK_RECENT_LEG_SUMMARIES"
+    )
+    # Spec W1 (D-W1-18): the model-backed checkpoint distiller. Shipped OFF and FLIPPED ON
+    # inside T13 once the gate the decision names was met and recorded: the continuation eval
+    # with the distiller in the loop, judged by a different model family, came back 3/3
+    # coherent with zero amnesia and zero ossification on the small tier production actually
+    # runs (evidence/t13_t14_*.md names the distiller, the judge and the prompt version).
+    # Set it to false and the deterministic writer runs, which is what production had before.
+    task_semantic_distiller_enabled: bool = Field(
+        default=True, validation_alias="PERSONA_TASK_SEMANTIC_DISTILLER_ENABLED"
+    )
+    # The tier the distillation runs on (D-W1-17): small first, because distillation is
+    # boilerplate and runs once per leg inside the drain margin. The eval decides whether it
+    # stays there; moving it to mid is this one value.
+    task_semantic_distiller_tier: str = Field(
+        default="small", validation_alias="PERSONA_TASK_SEMANTIC_DISTILLER_TIER"
+    )
+    # How long a distillation may take before the leg falls back to the deterministic writer.
+    # Raised from 20 to 45 by the W1 operator pass, which watched a real scheduled leg time
+    # out and lose its plan while the floor wrote the checkpoint. Configurable because the
+    # right number depends on the tier: a fast hosted model needs far less than a reasoning
+    # model that thinks before answering.
+    task_semantic_distiller_timeout_seconds: float = Field(
+        default=DEFAULT_DISTILL_TIMEOUT_S,
+        gt=0,
+        validation_alias="PERSONA_TASK_SEMANTIC_DISTILLER_TIMEOUT_SECONDS",
+    )
 
     # Authoring sampling knobs (drafter creativity). The FIRST draft / refinement
     # generation samples at these values so persona NAMES + personality come out

@@ -45,7 +45,10 @@ __all__ = [
     "BillingProviderUnavailableError",
     "CloudConfigRefusedError",
     "CommunityDbError",
+    "ApprovalPendingError",
     "ConcurrencyCappedError",
+    "LegGateMissingTaskError",
+    "WorkBriefTooLongError",
     "ConnectorServiceUnavailableError",
     "ConversationNotFoundError",
     "CreditsExhaustedError",
@@ -282,6 +285,30 @@ class ConcurrencyCappedError(PersonaError):
     the bound holds across multiple API workers (D-15-X-concurrency-cap;
     async-semaphore rejected). ``context`` always carries ``user_id`` and
     may carry ``retry_after_s`` to feed the HTTP ``Retry-After`` header.
+    """
+
+
+class ApprovalPendingError(PersonaError):
+    """A reply was sent to a task whose wait is a pending approval (Spec W1, T6; → 409).
+
+    The approval is the one referent that resolves that wait; a free-text reply would either
+    be lost or resume past the gate without an answer. The body names the proposal.
+    """
+
+
+class WorkBriefTooLongError(PersonaError):
+    """A one-off brief over the dispatch cap (Spec W1, D-W1-7 / D-W1-28; → 413).
+
+    Raised by ``work_dispatch_service`` with the human sentence as its message, so the
+    handler answers with words a person reads, never a raw validation body.
+    """
+
+
+class LegGateMissingTaskError(PersonaError):
+    """A policy-gated leg runner was asked to build without its task (Spec W1, D-W1-1).
+
+    The gate derives from the task's contract; building without it would silently run the
+    leg ungated, which is the exact regression the guard exists to prevent. Fail fast.
     """
 
 
@@ -668,6 +695,22 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content=_body("rate_limit_exceeded", exc.message or "rate limit exceeded", exc.context),
             headers=headers,
+        )
+
+    @app.exception_handler(ApprovalPendingError)
+    async def _approval_pending_409(_: Request, exc: ApprovalPendingError) -> JSONResponse:
+        """A reply where a yes or no is due (Spec W1, T6): point at the approval, plainly."""
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=_body("approval_pending", exc.message, exc.context),
+        )
+
+    @app.exception_handler(WorkBriefTooLongError)
+    async def _brief_too_long_413(_: Request, exc: WorkBriefTooLongError) -> JSONResponse:
+        """A one-off brief over the cap (Spec W1, D-W1-28): a human sentence, never a raw 422."""
+        return JSONResponse(
+            status_code=413,
+            content=_body("brief_too_long", exc.message, exc.context),
         )
 
     @app.exception_handler(ConcurrencyCappedError)

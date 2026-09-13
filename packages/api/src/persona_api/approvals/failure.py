@@ -84,14 +84,26 @@ class FailureAccount:
 
 
 def account_for_stuck(report: StuckReport, *, kind: FailureKind) -> FailureAccount:
-    """Voice an A2 :class:`StuckReport` (a dead-letter or a stuck task) as an honest account."""
+    """Voice an A2 :class:`StuckReport` (a dead-letter or a stuck task) as an honest account.
+
+    Spec W1 (D-W1-8): the offer NAMES what this kind of failure means for trying again. A
+    transient cause says picking it up is worth a go, and says plainly that it will be tried
+    once on its own if the user does not get to it first, so an automatic retry is never a
+    surprise. A deterministic cause says the opposite, because trying again would spend the
+    owner's credits on work that cannot succeed.
+    """
     next_step = report.next_step.strip() or "tell me how you'd like to proceed"
+    pick_up = (
+        "pick it up now (I'll try once on my own in a while if you don't)"
+        if report.retryable
+        else f"resume by replying ({next_step})"
+    )
     return FailureAccount(
         kind=kind,
         task_id=report.task_id,
         headline="I've hit a wall on this task and need you.",
         cause=report.cause,
-        options=(f"resume by replying ({next_step})", "cancel the task"),
+        options=(pick_up, "cancel the task"),
         priority=MessagePriority.FAILURE,
     )
 

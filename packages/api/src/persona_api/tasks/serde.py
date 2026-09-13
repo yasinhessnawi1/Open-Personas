@@ -10,7 +10,15 @@ from __future__ import annotations
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
-from persona.tasks import Contract, CostLedger, Task, TaskCheckpoint, TaskState, WaitKind
+from persona.tasks import (
+    Contract,
+    CostLedger,
+    Task,
+    TaskCheckpoint,
+    TaskKind,
+    TaskState,
+    WaitKind,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -43,6 +51,7 @@ def task_values(task: Task) -> dict[str, Any]:
         "owner_id": task.owner_id,
         "persona_id": task.persona_id,
         "contract_json": task.contract.model_dump(mode="json"),
+        "kind": task.kind.value,
         "state": task.state.value,
         "paused": task.paused,
         "wait_kind": task.wait_kind.value if task.wait_kind is not None else None,
@@ -68,6 +77,7 @@ def row_to_task(row: RowMapping) -> Task:
         owner_id=row["owner_id"],
         persona_id=row["persona_id"],
         contract=Contract.model_validate(row["contract_json"]),
+        kind=TaskKind(row["kind"]),
         state=TaskState(row["state"]),
         paused=row["paused"],
         wait_kind=WaitKind(wait_kind_raw) if wait_kind_raw is not None else None,

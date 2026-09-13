@@ -5,9 +5,10 @@ bounded agentic **legs**; the only thing that carries between legs is this check
 *progress (conclusions), intent (plan + next step), pointers (workspace artifacts), open
 questions* — **never transcripts**. Its shape decides the amnesia/ossification twin:
 
-- The **accumulating core** (``progress_conclusions`` + ``decisions`` + ``lessons``) is the
-  only part that grows, and the only part the size bound governs — it is bounded so a leg
-  records *conclusions, not history* (anti-amnesia without bloat).
+- The **accumulating core** (``progress_conclusions`` + ``decisions`` + ``lessons``, and
+  from Spec W1 the ``queries_run`` + ``sources_seen`` ledgers) is the only part that grows,
+  and the only part the size bound governs. It is bounded so a leg records *conclusions,
+  not history* (anti-amnesia without bloat).
 - The **regenerated** fields (``current_plan`` / ``next_step``) are rewritten every leg and
   recited last in reconstruction (anti-ossification); they are explicitly **outside** the cap.
 - **Pointers** (``artifact_pointers`` / ``event_log_cursor``) hold bulk by reference, so the
@@ -108,6 +109,13 @@ class TaskCheckpoint(BaseModel):
         progress_conclusions: Distilled findings (what is established), not events. Capped.
         decisions: Decisions-with-rationale made so far. Capped.
         lessons: Bounded wrong-turns to avoid re-walking. Capped.
+        queries_run: What earlier legs already asked the world (Spec W1, D-W1-16): the
+            canonical arguments of their search calls. Capped; the writer folds the oldest
+            into a count marker rather than truncating an entry. This is how leg N+1 knows
+            not to run leg N's searches again.
+        sources_seen: The URLs earlier legs already read (Spec W1, D-W1-16). Capped the same
+            way. A source listed here has been looked at; its findings are in the
+            conclusions, so fetching it again buys nothing.
         current_plan: The remaining steps, regenerated each leg. Not capped.
         next_step: The single concrete action this leg's successor runs first. Not capped.
         open_questions: What is still unresolved.
@@ -129,6 +137,10 @@ class TaskCheckpoint(BaseModel):
     progress_conclusions: tuple[str, ...] = ()
     decisions: tuple[Decision, ...] = ()
     lessons: tuple[str, ...] = ()
+    # Spec W1 (D-W1-16): defaults, so every checkpoint written before this field existed
+    # validates unchanged through this frozen extra="forbid" model.
+    queries_run: tuple[str, ...] = ()
+    sources_seen: tuple[str, ...] = ()
 
     current_plan: tuple[str, ...] = ()
     next_step: str = ""
@@ -153,10 +165,32 @@ class TaskCheckpoint(BaseModel):
         expected = self._compute_content_hash()
         if not self.content_hash:
             object.__setattr__(self, "content_hash", expected)
-        elif self.content_hash != expected:
+        elif self.content_hash != expected and not self._matches_pre_ledger_hash():
             msg = "content_hash does not match the checkpoint content (tamper check)"
             raise ValueError(msg)
         return self
+
+    def _matches_pre_ledger_hash(self) -> bool:
+        """Does this hash match the field set as it stood before the W1 ledgers existed?
+
+        Every checkpoint already in a database was hashed WITHOUT ``queries_run`` and
+        ``sources_seen``. Adding them to the model adds two keys to the hashed payload, so
+        without this path every stored checkpoint would read back as tampered and every
+        running task would break on its next leg.
+
+        Deliberately narrow. It applies only when both ledgers are EMPTY, which is the only
+        state a pre-W1 checkpoint can deserialize into, so it can never excuse a checkpoint
+        whose ledgers were edited: give either one a value and the current hash is the only
+        one that counts. A checkpoint written from here on carries the current hash.
+        """
+        if self.queries_run or self.sources_seen:
+            return False
+        data = self.model_dump(
+            mode="json",
+            exclude={"content_hash", "updated_at", "queries_run", "sources_seen"},
+        )
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        return self.content_hash == hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _compute_content_hash(self) -> str:
         """SHA-256 over the content fields (excludes ``updated_at`` + ``content_hash``).
@@ -170,12 +204,13 @@ class TaskCheckpoint(BaseModel):
 
 
 def checkpoint_token_count(checkpoint: TaskCheckpoint) -> int:
-    """Count the tokens in the checkpoint's *accumulating core* (D-A2-1).
+    """Count the tokens in the checkpoint's *accumulating core* (D-A2-1, D-W1-16).
 
     Counts ``progress_conclusions`` + each decision (``decision`` + ``rationale``) +
-    ``lessons`` — the only fields the size bound governs. The regenerated plan/next-step
-    and the pointers are deliberately excluded: the cap forces *conclusions, not history*,
-    not a small plan.
+    ``lessons`` + the ``queries_run`` / ``sources_seen`` ledgers: the fields the size bound
+    governs. The ledgers are IN the core because they accumulate exactly like conclusions do
+    and would otherwise grow without a gate. The regenerated plan/next-step and the pointers
+    are deliberately excluded: the cap forces *conclusions, not history*, not a small plan.
 
     Args:
         checkpoint: The checkpoint to measure.
@@ -188,6 +223,8 @@ def checkpoint_token_count(checkpoint: TaskCheckpoint) -> int:
         parts.append(decision.decision)
         parts.append(decision.rationale)
     parts.extend(checkpoint.lessons)
+    parts.extend(checkpoint.queries_run)
+    parts.extend(checkpoint.sources_seen)
     return count_tokens(" ".join(parts))
 
 

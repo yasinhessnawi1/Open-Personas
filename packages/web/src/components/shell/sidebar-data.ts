@@ -86,7 +86,13 @@ export interface SidebarCall {
  * server-side with the rest of the sidebar data (one round-trip, RLS-scoped).
  * Honest TOTALS, not preview-list lengths: `personas`/`conversations` were
  * previously derived from the truncated rail/messages previews (capped at
- * 4 / 30). `activeTasks` is the non-terminal working set; `schedules` counts
+ * 4 / 30). `activeTasks` is the non-terminal working set; `attention` is what
+ * NEEDS the user (waiting-on-you tasks, dead-lettered offers, pending approvals,
+ * recently failed work) and is what the Activity badge shows (Spec W1, D-W1-5):
+ * a badge that counts the working set reads "something needs you" while the
+ * review list is empty, which reads as the product lying (R9-099). The active
+ * count stays served and stays here, so swapping the badge back is one field.
+ * `schedules` counts
  * schedule ROWS (a recurring schedule counts once, never occurrences);
  * `memoryNodes` counts canonical graph nodes. Fail-soft: a failed fetch reads
  * all-zero, which renders as no badges (zero-hidden).
@@ -97,6 +103,7 @@ export interface SidebarNavCounts {
   readonly calls: number;
   readonly memoryNodes: number;
   readonly activeTasks: number;
+  readonly attention: number;
   readonly schedules: number;
 }
 
@@ -107,6 +114,7 @@ export const EMPTY_NAV_COUNTS: SidebarNavCounts = {
   calls: 0,
   memoryNodes: 0,
   activeTasks: 0,
+  attention: 0,
   schedules: 0,
 };
 

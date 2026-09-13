@@ -83,6 +83,7 @@ export async function fetchSidebarData(): Promise<SidebarData> {
           calls: navCounts.calls,
           memoryNodes: navCounts.memory_nodes,
           activeTasks: navCounts.active_tasks,
+          attention: navCounts.attention,
           schedules: navCounts.schedules,
         }
       : EMPTY_NAV_COUNTS;

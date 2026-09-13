@@ -37,6 +37,11 @@ export function RunView({
   runId: string;
   initial: RunStatusResponse;
 }) {
+  // Spec W1 (D-W1-4 / D-W1-28): a run that belongs to a task takes its answers on the task
+  // page (T6's reply door), never through the retired in-process respond queue.
+  const answerHref = initial.task_id
+    ? `/activity/tasks/${encodeURIComponent(initial.task_id)}`
+    : undefined;
   const t = useTranslations("runs");
   const { view, respond, cancel } = useRun(runId, initial);
   const [cancelling, setCancelling] = useState(false);
@@ -95,6 +100,7 @@ export function RunView({
         view={view}
         onAnswer={respond}
         personaId={initial.persona_id}
+        answerHref={answerHref}
       />
 
       {runLevelError ? (

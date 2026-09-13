@@ -23,6 +23,7 @@ from persona.tasks import (
     AcceptanceCriterion,
     Contract,
     ContractBounds,
+    Deliverable,
     UpdatePreference,
 )
 from persona.tools.categories import ActionCategory
@@ -133,6 +134,9 @@ class ContractDraft(BaseModel):
             per contract in v1); the validator enforces it.
         grants: The beyond-default permissions (each its own prominent echo line).
         updates: How the persona will report progress (digest granularity + channel).
+        deliverable: The shape the finished work takes (Spec W1, T11). Defaulted to
+            structured findings markdown, so a user who never said how they want it still
+            gets something with a shape; the judge fills it when they did say.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -144,6 +148,7 @@ class ContractDraft(BaseModel):
     trigger: TriggerSpec | None = None
     grants: tuple[GrantSpec, ...] = ()
     updates: UpdatePreference = UpdatePreference()
+    deliverable: Deliverable = Deliverable()
 
     @model_validator(mode="after")
     def _one_impulse(self) -> ContractDraft:
@@ -194,6 +199,7 @@ def build_contract(draft: ContractDraft) -> Contract:
         bounds=bounds,
         category_policy=policy,
         updates=draft.updates,
+        deliverable=draft.deliverable,
     )
 
 

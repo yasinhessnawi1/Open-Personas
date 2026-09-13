@@ -323,6 +323,8 @@ export type RunEventType =
   | "asking_user"
   | "user_responded"
   | "reasoning"
+  | "call_skipped"
+  | "context_pruned"
   | "completed"
   | "cancelled"
   | "max_steps"
@@ -350,6 +352,24 @@ export interface TierData {
 }
 export interface ReasoningData {
   content: string;
+}
+/**
+ * Spec W1 (D-W1-11): a tool call the run answered from its own ledger instead of
+ * dispatching. `guard` is `"repeat_error"` (this exact call already failed this run) or
+ * `"cached_read"` (this exact read already succeeded and nothing has changed since).
+ */
+export interface CallSkippedData {
+  tool: string;
+  guard: string;
+}
+/**
+ * Spec W1 (D-W1-13): older tool output was trimmed to a bounded head once the step's
+ * context passed the cost ceiling. The token counts are what the step cost before and
+ * after, so the trace shows the saving rather than the model quietly losing detail.
+ */
+export interface ContextPrunedData {
+  before_tokens: number;
+  after_tokens: number;
 }
 /** One predefined answer option for a proactive question (spec 21 T04, D-21-9). */
 export interface QuestionOption {
@@ -416,6 +436,8 @@ export type RunEvent =
   | (RunEventBase & { type: "asking_user"; data: AskingUserData })
   | (RunEventBase & { type: "user_responded"; data: EmptyData })
   | (RunEventBase & { type: "reasoning"; data: ReasoningData })
+  | (RunEventBase & { type: "call_skipped"; data: CallSkippedData })
+  | (RunEventBase & { type: "context_pruned"; data: ContextPrunedData })
   | (RunEventBase & { type: "completed"; data: CompletedData })
   | (RunEventBase & { type: "cancelled"; data: EmptyData })
   | (RunEventBase & { type: "max_steps"; data: MaxStepsData })

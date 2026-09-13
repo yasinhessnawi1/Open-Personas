@@ -109,7 +109,12 @@ identical across editions. Community just feeds them a constant.
   the worker's `scheduled_at`. `waiting(on_user)` parks the task at zero cost until a
   reply resumes it. Failure after retries reads the durable **dead letter** queue and
   parks the task `waiting(on_user)` with an honest stuck report. Cancel and pause
-  land cleanly.
+  land cleanly. Every stopped task has a door back: `pickup`, `reply`, `retry` and
+  `resume` all ride one continuation seam, a sweep revives a leg that was consumed
+  without running and retries a transient failure once, and the persona itself can
+  see and carry on its own stalled work. Knobs are the `PERSONA_TASK_*` env vars,
+  including the last few legs a reconstruction carries and whether the model backed
+  checkpoint distiller runs.
 - **MCP catalog auto sync.** A third leader gated periodic task on the worker loop
   keeps the Docker MCP catalog mirror fresh. On a daily-ish cadence it re-pulls
   `github.com/docker/mcp-registry`, reconciles the mirror (added, updated, removed,

@@ -12,6 +12,7 @@ import { useToast } from "@/components/patterns/toast";
 import {
   cancelTask,
   fetchTasks,
+  pickupTask,
   type TaskSummary,
 } from "@/lib/api/tasks-client";
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
@@ -91,6 +92,27 @@ export function TasksList({ personaNames }: { personaNames: PersonaNames }) {
     [getToken, toast, t, refreshSidebar],
   );
 
+  // Spec W1 (T7): carry a stalled task on from the list. The command is the durable seam the
+  // review page shares; the list is then RE-READ rather than patched, because a pickup moves
+  // the task's state, its cause and the Activity badge at once (refetch-not-trust, A6-R-4).
+  const onPickup = useCallback(
+    async (taskId: string) => {
+      setBusy((b) => ({ ...b, [taskId]: true }));
+      try {
+        const result = await pickupTask(await getToken(), taskId);
+        if (result.changed) toast.success(t("pickedUp"));
+        else toast.info(result.note || t("pickUpFailed"));
+        await load();
+        refreshSidebar();
+      } catch {
+        toast.error(t("pickUpFailed"));
+      } finally {
+        setBusy((b) => ({ ...b, [taskId]: false }));
+      }
+    },
+    [getToken, toast, t, load, refreshSidebar],
+  );
+
   if (tasks === null) {
     return (
       <Stack gap={3}>
@@ -119,6 +141,7 @@ export function TasksList({ personaNames }: { personaNames: PersonaNames }) {
           personaName={personaNames[task.persona_id] ?? task.persona_id}
           busy={busy[task.task_id] ?? false}
           onCancel={() => onCancel(task.task_id)}
+          onPickup={() => onPickup(task.task_id)}
         />
       ))}
     </Stack>

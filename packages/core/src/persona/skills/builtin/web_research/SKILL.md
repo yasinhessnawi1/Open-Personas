@@ -21,6 +21,27 @@ that benefits from triangulation across sources, when the question has
 multiple plausible angles, or when the user explicitly asks for a
 researched report.
 
+## Working across legs (read this first)
+
+A task runs in bounded legs, days apart. Each one starts from a checkpoint, never a
+transcript, so these four rules decide whether the next leg builds on this one or repeats it.
+
+**Batch.** Independent lookups go in ONE step. Five searches in one step cost one model
+call; one search per step costs five, and the budget runs out before the research does.
+
+**Never repeat a failed call.** If a search or a fetch came back with an error, do not
+re-issue it with the same arguments. Change the query, pick another source, or work with
+what you have. The same call fails the same way.
+
+**Check what you already know.** Your context carries QUERIES ALREADY RUN and SOURCES
+ALREADY SEEN from earlier legs, and CONCLUSIONS from all of them. Read those before
+searching. A query on that list has been asked and its answer is already in the
+conclusions; asking it again spends money to learn nothing.
+
+**Deliver partially, early.** Write what you have concluded as you go, not at the end. A
+leg that runs out of time keeps only what it wrote down. Say what is still missing rather
+than presenting a half-answer as a whole one.
+
 ## When to use
 
 Activate this skill for questions like:

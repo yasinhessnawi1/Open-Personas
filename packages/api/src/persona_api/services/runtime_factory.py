@@ -47,6 +47,7 @@ from persona.tools import (
 )
 from persona.tools.mcp.mirror import load_mirror_catalog
 from persona_runtime.agentic.loop import AgenticLoop
+from persona_runtime.agentic.pruner import DEFAULT_COST_CEILING_TOKENS, ToolResultPruner
 from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
 from persona_runtime.loop import ConversationLoop
 from persona_runtime.prompt import PromptBuilder
@@ -85,9 +86,10 @@ if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
     from persona.tasks.reader import TaskStateReader
+    from persona.tools.builtin.task_pickup import TaskPickupPort
     from persona.tools.mcp.catalog import MCPCatalog, MCPServerCatalogEntry
     from persona.tools.mcp.client import MCPClient
-    from persona.tools.toolbox import Toolbox
+    from persona.tools.toolbox import Toolbox, ToolboxFactory
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.graph_selection import GatingContext
     from persona_runtime.initiative.verbs import InitiativeVerbInterpreter
@@ -806,6 +808,7 @@ class RuntimeFactory:
         persona: Persona,
         scanned_skills: list[object],
         deferred_input_files_holder: list[SandboxFile] | None = None,
+        toolbox_factory: ToolboxFactory | None = None,
     ) -> object:
         """Build the toolbox (+ use_skill when the persona has skills + code_execution
         when the sandbox pool is configured). MCP clients are tracked for shutdown.
@@ -983,6 +986,18 @@ class RuntimeFactory:
                 persona_id=persona.persona_id,
             )
         )
+        # Spec W1 (T9, D-W1-10) — the WRITE half of the same window: having seen that one of
+        # its tasks has stalled, the persona can carry it on. Bound to THIS persona, resolved
+        # per dispatch from the RLS contextvar, and refusing anything outside that scope the
+        # same way an absent task is refused, so nothing here confirms what exists.
+        from persona.tools.builtin.task_pickup import make_task_pickup_tool
+
+        extra.append(
+            make_task_pickup_tool(
+                port_provider=self._build_task_pickup_provider(persona.persona_id),
+                persona_id=persona.persona_id,
+            )
+        )
         # R9-075 — the read-only ``schedule_introspect`` tool: the persona's window onto the
         # calendar. Personas could CREATE schedules (A1/A10) and the web could RENDER them (A8),
         # but the toolbox had no read surface for either, so "what's on my calendar this week?"
@@ -1040,6 +1055,9 @@ class RuntimeFactory:
             extra_mcp_clients=(byo_clients + image_clients) or None,
             file_sandbox_root=file_sandbox_root,
             mcp_search_catalog=self._mcp_search_catalog(),
+            # Spec W1 (D-W1-1): a task leg substitutes the policy-gated toolbox class here;
+            # chat and the approved-action replay keep the bare one (``None``).
+            toolbox_factory=toolbox_factory,
         )
         self._mcp_clients.extend(mcp_clients)
         return toolbox
@@ -1566,6 +1584,53 @@ class RuntimeFactory:
 
         return _provider
 
+    def _build_task_pickup_provider(
+        self, persona_id: str | None
+    ) -> Callable[[], TaskPickupPort | None]:
+        """The owner-scoped, persona-bound pickup port (Spec W1, T9; D-W1-10).
+
+        The tool asks only "pick up this id"; every scope question is answered here, where the
+        answers actually live. The owner is resolved per DISPATCH from the RLS contextvar, so a
+        toolbox built once cannot leak across requests, and off-request it fails closed. A task
+        belonging to another tenant (invisible under RLS) or to another persona of the same
+        owner raises :class:`TaskNotFoundError`, which the tool renders identically to a
+        made-up id: a persona cannot use refusals to discover what its owner has.
+        """
+        from datetime import UTC, datetime
+
+        from persona.errors import TaskNotFoundError
+        from persona.tools.builtin.task_pickup import PickupOutcome, TaskPickupPort
+
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services import task_control_service
+        from persona_api.tasks.store import TaskStore
+
+        engine = self._engine
+
+        class _Port(TaskPickupPort):
+            def pick_up(self, task_id: str) -> PickupOutcome:
+                owner = current_user_id.get()
+                if not owner:
+                    raise TaskNotFoundError("no task context", context={"id": task_id})
+                task = TaskStore(engine).get(owner, task_id)  # raises for another tenant's
+                if persona_id is None or task.persona_id != persona_id:
+                    # Another persona of the same owner: out of this persona's reach, and
+                    # indistinguishable from absent.
+                    raise TaskNotFoundError("not this persona's task", context={"id": task_id})
+                outcome = task_control_service.pickup_task(
+                    engine, owner, task, now=datetime.now(UTC), via="persona"
+                )
+                return PickupOutcome(
+                    changed=outcome.changed,
+                    note=outcome.note,
+                    goal=task.contract.goal,
+                )
+
+        def _provider() -> TaskPickupPort | None:
+            return _Port() if current_user_id.get() else None
+
+        return _provider
+
     def _build_schedule_reader_provider(self) -> Callable[[], ScheduleReader | None]:
         """The owner-scoped schedule reader provider (R9-075).
 
@@ -1791,11 +1856,22 @@ class RuntimeFactory:
         loop.deferred_input_files = deferred_holder
         return loop
 
-    async def build_agentic_loop(self, persona_id: str) -> AgenticLoop:
+    async def build_agentic_loop(
+        self,
+        persona_id: str,
+        *,
+        toolbox_factory: ToolboxFactory | None = None,
+        park_on_question: bool = False,
+    ) -> AgenticLoop:
         """Construct the AgenticLoop for ``persona_id`` (KEYSTONE 2, T11).
 
         Wires the Spec 16 M1a deferred-input-files holder symmetrically to
-        :meth:`build_conversation_loop`.
+        :meth:`build_conversation_loop`. ``toolbox_factory`` (Spec W1, D-W1-1) lets the
+        task-leg runner build the loop over A3's policy-gated toolbox; every other caller
+        leaves it ``None`` and gets the bare toolbox, byte-identical to before.
+        ``park_on_question`` (Spec W1, D-W1-34) is the same shape: a task leg sets it so a
+        question stops the run and parks the task on it; every other caller leaves it off
+        and keeps the proceed-with-best-judgment behaviour.
         """
         persona = self._load_persona(persona_id)
         # Spec M4 (T5a): the free-tier gate — a FREE owner's agentic run resolves the
@@ -1808,6 +1884,7 @@ class RuntimeFactory:
             persona,
             scanned,
             deferred_input_files_holder=deferred_holder,
+            toolbox_factory=toolbox_factory,
         )
         loop = AgenticLoop(
             persona=persona,
@@ -1828,9 +1905,34 @@ class RuntimeFactory:
             skill_consent=PostgresSkillConsentStore(self._engine),
             # R6: same shared crisis encoder as the chat loop — ONE classifier.
             crisis_encoder=self._crisis_encoder,
+            # Spec W1 (D-W1-34): a leg's user is reachable, just not synchronously.
+            park_on_question=park_on_question,
+            # Spec W1 (D-W1-13): the cost-keyed tool-result pruner at the configured
+            # ceiling. Setting the env var to 0 gives back the previous behaviour exactly.
+            pruner=ToolResultPruner(ceiling_tokens=self._context_cost_ceiling()),
         )
         loop.deferred_input_files = deferred_holder
         return loop
+
+    def build_task_recall(self, persona_id: str) -> Callable[[str], UnifiedProjection] | None:
+        """The persona's recall callable for a task leg (Spec W1, T12).
+
+        The SAME recall the chat loop uses, exposed under its own name because the caller is
+        the background worker rather than a request: a leg fetches its memory before the
+        loop starts, not inside a turn. ``None`` when recall is not configured (the K9 kill
+        switch, no graph store), which means every leg runs memoryless as before.
+        """
+        return self._build_unified_recall(persona_id)
+
+    def _context_cost_ceiling(self) -> int:
+        """The per-step context cost above which a run trims old tool results (D-W1-13).
+
+        A factory built without an api config (tests, the CLI) gets the ruled default, so
+        the guard is on everywhere rather than only where settings happen to be wired.
+        """
+        if self._api_config is None:
+            return DEFAULT_COST_CEILING_TOKENS
+        return self._api_config.agentic_context_cost_ceiling_tokens
 
     def build_action_executor(self, persona_id: str) -> ToolboxActionExecutor:
         """The un-gated single-tool executor for approved-action replay (Spec A6, T-seam).

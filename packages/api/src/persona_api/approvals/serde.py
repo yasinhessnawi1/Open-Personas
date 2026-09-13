@@ -13,6 +13,7 @@ as a sorted JSON array of the category strings; ``ApprovalDecision`` carries no 
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from persona.approvals import (
@@ -32,6 +33,11 @@ __all__ = [
     "row_to_decision",
     "row_to_proposal",
 ]
+
+
+def _utc(value: datetime) -> datetime:
+    """Re-attach UTC to a stored instant that came back naive (community SQLite)."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def proposal_values(proposal: ActionProposal) -> dict[str, Any]:
@@ -62,7 +68,9 @@ def row_to_proposal(row: RowMapping) -> ActionProposal:
         categories=frozenset(ActionCategory(c) for c in row["categories_json"]),
         description=row["description"],
         status=ProposalStatus(row["status"]),
-        created_at=row["created_at"],
+        # Storage is UTC; the community SQLite engine hands instants back naive (the task
+        # serde has the same guard). Postgres values are already aware and pass through.
+        created_at=_utc(row["created_at"]),
     )
 
 

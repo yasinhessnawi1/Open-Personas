@@ -122,6 +122,23 @@ _TOOL_CATEGORIES: dict[str, frozenset[ActionCategory]] = {
     # skill activation — loads instructions into context; the skill's constituent tools are
     # independently gated at their own dispatch, so the activation itself is free (observe).
     "use_skill": frozenset({ActionCategory.OBSERVE}),
+    # Self-knowledge and self-work (Spec W1, D-W1-45). These four reach only the OWNER'S OWN
+    # durable state through owner-scoped ports: nothing outside the tenant is read, changed,
+    # spent or credentialed. Unmapped they fell to the gated default, so a leg that looked at
+    # its own tasks parked the task on an approval — the whole point of T9 (a persona that can
+    # see its work) turned into a question the user had to answer before it could look.
+    "task_introspect": frozenset({ActionCategory.OBSERVE}),
+    "schedule_introspect": frozenset({ActionCategory.OBSERVE}),
+    # A fact about the user, written to the persona's own typed memory. Nobody but the owner
+    # ever sees it, which is what DRAFT means here (an artifact only the user sees).
+    "record_user_fact": frozenset({ActionCategory.DRAFT}),
+    # ``task_pickup`` MUTATES (it resumes a task), so OBSERVE is a stretch of the label and is
+    # recorded as one. The mapping is a RISK grouping, not a verb grouping, and this verb's
+    # risk is an observation's: it acts only on work the owner already agreed to, through a
+    # port bound to one persona (D-W1-10), under that task's own bounds and the owner's pause
+    # dial. Gating it would leave a persona able to SEE that its work stalled and unable to
+    # carry it on without asking, which is the half-feature T9 existed to end.
+    "task_pickup": frozenset({ActionCategory.OBSERVE}),
 }
 
 

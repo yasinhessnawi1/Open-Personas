@@ -29,6 +29,8 @@ __all__ = [
     "AcceptanceStatus",
     "Contract",
     "ContractBounds",
+    "Deliverable",
+    "DeliverableFormat",
     "UpdateGranularity",
     "UpdatePreference",
 ]
@@ -81,6 +83,46 @@ class ContractBounds(BaseModel):
     @classmethod
     def _deadline_tz_aware(cls, value: datetime | None) -> datetime | None:
         return _ensure_utc(value) if value is not None else None
+
+
+class DeliverableFormat(StrEnum):
+    """The shape a finished task hands back (Spec W1, T11).
+
+    Small and closed on purpose. A task that finishes into "some prose, probably" is a task
+    whose output nobody can use twice, and the alternative (a free-text format field the
+    model fills) produces a different answer every leg. These four cover what the tasks in
+    this product actually produce; adding one is an enum member plus a line of guidance.
+    """
+
+    #: The default: findings with their sources, in markdown, headed and skimmable.
+    FINDINGS_MARKDOWN = "findings_markdown"
+    #: A short written answer, no structure imposed.
+    PROSE = "prose"
+    #: Rows and columns, when the goal is a comparison or a list.
+    TABLE = "table"
+    #: A file in the workspace (the filename says which), for anything a person opens.
+    FILE = "file"
+
+
+class Deliverable(BaseModel):
+    """What "done" looks like for this task (Spec W1, T11).
+
+    Part of the A4-authored anchor, so it cannot drift leg to leg: the persona agreed a
+    shape at the start, and every leg re-reads it. ``filename`` is a convention, not a
+    promise of storage: a task that writes a file names it here so the successor leg writes
+    to the same place instead of inventing a second one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    format: DeliverableFormat = DeliverableFormat.FINDINGS_MARKDOWN
+    filename: str = ""
+
+    def render(self) -> str:
+        """One line naming the agreed shape, for the contract block and the report."""
+        if self.filename:
+            return f"{self.format.value} in {self.filename}"
+        return self.format.value
 
 
 class UpdateGranularity(StrEnum):
@@ -136,3 +178,7 @@ class Contract(BaseModel):
     # so every pre-A4 ``contract_json`` blob deserializes byte-compatibly through this
     # frozen ``extra="forbid"`` model; rides ``contract_json``, no migration.
     updates: UpdatePreference | None = None
+    # Spec W1 (T11): the agreed shape of the finished work. Defaulted, so every contract
+    # written before this field existed keeps validating, and an ad hoc task that nobody
+    # specified a format for still knows what to produce: structured findings markdown.
+    deliverable: Deliverable = Deliverable()

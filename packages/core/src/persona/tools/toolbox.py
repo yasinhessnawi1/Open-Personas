@@ -22,7 +22,7 @@ allow-list contains the same prefix.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from persona.backends.types import ToolSpec, tool_spec_from_tool
 from persona.errors import ToolExecutionError, ToolNotAllowedError
@@ -35,9 +35,24 @@ if TYPE_CHECKING:
     from persona.schema.tools import ToolCall, ToolResult
     from persona.tools.protocol import AsyncTool
 
-__all__ = ["Toolbox"]
+__all__ = ["Toolbox", "ToolboxFactory"]
 
 _logger = get_logger("tools.toolbox")
+
+
+class ToolboxFactory(Protocol):
+    """How a composition root substitutes the toolbox CLASS a persona's tools land in.
+
+    :func:`persona.tools.build_default_toolbox` assembles the tool list and the allow-list,
+    then calls this to construct the box. The default is :class:`Toolbox` itself; the
+    task-leg runner passes a factory that builds the policy-gated subclass (Spec A3's
+    ``PolicyGatedToolbox``), so a leg's toolbox enforces its contract's category policy
+    without the factory knowing anything about approvals (Spec W1, D-W1-1).
+    """
+
+    def __call__(
+        self, tools: Iterable[AsyncTool], *, allow_list: list[str] | None = None
+    ) -> Toolbox: ...
 
 
 class Toolbox:

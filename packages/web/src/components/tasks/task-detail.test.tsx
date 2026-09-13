@@ -50,6 +50,7 @@ function detail(overrides: Partial<TaskDetailData>): TaskDetailData {
     persona_id: "kai",
     goal: "Book the dentist",
     scope: "",
+    kind: "standing",
     status: "progressing",
     paused: false,
     grants: [{ category: "observe", decision: "allow" }],
@@ -72,6 +73,7 @@ function detail(overrides: Partial<TaskDetailData>): TaskDetailData {
     conversation_id: null,
     schedule_id: null,
     run_ids: [],
+    runs: [],
     created_at: "2026-07-07T09:00:00Z",
     updated_at: "2026-07-07T09:00:00Z",
     ...overrides,
@@ -143,6 +145,69 @@ describe("TaskDetail", () => {
     // no pause/resume/cancel on a terminal task — the controls are not offered.
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    });
+  });
+});
+
+describe("run history (Spec W1, D-W1-3)", () => {
+  it("lists the task's runs with a link into each viewer, newest first", async () => {
+    client.getTask.mockResolvedValue(
+      detail({
+        kind: "ad_hoc",
+        runs: [
+          {
+            id: "run_2",
+            persona_id: "kai",
+            task: "Book the dentist",
+            task_id: "t1",
+            status: "running",
+            started_at: "2026-09-06T12:00:00Z",
+            finished_at: null,
+          },
+          {
+            id: "run_1",
+            persona_id: "kai",
+            task: "Book the dentist",
+            task_id: "t1",
+            status: "completed",
+            started_at: "2026-09-06T11:00:00Z",
+            finished_at: "2026-09-06T11:01:00Z",
+          },
+        ],
+      }),
+    );
+    render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <TaskDetail taskId="t1" personaNames={{ kai: "Kai" }} />
+      </NextIntlClientProvider>,
+    );
+    const history = await waitFor(() => {
+      const el = document.querySelector('[data-slot="run-history"]');
+      if (!el) throw new Error("no run history yet");
+      return el;
+    });
+    const items = history.querySelectorAll('[data-slot="run-history-row"]');
+    expect(items).toHaveLength(2);
+    expect(items[0].getAttribute("data-status")).toBe("running");
+    expect(items[0].querySelector("a")?.getAttribute("href")).toBe(
+      "/runs/run_2",
+    );
+    expect(items[1].querySelector("a")?.getAttribute("href")).toBe(
+      "/runs/run_1",
+    );
+  });
+
+  it("says plainly when no run has opened yet", async () => {
+    client.getTask.mockResolvedValue(detail({ runs: [] }));
+    render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <TaskDetail taskId="t1" personaNames={{ kai: "Kai" }} />
+      </NextIntlClientProvider>,
+    );
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-slot="run-history-empty"]'),
+      ).not.toBeNull();
     });
   });
 });

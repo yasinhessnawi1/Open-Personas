@@ -245,3 +245,28 @@ def test_advance_checkpoint_rejected_on_terminal() -> None:
     done = _task().start(now=_T1).complete(now=_T1)
     with pytest.raises(TaskStateError):
         done.advance_checkpoint(0, now=_T1)
+
+
+# --- kind (Spec W1, D-W1-2) ----------------------------------------------------
+
+
+def test_task_kind_defaults_to_standing() -> None:
+    from persona.tasks import TaskKind
+
+    assert _task().kind is TaskKind.STANDING
+
+
+def test_ad_hoc_kind_round_trips_and_survives_transitions() -> None:
+    from persona.tasks import TaskKind
+
+    task = _task(kind=TaskKind.AD_HOC)
+    assert task.kind is TaskKind.AD_HOC
+    # The kind is fixed at create: a lifecycle transition carries it unchanged.
+    assert task.start(now=_T1).kind is TaskKind.AD_HOC
+    # And it survives a JSON round trip (the serde the api store relies on).
+    assert Task.model_validate(task.model_dump(mode="json")).kind is TaskKind.AD_HOC
+
+
+def test_unknown_kind_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _task(kind="scheduled")

@@ -128,3 +128,24 @@ def test_stuck_account_carries_the_real_cause() -> None:
     assert "rejected every candidate fare" in account.cause  # the real cause, not a paraphrase
     assert any("resume" in o for o in account.options)
     assert any("cancel" in o for o in account.options)
+
+
+def test_a_retryable_failure_says_it_will_be_tried_once_on_its_own() -> None:
+    """Spec W1 (D-W1-8): the sweep may pick a transient failure up on the owner's behalf, so
+    the offer says so. An automatic retry the user was never told about is a surprise, and
+    surprises are what the honesty discipline exists to prevent."""
+    transient = _stuck_report().model_copy(
+        update={"cause": "429 rate limit", "retryable": True, "retry_after": _NOW}
+    )
+    account = account_for_stuck(transient, kind=FailureKind.LEG_DEAD_LETTER)
+    offer = " ".join(account.options)
+    assert "pick it up" in offer
+    assert "on my own" in offer  # the automatic retry, named before it happens
+    assert any("cancel" in o for o in account.options)
+
+
+def test_a_deterministic_failure_promises_no_such_thing() -> None:
+    """Nothing will be retried behind the user's back for a cause that cannot succeed, so the
+    offer must not imply it will."""
+    account = account_for_stuck(_stuck_report(), kind=FailureKind.LEG_DEAD_LETTER)
+    assert "on my own" not in " ".join(account.options)

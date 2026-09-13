@@ -81,7 +81,11 @@ build never pulls `@clerk/*` into the bundle. CI gates and
   actions that re-index or remove what every persona retrieves.
 - **Activity and approvals** (`/tasks`, `/approvals`). The autonomy surface: what
   ran, what it produced, per task spend caps, and parked approvals resolvable from
-  the inbox or inline in chat.
+  the inbox or inline in chat. What needs you is acted on where it is read: a task
+  waiting on the persona's own question is answered in place, a stuck one offers
+  pick up, retry or cancel, and the nav badge counts what needs you rather than what
+  is merely running. An approval keeps its link into the inbox, where the tool and
+  its exact arguments are shown before you grant anything.
 - **Model picker.** Per persona preferred model from a live catalog with USD price
   tags and a curated shortlist, "use tier default" as the safety net, and a sticky
   last choice default on create.

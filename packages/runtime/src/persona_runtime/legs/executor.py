@@ -31,31 +31,38 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from persona.errors import GatedActionProposedError
+from persona.logging import get_logger
 from persona.tasks import (
     LegBox,
     SpendKind,
+    UserReply,
     reconstruct_context,
 )
 
 from persona_runtime.agentic.run import CancelToken, RunStatus
+from persona_runtime.agentic.step import StepType
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
     from datetime import datetime
 
     from persona.tasks import (
+        AutoRetry,
         EventFire,
         EventTrigger,
         LegBoxLimit,
         RecentLegSummary,
+        Revived,
         ScheduledFire,
         Task,
         TaskCheckpoint,
-        UserReply,
+        UserDispatch,
     )
 
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.agentic.run import Run, StepUsage
+
+_log = get_logger("legs.executor")
 
 __all__ = [
     "AgenticRunner",
@@ -75,13 +82,17 @@ class LegDisposition(StrEnum):
     resumes from the checkpoint. ``COMPLETED`` — the leg reached ``[FINAL]``. ``FAILED`` —
     the run errored. ``WAITING_APPROVAL`` — a gated action was proposed (A3): the leg ended
     with **no checkpoint, no execution**; the task parks ``waiting(on_user)`` until the user
-    decides (A3-D-X-gate-mechanism).
+    decides (A3-D-X-gate-mechanism). ``WAITING_USER`` — the model asked the user a question
+    (Spec W1, D-W1-34): unlike the approval park the leg DID work, so its checkpoint is
+    appended with the question in ``open_questions``, and the task parks ``waiting(on_user)``
+    until the reply route resumes it with the answer in the next leg's trigger.
     """
 
     CONTINUE = "continue"
     COMPLETED = "completed"
     FAILED = "failed"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_USER = "waiting_user"
 
 
 @dataclass(frozen=True)
@@ -138,9 +149,15 @@ class CheckpointWriter(Protocol):
     The v1 :class:`BasicCheckpointWriter` is a mechanical stand-in; the production writer
     distils the run + prior checkpoint into bounded conclusions (the amnesia/ossification
     quality the T11 eval gates). Either way it is a pure function of the run + prior state.
+
+    **Async since Spec W1 (D-W1-19).** The model-backed distiller needs a model call, and the
+    executor that drives this seam is already async. One async protocol beats a second
+    protocol plus an adapter (the drift the standards warn about) and beats hiding an await
+    behind a thread, which would complicate cancellation inside the worker's drain margin.
+    The deterministic writers simply gained the keyword.
     """
 
-    def write(
+    async def write(
         self,
         *,
         task: Task,
@@ -175,7 +192,7 @@ class BasicCheckpointWriter:
     to wire the machinery end-to-end; replace at the worker root (T7) with the distiller.
     """
 
-    def write(
+    async def write(
         self,
         *,
         task: Task,  # noqa: ARG002 — part of the CheckpointWriter port; the distiller uses it
@@ -187,8 +204,20 @@ class BasicCheckpointWriter:
     ) -> TaskCheckpoint:
         from persona.tasks import TaskCheckpoint as _Checkpoint
 
+        from persona_runtime.legs.ledger import queries_from_run, sources_from_run
+
         prior_conclusions = prior.progress_conclusions if prior is not None else ()
         new_conclusions = (*prior_conclusions, run.output) if run.output else prior_conclusions
+        # Spec W1 (D-W1-16): the stand-in carries the ledgers too. It does not compact them
+        # (it compacts nothing, which is the whole reason it is a stand-in), but a writer
+        # that silently DROPPED what earlier legs asked would make a test using it prove the
+        # opposite of production.
+        queries = _merge_ledger(
+            prior.queries_run if prior is not None else (), queries_from_run(run)
+        )
+        sources = _merge_ledger(
+            prior.sources_seen if prior is not None else (), sources_from_run(run)
+        )
         # R9-103: EMPTY, never the leg's output — see the distiller for the full
         # reasoning. ``next_step`` is recited to the successor as ``NEXT STEP: …``, so
         # assigning ``run.output`` handed it a finished answer as an instruction and
@@ -201,11 +230,21 @@ class BasicCheckpointWriter:
             leg_id=leg_id,
             checkpoint_seq=seq,
             progress_conclusions=new_conclusions,
+            queries_run=queries,
+            sources_seen=sources,
             next_step=next_step,
             open_questions=prior.open_questions if prior is not None else (),
             artifact_pointers=prior.artifact_pointers if prior is not None else (),
             updated_at=now,
         )
+
+
+def _merge_ledger(prior: Sequence[str], fresh: Sequence[str]) -> tuple[str, ...]:
+    """Earlier entries first, this leg's next, each entry once (Spec W1, D-W1-16)."""
+    seen: dict[str, None] = {}
+    for entry in (*prior, *fresh):
+        seen.setdefault(entry, None)
+    return tuple(seen)
 
 
 def _default_meter(run: Run) -> dict[SpendKind, int]:
@@ -275,7 +314,13 @@ class LegExecutor:
         self,
         *,
         task: Task,
-        trigger: ScheduledFire | UserReply | EventTrigger | EventFire,
+        trigger: ScheduledFire
+        | UserReply
+        | UserDispatch
+        | AutoRetry
+        | Revived
+        | EventTrigger
+        | EventFire,
         prior_checkpoint: TaskCheckpoint | None = None,
         recent_legs: Sequence[RecentLegSummary] = (),
         retrieval: Sequence[str] = (),
@@ -348,9 +393,10 @@ class LegExecutor:
             )
 
         leg_id = f"{task.id}:leg:{effective_seq}"
-        checkpoint = self._writer.write(
+        checkpoint = await self._writer.write(
             task=task, prior=prior_checkpoint, run=run, leg_id=leg_id, seq=effective_seq, now=now
         )
+        checkpoint = _settle_open_questions(checkpoint, run, trigger)
         spend = dict(self._meter(run))
         if run.status == RunStatus.ERROR:
             # A failed leg made no durable progress — do NOT append (advancing the head would
@@ -377,7 +423,13 @@ class LegExecutor:
     @staticmethod
     def _render(
         task: Task,
-        trigger: ScheduledFire | UserReply | EventTrigger | EventFire,
+        trigger: ScheduledFire
+        | UserReply
+        | UserDispatch
+        | AutoRetry
+        | Revived
+        | EventTrigger
+        | EventFire,
         prior: TaskCheckpoint | None,
         recent_legs: Sequence[RecentLegSummary],
         retrieval: Sequence[str],
@@ -389,14 +441,93 @@ class LegExecutor:
             recent_legs=recent_legs,
             retrieval=retrieval,
         )
+        # Spec W1 (T15): what this leg was actually given, by stage name and size. The
+        # reconstruction itself never reaches a durable surface (the run record stores the
+        # contract goal), so before this there was no way to tell from the outside whether a
+        # leg retrieved anything at all: the W1 operator pass had to add it to answer its own
+        # question. Names and counts only, never the content, which carries the user's work.
+        _log.info(
+            "leg reconstruction",
+            task_id=task.id,
+            stages=[block.stage.value for block in blocks],
+            recent_legs=len(recent_legs),
+            retrieval=len(retrieval),
+            queries_known=len(prior.queries_run) if prior is not None else 0,
+            sources_known=len(prior.sources_seen) if prior is not None else 0,
+        )
         return "\n\n".join(block.content for block in blocks)
 
 
+def _asked_question(run: Run) -> str | None:
+    """The question a parked run stopped on, from its own last unanswered ask-user step."""
+    if run.status is not RunStatus.AWAITING_USER:
+        return None
+    return next(
+        (
+            step.question
+            for step in reversed(run.steps)
+            if step.type is StepType.ASK_USER and step.user_answer is None and step.question
+        ),
+        None,
+    )
+
+
+def _settle_open_questions(
+    checkpoint: TaskCheckpoint,
+    run: Run,
+    trigger: ScheduledFire
+    | UserReply
+    | UserDispatch
+    | AutoRetry
+    | Revived
+    | EventTrigger
+    | EventFire,
+) -> TaskCheckpoint:
+    """Make ``open_questions`` say what is open NOW (Spec W1, D-W1-34 / D-W1-35).
+
+    Two rules, and the second is the one that was missing:
+
+    - **A parked leg's question is open.** The checkpoint is where a task's open questions
+      live and what the attention surface reads to say WHY it waits and to show the question.
+      A writer cannot know about the park (it summarises a finished run), so the question is
+      put here from the run's own last step.
+    - **A question the user ANSWERED is not open any more.** Every writer copies
+      ``prior.open_questions`` forward and nothing ever removed one, so an answered question
+      lived forever: the task parked on Q1, the user answered it, the persona then asked Q2
+      and parked again, and the review line still showed Q1 — inviting the user to answer a
+      question that was already resolved. Every later leg was also told, in its own
+      reconstruction, that answered questions were still open, which invites re-asking.
+      A leg resumed by a :class:`UserReply` therefore starts from NOTHING open: the reply is
+      the answer to whatever stood there. Anything still genuinely unresolved comes back as
+      the question this leg parks on, which is the honest way for it to reappear.
+
+    A pickup rides the same trigger. Clearing there is self-healing: if the work is still
+    blocked on the same thing, the persona asks it again and it returns to the line.
+    """
+    carried = () if isinstance(trigger, UserReply) else checkpoint.open_questions
+    asked = _asked_question(run)
+    settled = carried if asked is None or asked in carried else (*carried, asked)
+    if settled == checkpoint.open_questions:
+        return checkpoint
+    # A checkpoint is tamper-evident: its ``content_hash`` covers the content fields and is
+    # verified on construction. ``model_copy`` would change the content while keeping the old
+    # hash, so the next read of the row raises. Rebuild through validation with the hash
+    # cleared, which is what recomputes it.
+    fields = checkpoint.model_dump()
+    fields["open_questions"] = settled
+    fields["content_hash"] = ""
+    return type(checkpoint).model_validate(fields)
+
+
 def _disposition(status: RunStatus) -> LegDisposition:
-    """Map a run status to what it implies for the task (waiting kinds are T8)."""
+    """Map a run status to what it implies for the task."""
     if status == RunStatus.COMPLETED:
         return LegDisposition.COMPLETED
     if status == RunStatus.ERROR:
         return LegDisposition.FAILED
+    if status == RunStatus.AWAITING_USER:
+        # Spec W1 (D-W1-34): the leg stopped ON a question. Another leg follows, but only
+        # once the user answers — the task waits on them, it does not queue work.
+        return LegDisposition.WAITING_USER
     # MAX_STEPS_REACHED or CANCELLED (box trip / external drain) → another leg.
     return LegDisposition.CONTINUE

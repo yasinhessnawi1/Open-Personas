@@ -17,6 +17,10 @@ Semantics (the honest choices, pinned):
 - ``conversations`` counts chat-born threads only (``origin != 'call'``) — call
   transcripts belong to the Calls surface, and the count captions the sidebar's
   "All chats" affordance.
+- ``attention`` (Spec W1, D-W1-5) is what NEEDS the user: pending approvals,
+  tasks waiting on the user, FAILED tasks inside the digest window. It is the
+  length of the review page's own list (``attention_service.list_attention``),
+  so the badge and the list cannot disagree. This is the Activity badge now.
 - ``active_tasks`` is the active working set: the complement of
   :data:`persona.tasks.state.TERMINAL_STATES` (``defined``/``active``/
   ``waiting``), derived from the enum so a lifecycle change can't silently
@@ -32,6 +36,7 @@ Semantics (the honest choices, pinned):
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.tasks.state import TERMINAL_STATES, TaskState
@@ -57,7 +62,9 @@ ACTIVE_TASK_STATES: tuple[str, ...] = tuple(
 )
 
 
-def get_nav_counts(rls_engine: Engine, *, owner_id: str, include_memory: bool) -> dict[str, int]:
+def get_nav_counts(
+    rls_engine: Engine, *, owner_id: str, include_memory: bool, now: datetime | None = None
+) -> dict[str, int]:
     """All six owner-scoped nav counts in one round-trip (see module docstring).
 
     Read-only (CQS). ``include_memory=False`` (no graph store wired — community /
@@ -112,4 +119,12 @@ def get_nav_counts(rls_engine: Engine, *, owner_id: str, include_memory: bool) -
         row = conn.execute(select(*columns)).mappings().one()
     counts = {key: int(value) for key, value in row.items()}
     counts.setdefault("memory_nodes", 0)
+    # Spec W1 (D-W1-5): the Activity badge counts ATTENTION, and it is the length of the
+    # very list the review page renders (one query feeds both). Imported here because the
+    # attention service reaches the task handler, which reaches this package's init.
+    from persona_api.services.attention_service import count_attention  # noqa: PLC0415
+
+    counts["attention"] = count_attention(
+        rls_engine, owner_id=owner_id, now=now if now is not None else datetime.now(UTC)
+    )
     return counts

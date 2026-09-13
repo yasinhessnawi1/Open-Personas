@@ -197,13 +197,18 @@ def test_user_b_cannot_create_conversation_on_user_a_persona(app_client: TestCli
     )
 
 
-def test_user_b_cannot_read_user_a_run(app_client: TestClient) -> None:
+def test_user_b_cannot_read_user_a_dispatched_task(app_client: TestClient) -> None:
+    """A one-off dispatch answers with the TASK that carries the work (Spec W1, D-W1-1); the
+    run row is opened by the worker later. The task, its detail and its controls are A's."""
     ids = _seed_a(app_client)
-    run_id = app_client.post(
+    res = app_client.post(
         f"/v1/personas/{ids['persona_id']}/runs", json={"task": "t"}, headers=_h("user_A")
-    ).json()["id"]
-    assert app_client.get(f"/v1/runs/{run_id}", headers=_h("user_B")).status_code == 404
-    assert app_client.post(f"/v1/runs/{run_id}/cancel", headers=_h("user_B")).status_code == 404
+    )
+    assert res.status_code == 202, res.text
+    task_id = res.json()["task_id"]
+    assert app_client.get(f"/v1/tasks/{task_id}", headers=_h("user_B")).status_code == 404
+    assert app_client.post(f"/v1/tasks/{task_id}/cancel", headers=_h("user_B")).status_code == 404
+    assert app_client.get(f"/v1/tasks/{task_id}", headers=_h("user_A")).status_code == 200
 
 
 def test_user_b_list_endpoints_exclude_user_a_resources(app_client: TestClient) -> None:

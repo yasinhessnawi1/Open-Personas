@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from persona.errors import TaskNotFoundError, TaskStateError
+from persona.errors import TaskNotFoundError
 from persona.logging import get_logger
 from persona.tasks import TaskState, is_terminal
 from persona.tasks.reader import IntrospectionStatus, project_task_state, summarise_task
@@ -31,9 +31,10 @@ from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import task_checkpoints as checkpoints_t
+from persona_api.errors import WorkBriefTooLongError
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.store import ScheduleStore
-from persona_api.schemas.requests import BudgetExtendRequest
+from persona_api.schemas.requests import BudgetExtendRequest, TaskReplyRequest
 from persona_api.schemas.responses import (
     AcceptanceCriterionOut,
     BudgetExtendResult,
@@ -47,6 +48,7 @@ from persona_api.schemas.responses import (
     TaskReportOut,
     TaskSummaryOut,
 )
+from persona_api.services import audit_service, run_service, task_control_service
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -61,6 +63,11 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
 
 _LIST_LIMIT = 50
+#: A reply rides into the next leg's trigger block verbatim (D-W1-7's cap, D-W1-28's sentence).
+MAX_REPLY_CHARS = 8_000
+REPLY_TOO_LONG_MESSAGE = (
+    "That reply is longer than I can take in one go. Keep it under 8,000 characters."
+)
 _CHECKPOINT_LIMIT = 10
 #: A single budget extension can't exceed the platform default cap (the bound — never unbounded).
 _MAX_EXTEND_MICROS = PLATFORM_DEFAULT_BUDGET_MICROS
@@ -81,35 +88,9 @@ def _kill_switch(engine: Engine) -> KillSwitchStore:
     )
 
 
-def _mirror_schedule_pause(engine: Engine, owner_id: str, task: Task, *, paused: bool) -> None:
-    """Stop (or restart) the task's SCHEDULE alongside its ``paused`` overlay (R9-108).
-
-    The leg handler already honours ``task.paused`` and skips the work, so pausing
-    stopped anything running. But nothing stopped the schedule FIRING: production
-    showed 47 fires against a paused task, each enqueueing a job that was
-    immediately discarded, while the calendar still presented the task as live. The
-    owner reasonably read that as "pause did nothing".
-
-    Routed through :class:`ScheduleStore`'s own API rather than writing the table
-    here: A10-D-9 permits exactly one schedule write path, and a second one is the
-    very drift this is fixing. Best-effort — a task whose schedule is already gone,
-    or a mirror that fails, must never block the task control the user pressed.
-    """
-    if task.schedule_id is None:
-        return
-    now = datetime.now(UTC)
-    try:
-        store = ScheduleStore(engine)
-        if paused:
-            store.pause(owner_id, task.schedule_id, now=now)
-        else:
-            store.resume(owner_id, task.schedule_id, now=now)
-    except Exception as exc:  # noqa: BLE001 — the task control already succeeded
-        _log.warning(
-            "task {task_id}: schedule pause mirror failed ({error})",
-            task_id=task.id,
-            error=str(exc),
-        )
+# Spec W1 (D-W1-14): the mirror now lives with the task controls; kept under its old name
+# here for the pause/resume routes (and the R9-108 test that imports it from this module).
+_mirror_schedule_pause = task_control_service.mirror_schedule_pause
 
 
 def _command_result(
@@ -152,6 +133,7 @@ def _summary(
         task_id=task.id,
         persona_id=task.persona_id,
         goal=task.contract.goal,
+        kind=task.kind.value,
         status=summarise_task(task).status.value,
         paused=task.paused,
         spent_micros=task.ledger.total_micros,
@@ -257,6 +239,7 @@ async def get_task(
         persona_id=task.persona_id,
         goal=contract.goal,
         scope=contract.scope,
+        kind=task.kind.value,
         status=view.status.value,
         paused=task.paused,
         grants=[
@@ -299,6 +282,11 @@ async def get_task(
         conversation_id=task.conversation_id,
         schedule_id=task.schedule_id,
         run_ids=list(task.run_ids),
+        # Spec W1 (D-W1-3): the task detail is the home of its run history.
+        runs=[
+            run_service.summarise_run(r)
+            for r in run_service.list_runs_for_task(rls_engine=engine, task_id=task_id)
+        ],
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
@@ -353,16 +341,9 @@ async def pause_task(
         task = store.get(user.id, task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
-    if task.paused:
-        return _command_result(task, changed=False, note="Already paused.")
-    try:
-        updated = store.pause(user.id, task_id, now=datetime.now(UTC))  # audits task.pause
-        _mirror_schedule_pause(engine, user.id, updated, paused=True)
-    except TaskStateError:  # terminal → nothing to pause; reflect the durable truth
-        return _command_result(
-            store.get(user.id, task_id), changed=False, note="This task has already finished."
-        )
-    return _command_result(updated, changed=True)
+    # Spec W1 (R9-146): the ONE pause every door shares (this route, the chat verb).
+    outcome = task_control_service.pause_task(engine, user.id, task, now=datetime.now(UTC))
+    return _command_result(store.get(user.id, task_id), changed=outcome.changed, note=outcome.note)
 
 
 @router.post("/{task_id}/resume", response_model=TaskCommandResult)
@@ -378,17 +359,16 @@ async def resume_task(
         task = store.get(user.id, task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
-    if not task.paused:
-        return _command_result(task, changed=False, note="Not paused.")
-    updated = store.unpause(user.id, task_id, now=datetime.now(UTC))  # audits task.unpause
-    _mirror_schedule_pause(engine, user.id, updated, paused=False)
-    owner_paused = _kill_switch(engine).is_owner_autonomy_paused(user.id)
-    note = (
-        "Resumed, but your autonomy is paused, so it won't run until you resume autonomy."
-        if owner_paused
-        else ""
+    # Spec W1 (R9-146, D-W1-30): the ONE resume every door shares. It clears the overlay AND
+    # puts the next leg back on the worker from the salvaged head; the chat verb rides the
+    # same function through ``TaskControlMutator``.
+    outcome = task_control_service.resume_task(engine, user.id, task, now=datetime.now(UTC))
+    return _command_result(
+        store.get(user.id, task_id),
+        changed=outcome.changed,
+        note=outcome.note,
+        owner_paused=outcome.owner_paused,
     )
-    return _command_result(updated, changed=True, note=note, owner_paused=owner_paused)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskCommandResult)
@@ -406,12 +386,105 @@ async def cancel_task(
         raise HTTPException(status_code=404, detail="task not found") from exc
     if is_terminal(task.state):  # already done/cancelled → the durable truth, no error
         return _command_result(task, changed=False, note="This task has already finished.")
-    _kill_switch(engine).cancel_task(user.id, task_id, now=datetime.now(UTC))  # audits task.cancel
-    _mirror_schedule_pause(engine, user.id, task, paused=True)  # terminal: stop firing
+    # Spec W1 (D-W1-14): the ONE cancel every door shares (task detail, review, run viewer).
+    task_control_service.cancel_task(engine, user.id, task, now=datetime.now(UTC))
     return _command_result(
         store.get(user.id, task_id),
         changed=True,
         note="A running step finishes its current work, then the task stops.",
+    )
+
+
+@router.post("/{task_id}/pickup", response_model=TaskCommandResult)
+async def pickup_task(
+    task_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> TaskCommandResult:
+    """Pick up a task that waits on you (Spec W1, T6): its next leg runs on the worker.
+
+    Cross-tenant ids are not found (RLS). A paused task, a paused owner or a suspended persona
+    is refused with the reason (D-W1-10). Idempotent: a second pickup dedups to the one job.
+    """
+    engine = request.app.state.rls_engine
+    store = TaskStore(engine)
+    try:
+        task = store.get(user.id, task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    outcome = task_control_service.pickup_task(engine, user.id, task, now=datetime.now(UTC))
+    if outcome.changed:
+        audit_service.record(engine=engine, user_id=user.id, action="task.pickup", target=task_id)
+    return _command_result(
+        store.get(user.id, task_id),
+        changed=outcome.changed,
+        note=outcome.note,
+        owner_paused=outcome.owner_paused,
+    )
+
+
+@router.post("/{task_id}/reply", response_model=TaskCommandResult)
+async def reply_to_task(
+    task_id: str,
+    body: TaskReplyRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> TaskCommandResult:
+    """Answer a task that waits on you (Spec W1, T6; D-W1-4): the reply rides into its next leg.
+
+    A task whose wait is a pending approval answers 409 and names the approval.
+    """
+    engine = request.app.state.rls_engine
+    store = TaskStore(engine)
+    try:
+        task = store.get(user.id, task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    reply = body.reply.strip()
+    if len(reply) > MAX_REPLY_CHARS:
+        raise WorkBriefTooLongError(
+            REPLY_TOO_LONG_MESSAGE,
+            context={"max_chars": str(MAX_REPLY_CHARS), "chars": str(len(reply))},
+        )
+    outcome = task_control_service.reply_to_task(
+        engine, user.id, task, reply, now=datetime.now(UTC)
+    )
+    if outcome.changed:
+        audit_service.record(engine=engine, user_id=user.id, action="task.reply", target=task_id)
+    return _command_result(
+        store.get(user.id, task_id),
+        changed=outcome.changed,
+        note=outcome.note,
+        owner_paused=outcome.owner_paused,
+    )
+
+
+@router.post("/{task_id}/retry", response_model=TaskCommandResult)
+async def retry_task(
+    task_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> TaskCommandResult:
+    """Run a finished task again as a NEW task with the same contract (Spec W1, T6).
+
+    The response names the successor; the old task stays as the record of what happened.
+    """
+    engine = request.app.state.rls_engine
+    store = TaskStore(engine)
+    try:
+        task = store.get(user.id, task_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    outcome = task_control_service.retry_task(engine, user.id, task, now=datetime.now(UTC))
+    if outcome.successor is not None:
+        audit_service.record(
+            engine=engine, user_id=user.id, action="task.retry", target=outcome.successor.id
+        )
+    result = _command_result(
+        task, changed=outcome.changed, note=outcome.note, owner_paused=outcome.owner_paused
+    )
+    return result.model_copy(
+        update={"successor_task_id": outcome.successor.id if outcome.successor else None}
     )
 
 

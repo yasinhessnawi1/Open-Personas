@@ -22,8 +22,22 @@ const auth = vi.hoisted(() => ({
   getToken: () => Promise.resolve("test-token"),
 }));
 
+const tasks = vi.hoisted(() => ({
+  pickupTask: vi.fn(),
+  replyToTask: vi.fn(),
+  cancelTask: vi.fn(),
+  retryTask: vi.fn(),
+}));
+
 vi.mock("@/auth", () => ({ useAuth: () => ({ getToken: auth.getToken }) }));
 vi.mock("@/lib/api/review-client", () => ({ fetchReview: api.fetchReview }));
+vi.mock("@/lib/api/tasks-client", () => tasks);
+vi.mock("@/components/patterns/toast", () => ({
+  useToast: () => ({ info: vi.fn(), success: vi.fn(), error: vi.fn() }),
+}));
+vi.mock("@/lib/hooks/use-sidebar-refresh", () => ({
+  useSidebarRefresh: () => vi.fn(),
+}));
 
 function digest(overrides: Partial<MorningDigest> = {}): MorningDigest {
   return {
@@ -43,6 +57,8 @@ function item(over: Partial<MorningDigest["sections"][0]["items"][0]> = {}) {
     detail: "",
     ref: null,
     ran_because: null,
+    actions: [],
+    reason: null,
     ...over,
   };
 }
@@ -212,5 +228,119 @@ describe("Review", () => {
     expect(
       await screen.findByText("ran because: your invoice fell due"),
     ).toBeInTheDocument();
+  });
+});
+
+// --- Spec W1 (T7): the line acts where it is read ------------------------------------------
+
+describe("attention actions (Spec W1, T7)", () => {
+  it("renders the verbs the item offers on a waiting line, and acts on that task", async () => {
+    api.fetchReview.mockResolvedValue(
+      digest({
+        sections: [
+          {
+            kind: "waiting",
+            items: [
+              item({
+                title: "which day suits you?",
+                ref: { kind: "task", id: "task_7" },
+                actions: ["reply", "pickup", "cancel"],
+                reason: "question",
+              }),
+            ],
+            overflow: 0,
+          },
+        ],
+      }),
+    );
+    tasks.pickupTask.mockResolvedValue({
+      task_id: "task_7",
+      status: "progressing",
+      paused: false,
+      changed: true,
+      owner_autonomy_paused: false,
+      note: "",
+    });
+    renderReview();
+    await screen.findByText("which day suits you?");
+
+    const bar = document.querySelector('[data-slot="attention-actions"]');
+    expect(bar).toBeTruthy();
+    expect(screen.getByText("Pick up")).toBeTruthy();
+    expect(screen.getByText("Reply")).toBeTruthy();
+
+    // The digest is re-read after the verb acts: the list and the badge move together.
+    api.fetchReview.mockClear();
+    await act(async () => {
+      (document.querySelector('[data-verb="pickup"]') as HTMLElement).click();
+    });
+    await waitFor(() => expect(tasks.pickupTask).toHaveBeenCalledOnce());
+    expect(tasks.pickupTask).toHaveBeenCalledWith("test-token", "task_7");
+    await waitFor(() => expect(api.fetchReview).toHaveBeenCalled());
+  });
+
+  it("keeps an approval line as a link into the inbox, where the proposal is visible", async () => {
+    api.fetchReview.mockResolvedValue(
+      digest({
+        sections: [
+          {
+            kind: "waiting",
+            items: [
+              item({
+                title: "send the deposit email",
+                ref: { kind: "approval", id: "p1" },
+                actions: ["approve", "decline"],
+                reason: "approval",
+              }),
+            ],
+            overflow: 0,
+          },
+        ],
+      }),
+    );
+    renderReview();
+    await screen.findByText("send the deposit email");
+    expect(
+      document.querySelector('[data-slot="attention-actions"]'),
+    ).toBeNull();
+    const link = screen.getByText("Review in Approvals").closest("a");
+    expect(link?.getAttribute("href")).toBe("/activity/approvals?id=p1");
+  });
+
+  it("offers Try again on a failed line and starts a fresh task", async () => {
+    api.fetchReview.mockResolvedValue(
+      digest({
+        sections: [
+          {
+            kind: "stuck",
+            items: [
+              item({
+                title: "renew the parking permit",
+                ref: { kind: "task", id: "task_9" },
+                actions: ["retry"],
+                reason: "stuck",
+              }),
+            ],
+            overflow: 0,
+          },
+        ],
+      }),
+    );
+    tasks.retryTask.mockResolvedValue({
+      task_id: "task_9",
+      status: "failed",
+      paused: false,
+      changed: true,
+      owner_autonomy_paused: false,
+      note: "",
+      successor_task_id: "task_10",
+    });
+    renderReview();
+    await screen.findByText("renew the parking permit");
+    await act(async () => {
+      (document.querySelector('[data-verb="retry"]') as HTMLElement).click();
+    });
+    await waitFor(() => expect(tasks.retryTask).toHaveBeenCalledOnce());
+    expect(tasks.retryTask).toHaveBeenCalledWith("test-token", "task_9");
   });
 });

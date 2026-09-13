@@ -14,6 +14,8 @@ from persona.tasks import (
     ArtifactPointer,
     Contract,
     CostLedger,
+    Deliverable,
+    DeliverableFormat,
     Task,
     TaskCheckpoint,
     build_cancellation_summary,
@@ -23,14 +25,15 @@ from persona.tasks import (
 from pydantic import ValidationError
 
 _NOW = datetime(2026, 6, 25, 12, 0, tzinfo=UTC)
+_DELIVERABLE = Deliverable(format=DeliverableFormat.FILE, filename="fibre-brief.md")
 
 
-def _task() -> Task:
+def _task(*, contract: Contract | None = None) -> Task:
     return Task(
         id="t1",
         owner_id="user_a",
         persona_id="persona_a",
-        contract=Contract(goal="find the cheapest fare"),
+        contract=contract or Contract(goal="find the cheapest fare"),
         ledger=CostLedger(model_micros=1200, sandbox_micros=300),
         created_at=_NOW,
         updated_at=_NOW,
@@ -103,3 +106,24 @@ def test_reports_are_frozen_and_distinct_types() -> None:
     assert type(stuck).__name__ == "StuckReport"
     with pytest.raises(ValidationError):
         completion.goal = "y"  # type: ignore[misc]
+
+
+# --- the agreed shape on the finished record (Spec W1, T11) ------------------
+
+
+def test_the_completion_report_carries_the_shape_the_contract_agreed() -> None:
+    """So the "I've finished" message can say what was produced and where, instead of
+    leaving the user to guess whether the prose IS the deliverable or a note about it."""
+    task = _task(contract=Contract(goal="brief me weekly", deliverable=_DELIVERABLE))
+    report = build_completion_report(task, None, now=_NOW)
+
+    assert report.deliverable == _DELIVERABLE
+    assert report.deliverable.render() == "file in fibre-brief.md"
+
+
+def test_a_contract_that_named_no_shape_reports_the_default() -> None:
+    task = _task(contract=Contract(goal="brief me weekly"))
+    report = build_completion_report(task, None, now=_NOW)
+
+    assert report.deliverable.format is DeliverableFormat.FINDINGS_MARKDOWN
+    assert report.deliverable.render() == "findings_markdown"

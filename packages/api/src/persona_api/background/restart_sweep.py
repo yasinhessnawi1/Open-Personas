@@ -49,8 +49,13 @@ _log = get_logger("api.restart_sweep")
 
 __all__ = ["reconcile_in_flight_on_startup"]
 
-# Runs left non-terminal by a restart. ``awaiting_user`` is also orphaned — its
-# in-process response queue died with the task, so it can never be answered.
+# Runs left non-terminal by a restart. ``awaiting_user`` was also orphaned on the
+# premise that its in-process response queue died with the task, so it could never be
+# answered. Spec W1 (D-W1-34) makes that premise conditional: a run belonging to a TASK
+# parks on its question durably — the task sits ``waiting(on_user)`` and the answer comes
+# back through the reply route, which no restart can lose — so reaping it would error a
+# run the user is about to answer. A parked run with no task behind it is still the old
+# in-process shape and is still an orphan.
 _ORPHANED_RUN_STATES = ("running", "awaiting_user")
 
 
@@ -77,7 +82,13 @@ def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
         )
         run_result = conn.execute(
             update(runs_t)
-            .where(runs_t.c.status.in_(_ORPHANED_RUN_STATES))
+            .where(
+                runs_t.c.status.in_(_ORPHANED_RUN_STATES),
+                # Spec W1 (D-W1-34): a parked run that belongs to a task is answerable
+                # after any restart, so it is never an orphan. Only the old in-process
+                # shape (no task behind it) is.
+                (runs_t.c.status != "awaiting_user") | (runs_t.c.task_id.is_(None)),
+            )
             .values(status="error", error="interrupted by a server restart", finished_at=now)
         )
     counts = {"messages": msg_result.rowcount, "runs": run_result.rowcount}

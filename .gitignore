@@ -78,6 +78,11 @@ CLAUDE.md
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.
 **/.persona_community.db
 **/.persona_chroma/
+# The managed-Postgres migration (K10) renames the legacy store aside with a timestamp
+# before importing it, so the backups land beside the names above and outside these rules.
+# W1's operator pass left six of them in a worktree, one `git add -A` away from a merge-back.
+**/.persona_community.db.migrated-*
+**/.persona_chroma.migrated-*/
 
 # secrets live outside the tree everywhere (the api symlink included)
 .secrets

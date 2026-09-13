@@ -93,3 +93,9 @@ def test_validate_transition_error_carries_context() -> None:
         validate_transition(TaskState.COMPLETED, TaskState.ACTIVE)
     assert exc.value.context["from"] == "completed"
     assert exc.value.context["to"] == "active"
+
+
+def test_task_kind_values() -> None:
+    from persona.tasks import TaskKind
+
+    assert {k.value for k in TaskKind} == {"standing", "ad_hoc"}

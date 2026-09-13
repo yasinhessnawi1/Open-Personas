@@ -14,8 +14,10 @@ The safety properties under test:
 
 from __future__ import annotations
 
+import pytest
 from persona.tools.catalog import known_tool_names
 from persona.tools.categories import (
+    _TOOL_CATEGORIES,
     FREE_CATEGORIES,
     GATED_BY_DEFAULT,
     ActionCategory,
@@ -136,3 +138,53 @@ class TestRegistrationEnforcement:
         # catalog without an explicit category mapping fails this test (it must not be
         # silently carried by the gated default).
         assert unmapped_catalog_tools() == frozenset()
+
+
+# --- self-knowledge and self-work (Spec W1, D-W1-45) ------------------------
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["task_introspect", "schedule_introspect", "record_user_fact", "task_pickup"],
+)
+def test_a_leg_may_look_at_and_pick_up_its_own_work_unattended(tool: str) -> None:
+    """D-W1-45. These four reach only the owner's own durable state through owner-scoped
+    ports, so an unattended leg runs them without an approval.
+
+    Found by the W1 operator pass, on the first real scheduled fire: none of them was in the
+    mapping, so each fell to the gated default and the leg parked the task on an approval the
+    moment the persona looked at its own tasks. A persona that must ask permission to see its
+    own work is the half-feature T9 existed to end.
+    """
+    assert resolve_action_categories(tool) <= FREE_CATEGORIES
+
+
+def test_every_tool_the_factory_composes_is_mapped() -> None:
+    """The back-door closure cuts both ways: an unmapped tool is gated, which is safe, and
+    silently unusable inside a leg, which is not. A tool composed into the toolbox and not
+    mapped here is a leg that parks the first time a model reaches for it.
+    """
+    composed = {
+        "web_search",
+        "web_fetch",
+        "file_read",
+        "file_write",
+        "code_execution",
+        "calculator",
+        "datetime",
+        "json_query",
+        "regex_match",
+        "text_diff",
+        "text_summarize",
+        "currency_convert",
+        "generate_image",
+        "render_diagram",
+        "use_skill",
+        "mcp_search",
+        "task_introspect",
+        "task_pickup",
+        "schedule_introspect",
+        "record_user_fact",
+    }
+    unmapped = {tool for tool in composed if tool not in _TOOL_CATEGORIES}
+    assert unmapped == set(), f"composed but unmapped (gated + unusable in a leg): {unmapped}"

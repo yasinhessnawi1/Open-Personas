@@ -23,12 +23,14 @@ from persona.tools.builtin.json_query import make_json_query_tool
 from persona.tools.builtin.mcp_search import make_mcp_search_tool
 from persona.tools.builtin.regex_match import make_regex_match_tool
 from persona.tools.builtin.schedule_introspection import SCHEDULE_INTROSPECT_TOOL_NAME
+from persona.tools.builtin.task_introspection import TASK_INTROSPECT_TOOL_NAME
+from persona.tools.builtin.task_pickup import TASK_PICKUP_TOOL_NAME
 from persona.tools.builtin.text_diff import make_text_diff_tool
 from persona.tools.builtin.web_fetch import make_web_fetch_tool
 from persona.tools.builtin.web_search import make_web_search_tool
 from persona.tools.mcp.client import MCPClient, load_mcp_clients
 from persona.tools.mcp.naming import referenced_server_name, server_grant_name
-from persona.tools.toolbox import Toolbox
+from persona.tools.toolbox import Toolbox, ToolboxFactory
 
 if TYPE_CHECKING:
     from persona.config import PersonaCoreConfig
@@ -61,7 +63,23 @@ _logger = get_logger("tools.factory")
 #: * ``schedule_introspect`` — the read-only calendar window (R9-075). A persona could
 #:   create schedules but had no way to read them back, so "what's on my calendar?" was
 #:   answered from imagination.
-SELF_KNOWLEDGE_TOOLS: frozenset[str] = frozenset({"use_skill", SCHEDULE_INTROSPECT_TOOL_NAME})
+#: * ``task_introspect`` — the read-only window onto its own standing work (A4-D-5). It was
+#:   composed as an extra tool and never auto-allowed, so it hit exactly the filter this set
+#:   exists to prevent: registered, counted, and then dropped for every persona with a
+#:   non-empty allow-list, which is every persona. It is absent from the catalog too, so no
+#:   YAML could name it either, and "how's the research going?" was answered from
+#:   imagination by a persona that had a grounded answer available (Spec W1, T9).
+#: * ``task_pickup`` — the write half of the same window (Spec W1, D-W1-10). Not a capability
+#:   a persona opts into: it carries on that persona's OWN stalled work and can do nothing
+#:   else, with every scope question answered by the injected port.
+SELF_KNOWLEDGE_TOOLS: frozenset[str] = frozenset(
+    {
+        "use_skill",
+        SCHEDULE_INTROSPECT_TOOL_NAME,
+        TASK_INTROSPECT_TOOL_NAME,
+        TASK_PICKUP_TOOL_NAME,
+    }
+)
 
 #: The server name the Docker MCP Gateway registers under (Spec N1, D-N1-6); its
 #: aggregated tools are prefixed ``mcp:docker:<tool>``.
@@ -123,6 +141,7 @@ async def build_default_toolbox(
     extra_mcp_clients: list[MCPClient] | None = None,
     file_sandbox_root: SandboxRootProvider | None = None,
     mcp_search_catalog: MCPCatalog | None = None,
+    toolbox_factory: ToolboxFactory | None = None,
 ) -> tuple[Toolbox, list[MCPClient]]:
     """Compose a Toolbox for the given persona.
 
@@ -302,5 +321,11 @@ async def build_default_toolbox(
     allow_list = (
         [*persona.tools, *grant_allow, *byo_allow, *injected_allow] if persona.tools else None
     )
-    toolbox = Toolbox(all_tools, allow_list=allow_list)
+    # Spec W1 (D-W1-1): the composition root may substitute the toolbox CLASS (the
+    # task-leg runner passes the policy-gated one); the tools and the allow-list are
+    # assembled identically either way.
+    make_toolbox: ToolboxFactory | type[Toolbox] = (
+        toolbox_factory if toolbox_factory is not None else Toolbox
+    )
+    toolbox = make_toolbox(all_tools, allow_list=allow_list)
     return toolbox, mcp_clients

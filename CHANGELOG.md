@@ -11,6 +11,73 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Persona work access: a persona can see its work, and its work can continue (2026-09-13)
+
+> A task the persona was running had no door the user could open. It ran, it
+> stalled, it finished, and the only way to know which was to ask. Meanwhile the
+> persona itself could not see its own work at all: it had a tool to look, and the
+> tool had never once reached a model. This makes the work visible from both
+> sides, and makes a leg carry what it learned into the next one.
+
+#### Added
+- **The review page acts.** A task waiting on you shows the persona's own question
+  and answers it in place; a stuck one offers pick up, retry or cancel, and the
+  Activity badge counts what needs you rather than what is merely running. An
+  approval keeps its link into the inbox, because approving from a one-line summary
+  is not the same as approving what you have read.
+- **A persona can carry on its own stalled work.** `task_pickup` takes a task id and
+  nothing else: every question of scope is answered behind an owner-bound seam, so
+  another tenant's task and a made-up one are the same answer. `task_introspect`,
+  which had been composed since the autonomy work and filtered out of every
+  persona's toolbox before a model ever saw it, now actually reaches the model.
+- **A leg that needs you stops and says so.** When the persona asks a question
+  inside a task, the task parks on the question instead of answering itself and
+  carrying on. The answer arrives through the task page and the work resumes.
+- **Work that stops gets picked back up.** A sweep revives a leg that was consumed
+  without running and retries a transient failure once, naming the cause in the
+  persona's own words rather than posing as the user.
+- **A leg carries a plan, not only findings.** A model-backed distiller writes the
+  next checkpoint: what is established, what was learned, the plan, and the single
+  next action. The deterministic writer stays underneath it, and takes over on any
+  timeout, refusal or malformed answer, so a leg never loses its checkpoint to the
+  distiller being clever.
+- **A leg knows what earlier legs already asked.** The checkpoint carries the
+  queries run and the sources read, extracted from the finished run rather than
+  asked of the model, so the next leg builds on them instead of paying to learn
+  them again.
+- **Legs read their own history and memory.** The last few legs and the persona's
+  recall now reach the reconstruction, off the loop and skipped on timeout: a leg
+  that cannot reach its memory does the work anyway.
+- **Every leg records its own shape** beside the spend it already meters: steps,
+  tool calls, distinct questions asked, repeats the guards saved, tokens, wall
+  clock and which bound stopped it.
+
+#### Changed
+- **A long run stops paying twice for the same answer.** A repeat of a call that
+  failed is refused with the original error and told to change something; a repeat
+  of a read that succeeded is served from the run's own ledger. Tool output older
+  than the last two steps is trimmed to a readable head once a step's context
+  passes a cost ceiling, so a six-search session stops compounding.
+- **Method, in the work itself.** Every leg now reads how to work before it works:
+  read what you already know first, batch independent lookups into one step, never
+  repeat a failed call, deliver in the agreed format, and write down what you
+  concluded before the time runs out.
+- **"Done" has a shape.** A task's contract carries the deliverable it agreed, and
+  the finished report says what was produced and where.
+
+#### Fixed
+- **A persona could not look at its own work unattended.** Four self-knowledge
+  tools were missing from the permission map, so an unattended leg that called one
+  parked the whole task on an approval. Reading your own tasks and schedules, and
+  writing a fact to your own memory, are not external actions.
+- **A paused task could not be resumed.** Pausing mid-leg stopped the work and left
+  nothing to restart it; resume now puts the leg back through the same door every
+  other resume uses.
+- **An answered question lived forever.** A question the user had already answered
+  kept being carried forward as open, so the review page offered a resolved
+  question and every later leg read it as unanswered.
+
+
 ### Connectors fold: one process, one model stack (2026-09-06)
 
 > The connector service ran on its own machine, and almost all of that machine was

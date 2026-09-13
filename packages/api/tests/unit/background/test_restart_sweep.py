@@ -27,6 +27,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
+from persona_api.db.models import tasks as tasks_t
 from sqlalchemy import insert, select
 
 if TYPE_CHECKING:
@@ -58,15 +59,30 @@ def _msg(conn: object, mid: str, status: str | None) -> None:
     )
 
 
-def _run(conn: object, rid: str, status: str) -> None:
+def _run(conn: object, rid: str, status: str, *, task_id: str | None = None) -> None:
     conn.execute(  # type: ignore[attr-defined]
         insert(runs_t).values(
             id=rid,
             owner_id=_OWNER,
             persona_id=_PERSONA,
             task="t",
+            task_id=task_id,
             status=status,
             started_at=datetime.now(UTC),
+        )
+    )
+
+
+def _task(conn: object, tid: str) -> None:
+    """A task for a run to belong to (Spec W1): the reason a parked run is answerable."""
+    conn.execute(  # type: ignore[attr-defined]
+        insert(tasks_t).values(
+            id=tid,
+            owner_id=_OWNER,
+            persona_id=_PERSONA,
+            contract_json={"goal": "book the dentist"},
+            state="waiting",
+            wait_kind="on_user",
         )
     )
 
@@ -104,7 +120,9 @@ def test_sweep_marks_orphaned_runs_error_with_finished_at(engine: Engine) -> Non
     assert rows["r_running"]["status"] == "error"
     assert rows["r_running"]["finished_at"] is not None
     assert rows["r_running"]["error"]  # carries a reason
-    assert rows["r_awaiting"]["status"] == "error"  # an awaiting-user run is also orphaned
+    # An awaiting-user run with NO task behind it is the old in-process shape: its response
+    # queue died with the process, so it can never be answered and is still an orphan.
+    assert rows["r_awaiting"]["status"] == "error"
     assert rows["r_done"]["status"] == "completed"  # terminal untouched
     assert rows["r_error"]["status"] == "error"  # already-terminal untouched
     assert counts["runs"] == 2
@@ -161,3 +179,29 @@ def test_sweep_logs_nothing_on_a_clean_database(
     plog.reset_for_testing()
     output = capsys.readouterr().err
     assert "restart sweep reconciled" not in output
+
+
+def test_a_parked_run_that_belongs_to_a_task_survives_the_sweep(engine: Engine) -> None:
+    """Spec W1 (D-W1-34): the sweep's premise is that an in-flight run's answer died with the
+    process. A run parked on a question inside a TASK breaks that premise: the task sits
+    waiting on the user and the answer comes back through the durable reply route, which no
+    restart can lose. Reaping it would error a question the user is about to answer, and the
+    task would be left waiting on a run that says it failed.
+    """
+    with engine.begin() as conn:
+        _task(conn, "task_1")
+        _run(conn, "r_parked_in_a_task", "awaiting_user", task_id="task_1")
+        _run(conn, "r_parked_alone", "awaiting_user")
+        _run(conn, "r_running_in_a_task", "running", task_id="task_1")
+
+    counts = reconcile_in_flight_on_startup(engine=engine)
+
+    with engine.begin() as conn:
+        rows = {r["id"]: dict(r) for r in conn.execute(select(runs_t)).mappings().all()}
+    assert rows["r_parked_in_a_task"]["status"] == "awaiting_user"  # spared: still answerable
+    assert rows["r_parked_in_a_task"]["finished_at"] is None
+    assert rows["r_parked_alone"]["status"] == "error"  # no task behind it: still an orphan
+    # A task-owned run that was RUNNING is still an orphan: nothing is waiting for a person,
+    # its loop simply died. Only the parked shape is answerable.
+    assert rows["r_running_in_a_task"]["status"] == "error"
+    assert counts["runs"] == 2

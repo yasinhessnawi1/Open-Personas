@@ -154,3 +154,105 @@ def test_task_resumer_protocol_is_structural() -> None:
 
     assert isinstance(_Resumer(), TaskResumer)
     assert not isinstance(_NotAResumer(), TaskResumer)
+
+
+# --- UserDispatch (Spec W1, D-W1-1): a one-off the user asked for directly --------
+
+
+def test_user_dispatch_carries_when_the_user_asked() -> None:
+    from persona.tasks import UserDispatch, wait_kind_for
+
+    trigger = UserDispatch(dispatched_at=datetime(2026, 9, 6, 12, 0, tzinfo=UTC))
+    assert trigger.kind == "user_dispatch"
+    assert trigger.dispatched_at.tzinfo is UTC
+    # The user's own hand un-parks like a reply does.
+    assert wait_kind_for(trigger) is WaitKind.ON_USER
+
+
+def test_user_dispatch_rejects_a_naive_timestamp() -> None:
+    from persona.tasks import UserDispatch
+
+    with pytest.raises(ValidationError):
+        UserDispatch(dispatched_at=datetime(2026, 9, 6, 12, 0))  # noqa: DTZ001 — the point
+
+
+def test_user_dispatch_round_trips_through_the_resume_trigger_union() -> None:
+    from persona.tasks import ResumeTrigger, UserDispatch
+    from pydantic import TypeAdapter
+
+    original = UserDispatch(dispatched_at=datetime(2026, 9, 6, 12, 0, tzinfo=UTC))
+    adapter: TypeAdapter[ResumeTrigger] = TypeAdapter(ResumeTrigger)
+    assert adapter.validate_python(original.model_dump(mode="json")) == original
+
+
+# --- the system's own wakes (Spec W1, D-W1-34 / D-W1-38) --------------------------------------
+#
+# Neither is a UserReply, and that is the point: a leg woken by the system must not be told a
+# person said something. Both are pinned here, where a unit run catches a union that silently
+# stopped accepting one of them.
+
+
+def test_auto_retry_carries_the_failure_it_is_retrying() -> None:
+    from persona.tasks import AutoRetry, wait_kind_for
+
+    trigger = AutoRetry(cause="429 rate limit", retried_at=datetime(2026, 9, 11, 9, 0, tzinfo=UTC))
+    assert trigger.kind == "auto_retry"
+    assert trigger.retried_at.tzinfo is UTC
+    assert trigger.cause == "429 rate limit"  # the next leg knows WHAT broke, so it can retry it
+    # It un-parks a task that was waiting on the user for a failure they were offered.
+    assert wait_kind_for(trigger) is WaitKind.ON_USER
+
+
+def test_revived_carries_the_reason_it_was_put_back() -> None:
+    from persona.tasks import Revived, wait_kind_for
+
+    trigger = Revived(
+        reason="the user resumed it after a pause",
+        revived_at=datetime(2026, 9, 11, 9, 0, tzinfo=UTC),
+    )
+    assert trigger.kind == "revived"
+    assert trigger.revived_at.tzinfo is UTC
+    assert trigger.reason == "the user resumed it after a pause"
+    assert wait_kind_for(trigger) is WaitKind.ON_USER
+
+
+def test_auto_retry_rejects_a_naive_timestamp() -> None:
+    from persona.tasks import AutoRetry
+
+    with pytest.raises(ValidationError):
+        AutoRetry(cause="429", retried_at=datetime(2026, 9, 11, 9, 0))  # noqa: DTZ001 — the point
+
+
+def test_revived_rejects_a_naive_timestamp() -> None:
+    from persona.tasks import Revived
+
+    with pytest.raises(ValidationError):
+        Revived(reason="put back", revived_at=datetime(2026, 9, 11, 9, 0))  # noqa: DTZ001 — the point
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        pytest.param(
+            "auto_retry",
+            id="auto_retry",
+        ),
+        pytest.param(
+            "revived",
+            id="revived",
+        ),
+    ],
+)
+def test_the_system_wakes_round_trip_through_the_resume_trigger_union(original: str) -> None:
+    """The trigger crosses a process boundary inside the job payload, so union membership is
+    the thing that makes a revived leg readable on the other side."""
+    from persona.tasks import AutoRetry, ResumeTrigger, Revived
+
+    at = datetime(2026, 9, 11, 9, 0, tzinfo=UTC)
+    trigger: ResumeTrigger = (
+        AutoRetry(cause="429 rate limit", retried_at=at)
+        if original == "auto_retry"
+        else Revived(reason="the user extended its budget", revived_at=at)
+    )
+    adapter: TypeAdapter[ResumeTrigger] = TypeAdapter(ResumeTrigger)
+    assert adapter.validate_python(trigger.model_dump(mode="json")) == trigger

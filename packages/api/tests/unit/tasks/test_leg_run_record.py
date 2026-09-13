@@ -91,7 +91,7 @@ class _RunnerBuilder:
     def __init__(self, runner: _Runner) -> None:
         self._runner = runner
 
-    def build(self, task_id: str, persona_id: str, box: LegBox) -> _Runner:
+    def build(self, task_id: str, persona_id: str, box: LegBox, *, task: object = None) -> _Runner:
         return self._runner
 
 
@@ -228,6 +228,8 @@ async def test_completed_leg_lands_a_run_row_linked_to_the_task(
     assert row["owner_id"] == _OWNER
     assert row["persona_id"] == _PERSONA
     assert row["task"] == _GOAL
+    # Spec W1 (D-W1-1): the run names its task, not only the other way round.
+    assert row["task_id"] == _TASK
     assert row["status"] == "completed"
     assert row["output"] == "1620 kr, SAS, Tue"
     assert row["error"] is None
@@ -257,6 +259,7 @@ async def test_failed_leg_is_recorded_with_its_error(engine: Engine, tasks: Task
     assert len(rows) == 1
     assert rows[0]["status"] == "error"
     assert rows[0]["error"] == "the browser tool died"
+    assert rows[0]["task_id"] == _TASK  # a failed attempt still names its task (W1)
     assert _steps(rows[0]), "a failed run still records the steps it got through"
     assert tasks.get(_OWNER, _TASK).run_ids == (rows[0]["id"],)
 
