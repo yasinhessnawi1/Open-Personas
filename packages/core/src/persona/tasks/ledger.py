@@ -9,13 +9,21 @@ atomically with the checkpoint append — D-A2-X-idempotency).
 
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["MICROS_PER_CENT", "CostLedger", "SpendKind", "micros_from_cents"]
+__all__ = [
+    "MICROS_PER_CENT",
+    "MICROS_PER_DOLLAR",
+    "CostLedger",
+    "SpendKind",
+    "format_micros",
+    "micros_from_cents",
+    "micros_from_dollars",
+]
 
 #: Ledger micros per cent of priced cost.
 #:
@@ -27,6 +35,17 @@ __all__ = ["MICROS_PER_CENT", "CostLedger", "SpendKind", "micros_from_cents"]
 #: place the two scales meet: anything that turns a priced cost into ledger spend goes
 #: through :func:`micros_from_cents` rather than scaling the number itself.
 MICROS_PER_CENT: Final[int] = 100
+
+#: Ledger micros per **US dollar**, and the one place that scale is written down.
+#:
+#: Until 2026-09-15 this number lived as a literal ``10_000`` in five places and as a
+#: constant named ``_MICROS_PER_KR`` in three more, which is how the task surface came to
+#: render a dollar amount with a kroner label (R9-172): the constant was the dollar scale
+#: wearing a krone's name, so nothing in the arithmetic ever disagreed and no test could
+#: fail. The currency audit of 2026-09-14 found no currency column and no rate column on any
+#: money table in the schema, so there is exactly one currency in this system and it is USD.
+#: Name it here, once, and let every caller import it.
+MICROS_PER_DOLLAR: Final[int] = MICROS_PER_CENT * 100
 
 
 class SpendKind(StrEnum):
@@ -102,3 +121,39 @@ def micros_from_cents(cost_cents: float) -> int:
         return 0
     micros = Decimal(str(cost_cents)) * MICROS_PER_CENT
     return int(micros.to_integral_value(rounding=ROUND_CEILING))
+
+
+def micros_from_dollars(dollars: Decimal | int | str | float) -> int:
+    """Convert a user-stated US dollar amount into ledger micros (the input side).
+
+    This is the path a person's typed spending cap takes: the task budget field, and the
+    figure a model extracts from "you can spend up to fifty dollars on this". Rounds
+    half-up, because a cap is a number the user chose rather than a cost being metered, so
+    neither direction of error is the safe one and the nearest value is the honest one.
+
+    Args:
+        dollars: The amount in US dollars. A ``float`` is accepted because it is what
+            arrives from JSON, and is routed through its printed decimal so binary noise
+            cannot shift the cap.
+
+    Returns:
+        The cap in ledger micros.
+    """
+    micros = Decimal(str(dollars)) * MICROS_PER_DOLLAR
+    return int(micros.to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def format_micros(micros: int) -> str:
+    """Render ledger micros as a US dollar string, unit attached: ``"$1.50"``.
+
+    The unit travels with the number rather than being written beside it in a template.
+    That is deliberate: every place the unit was a separate word is a place it was able to
+    disagree with the value, which is the whole of R9-172 and of the audit's B7.
+
+    Sub-dollar amounts keep the cent, since an overnight task spend is routinely a few
+    cents and "$0" would read as "nothing was spent".
+    """
+    amount = (Decimal(micros) / MICROS_PER_DOLLAR).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return f"${amount}"

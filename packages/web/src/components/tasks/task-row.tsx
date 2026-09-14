@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { TaskSummary } from "@/lib/api/tasks-client";
+import { usd } from "@/lib/money";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { cn } from "@/lib/utils";
 
@@ -20,12 +21,6 @@ function badgeVariant(status: string): "outline" | "secondary" | "destructive" {
   if (status === "failed") return "destructive";
   if (status === "waiting_on_user" || status === "completed") return "outline";
   return "secondary";
-}
-
-/** micros → kr (1 kr = 10 000 micros, the project's credit unit); sub-10 kr keeps one decimal. */
-export function kr(micros: number): string {
-  const v = micros / 10_000;
-  return v < 10 ? v.toFixed(1) : Math.round(v).toString();
 }
 
 interface TaskRowProps {
@@ -97,7 +92,7 @@ export function TaskRow({
             </span>
           ) : null}
           <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
-            {t("spend", { spent: kr(task.spent_micros), cap: kr(cap) })}
+            {t("spend", { spent: usd(task.spent_micros), cap: usd(cap) })}
           </span>
         </div>
 

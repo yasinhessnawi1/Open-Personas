@@ -33,7 +33,7 @@ describe("BudgetIndicator", () => {
       session_spent_cents: 10,
       max_cents_per_session: 50,
     });
-    expect(getByText(/10\.00 of 50\.00/)).toBeInTheDocument();
+    expect(getByText(/10\.00¢ of 50\.00¢/)).toBeInTheDocument();
     expect(
       container
         .querySelector('[data-slot="budget-session"]')

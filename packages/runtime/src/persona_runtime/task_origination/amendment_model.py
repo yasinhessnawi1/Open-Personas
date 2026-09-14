@@ -1,7 +1,7 @@
 """The model-backed amendment interpreter — adjust-by-reply's precision layer (Spec A4, T9).
 
 A reply to a pending proposal that is not a clean confirmation may be an **amendment**: "make it
-8am", "cap it at 500kr instead", "only on weekdays". This turns such a reply into an *amended*
+8am", "cap it at $500 instead", "only on weekdays". This turns such a reply into an *amended*
 :class:`ContractDraft` by asking the model which clauses changed and to what, then applying only
 those clauses onto the existing draft (every unspecified clause is preserved — an amendment edits,
 never rebuilds). A reply that is not an amendment (a question, a topic change, a plain refusal)
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
 from persona.schema.conversation import ConversationMessage
-from persona.tasks import UpdateGranularity, UpdatePreference
+from persona.tasks import UpdateGranularity, UpdatePreference, format_micros, micros_from_dollars
 from persona.tools.categories import ActionCategory
 
 from persona_runtime.errors import ScheduleParseError
@@ -66,7 +66,7 @@ Reply with ONLY a JSON object, no prose:
 {"amends": true|false,
  "goal": "<new goal, if changed>",
  "scope": "<new scope, if changed>",
- "spend_cap_kr": <new spending cap in kroner, if changed>,
+ "spend_cap_usd": <new spending cap in US dollars, if changed>,
  "clear_spend": true,            // only if the user removed the spending permission
  "schedule_rrule": "FREQ=...;BYHOUR=..",  // an RFC-5545 RRULE, if changed to a recurring cadence
  "one_time_at": "<ISO-8601 local datetime, if changed to a single moment>",
@@ -77,7 +77,6 @@ If the reply is not an amendment at all, reply with {"amends": false}.
 
 _MAX_TOKENS = 400
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-_MICROS_PER_KR = 10_000
 _GRANULARITIES = {g.value for g in UpdateGranularity}
 
 
@@ -93,7 +92,7 @@ class ModelAmendmentInterpreter:
         now = self._now()
         current = (
             f"goal: {draft.goal}\nscope: {draft.scope or '(none)'}\n"
-            f"spend_cap_kr: {self._current_cap_kr(draft)}\n"
+            f"spend_cap_usd: {self._current_cap_usd(draft)}\n"
             f"updates: {draft.updates.granularity.value} / {draft.updates.channel or 'home'}"
         )
         if draft.schedule is not None:
@@ -124,9 +123,9 @@ class ModelAmendmentInterpreter:
         return datetime.now(UTC)
 
     @staticmethod
-    def _current_cap_kr(draft: ContractDraft) -> str:
+    def _current_cap_usd(draft: ContractDraft) -> str:
         cap = next((g.cap_micros for g in draft.grants if g.category is ActionCategory.SPEND), None)
-        return "(none)" if cap is None else str(cap // _MICROS_PER_KR)
+        return "(none)" if cap is None else format_micros(cap)
 
     def _apply(self, text: str, draft: ContractDraft) -> ContractDraft | None:
         """Apply the model's clause patch onto ``draft`` (present clauses only), or ``None``."""
@@ -155,11 +154,11 @@ class ModelAmendmentInterpreter:
     def _apply_spend(self, payload: dict[str, object], draft: ContractDraft) -> ContractDraft:
         if payload.get("clear_spend") is True:
             return clear_grant(draft, ActionCategory.SPEND)
-        cap = payload.get("spend_cap_kr")
+        cap = payload.get("spend_cap_usd")
         if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0:
             return set_grant(
                 draft,
-                GrantSpec(category=ActionCategory.SPEND, cap_micros=int(cap * _MICROS_PER_KR)),
+                GrantSpec(category=ActionCategory.SPEND, cap_micros=micros_from_dollars(cap)),
             )
         return draft
 

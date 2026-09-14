@@ -70,7 +70,8 @@ class JobContext(Protocol):
         """Record a spend event attributable to THIS job (criterion 9, D-A0-X-metering-bar).
 
         ``kind`` is the spend class (``"model"`` / ``"sandbox"`` / ``"external"``);
-        ``amount_micros`` is the spend in micro-units (micro-credits / micro-$),
+        ``amount_micros`` is the spend in ledger micros (a hundredth of a US cent, so
+        10 000 to the dollar — ``persona.tasks.MICROS_PER_DOLLAR``; NOT micro-dollars),
         an integer to avoid float drift. Recorded into the EXISTING observability
         ledger keyed by ``job_id`` — A0 *meters* (records), A2 accounts, A3
         enforces. This never deducts credits; a charged handler does that

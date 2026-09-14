@@ -55,10 +55,11 @@ class GrantSpec(BaseModel):
         category: The action category this grant governs.
         decision: The posture the grant sets (usually ``ALLOW`` to loosen a gated category,
             or ``DENY`` to tighten beyond the default).
-        cap_micros: For a ``SPEND`` grant, the spend cap in micros (1 kr = 10_000 micros);
+        cap_micros: For a ``SPEND`` grant, the spend cap in micros (1 USD = 10 000 micros,
+            ``persona.tasks.MICROS_PER_DOLLAR``);
             ``None`` for non-spend grants.
         human: The persona-voiced echo line, stated prominently
-            ("I may book it if it's under 1500kr — a spend permission with a 1500kr cap").
+            ("I may book it if it's under $1500 — a spend permission with a $1500 cap").
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

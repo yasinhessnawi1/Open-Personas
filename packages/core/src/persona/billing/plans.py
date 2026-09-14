@@ -7,7 +7,8 @@ NOT the actual model strings (those stay in ``PERSONA_<TIER>_MODELS`` env, owner
 go-live) and NOT any enforcement (the per-plan model policy is T5; the paywall/webhook
 is T2/T3). Under the community edition the catalog is inert — there is no paywall.
 
-Accounting: ``1 credit = 1¢`` (M3). Plan prices and allowances are stored in **credits**
+Accounting: ``1 credit = 1 US cent`` (M3). Plan prices and allowances are stored in
+**credits**
 (= cents) so they compose with the ledger without conversion; the ``$`` view is the
 :func:`credits_to_dollars` / :func:`format_dollars` presentation layer (D-M4-1).
 """
@@ -38,7 +39,8 @@ __all__ = [
     "payg_pack_code",
 ]
 
-#: Cents per dollar — the ledger unit is 1 credit = 1¢ (M3), so 1 dollar = 100 credits.
+#: US cents per US dollar — the ledger unit is 1 credit = 1 cent (M3), so 1 dollar = 100
+#: credits. USD is the only currency this system has (currency audit, 2026-09-14).
 _CENTS_PER_DOLLAR = 100
 
 

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from persona.errors import TaskNotFoundError
 from persona.schema.tools import ToolResult
+from persona.tasks.ledger import format_micros
 from persona.tasks.reader import (
     IntrospectionStatus,
     TaskStateView,
@@ -130,5 +131,5 @@ def _render_view(view: TaskStateView) -> str:
         lines.append("Open questions:")
         lines.extend(f"  - {q}" for q in view.open_questions)
     if view.spent_micros:
-        lines.append(f"Spent so far: {view.spent_micros / 10_000:g}kr")
+        lines.append(f"Spent so far: {format_micros(view.spent_micros)}")
     return "\n".join(lines)

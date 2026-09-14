@@ -2,8 +2,8 @@
 
 import { useLocale, useTranslations } from "next-intl";
 
-import { kr } from "@/components/tasks/task-row";
 import type { MorningDigest } from "@/lib/api/review-client";
+import { usdFine } from "@/lib/money";
 
 /**
  * Spec R11 (B2) — the Activity dateline, in the ratified A6-R-1 "Morning
@@ -11,7 +11,7 @@ import type { MorningDigest } from "@/lib/api/review-client";
  *
  *     Thursday morning.
  *     *Three things* need you.
- *     5 Jul · 07:00  ·  3 personas worked overnight  ·  kr 0.64 spent
+ *     5 Jul · 07:00  ·  3 personas worked overnight  ·  $0.64 spent
  *
  * Editorial Fraunces headline; the needs-you count is the ONE accent moment
  * (italic, terracotta) — loud only where it informs. Every number is honest:
@@ -34,13 +34,6 @@ export function personasWorkedCount(digest: MorningDigest): number {
   for (const section of digest.sections)
     for (const item of section.items) ids.add(item.persona_id);
   return ids.size;
-}
-
-/** Overnight spends are often sub-1kr; keep two decimals there (the artifact's
- * "kr 0.64 spent") where the shared `kr()` would flatten it to one. */
-function krFine(micros: number): string {
-  const v = micros / 10_000;
-  return v < 1 ? v.toFixed(2) : kr(micros);
 }
 
 function daypartKey(
@@ -74,7 +67,7 @@ export function ReviewDateline({ digest }: { digest: MorningDigest }) {
   const meta: string[] = [`${date} · ${time}`];
   if (worked > 0) meta.push(t("worked", { count: worked }));
   if (digest.total_spent_micros > 0)
-    meta.push(t("spent", { amount: krFine(digest.total_spent_micros) }));
+    meta.push(t("spent", { amount: usdFine(digest.total_spent_micros) }));
 
   return (
     <div className="flex flex-col gap-3" data-slot="review-dateline">

@@ -21,14 +21,13 @@ import {
   type TaskDetail as TaskDetailData,
 } from "@/lib/api/tasks-client";
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
+import { microsFromDollars, usd } from "@/lib/money";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { useTaskSignal } from "@/lib/task-signal";
 import { cn } from "@/lib/utils";
-
 import { InitiativeDialControl } from "./initiative-dial-control";
 import { RunHistory } from "./run-history";
 import { TaskReschedule } from "./task-reschedule";
-import { kr } from "./task-row";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 /** How often the detail re-reads while a run is live (D-W1-3); off otherwise. */
@@ -59,7 +58,7 @@ export function TaskDetail({
   const [busy, setBusy] = useState(false);
   const [reflection, setReflection] = useState<string | null>(null);
   const [showQuestions, setShowQuestions] = useState(false);
-  const [extendKr, setExtendKr] = useState("");
+  const [extendUsd, setExtendUsd] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -129,7 +128,7 @@ export function TaskDetail({
   );
 
   const doExtend = useCallback(async () => {
-    const amount = Math.round(Number(extendKr) * 10_000); // kr → micros
+    const amount = microsFromDollars(extendUsd);
     if (!Number.isFinite(amount) || amount <= 0) return;
     setBusy(true);
     try {
@@ -137,19 +136,19 @@ export function TaskDetail({
       setReflection(
         r.applied
           ? t("budgetExtended", {
-              from: kr(r.old_cap_micros),
-              to: kr(r.new_cap_micros),
+              from: usd(r.old_cap_micros),
+              to: usd(r.new_cap_micros),
             })
           : r.note,
       );
-      setExtendKr("");
+      setExtendUsd("");
       await refetch();
     } catch {
       toast.error(t("commandFailed"));
     } finally {
       setBusy(false);
     }
-  }, [extendKr, getToken, taskId, refetch, toast, t]);
+  }, [extendUsd, getToken, taskId, refetch, toast, t]);
 
   if (detail === null) return <SkeletonBlock className="h-64" />;
   if (detail === "error") {
@@ -268,8 +267,8 @@ export function TaskDetail({
             </p>
             <span className="ml-auto text-sm tabular-nums">
               {t("spend", {
-                spent: kr(detail.budget.spent_micros),
-                cap: kr(detail.budget.cap_micros),
+                spent: usd(detail.budget.spent_micros),
+                cap: usd(detail.budget.cap_micros),
               })}
             </span>
           </div>
@@ -301,8 +300,8 @@ export function TaskDetail({
                 type="number"
                 inputMode="numeric"
                 min={1}
-                value={extendKr}
-                onChange={(e) => setExtendKr(e.target.value)}
+                value={extendUsd}
+                onChange={(e) => setExtendUsd(e.target.value)}
                 placeholder={t("extendPlaceholder")}
                 className="h-8 w-28"
                 aria-label={t("extendLabel")}
@@ -310,7 +309,7 @@ export function TaskDetail({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy || !extendKr}
+                disabled={busy || !extendUsd}
                 onClick={doExtend}
               >
                 {t("extend")}

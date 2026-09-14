@@ -33,6 +33,11 @@ jobs:
       # what an operator follows when pushing wheels to PyPI. The script self-tests
       # against the real passages on every run, so it cannot rot into a no-op.
       - run: uv run python scripts/check_licence_claims.py
+      # One currency (USD), one scale, named in two places that cannot import each
+      # other. R9-172 shipped a dollar amount with a kroner label for months because
+      # the constant 10_000 is micros per DOLLAR and was named _MICROS_PER_KR: every
+      # number was right and only the word was wrong, which no test can fail on.
+      - run: uv run python scripts/check_money_units.py
       # Match the local check matrix exactly: strict on the MIT/PolyForm engine
       # packages (core + runtime + voice + connectors), standard on api.
       # Strict tiers come from the canonical per-spec gates: every V2 task ran

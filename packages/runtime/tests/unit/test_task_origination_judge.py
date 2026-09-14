@@ -110,19 +110,19 @@ async def test_json_in_markdown_fence_is_parsed() -> None:
 @pytest.mark.asyncio
 async def test_spend_cap_becomes_a_spend_grant() -> None:
     result = await _judge(
-        '{"verdict": "standing", "goal": "book the trip", "spend_cap_kr": 1500, '
-        '"spend_note": "I may book under 1500kr"}'
+        '{"verdict": "standing", "goal": "book the trip", "spend_cap_usd": 1500, '
+        '"spend_note": "I may book under $1500"}'
     )
     assert result.draft is not None
     spend = [g for g in result.draft.grants if g.category is ActionCategory.SPEND]
     assert len(spend) == 1
-    assert spend[0].cap_micros == 15_000_000  # 1500 kr → micros
-    assert spend[0].human == "I may book under 1500kr"
+    assert spend[0].cap_micros == 15_000_000  # $1500 → micros (MICROS_PER_DOLLAR)
+    assert spend[0].human == "I may book under $1500"
 
 
 @pytest.mark.asyncio
 async def test_zero_or_negative_spend_cap_is_ignored() -> None:
-    result = await _judge('{"verdict": "standing", "goal": "g", "spend_cap_kr": 0}')
+    result = await _judge('{"verdict": "standing", "goal": "g", "spend_cap_usd": 0}')
     assert result.draft is not None
     assert result.draft.grants == ()
 

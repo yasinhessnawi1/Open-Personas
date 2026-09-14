@@ -51,11 +51,11 @@ describe("ActivityState (P2 T5 — live using-X state)", () => {
     const { container } = render(
       <ActivityState
         activities={[
-          { ...running("a1", "Spending 1500 kr"), status: "awaiting_approval" },
+          { ...running("a1", "Spending $1500"), status: "awaiting_approval" },
         ]}
       />,
     );
-    expect(screen.getByRole("status")).toHaveTextContent("Spending 1500 kr");
+    expect(screen.getByRole("status")).toHaveTextContent("Spending $1500");
     expect(screen.getByRole("status").textContent).not.toContain("…");
     const dot = container.querySelector(".v-activity-dot");
     expect(dot?.getAttribute("data-awaiting")).toBe("true");

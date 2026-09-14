@@ -37,13 +37,13 @@ def _schedule(human: str = "every weekday at 07:00 your time") -> ParsedSchedule
 def _draft_with_two_grants() -> ContractDraft:
     return ContractDraft(
         goal="track fares and book the trip",
-        scope="under 2000kr",
+        scope="under $2000",
         schedule=_schedule(),
         grants=(
             GrantSpec(
                 category=ActionCategory.SPEND,
                 cap_micros=15_000_000,
-                human="I may book it if it's under 1500kr, a spend permission with a 1500kr cap",
+                human="I may book it if it's under $1500, a spend permission with a $1500 cap",
             ),
             GrantSpec(
                 category=ActionCategory.EXTERNAL_MUTATE,
@@ -63,7 +63,7 @@ def test_voice_echo_speaks_goal_schedule_tz_and_every_grant() -> None:
     assert "every weekday at 07:00 your time" in echo
     assert "Europe/Oslo" in echo  # the concrete zone is still named
     # BOTH grants are spoken (no grant dropped on voice — the completeness guarantee).
-    assert "I may book it if it's under 1500kr, a spend permission with a 1500kr cap" in echo
+    assert "I may book it if it's under $1500, a spend permission with a $1500 cap" in echo
     assert "I can hold a seat on the booking site" in echo
 
 
@@ -150,7 +150,7 @@ def test_voice_bounds_folds_grants_into_one_clause_not_a_list() -> None:
     assert line.startswith("I'll also be allowed to:")
     assert "  - " not in line
     # both grants present, joined
-    assert "1500kr cap" in line
+    assert "$1500 cap" in line
     assert "hold a seat" in line
 
 
@@ -161,7 +161,7 @@ def test_voice_bounds_uses_default_grant_text_when_human_absent() -> None:
         grants=(GrantSpec(category=ActionCategory.SPEND, cap_micros=5_000_000),),
     )
     line = render_clause(draft, Clause.BOUNDS, EchoMode.VOICE)
-    assert "a spend permission, up to 500kr" in line
+    assert "a spend permission, up to $500.00" in line
 
 
 # --- CHAT stays byte-identical -------------------------------------------------------------
@@ -179,10 +179,10 @@ def test_chat_echo_snapshot_pinned() -> None:
     draft = _draft_with_two_grants()
     expected = (
         "Goal: track fares and book the trip\n"
-        "Scope: under 2000kr\n"
+        "Scope: under $2000\n"
         "When: every weekday at 07:00 your time · Europe/Oslo\n"
         "Within bounds:\n"
-        "  - I may book it if it's under 1500kr, a spend permission with a 1500kr cap\n"
+        "  - I may book it if it's under $1500, a spend permission with a $1500 cap\n"
         "  - I can hold a seat on the booking site\n"
         "Updates: at milestones (and when it's done) on web"
     )

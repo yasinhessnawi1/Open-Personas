@@ -96,7 +96,7 @@ ONLY_STEP="${ONLY_STEP:-}"
 
 # Canonical step names, in run order. This is what --only accepts, and every
 # step's log file under .ci-local/<run>/ is named "<one of these>.log".
-CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared licence-claims mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
+CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared licence-claims money-units mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
 
 is_valid_step() { # name
   local n
@@ -480,6 +480,12 @@ fi
 if want_step "licence-claims"; then
   run_step "licence-claims" "uv run python scripts/check_licence_claims.py" \
     uv run python scripts/check_licence_claims.py
+fi
+# One currency (USD), one scale. R9-172: the task surface rendered dollars labelled "kr"
+# for months because the constant was the dollar scale wearing a krone's name.
+if want_step "money-units"; then
+  run_step "money-units" "uv run python scripts/check_money_units.py" \
+    uv run python scripts/check_money_units.py
 fi
 if want_step "ruff-format"; then
   run_step "ruff-format"  "uv run ruff format --check"  uv run ruff format --check

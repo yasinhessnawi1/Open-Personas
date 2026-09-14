@@ -80,11 +80,11 @@ async def test_goal_change_applies_and_preserves_other_clauses() -> None:
 
 @pytest.mark.asyncio
 async def test_spend_cap_becomes_a_spend_grant() -> None:
-    amended = await _amend('{"amends": true, "spend_cap_kr": 500}')
+    amended = await _amend('{"amends": true, "spend_cap_usd": 500}')
     assert amended is not None
     spend = [g for g in amended.grants if g.category is ActionCategory.SPEND]
     assert len(spend) == 1
-    assert spend[0].cap_micros == 5_000_000  # 500 kr → micros
+    assert spend[0].cap_micros == 5_000_000  # $500 → micros (MICROS_PER_DOLLAR)
 
 
 @pytest.mark.asyncio

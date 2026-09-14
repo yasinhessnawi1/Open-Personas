@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
 from persona.schema.conversation import ConversationMessage
-from persona.tasks import Deliverable, DeliverableFormat
+from persona.tasks import Deliverable, DeliverableFormat, micros_from_dollars
 from persona.tools.categories import ActionCategory
 
 from persona_runtime.errors import ScheduleParseError
@@ -86,7 +86,7 @@ Reply with ONLY a JSON object, no prose:
 {"verdict": "standing"|"now_work"|"ambiguous", \
 "goal": "<the objective, self-contained, in your words>", \
 "scope": "<constraints + any detail the runner needs, self-contained>", \
-"spend_cap_kr": <number if a spending limit was offered>, \
+"spend_cap_usd": <number, in US dollars, if a spending limit was offered>, \
 "spend_note": "<one short line restating the spend permission, if any>", \
 "deliverable_format": "findings_markdown"|"prose"|"table"|"file", \
 "deliverable_filename": "<the filename, only for the file format>", \
@@ -154,7 +154,7 @@ def dangling_reference(text: str) -> bool:
     return bool(_DANGLING_REFERENCE_RE.search(text))
 
 
-_MICROS_PER_KR = 10_000
+
 
 
 class ModelStandingIntentJudge:
@@ -321,14 +321,14 @@ class ModelStandingIntentJudge:
     @staticmethod
     def _spend_grant(payload: dict[str, object]) -> tuple[GrantSpec, ...]:
         """Build a SPEND grant from an offered cap, or none."""
-        cap = payload.get("spend_cap_kr")
+        cap = payload.get("spend_cap_usd")
         if not isinstance(cap, (int, float)) or isinstance(cap, bool) or cap <= 0:
             return ()
         note = str(payload.get("spend_note", "")).strip()
         return (
             GrantSpec(
                 category=ActionCategory.SPEND,
-                cap_micros=int(cap * _MICROS_PER_KR),
+                cap_micros=micros_from_dollars(cap),
                 human=note,
             ),
         )

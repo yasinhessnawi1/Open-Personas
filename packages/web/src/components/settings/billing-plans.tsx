@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api/client";
 import type { components } from "@/lib/api/schema";
 import { useApi } from "@/lib/api/use-api";
+import { dollarsFromCredits } from "@/lib/money";
 
 type BillingConfig = components["schemas"]["BillingConfigResponse"];
 
@@ -28,11 +29,6 @@ type BillingConfig = components["schemas"]["BillingConfigResponse"];
  * unconfigured Price — the backend 400s, and the honest error is surfaced rather than
  * left as a dead spinner (D-M5-3's no-dead-affordance rule applied to failure states).
  */
-
-/** Credits are cents (1 credit = 1¢), so `$` is a pure presentation concern. */
-function dollars(credits: number): string {
-  return (credits / 100).toFixed(credits % 100 === 0 ? 0 : 2);
-}
 
 type Busy = {
   readonly kind: "plan" | "pack" | "portal";
@@ -149,7 +145,7 @@ export function BillingPlans() {
                   </p>
                   <p className="type-caption text-muted-foreground">
                     {t("planTerms", {
-                      price: dollars(plan.monthly_price_credits),
+                      price: dollarsFromCredits(plan.monthly_price_credits),
                       credits: plan.included_allowance_credits,
                     })}
                   </p>
@@ -206,7 +202,7 @@ export function BillingPlans() {
               {busy?.kind === "pack" && busy.code === pack.code
                 ? t("opening")
                 : t("packLabel", {
-                    price: dollars(pack.price_credits),
+                    price: dollarsFromCredits(pack.price_credits),
                     credits: pack.granted_credits,
                   })}
             </Button>

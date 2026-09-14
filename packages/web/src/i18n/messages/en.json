@@ -217,7 +217,7 @@
     "cancelBody": "No payment was taken and nothing changed. Come back whenever you are ready.",
     "backToSettings": "Back to settings",
     "balanceLabel": "Credits",
-    "balanceHint": "{allowance} from your monthly allowance, {payg} from credit packs.",
+    "balanceHint": "{allowance} credits from your monthly allowance, {payg} from credit packs.",
     "walletLoading": "Checking your balance.",
     "walletUnavailable": "We could not load your balance just now. Refresh to try again.",
     "grantPending": "Your credits are on the way. This page updates the moment they land.",
@@ -301,7 +301,7 @@
   "taskList": {
     "title": "Tasks",
     "subtitle": "What your personas are working on. Waiting on you first, then in progress, then done.",
-    "spend": "kr {spent} / {cap}",
+    "spend": "{spent} / {cap}",
     "resolve": "Resolve",
     "pickUp": "Pick up",
     "pickedUp": "Picked up. They're back on it.",
@@ -326,7 +326,7 @@
   "taskDetail": {
     "title": "Task",
     "back": "All tasks",
-    "spend": "kr {spent} / {cap}",
+    "spend": "{spent} / {cap}",
     "whereItStands": "Where it stands",
     "nextStep": "Next:",
     "openQuestions": "Open questions",
@@ -341,8 +341,8 @@
     "preview": "Preview",
     "applyReschedule": "Apply",
     "extend": "Raise cap",
-    "extendPlaceholder": "kr",
-    "extendLabel": "Amount to add, in kroner",
+    "extendPlaceholder": "$",
+    "extendLabel": "Amount to add, in US dollars",
     "openRun": "Open run",
     "loadFailed": "Couldn't load this task. Try again in a moment.",
     "commandFailed": "That didn't go through. Try again in a moment.",
@@ -351,7 +351,7 @@
     "dialFailed": "Couldn't change the dial. Try again in a moment.",
     "rescheduleFailed": "Couldn't preview that change. Try again in a moment.",
     "rescheduleConflict": "This schedule changed since you opened it. Here's the current plan.",
-    "budgetExtended": "Budget raised from kr {from} to kr {to}.",
+    "budgetExtended": "Budget raised from {from} to {to}.",
     "reflect": {
       "pause": "Paused.",
       "resume": "Resumed.",
@@ -418,7 +418,7 @@
       "nothing": "Nothing needs you.",
       "needs": "<em>{count, plural, =1 {One thing} =2 {Two things} =3 {Three things} =4 {Four things} =5 {Five things} =6 {Six things} =7 {Seven things} =8 {Eight things} =9 {Nine things} other {# things}}</em> {count, plural, =1 {needs} other {need}} you.",
       "worked": "{count, plural, =1 {1 persona worked overnight} other {# personas worked overnight}}",
-      "spent": "kr {amount} spent"
+      "spent": "{amount} spent"
     },
     "quickAccess": {
       "heading": "Quick access",
@@ -979,7 +979,7 @@
     },
     "budget": {
       "label": "Budget",
-      "session": "{spent} of {cap}¢ this session",
+      "session": "{spent}¢ of {cap}¢ this session",
       "sessionNoCap": "{spent}¢ this session",
       "approaching": "Approaching the session cap, so we're favouring cheaper models",
       "perTurnCap": "Per-turn cap {cap}¢",

@@ -149,7 +149,7 @@ def test_default_grant_text_used_when_human_absent() -> None:
         schedule=_schedule(),
         grants=(GrantSpec(category=ActionCategory.SPEND, cap_micros=5_000_000),),
     )
-    assert "a spend permission, up to 500kr" in render_clause(draft, Clause.BOUNDS)
+    assert "a spend permission, up to $500.00" in render_clause(draft, Clause.BOUNDS)
 
 
 def test_echo_prompt_artifact_is_versioned_and_embeds_structure() -> None:

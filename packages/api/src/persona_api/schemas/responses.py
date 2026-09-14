@@ -1417,7 +1417,14 @@ class AcceptanceCriterionOut(_Output):
 
 
 class LedgerOut(_Output):
-    """The cost ledger, per kind + total (µ-dollars)."""
+    """The cost ledger, per kind + total, in ledger micros.
+
+    A micro is a hundredth of a US cent, so 10 000 micros is one dollar
+    (``persona.tasks.MICROS_PER_DOLLAR``). This docstring said "µ-dollars" until
+    2026-09-15, which is a millionth of a dollar and wrong by a factor of a hundred. It
+    misled a careful reader inside the very audit that found it, and the error was mirrored
+    into the generated web client, so it was costing real time.
+    """
 
     model_micros: int
     sandbox_micros: int

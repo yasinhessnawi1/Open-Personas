@@ -26,7 +26,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from persona.tasks import Revived
+from persona.tasks import Revived, micros_from_dollars
 from sqlalchemy import text
 
 from persona_api.services import audit_service
@@ -73,33 +73,41 @@ _BUDGET_EXTENDED = "budget.extended"
 _BUDGET_REACHED = "budget.reached"
 _BUDGET_APPROACHING = "budget.approaching"
 
-#: Norwegian kroner → micros (the ledger unit). 1 kr = 10_000 micros.
+#: What a user may write when they name an amount, in a chat reply.
 #:
-#: R9-161 note, so the next reader is not misled: the ledger's micros are now filled by the
-#: leg meter, which prices through the M2/M3 path, and that path is denominated in cents at
-#: 1 credit = 1¢, i.e. 10 000 micros to one DOLLAR (``persona.tasks.micros_from_cents``).
-#: This input side, the Tasks surface's rendering and the origination models all still speak
-#: kroner, and nothing in the repo holds an exchange rate. So a cap the user states in kroner
-#: is enforced against the same number of dollars. That is a currency-labelling decision the
-#: product owes an answer to (denominate the task budget in the same currency as the wallet
-#: M4 funds, or introduce a real rate); it is deliberately NOT resolved here, because the
-#: wrong fix is to invent a rate and bake it into a safety bound. Before R9-161 this field
-#: was compared against a token count, so no currency reading of it was true at all.
-_MICROS_PER_KR = 10_000
-_KR_AMOUNT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:kr|kroner|nok)", re.IGNORECASE)
+#: Ruled 2026-09-15 (the currency unification): this product has exactly one currency and it
+#: is USD. The audit of 2026-09-14 found no currency column and no rate column on any money
+#: table in the schema, so a stored charge does not record what the customer was billed or in
+#: what currency, and displaying it as anything but what it is would silently restate the
+#: value of every past transaction at today's rate. There is therefore nothing to convert
+#: FROM: this parser reads a dollar figure.
+#:
+#: Before this, the pattern accepted ``kr`` / ``kroner`` / ``nok`` and multiplied by 10 000,
+#: which is micros per DOLLAR. A user asking for a 100 kr cap was granted a 100 USD cap,
+#: about ten times what they authorised, and the error was invisible because the constant was
+#: named ``_MICROS_PER_KR`` while holding the dollar scale (R9-172).
+#:
+#: The kroner spellings stay in the pattern as INPUT only, and are treated as dollars with no
+#: conversion, because a Norwegian user typing "legg til 50kr" should not have their reply
+#: silently unrecognised and be asked again. Every surface that states the cap back to them
+#: says dollars, so the mismatch is visible in the confirmation rather than hidden in a bound.
+_AMOUNT = re.compile(
+    r"(?:\$\s*(\d+(?:[.,]\d+)?)|(\d+(?:[.,]\d+)?)\s*(?:dollars?|usd|kr|kroner|nok))",
+    re.IGNORECASE,
+)
 
 
 def parse_extension_micros(reply: str) -> int | None:
-    """Parse a one-reply extension amount ("add another 50kr" / "legg til 50kr") → micros.
+    """Parse a one-reply extension amount ("add another $50" / "50 dollars") → micros.
 
     Returns the micros to add, or ``None`` if no amount is recognisable (the caller then
     clarifies rather than guessing — the same default-to-not-act floor as reply parsing).
     """
-    match = _KR_AMOUNT.search(reply)
+    match = _AMOUNT.search(reply)
     if match is None:
         return None
-    kroner = float(match.group(1).replace(",", "."))
-    return int(round(kroner * _MICROS_PER_KR))
+    amount = match.group(1) or match.group(2)
+    return micros_from_dollars(amount.replace(",", "."))
 
 
 class BudgetState(StrEnum):

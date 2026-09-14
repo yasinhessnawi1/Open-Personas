@@ -20,7 +20,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from persona.tasks import UpdateGranularity, UpdatePreference
+from persona.tasks import UpdateGranularity, UpdatePreference, format_micros
 from persona.tools.categories import ActionCategory
 
 if TYPE_CHECKING:
@@ -288,8 +288,7 @@ def _render_updates_voice(updates: UpdatePreference) -> str:
 def _default_grant_text(grant: GrantSpec) -> str:
     """A safe fallback grant line when the draft did not supply persona-voiced text."""
     if grant.category is ActionCategory.SPEND and grant.cap_micros is not None:
-        kr = grant.cap_micros / 10_000
-        return f"a spend permission, up to {kr:g}kr"
+        return f"a spend permission, up to {format_micros(grant.cap_micros)}"
     return f"a {grant.category.value} permission ({grant.decision.value})"
 
 

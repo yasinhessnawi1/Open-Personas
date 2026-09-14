@@ -160,7 +160,7 @@ describe("Review", () => {
   it("renders the A6-R-1 dateline: worded needs-you count incl. overflow, workers, spend (R11-B2)", async () => {
     api.fetchReview.mockResolvedValue(
       digest({
-        total_spent_micros: 6_400, // kr 0.64
+        total_spent_micros: 6_400, // $0.64
         sections: [
           {
             kind: "waiting",
@@ -189,9 +189,9 @@ describe("Review", () => {
     // 1 waiting + 1 waiting-overflow + 1 stuck = Three things, worded + accent em.
     expect(dateline.querySelector("em")?.textContent).toBe("Three things");
     expect(dateline.textContent).toContain("need you.");
-    // 2 distinct personas across sections; spend rendered in kr.
+    // 2 distinct personas across sections; spend rendered in USD.
     expect(dateline.textContent).toContain("2 personas worked overnight");
-    expect(dateline.textContent).toContain("kr 0.64 spent");
+    expect(dateline.textContent).toContain("$0.64 spent");
   });
 
   it("reads 'Nothing needs you.' on a quiet digest — no fabricated segments", async () => {
