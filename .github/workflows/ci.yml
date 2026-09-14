@@ -17,6 +17,16 @@ jobs:
       - run: uv sync --all-packages
       - run: uv run ruff check
       - run: uv run ruff format --check
+      # The open-core licence boundary: the MIT engine must never import the
+      # PolyForm NC app. README.md says twice that this is enforced in CI, and
+      # until 2026-09-14 nothing ran it: the contract existed and held only by
+      # author discipline. A promise this public needs a gate behind it.
+      - run: uv run lint-imports
+      # Every feature flag is declared in .env.example with its state, even when
+      # it ships off. This ran in scripts/ci-local.sh only, so a pull request could
+      # merge green with an undeclared flag, which is the exact failure the rule
+      # was written after.
+      - run: uv run python scripts/check_flags_declared.py
       # Match the local check matrix exactly: strict on the MIT/PolyForm engine
       # packages (core + runtime + voice + connectors), standard on api.
       # Strict tiers come from the canonical per-spec gates: every V2 task ran
