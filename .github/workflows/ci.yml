@@ -27,6 +27,12 @@ jobs:
       # merge green with an undeclared flag, which is the exact failure the rule
       # was written after.
       - run: uv run python scripts/check_flags_declared.py
+      # No document may call the MIT engine "source available", "noncommercial" or
+      # PolyForm. That rule was written in prose inside ARCHITECTURE section 9.5 and
+      # then broken five times anyway, the worst in PUBLISH_CHECKLIST.md, which is
+      # what an operator follows when pushing wheels to PyPI. The script self-tests
+      # against the real passages on every run, so it cannot rot into a no-op.
+      - run: uv run python scripts/check_licence_claims.py
       # Match the local check matrix exactly: strict on the MIT/PolyForm engine
       # packages (core + runtime + voice + connectors), standard on api.
       # Strict tiers come from the canonical per-spec gates: every V2 task ran

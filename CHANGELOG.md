@@ -2360,7 +2360,7 @@ prompts, K4 wellbeing, K5 graph UI build on it).
 ## [1.0.0] - 2026-06-20
 
 > **Open Persona v1.0, first stable release.** The complete four-layer platform: a
-> source-available core (`persona-core`, MIT) with four typed memory stores
+> MIT-licensed core (`persona-core`) with four typed memory stores
 > (identity / self_facts / worldview / episodic), versioned append-only history, and a
 > CLI; the runtime (`persona-runtime`, MIT) conversation loop, rule-based tier router,
 > and agentic engine; the hosted FastAPI service (`persona-api`, PolyForm-NC) with
