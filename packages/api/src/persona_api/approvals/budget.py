@@ -52,8 +52,19 @@ __all__ = [
 _log = get_logger("api.approvals.budget")
 
 #: The platform default per-task cap for an unconfigured task (env-tunable at the worker:
-#: ``PERSONA_TASK_BUDGET_DEFAULT_MICROS``). Conservative — an unconfigured task is still bounded.
-PLATFORM_DEFAULT_BUDGET_MICROS = 10_000_000
+#: ``PERSONA_TASK_BUDGET_DEFAULT_MICROS``). An unconfigured task is still bounded.
+#:
+#: REVALUED 2026-09-14. This was 10_000_000 and described as conservative, which was true while
+#: the ledger counted TOKENS. R9-161 made the ledger hold real money without changing this number,
+#: and 10 000 micros is one dollar, so the default silently became a 1000 dollar cap per task, with
+#: ``_MAX_EXTEND_MICROS`` tracking it so one extension could add another 1000. Nothing flagged it
+#: because the constant itself never changed, which is exactly how a unit change does damage.
+#:
+#: 100_000 micros is 10 dollars. A measured leg on this product costs a few cents, so ten dollars
+#: is roughly a hundred and fifty legs: generous for an unconfigured task and survivable if one
+#: runs away. The NUMBER is a product decision and is registered for the owner; what is not
+#: negotiable is that it be stated in the unit it is actually enforced in.
+PLATFORM_DEFAULT_BUDGET_MICROS = 100_000
 
 #: The "approaching" threshold (fraction of the effective cap).
 _APPROACHING_FRACTION = 0.8

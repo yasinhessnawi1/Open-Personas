@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from persona.tasks import Contract, Task, TaskCheckpoint, WaitKind
+from persona_api.approvals.budget import PLATFORM_DEFAULT_BUDGET_MICROS
 from persona_api.auth import AuthenticatedUser
 from persona_api.routes.tasks import (
     cancel_task,
@@ -87,7 +88,10 @@ async def test_list_tasks_shows_active_and_terminal(
     by_id = {s.task_id: s for s in summaries}
     assert by_id["t_active"].status == "just_created"  # started, no checkpoint yet
     assert by_id["t_done"].status == "completed"
-    assert by_id["t_done"].budget_cap_micros == 10_000_000  # the platform default cap
+    assert by_id["t_done"].budget_cap_micros == PLATFORM_DEFAULT_BUDGET_MICROS
+    # Read from the constant rather than hardcoded: this assertion said 10_000_000 and kept
+    # passing when that value silently became a 1000 dollar cap (R9-161 changed the unit, not
+    # the number). A test that restates a constant cannot notice the constant being wrong.
 
 
 async def test_task_detail_renders_contract_grants_budget_and_report(
@@ -105,7 +109,7 @@ async def test_task_detail_renders_contract_grants_budget_and_report(
     grants = {g.category: g.decision for g in detail.grants}
     assert grants["observe"] == "allow"  # free category
     assert grants["spend"] == "gate"  # gated-by-default (default policy)
-    assert detail.budget.cap_micros == 10_000_000
+    assert detail.budget.cap_micros == PLATFORM_DEFAULT_BUDGET_MICROS
     assert detail.budget.state == "ok"
     assert detail.report is not None
     assert detail.report.kind == "completed"
@@ -232,12 +236,21 @@ async def test_budget_extend_is_bounded_and_at_most_once(
 
     # bounded: an over-the-max increment is refused, not written.
     with pytest.raises(HTTPException) as exc:
-        await extend_budget("t1", BudgetExtendRequest(amount_micros=10_000_001), req, _USER)
+        await extend_budget(
+            "t1", BudgetExtendRequest(amount_micros=PLATFORM_DEFAULT_BUDGET_MICROS + 1), req, _USER
+        )
     assert exc.value.status_code == 422
 
-    result = await extend_budget("t1", BudgetExtendRequest(amount_micros=500_000), req, _USER)
+    # Derived from the cap, not a literal: a literal here silently became invalid when the
+    # constant was revalued, and the test then failed for a reason unrelated to its subject.
+    valid_increment = PLATFORM_DEFAULT_BUDGET_MICROS // 2
+    result = await extend_budget(
+        "t1", BudgetExtendRequest(amount_micros=valid_increment), req, _USER
+    )
     assert result.applied is True
-    assert result.new_cap_micros == result.old_cap_micros + 500_000  # old → new, bounded
+    assert result.new_cap_micros == result.old_cap_micros + valid_increment
     # the task un-paused (the extend armed it); a second extend now no-ops (at-most-once).
-    again = await extend_budget("t1", BudgetExtendRequest(amount_micros=500_000), req, _USER)
+    again = await extend_budget(
+        "t1", BudgetExtendRequest(amount_micros=valid_increment), req, _USER
+    )
     assert again.applied is False
