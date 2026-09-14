@@ -34,7 +34,7 @@ from persona.tasks.contract import (
     UpdatePreference,
 )
 from persona.tasks.entity import TASK_SCHEMA_VERSION, Task
-from persona.tasks.ledger import CostLedger, SpendKind
+from persona.tasks.ledger import MICROS_PER_CENT, CostLedger, SpendKind, micros_from_cents
 from persona.tasks.reader import (
     IntrospectionStatus,
     TaskStateReader,
@@ -98,6 +98,7 @@ __all__ = [
     "ContractBounds",
     "Deliverable",
     "DeliverableFormat",
+    "MICROS_PER_CENT",
     "CostLedger",
     "Decision",
     "AutoRetry",
@@ -116,6 +117,7 @@ __all__ = [
     "Revived",
     "ScheduledFire",
     "SpendKind",
+    "micros_from_cents",
     "Task",
     "TaskCheckpoint",
     "TaskKind",

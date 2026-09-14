@@ -57,9 +57,11 @@ from persona.tasks import (
     RecentLegSummary,
     ResumeTrigger,
     ScheduledFire,
+    SpendKind,
     TaskState,
     WaitKind,
     is_terminal,
+    micros_from_cents,
 )
 from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
@@ -71,7 +73,7 @@ from persona_api.tasks.leg_profile import leg_profile
 from persona_api.tasks.leg_retrieval import LegRetrieval  # noqa: TC001 (a constructor arg)
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import StuckReport, Task, TaskCheckpoint
@@ -83,7 +85,7 @@ if TYPE_CHECKING:
 
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
-    from persona_api.services.llm_usage_collector import UsageTotals
+    from persona_api.services.llm_usage_collector import LLMUsageSink
     from persona_api.tasks.continuation import TaskContinuation
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
@@ -171,20 +173,40 @@ class RunnableGuard(Protocol):
     def is_runnable(self, owner_id: str, task: Task) -> bool: ...
 
 
-class _LegBillingAccumulator:
-    """Sums a leg's real per-step model cost for the owner-billed deduct (Spec M3, T4b).
+class _LegCost:
+    """Prices one leg's real model cost, once, for the two things that need it.
 
     The leg's ``on_step_usage`` callback: each step's model-call usage is priced like
     a chat turn (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual preferred;
     else the resolver estimate; else unpriced). The cost is SUMMED across the leg's
-    steps (a leg can span tiers); the handler bills the total ONCE, after the CAS
-    append commits. On a re-delivery the leg re-runs and re-accumulates the SAME cost
-    — harmlessly discarded by the billing_key idempotency gate.
+    steps (a leg can span tiers), and the checkpoint distiller's own model call is
+    summed with them (D-W1-44): it is a call made because this leg ran, so it is part
+    of what the leg cost, not a surface of its own.
+
+    Two readers, one accumulation (the M2 one-pricing-truth rule):
+
+    * **The owner-billed deduct** (Spec M3, T4b): :meth:`result` in cents, billed ONCE
+      after the CAS append commits. On a re-delivery the leg re-runs and re-accumulates
+      the SAME cost, harmlessly discarded by the billing_key idempotency gate.
+    * **The task ledger** (R9-161): :meth:`ledger_spend` in ledger micros, the CURRENCY
+      unit the contract's ``total_budget_micros`` cap is written in. It is the executor's
+      injected meter, so a leg accrues what it really cost instead of, as before, the run's
+      raw token count. It records the PROVIDER cost, not the credit charge: the ledger is
+      an accounting of what the work costs (its kinds are model / sandbox / external, not
+      billing surfaces), the charge adds a markup and a per-leg floor that would make a
+      task of many near-free legs look expensive against its bound, and a safety bound must
+      not change meaning between the hosted and community editions.
+
+    Both are **reads**: the distillation is priced from the live usage sink at read time,
+    never folded in by a mutation, so the ledger read (inside the leg, after the distiller
+    has run) and the billing read (after it) return the same figure and neither can
+    double-count the other.
     """
 
-    def __init__(self, cost_source: CostSource | None) -> None:
+    def __init__(self, cost_source: CostSource | None, distillation: LLMUsageSink) -> None:
         self._cost_source = cost_source
-        self._total_cents = 0.0
+        self._distillation = distillation
+        self._step_cents = 0.0
         self._basis: str | None = None
 
     async def on_step_usage(self, usage: StepUsage) -> None:
@@ -196,24 +218,24 @@ class _LegBillingAccumulator:
             actual_cost_usd=usage.cost_usd,
             source=self._cost_source,
         )
-        self._total_cents += cost_cents
+        self._step_cents += cost_cents
         # Prefer a genuine basis over ``unpriced`` (same-provider legs share one).
         if basis != "unpriced" or self._basis is None:
             self._basis = basis
 
-    async def add_distillation(self, totals: UsageTotals) -> None:
-        """Fold the checkpoint distiller's model call into this leg's cost (D-W1-44).
+    def _distillation_cents(self) -> tuple[float, str | None]:
+        """The checkpoint distiller's model call, priced like a step (D-W1-44).
 
-        Priced exactly like a step, because that is what it is: a model call made because
-        this leg ran. Zero usage (the deterministic writer, an unmetered install, a
-        distillation that never reached a model) adds nothing and leaves the basis alone,
-        so a leg that did not distil bills exactly what it billed before.
+        Priced through the same function as a step, but NOT fabricated as one: a
+        ``StepUsage`` carries a step index, and this call belongs to no step of the run.
+        Zero usage (the deterministic writer, an unmetered install, a distillation that
+        never reached a model) costs nothing and contributes no basis, so a leg that did
+        not distil bills exactly what it billed before.
         """
+        totals = self._distillation.totals()
         if not totals.prompt_tokens and not totals.completion_tokens:
-            return
-        # Priced through the same function as a step, but NOT fabricated as one: a
-        # ``StepUsage`` carries a step index, and this call belongs to no step of the run.
-        cost_cents, basis = compute_turn_cost(
+            return 0.0, None
+        return compute_turn_cost(
             provider=totals.provider,
             model=totals.model,
             prompt_tokens=totals.prompt_tokens,
@@ -221,13 +243,43 @@ class _LegBillingAccumulator:
             actual_cost_usd=totals.cost_usd,
             source=self._cost_source,
         )
-        self._total_cents += cost_cents
-        if basis != "unpriced" or self._basis is None:
-            self._basis = basis
 
     def result(self) -> tuple[float, str | None]:
-        """``(total_cost_cents, cost_basis)`` — basis ``None`` iff no step ran."""
-        return self._total_cents, self._basis
+        """``(total_cost_cents, cost_basis)``; basis ``None`` iff nothing priceable ran.
+
+        The basis is the steps' own whenever they have a genuine one: the steps ARE the
+        leg, and one cheap-tier distillation call should not relabel what a whole leg of
+        model work was priced from. It falls back to the distillation's basis only when
+        the steps have none or came back unpriced.
+        """
+        distilled_cents, distilled_basis = self._distillation_cents()
+        steps_priced = self._basis is not None and self._basis != "unpriced"
+        basis: str | None = self._basis
+        if not steps_priced and distilled_basis is not None:
+            basis = distilled_basis
+        return self._step_cents + distilled_cents, basis
+
+    def ledger_spend(
+        self,
+        run: Run,  # noqa: ARG002 (part of the meter port; see the docstring)
+    ) -> Mapping[SpendKind, int]:
+        """The executor's meter: this leg's priced cost in ledger micros (R9-161).
+
+        ``run`` is part of the meter port and is deliberately unused: what a leg cost
+        cannot be read off the run, because the served provider, model and response-side
+        actual cost are not persisted there (they arrive through ``on_step_usage``). That
+        is exactly why the old stand-in metered ``sum(step.tokens)`` and why a money cap
+        ended up enforced against a token count.
+
+        Only ``MODEL`` is recorded. ``SANDBOX`` and ``EXTERNAL`` stay zero because nothing
+        reports a per-leg figure for them: a sandbox execution charges the owner from
+        inside the tool (``sandbox/runtime_tool.py``, basis ``infra_flat``) and tells the
+        enclosing leg nothing, and connector / MCP infra is by M3's T7 ruling subsumed by
+        the leg's own credit floor rather than charged per call. Inventing a number for
+        either would be worse than a zero that is honest about what is measured.
+        """
+        cost_cents, _ = self.result()
+        return {SpendKind.MODEL: micros_from_cents(cost_cents)}
 
 
 class _LegRunRecord:
@@ -496,9 +548,7 @@ class TaskLegHandler:
     def _billing_enabled(self) -> bool:
         return self._credits_policy is not None and self._rls_engine is not None
 
-    async def _bill_leg(
-        self, owner: str, task_id: str, seq: int, accumulator: _LegBillingAccumulator
-    ) -> None:
+    async def _bill_leg(self, owner: str, task_id: str, seq: int, cost: _LegCost) -> None:
         """Owner-bill a committed leg's real cost, CAS-ridden idempotent (Spec M3, T4b, D-M3-R5).
 
         Called ONLY when the leg's checkpoint CAS-append committed (disposition
@@ -512,7 +562,7 @@ class TaskLegHandler:
         """
         if self._credits_policy is None or self._rls_engine is None:
             return
-        cost_cents, basis = accumulator.result()
+        cost_cents, basis = cost.result()
         if basis is None:
             return  # no metered model call this leg (nothing to bill)
         charge = credits_charged(
@@ -637,17 +687,25 @@ class TaskLegHandler:
         # Spec W1 (D-W1-21): the user's cancel / pause reaches this leg at its next boundary.
         control = _ControlledRunner(runner, tasks=self._tasks, owner_id=owner, task_id=task.id)
         runner = control
-        executor = LegExecutor(runner=runner, writer=self._writer, sink=self._checkpoints)
-        # Spec M3 (T4b): meter the leg's real per-step cost for the owner-billed deduct.
-        # None when billing is unwired → the run_leg call stays byte-identical.
-        accumulator = _LegBillingAccumulator(self._cost_source) if self._billing_enabled() else None
         # Spec W1 (D-W1-44): the checkpoint distiller's model call happens INSIDE the leg,
-        # so it is billed with the leg rather than absorbed. It runs on the cheapest tier
+        # so it is priced with the leg rather than absorbed. It runs on the cheapest tier
         # and usually disappears into the per-leg floor, but a per-leg provider call kept
         # outside the ledger is the shape M3 exists to end. The sink is inert unless a
         # usage-collecting backend is wired (the worker root wires one for the distiller),
         # so the deterministic writer and an unmetered install record nothing here.
         with collect_llm_usage() as distillation:
+            # R9-161: ONE priced cost per leg, read by two callers: the owner-billed
+            # deduct below and the executor's ledger meter. It is built unconditionally,
+            # because the task ledger backs the user's per-task budget cap and that safety
+            # bound must not depend on whether BILLING happens to be wired: an install
+            # without credits still owes the truth about what its tasks are spending.
+            cost = _LegCost(self._cost_source, distillation)
+            executor = LegExecutor(
+                runner=runner,
+                writer=self._writer,
+                sink=self._checkpoints,
+                meter=cost.ledger_spend,
+            )
             try:
                 outcome = await executor.run_leg(
                     task=task,
@@ -658,7 +716,7 @@ class TaskLegHandler:
                     seq=seq,
                     box=self._box,
                     now=now,
-                    on_step_usage=accumulator.on_step_usage if accumulator is not None else None,
+                    on_step_usage=cost.on_step_usage,
                 )
             except CheckpointTooLargeError as exc:
                 # The RUN itself finished — settle its record from what the wrapped runner
@@ -703,6 +761,9 @@ class TaskLegHandler:
         # A0 metering visibility (per-job spend → audit_log); the task ledger already accrued
         # via the CAS append. On a re-delivery the leg re-runs, so A0 records this execution's
         # spend (forensics) while the ledger no-ops — A0 meters executions, A2 accounts work.
+        # R9-161: this is the leg's priced cost in ledger micros, the same money the ledger
+        # took, not the run's token count. The token shape stays visible in ``leg_profile``
+        # (``tokens_total`` / ``tokens_per_step_max``), which is where it belongs.
         total = sum(outcome.spend.values())
         context.meter(
             amount_micros=total,
@@ -734,16 +795,15 @@ class TaskLegHandler:
         # Spec W1 (D-W1-34): WAITING_USER belongs here. The approval park bills nothing
         # because it executed nothing; a leg that stopped on a question ran real steps,
         # appended their checkpoint, and spent real model credits doing it.
-        if accumulator is not None:
-            # The distillation rides the SAME leg charge (one billing_key, one deduct), not a
-            # second row: it is part of what this leg cost, not a surface of its own.
-            await accumulator.add_distillation(distillation.totals())
-        if accumulator is not None and outcome.disposition in (
+        # The distillation rides the SAME leg charge (one billing_key, one deduct), not a
+        # second row: it is part of what this leg cost, not a surface of its own, so it is
+        # summed inside ``_LegCost.result`` rather than added here.
+        if self._billing_enabled() and outcome.disposition in (
             LegDisposition.CONTINUE,
             LegDisposition.COMPLETED,
             LegDisposition.WAITING_USER,
         ):
-            await self._bill_leg(owner, payload.task_id, seq, accumulator)
+            await self._bill_leg(owner, payload.task_id, seq, cost)
         # Spec W1 (D-W1-21): a leg a control stopped enqueues nothing further. Its checkpoint
         # landed above (the salvage rode the CAS append) and the task row already carries the
         # user's decision; a continuation would only create a job the claim skips.

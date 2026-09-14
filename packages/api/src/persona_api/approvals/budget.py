@@ -62,7 +62,18 @@ _BUDGET_EXTENDED = "budget.extended"
 _BUDGET_REACHED = "budget.reached"
 _BUDGET_APPROACHING = "budget.approaching"
 
-#: Norwegian kroner → micros (the ledger unit). 1 kr = 10_000 micros (the project's credit unit).
+#: Norwegian kroner → micros (the ledger unit). 1 kr = 10_000 micros.
+#:
+#: R9-161 note, so the next reader is not misled: the ledger's micros are now filled by the
+#: leg meter, which prices through the M2/M3 path, and that path is denominated in cents at
+#: 1 credit = 1¢, i.e. 10 000 micros to one DOLLAR (``persona.tasks.micros_from_cents``).
+#: This input side, the Tasks surface's rendering and the origination models all still speak
+#: kroner, and nothing in the repo holds an exchange rate. So a cap the user states in kroner
+#: is enforced against the same number of dollars. That is a currency-labelling decision the
+#: product owes an answer to (denominate the task budget in the same currency as the wallet
+#: M4 funds, or introduce a real rate); it is deliberately NOT resolved here, because the
+#: wrong fix is to invent a rate and bake it into a safety bound. Before R9-161 this field
+#: was compared against a token count, so no currency reading of it was true at all.
 _MICROS_PER_KR = 10_000
 _KR_AMOUNT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:kr|kroner|nok)", re.IGNORECASE)
 

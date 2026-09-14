@@ -52,13 +52,31 @@ def app_engine(migrated_engine: Engine) -> Iterator[Engine]:
     engine.dispose()
 
 
+#: What one leg of ``_FakeRunner`` costs: an OpenRouter response-side actual of 0.005 USD
+#: = 0.5¢ = 50 ledger micros (R9-161). Deliberately unequal to the run's 100 tokens, so a
+#: ledger that carried the token count instead of the money could not pass these tests.
+_LEG_COST_USD = 0.005
+_LEG_COST_MICROS = 50
+
+
 class _FakeRunner:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         self.calls += 1
         await on_event(RunEvent.thinking(0))
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="z-ai/glm-4.6",
+                    prompt_tokens=60,
+                    completion_tokens=40,
+                    cost_usd=_LEG_COST_USD,
+                )
+            )
         return Run(
             persona_id="persona_a",
             task=task,
@@ -138,8 +156,10 @@ async def test_leg_runs_and_writes_checkpoint(migrated_engine: Engine, app_engin
     assert latest.checkpoint_seq == 0
     task = TaskStore(app_engine).get("user_a", "t1")
     assert task.head_checkpoint_seq == 0
-    assert task.ledger.model_micros == 100  # one step × 100 tokens
-    assert ctx.meter_calls == [100]
+    # R9-161: the leg's real cost in ledger micros (the unit the budget cap is written
+    # in), not the run's 100 tokens.
+    assert task.ledger.model_micros == _LEG_COST_MICROS
+    assert ctx.meter_calls == [_LEG_COST_MICROS]
 
 
 @pytest.mark.asyncio
@@ -164,11 +184,11 @@ async def test_redelivery_is_idempotent_via_store_cas(
     task = tasks.get("user_a", "t1")
     # Idempotent: head advanced once, ledger accrued once, one checkpoint.
     assert task.head_checkpoint_seq == 0
-    assert task.ledger.model_micros == 100  # NOT 200
+    assert task.ledger.model_micros == _LEG_COST_MICROS  # NOT twice that
     assert len(checkpoints.list_recent("user_a", "t1", limit=10)) == 1
     # The leg re-ran (at-least-once) and A0 metered BOTH executions (forensics)...
     assert runner.calls == 2
-    assert ctx.meter_calls == [100, 100]
+    assert ctx.meter_calls == [_LEG_COST_MICROS, _LEG_COST_MICROS]
     # ...but the task ledger accrued exactly once (the CAS).
 
 
@@ -187,7 +207,7 @@ async def test_second_leg_progresses(migrated_engine: Engine, app_engine: Engine
     await handler.handle(TaskLegPayload(task_id="t1", predecessor_seq=0, trigger=_TRIGGER), ctx)
     task = TaskStore(app_engine).get("user_a", "t1")
     assert task.head_checkpoint_seq == 1
-    assert task.ledger.model_micros == 200  # two distinct legs
+    assert task.ledger.model_micros == 2 * _LEG_COST_MICROS  # two distinct legs
     assert len(CheckpointStore(app_engine).list_recent("user_a", "t1", limit=10)) == 2
 
 
@@ -215,7 +235,7 @@ class _ContinueRunner:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         self.calls += 1
         return Run(
             persona_id="persona_a",
@@ -287,7 +307,7 @@ async def _false() -> bool:
 class _GatedRunner:
     """A leg whose toolbox proposed a gated action → the executor parks WAITING_APPROVAL."""
 
-    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         from persona.errors import GatedActionProposedError
 
         raise GatedActionProposedError(
@@ -592,7 +612,7 @@ async def test_redelivery_does_not_double_charge_the_owner(
     assert billing_key == "t1:leg:0"  # the checkpoint's identity — the CAS-ridden key
     # The leg genuinely RE-RAN (at-least-once) and A0 metered BOTH executions (forensics)...
     assert runner.calls == 2
-    assert ctx.meter_calls == [1100, 1100]
+    assert ctx.meter_calls == [300, 300]  # 0.03 USD = 3¢ = 300 micros, not 1100 tokens
     # ...but the owner credit ledger accrued exactly once (the billing_key gate).
 
 

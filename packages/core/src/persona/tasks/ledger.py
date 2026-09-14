@@ -9,11 +9,24 @@ atomically with the checkpoint append — D-A2-X-idempotency).
 
 from __future__ import annotations
 
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["CostLedger", "SpendKind"]
+__all__ = ["MICROS_PER_CENT", "CostLedger", "SpendKind", "micros_from_cents"]
+
+#: Ledger micros per cent of priced cost.
+#:
+#: The ledger's unit is the **micro**, and 10 000 micros is one unit of account: that is
+#: the unit the contract's ``ContractBounds.total_budget_micros`` cap is written in and the
+#: unit the task surfaces render as money. The project's pricing path is denominated in
+#: **cents** throughout (Spec M2's ``compute_turn_cost`` returns cost in cents; Spec M3
+#: accounts at 1 credit = 1 cent), so one cent is 100 micros. This constant is the single
+#: place the two scales meet: anything that turns a priced cost into ledger spend goes
+#: through :func:`micros_from_cents` rather than scaling the number itself.
+MICROS_PER_CENT: Final[int] = 100
 
 
 class SpendKind(StrEnum):
@@ -61,3 +74,31 @@ class CostLedger(BaseModel):
         field = f"{kind.value}_micros"
         current: int = getattr(self, field)
         return self.model_copy(update={field: current + amount_micros})
+
+
+def micros_from_cents(cost_cents: float) -> int:
+    """Convert a priced cost in cents into ledger micros (the unit the cap is written in).
+
+    The one conversion between the pricing path's cents and the ledger's micros. It exists
+    because the two scales are easy to mix up and the consequence of mixing them up is a
+    safety bound that does not mean what the user was told it means: before this, the task
+    ledger accrued a raw token count into a field compared against a money cap.
+
+    Rounds **up** to the next whole micro, on the printed decimal value so binary-float
+    noise can never invent a micro (the same discipline
+    :func:`persona.billing.formula.credits_charged` uses). Up, because under-recording
+    spend loosens a bound whose whole job is to stop a runaway task; the error is a
+    hundredth of a cent per leg either way.
+
+    Args:
+        cost_cents: The priced cost in cents. Negative values (a defensive case the
+            pricing path already rules out) are clamped to zero rather than credited back
+            against the cap.
+
+    Returns:
+        The spend in ledger micros, ready for :meth:`CostLedger.record`.
+    """
+    if cost_cents <= 0:
+        return 0
+    micros = Decimal(str(cost_cents)) * MICROS_PER_CENT
+    return int(micros.to_integral_value(rounding=ROUND_CEILING))

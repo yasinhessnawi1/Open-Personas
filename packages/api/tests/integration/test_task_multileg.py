@@ -34,7 +34,7 @@ from persona_api.tasks import (
     TaskLegPayload,
     TaskStore,
 )
-from persona_runtime.agentic.run import CancelToken, Run, RunStatus
+from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
 from persona_runtime.agentic.step import Step, StepType
 from persona_runtime.legs import CompactingCheckpointWriter
 from sqlalchemy import create_engine, text
@@ -56,6 +56,13 @@ def app_engine(migrated_engine: Engine) -> Iterator[Engine]:
     engine.dispose()
 
 
+#: What one scripted leg costs: an OpenRouter actual of 0.002 USD = 0.2¢ = 20 ledger micros
+#: (R9-161). Not equal to the run's 120 tokens, so the ledger assertions below fail if the
+#: ledger ever goes back to carrying a token count.
+_LEG_COST_USD = 0.002
+_LEG_COST_MICROS = 20
+
+
 class _ScriptedRunner:
     """Returns a scripted status/output per call (deterministic legs — no model)."""
 
@@ -63,9 +70,20 @@ class _ScriptedRunner:
         self._script = script
         self.calls = 0
 
-    async def run(self, task, *, on_event, cancel_token: CancelToken) -> Run:
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         status, output = self._script[self.calls]
         self.calls += 1
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="z-ai/glm-4.6",
+                    prompt_tokens=80,
+                    completion_tokens=40,
+                    cost_usd=_LEG_COST_USD,
+                )
+            )
         has_output = status in (RunStatus.COMPLETED, RunStatus.MAX_STEPS_REACHED)
         return Run(
             persona_id="persona_a",
@@ -177,8 +195,8 @@ async def test_multileg_task_with_crash_resume(migrated_engine: Engine, app_engi
     cps = checkpoints.list_recent("user_a", "t1", limit=20)
     assert len(cps) == 4  # exactly 4 (0-3) — the re-delivery wrote NO duplicate
     assert runner.calls == 5  # the leg re-ran on re-delivery (at-least-once) ...
-    # ... but the ledger counted committed legs only (4 legs × 120), not the wasted re-run.
-    assert task.ledger.model_micros == 4 * 120
+    # ... but the ledger counted committed legs only (4 legs of real cost), not the re-run.
+    assert task.ledger.model_micros == 4 * _LEG_COST_MICROS
     # The production distiller kept the checkpoint under budget the whole way.
     enforce_checkpoint_budget(checkpoints.get_latest("user_a", "t1"))  # type: ignore[arg-type]
     # The crash did not spawn a stray leg: leg 3 enqueued exactly once (A2-R-4 key dedup).

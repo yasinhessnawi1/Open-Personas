@@ -17,11 +17,11 @@ from datetime import UTC, datetime
 import pytest
 from persona.backends import BackendConfig
 from persona.schema.tools import ToolCall, ToolResult
-from persona.tasks import Contract, Task
+from persona.tasks import Contract, SpendKind, Task, micros_from_cents
 from persona_api.background.worker_root import _checkpoint_writer
 from persona_api.config import APIConfig
 from persona_api.services.llm_usage_collector import collect_llm_usage
-from persona_api.tasks.handler import _LegBillingAccumulator
+from persona_api.tasks.handler import _LegCost
 from persona_api.tasks.leg_profile import leg_profile
 from persona_runtime.agentic.call_ledger import CACHED_RESULT_NOTE, REPEAT_ERROR_HINT
 from persona_runtime.agentic.run import Run, RunStatus
@@ -119,16 +119,20 @@ def test_the_distillation_timeout_is_configured_not_hardcoded() -> None:
 # --- the leg profile (research V-4) -----------------------------------------
 
 
-def _outcome(*, steps: list[Step], box_limit: str | None = None) -> LegOutcome:
-    run = Run(
+def _run(steps: list[Step] | None = None) -> Run:
+    return Run(
         persona_id="p",
         task="x",
         status=RunStatus.COMPLETED,
-        steps=steps,
+        steps=steps if steps is not None else [],
         output="done",
         started_at=_NOW,
         finished_at=_NOW.replace(second=12),
     )
+
+
+def _outcome(*, steps: list[Step], box_limit: str | None = None) -> LegOutcome:
+    run = _run(steps)
     task = Task(
         id="t1",
         owner_id="u",
@@ -232,19 +236,17 @@ def test_a_leg_that_never_ran_measures_nothing_rather_than_zeroes() -> None:
 # --- who pays for the distillation (Spec W1, D-W1-44) -----------------------
 
 
-@pytest.mark.asyncio
-async def test_the_distillers_usage_reaches_the_legs_accumulator() -> None:
+def test_the_distillers_usage_reaches_the_legs_accumulator() -> None:
     """D-W1-44: the distiller's model call is billed WITH the leg, not absorbed.
 
     The path is the one M3 already built for background calls: a usage-collecting backend
-    records into the per-op sink, and the handler folds that sink's totals into the leg's
-    own accumulator, so it rides the SAME per-leg deduct (one billing key, one charge)
-    rather than becoming a second row against the owner.
+    records into the per-op sink, and the leg's cost reads that sink's totals, so it rides
+    the SAME per-leg deduct (one billing key, one charge) rather than becoming a second row
+    against the owner.
     """
-    accumulator = _LegBillingAccumulator(cost_source=None)  # type: ignore[arg-type]
-    before, _ = accumulator.result()
-
     with collect_llm_usage() as sink:
+        cost = _LegCost(None, sink)
+        before, _ = cost.result()
         sink.record(
             provider="nvidia",
             model="nvidia/nemotron-3-super-120b-a12b",
@@ -252,24 +254,21 @@ async def test_the_distillers_usage_reaches_the_legs_accumulator() -> None:
             completion_tokens=320,
             cost_usd=0.0004,
         )
-        totals = sink.totals()
-    await accumulator.add_distillation(totals)
+        after, basis = cost.result()
 
-    after, basis = accumulator.result()
     assert before == 0.0
     assert after > 0.0, "the distillation's real cost has to reach the leg's charge"
     assert basis is not None
+    # R9-161: and the same cost reaches the task ledger, in the ledger's own unit.
+    assert cost.ledger_spend(_run())[SpendKind.MODEL] == micros_from_cents(after)
 
 
-@pytest.mark.asyncio
-async def test_a_leg_that_did_not_distil_bills_exactly_what_it_billed_before() -> None:
+def test_a_leg_that_did_not_distil_bills_exactly_what_it_billed_before() -> None:
     """The deterministic writer, an unmetered install, and a distillation that never
     reached a model all record nothing, so turning this on cannot move a bill that has no
     distillation behind it."""
-    accumulator = _LegBillingAccumulator(cost_source=None)  # type: ignore[arg-type]
-
     with collect_llm_usage() as sink:
-        pass
-    await accumulator.add_distillation(sink.totals())
+        cost = _LegCost(None, sink)
 
-    assert accumulator.result() == (0.0, None)
+    assert cost.result() == (0.0, None)
+    assert cost.ledger_spend(_run())[SpendKind.MODEL] == 0

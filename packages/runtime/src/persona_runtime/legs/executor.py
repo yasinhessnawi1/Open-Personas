@@ -12,7 +12,7 @@ book-ended by reconstruction + a checkpoint. The executor:
    degrades to *finish the box, write the checkpoint, stop*.
 3. **Writes the checkpoint** (produced by a :class:`CheckpointWriter`) via a
    :class:`CheckpointSink` — in production the api's ``CheckpointStore.append`` (the atomic
-   CAS write, A2-R-4); the spend is metered from the run.
+   CAS write, A2-R-4); the leg's spend is metered by the injected meter and accrues with it.
 
 The loop is composed **unmodified** (criterion 12): the box, the episodic sink, and the
 reconstruction all live outside it. persona-runtime cannot import persona-api, so persistence
@@ -108,9 +108,11 @@ class LegOutcome:
             ``None`` on a ``WAITING_APPROVAL`` gate (the run raised before returning).
         disposition: What the outcome implies (continue / completed / failed / waiting_approval).
         box_limit: Which box bound tripped (``None`` if the run ended on its own).
-        spend: The per-kind spend metered for this leg (accrued into the ledger). Empty on a
-            gate — the partial pre-gate model spend is not ledgered (no ``Run`` to meter; the
-            proposal is the value).
+        spend: The per-kind spend metered for this leg (accrued into the ledger), in ledger
+            micros, the injected meter's unit, which is the CURRENCY unit the contract's
+            ``total_budget_micros`` cap is written in (:func:`persona.tasks.micros_from_cents`
+            is the one conversion into it). Empty on a gate: the partial pre-gate model
+            spend is not ledgered (no ``Run`` to meter; the proposal is the value).
         resume_at: A timed-wait directive — when set, the task should go
             ``waiting(until_time)`` and the continuation is scheduled for this instant (a
             "re-check in 4h" leg). ``None`` (the v1 basic path) → an immediate continuation;
@@ -247,15 +249,6 @@ def _merge_ledger(prior: Sequence[str], fresh: Sequence[str]) -> tuple[str, ...]
     return tuple(seen)
 
 
-def _default_meter(run: Run) -> dict[SpendKind, int]:
-    """Stand-in meter: the run's total tokens as ``model`` micros.
-
-    The real token→credit rate is applied at the api metering boundary (T7 injects a meter
-    over A0's cost model). Kept here so the executor is self-contained + testable.
-    """
-    return {SpendKind.MODEL: sum(step.tokens for step in run.steps)}
-
-
 class _BoxWatcher:
     """Trips the loop's ``CancelToken`` at a step boundary when the box is exhausted.
 
@@ -293,6 +286,17 @@ class LegExecutor:
     Pure dependency injection: the runner (the loop), the checkpoint writer, the durable
     sink, the meter, and the clock are all injected. The executor owns no state between legs
     — everything durable rides the checkpoint + task.
+
+    **The meter has no default, deliberately (R9-161).** It used to fall back to a stand-in
+    that returned the run's raw token count, which then accrued into the task ledger that
+    :class:`~persona_api.approvals.BudgetEnforcer` compares against a cap the user set in
+    money, so "stop this task at 1500" was enforced against a token count, and did not
+    mean what the surfaces said it meant. There is also no correct default available here:
+    pricing a leg needs the served provider, model and response-side actual cost, and those
+    reach the caller through ``on_step_usage`` precisely because they are deliberately NOT
+    persisted on :class:`~persona_runtime.agentic.run.Run` (billing is the api's concern,
+    not the loop's). A parameter with no correct default must not have one, so every caller
+    states the unit it meters in.
     """
 
     def __init__(
@@ -301,7 +305,7 @@ class LegExecutor:
         runner: AgenticRunner,
         writer: CheckpointWriter,
         sink: CheckpointSink,
-        meter: Callable[[Run], Mapping[SpendKind, int]] = _default_meter,
+        meter: Callable[[Run], Mapping[SpendKind, int]],
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._runner = runner
@@ -348,10 +352,12 @@ class LegExecutor:
             now: The write time (injected; core stays clock-free).
             external_cancel: A drain/cancel token to compose — a deploy or a user cancel
                 trips the same boundary mechanism, so the leg still checkpoints and stops.
-            on_step_usage: Optional per-step billing callback (Spec M3, T4b) — forwarded
-                to the loop so the api handler can meter the leg's real cost for the
-                owner-billed, CAS-ridden idempotent deduct. ``None`` → no metering
-                (byte-unchanged for a runner double without the kwarg).
+            on_step_usage: Optional per-step usage callback (Spec M3, T4b), forwarded
+                to the loop so the caller can price the leg's real cost. It feeds BOTH the
+                owner-billed, CAS-ridden idempotent deduct and the injected ``meter`` whose
+                figure accrues into the task ledger (R9-161): one accumulation, one pricing
+                truth, two readers. ``None`` → nothing to price from (byte-unchanged for a
+                runner double without the kwarg), and the meter sees no usage.
 
         Returns:
             The :class:`LegOutcome` the api handler acts on.

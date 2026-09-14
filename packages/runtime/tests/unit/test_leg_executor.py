@@ -26,6 +26,7 @@ from persona.tasks import (
     Task,
     TaskCheckpoint,
     UserReply,
+    micros_from_cents,
 )
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.run import CancelToken, Run, RunStatus
@@ -144,8 +145,21 @@ def _task() -> Task:
     )
 
 
+#: What one step of the fake runner costs, in cents. The executor has no default meter
+#: (R9-161): a leg's cost cannot be read off the ``Run``, so every caller states the unit it
+#: meters in, and these tests state a CURRENCY one exactly as the api handler does.
+_CENTS_PER_STEP = 0.25
+
+
+def _meter(run: Run) -> Mapping[SpendKind, int]:
+    """A currency meter: the leg's priced cost, converted once into ledger micros."""
+    return {SpendKind.MODEL: micros_from_cents(_CENTS_PER_STEP * len(run.steps))}
+
+
 def _executor(runner, sink, clock) -> LegExecutor:  # noqa: ANN001
-    return LegExecutor(runner=runner, writer=BasicCheckpointWriter(), sink=sink, clock=clock)
+    return LegExecutor(
+        runner=runner, writer=BasicCheckpointWriter(), sink=sink, meter=_meter, clock=clock
+    )
 
 
 class _GatingRunner:
@@ -303,10 +317,13 @@ async def test_checkpoint_written_with_metered_spend() -> None:
     assert len(sink.calls) == 1
     written, spend = sink.calls[0]
     assert written.checkpoint_seq == 0
-    # default meter = total tokens as model micros (3 steps × 100).
-    assert spend == {SpendKind.MODEL: 300}
+    # R9-161: what rides the append is the leg's priced cost in ledger micros (3 steps ×
+    # 0.25¢ = 0.75¢ = 75 micros), NOT the run's token count (3 × 100 = 300). The two are
+    # different numbers on purpose: the ledger is what the per-task money cap is enforced
+    # against, so a token count in that field is a bound that does not mean what it says.
+    assert spend == {SpendKind.MODEL: 75}
     assert outcome.task.head_checkpoint_seq == 0
-    assert outcome.task.ledger.model_micros == 300
+    assert outcome.task.ledger.model_micros == 75
 
 
 # --- A3 gate → WAITING_APPROVAL (no append, no execution) --------------------
