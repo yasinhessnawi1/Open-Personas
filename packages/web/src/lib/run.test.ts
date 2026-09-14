@@ -357,6 +357,167 @@ describe("runViewFromSnapshot", () => {
   });
 });
 
+describe("runViewFromSnapshot: the guard notes on a REOPENED run (R9-157)", () => {
+  // The bug this pins: `call_skipped` / `context_pruned` reduced into step.notes from the
+  // LIVE event stream only. The durable record carried nothing, so every run opened after
+  // the fact showed no guard activity at all, and nobody watches a task leg live. A
+  // reopened run has to tell the same story as a watched one.
+  const reopened = (steps: Record<string, unknown>[]): RunStatusResponse => ({
+    id: "run_1",
+    persona_id: "p1",
+    task: "Research the deposit rules",
+    status: "completed",
+    output: "Final answer",
+    steps,
+  });
+
+  const searchStep = (notes?: unknown): Record<string, unknown> => ({
+    type: "tool_call",
+    tool_calls: [{ name: "web_search", call_id: "c1", args: { q: "deposit" } }],
+    results: [
+      {
+        tool_name: "web_search",
+        call_id: "c1",
+        content: "hit",
+        is_error: false,
+      },
+    ],
+    tier_used: "small",
+    ...(notes === undefined ? {} : { notes }),
+  });
+
+  it("shows the call its ledger answered, named by tool", () => {
+    const view = runViewFromSnapshot(
+      reopened([
+        searchStep([
+          { kind: "call_skipped", tool: "web_search", guard: "cached_read" },
+        ]),
+      ]),
+    );
+
+    expect(view.steps[0].notes).toEqual([
+      { kind: "call_skipped", tool: "web_search" },
+    ]);
+  });
+
+  it("shows a refused repeat too, not only a served one", () => {
+    const view = runViewFromSnapshot(
+      reopened([
+        searchStep([
+          { kind: "call_skipped", tool: "flaky", guard: "repeat_error" },
+        ]),
+      ]),
+    );
+
+    expect(view.steps[0].notes).toEqual([
+      { kind: "call_skipped", tool: "flaky" },
+    ]);
+  });
+
+  it("carries a trim onto its step whatever kind of step it was", () => {
+    const view = runViewFromSnapshot(
+      reopened([
+        {
+          type: "reasoning",
+          content: "Let me think.",
+          notes: [
+            { kind: "context_pruned", before_tokens: 9000, after_tokens: 4000 },
+          ],
+        },
+      ]),
+    );
+
+    expect(view.steps[0].notes).toEqual([{ kind: "context_pruned" }]);
+  });
+
+  it("keeps every note on a step that batched several", () => {
+    const view = runViewFromSnapshot(
+      reopened([
+        searchStep([
+          { kind: "call_skipped", tool: "web_search", guard: "cached_read" },
+          { kind: "call_skipped", tool: "file_read", guard: "cached_read" },
+          { kind: "context_pruned", before_tokens: 9000, after_tokens: 4000 },
+        ]),
+      ]),
+    );
+
+    expect(view.steps[0].notes).toHaveLength(3);
+  });
+
+  it("reads the same as the live stream for the same guard activity", () => {
+    // The whole point, stated as an equality: watched and reopened are one story.
+    const live = runViewFromEvents(
+      [
+        ev.started("Research the deposit rules"),
+        ev.toolCalling(0, "web_search", "c1"),
+        ev.toolResult(0, "web_search", "hit"),
+        {
+          type: "call_skipped",
+          step: 0,
+          data: { tool: "web_search", guard: "cached_read" },
+          timestamp: TS,
+        },
+        {
+          type: "context_pruned",
+          step: 0,
+          data: { before_tokens: 9000, after_tokens: 4000 },
+          timestamp: TS,
+        },
+      ],
+      { task: "Research the deposit rules" },
+    );
+    const persisted = runViewFromSnapshot(
+      reopened([
+        searchStep([
+          { kind: "call_skipped", tool: "web_search", guard: "cached_read" },
+          { kind: "context_pruned", before_tokens: 9000, after_tokens: 4000 },
+        ]),
+      ]),
+    );
+
+    expect(persisted.steps[0].notes).toEqual(live.steps[0].notes);
+  });
+
+  it("shows no note at all on a run whose guards never fired", () => {
+    const view = runViewFromSnapshot(reopened([searchStep([])]));
+
+    expect(view.steps[0].notes).toBeUndefined();
+    expect(view.steps[0].tools[0].result).toBe("hit"); // the rest of the step is intact
+  });
+
+  it("rebuilds a run persisted before the field existed", () => {
+    // Every run already in the database. No notes key at all: it must render exactly as
+    // it does today: nothing extra, nothing thrown.
+    const view = runViewFromSnapshot(
+      reopened([searchStep(), { type: "final", content: "Final answer" }]),
+    );
+
+    expect(view.steps).toHaveLength(2);
+    expect(view.steps[0].notes).toBeUndefined();
+    expect(view.steps[0].tools[0]).toMatchObject({
+      toolName: "web_search",
+      result: "hit",
+      pending: false,
+    });
+    expect(view.steps[1].final).toBe("Final answer");
+  });
+
+  it("drops a note it cannot state honestly", () => {
+    // A note with no tool name, or a kind this build does not know, is data we cannot
+    // render truthfully. Skip it rather than show a half-written line.
+    const view = runViewFromSnapshot(
+      reopened([
+        searchStep([
+          { kind: "call_skipped", guard: "cached_read" },
+          { kind: "a_guard_from_the_future" },
+        ]),
+      ]),
+    );
+
+    expect(view.steps[0].notes).toBeUndefined();
+  });
+});
+
 describe("isTerminal", () => {
   it("classifies run statuses", () => {
     expect(isTerminal("running")).toBe(false);

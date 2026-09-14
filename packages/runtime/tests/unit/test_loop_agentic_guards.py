@@ -38,6 +38,7 @@ from persona.tools.protocol import tool
 from persona_runtime.agentic.call_ledger import CACHED_RESULT_NOTE, REPEAT_ERROR_HINT
 from persona_runtime.agentic.loop import AgenticLoop
 from persona_runtime.agentic.pruner import PRUNED_MARKER, ToolResultPruner
+from persona_runtime.agentic.step import Step
 from persona_runtime.prompt import PromptBuilder
 from persona_runtime.router import Router
 from persona_runtime.tier import TierConfig, TierRegistry
@@ -521,3 +522,146 @@ async def test_a_batched_step_is_trimmed_once_two_further_steps_have_run() -> No
     assert len(trimmed) == 5  # the whole batched step, and only it
     assert PRUNED_MARKER not in str(final_context[-1].content)  # the newest is intact
     assert any(e.type == "context_pruned" for e in events)
+
+
+# ----- (d) the guard outcome survives the run (R9-157) ----------------------
+#
+# The disclosure used to exist only while someone was watching: the guards emitted
+# ``call_skipped`` / ``context_pruned`` run events, the web reduced them into the step
+# trace, and the RUN that gets persisted carried nothing. Nobody watches a task leg live,
+# so the common case was a correct guard reading as a missing feature. These tests assert
+# the durable half: what the guards did is ON the step, and it is on the step in the exact
+# JSON ``persist_final`` writes to ``runs.steps``.
+
+
+def _notes_json(run: Run, index: int) -> list[dict[str, object]]:
+    """A step's notes exactly as the api persists them (``Step.model_dump(mode="json")``)."""
+    dumped = run.steps[index].model_dump(mode="json")
+    return list(dumped["notes"])
+
+
+@pytest.mark.asyncio
+async def test_a_cached_read_is_recorded_on_the_step_not_only_on_the_stream() -> None:
+    calls = _Calls()
+    script = [
+        _search("deposit rules", "c1"),
+        _search("deposit rules", "c2"),
+        _resp("[FINAL] Here is what I found."),
+    ]
+    loop, _ = _make_loop(script, tools=_tools(calls))
+
+    run, events = await _run(loop)
+
+    assert _guards(events) == ["cached_read"]  # the live seam still says it
+    assert _notes_json(run, 1) == [
+        {"kind": "call_skipped", "tool": "web_search", "guard": "cached_read"}
+    ]
+    assert _notes_json(run, 0) == []  # the step that really searched claims nothing
+
+
+@pytest.mark.asyncio
+async def test_a_refused_repeat_records_which_guard_refused_it() -> None:
+    """``repeat_error`` and ``cached_read`` are different events for the reader: one is a
+    call that was refused, the other an answer served. The record has to say which."""
+    _FLAKY_CALLS.clear()
+    same = {"query": "husleieloven deposit"}
+    script = [
+        _resp(tool_calls=[ToolCall(name="flaky", args=same, call_id="c1")]),
+        _resp(tool_calls=[ToolCall(name="flaky", args=same, call_id="c2")]),
+        _resp("[FINAL] I worked with what I had."),
+    ]
+    loop, _ = _make_loop(script, tools=[_flaky])
+
+    run, _events = await _run(loop)
+
+    assert _notes_json(run, 1) == [
+        {"kind": "call_skipped", "tool": "flaky", "guard": "repeat_error"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_batched_two_skips_records_both() -> None:
+    calls = _Calls()
+    read = ToolCall(name="file_read", args={"path": "/notes.md"}, call_id="r1")
+    search = ToolCall(name="web_search", args={"query": "deposit rules"}, call_id="s1")
+    script = [
+        _resp(tool_calls=[read, search]),
+        _resp(
+            tool_calls=[
+                ToolCall(name="file_read", args={"path": "/notes.md"}, call_id="r2"),
+                ToolCall(name="web_search", args={"query": "deposit rules"}, call_id="s2"),
+            ]
+        ),
+        _resp("[FINAL] done"),
+    ]
+    loop, _ = _make_loop(script, tools=_tools(calls))
+
+    run, _events = await _run(loop)
+
+    assert [n["tool"] for n in _notes_json(run, 1)] == ["file_read", "web_search"]
+
+
+@pytest.mark.asyncio
+async def test_a_trim_is_recorded_on_the_step_it_happened_on() -> None:
+    """The pruner fires at a step's boundary, after the step is already built. The note has
+    to land on THAT step, the same one the live ``context_pruned`` event names, or a
+    reopened run would attribute the trim to the wrong place in the timeline."""
+    calls = _Calls()
+    script = [
+        *[_search(f"query {n}", f"c{n}") for n in range(6)],
+        _resp("[FINAL] Here is what I found."),
+    ]
+    loop, _ = _make_loop(
+        script, tools=_tools(calls, body_words=300), ceiling_tokens=2_000, head_chars=200
+    )
+
+    run, events = await _run(loop)
+
+    pruned_events = [e for e in events if e.type == "context_pruned"]
+    assert pruned_events, "the run must actually have crossed the ceiling"
+    live_steps = [e.step for e in pruned_events]
+    recorded_steps = [
+        i for i, s in enumerate(run.steps) if any(n.kind == "context_pruned" for n in s.notes)
+    ]
+    assert recorded_steps == live_steps  # the durable story matches the watched one
+
+    first = next(n for n in _notes_json(run, live_steps[0]) if n["kind"] == "context_pruned")
+    assert int(str(first["after_tokens"])) < int(str(first["before_tokens"]))  # the saving
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_guards_never_fired_records_no_notes() -> None:
+    """The contrast. Notes are what the guards DID, so a run that repeated nothing and
+    never crossed the ceiling must carry none: an empty list on every step, so a reopened
+    run of honest work shows a clean trace rather than a manufactured one."""
+    calls = _Calls()
+    script = [
+        _search("deposit rules", "c1"),
+        _search("notice periods", "c2"),
+        _resp("[FINAL] done"),
+    ]
+    loop, _ = _make_loop(script, tools=_tools(calls))
+
+    run, events = await _run(loop)
+
+    assert len(calls.searched) == 2  # both searches really ran
+    assert _guards(events) == []
+    assert all(s.notes == [] for s in run.steps)
+    assert all(step.model_dump(mode="json")["notes"] == [] for step in run.steps)
+
+
+def test_a_step_persisted_before_notes_existed_still_loads() -> None:
+    """Backward compatibility: every run already in the database was written without this
+    field. Loading one must give a step with no guard activity, not an error."""
+    legacy = {
+        "type": "tool_call",
+        "tool_calls": [{"name": "web_search", "args": {"query": "x"}, "call_id": "c1"}],
+        "results": [{"tool_name": "web_search", "content": "hit", "call_id": "c1"}],
+        "tier_used": "small",
+        "tokens": 15,
+        "latency_ms": 1.0,
+    }
+
+    step = Step.model_validate(legacy)
+
+    assert step.notes == []

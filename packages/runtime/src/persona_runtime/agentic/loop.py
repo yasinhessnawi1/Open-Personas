@@ -64,7 +64,13 @@ from persona_runtime.agentic.compactor import StepHistoryCompactor
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.pruner import PROTECTED_STEPS, ToolResultPruner
 from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
-from persona_runtime.agentic.step import Step, StepType
+from persona_runtime.agentic.step import (
+    CallSkippedNote,
+    ContextPrunedNote,
+    Step,
+    StepNote,
+    StepType,
+)
 from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.prompt import RetrievedContext
 from persona_runtime.question_author import TemplateQuestionAuthor
@@ -147,6 +153,16 @@ def _protected_boundary(context: list[ConversationMessage], step_message_counts:
     """
     protected = sum(step_message_counts[-PROTECTED_STEPS:])
     return max(1, len(context) - protected)
+
+
+def _with_note(step: Step, note: StepNote) -> Step:
+    """The step with one more guard note on it (Spec W1; R9-157).
+
+    :class:`Step` is frozen, and a guard that fires at the step's boundary (the pruner)
+    only knows what it did after the step is built, so the note lands as a replacement
+    rather than a mutation.
+    """
+    return step.model_copy(update={"notes": [*step.notes, note]})
 
 
 def _backend_max_tokens(backend: ChatBackend) -> int:
@@ -457,12 +473,18 @@ class AgenticLoop:
                 # one step: nothing of it is prunable until the run moves on.
                 context = compacted
                 step_message_counts = [max(0, len(context) - 1)]
-            context = await self._maybe_prune(
+            context, prune_note = await self._maybe_prune(
                 context,
                 step_num,
                 on_event,
                 protect_from=_protected_boundary(context, step_message_counts),
             )
+            if prune_note is not None and steps:
+                # R9-157: the trim belongs to the step that just ran. This iteration
+                # appended exactly one step, so that is ``steps[-1]``. The step is frozen
+                # by then (it has to be: the loop hands out finished steps), so the note
+                # lands by replacing it rather than by mutating it.
+                steps[-1] = _with_note(steps[-1], prune_note)
         else:
             status = RunStatus.MAX_STEPS_REACHED
             output = self._clean_output(await self._best_effort_summary(context))
@@ -522,10 +544,14 @@ class AgenticLoop:
             new_context.append(self._assistant(response.content))
 
         results: list[ToolResult] = []
+        notes: list[StepNote] = []
         bad_tool_this_step: str | None = None
         for call in response.tool_calls:
-            result = await self._dispatch(call, step_num=step_num, on_event=on_event)
+            result, note = await self._dispatch(call, step_num=step_num, on_event=on_event)
             results.append(result)
+            if note is not None:
+                # R9-157: the same disclosure the live stream gets, recorded on the step.
+                notes.append(note)
             if result.is_error and self._is_unknown_tool(call):
                 bad_tool_this_step = call.name
             new_context.append(
@@ -559,6 +585,7 @@ class AgenticLoop:
             type=StepType.TOOL_CALL,
             tool_calls=list(response.tool_calls),
             results=results,
+            notes=notes,
             tier_used=tier,
             tokens=tokens,
             latency_ms=latency_ms,
@@ -731,7 +758,7 @@ class AgenticLoop:
         on_event: Callable[[RunEvent], Awaitable[None]] | None,
         *,
         protect_from: int,
-    ) -> list[ConversationMessage]:
+    ) -> tuple[list[ConversationMessage], ContextPrunedNote | None]:
         """Trim old tool results once the step's context gets expensive (Spec W1, D-W1-13).
 
         Separate from :meth:`_maybe_compact` on purpose: that one keys off the model's
@@ -741,19 +768,24 @@ class AgenticLoop:
 
         ``protect_from`` is where the last two steps begin (D-W1-41): a result is never
         trimmed before the model has been sent it whole at least once.
+
+        Returns:
+            The context to carry forward, and the note the step records when something was
+            actually cut (``None`` otherwise): the durable half of the disclosure that
+            the ``context_pruned`` event makes live (R9-157).
         """
         if not self._pruner.should_prune(context):
-            return context
+            return context, None
         before = self._pruner.size(context)
         pruned = self._pruner.prune(context, protect_from=protect_from)
         after = self._pruner.size(pruned)
         if after == before:
-            return context  # nothing was long enough to be worth cutting
+            return context, None  # nothing was long enough to be worth cutting
         await self._emit(
             on_event,
             RunEvent.context_pruned(step_num, before_tokens=before, after_tokens=after),
         )
-        return pruned
+        return pruned, ContextPrunedNote(before_tokens=before, after_tokens=after)
 
     async def _summarise(self, messages: list[ConversationMessage]) -> str:
         """Summarise an excerpt on the background tier (the one async summary call).
@@ -905,7 +937,7 @@ class AgenticLoop:
         *,
         step_num: int = -1,
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
-    ) -> ToolResult:
+    ) -> tuple[ToolResult, CallSkippedNote | None]:
         """The one door a tool call goes through: the guards, then the tool itself.
 
         Three things can answer a call without running it. A call the provider truncated
@@ -913,15 +945,24 @@ class AgenticLoop:
         "Field required" and an identical-retry loop). A repeat of a call that already
         failed, and an allowlisted read that already succeeded, are answered from the
         run's ledger (Spec W1, D-W1-11). Everything else reaches :meth:`_dispatch_now`.
+
+        Returns:
+            The result the model receives, and the note the step records when a guard
+            answered the call instead of dispatching it (``None`` otherwise). The note
+            rides the step into the durable record, so a run opened after the fact
+            discloses the skip exactly as a run watched live does (R9-157).
         """
         from persona.schema.tools import truncated_tool_call_message
 
         if call.truncated:
-            return ToolResult(
-                tool_name=call.name,
-                call_id=call.call_id,
-                is_error=True,
-                content=truncated_tool_call_message(call.name),
+            return (
+                ToolResult(
+                    tool_name=call.name,
+                    call_id=call.call_id,
+                    is_error=True,
+                    content=truncated_tool_call_message(call.name),
+                ),
+                None,
             )
 
         # Spec W1 (D-W1-11): the ledger answers before anything is dispatched. A repeat of
@@ -933,11 +974,11 @@ class AgenticLoop:
             await self._emit(
                 on_event, RunEvent.call_skipped(step_num, tool=call.name, guard=hit.kind)
             )
-            return hit.result
+            return hit.result, CallSkippedNote(tool=call.name, guard=hit.kind)
 
         result = await self._dispatch_now(call, step_num=step_num, on_event=on_event)
         self._ledger.remember(call, result)
-        return result
+        return result, None
 
     async def _dispatch_now(
         self,

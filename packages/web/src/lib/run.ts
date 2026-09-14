@@ -90,6 +90,11 @@ export interface RunStep {
    * muted notes under the tool cards. A guard that fires is a call the model asked for
    * and did not get, or output it can no longer read in full; leaving that invisible
    * makes a run look idle or forgetful for no stated reason.
+   *
+   * Filled by BOTH reductions (R9-157): the live `call_skipped` / `context_pruned`
+   * events, and the persisted `Step.notes` a reopened run is rebuilt from. It used to be
+   * the live path only, which made a working guard invisible to everyone who was not
+   * watching the run happen.
    */
   notes?: RunStepNote[];
   question?: string;
@@ -323,6 +328,17 @@ interface PersistedToolResult {
   call_id?: string;
   is_error?: boolean;
 }
+/**
+ * One `Step.notes` entry as the durable record carries it (R9-157). Every field is
+ * optional here because the record is data, not a promise: a run written before this
+ * field existed has no `notes` at all, and a note whose shape we cannot read is dropped
+ * rather than rendered half-stated.
+ */
+interface PersistedStepNote {
+  kind?: string;
+  tool?: string;
+  guard?: string;
+}
 interface PersistedStep {
   type: string;
   tool_calls?: PersistedToolCall[];
@@ -330,7 +346,28 @@ interface PersistedStep {
   question?: string | null;
   user_answer?: string | null;
   content?: string | null;
+  notes?: PersistedStepNote[] | null;
   tier_used?: string | null;
+}
+
+/**
+ * Read the guard notes off a persisted step, so a REOPENED run says what the run's
+ * guards did (R9-157). The live stream reduces the `call_skipped` / `context_pruned`
+ * events into the same {@link RunStep.notes}; this is the other half, and without it the
+ * disclosure exists only while someone is watching.
+ */
+function persistedNotes(
+  raw: PersistedStepNote[] | null | undefined,
+): RunStepNote[] {
+  const notes: RunStepNote[] = [];
+  for (const note of raw ?? []) {
+    if (note.kind === "call_skipped" && note.tool) {
+      notes.push({ kind: "call_skipped", tool: note.tool });
+    } else if (note.kind === "context_pruned") {
+      notes.push({ kind: "context_pruned" });
+    }
+  }
+  return notes;
 }
 
 function isRunEventDict(x: unknown): x is RunEvent {
@@ -340,6 +377,10 @@ function isRunEventDict(x: unknown): x is RunEvent {
 function stepToRunStep(s: PersistedStep, index: number): RunStep {
   const out = emptyStep(index);
   out.tier = s.tier_used ?? undefined;
+  // Every step type can carry notes: the ledger answers a call on a tool_call step, and
+  // the pruner trims at the boundary of whatever step just ran.
+  const notes = persistedNotes(s.notes);
+  if (notes.length > 0) out.notes = notes;
   switch (s.type) {
     case "tool_call": {
       const calls = s.tool_calls ?? [];

@@ -128,6 +128,11 @@ def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None
 
     The run's own ``status`` is written verbatim: every :class:`RunStatus` value is a
     member of the ``runs_status_check`` vocabulary, so no mapping is invented here.
+
+    This REPLACES the event-log snapshot :func:`persist_progress` left behind, so what a
+    reopened run can ever show is exactly what :class:`~persona_runtime.agentic.step.Step`
+    carries. A run event that is never reduced onto a step does not survive this write
+    (R9-157: that is how the guard disclosure came to exist only while a run was watched).
     """
     _update(
         engine,

@@ -30,6 +30,12 @@ from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.run import Run, RunStatus
+from persona_runtime.agentic.step import (
+    CallSkippedNote,
+    ContextPrunedNote,
+    Step,
+    StepType,
+)
 from sqlalchemy import insert, select
 
 if TYPE_CHECKING:
@@ -222,3 +228,69 @@ async def test_runs_steps_is_the_durable_floor_mid_run(engine: Engine) -> None:
     with engine.begin() as conn:
         status = conn.execute(select(runs_t.c.status).where(runs_t.c.id == _RUN)).scalar_one()
     assert status == str(RunStatus.COMPLETED)  # authoritative final persisted on completion
+
+
+class _GuardedLoop:
+    """Completes with a step whose deterministic guards fired (Spec W1; R9-157).
+
+    The ledger answered one of the step's calls and the pruner trimmed at its boundary,
+    which is what a long leg really looks like. Nothing is emitted live here on purpose:
+    the question is what the DURABLE record says, because that is all a run opened after
+    the fact has.
+    """
+
+    async def run(
+        self,
+        task: str,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
+        user_respond: Callable[[str], Awaitable[str]] | None = None,
+        cancel_token: object | None = None,
+    ) -> Run:
+        now = datetime.now(UTC)
+        return Run(
+            persona_id=_PERSONA,
+            task=task,
+            status=RunStatus.COMPLETED,
+            steps=[
+                Step(
+                    type=StepType.TOOL_CALL,
+                    tool_calls=[ToolCall(name="web_search", args={"q": "rent"}, call_id="c1")],
+                    results=[ToolResult(tool_name="web_search", content="results", call_id="c1")],
+                    notes=[
+                        CallSkippedNote(tool="web_search", guard="cached_read"),
+                        ContextPrunedNote(before_tokens=9_000, after_tokens=4_000),
+                    ],
+                    tier_used="small",
+                ),
+                Step(type=StepType.FINAL, content="done", tier_used="mid"),
+            ],
+            output="done",
+            error=None,
+            started_at=now,
+            finished_at=now,
+        )
+
+
+@pytest.mark.asyncio
+async def test_what_the_guards_did_is_in_the_persisted_run(engine: Engine) -> None:
+    """R9-157: the guard disclosure used to live only on the live SSE stream, so every run
+    opened afterwards showed nothing and a correct guard read as a missing feature. The
+    terminal write is the fix's load-bearing half: ``runs.steps`` itself has to say which
+    guard fired, and for a skipped call, on which tool."""
+    registry = RunRegistry(engine)
+    handle = registry.start(
+        run_id=_RUN,
+        owner_id=_OWNER,
+        loop=_GuardedLoop(),
+        task_text="t",  # type: ignore[arg-type]
+    )
+    assert handle.task is not None
+    await handle.task
+
+    steps = _persisted_steps(engine)
+
+    assert steps[0]["notes"] == [
+        {"kind": "call_skipped", "tool": "web_search", "guard": "cached_read"},
+        {"kind": "context_pruned", "before_tokens": 9_000, "after_tokens": 4_000},
+    ]
+    assert steps[1]["notes"] == []  # the step no guard touched claims nothing
