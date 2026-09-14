@@ -11,6 +11,39 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Release-note backfill (drafted 2026-09-14)
+
+> Six capabilities shipped between 2026-07-01 and 2026-07-05 and were never written up here,
+> four of them carrying a database migration. They are recorded now from their merge commits.
+> Dates are the day each merged, not the day this was written.
+
+#### Added
+- **Per-user sign-in to your own external tools (2026-07-02).** Connecting an outside tool no
+  longer means pasting a token. You sign in to it the way you sign in anywhere else, with the
+  authorisation handled per user and refreshed on your behalf, and a connection that goes stale
+  reconnects once rather than retrying in a loop. GitHub works out of the box, and anything
+  speaking the standard discovery protocol is found automatically.
+- **A persona's feelings reach you as expression, not markup (2026-07-01).** A palette of
+  twenty-eight feeling tags a persona can use, converted before anything is written back in chat
+  and before speech in voice, so a raw tag can never appear in front of you. Restraint comes
+  first: the persona expresses feeling where it fits rather than decorating every line.
+- **Documents generated at full fidelity (2026-07-01).** The sandbox that builds your files now
+  runs from a prepared image with the document libraries already in it, so spreadsheets, slides
+  and PDFs come out complete instead of degraded. Network access stays off.
+- **Memory that consolidates instead of only accumulating (2026-07-03).** The knowledge graph
+  gained time-aware versioning, soft consolidation of things it learns repeatedly, and a sense of
+  which evidence matters, so a persona's memory sharpens with use rather than simply growing.
+
+#### Changed
+- **The service survives more than one worker (2026-07-03).** The audit trail and request
+  telemetry moved to the database behind their existing interfaces, and file storage gained a
+  seam that works against object storage as well as a local disk. Nothing changes for a single
+  worker; the ceiling on running several is gone.
+- **A runaway task cannot drain your balance (2026-07-03).** A per-day spend cap and a concurrency
+  cap, both fail-loud, so an unattended task that goes wrong stops instead of spending until
+  someone notices.
+
+
 ### Persona work access: a persona can see its work, and its work can continue (2026-09-13)
 
 > A task the persona was running had no door the user could open. It ran, it
