@@ -87,7 +87,7 @@ A bundled toolbox (web search, sandboxed code execution, image generation, diagr
 
 ### 🔌 Reach them where you actually talk
 
-Connect the apps you already live in and message a persona by name. **Telegram, WhatsApp, SMS, and email** connect today with a guided flow (deep link or a verification code). **Discord and Slack are next**: adapters built, OAuth mounting in progress, and the UI says "coming soon" because it's honest. Persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web.
+Connect the apps you already live in and message a persona by name. **Telegram, Discord, Slack, and email** connect today with a guided flow (deep link or a verification code). **Discord and Slack are next**: adapters built, OAuth mounting in progress, and the UI says "coming soon" because it's honest. Persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web.
 
 ![Connectors: reach your personas anywhere](assets/readme/connectors.png)
 
@@ -312,7 +312,7 @@ Shipped and load bearing:
 - [x] Episodic memory pyramid (details on demand, summaries by default)
 - [x] Realtime voice with emotion, barge in and shared call memory
 - [x] Autonomy: schedules + calendar, initiative, event triggers, approvals spine, activity inbox
-- [x] Telegram, WhatsApp, SMS & email connectors with a guided connect flow
+- [x] Telegram, Discord, Slack & email connectors with a guided connect flow
 - [x] Model selection per persona with live price tags + honest cost accounting per turn
 - [x] Specialities, MCP catalog, bring your own MCP, sandboxed execution
 - [x] 60 starter personas written by hand
@@ -322,7 +322,7 @@ Shipped and load bearing:
 
 Coming (the planned region of the [capabilities diagram](#what-your-personas-can-do) carries the longer list):
 
-- [ ] Discord & Slack open for linking from the web (the transports and their OAuth callbacks already run inside the service)
+- [ ] WhatsApp & SMS open for linking from the web (the transports run inside the service; each needs its provider leg finished)
 - [ ] Managed embedded Postgres becomes the community default (automatic import from SQLite)
 - [ ] Autonomy defaults maturing from opt in feature gates toward safe defaults
 - [ ] Voice: tier visibility per turn and continued latency work
