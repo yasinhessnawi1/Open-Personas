@@ -72,12 +72,24 @@ _logger = get_logger("tools.factory")
 #: * ``task_pickup`` — the write half of the same window (Spec W1, D-W1-10). Not a capability
 #:   a persona opts into: it carries on that persona's OWN stalled work and can do nothing
 #:   else, with every scope question answered by the injected port.
+#: * ``record_user_fact`` (Spec K2, D-K2-1; R9-160): how a persona remembers what you told it.
+#:   Presence is the authorization because there is nothing here for a persona to opt into:
+#:   the tool writes one stated fact into the USER's own typed memory and can do nothing else,
+#:   the owner is resolved per dispatch from the RLS contextvar so an off-request call fails
+#:   closed, and every write already carries an audit reason. It shipped composed but
+#:   unreachable for exactly the reason ``task_introspect`` did, the THIRD recurrence of the
+#:   failure this set exists to prevent, so "save that into my memory" was answered by a
+#:   persona reaching for a filesystem write instead (R9-159). The literal name is spelled out
+#:   because the tool itself is built in ``persona_runtime`` and core sits below it; the guard
+#:   in ``packages/api/tests/unit/services/test_tool_admission_guard.py`` is what now fails the
+#:   build on a fourth instance rather than this prose.
 SELF_KNOWLEDGE_TOOLS: frozenset[str] = frozenset(
     {
         "use_skill",
         SCHEDULE_INTROSPECT_TOOL_NAME,
         TASK_INTROSPECT_TOOL_NAME,
         TASK_PICKUP_TOOL_NAME,
+        "record_user_fact",
     }
 )
 
