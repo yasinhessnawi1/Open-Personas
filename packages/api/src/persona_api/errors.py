@@ -45,6 +45,7 @@ __all__ = [
     "BillingProviderUnavailableError",
     "CloudConfigRefusedError",
     "CommunityDbError",
+    "CommunitySchemaUpgradeError",
     "ApprovalPendingError",
     "ConcurrencyCappedError",
     "LegGateMissingTaskError",
@@ -162,6 +163,22 @@ class CommunityDbError(PersonaError):
     ``reason`` (+ the ``mode`` / ``path`` / ``major`` at fault). Like the sibling
     startup guards this crashes the boot rather than degrading to an unusable
     store.
+    """
+
+
+class CommunitySchemaUpgradeError(PersonaError):
+    """Raised when a community SQLite database cannot be brought to the current schema (R9-174).
+
+    The community edition creates its SQLite schema with ``metadata.create_all``
+    and deliberately skips the cloud Alembic chain (Postgres-only DDL), so an
+    existing database is reconciled column by column at boot instead. SQLite can
+    only ADD a column: it cannot add a PRIMARY KEY or UNIQUE column, cannot add a
+    NOT NULL column that would be NULL on the rows already there, and cannot add
+    one whose default is not a literal. Those shapes need a full table rebuild,
+    which this code will not do behind the operator's back, so it refuses with a
+    message naming the table, the column and the two ways out. ``context`` carries
+    the ``table``, ``column`` and ``reason``. Like the sibling startup guards this
+    crashes the boot rather than serving a half-upgraded database.
     """
 
 

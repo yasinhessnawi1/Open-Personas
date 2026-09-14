@@ -26,10 +26,12 @@ listener enabling ``PRAGMA foreign_keys=ON`` — SQLite enforces foreign keys
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from persona.logging import get_logger
 from sqlalchemy import (
     ColumnDefault,
     DateTime,
@@ -41,20 +43,28 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Dialect, Engine
+from sqlalchemy.schema import CreateColumn
 from sqlalchemy.sql.schema import DefaultClause
 
 from persona_api.db.models import metadata as _canonical_metadata
 from persona_api.db.models import users as _users_t
+from persona_api.errors import CommunitySchemaUpgradeError
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sqlalchemy import Column, Table
+    from sqlalchemy.engine import Connection
 
 __all__ = [
     "build_community_metadata",
     "create_community_schema",
     "ensure_owner",
     "make_community_engine",
+    "reconcile_community_schema",
 ]
+
+_LOG = get_logger("api.db.community")
 
 # Tables that exist only in the cloud relational store — never part of the
 # community SQLite store. ``memory_chunks``' vectors live in Chroma in community;
@@ -156,14 +166,196 @@ def make_community_engine(db_path: Path) -> Engine:
     return engine
 
 
-def create_community_schema(engine: Engine) -> None:
-    """Create the community schema on a fresh SQLite file (D-33-8).
+#: A default SQLite will accept in ``ALTER TABLE ... ADD COLUMN``: a literal, and
+#: nothing else. ``CURRENT_TIMESTAMP``, a function call and a parenthesised
+#: expression are all rejected by SQLite with "Cannot add a column with
+#: non-constant default", so they are refused here with a message an operator can
+#: act on instead (R9-174). The pattern is matched against the DEFAULT text the
+#: SQLite dialect itself would emit, so it stays right as column types change.
+_SQLITE_LITERAL_DEFAULT = re.compile(
+    r"""
+    ^(?:
+        NULL | TRUE | FALSE
+      | [+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?
+      | '(?:[^']|'')*'
+      | [xX]'[0-9a-fA-F]*'
+    )$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
-    Uses ``metadata.create_all`` over the community-variant metadata, bypassing
-    the cloud Alembic RLS chain entirely (the chain bakes in
-    ``CREATE EXTENSION vector`` / ``CREATE POLICY``, both Postgres-only).
+
+def create_community_schema(engine: Engine) -> None:
+    """Bring the community schema up to date, creating or upgrading (D-33-8, R9-174).
+
+    ``metadata.create_all`` creates the tables that do not exist and, with its
+    default ``checkfirst=True``, silently SKIPS every table that does. That is
+    correct on a fresh file and wrong on every later boot: an existing database
+    never gained a column, so upgrading across a release that added one crashed
+    with a raw ``sqlite3.OperationalError: no such column`` from wherever the new
+    column was first read (R9-174, the third occurrence of it). Community
+    deliberately bypasses the cloud Alembic chain (it bakes in ``CREATE EXTENSION
+    vector`` / ``CREATE POLICY``, both Postgres-only), so nothing else closes that
+    gap. :func:`reconcile_community_schema` runs right after ``create_all`` and is
+    what closes it.
     """
-    build_community_metadata().create_all(engine)
+    community = build_community_metadata()
+    community.create_all(engine)
+    reconcile_community_schema(engine, metadata=community)
+
+
+def reconcile_community_schema(
+    engine: Engine, *, metadata: MetaData | None = None
+) -> tuple[str, ...]:
+    """Add the columns an existing community database is missing (R9-174).
+
+    For every table in the community metadata, compare the model's columns against
+    what SQLite actually has (``PRAGMA table_info``) and ``ALTER TABLE ... ADD
+    COLUMN`` each missing one. Additive only: a column the database has but the
+    model does not is left alone, and no data is ever rewritten.
+
+    What it cannot do it refuses loudly. SQLite can only add a column, so a new
+    PRIMARY KEY or UNIQUE column, a NOT NULL column with no literal default, and a
+    column whose default is an expression all need a full table rebuild. This code
+    does not rebuild tables; it raises :class:`CommunitySchemaUpgradeError` naming
+    the table, the column and what the operator can do. Changing a column's type
+    and dropping one are outside its reach for the same reason and are not
+    detected: SQLite ignores declared types on read, so a type change does not
+    fail here, it just keeps the old affinity.
+
+    One divergence worth knowing: SQLite attaches foreign keys at ``CREATE TABLE``
+    time only, so a reconciled column that carries one gets the column but not the
+    constraint. That is logged as a warning per column rather than refused, because
+    refusing would block the common, safe case for a check the single-owner
+    community edition does not lean on.
+
+    Args:
+        engine: The community SQLite engine.
+        metadata: The community metadata to reconcile against. Defaults to a fresh
+            :func:`build_community_metadata`; the boot path passes the one it just
+            created from, to avoid building it twice.
+
+    Returns:
+        The ``table.column`` names that were added, in the order they were added.
+
+    Raises:
+        CommunitySchemaUpgradeError: A missing column is a shape SQLite cannot add.
+    """
+    community = build_community_metadata() if metadata is None else metadata
+    added: list[str] = []
+    with engine.begin() as conn:
+        # Plan every statement before running any of them. SQLite's pysqlite driver
+        # runs DDL outside the transaction, so a refusal halfway through would leave
+        # the earlier ALTERs applied; refusing during the plan is what lets the error
+        # message promise that nothing was changed.
+        plan: list[tuple[Table, Column[Any], str]] = []
+        for table in community.sorted_tables:
+            live = _live_column_names(conn, table, engine)
+            if not live:
+                # No rows from PRAGMA means the table does not exist. Creating tables
+                # is ``create_all``'s job, not this function's.
+                continue
+            plan.extend(
+                (table, column, _add_column_statement(engine, table, column))
+                for column in table.columns
+                if column.name not in live
+            )
+        for table, column, statement in plan:
+            conn.exec_driver_sql(statement)
+            added.append(f"{table.name}.{column.name}")
+            if column.foreign_keys:
+                _LOG.warning(
+                    "community schema upgrade: added {ref} without its foreign key. "
+                    "SQLite can only attach one when the table is created, so that "
+                    "reference is unenforced until the database is rebuilt.",
+                    ref=added[-1],
+                )
+    if added:
+        _LOG.info(
+            "community schema upgrade: added {n} missing column(s): {cols}",
+            n=len(added),
+            cols=", ".join(added),
+        )
+    return tuple(added)
+
+
+def _live_column_names(conn: Connection, table: Table, engine: Engine) -> set[str]:
+    """The column names SQLite actually has for ``table`` (empty if it has no table).
+
+    ``PRAGMA`` takes no bind parameters, so the name is interpolated. It comes from
+    our own metadata and is quoted by the dialect's preparer, never from a request.
+    """
+    quoted = engine.dialect.identifier_preparer.format_table(table)
+    rows = conn.exec_driver_sql(f"PRAGMA table_info({quoted})")
+    return {str(row[1]) for row in rows}
+
+
+def _add_column_statement(engine: Engine, table: Table, column: Column[Any]) -> str:
+    """The ``ALTER TABLE ... ADD COLUMN`` statement for one missing column.
+
+    The column fragment is compiled from the SQLAlchemy column by the SQLite
+    dialect, so a type this function has never seen renders correctly without
+    anyone editing it.
+
+    Raises:
+        CommunitySchemaUpgradeError: ``column`` is a shape SQLite cannot add.
+    """
+    _refuse_column_sqlite_cannot_add(engine, table, column)
+    quoted = engine.dialect.identifier_preparer.format_table(table)
+    fragment = str(CreateColumn(column).compile(dialect=engine.dialect)).strip()
+    return f"ALTER TABLE {quoted} ADD COLUMN {fragment}"
+
+
+def _server_default_sql(engine: Engine, column: Column[Any]) -> str | None:
+    """The DEFAULT text the dialect would emit for ``column``, or ``None`` if it has none.
+
+    Asked of the dialect's own DDL compiler rather than rebuilt here, so the
+    literal quoting matches exactly what the ADD COLUMN statement will carry.
+    """
+    # The compiler is annotated as needing a statement, but ``get_column_default_string``
+    # only reads the column it is handed, and ``Compiled.__init__`` skips compiling when
+    # the statement is None. Asking it directly beats re-deriving the literal quoting here.
+    compiler = engine.dialect.ddl_compiler(engine.dialect, None)  # type: ignore[arg-type]
+    return compiler.get_column_default_string(column)
+
+
+def _refuse_column_sqlite_cannot_add(engine: Engine, table: Table, column: Column[Any]) -> None:
+    """Raise with an actionable message if SQLite cannot ADD ``column`` (R9-174 part 2)."""
+    default_sql = _server_default_sql(engine, column)
+    reason: tuple[str, str] | None = None
+    if column.primary_key:
+        reason = ("primary_key", "belongs to the primary key, and SQLite cannot add one")
+    elif column.unique:
+        reason = ("unique", "is UNIQUE, and SQLite cannot add a UNIQUE column")
+    elif default_sql is not None and not _SQLITE_LITERAL_DEFAULT.match(default_sql.strip()):
+        reason = (
+            "non_literal_default",
+            f"defaults to {default_sql.strip()}, which is not a literal, and SQLite can only "
+            "add a column whose default is one",
+        )
+    elif not column.nullable and default_sql is None:
+        reason = (
+            "not_null_without_default",
+            "is NOT NULL with no database default, so the rows already in the table would have "
+            "no value for it, and SQLite refuses that",
+        )
+    if reason is None:
+        return
+    code, explanation = reason
+    database = engine.url.database or str(engine.url)
+    raise CommunitySchemaUpgradeError(
+        f"this community database is older than the code and cannot be upgraded in place: "
+        f"column {table.name}.{column.name} {explanation}. Nothing was changed. Two ways "
+        f"forward: set PERSONA_COMMUNITY_DB_MODE=auto, which runs the real migration chain "
+        f"on the managed database and imports this file into it, keeping your data; or move "
+        f"{database} aside and start again on a fresh database, which loses what is in it.",
+        context={
+            "reason": code,
+            "table": table.name,
+            "column": column.name,
+            "database": database,
+        },
+    )
 
 
 def ensure_owner(engine: Engine, *, owner_id: str, email: str) -> None:
