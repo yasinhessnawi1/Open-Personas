@@ -173,5 +173,8 @@ class PolicyGatedToolbox(Toolbox):
                 "proposal_id": persisted.proposal_id,
                 "tool": tool_call.name,
                 "task_id": self._ctx.task_id,
+                # R9-163: the same sentence the inbox shows, so the park can say WHAT it is
+                # waiting for and not merely that it waits.
+                "description": persisted.description,
             },
         )

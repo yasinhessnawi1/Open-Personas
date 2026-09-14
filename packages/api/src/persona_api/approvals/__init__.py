@@ -45,6 +45,7 @@ from persona_api.approvals.resolver import (
     ActionExecutor,
     ApprovalNotifier,
     ApprovalResolver,
+    ExecutedAction,
     InboxDecision,
     ResolutionOutcome,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "PLATFORM_DEFAULT_BUDGET_MICROS",
     "REMIND_AFTER_DEFAULT",
     "ActionExecutor",
+    "ExecutedAction",
     "ApprovalNotifier",
     "ApprovalResolver",
     "ApprovalStore",

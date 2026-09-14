@@ -385,3 +385,44 @@ async def test_a_leg_with_no_output_can_still_carry_a_next_step() -> None:
 def test_the_prompt_carries_a_version() -> None:
     """An eval result has to name the prompt it judged (the Spec 10 discipline)."""
     assert DISTILLER_PROMPT_VERSION.startswith("w1-distiller-v")
+
+
+@pytest.mark.asyncio
+async def test_the_distiller_carries_the_legs_real_files_not_the_models_word() -> None:
+    """R9-162: pointers come from ``ToolResult.artifacts``, never from the distillation.
+
+    A path is a fact about what was persisted. A model that could name one would point the
+    next leg at a file that is not there, so the claimed pointer is ignored and the run's own
+    typed channel is what lands.
+    """
+    from persona.schema.tools import PersistedArtifact
+    from persona.tasks import ArtifactPointer
+
+    wrote = Step(
+        type=StepType.TOOL_CALL,
+        tool_calls=[ToolCall(name="file_write", args={"path": "out/summary.md"}, call_id="c2")],
+        results=[
+            ToolResult(
+                tool_name="file_write",
+                call_id="c2",
+                content="wrote out/summary.md",
+                artifacts=(
+                    PersistedArtifact(
+                        workspace_path="out/summary.md", mime_type="text/markdown", size_bytes=40
+                    ),
+                ),
+            )
+        ],
+    )
+    backend = _ScriptedBackend(_distillation(artifact_pointers=["out/invented.md"]))
+    checkpoint = await _writer(backend).write(
+        task=_task(),
+        prior=None,
+        run=_run(steps=[wrote]),
+        leg_id="t1:leg:0",
+        seq=0,
+        now=_NOW,
+    )
+    assert checkpoint.artifact_pointers == (
+        ArtifactPointer(kind="workspace", ref="out/summary.md"),
+    )

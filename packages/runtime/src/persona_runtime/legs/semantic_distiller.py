@@ -45,11 +45,13 @@ from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
     TaskCheckpoint,
     checkpoint_token_count,
+    merge_artifact_pointers,
 )
 
 from persona_runtime.legs.distiller import CompactingCheckpointWriter
 from persona_runtime.legs.ledger import (
     LEDGER_TOKEN_SHARE,
+    artifacts_from_run,
     fold_oldest,
     queries_from_run,
     sources_from_run,
@@ -264,7 +266,13 @@ class SemanticCheckpointWriter:
             open_questions=tuple(_strings(distilled.get("open_questions"))),
             queries_run=queries,
             sources_seen=sources,
-            artifact_pointers=prior.artifact_pointers if prior is not None else (),
+            # R9-162: the leg's real files, not an empty tuple copied forward. Deliberately
+            # NOT from the model's answer: a path is a fact about what was persisted, and a
+            # distiller that could invent one would point the next leg at a file that is not
+            # there. Read from the run's own ``ToolResult.artifacts`` either way.
+            artifact_pointers=merge_artifact_pointers(
+                prior.artifact_pointers if prior is not None else (), artifacts_from_run(run)
+            ),
             event_log_cursor=run.id,
             updated_at=now,
         )

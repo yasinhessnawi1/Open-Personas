@@ -64,7 +64,12 @@ from persona.tasks import (
     micros_from_cents,
 )
 from persona_runtime.cost import compute_turn_cost
-from persona_runtime.legs import CompactingCheckpointWriter, LegDisposition, LegExecutor
+from persona_runtime.legs import (
+    CompactingCheckpointWriter,
+    LegDisposition,
+    LegExecutor,
+    evidence_from_run,
+)
 
 from persona_api.services import run_record
 from persona_api.services.llm_usage_collector import collect_llm_usage
@@ -80,7 +85,12 @@ if TYPE_CHECKING:
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.agentic.run import CancelToken, Run, StepUsage
     from persona_runtime.cost import CostSource
-    from persona_runtime.legs import AgenticRunner, CheckpointWriter, LegOutcome
+    from persona_runtime.legs import (
+        AcceptanceAssessor,
+        AgenticRunner,
+        CheckpointWriter,
+        LegOutcome,
+    )
     from sqlalchemy import Engine
 
     from persona_api.editions.credits_policy import CreditsPolicy
@@ -489,6 +499,7 @@ class TaskLegHandler:
         agentic_floor: int = 1,
         recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
         retrieval: LegRetrieval | None = None,
+        acceptance: AcceptanceAssessor | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -508,6 +519,10 @@ class TaskLegHandler:
         # Zero summaries and a ``None`` retrieval are the pre-W1 behaviour exactly.
         self._recent_leg_summaries = max(0, min(recent_leg_summaries, MAX_RECENT_LEG_SUMMARIES))
         self._retrieval = retrieval
+        # R9-164: the acceptance assessor — reads the finished leg and proposes which of the
+        # contract's criteria it settled. Optional; ``None`` leaves every criterion pending,
+        # which is what the system did before it existed. The core gate decides what lands.
+        self._acceptance = acceptance
         # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
         # continuation applies. Optional + best-effort; a plain A2 worker wires none.
         self._on_milestone = on_milestone
@@ -753,6 +768,11 @@ class TaskLegHandler:
                         or str(exc)
                     )
                 raise
+            # R9-164: which of the contract's criteria this leg settled. Inside the usage
+            # block so the assessment's model call is billed WITH the leg that caused it,
+            # the way the distillation already is (D-W1-44). Skipped entirely for a task
+            # with no criteria, which is most ad hoc ones, so it costs nothing to have.
+            await self._settle_criteria(owner, task, outcome)
         # The run finished (COMPLETED / CONTINUE / FAILED), or the A3 gate ended the leg with
         # no run at all — settle the durable record either way, before anything downstream
         # (metering, billing, the continuation) can raise and strand it in ``running``.
@@ -917,6 +937,46 @@ class TaskLegHandler:
         else:  # pragma: no cover — a run-less leg always carries a cause
             record.fail("the leg ended without producing a run")
 
+    async def _settle_criteria(self, owner: str, task: Task, outcome: LegOutcome) -> None:
+        """Let the leg's work move the contract's acceptance criteria (R9-164).
+
+        Only a leg that ran and produced a checkpoint may settle anything, and only if its
+        run did not error: a gated leg executed nothing, and a failed one established
+        nothing. Stated here rather than left to the assessor's own short-circuit, so the
+        rule is visible at the call site that decides whether to pay for a model call.
+
+        The assessor proposes and the core gate decides; the store applies the survivors
+        inside a row lock, against the contract as it stands at the write.
+
+        Best-effort in both directions. A criterion that does not advance stays pending and
+        the next leg can claim it, so nothing is lost; and a failure here never touches the
+        leg, whose real work has already landed.
+        """
+        if self._acceptance is None or outcome.run is None or outcome.checkpoint is None:
+            return
+        if outcome.disposition is LegDisposition.FAILED:
+            return
+        if not task.contract.acceptance_criteria:
+            return
+        try:
+            claims = await self._acceptance.assess(contract=task.contract, run=outcome.run)
+            if not claims:
+                return
+            rejected = self._tasks.settle_criteria(
+                owner, task.id, claims, evidence_from_run(outcome.run)
+            )
+        except Exception as exc:  # noqa: BLE001 — additive; the leg's work already landed
+            _log.warning(
+                "acceptance assessment failed task_id={tid}: {err}", tid=task.id, err=str(exc)
+            )
+            return
+        _log.info(
+            "acceptance criteria assessed",
+            task_id=task.id,
+            claimed=len(claims),
+            rejected=[f"{r.criterion_id}: {r.reason}" for r in rejected],
+        )
+
     async def _park_stuck(self, owner: str, task: Task, *, cause: str, now: datetime) -> None:
         """Park the task ``waiting(on_user)`` with an honest cause + voice it (R9-005).
 
@@ -999,6 +1059,7 @@ def register_task_leg_handler(
     agentic_floor: int = 1,
     recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
     retrieval: LegRetrieval | None = None,
+    acceptance: AcceptanceAssessor | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -1025,6 +1086,7 @@ def register_task_leg_handler(
                 agentic_floor=agentic_floor,
                 recent_leg_summaries=recent_leg_summaries,
                 retrieval=retrieval,
+                acceptance=acceptance,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=TASK_LEG_RETRY_POLICY,

@@ -45,13 +45,20 @@ from persona.approvals import (
     resolve_reply,
 )
 from persona.logging import get_logger
-from persona.tasks import TaskCheckpoint, UserReply
+from persona.tasks import (
+    TaskCheckpoint,
+    UserReply,
+    merge_artifact_pointers,
+    pointers_from_artifacts,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from persona.approvals import ReplyInterpreter, ResolvedReply
+    from persona.schema.tools import PersistedArtifact
+    from persona.tasks import ArtifactPointer
     from pydantic import JsonValue
 
     from persona_api.approvals.store import ApprovalStore
@@ -62,6 +69,7 @@ __all__ = [
     "ActionExecutor",
     "ApprovalNotifier",
     "ApprovalResolver",
+    "ExecutedAction",
     "InboxDecision",
     "ResolutionOutcome",
 ]
@@ -83,14 +91,30 @@ class InboxDecision(StrEnum):
 _log = get_logger("api.approvals.resolver")
 
 
+@dataclass(frozen=True)
+class ExecutedAction:
+    """What replaying one approved action produced: a summary, and any files it persisted.
+
+    ``artifacts`` is the Spec-28 channel (R9-162). An approved ``file_write`` or
+    ``generate_image`` writes real bytes into the workspace, and before this the resolution
+    checkpoint recorded only a sentence about it: the file existed and the task's pointer
+    list did not know. Empty for the tools that produce only text, which is most of them.
+    """
+
+    summary: str
+    artifacts: tuple[PersistedArtifact, ...] = ()
+
+
 class ActionExecutor(Protocol):
-    """Executes the EXACT recorded payload verbatim and returns a short result summary.
+    """Executes the EXACT recorded payload verbatim and returns what the replay produced.
 
     The api wires a plain (un-gated) ``Toolbox`` dispatch — the approval *is* the
     authorisation, so execution does not re-gate. The model never re-derives the call.
     """
 
-    async def execute(self, tool_name: str, arguments: Mapping[str, JsonValue]) -> str: ...
+    async def execute(
+        self, tool_name: str, arguments: Mapping[str, JsonValue]
+    ) -> ExecutedAction: ...
 
 
 class ApprovalNotifier(Protocol):
@@ -300,7 +324,8 @@ class ApprovalResolver:
         self._write_resolution_checkpoint(
             owner_id,
             proposal.task_id,
-            conclusion=f"Approved + executed: {proposal.description} → {result}",
+            conclusion=f"Approved + executed: {proposal.description} → {result.summary}",
+            produced=pointers_from_artifacts(result.artifacts),
             now=now,
         )
         self._approvals.transition_proposal(
@@ -346,7 +371,13 @@ class ApprovalResolver:
         return ResolutionOutcome(outcome=DecisionType.DENY, resumed=True)
 
     def _write_resolution_checkpoint(
-        self, owner_id: str, task_id: str, *, conclusion: str, now: datetime
+        self,
+        owner_id: str,
+        task_id: str,
+        *,
+        conclusion: str,
+        now: datetime,
+        produced: Sequence[ArtifactPointer] = (),
     ) -> None:
         """Fold the resolution into a new checkpoint (the A2 CAS gates the durable write)."""
         task = self._tasks.get(owner_id, task_id)
@@ -362,7 +393,12 @@ class ApprovalResolver:
             ),
             next_step=prior.next_step if prior is not None else "",
             open_questions=prior.open_questions if prior is not None else (),
-            artifact_pointers=prior.artifact_pointers if prior is not None else (),
+            # R9-162: an approved action that wrote a file leaves the file in the pointer
+            # list, not only in a sentence. A denial produces nothing, so it carries the
+            # prior pointers through unchanged (the merge with an empty tuple).
+            artifact_pointers=merge_artifact_pointers(
+                prior.artifact_pointers if prior is not None else (), produced
+            ),
             # Spec W1 (D-W1-16): an approval decision is not a leg and asks the world
             # nothing, so it carries both ledgers forward untouched. Dropping them here
             # would make every approved task re-run every search it had already run.

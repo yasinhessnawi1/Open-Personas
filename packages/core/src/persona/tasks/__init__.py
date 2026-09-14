@@ -8,6 +8,18 @@ persona-api / persona-runtime). T1 lands the checkpoint (the architectural lock,
 
 from __future__ import annotations
 
+from persona.tasks.acceptance import (
+    CriterionClaim,
+    LegEvidence,
+    RejectedClaim,
+    settle_criteria,
+)
+from persona.tasks.artifacts import (
+    MAX_ARTIFACT_POINTERS,
+    WORKSPACE_POINTER_KIND,
+    merge_artifact_pointers,
+    pointers_from_artifacts,
+)
 from persona.tasks.boxing import (
     DEFAULT_LEG_MAX_STEPS,
     DEFAULT_LEG_WALL_CLOCK_SECONDS,
@@ -84,6 +96,10 @@ from persona.tasks.trigger import (
 
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
+    "MAX_ARTIFACT_POINTERS",
+    "WORKSPACE_POINTER_KIND",
+    "merge_artifact_pointers",
+    "pointers_from_artifacts",
     "DEFAULT_CHECKPOINT_TOKEN_BUDGET",
     "DEFAULT_LEG_MAX_STEPS",
     "DEFAULT_LEG_WALL_CLOCK_SECONDS",
@@ -91,6 +107,10 @@ __all__ = [
     "TERMINAL_STATES",
     "AcceptanceCriterion",
     "AcceptanceStatus",
+    "CriterionClaim",
+    "LegEvidence",
+    "RejectedClaim",
+    "settle_criteria",
     "ArtifactPointer",
     "CancellationSummary",
     "CompletionReport",

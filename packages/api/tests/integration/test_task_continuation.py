@@ -18,6 +18,7 @@ from persona.tasks import Contract, Task, TaskState, UserReply, WaitKind
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.store import ScheduleStore
 from persona_api.tasks import TaskContinuation, TaskStore
+from persona_api.tasks.store import CheckpointStore
 from persona_runtime.agentic.run import Run, RunStatus
 from persona_runtime.legs import LegDisposition, LegOutcome
 from sqlalchemy import create_engine, text
@@ -311,3 +312,193 @@ def test_resume_enqueues_leg_carrying_the_reply(
     trigger = jobs[0]["payload"]["trigger"]
     assert trigger["kind"] == "user_reply"
     assert trigger["reply"] == "yes, Tuesday works"  # the reply rides into the next leg
+
+
+# --- R9-163: a park records WHAT the task is blocked on ----------------------
+
+
+def _blocked_reason(engine: Engine, task_id: str = "t1") -> str | None:
+    """The head checkpoint's obstacle — what every surface actually reads."""
+    head = CheckpointStore(engine).get_latest("user_a", task_id)
+    return None if head is None else head.blocked_on
+
+
+def _gate_outcome(task: Task, blocked_on: str) -> LegOutcome:
+    """What the executor hands back when a leg hits the A3 approval gate: no checkpoint."""
+    return LegOutcome(
+        task=task,
+        checkpoint=None,
+        run=None,
+        disposition=LegDisposition.WAITING_APPROVAL,
+        box_limit=None,
+        spend={},
+        proposal_id="prop_1",
+        blocked_on=blocked_on,
+    )
+
+
+def test_a_stuck_park_leaves_the_head_exactly_where_the_dead_job_left_it(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The stuck park records no obstacle checkpoint, and that is deliberate.
+
+    The head checkpoint sequence is the correlation key between a task and the job that died
+    on it: the revival sweep finds a transient failure by matching a dead job whose key is
+    ``task:{id}:after:{head}``. A park that appended anything would move the head off that
+    value, the dead row would stop matching, and transient failures would silently never be
+    picked up on the user's behalf again. An earlier draft did exactly that.
+    """
+    task = _seed_active_task(migrated_engine)
+    checkpoints = CheckpointStore(app_engine)
+    cont = TaskContinuation(
+        task_store=TaskStore(app_engine), queue=JobQueue(app_engine), checkpoint_store=checkpoints
+    )
+    checkpoints.append(
+        task,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:0",
+            checkpoint_seq=0,
+            progress_conclusions=("the deposit is held at Sparebanken",),
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+
+    report = cont.react_to_dead_leg("user_a", "t1", "the portal rejected the login", now=_NOW)
+
+    assert report is not None
+    assert report.cause == "the portal rejected the login"  # the cause is still carried, voiced
+    fetched = TaskStore(app_engine).get("user_a", "t1")
+    assert fetched.state == TaskState.WAITING
+    assert fetched.head_checkpoint_seq == 0  # unmoved — the dead job's key still matches
+
+
+def test_the_obstacle_carries_the_prior_progress_forward(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """It is a checkpoint, so the head still answers "where did it get to"."""
+    task = _seed_active_task(migrated_engine)
+    checkpoints = CheckpointStore(app_engine)
+    checkpoints.append(
+        task,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:0",
+            checkpoint_seq=0,
+            progress_conclusions=("the deposit is held at Sparebanken",),
+            next_step="call the branch",
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+    cont = TaskContinuation(
+        task_store=TaskStore(app_engine), queue=JobQueue(app_engine), checkpoint_store=checkpoints
+    )
+
+    cont.apply(
+        "user_a",
+        _gate_outcome(
+            TaskStore(app_engine).get("user_a", "t1"),
+            "Waiting for your approval: Call the branch on your behalf",
+        ),
+        now=_NOW,
+    )
+
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert head.checkpoint_seq == 1
+    assert head.progress_conclusions == ("the deposit is held at Sparebanken",)
+    assert head.next_step == "call the branch"
+    assert head.blocked_on == "Waiting for your approval: Call the branch on your behalf"
+
+
+def test_an_ordinary_leg_clears_the_obstacle(migrated_engine: Engine, app_engine: Engine) -> None:
+    """Nobody has to remember to erase it: a leg that ran writes no ``blocked_on``."""
+    task = _seed_active_task(migrated_engine)
+    checkpoints = CheckpointStore(app_engine)
+    tasks = TaskStore(app_engine)
+    cont = TaskContinuation(
+        task_store=tasks, queue=JobQueue(app_engine), checkpoint_store=checkpoints
+    )
+    cont.apply("user_a", _gate_outcome(task, "Waiting for your approval: Send the email"), now=_NOW)
+    assert _blocked_reason(app_engine) == "Waiting for your approval: Send the email"
+
+    resumed = tasks.resume("user_a", "t1", now=_NOW)
+    checkpoints.append(
+        resumed,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:1",
+            checkpoint_seq=resumed.next_checkpoint_seq,
+            progress_conclusions=("the email went out",),
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+
+    assert _blocked_reason(app_engine) is None
+
+
+def test_an_approval_park_names_what_it_waits_for(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """A gated leg wrote no checkpoint at all, so the task waited for an unnamed something."""
+    task = _seed_active_task(migrated_engine)
+    tasks = TaskStore(app_engine)
+    cont = TaskContinuation(
+        task_store=tasks, queue=JobQueue(app_engine), checkpoint_store=CheckpointStore(app_engine)
+    )
+    gated = _gate_outcome(task, "Waiting for your approval: Send an email to the landlord")
+
+    cont.apply("user_a", gated, now=_NOW)
+
+    fetched = tasks.get("user_a", "t1")
+    assert fetched.state == TaskState.WAITING
+    assert fetched.wait_kind == WaitKind.ON_USER
+    assert _blocked_reason(app_engine) == "Waiting for your approval: Send an email to the landlord"
+    assert len(_leg_jobs(migrated_engine)) == 0  # still zero-cost: a state row, no job
+
+
+def test_a_question_park_is_not_an_obstacle(migrated_engine: Engine, app_engine: Engine) -> None:
+    """The distinction the field turns on: a leg that worked and then asked is not blocked.
+
+    The waiting state already says it waits and ``open_questions`` already carries the
+    question. Calling that 'blocked' would make the continuity window report a leg that did
+    a full leg's work as a leg that hit a wall.
+    """
+    task = _seed_active_task(migrated_engine)
+    checkpoints = CheckpointStore(app_engine)
+    cont = TaskContinuation(
+        task_store=TaskStore(app_engine), queue=JobQueue(app_engine), checkpoint_store=checkpoints
+    )
+    checkpoints.append(
+        task,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:0",
+            checkpoint_seq=0,
+            progress_conclusions=("three clinics have Tuesday slots",),
+            open_questions=("Which clinic, and which day?",),
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+    # The leg's own append already advanced the head, so the outcome carries the post-append
+    # task (what the executor really hands the continuation) rather than the shared helper's
+    # always-seq-0 shape.
+    asked = LegOutcome(
+        task=TaskStore(app_engine).get("user_a", "t1"),
+        checkpoint=checkpoints.get_latest("user_a", "t1"),
+        run=None,
+        disposition=LegDisposition.WAITING_USER,
+        box_limit=None,
+        spend={},
+    )
+
+    cont.apply("user_a", asked, now=_NOW)
+
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert head.blocked_on is None
+    assert head.open_questions == ("Which clinic, and which day?",)

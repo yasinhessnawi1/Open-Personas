@@ -21,9 +21,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from persona.skills import count_tokens
+from persona.tasks import pointers_from_artifacts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+    from persona.tasks import ArtifactPointer
 
     from persona_runtime.agentic.run import Run
 
@@ -31,6 +34,7 @@ __all__ = [
     "LEDGER_TOKEN_SHARE",
     "SEARCH_TOOLS",
     "SOURCE_TOOLS",
+    "artifacts_from_run",
     "fold_oldest",
     "queries_from_run",
     "sources_from_run",
@@ -89,6 +93,28 @@ def sources_from_run(run: Run) -> tuple[str, ...]:
                 continue
             sources.extend(_urls_in(result.data))
     return _dedupe(sources)
+
+
+def artifacts_from_run(run: Run) -> tuple[ArtifactPointer, ...]:
+    """The files this run actually persisted, as checkpoint pointers, in order (Spec 28 → A2).
+
+    Read from :attr:`persona.schema.tools.ToolResult.artifacts`, the typed channel a
+    byte-producing tool surfaces its persisted output on. That is the only honest source: the
+    prose content is written for the model, and a path parsed out of it is a guess, while an
+    entry here means the bytes are in the workspace under that path.
+
+    A failed result contributes nothing. A tool that errored may still have written a partial
+    file, and a pointer to one is worse than no pointer: the next leg would open it and treat
+    half a file as the leg's work.
+    """
+    produced = [
+        artifact
+        for step in run.steps
+        for result in step.results
+        if not result.is_error
+        for artifact in result.artifacts
+    ]
+    return pointers_from_artifacts(produced)
 
 
 def fold_oldest(entries: Sequence[str], *, target_tokens: int, noun: str) -> tuple[str, ...]:

@@ -44,7 +44,7 @@ from persona.tasks import ScheduledFire, TaskState, WaitKind
 from persona.tools import ActionCategory
 from persona_api.app import create_app
 from persona_api.approvals import ApprovalStore
-from persona_api.approvals.resolver import ApprovalResolver
+from persona_api.approvals.resolver import ApprovalResolver, ExecutedAction
 from persona_api.config import APIConfig
 from persona_api.jobs import Worker
 from persona_api.jobs.queue import JobQueue
@@ -373,7 +373,7 @@ async def test_pickup_after_a_dead_letter_enqueues_a_claimable_leg_the_worker_ru
 
 
 class _NoExecutor:
-    async def execute(self, tool_name: str, arguments: Mapping[str, object]) -> str:  # noqa: ARG002
+    async def execute(self, tool_name: str, arguments: Mapping[str, object]) -> ExecutedAction:  # noqa: ARG002
         raise AssertionError("a decline never executes")
 
 

@@ -32,6 +32,7 @@ from persona.logging import get_logger
 from persona.schedules import next_fire_after
 from persona.tasks import (
     ScheduledFire,
+    TaskCheckpoint,
     TaskState,
     WaitKind,
     build_cancellation_summary,
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
         ResumeTrigger,
         StuckReport,
         Task,
-        TaskCheckpoint,
     )
     from persona_runtime.legs import LegOutcome
 
@@ -153,6 +153,11 @@ class TaskContinuation:
             # replying in chat (both wired via ApprovalResolutionService). NOTE: the proactive C0
             # "may I do X?" voice on park (ApprovalResolver.announce) is NOT yet wired — a known
             # notify-on-park gap; discovery is inbox/chat-driven until it is.
+            # R9-163: record WHAT it waits for before parking. The gated leg wrote no
+            # checkpoint of its own (it executed nothing), so without this the task page,
+            # the persona's own grounded answer and the next leg's continuity window all
+            # showed a task that waits for an unnamed something.
+            self._record_obstacle(owner_id, task, outcome.blocked_on, now=now)
             self.wait_on_user(owner_id, task.id, now=now)
             _log.info(
                 "task waiting(on_user) — approval",
@@ -265,6 +270,23 @@ class TaskContinuation:
             return None  # already reacted / waiting / terminal — idempotent
         checkpoint = self._latest_checkpoint(owner_id, task_id)
         report = build_stuck_report(task, checkpoint, cause=cause, now=now)
+        # R9-163: this park deliberately records NO obstacle checkpoint, and the reason is
+        # worth keeping because the obvious improvement here is a live regression.
+        #
+        # The head checkpoint sequence is not just a pointer into the chain: it is the
+        # CORRELATION KEY between a task and the job that died on it. The revival sweep finds
+        # a transient failure by looking for a dead job whose idempotency key is
+        # ``task:{id}:after:{head}`` (``_dead_cause_at_head``), and the pickup path keys the
+        # replacement leg the same way. Appending anything here moves the head off the value
+        # the dead job was enqueued at, so the dead row stops matching: transient failures
+        # are never picked up again on the user's behalf, and the user is left to notice. An
+        # earlier draft of this change did exactly that and the revival suite caught it.
+        #
+        # So the stuck cause still reaches the user the way it did before (the voiced
+        # StuckReport built above, and A0's ``last_error``), and making it reach the task
+        # page's blocked line means first teaching the sweep to read the cause off the head
+        # checkpoint instead of off the job key. That is a change to shipped safety
+        # machinery and belongs in its own spec, not in a display fix.
         self._tasks.begin_wait(owner_id, task_id, WaitKind.ON_USER, now=now)
         _log.info("task stuck → waiting(on_user)", task_id=task_id, cause=cause)
         self._signal(owner_id, task_id, TaskState.WAITING.value)  # stuck→waiting_on_user — A11 ping
@@ -307,6 +329,63 @@ class TaskContinuation:
         _log.info("task cancelled", task_id=task_id)
         self._signal(owner_id, task_id, TaskState.CANCELLED.value)  # terminal — A11 ping
         return summary
+
+    def _record_obstacle(
+        self, owner_id: str, task: Task, blocked_on: str | None, *, now: datetime
+    ) -> None:
+        """Append a checkpoint whose only news is the obstacle (R9-163).
+
+        A park is the one moment a task learns something that is not progress: it cannot go
+        on, and the reason is worth exactly one sentence. The checkpoint chain is the only
+        durable per-task record with a reader on every surface, so the obstacle is recorded
+        as a checkpoint carrying the prior state forward unchanged plus ``blocked_on``.
+
+        Two things follow from that, both wanted. The obstacle is at the HEAD, which is what
+        the task list, the task page and the grounded introspection read. And it CLEARS
+        itself: the next leg to run writes an ordinary checkpoint with no ``blocked_on``, so
+        a task that got moving again stops being described as stuck without anyone
+        remembering to erase anything.
+
+        Used by the APPROVAL gate only, and see :meth:`react_to_dead_leg` for why the stuck
+        park does not call it: advancing the head there breaks the revival sweep's
+        correlation between a task and the job that died on it. The gate is safe because no
+        dead job exists at that head (the gated leg's job succeeded), and moving the head is
+        what the approval resolver's own resolution checkpoint already does one step later.
+
+        Best-effort. A task that parked is parked; failing the park because a context write
+        failed would trade the durable state change for an explanatory line.
+        """
+        if blocked_on is None or self._checkpoints is None:
+            return
+        try:
+            prior = self._checkpoints.get_latest(owner_id, task.id)
+            seq = task.next_checkpoint_seq
+            self._checkpoints.append(
+                task,
+                TaskCheckpoint(
+                    task_id=task.id,
+                    leg_id=f"{task.id}:blocked:{seq}",
+                    checkpoint_seq=seq,
+                    progress_conclusions=prior.progress_conclusions if prior is not None else (),
+                    decisions=prior.decisions if prior is not None else (),
+                    lessons=prior.lessons if prior is not None else (),
+                    queries_run=prior.queries_run if prior is not None else (),
+                    sources_seen=prior.sources_seen if prior is not None else (),
+                    current_plan=prior.current_plan if prior is not None else (),
+                    next_step=prior.next_step if prior is not None else "",
+                    open_questions=prior.open_questions if prior is not None else (),
+                    artifact_pointers=prior.artifact_pointers if prior is not None else (),
+                    event_log_cursor=prior.event_log_cursor if prior is not None else None,
+                    blocked_on=blocked_on,
+                    updated_at=now,
+                ),
+                spend={},
+                now=now,
+            )
+        except Exception as exc:  # noqa: BLE001 — the park is the floor; the reason is extra
+            _log.warning(
+                "could not record the obstacle task_id={tid}: {err}", tid=task.id, err=str(exc)
+            )
 
     def _latest_checkpoint(self, owner_id: str, task_id: str) -> TaskCheckpoint | None:
         return (

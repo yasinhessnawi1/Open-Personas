@@ -20,7 +20,10 @@ from datetime import UTC, datetime
 
 import pytest
 from persona.tasks import (
+    AcceptanceCriterion,
+    AcceptanceStatus,
     Contract,
+    CriterionClaim,
     ScheduledFire,
     Task,
     TaskState,
@@ -69,10 +72,12 @@ class _ScriptedRunner:
     def __init__(self, script: list[tuple[RunStatus, str]]) -> None:
         self._script = script
         self.calls = 0
+        self.reconstructions: list[str] = []
 
     async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
         status, output = self._script[self.calls]
         self.calls += 1
+        self.reconstructions.append(task)
         if on_step_usage is not None:
             await on_step_usage(
                 StepUsage(
@@ -201,3 +206,260 @@ async def test_multileg_task_with_crash_resume(migrated_engine: Engine, app_engi
     enforce_checkpoint_budget(checkpoints.get_latest("user_a", "t1"))  # type: ignore[arg-type]
     # The crash did not spawn a stray leg: leg 3 enqueued exactly once (A2-R-4 key dedup).
     assert _leg_job_count(migrated_engine) <= 4  # legs 1,2,3 enqueued (0 was the seed delivery)
+
+
+@pytest.mark.asyncio
+async def test_the_obstacle_a_park_recorded_reaches_the_next_legs_window(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-163, driven through the real chain rather than a hand-built checkpoint.
+
+    Leg 0 works and continues. Leg 1 hits the A3 approval gate, so it executes nothing and
+    writes no checkpoint of its own, and the park records WHAT it is waiting for. The leg
+    after the approval must be TOLD that: before this the continuity window read a leg's
+    outcome off ``blocked_on``, nothing ever wrote one, and every leg in every window was
+    summarised as "worked" — including the ones that had got nowhere.
+    """
+    _seed(migrated_engine)
+    runner = _GatingThenWorkingRunner(
+        [
+            (RunStatus.MAX_STEPS_REACHED, "leg0: the portal has a 2FA step"),
+            None,  # leg 1 gates on a policy-gated action
+            (RunStatus.MAX_STEPS_REACHED, "leg2: sent it once you said yes"),
+            (RunStatus.COMPLETED, "leg3: pulled the statement"),
+        ]
+    )
+    tasks = TaskStore(app_engine)
+    checkpoints = CheckpointStore(app_engine)
+    continuation = TaskContinuation(
+        task_store=tasks, queue=JobQueue(app_engine), checkpoint_store=checkpoints
+    )
+    handler = TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=checkpoints,
+        runner_builder=_Builder(runner),
+        continuation=continuation,
+        writer=CompactingCheckpointWriter(),
+    )
+    ctx = _Ctx("user_a")
+
+    async def deliver(predecessor: int | None) -> None:
+        await handler.handle(
+            TaskLegPayload(task_id="t1", predecessor_seq=predecessor, trigger=_TRIGGER), ctx
+        )
+
+    await deliver(None)  # leg 0 → checkpoint 0
+    await deliver(0)  # leg 1 gates → the park records the obstacle as checkpoint 1
+    assert tasks.get("user_a", "t1").state == TaskState.WAITING
+
+    tasks.resume("user_a", "t1", now=_NOW)
+    await deliver(1)  # the leg after the approval reads the obstacle as its CHECKPOINT block
+
+    assert "BLOCKED ON: Waiting for your approval: Send an email" in runner.reconstructions[2]
+
+    await deliver(2)  # one leg later the park has fallen back into the continuity window
+
+    assert "blocked: Waiting for your approval: Send an email" in runner.reconstructions[3]
+    # And the legs that ran are not described as blocked: the obstacle cleared itself.
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert head.blocked_on is None
+
+
+class _GatingThenWorkingRunner(_ScriptedRunner):
+    """A scripted runner where a ``None`` entry means "this leg hits the A3 gate".
+
+    The gate is a control-flow signal raised by the policy-gated toolbox and propagated
+    through the unmodified loop, so a runner that raises it is the honest stand-in for a leg
+    whose action needed permission it did not have.
+    """
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
+        from persona.errors import GatedActionProposedError
+
+        if self._script[self.calls] is None:
+            self.calls += 1
+            self.reconstructions.append(task)
+            # A gated leg raises BEFORE any step usage, which is why its spend is empty.
+            raise GatedActionProposedError(
+                "gated action awaiting approval",
+                context={
+                    "proposal_id": "prop_1",
+                    "tool": "send_email",
+                    "description": "Send an email to the landlord",
+                },
+            )
+        return await super().run(
+            task, on_event=on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+        )
+
+
+# --- R9-164: a leg's work ticks the contract's checklist ---------------------
+
+
+class _WritingRunner:
+    """A leg that persists a file, the way a real ``file_write`` leg does (Spec 28)."""
+
+    def __init__(self, path: str, status: RunStatus = RunStatus.COMPLETED) -> None:
+        self._path = path
+        self._status = status
+
+    async def run(self, task, *, on_event, cancel_token: CancelToken, on_step_usage=None) -> Run:
+        from persona.schema.tools import PersistedArtifact, ToolCall, ToolResult
+
+        if on_step_usage is not None:
+            await on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="openrouter",
+                    model="z-ai/glm-4.6",
+                    prompt_tokens=80,
+                    completion_tokens=40,
+                    cost_usd=_LEG_COST_USD,
+                )
+            )
+        return Run(
+            persona_id="persona_a",
+            task=task,
+            status=self._status,
+            steps=[
+                Step(
+                    type=StepType.TOOL_CALL,
+                    tool_calls=[
+                        ToolCall(name="file_write", args={"path": self._path}, call_id="a")
+                    ],
+                    results=[
+                        ToolResult(
+                            tool_name="file_write",
+                            call_id="a",
+                            content=f"wrote {self._path}",
+                            artifacts=(
+                                PersistedArtifact(
+                                    workspace_path=self._path,
+                                    mime_type="text/markdown",
+                                    size_bytes=64,
+                                ),
+                            ),
+                        )
+                    ],
+                    tokens=120,
+                )
+            ],
+            output="the comparison is written",
+            started_at=_NOW,
+            finished_at=_NOW,
+        )
+
+
+class _ScriptedAssessor:
+    """Claims exactly what the test tells it to (the model half is unit-tested elsewhere)."""
+
+    def __init__(self, claims: tuple[CriterionClaim, ...]) -> None:
+        self._claims = claims
+        self.contracts_seen: list[Contract] = []
+
+    async def assess(self, *, contract: Contract, run) -> tuple[CriterionClaim, ...]:
+        self.contracts_seen.append(contract)
+        return self._claims
+
+
+def _seed_with_criteria(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES ('user_a','a@example.com')"))
+        conn.execute(
+            text(
+                "INSERT INTO personas (id, owner_id, yaml) VALUES ('persona_a','user_a','name: x')"
+            )
+        )
+    tasks = TaskStore(engine)
+    tasks.create(
+        Task(
+            id="t1",
+            owner_id="user_a",
+            persona_id="persona_a",
+            contract=Contract(
+                goal="compare rental deposit schemes",
+                acceptance_criteria=(
+                    AcceptanceCriterion(id="c1", statement="written to a file"),
+                    AcceptanceCriterion(id="c2", statement="three schemes compared"),
+                ),
+            ),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    tasks.start("user_a", "t1", now=_NOW)
+
+
+def _handler_with(
+    app_engine: Engine, runner: object, assessor: _ScriptedAssessor
+) -> TaskLegHandler:
+    tasks = TaskStore(app_engine)
+    checkpoints = CheckpointStore(app_engine)
+    return TaskLegHandler(
+        task_store=tasks,
+        checkpoint_store=checkpoints,
+        runner_builder=_Builder(runner),  # type: ignore[arg-type]
+        continuation=TaskContinuation(
+            task_store=tasks, queue=JobQueue(app_engine), checkpoint_store=checkpoints
+        ),
+        writer=CompactingCheckpointWriter(),
+        acceptance=assessor,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_evidenced_criterion_advances_and_the_next_leg_reads_it_as_done(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The whole chain: the leg writes a file, the claim cites it, the contract moves.
+
+    Before this AcceptanceStatus.DONE was unreachable, so a task re-read its whole checklist
+    as ``[pending]`` on every leg for as long as it lived.
+    """
+    _seed_with_criteria(migrated_engine)
+    assessor = _ScriptedAssessor(
+        (
+            CriterionClaim(
+                criterion_id="c1",
+                status=AcceptanceStatus.DONE,
+                evidence="wrote reports/deposits.md",
+            ),
+        )
+    )
+    handler = _handler_with(app_engine, _WritingRunner("reports/deposits.md"), assessor)
+
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _Ctx("user_a")
+    )
+
+    criteria = TaskStore(app_engine).get("user_a", "t1").contract.acceptance_criteria
+    assert [(c.id, c.status) for c in criteria] == [
+        ("c1", AcceptanceStatus.DONE),
+        ("c2", AcceptanceStatus.PENDING),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unevidenced_claim_leaves_the_checklist_alone(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The gate runs inside the store's write, so a claim cannot route around it."""
+    _seed_with_criteria(migrated_engine)
+    assessor = _ScriptedAssessor(
+        (
+            CriterionClaim(
+                criterion_id="c2",
+                status=AcceptanceStatus.DONE,
+                evidence="I compared three schemes, trust me",
+            ),
+        )
+    )
+    handler = _handler_with(app_engine, _WritingRunner("reports/deposits.md"), assessor)
+
+    await handler.handle(
+        TaskLegPayload(task_id="t1", predecessor_seq=None, trigger=_TRIGGER), _Ctx("user_a")
+    )
+
+    criteria = TaskStore(app_engine).get("user_a", "t1").contract.acceptance_criteria
+    assert all(c.status is AcceptanceStatus.PENDING for c in criteria)

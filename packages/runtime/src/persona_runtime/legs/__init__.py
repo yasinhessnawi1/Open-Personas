@@ -8,6 +8,12 @@ through the :class:`CheckpointSink` port (the api's ``CheckpointStore.append`` â
 
 from __future__ import annotations
 
+from persona_runtime.legs.acceptance import (
+    ACCEPTANCE_PROMPT_VERSION,
+    DEFAULT_ASSESS_TIMEOUT_S,
+    AcceptanceAssessor,
+    evidence_from_run,
+)
 from persona_runtime.legs.distiller import CompactingCheckpointWriter
 from persona_runtime.legs.executor import (
     AgenticRunner,
@@ -26,6 +32,9 @@ from persona_runtime.legs.memory import (
 )
 
 __all__ = [
+    "ACCEPTANCE_PROMPT_VERSION",
+    "DEFAULT_ASSESS_TIMEOUT_S",
+    "AcceptanceAssessor",
     "AgenticRunner",
     "BasicCheckpointWriter",
     "CheckpointSink",
@@ -37,5 +46,6 @@ __all__ = [
     "MilestoneRecorder",
     "TaskEpisodicSink",
     "TaskMilestone",
+    "evidence_from_run",
     "milestone_for",
 ]

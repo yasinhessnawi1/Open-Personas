@@ -119,8 +119,15 @@ class TaskCheckpoint(BaseModel):
         current_plan: The remaining steps, regenerated each leg. Not capped.
         next_step: The single concrete action this leg's successor runs first. Not capped.
         open_questions: What is still unresolved.
-        blocked_on: A human-readable reason the task is waiting (the authoritative wait
-            *kind* is the task state, T2); ``None`` when not blocked.
+        blocked_on: The **obstacle**: what has to change OUTSIDE the task before another
+            leg can make progress, in one human sentence. ``None`` whenever the work can
+            carry on, which is every ordinary leg. It is deliberately narrower than "why
+            this task is waiting": the task state already says a task waits, and a question
+            the persona asked lives in ``open_questions`` and is answered by the person
+            reading it, so a leg that did its work and ended on a question is NOT blocked.
+            Written where a park learns the obstacle (an approval it cannot grant itself, a
+            leg that died after its retries) and never carried forward, so a task that got
+            moving again is not still described as stuck.
         artifact_pointers: References to workspace artifacts / key sources.
         event_log_cursor: Offset/id into the durable run records for just-in-time recall.
         schema_version: The checkpoint schema version.

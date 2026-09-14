@@ -120,6 +120,11 @@ class LegOutcome:
         proposal_id: The recorded :class:`~persona.approvals.ActionProposal` id on a
             ``WAITING_APPROVAL`` gate (the durable referent the approval flow resumes against);
             ``None`` otherwise.
+        blocked_on: The obstacle this leg ran into, in one human sentence, when there IS one
+            (R9-163). The executor only ever LEARNS it — recording it durably is the park's
+            job, because the leg that gated wrote no checkpoint of its own. ``None`` on every
+            ordinary outcome, and on a leg that merely ended on a question: a question is
+            answered by the person reading it, not an obstacle in the world.
     """
 
     task: Task
@@ -130,6 +135,7 @@ class LegOutcome:
     spend: Mapping[SpendKind, int]
     resume_at: datetime | None = None
     proposal_id: str | None = None
+    blocked_on: str | None = None
 
 
 class AgenticRunner(Protocol):
@@ -205,8 +211,13 @@ class BasicCheckpointWriter:
         now: datetime,
     ) -> TaskCheckpoint:
         from persona.tasks import TaskCheckpoint as _Checkpoint
+        from persona.tasks import merge_artifact_pointers
 
-        from persona_runtime.legs.ledger import queries_from_run, sources_from_run
+        from persona_runtime.legs.ledger import (
+            artifacts_from_run,
+            queries_from_run,
+            sources_from_run,
+        )
 
         prior_conclusions = prior.progress_conclusions if prior is not None else ()
         new_conclusions = (*prior_conclusions, run.output) if run.output else prior_conclusions
@@ -236,7 +247,13 @@ class BasicCheckpointWriter:
             sources_seen=sources,
             next_step=next_step,
             open_questions=prior.open_questions if prior is not None else (),
-            artifact_pointers=prior.artifact_pointers if prior is not None else (),
+            # R9-162: the files this leg actually wrote, merged with what earlier legs
+            # produced. Every writer used to copy the prior tuple forward and nothing ever
+            # put anything IN it, so the pointer half of the checkpoint carried the empty
+            # tuple for the life of every task.
+            artifact_pointers=merge_artifact_pointers(
+                prior.artifact_pointers if prior is not None else (), artifacts_from_run(run)
+            ),
             updated_at=now,
         )
 
@@ -396,6 +413,7 @@ class LegExecutor:
                 box_limit=watcher.box_limit,
                 spend={},
                 proposal_id=exc.context.get("proposal_id"),
+                blocked_on=_gate_obstacle(exc),
             )
 
         leg_id = f"{task.id}:leg:{effective_seq}"
@@ -462,6 +480,18 @@ class LegExecutor:
             sources_known=len(prior.sources_seen) if prior is not None else 0,
         )
         return "\n\n".join(block.content for block in blocks)
+
+
+def _gate_obstacle(exc: GatedActionProposedError) -> str:
+    """The one-sentence obstacle a gated leg hit (R9-163).
+
+    A gated leg is blocked in the strict sense the field means: the work cannot continue
+    until somebody outside the task grants something the task cannot grant itself. The
+    description is the same sentence the approvals inbox shows, so the task page, the
+    continuity window and the inbox all name the same pending thing.
+    """
+    described = exc.context.get("description") or exc.context.get("tool") or "a gated action"
+    return f"Waiting for your approval: {described}"
 
 
 def _asked_question(run: Run) -> str | None:

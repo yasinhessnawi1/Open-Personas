@@ -17,6 +17,11 @@ import pkgutil
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 def _repo_root() -> Path:
     """The worktree this is being run against, asked of git rather than assumed.
@@ -32,7 +37,7 @@ def _repo_root() -> Path:
             ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
         )
         return Path(out.stdout.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001 - any git failure falls back to the script's own path
         return Path(__file__).resolve().parent.parent
 
 
@@ -43,13 +48,13 @@ for pkg in ("core", "runtime", "api", "voice", "connectors"):
     sys.path.insert(0, str(ROOT / "packages" / pkg / "src"))
 
 
-def settings_classes():
+def settings_classes() -> Iterator[type]:
     """Every BaseSettings subclass reachable from the workspace packages."""
     try:
         from pydantic_settings import BaseSettings
-    except ImportError:  # pragma: no cover - the gate cannot run without it
+    except ImportError as exc:  # pragma: no cover - the gate cannot run without it
         print("pydantic_settings unavailable; gate skipped")
-        raise SystemExit(0)
+        raise SystemExit(0) from exc
     seen = set()
     for pkg in ("persona", "persona_runtime", "persona_api", "persona_voice"):
         try:
@@ -75,10 +80,11 @@ def settings_classes():
                     yield obj
 
 
-def env_names(cls) -> list[tuple[str, str]]:
+def env_names(cls: type) -> list[tuple[str, str]]:
     """(env name, field name) for every BOOLEAN field, honouring alias and env_prefix."""
-    prefix = (getattr(cls, "model_config", {}) or {}).get("env_prefix", "") or ""
-    out = []
+    config: dict[str, Any] = getattr(cls, "model_config", {}) or {}
+    prefix = config.get("env_prefix", "") or ""
+    out: list[tuple[str, str]] = []
     for fname, field in getattr(cls, "model_fields", {}).items():
         if field.annotation is not bool:
             continue

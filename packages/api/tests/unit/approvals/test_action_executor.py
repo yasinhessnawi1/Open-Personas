@@ -8,6 +8,9 @@ property is proven on real machinery, not a fake:
   (the model never re-derives; the approval is the authorization).
 - **The guardrail** — a build failure, a dispatch exception, and a tool-level error each return an
   ``"Execution failed: …"`` summary; the executor NEVER raises (an approval reply must not 500).
+- **The produced files travel** (R9-162) — a tool that persisted bytes surfaces them on
+  :attr:`persona.schema.tools.ToolResult.artifacts`, and the executor carries them out so the
+  resolution checkpoint can record the file rather than only a sentence about it.
 """
 
 from __future__ import annotations
@@ -53,7 +56,8 @@ async def test_executor_replays_the_exact_recorded_call_verbatim() -> None:
     result = await executor.execute("send_email", _ARGS)
 
     assert sink == [_ARGS]  # the EXACT args reached the tool — nothing re-derived
-    assert result == "sent to bob@example.com"
+    assert result.summary == "sent to bob@example.com"
+    assert result.artifacts == ()  # a text-only tool produces no files
 
 
 async def test_executor_build_failure_returns_failed_summary_never_raises() -> None:
@@ -63,8 +67,9 @@ async def test_executor_build_failure_returns_failed_summary_never_raises() -> N
 
     executor = ToolboxActionExecutor(_bad_build)
     result = await executor.execute("send_email", _ARGS)  # must not raise
-    assert result.startswith("Execution failed:")
-    assert "toolbox build blew up" in result
+    assert result.summary.startswith("Execution failed:")
+    assert "toolbox build blew up" in result.summary
+    assert result.artifacts == ()
 
 
 async def test_executor_dispatch_exception_returns_failed_summary_never_raises() -> None:
@@ -75,7 +80,7 @@ async def test_executor_dispatch_exception_returns_failed_summary_never_raises()
 
     executor = _executor_over(_boom, allow=["boom"])
     result = await executor.execute("boom", {})  # dispatch raises → caught, no propagation
-    assert result.startswith("Execution failed:")
+    assert result.summary.startswith("Execution failed:")
 
 
 async def test_executor_tool_error_result_is_a_failed_summary() -> None:
@@ -85,4 +90,48 @@ async def test_executor_tool_error_result_is_a_failed_summary() -> None:
 
     executor = _executor_over(_soft, allow=["soft_fail"])
     result = await executor.execute("soft_fail", {})
-    assert result == "Execution failed: quota exceeded"
+    assert result.summary == "Execution failed: quota exceeded"
+
+
+async def test_a_tool_that_persisted_a_file_carries_its_artifacts_out() -> None:
+    """R9-162: the Spec-28 channel reaches the resolver, so the pointer list learns the file."""
+    from persona.schema.tools import PersistedArtifact
+
+    produced = PersistedArtifact(
+        workspace_path="uploads/appeal.pdf", mime_type="application/pdf", size_bytes=2048
+    )
+
+    @tool(name="make_pdf", description="writes a file into the workspace")
+    async def _make() -> ToolResult:
+        return ToolResult(
+            tool_name="make_pdf", content="wrote uploads/appeal.pdf", artifacts=(produced,)
+        )
+
+    executor = _executor_over(_make, allow=["make_pdf"])
+    result = await executor.execute("make_pdf", {})
+    assert result.artifacts == (produced,)
+
+
+async def test_a_failed_tool_carries_no_artifacts() -> None:
+    """A half-written file must not read to the next leg as the work having landed."""
+    from persona.schema.tools import PersistedArtifact
+
+    @tool(name="half_write", description="errors after writing part of a file")
+    async def _half() -> ToolResult:
+        return ToolResult(
+            tool_name="half_write",
+            content="disk full",
+            is_error=True,
+            artifacts=(
+                PersistedArtifact(
+                    workspace_path="uploads/partial.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=1,
+                ),
+            ),
+        )
+
+    executor = _executor_over(_half, allow=["half_write"])
+    result = await executor.execute("half_write", {})
+    assert result.summary.startswith("Execution failed:")
+    assert result.artifacts == ()

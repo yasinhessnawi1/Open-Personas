@@ -272,3 +272,29 @@ def test_a_leg_that_did_not_distil_bills_exactly_what_it_billed_before() -> None
 
     assert cost.result() == (0.0, None)
     assert cost.ledger_spend(_run())[SpendKind.MODEL] == 0
+
+
+# --- R9-164: the acceptance assessor is composed, not merely written ---------
+
+
+def _assessor(**config_overrides: object):  # noqa: ANN202 - the return is internal
+    from persona_api.background.worker_root import _acceptance_assessor
+
+    return _acceptance_assessor(
+        APIConfig(**config_overrides),  # type: ignore[arg-type]
+        rls_engine=None,  # type: ignore[arg-type]  # only reached when an assess resolves a backend
+        tier_registry=_registry(),
+        free_tier_registry=None,
+    )
+
+
+def test_a_worker_built_from_the_default_config_assesses_criteria() -> None:
+    """The built-but-inert failure: a checklist that can never be ticked is the old bug."""
+    from persona_runtime.legs import AcceptanceAssessor
+
+    assert isinstance(_assessor(), AcceptanceAssessor)
+
+
+def test_the_kill_switch_restores_the_old_behaviour_exactly() -> None:
+    """Off is not a degraded assessment; it is no assessment, so criteria stay pending."""
+    assert _assessor(PERSONA_TASK_ACCEPTANCE_ASSESSOR_ENABLED="false") is None

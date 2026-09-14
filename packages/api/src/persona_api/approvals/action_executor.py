@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 from persona.schema.tools import ToolCall
 
+from persona_api.approvals.resolver import ExecutedAction
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
@@ -42,19 +44,23 @@ class ToolboxActionExecutor:
     def __init__(self, build_toolbox: Callable[[], Awaitable[Toolbox]]) -> None:
         self._build_toolbox = build_toolbox
 
-    async def execute(self, tool_name: str, arguments: Mapping[str, JsonValue]) -> str:
+    async def execute(self, tool_name: str, arguments: Mapping[str, JsonValue]) -> ExecutedAction:
         """Dispatch the EXACT recorded ``(tool_name, arguments)`` verbatim; never raise (A6).
 
-        Returns the tool's result summary, or an ``"Execution failed: …"`` summary on any build /
-        dispatch failure (the resolver records that as a failed outcome and resumes the task).
+        Returns the tool's result summary plus any files it persisted (R9-162 — an approved
+        ``file_write`` produces bytes the task's pointer list must know about), or an
+        ``"Execution failed: …"`` summary with no artifacts on any build / dispatch failure
+        (the resolver records that as a failed outcome and resumes the task).
         """
         try:
             toolbox = await self._build_toolbox()
             result = await toolbox.dispatch(ToolCall(name=tool_name, args=dict(arguments)))
         except Exception as exc:  # noqa: BLE001 — resilience boundary: a reply must never 500
             _log.warning("approval action execution failed", tool_name=tool_name, error=str(exc))
-            return f"Execution failed: {exc}"
+            return ExecutedAction(summary=f"Execution failed: {exc}")
         if result.is_error:
+            # A failed tool may still have written a partial file; a pointer to one would
+            # tell the next leg the work landed. The summary is the whole truth here.
             _log.info("approval action tool returned an error", tool_name=tool_name)
-            return f"Execution failed: {result.content}"
-        return result.content
+            return ExecutedAction(summary=f"Execution failed: {result.content}")
+        return ExecutedAction(summary=result.content, artifacts=result.artifacts)

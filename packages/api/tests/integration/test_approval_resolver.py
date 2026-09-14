@@ -26,9 +26,15 @@ from persona.approvals import (
     ProposalStatus,
     RawInterpretation,
 )
-from persona.tasks import Contract, Task, TaskCheckpoint
+from persona.schema.tools import PersistedArtifact
+from persona.tasks import ArtifactPointer, Contract, Task, TaskCheckpoint
 from persona.tools import ActionCategory
-from persona_api.approvals import ApprovalResolver, ApprovalStore, InboxDecision
+from persona_api.approvals import (
+    ApprovalResolver,
+    ApprovalStore,
+    ExecutedAction,
+    InboxDecision,
+)
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
@@ -53,12 +59,13 @@ def app_engine(migrated_engine: Engine) -> Iterator[Engine]:
 class _FakeExecutor:
     """Records the verbatim payloads it was asked to replay."""
 
-    def __init__(self) -> None:
+    def __init__(self, artifacts: tuple[PersistedArtifact, ...] = ()) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self._artifacts = artifacts
 
-    async def execute(self, tool_name: str, arguments: Mapping) -> str:
+    async def execute(self, tool_name: str, arguments: Mapping) -> ExecutedAction:
         self.calls.append((tool_name, dict(arguments)))
-        return "sent"
+        return ExecutedAction(summary="sent", artifacts=self._artifacts)
 
 
 class _FakeInterpreter:
@@ -147,13 +154,19 @@ def _proposal(owner: str, persona: str, task_id: str, pid: str = "p1") -> Action
     )
 
 
-def _resolver(engine: Engine, interp: _FakeInterpreter, **extra: object) -> tuple:
+def _resolver(
+    engine: Engine,
+    interp: _FakeInterpreter,
+    *,
+    artifacts: tuple[PersistedArtifact, ...] = (),
+    **extra: object,
+) -> tuple:
     approvals = ApprovalStore(engine)
     tasks = TaskStore(engine)
     checkpoints = CheckpointStore(engine)
     queue = _FakeQueue()
     continuation = TaskContinuation(task_store=tasks, queue=queue, checkpoint_store=checkpoints)  # type: ignore[arg-type]
-    executor = _FakeExecutor()
+    executor = _FakeExecutor(artifacts)
     notifier = _FakeNotifier()
     resolver = ApprovalResolver(
         approvals=approvals,
@@ -468,3 +481,63 @@ async def test_concurrent_chat_and_inbox_resolve_execute_once(
     assert len(executor.calls) == 1  # one execution — the CAS held under concurrency
     assert len(checkpoints.list_recent("user_a", "t1", limit=10)) == 1  # one resolution checkpoint
     assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+
+
+async def test_an_approved_action_that_writes_a_file_leaves_a_pointer(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-162: an approved ``file_write`` puts the file in the task's pointer list.
+
+    Before this the resolution checkpoint recorded a SENTENCE about the file and the pointer
+    list stayed empty, so the next leg was told nothing had been produced and the completion
+    report listed no artifacts for work the user had explicitly approved.
+    """
+    _seed(migrated_engine, "user_a", "persona_a")
+    produced = PersistedArtifact(
+        workspace_path="uploads/appeal.pdf", mime_type="application/pdf", size_bytes=2048
+    )
+    resolver, approvals, checkpoints, _e, _n, _q = _resolver(
+        app_engine, _approve(), artifacts=(produced,)
+    )
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes send it", "telegram", now=_NOW)
+
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert [(p.kind, p.ref) for p in head.artifact_pointers] == [
+        ("workspace", "uploads/appeal.pdf")
+    ]
+
+
+async def test_a_denial_carries_the_prior_pointers_through_unchanged(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """A denial executes nothing, so it neither adds nor loses a pointer."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, checkpoints, _e, _n, _q = _resolver(
+        app_engine,
+        _FakeInterpreter(RawInterpretation(intent=InterpretedIntent.DENY, confidence=0.9)),
+    )
+    tasks = TaskStore(app_engine)
+    _waiting_task(tasks, owner="user_a", persona="persona_a", task_id="t1")
+    task = tasks.get("user_a", "t1")
+    checkpoints.append(
+        task,
+        TaskCheckpoint(
+            task_id="t1",
+            leg_id="t1:leg:0",
+            checkpoint_seq=0,
+            artifact_pointers=(ArtifactPointer(kind="workspace", ref="notes/earlier.md"),),
+            updated_at=_NOW,
+        ),
+        now=_NOW,
+    )
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "no, do not send it", "telegram", now=_NOW)
+
+    head = checkpoints.get_latest("user_a", "t1")
+    assert head is not None
+    assert [p.ref for p in head.artifact_pointers] == ["notes/earlier.md"]

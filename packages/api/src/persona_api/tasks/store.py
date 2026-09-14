@@ -36,9 +36,11 @@ from persona.errors import TaskNotFoundError
 from persona.logging import get_logger
 from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+    AcceptanceStatus,
     Task,
     enforce_checkpoint_budget,
 )
+from persona.tasks import settle_criteria as gate_criteria
 from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -54,10 +56,17 @@ from persona_api.tasks.serde import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime
 
-    from persona.tasks import SpendKind, TaskCheckpoint, WaitKind
+    from persona.tasks import (
+        CriterionClaim,
+        LegEvidence,
+        RejectedClaim,
+        SpendKind,
+        TaskCheckpoint,
+        WaitKind,
+    )
     from sqlalchemy import Engine
 
 __all__ = ["CheckpointStore", "TaskStore"]
@@ -228,6 +237,72 @@ class TaskStore:
             target=task_id,
             metadata={"run_id": run_id},
         )
+
+    def settle_criteria(
+        self, owner_id: str, task_id: str, claims: Sequence[CriterionClaim], evidence: LegEvidence
+    ) -> tuple[RejectedClaim, ...]:
+        """Run acceptance claims through the core gate and persist what it accepts (R9-164).
+
+        The gate (:func:`persona.tasks.acceptance.settle_criteria`) is what decides; this
+        method is the durable half. Read-modify-write inside ONE row-locked transaction
+        (``SELECT ... FOR UPDATE``), because the contract is a JSON column and two legs of the
+        same task settling different criteria must not clobber each other. The re-read inside
+        the lock is what makes that true: the claims are applied to the contract as it stands
+        NOW, not as it stood when the leg started.
+
+        ``Task.settle_criteria`` re-checks the ids and statements against that contract, so a
+        status is the only thing this call can change even if the criteria were assembled
+        elsewhere. Statuses only ever move forward (pending to done/failed, failed to done);
+        the gate refuses anything else.
+
+        Args:
+            owner_id: The RLS scope (the task's owner).
+            task_id: The task whose criteria are being settled.
+            claims: What the assessor proposed.
+            evidence: The durable facts about the leg the claims come from.
+
+        Returns:
+            The refused claims, with reasons, for the caller to log. Empty when everything
+            landed or nothing was claimed.
+
+        Raises:
+            TaskNotFoundError: If the task is not visible to ``owner_id``.
+        """
+        if not claims:
+            return ()
+        with rls_connection(self._engine, owner_id) as conn:
+            row = (
+                conn.execute(select(tasks_t).where(tasks_t.c.id == task_id).with_for_update())
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise TaskNotFoundError("task not found", context={"task_id": task_id})
+            current = row_to_task(row)
+            criteria, rejected = gate_criteria(current.contract, claims, evidence)
+            settled = current.settle_criteria(criteria, now=current.updated_at)
+            if settled is current:
+                return rejected
+            conn.execute(
+                update(tasks_t)
+                .where(tasks_t.c.id == task_id)
+                .values(contract_json=settled.contract.model_dump(mode="json"))
+            )
+        audit_service.record(
+            engine=self._engine,
+            user_id=owner_id,
+            action="task.settle_criteria",
+            target=task_id,
+            metadata={
+                "settled": ",".join(
+                    f"{c.id}={c.status.value}"
+                    for c in settled.contract.acceptance_criteria
+                    if c.status is not AcceptanceStatus.PENDING
+                ),
+                "rejected": str(len(rejected)),
+            },
+        )
+        return rejected
 
     # --- internals ----------------------------------------------------------
 

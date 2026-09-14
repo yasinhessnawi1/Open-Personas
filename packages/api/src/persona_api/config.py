@@ -18,6 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona_runtime.legs.acceptance import DEFAULT_ASSESS_TIMEOUT_S
 from persona_runtime.legs.semantic_distiller import DEFAULT_DISTILL_TIMEOUT_S
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -625,6 +626,28 @@ class APIConfig(BaseSettings):
         default=DEFAULT_DISTILL_TIMEOUT_S,
         gt=0,
         validation_alias="PERSONA_TASK_SEMANTIC_DISTILLER_TIMEOUT_SECONDS",
+    )
+    # R9-164: the acceptance assessor, which lets a leg's work move a contract's acceptance
+    # criteria off ``pending``. On, because a checklist that can never be ticked is worse than
+    # no checklist; the safety is not this flag but the core gate the claims pass through
+    # (persona.tasks.acceptance), which refuses anything it cannot check. Set it to false and
+    # every criterion stays pending, which is what the system did before this existed. It
+    # costs one small-tier call per leg, and only for a task that HAS criteria.
+    task_acceptance_assessor_enabled: bool = Field(
+        default=True, validation_alias="PERSONA_TASK_ACCEPTANCE_ASSESSOR_ENABLED"
+    )
+    # The tier the assessment runs on. Small for the same reason the distillation is: it is a
+    # short, bounded judgement made once per leg, and it must not delay the next one.
+    task_acceptance_assessor_tier: str = Field(
+        default="small", validation_alias="PERSONA_TASK_ACCEPTANCE_ASSESSOR_TIER"
+    )
+    # How long the assessment may take before the leg moves on without it. Shorter than the
+    # distiller's: a missed criterion simply stays pending and a later leg can claim it, while
+    # a lost distillation costs the next leg its plan.
+    task_acceptance_assessor_timeout_seconds: float = Field(
+        default=DEFAULT_ASSESS_TIMEOUT_S,
+        gt=0,
+        validation_alias="PERSONA_TASK_ACCEPTANCE_ASSESSOR_TIMEOUT_SECONDS",
     )
 
     # Authoring sampling knobs (drafter creativity). The FIRST draft / refinement

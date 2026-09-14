@@ -19,6 +19,7 @@ and the spec §2 lifecycle.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -26,6 +27,11 @@ from persona.errors import TaskStateError
 from persona.tasks.contract import Contract  # noqa: TC001 — Pydantic needs runtime access
 from persona.tasks.ledger import CostLedger, SpendKind
 from persona.tasks.state import TaskKind, TaskState, WaitKind, is_terminal, validate_transition
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from persona.tasks.contract import AcceptanceCriterion
 
 __all__ = ["TASK_SCHEMA_VERSION", "Task"]
 
@@ -223,3 +229,38 @@ class Task(BaseModel):
                 context={"expected": str(expected), "got": str(seq), "task_id": self.id},
             )
         return self.model_copy(update={"head_checkpoint_seq": seq, "updated_at": now})
+
+    def settle_criteria(self, criteria: Sequence[AcceptanceCriterion], *, now: datetime) -> Task:
+        """Advance acceptance-criterion STATUSES — the controlled path the contract names.
+
+        The contract is the anti-drift anchor and carries no mutation method: a leg
+        structurally cannot rewrite the goal, the scope, or a criterion's wording. Status is
+        the one part that moves as work progresses, and it moves through here, where the ids
+        and the statements are checked against the ones already on the contract. So the only
+        thing this call can ever change is a status, however the caller assembled the tuple.
+
+        Args:
+            criteria: The full criteria tuple, in contract order, with statuses applied.
+            now: The write time.
+
+        Returns:
+            A new ``Task``, or ``self`` unchanged when no status actually moved.
+
+        Raises:
+            TaskStateError: If the task is terminal, or the ids/statements do not match the
+                contract exactly (a rewrite wearing a status update's clothes).
+        """
+        if is_terminal(self.state):
+            raise TaskStateError(
+                "cannot settle criteria on a terminal task", context={"state": self.state.value}
+            )
+        existing = self.contract.acceptance_criteria
+        if [(c.id, c.statement) for c in existing] != [(c.id, c.statement) for c in criteria]:
+            raise TaskStateError(
+                "acceptance criteria may change status only, never id or statement",
+                context={"task_id": self.id},
+            )
+        if tuple(criteria) == existing:
+            return self
+        contract = self.contract.model_copy(update={"acceptance_criteria": tuple(criteria)})
+        return self.model_copy(update={"contract": contract, "updated_at": now})

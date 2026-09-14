@@ -65,6 +65,7 @@ from persona.stores.summarizer import TierSummarizer
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 from persona_runtime.legs import CompactingCheckpointWriter
+from persona_runtime.legs.acceptance import AcceptanceAssessor
 from persona_runtime.legs.semantic_distiller import SemanticCheckpointWriter
 from persona_runtime.routing import tier_for
 
@@ -465,6 +466,16 @@ def build_worker_registry(
                 tier_registry=tier_registry,
                 free_tier_registry=free_tier_registry,
             ),
+            # R9-164: the acceptance assessor, on the same per-job owner-scoped backend
+            # resolution the distiller uses. Separate from the writer on purpose: a bad
+            # summary is a poor next leg, a bad acceptance claim tells the user their work
+            # is finished when it is not, so it gets its own flag and its own gate.
+            acceptance=_acceptance_assessor(
+                config,
+                rls_engine=rls_engine,
+                tier_registry=tier_registry,
+                free_tier_registry=free_tier_registry,
+            ),
         )
 
     # Initiative scan (Spec A5, T6) — env-gated at the composition root:
@@ -734,6 +745,39 @@ def _checkpoint_writer(
     )
 
 
+def _acceptance_assessor(
+    config: APIConfig,
+    *,
+    rls_engine: Engine,
+    tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+) -> AcceptanceAssessor | None:
+    """The leg's acceptance assessor, or ``None`` when the operator turned it off (R9-164).
+
+    ``None`` is the pre-R9-164 behaviour exactly: criteria stay pending forever. On, a leg's
+    work is read once on the small tier and its claims go through the core gate, which is
+    where the safety lives — not here.
+    """
+    if not config.task_acceptance_assessor_enabled:
+        return None
+
+    def _backend() -> ChatBackend:
+        return plan_scoped_background_backend(
+            tier=config.task_acceptance_assessor_tier,
+            rls_engine=rls_engine,
+            paid_tier_registry=tier_registry,
+            free_tier_registry=free_tier_registry,
+            # Metered: the call happens because this leg ran, so it rides the leg's own
+            # per-leg deduct rather than becoming a charge of its own (D-W1-44's rule).
+            metered=True,
+        )
+
+    return AcceptanceAssessor(
+        backend_provider=_backend,
+        timeout_s=config.task_acceptance_assessor_timeout_seconds,
+    )
+
+
 def _register_task_leg_tenant(
     registry: JobRegistry,
     *,
@@ -751,6 +795,7 @@ def _register_task_leg_tenant(
     agentic_floor: int = 1,
     recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
     writer: CheckpointWriter | None = None,
+    acceptance: AcceptanceAssessor | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
 
@@ -836,6 +881,10 @@ def _register_task_leg_tenant(
         # fetched off-loop and skipped on timeout so a slow recall never delays a leg.
         recent_leg_summaries=recent_leg_summaries,
         retrieval=LegRetrieval(recall_for=runtime_factory.build_task_recall),
+        # R9-164: the acceptance assessor. ``None`` (the flag off, or no tier) leaves every
+        # criterion pending exactly as before; wired, a leg's work can tick the checklist the
+        # user agreed, through the core gate that refuses an unevidenced claim.
+        acceptance=acceptance,
         on_milestone=on_milestone,
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,

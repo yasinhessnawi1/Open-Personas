@@ -136,6 +136,12 @@ def _render_checkpoint(checkpoint: TaskCheckpoint) -> str:  # noqa: C901 - one l
     if checkpoint.open_questions:
         lines.append("OPEN QUESTIONS:")
         lines.extend(f"- {q}" for q in checkpoint.open_questions)
+    # R9-163: the obstacle that stopped the last attempt. A leg resumed after a park reads
+    # its predecessor's checkpoint in full and, without this, was told everything EXCEPT the
+    # thing that stopped it: it re-ran the same approach into the same wall. Rendered after
+    # the open questions and before the pointers, so the established findings still lead.
+    if checkpoint.blocked_on:
+        lines.append(f"BLOCKED ON: {checkpoint.blocked_on}")
     if checkpoint.artifact_pointers:
         lines.append("ARTIFACTS:")
         lines.extend(f"- {p.kind}: {p.ref}" for p in checkpoint.artifact_pointers)

@@ -19,10 +19,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.skills import count_tokens
-from persona.tasks import DEFAULT_CHECKPOINT_TOKEN_BUDGET, TaskCheckpoint
+from persona.tasks import (
+    DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+    TaskCheckpoint,
+    merge_artifact_pointers,
+)
 
 from persona_runtime.legs.ledger import (
     LEDGER_TOKEN_SHARE,
+    artifacts_from_run,
     fold_oldest,
     queries_from_run,
     sources_from_run,
@@ -106,7 +111,14 @@ class CompactingCheckpointWriter:
             queries_run=queries,
             sources_seen=sources,
             open_questions=prior.open_questions if prior is not None else (),
-            artifact_pointers=prior.artifact_pointers if prior is not None else (),
+            # R9-162: the pointer half of D-A2-1, at last produced rather than copied. A leg
+            # that persists a file surfaces it on ``ToolResult.artifacts`` (Spec 28); this is
+            # where it becomes the reference the NEXT leg's reconstruction recites, so the
+            # successor opens the file instead of rebuilding it. The pointers sit outside the
+            # token budget (they are references, not content), so the merge bounds them itself.
+            artifact_pointers=merge_artifact_pointers(
+                prior.artifact_pointers if prior is not None else (), artifacts_from_run(run)
+            ),
             event_log_cursor=run.id,  # the durable run record holds the compacted detail
             updated_at=now,
         )

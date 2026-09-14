@@ -169,8 +169,9 @@ class _GatingRunner:
     propagates through the (unmodified) loop to ``run_leg``. We model that by raising mid-run.
     """
 
-    def __init__(self, proposal_id: str) -> None:
+    def __init__(self, proposal_id: str, description: str = "") -> None:
         self._proposal_id = proposal_id
+        self._description = description
 
     async def run(
         self,
@@ -180,9 +181,10 @@ class _GatingRunner:
         cancel_token: CancelToken,  # noqa: ARG002 — part of the runner contract
     ) -> Run:
         await on_event(RunEvent.thinking(0))
-        raise GatedActionProposedError(
-            "gated action awaiting approval", context={"proposal_id": self._proposal_id}
-        )
+        context = {"proposal_id": self._proposal_id, "tool": "send_email"}
+        if self._description:
+            context["description"] = self._description
+        raise GatedActionProposedError("gated action awaiting approval", context=context)
 
 
 # --- reconstruction rendering ------------------------------------------------
@@ -344,6 +346,38 @@ async def test_gate_yields_waiting_approval_and_does_not_append() -> None:
     assert outcome.spend == {}
     assert sink.calls == []  # the sink was never touched (no append, no double-write)
     assert outcome.task.head_checkpoint_seq is None  # task unadvanced
+
+
+# --- R9-163: the leg LEARNS the obstacle; the park records it ----------------
+
+
+@pytest.mark.asyncio
+async def test_a_gated_leg_names_the_obstacle_it_hit() -> None:
+    """The description the inbox shows, so the task page and the inbox name one thing."""
+    outcome = await _executor(
+        _GatingRunner("prop_abc", "Send an email to the landlord"),
+        _RecordingSink(),
+        _FakeClock(),
+    ).run_leg(task=_task(), trigger=_TRIGGER, now=_NOW)
+    assert outcome.blocked_on == "Waiting for your approval: Send an email to the landlord"
+
+
+@pytest.mark.asyncio
+async def test_a_gate_with_no_description_still_names_the_tool() -> None:
+    outcome = await _executor(_GatingRunner("prop_abc"), _RecordingSink(), _FakeClock()).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW
+    )
+    assert outcome.blocked_on == "Waiting for your approval: send_email"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_leg_is_not_blocked() -> None:
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW
+    )
+    assert outcome.blocked_on is None
 
 
 class _AskingRunner:
