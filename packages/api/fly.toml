@@ -18,7 +18,16 @@
 #     machine-local — a client reconnecting to a different Machine loses the live
 #     stream. Needs sticky sessions or LISTEN/NOTIFY/pub-sub first. Steps persist
 #     to runs.steps, so runs stay crash-viewable, but the live tail does not survive.
-#   - The rate limiter is already PostgresRateLimitStore (D-19-5, multi-instance-safe).
+#   - The rate limiter is NOT multi-instance-safe today. This line used to claim it was.
+#     `PostgresRateLimitStore` is selected only when PERSONA_API_RATE_LIMIT_BACKEND=postgres;
+#     the default is `memory` and the variable is set NOWHERE (no Fly secret, no [env] here),
+#     so the live app runs InMemoryRateLimitStore. With N machines every user's limit
+#     multiplies by N. Set the backend to postgres BEFORE raising min_machines_running.
+#     Corrected 2026-09-14 (R9-170) after the claim was checked against the code.
+#   - Same shape, same block: PERSONA_API_AUDIT_BACKEND and PERSONA_API_STORAGE_BACKEND are
+#     named in the comments above but set nowhere, so audit is still single-writer JSONL and
+#     storage is still the machine-local volume. R5 built the Postgres and S3 backends to lift
+#     exactly this, and none of the three is switched on.
 #   - The routing latency tracker re-warms per-Machine (~5 turns, self-healing) —
 #     degraded-but-tolerable, not blocking.
 #   - The file-tool sandbox (PERSONA_TOOLS_SANDBOX_ROOT) is still volume-local
