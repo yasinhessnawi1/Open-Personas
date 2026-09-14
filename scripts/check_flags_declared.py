@@ -18,7 +18,25 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+def _repo_root() -> Path:
+    """The worktree this is being run against, asked of git rather than assumed.
+
+    Deriving it from ``__file__`` breaks the moment someone runs a copy of this script from
+    somewhere else, which is exactly what happened the first time it was pointed at another
+    worktree. A gate that only works from one path is a gate that gets skipped.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+        )
+        return Path(out.stdout.strip())
+    except Exception:
+        return Path(__file__).resolve().parent.parent
+
+
+ROOT = _repo_root()
 EXEMPT = re.compile(r"MULTIPLIER|MARKUP|_SECRET|_KEY$|_TOKEN$|PASSWORD")
 
 for pkg in ("core", "runtime", "api", "voice", "connectors"):
