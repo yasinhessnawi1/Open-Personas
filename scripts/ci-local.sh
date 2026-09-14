@@ -96,7 +96,7 @@ ONLY_STEP="${ONLY_STEP:-}"
 
 # Canonical step names, in run order. This is what --only accepts, and every
 # step's log file under .ci-local/<run>/ is named "<one of these>.log".
-CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
+CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format flags-declared mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
 
 is_valid_step() { # name
   local n
@@ -464,6 +464,12 @@ fi
 # --- Job lint-and-type-check -------------------------------------------------
 if want_step "ruff-check"; then
   run_step "ruff-check"   "uv run ruff check"          uv run ruff check
+fi
+# Owner rule 2026-09-14: every feature flag is declared in .env.example WITH its state,
+# even when it ships off, so "what is on and what is off" is answerable from a checkout.
+if want_step "flags-declared"; then
+  run_step "flags-declared" "uv run python scripts/check_flags_declared.py" \
+    uv run python scripts/check_flags_declared.py
 fi
 if want_step "ruff-format"; then
   run_step "ruff-format"  "uv run ruff format --check"  uv run ruff format --check
