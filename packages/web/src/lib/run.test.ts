@@ -782,3 +782,131 @@ describe("runViewFromEvents → step.outputs derivation (T04)", () => {
     ]);
   });
 });
+
+// part3 F2: a reopened run used to flatten every generated image, chart and document
+// into a paragraph of text. The live stream classifies each tool result into rich
+// `outputs`; the persisted-step reader built `tools` and left `outputs` empty. So what
+// you watched and what you came back to were different, and the difference was the
+// entire point of having generated a file.
+describe("runViewFromSnapshot: rich outputs survive a reopen", () => {
+  const imageStep = {
+    type: "tool_call",
+    tool_calls: [
+      { name: "generate_image", call_id: "c1", args: { prompt: "a chart" } },
+    ],
+    results: [
+      {
+        tool_name: "generate_image",
+        call_id: "c1",
+        content: "made a chart",
+        is_error: false,
+        artifacts: [
+          {
+            workspace_path: "charts/q3.png",
+            mime_type: "image/png",
+            size_bytes: 1234,
+            rendered_inline: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  it("recovers a generated image from the durable record", () => {
+    const view = runViewFromSnapshot({
+      id: "run_1",
+      persona_id: "p1",
+      task: "Chart Q3",
+      status: "completed",
+      steps: [imageStep as unknown as Record<string, unknown>],
+    });
+
+    expect(view.steps[0].outputs).toHaveLength(1);
+    expect(view.steps[0].outputs[0].kind).not.toBe("result-block");
+  });
+
+  it("recovers produced files, which persist inside the result's `data`", () => {
+    const view = runViewFromSnapshot({
+      id: "run_1",
+      persona_id: "p1",
+      task: "Build the deck",
+      status: "completed",
+      steps: [
+        {
+          type: "tool_call",
+          tool_calls: [{ name: "code_execution", call_id: "c1" }],
+          results: [
+            {
+              tool_name: "code_execution",
+              call_id: "c1",
+              content: "wrote the file",
+              is_error: false,
+              data: {
+                produced_files: [
+                  {
+                    path: "out/report.pdf",
+                    size_bytes: 9001,
+                    mime_type: "application/pdf",
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+
+    expect(view.steps[0].outputs).toHaveLength(1);
+    expect(view.steps[0].outputs[0].kind).not.toBe("result-block");
+  });
+
+  it("still renders a plain result as a result block", () => {
+    const view = runViewFromSnapshot({
+      id: "run_1",
+      persona_id: "p1",
+      task: "Research",
+      status: "completed",
+      steps: [
+        {
+          type: "tool_call",
+          tool_calls: [{ name: "web_search", call_id: "c1" }],
+          results: [
+            {
+              tool_name: "web_search",
+              call_id: "c1",
+              content: "hit",
+              is_error: false,
+            },
+          ],
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+
+    expect(view.steps[0].outputs[0].kind).toBe("result-block");
+  });
+
+  it("classifies a failed call as a failure, not as text", () => {
+    const view = runViewFromSnapshot({
+      id: "run_1",
+      persona_id: "p1",
+      task: "Research",
+      status: "completed",
+      steps: [
+        {
+          type: "tool_call",
+          tool_calls: [{ name: "web_search", call_id: "c1" }],
+          results: [
+            {
+              tool_name: "web_search",
+              call_id: "c1",
+              content: "boom",
+              is_error: true,
+            },
+          ],
+        } as unknown as Record<string, unknown>,
+      ],
+    });
+
+    expect(view.steps[0].outputs[0].kind).toBe("failure");
+  });
+});

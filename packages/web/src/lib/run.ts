@@ -7,7 +7,12 @@ import {
   projectToolCalling,
   projectToolResult,
 } from "@/lib/normalisers/_classify";
-import type { QuestionOption, RunEvent } from "@/lib/sse-types";
+import type {
+  ArtifactRef,
+  QuestionOption,
+  RunEvent,
+  ToolResultData,
+} from "@/lib/sse-types";
 import { warnUnhandledSseEvent } from "@/lib/sse-types";
 
 // Normalised run-viewer model (T07). Both the live `RunEvent` SSE stream and the
@@ -327,6 +332,17 @@ interface PersistedToolResult {
   content: string;
   call_id?: string;
   is_error?: boolean;
+  /**
+   * Spec 28 byte-outputs, as the durable record carries them. Present on a stored run
+   * exactly as on the live frame, which is what makes part3 F2 fixable at all.
+   */
+  artifacts?: ArtifactRef[];
+  /**
+   * The tool's structured payload. `produced_files` lives in here on the record, and is
+   * lifted onto the frame's top level by `RunEvent.tool_result`; this reader does the same
+   * lift so a reopened run and a watched one classify identically.
+   */
+  data?: Record<string, unknown> | null;
 }
 /**
  * One `Step.notes` entry as the durable record carries it (R9-157). Every field is
@@ -374,6 +390,30 @@ function isRunEventDict(x: unknown): x is RunEvent {
   return typeof x === "object" && x !== null && "timestamp" in x;
 }
 
+/**
+ * Rebuild the `tool_result` frame payload from a persisted result, so the reopen path and
+ * the live path hand {@link projectToolResult} the same shape (part3 F2).
+ *
+ * `produced_files` is lifted out of `data` exactly as `RunEvent.tool_result` lifts it, and
+ * an empty list is omitted rather than passed as `[]`, because the classifier treats
+ * absence as "fall back" and an empty array would read as "there were none".
+ */
+function persistedResultAsFrame(r: PersistedToolResult): ToolResultData {
+  const frame: ToolResultData = {
+    tool_name: r.tool_name,
+    is_error: r.is_error ?? false,
+    content: r.content,
+  };
+  if (r.artifacts !== undefined && r.artifacts.length > 0) {
+    frame.artifacts = r.artifacts;
+  }
+  const pf = r.data?.produced_files;
+  if (Array.isArray(pf) && pf.length > 0) {
+    frame.produced_files = pf as ToolResultData["produced_files"];
+  }
+  return frame;
+}
+
 function stepToRunStep(s: PersistedStep, index: number): RunStep {
   const out = emptyStep(index);
   out.tier = s.tier_used ?? undefined;
@@ -398,6 +438,20 @@ function stepToRunStep(s: PersistedStep, index: number): RunStep {
           pending: r === undefined,
         };
       });
+      // part3 F2: reopen a run and every generated image, chart and document used to
+      // come back as a paragraph of text. The live stream classifies each result into
+      // rich `outputs`; this path built `tools` and left `outputs` empty, so the run you
+      // watched and the run you reopened showed different things, and the difference was
+      // the whole point of generating a file.
+      //
+      // The record had the data all along. Artifacts persist on the result, and
+      // `produced_files` persists inside its `data` — the same two places
+      // `RunEvent.tool_result` reads when it builds the live frame. Rebuilding that exact
+      // payload here is what makes the two paths agree by construction rather than by
+      // two normalisers being kept in step by hand.
+      out.outputs = results.flatMap((r) =>
+        projectToolResult(persistedResultAsFrame(r)),
+      );
       break;
     }
     case "ask_user":
