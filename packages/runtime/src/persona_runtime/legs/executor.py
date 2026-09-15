@@ -272,16 +272,32 @@ class _BoxWatcher:
     The loop emits a ``thinking`` event at the top of every step and checks the token at the
     same boundary (``loop.py`` D-06-7), so cancelling on a ``thinking`` event stops the leg
     at the next boundary — never mid-step. Wall-clock is measured with a monotonic clock;
-    the step bound is the loop's own ``max_steps`` (this is a backstop); spend is metered
-    post-leg (the loop does not surface per-step tokens on the event stream).
+    the step bound is the loop's own ``max_steps`` (this is a backstop). Spend is read
+    through the injected ``spent_micros`` probe, which the caller closes over its own
+    running meter: the loop does not surface per-step cost on the event stream, but the
+    caller that prices ``on_step_usage`` knows the running total and can be asked for it.
     """
 
-    def __init__(self, box: LegBox, token: CancelToken, *, clock: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        box: LegBox,
+        token: CancelToken,
+        *,
+        clock: Callable[[], float],
+        spent_micros: Callable[[], int] | None = None,
+    ) -> None:
         self._box = box
         self._token = token
         self._clock = clock
         self._start = clock()
         self._steps = 0
+        #: Reads the leg's spend SO FAR, in ledger micros. ``None`` → the leg is unpriced and
+        #: the spend bound cannot be judged, so it reports zero and only steps and wall clock
+        #: bound the leg. Until 2026-09-15 this was the hardcoded literal ``0`` with no way to
+        #: pass anything else, which meant ``LegBox.budget_micros`` could never be reached
+        #: even when set: one of the two independent reasons the per-leg spend cap had never
+        #: fired in production (R9-176).
+        self._spent_micros = spent_micros
         self.box_limit: LegBoxLimit | None = None
 
     async def on_event(self, event: RunEvent) -> None:
@@ -290,7 +306,9 @@ class _BoxWatcher:
         self._steps += 1
         elapsed = self._clock() - self._start
         limit = self._box.exhausted_by(
-            steps_taken=self._steps, elapsed_seconds=elapsed, spent_micros=0
+            steps_taken=self._steps,
+            elapsed_seconds=elapsed,
+            spent_micros=0 if self._spent_micros is None else self._spent_micros(),
         )
         if limit is not None and not self._token.is_cancelled:
             self.box_limit = limit
@@ -350,6 +368,7 @@ class LegExecutor:
         now: datetime,
         external_cancel: CancelToken | None = None,
         on_step_usage: Callable[[StepUsage], Awaitable[None]] | None = None,
+        spent_micros: Callable[[], int] | None = None,
     ) -> LegOutcome:
         """Reconstruct → run the boxed loop → write the checkpoint → return the outcome.
 
@@ -383,7 +402,7 @@ class LegExecutor:
         effective_seq = seq if seq is not None else task.next_checkpoint_seq
         task_str = self._render(task, trigger, prior_checkpoint, recent_legs, retrieval)
         token = external_cancel if external_cancel is not None else CancelToken()
-        watcher = _BoxWatcher(effective_box, token, clock=self._clock)
+        watcher = _BoxWatcher(effective_box, token, clock=self._clock, spent_micros=spent_micros)
 
         try:
             if on_step_usage is not None:

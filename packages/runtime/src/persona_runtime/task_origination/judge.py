@@ -154,9 +154,6 @@ def dangling_reference(text: str) -> bool:
     return bool(_DANGLING_REFERENCE_RE.search(text))
 
 
-
-
-
 class ModelStandingIntentJudge:
     """A :class:`StandingIntentJudge` over a chat backend (mockable; conservative)."""
 

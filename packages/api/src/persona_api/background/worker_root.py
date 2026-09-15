@@ -831,7 +831,7 @@ def _register_task_leg_tenant(
         audit_logger=audit_logger,
         live_sessions=live_sessions,
     )
-    budget_gate = _build_budget_gate(
+    budget_gate, leg_budget_micros = _build_budget_gate(
         rls_engine=rls_engine,
         task_store=task_store,
         memory_backend=memory_backend,
@@ -889,6 +889,7 @@ def _register_task_leg_tenant(
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
         budget_gate=budget_gate,
+        leg_budget_micros=leg_budget_micros,
         on_approval_parked=on_approval_parked,
         on_task_stuck=on_task_stuck,
         # Spec M3 (T4b): OWNER-billed, CAS-ridden idempotent leg billing. The
@@ -924,7 +925,7 @@ def _build_budget_gate(
     audit_logger: AuditLogger | None,
     live_sessions: LiveSessionRegistry | None,
     emit_task_updated: Callable[[str, str, str], None],
-) -> Callable[[str, Task, datetime], Awaitable[bool]]:
+) -> tuple[Callable[[str, Task, datetime], Awaitable[bool]], Callable[[str, Task], int]]:
     """The A3 leg-boundary budget gate (T10) — enforce the per-task cap + voice the extend ask.
 
     Returns an async gate the leg handler consults before enqueueing a CONTINUE's next leg: over
@@ -933,6 +934,12 @@ def _build_budget_gate(
     without C0), the pause still holds — only the voiced ask degrades to the persist-only floor
     (the Tasks surface still shows the budget-paused "extend?" affordance). The pause emits a
     ``task.updated`` ping through ``emit_task_updated`` (A11) so the surface refetches live.
+
+    Returns the gate AND a reader for the task's REMAINING budget, because the same enforcer
+    answers both and only it knows the effective cap (the contract's bound plus every granted
+    extension, which lives in audit rows rather than on the task). The remaining figure is what
+    finally gives the per-leg spend box a number to hold: it had never fired, because both
+    ``LegBox`` construction sites passed no budget at all (R9-176).
     """
     from persona_api.approvals import account_for_budget_pause
     from persona_api.approvals.budget import BudgetEnforcer
@@ -983,7 +990,11 @@ def _build_budget_gate(
                 _log.warning("budget extend ask voicing failed", task_id=task.id)
         return True
 
-    return _gate
+    def _remaining(owner: str, task: Task) -> int:
+        """What this task may still spend, in ledger micros; never negative."""
+        return max(0, budget.effective_cap(owner, task) - task.ledger.total_micros)
+
+    return _gate, _remaining
 
 
 def _build_approval_announce_hook(

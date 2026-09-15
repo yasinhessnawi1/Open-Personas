@@ -153,7 +153,5 @@ def format_micros(micros: int) -> str:
     Sub-dollar amounts keep the cent, since an overnight task spend is routinely a few
     cents and "$0" would read as "nothing was spent".
     """
-    amount = (Decimal(micros) / MICROS_PER_DOLLAR).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
+    amount = (Decimal(micros) / MICROS_PER_DOLLAR).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return f"${amount}"

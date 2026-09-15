@@ -258,6 +258,65 @@ async def test_within_box_runs_to_completion() -> None:
     assert outcome.run.status == RunStatus.COMPLETED
 
 
+# --- the box SPEND trip (R9-176: the bound that had never once fired) --------
+
+
+@pytest.mark.asyncio
+async def test_spend_box_stops_a_leg_that_runs_past_its_budget() -> None:
+    """A leg whose metered spend crosses the box budget stops, mid-leg, and says why.
+
+    This bound shipped unreachable twice over. ``LegBox.budget_micros`` defaults to ``None``
+    and both production construction sites built ``LegBox()`` with no arguments, so the
+    branch could not be entered; and the only thing that checked it passed a hardcoded
+    ``spent_micros=0``, so even a box WITH a budget could not have tripped. Two independent
+    reasons, one silent result: the per-leg money bound had never stopped a leg.
+
+    The spend here is driven by the leg actually running, through the same probe the
+    handler wires to its real meter. Nothing forces the end state.
+    """
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=10, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    sink = _RecordingSink()
+    spent = {"micros": 0}
+
+    def probe() -> int:
+        # 400 micros a step (4 cents); the box allows 1000 → the 3rd step crosses it.
+        spent["micros"] += 400
+        return spent["micros"]
+
+    outcome = await _executor(runner, sink, clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        box=LegBox(max_steps=10, wall_clock_seconds=180.0, budget_micros=1_000),
+        now=_NOW,
+        spent_micros=probe,
+    )
+    assert outcome.box_limit == LegBoxLimit.BUDGET
+    assert outcome.run.status == RunStatus.CANCELLED
+    assert len(outcome.run.steps) == 3  # stopped at the step that crossed, not mid-step
+    assert len(sink.calls) == 1  # and it still checkpointed, like every other box trip
+
+
+@pytest.mark.asyncio
+async def test_no_spend_probe_leaves_the_leg_bounded_by_steps_and_clock_only() -> None:
+    """Without a probe the spend bound is not judged, rather than judged as zero.
+
+    A caller that does not price its legs (the plain A2 shape) has no honest spend figure.
+    It must not therefore be treated as having spent nothing against a real cap, nor be
+    stopped by one. It runs to completion on steps and wall clock.
+    """
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=3, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        box=LegBox(max_steps=10, wall_clock_seconds=180.0, budget_micros=1),
+        now=_NOW,
+    )
+    assert outcome.box_limit is None
+    assert outcome.disposition == LegDisposition.COMPLETED
+
+
 # --- the cooperative drain-cancel checkpoint ---------------------------------
 
 

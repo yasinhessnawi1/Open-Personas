@@ -490,6 +490,7 @@ class TaskLegHandler:
         on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]]
         | None = None,
         budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
+        leg_budget_micros: Callable[[str, Task], int] | None = None,
         on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
         on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
         credits_policy: CreditsPolicy | None = None,
@@ -535,6 +536,21 @@ class TaskLegHandler:
         # caller must NOT continue); the gate voices the "budget reached; extend?" ask. Optional —
         # a plain A2 worker wires none, and the pre-A3 no-cap behaviour holds.
         self._budget_gate = budget_gate
+        # R9-176: the per-LEG spend bound, which had never once fired in production. The
+        # box's ``budget_micros`` defaults to None and both construction sites built
+        # ``LegBox()`` with no arguments, so the check at ``boxing.py:106`` was unreachable.
+        # Given the task's REMAINING budget, this reads it per leg.
+        #
+        # Remaining, not an invented fraction. The per-task cap already says a task may not
+        # spend more than X, so a leg spending past what the task has left is already
+        # forbidden; this turns a bound checked BETWEEN legs into one checked DURING a leg.
+        # It needs no new product number and there is no reading of it under which it is
+        # wrong. A fraction would be a policy decision, and inventing one inside a safety
+        # bound is how R9-161 happened.
+        #
+        # None → no cap plumbed (a plain A2 worker), and the box holds on steps and wall
+        # clock exactly as before.
+        self._leg_budget_micros = leg_budget_micros
         # Spec A3 (notify-on-park): the proactive C0 "may I do X?" voice for a freshly-parked
         # approval. Given (owner_id, proposal_id), the wired closure loads the proposal + voices
         # via the approval notifier. Optional + best-effort; None → the inbox/chat is the floor.
@@ -729,9 +745,13 @@ class TaskLegHandler:
                     recent_legs=recent_legs,
                     retrieval=retrieval,
                     seq=seq,
-                    box=self._box,
+                    box=self._leg_box(owner, task),
                     now=now,
                     on_step_usage=cost.on_step_usage,
+                    # The probe and the ledger read the SAME accumulator through the same
+                    # conversion, so the bound that stops a leg and the figure recorded
+                    # against it cannot disagree (R9-176).
+                    spent_micros=lambda: micros_from_cents(cost.result()[0]),
                 )
             except CheckpointTooLargeError as exc:
                 # The RUN itself finished — settle its record from what the wrapped runner
@@ -902,6 +922,27 @@ class TaskLegHandler:
                     "task lifecycle emit failed task_id={tid}: {err}", tid=task.id, err=str(exc)
                 )
 
+    def _leg_box(self, owner: str, task: Task) -> LegBox:
+        """This leg's bounds: the configured box, plus the task's remaining budget (R9-176).
+
+        The per-leg spend cap existed, was tested, and could never fire: ``LegBox`` defaults
+        ``budget_micros`` to ``None`` and both construction sites built ``LegBox()`` with no
+        arguments, so the branch that enforces it was unreachable. This supplies the number.
+
+        Remaining budget rather than a share of it. A leg may not spend past what its task
+        has left, which the per-task cap already says; the only thing added here is that it
+        is now noticed DURING the leg instead of at the boundary after the money is gone.
+
+        A task already at or over its cap yields a zero budget, which trips the box on the
+        first step. That is correct rather than harsh: the leg-boundary gate should have
+        paused the task before this leg was enqueued, so arriving here at all means
+        something upstream let it through, and the cheap stop is the right one.
+        """
+        if self._leg_budget_micros is None:
+            return self._box
+        remaining = self._leg_budget_micros(owner, task)
+        return self._box.model_copy(update={"budget_micros": max(0, remaining)})
+
     def _open_run_record(self, owner: str, task: Task, now: datetime) -> _LegRunRecord | None:
         """Open the leg's ``runs`` row and link it to the task, before any model spend.
 
@@ -1050,6 +1091,7 @@ def register_task_leg_handler(
     on_milestone: Callable[[LegOutcome, datetime], Awaitable[None]] | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
     budget_gate: Callable[[str, Task, datetime], Awaitable[bool]] | None = None,
+    leg_budget_micros: Callable[[str, Task], int] | None = None,
     on_approval_parked: Callable[[str, str], Awaitable[None]] | None = None,
     on_task_stuck: Callable[[str, StuckReport], Awaitable[None]] | None = None,
     credits_policy: CreditsPolicy | None = None,
@@ -1077,6 +1119,7 @@ def register_task_leg_handler(
                 on_milestone=on_milestone,
                 on_leg_settled=on_leg_settled,
                 budget_gate=budget_gate,
+                leg_budget_micros=leg_budget_micros,
                 on_approval_parked=on_approval_parked,
                 on_task_stuck=on_task_stuck,
                 credits_policy=credits_policy,
