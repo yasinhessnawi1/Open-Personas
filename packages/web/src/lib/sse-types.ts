@@ -221,6 +221,12 @@ export type ChatEvent =
   // call, whose args don't stream as deltas). Empty payload; cleared on the
   // next chunk/tool_calling/tool_result.
   | { event: "thinking"; data: Record<string, never> }
+  // The routed tier for THIS turn, emitted by the conversation loop before the answer
+  // streams. The same value arrives again on `done`, so nothing was ever lost by
+  // dropping it — but dropping it meant `warnUnhandledSseEvent` fired on every single
+  // turn, and a guard that cries wolf every turn is a guard nobody reads. It exists to
+  // catch dropped-event bugs, which is exactly the class this sweep was chasing.
+  | { event: "tier"; data: ChatTierData }
   | { event: "done"; data: ChatDoneData };
 
 const CHAT_EVENTS = new Set([
@@ -232,6 +238,7 @@ const CHAT_EVENTS = new Set([
   "asking_user",
   "memory_recall",
   "thinking",
+  "tier",
   "done",
   // PENDING-web seam (Spec C0, D-C0-X-within-runtime-default-off): the api can
   // push a "persona_originated" event (a persona-initiated message) inline on the
@@ -346,6 +353,14 @@ type EmptyData = Record<string, never>;
 
 export interface StartedData {
   task: string;
+}
+/**
+ * The tier the router chose for this turn, with the Spec 31 decision summary when
+ * intelligent routing ran. Arrives BEFORE the answer streams; `done` repeats it.
+ */
+export interface ChatTierData {
+  tier: string;
+  routing?: ChatDoneData["routing"];
 }
 export interface TierData {
   tier: string;

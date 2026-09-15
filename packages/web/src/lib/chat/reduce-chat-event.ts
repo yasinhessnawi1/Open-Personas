@@ -151,6 +151,18 @@ export function reduceChatEvent(
       ],
     };
   }
+  if (ev.event === "tier") {
+    // The tier lands BEFORE the answer streams, so the badge can be right from the first
+    // token instead of appearing only once the turn finishes. `done` repeats it, and the
+    // persisted message carries `tier_used`, so this arm adds earliness, not truth.
+    // `routing` is only present when intelligent routing ran; leave any existing value
+    // alone rather than clearing it.
+    return {
+      ...a,
+      tier: ev.data.tier,
+      routing: ev.data.routing ?? a.routing,
+    };
+  }
   if (ev.event === "done") {
     // Spec 31 (D-31-1/2): carry the model decision + budget snapshot alongside the
     // tier. NB: `done` never appears in the PERSISTED log (the worker routes tier to

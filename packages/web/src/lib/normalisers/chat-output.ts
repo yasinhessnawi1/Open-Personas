@@ -41,6 +41,8 @@ export function chatSseToOutputContent(event: ChatEvent): OutputContent[] {
     // not assistant output content — it never contributes to the output dispatcher.
     case "activity_start":
     case "activity_end":
+    // The routed tier is a badge on the message, not content in it.
+    case "tier":
       return [];
     case "tool_calling":
       return projectToolCalling(event.data.tool_calls);
