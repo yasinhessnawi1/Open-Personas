@@ -1131,3 +1131,83 @@ class TestRetiredModel:
         with pytest.raises(ProviderError):
             await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
         assert secondary.call_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# A busy provider walks the chain (the statusless overload)
+# --------------------------------------------------------------------------- #
+class TestOverloadedProvider:
+    """A provider saying "I am busy" must not end the turn.
+
+    NVIDIA's NIM endpoints answer with "Service temporarily overloaded" as a bare APIError
+    carrying NO http status. The statusless branch defaulted to SURFACE, so the turn died
+    with the operator's alternates sitting right behind the busy model, untried. Observed in
+    production 2026-09-15: repeated "Sorry, something went wrong on my end" on Telegram while
+    a perfectly healthy fallback model was configured and never called.
+
+    Same shape as R9-124, different door: there a RETIRED model stopped the chain, here a
+    BUSY one does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_statusless_overload_falls_over_to_the_next_model(self) -> None:
+        primary = _ScriptedBackend(
+            "nvidia",
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            [
+                ProviderError("Service temporarily overloaded", context={"provider": "nvidia"}),
+                ProviderError("Service temporarily overloaded", context={"provider": "nvidia"}),
+            ],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        response = await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert response.model == "claude"
+        assert secondary.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_the_busy_model_is_retried_once_before_the_walk(self) -> None:
+        """Busy is a property of the MOMENT, so the same model is worth one more try —
+        unlike a retirement, which is a property of the slot."""
+        primary = _ScriptedBackend(
+            "nvidia",
+            "nemotron",
+            [
+                ProviderError("Service temporarily overloaded", context={"provider": "nvidia"}),
+                _ok_response("nvidia", "nemotron"),
+            ],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        response = await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert response.model == "nemotron", "the retry succeeded; no need to walk"
+        assert primary.call_count == 2
+        assert secondary.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_statusless_error_that_does_not_say_busy_still_surfaces(self) -> None:
+        """Scope guard, and the reason this is matched on phrases rather than on "no status".
+
+        A statusless error is usually our own bug. Treating every one of them as transient
+        would retry a broken request against every model in the tier and hide the fault.
+        """
+        primary = _ScriptedBackend(
+            "nvidia",
+            "nemotron",
+            [ProviderError("invalid tool schema", context={"provider": "nvidia"})],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        with pytest.raises(ProviderError):
+            await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert secondary.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_coded_error_is_still_classified_by_its_code(self) -> None:
+        """The phrase check runs only when no status was supplied; a 400 stays a 400."""
+        primary = _ScriptedBackend(
+            "openai",
+            "gpt-4o",
+            [ProviderError("capacity", context={"provider": "openai", "status_code": "400"})],
+        )
+        secondary = _ScriptedBackend("anthropic", "claude", [_ok_response("anthropic", "claude")])
+        with pytest.raises(ProviderError):
+            await MultiModelChatBackend([primary, secondary]).chat([_user_msg()])
+        assert secondary.call_count == 0

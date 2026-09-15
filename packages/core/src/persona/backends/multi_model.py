@@ -99,6 +99,35 @@ _RETIRED_MODEL_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
+#: A provider saying it is BUSY, in a body with no HTTP status attached.
+#:
+#: NVIDIA's NIM endpoints return "Service temporarily overloaded" as a bare ``APIError``
+#: carrying no ``status_code``, which fell into the conservative SURFACE default below and
+#: killed the turn — with the operator's alternate models sitting right behind the busy one,
+#: untried. That is the R9-124 shape again (a recoverable condition short-circuiting the whole
+#: chain), reached by a different door: there, a retired model; here, a busy one.
+#:
+#: Matched on the message because there is no status to match on. Kept to phrases that can
+#: only mean "come back later" — the statusless default stays SURFACE, so a genuine bug in our
+#: own request still stops the chain loudly instead of being retried against every model in the
+#: tier.
+_OVERLOADED_MARKERS: Final[tuple[str, ...]] = (
+    "temporarily overloaded",
+    "server is overloaded",
+    "overloaded_error",
+    "capacity",
+    "try again later",
+    "temporarily unavailable",
+    "service unavailable",
+)
+
+
+def _is_overloaded_error(exc: ProviderError) -> bool:
+    """Whether ``exc`` is the provider saying it is busy right now (no status attached)."""
+    message = str(exc).lower()
+    return any(marker in message for marker in _OVERLOADED_MARKERS)
+
+
 def _is_retired_model_error(exc: ProviderError) -> bool:
     """Whether ``exc`` says the model itself is gone (404/410, or a retirement body)."""
     status_raw = exc.context.get("status_code", "")
@@ -713,7 +742,12 @@ class MultiModelChatBackend:
                 return _RETRY_THEN_FALLBACK
             # 400 generic / 413 payload-too-large / 422 validation → SURFACE.
             return _SURFACE
-        # ProviderError with no status_code context — conservative SURFACE.
+        # A statusless body that SAYS it is busy is transient: retry once, then walk the
+        # chain. Checked only when no status was supplied, so a coded response is still
+        # classified by its code alone.
+        if _is_overloaded_error(exc):
+            return _RETRY_THEN_FALLBACK
+        # Any other ProviderError with no status_code context — conservative SURFACE.
         return _SURFACE
 
     # ------------------------------------------------------------------ #
