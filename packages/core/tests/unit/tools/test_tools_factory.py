@@ -568,7 +568,12 @@ class TestServerGrantExpansion:
         names = toolbox.names()
         assert "mcp:launcher:search" in names
         assert toolbox.is_allowed("mcp:launcher:search")
-        assert "mcp:launcher:search" in [s.name for s in toolbox.get_specs()]
+        # Advertised under its WIRE name: a provider rejects the whole request over a
+        # colon in a function name, so the model is offered `mcp_launcher_search` and the
+        # Toolbox maps it back on dispatch. Asserted through the toolbox's own mapping
+        # rather than the literal spelling, so this still means "is it advertised".
+        advertised = [s.name for s in toolbox.get_specs()]
+        assert "mcp:launcher:search" in [toolbox.real_name(n) for n in advertised]
 
     @pytest.mark.asyncio
     async def test_bare_grant_expands_env_configured_server(
@@ -750,7 +755,7 @@ class TestDeclaredToolTypoIsSurfaced:
         seen: list[Any] = []
         with patch(
             "persona.tools._factory.warn_unknown_declared_tools",
-            side_effect=lambda declared, **kw: seen.append(list(declared)) or (),
+            side_effect=lambda declared, **_kw: seen.append(list(declared)) or (),
         ):
             await build_default_toolbox(config, _persona(tools=["web_serch", "calculator"]))
 
@@ -770,7 +775,7 @@ class TestDeclaredToolTypoIsSurfaced:
         seen: list[Any] = []
         with patch(
             "persona.tools._factory.warn_unknown_declared_tools",
-            side_effect=lambda declared, **kw: seen.append(list(declared)) or (),
+            side_effect=lambda declared, **_kw: seen.append(list(declared)) or (),
         ):
             toolbox, _ = await build_default_toolbox(config, _persona(tools=["calculator"]))
 

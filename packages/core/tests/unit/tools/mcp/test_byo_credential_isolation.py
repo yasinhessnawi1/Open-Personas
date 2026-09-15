@@ -159,7 +159,10 @@ async def test_credential_is_not_in_the_advertised_tool_spec(tmp_path: Path) -> 
     toolbox, clients = await build_default_toolbox(config, _persona(), extra_mcp_clients=[adopted])
 
     spec_names = [s.name for s in toolbox.get_specs()]
-    assert "mcp:adopted:search" in spec_names  # advertised by name
+    # Advertised by name — its WIRE name, since a colon in a function name 400s the whole
+    # request at every provider. Resolved back through the toolbox so this asserts the tool
+    # is offered, not how the name happens to be spelled on the wire.
+    assert "mcp:adopted:search" in [toolbox.real_name(n) for n in spec_names]
     assert all(_SECRET not in s.model_dump_json() for s in toolbox.get_specs())  # never the secret
 
     for c in clients:

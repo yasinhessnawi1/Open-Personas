@@ -150,7 +150,8 @@ class TaskContinuation:
         if outcome.disposition == LegDisposition.WAITING_APPROVAL:
             # A3 gate: the leg recorded a durable proposal and ended (no append). Park the task
             # waiting(on_user) at zero cost — the user resolves it in the Approvals inbox or by
-            # replying in chat (both wired via ApprovalResolutionService). The proactive C0 "may I do
+            # replying in chat (both wired via ApprovalResolutionService). The proactive C0
+            # "may I do
             # X?" voice on park IS wired: the leg handler fires ``on_approval_parked``, which
             # goes through ``announce_parked_proposal`` (the PENDING guard lives there). This
             # comment claimed the opposite until 2026-09-15, long after the hook landed, and a
