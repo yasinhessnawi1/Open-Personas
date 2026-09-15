@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path  # noqa: TC003 — used at runtime in fixtures
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.schema.skills import SkillSpec
 from persona.skills._tokens import count_tokens
 from persona.skills.injector import MARKER, SkillInjector
@@ -199,14 +200,14 @@ class TestTruncateHelper:
     def test_under_budget_returns_verbatim_no_marker(self) -> None:
         from persona.skills.injector import _truncate
 
-        out = _truncate("short text.", budget=500)
+        out = _truncate("short text.", budget=500, skill="probe", source="content")
         assert out == "short text."
         assert MARKER not in out
 
     def test_budget_smaller_than_marker_returns_marker_only(self) -> None:
         from persona.skills.injector import _truncate
 
-        out = _truncate("any non-empty content " * 100, budget=2)
+        out = _truncate("any non-empty content " * 100, budget=2, skill="probe", source="content")
         # Marker is 5 tokens; budget < marker → just the marker.
         assert out == MARKER
 
@@ -214,7 +215,9 @@ class TestTruncateHelper:
         from persona.skills.injector import _MARKER_TOKENS, _truncate
 
         # Budget equals marker token count → target = 0 → return marker.
-        out = _truncate("plenty of content " * 100, budget=_MARKER_TOKENS)
+        out = _truncate(
+            "plenty of content " * 100, budget=_MARKER_TOKENS, skill="probe", source="content"
+        )
         assert out == MARKER
 
     def test_marker_is_exactly_five_tokens(self) -> None:
@@ -229,8 +232,8 @@ class TestTruncateHelper:
         from persona.skills.injector import _truncate
 
         big = "Lorem ipsum dolor sit amet. " * 600
-        out1 = _truncate(big, 500)
-        out2 = _truncate(big, 500)
+        out1 = _truncate(big, 500, skill="probe", source="content")
+        out2 = _truncate(big, 500, skill="probe", source="content")
         assert out1 == out2
 
 
@@ -259,3 +262,43 @@ class TestStateless:
         out1 = await injector.inject(spec)
         out2 = await injector.inject(spec)
         assert out1 == out2
+
+
+class TestTruncationIsAudible:
+    """A skill cut to fit the budget must say so.
+
+    Until 2026-09-16 truncation emitted nothing. The module's only warning guards the
+    summariser overshoot, which cannot happen because no summariser is wired, so the branch
+    that actually runs in production was silent. The built-in `web_research` skill has been
+    losing 1,070 of its 3,069 tokens on every injection — its whole source-evaluation rubric
+    — and an ingested skill measured 17,627 tokens against a 2,000 budget. Both were found by
+    a person reading files, which is not a mechanism.
+    """
+
+    def test_a_truncated_skill_logs_its_name_and_what_was_lost(self) -> None:
+        from persona.skills.injector import _truncate
+
+        captured: list[str] = []
+        sink = _loguru_logger.add(lambda m: captured.append(str(m)), level="WARNING")
+        try:
+            _truncate("plenty of content " * 500, 100, skill="web_research", source="content")
+        finally:
+            _loguru_logger.remove(sink)
+
+        assert captured, "truncation must not be silent"
+        said = " ".join(captured)
+        assert "web_research" in said, "the log must name the skill, or it is not actionable"
+        assert "truncated" in said.lower()
+
+    def test_content_within_budget_logs_nothing(self) -> None:
+        """The warning must mean something. A skill that fits is not an event."""
+        from persona.skills.injector import _truncate
+
+        captured: list[str] = []
+        sink = _loguru_logger.add(lambda m: captured.append(str(m)), level="WARNING")
+        try:
+            _truncate("short.", 500, skill="tiny", source="content")
+        finally:
+            _loguru_logger.remove(sink)
+
+        assert captured == []

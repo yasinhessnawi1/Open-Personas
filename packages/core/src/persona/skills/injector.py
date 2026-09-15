@@ -107,24 +107,48 @@ class SkillInjector:
                 summary_tokens=count_tokens(summary),
                 budget=budget,
             )
-            return _truncate(summary, budget)
+            return _truncate(summary, budget, skill=skill.name, source="summary")
 
-        return _truncate(skill.content, budget)
+        return _truncate(skill.content, budget, skill=skill.name, source="content")
 
 
-def _truncate(content: str, budget: int) -> str:
+def _truncate(content: str, budget: int, *, skill: str, source: str) -> str:
     """Largest prefix of ``content`` such that ``tokens(prefix + MARKER) <= budget``.
 
     Uses ceil-bisection on character index (D-04-8). O(log N) tokeniser
     calls.
+
+    **Says so, at WARNING.** Until 2026-09-16 this cut skills silently: the only warning in
+    the module guards the summariser overshoot, which cannot happen because no summariser is
+    wired, so truncation — the behaviour that actually runs — emitted nothing at all. The
+    built-in ``web_research`` skill has been losing 1,070 of its 3,069 tokens on every
+    injection, and the lost tail is its entire source-evaluation rubric; an externally
+    ingested skill on the owner's machine measured 17,627 tokens against a 2,000 budget.
+    Neither was discoverable from a log. Both were found by a manual sweep, which is not a
+    mechanism.
+
+    This does not decide the POLICY (truncate / refuse / summarise is the owner's call, and
+    the composition path already refuses rather than cuts for chained skills). It makes the
+    current behaviour audible so the next one is found by reading a log.
 
     Edge cases:
     - Content already under budget → return verbatim (no marker; caller
       should already have checked, but this is defensive).
     - Budget smaller than the marker itself → return just the marker.
     """
-    if count_tokens(content) <= budget:
+    actual = count_tokens(content)
+    if actual <= budget:
         return content
+    _logger.warning(
+        "skill {source} truncated to fit the turn budget — {lost} tokens dropped "
+        "(skill={skill}, tokens={actual}, budget={budget}). The cut tail is gone from the "
+        "prompt; shorten the skill or raise its token_budget.",
+        skill=skill,
+        source=source,
+        actual=actual,
+        budget=budget,
+        lost=actual - budget,
+    )
     target = budget - _MARKER_TOKENS
     if target <= 0:
         return MARKER
