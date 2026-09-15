@@ -1019,7 +1019,7 @@ def _build_approval_announce_hook(
     from persona.audit import JSONLAuditLogger
     from persona.stores.episodic import EpisodicStore
 
-    from persona_api.approvals import ApprovalStore
+    from persona_api.approvals import ApprovalStore, announce_parked_proposal
     from persona_api.services.origination_adapters import OriginatorApprovalNotifier
 
     notifier = OriginatorApprovalNotifier(
@@ -1036,8 +1036,14 @@ def _build_approval_announce_hook(
     async def _announce(owner_id: str, proposal_id: str) -> None:
         # Load the durable proposal + voice the ask; a deleted persona / gone proposal is a
         # graceful no-op inside the notifier. Best-effort — the handler wraps + never fails the leg.
-        proposal = approvals.get_proposal(owner_id, proposal_id)
-        await notifier.ask(proposal)
+        #
+        # part1 F6: this was a near-copy of ``ApprovalResolver.announce`` that dropped its
+        # ``PENDING`` guard, so a re-delivered leg job could ask "may I do X?" about something
+        # the user had already answered. The shared function carries the guard; the sweep had
+        # this recorded as an unwired feature, and it was really a wired duplicate of one.
+        await announce_parked_proposal(
+            approvals, notifier, owner_id=owner_id, proposal_id=proposal_id
+        )
 
     return _announce
 

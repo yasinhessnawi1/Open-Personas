@@ -28,6 +28,7 @@ from persona.tools.builtin.task_pickup import TASK_PICKUP_TOOL_NAME
 from persona.tools.builtin.text_diff import make_text_diff_tool
 from persona.tools.builtin.web_fetch import make_web_fetch_tool
 from persona.tools.builtin.web_search import make_web_search_tool
+from persona.tools.catalog import warn_unknown_declared_tools
 from persona.tools.mcp.client import MCPClient, load_mcp_clients
 from persona.tools.mcp.naming import referenced_server_name, server_grant_name
 from persona.tools.toolbox import Toolbox, ToolboxFactory
@@ -308,6 +309,22 @@ async def build_default_toolbox(
         mcp_clients.append(c)
 
     all_tools: list[AsyncTool] = [*builtins, *mcp_tools, *byo_tools, *(extra_tools or [])]
+
+    # part1 F7: the catalog's one check finally has a caller.
+    #
+    # ``warn_unknown_declared_tools`` was written for D-26-X-known-tool-catalog, exported
+    # twice, unit-tested, and called from nowhere in production for as long as it existed.
+    # A persona whose YAML says ``web_serch`` therefore declared a tool that does not exist
+    # and was told nothing: the name sits in the allow-list, nothing registers under it, and
+    # the persona simply cannot do the thing its author believed it could. Silent, which is
+    # the shape this whole sweep is about.
+    #
+    # Declared names that DID register are filtered out first, so the warning cannot fire for
+    # a tool that demonstrably exists. That makes this soft check about typos and nothing
+    # else, and keeps the deliberate no-hard-validation ruling intact: an unknown name is
+    # logged and the persona still loads, exactly as D-26-X says.
+    registered = {t.name for t in all_tools}
+    warn_unknown_declared_tools([t for t in persona.tools if t not in registered])
 
     _logger.info(
         "build_default_toolbox composed",

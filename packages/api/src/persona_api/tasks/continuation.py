@@ -150,9 +150,11 @@ class TaskContinuation:
         if outcome.disposition == LegDisposition.WAITING_APPROVAL:
             # A3 gate: the leg recorded a durable proposal and ended (no append). Park the task
             # waiting(on_user) at zero cost — the user resolves it in the Approvals inbox or by
-            # replying in chat (both wired via ApprovalResolutionService). NOTE: the proactive C0
-            # "may I do X?" voice on park (ApprovalResolver.announce) is NOT yet wired — a known
-            # notify-on-park gap; discovery is inbox/chat-driven until it is.
+            # replying in chat (both wired via ApprovalResolutionService). The proactive C0 "may I do
+            # X?" voice on park IS wired: the leg handler fires ``on_approval_parked``, which
+            # goes through ``announce_parked_proposal`` (the PENDING guard lives there). This
+            # comment claimed the opposite until 2026-09-15, long after the hook landed, and a
+            # note saying a thing is missing is how a second copy of it gets written.
             # R9-163: record WHAT it waits for before parking. The gated leg wrote no
             # checkpoint of its own (it executed nothing), so without this the task page,
             # the persona's own grounded answer and the next leg's continuity window all

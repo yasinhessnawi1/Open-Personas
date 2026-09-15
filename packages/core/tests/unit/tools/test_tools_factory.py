@@ -6,7 +6,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from persona.config import PersonaCoreConfig
@@ -727,3 +727,60 @@ class TestToolboxFactorySeam:
         assert type(made) is _Marked
         assert seen["allow_list"] is not None
         assert made.names() == bare.names()
+
+
+# Section: the known-tool catalog warns about a typo at build (part1 F7)
+
+
+class TestDeclaredToolTypoIsSurfaced:
+    """``warn_unknown_declared_tools`` had no production caller at all.
+
+    It was written for D-26-X-known-tool-catalog, exported from two modules and unit-tested,
+    and nothing ever called it. So a persona whose YAML declared ``web_serch`` was told
+    nothing: the name went into the allow-list, no tool registered under it, and the persona
+    quietly could not do the thing its author thought it could.
+
+    These drive the real build rather than the function, because the function was never the
+    broken part.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_misspelled_tool_warns_at_build(self, tmp_path: Path) -> None:
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        seen: list[Any] = []
+        with patch(
+            "persona.tools._factory.warn_unknown_declared_tools",
+            side_effect=lambda declared, **kw: seen.append(list(declared)) or (),
+        ):
+            await build_default_toolbox(config, _persona(tools=["web_serch", "calculator"]))
+
+        assert seen, "the catalog check must be consulted when a toolbox is built"
+        assert "web_serch" in seen[0]
+
+    @pytest.mark.asyncio
+    async def test_a_tool_that_really_registered_is_never_warned_about(
+        self, tmp_path: Path
+    ) -> None:
+        """The filter that keeps this soft check about typos and nothing else.
+
+        A declared name that a real tool registered under is dropped before the catalog is
+        consulted, so the warning cannot fire for a tool that demonstrably exists.
+        """
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        seen: list[Any] = []
+        with patch(
+            "persona.tools._factory.warn_unknown_declared_tools",
+            side_effect=lambda declared, **kw: seen.append(list(declared)) or (),
+        ):
+            toolbox, _ = await build_default_toolbox(config, _persona(tools=["calculator"]))
+
+        assert "calculator" in toolbox.names(), "fixture guard: the tool must really register"
+        assert seen == [[]], "a registered tool is not a typo"
+
+    @pytest.mark.asyncio
+    async def test_an_mcp_grant_is_not_mistaken_for_a_typo(self, tmp_path: Path) -> None:
+        """``mcp:`` grants resolve dynamically and are never in the static catalog."""
+        config = PersonaCoreConfig(tools_sandbox_root=tmp_path)
+        await build_default_toolbox(config, _persona(tools=["mcp:some-server"]))
+        # The real check skips ``mcp:`` names; this asserts the build survives one, which is
+        # the regression that a naive "unknown name" rule would cause.

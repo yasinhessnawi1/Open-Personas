@@ -48,6 +48,7 @@ from persona_api.approvals.resolver import (
     ExecutedAction,
     InboxDecision,
     ResolutionOutcome,
+    announce_parked_proposal,
 )
 from persona_api.approvals.store import ApprovalStore
 from persona_api.approvals.sweep import (
@@ -71,6 +72,7 @@ __all__ = [
     "ExecutedAction",
     "ApprovalNotifier",
     "ApprovalResolver",
+    "announce_parked_proposal",
     "ApprovalStore",
     "ApprovalSweepRunner",
     "ApprovalSweepVoicer",

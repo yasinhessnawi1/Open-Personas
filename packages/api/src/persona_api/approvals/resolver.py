@@ -69,6 +69,7 @@ __all__ = [
     "ActionExecutor",
     "ApprovalNotifier",
     "ApprovalResolver",
+    "announce_parked_proposal",
     "ExecutedAction",
     "InboxDecision",
     "ResolutionOutcome",
@@ -142,6 +143,32 @@ class ResolutionOutcome:
     note: str = ""
 
 
+async def announce_parked_proposal(
+    approvals: ApprovalStore,
+    notifier: ApprovalNotifier,
+    *,
+    owner_id: str,
+    proposal_id: str,
+) -> None:
+    """Voice the C0 "may I do X?" for a proposal that is STILL pending.
+
+    One implementation, two callers: :meth:`ApprovalResolver.announce` and the leg handler's
+    notify-on-park hook in ``worker_root``. It is a module function rather than a method
+    because the hook has a store and a notifier and none of the resolver's other six
+    collaborators, and building a whole resolver to reach one guard is how the second copy
+    came to exist in the first place.
+
+    **The guard is the point.** Until 2026-09-15 the wired path was a near-duplicate of this
+    that omitted the ``PENDING`` check, so a re-delivered leg job could voice "may I do X?"
+    for a proposal the user had already answered. The resolver's copy had the check and no
+    callers; the hook had callers and no check (part1 F6, which the sweep recorded as an
+    unwired feature and which was really a wired duplicate of one).
+    """
+    proposal = approvals.get_proposal(owner_id, proposal_id)
+    if proposal.status is ProposalStatus.PENDING:
+        await notifier.ask(proposal)
+
+
 class ApprovalResolver:
     """Closes the approval loop: reply → floor → verbatim replay → resolution checkpoint."""
 
@@ -166,9 +193,9 @@ class ApprovalResolver:
 
     async def announce(self, owner_id: str, proposal_id: str) -> None:
         """Originate the persona-voiced C0 ask for a freshly-parked proposal (the leg gated)."""
-        proposal = self._approvals.get_proposal(owner_id, proposal_id)
-        if proposal.status is ProposalStatus.PENDING:
-            await self._notifier.ask(proposal)
+        await announce_parked_proposal(
+            self._approvals, self._notifier, owner_id=owner_id, proposal_id=proposal_id
+        )
 
     async def resolve(
         self, owner_id: str, proposal_id: str, reply: str, channel: str, *, now: datetime
