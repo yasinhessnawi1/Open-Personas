@@ -18,6 +18,16 @@ retried after a short backoff — one bad poll must never kill the loop or take 
 whole service down with it (previously an uncaught exception here propagated into
 ``asyncio.gather`` in ``__main__._amain`` unlogged). A normal shutdown
 (``asyncio.CancelledError``) is re-raised untouched, never swallowed.
+
+**The one fault this loop cannot recover from, and says so (2026-09-15):** Telegram allows a
+single ``getUpdates`` consumer per bot token and terminates the previous caller on every new
+one. Two deployments polling the same bot therefore evict each other indefinitely, and the
+user sees a persona that answers, apologises, and answers again at random. Retrying cannot
+help, because the other consumer is not going away. A SUSTAINED run of 409s is escalated to
+``ERROR`` naming the cause and the remedy; a one-off stays a warning, since a deploy overlaps
+consumers briefly by design. No lock and no self-shutdown: D-I1-7 ruled that a stale advisory
+lock silently keeping a platform DOWN is worse than a loud, bounded hazard. This is the part
+that makes it loud, which it was not when it happened.
 """
 
 from __future__ import annotations
@@ -38,6 +48,22 @@ _log = get_logger("connectors.telegram_longpoll")
 
 _DEFAULT_ALLOWED = ("message",)
 _DEFAULT_ERROR_BACKOFF_SECONDS = 2.0
+
+#: Telegram's "only one bot instance" error. One consumer per bot token, full stop: each new
+#: ``getUpdates`` terminates the one before it, so two consumers evict each other forever and
+#: an update lands on whichever won the race at that instant. To a user that is a persona
+#: that answers, then apologises, then answers, at random.
+_CONFLICT_MARKER = "error_code=409"
+
+#: How many CONSECUTIVE conflicts mean a second consumer is really running, rather than the
+#: brief overlap of a deploy where the old machine has not stopped yet. At a couple of seconds
+#: of backoff each, five is roughly ten seconds: far longer than a handover, far shorter than
+#: a person noticing their bot is "glitchy".
+_CONFLICT_ESCALATE_AFTER = 5
+
+#: Re-state the ERROR every N conflicts after that, so it stays visible in a busy log without
+#: becoming the log.
+_CONFLICT_REPEAT_EVERY = 100
 
 
 def _always() -> bool:
@@ -70,6 +96,7 @@ async def run_long_poll(
     """
     allowed = list(allowed_updates) if allowed_updates is not None else list(_DEFAULT_ALLOWED)
     offset: int | None = None
+    conflicts = 0
     _log.info("telegram long-poll loop starting")
     while should_continue():
         try:
@@ -80,8 +107,28 @@ async def run_long_poll(
             raise  # normal shutdown — never swallow cancellation
         except Exception as exc:  # noqa: BLE001 — one bad poll must never kill the loop/service
             _log.warning("telegram get_updates failed: {error}", error=str(exc))
+            conflicts = conflicts + 1 if _CONFLICT_MARKER in str(exc) else 0
+            if conflicts == _CONFLICT_ESCALATE_AFTER or (
+                conflicts > _CONFLICT_ESCALATE_AFTER and conflicts % _CONFLICT_REPEAT_EVERY == 0
+            ):
+                # Not another warning. A sustained 409 is not a blip, it is a second
+                # deployment polling this same bot token, and it makes every conversation
+                # unreliable for as long as it lasts. It ran for forty hours once, logged
+                # only as a repeating WARNING among thousands of lines, and was found by a
+                # person saying the bot felt "glitchy" (I1 cutover, step 2 skipped).
+                _log.error(
+                    "telegram has TWO consumers on this bot token ({count} conflicts in a "
+                    "row). Only one process may long-poll a bot: every getUpdates "
+                    "terminates the previous one, so messages are delivered to whichever "
+                    "wins the race and the rest fail. Stop the other one. If the api runs "
+                    "embedded connectors (PERSONA_API_EMBED_CONNECTORS), the standalone "
+                    "connectors app must be scaled to zero, and it must run ONE machine "
+                    "even alone. See docs/ops/connectors_fold_cutover.md.",
+                    count=conflicts,
+                )
             await asyncio.sleep(error_backoff_seconds)
             continue
+        conflicts = 0
         if updates:
             _log.debug("telegram long-poll received {count} update(s)", count=len(updates))
         for update in updates:

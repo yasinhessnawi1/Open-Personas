@@ -62,6 +62,17 @@ kill_timeout = "30s"
   # CRITICAL: single Machine — duplicate gateway/socket sessions on a second
   # machine would double-deliver. No autostop — cold start drops the persistent
   # outbound connections + misses inbound webhooks.
+  #
+  # `min_machines_running` is a FLOOR, not a ceiling, and this app ran two machines
+  # for as long as nobody looked. Only `flyctl scale count 1 -a open-persona-connectors`
+  # pins the number; this line cannot. Two Telegram pollers evict each other on every
+  # getUpdates, so messages land on whichever won the race and the rest fail, which
+  # reads to a user as a persona that answers and apologises at random.
+  #
+  # Retired 2026-09-15: scaled to 0 as the I1 fold's step 2, which had been skipped
+  # while the flag and the DNS were already cut over — three consumers on one bot
+  # token for about forty hours. If this app is ever revived, scale count 1, and only
+  # while PERSONA_API_EMBED_CONNECTORS is OFF on the api.
   auto_stop_machines = "off"
   auto_start_machines = false
   min_machines_running = 1
