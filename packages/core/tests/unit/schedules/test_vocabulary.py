@@ -121,12 +121,28 @@ def test_nth_weekday_renders_with_ordinal() -> None:
     assert render_recurrence_terms(rule) == "every month on the 2nd Tuesday at 08:00 your time"
 
 
-def test_every_n_hours_reads_as_wall_clock_marks() -> None:
-    # A8-D-8: names the local marks + "your time" — never an elapsed-time promise.
+def test_every_n_hours_reads_as_wall_clock_without_listing_marks() -> None:
+    # A8-D-8 asks that the phrase can never read as an elapsed-time promise under DST.
+    # "your time" is what carries that; the mark list never did, because the mark set this
+    # branch matches always starts at 00:00 and steps evenly, so it only ever restated the
+    # interval. It cost a twenty-four-item sentence per line of every agenda.
     rule = pattern_to_rule(RecurrencePattern(kind=RecurrenceKind.HOURLY, interval=6, minute=0))
     phrase = render_recurrence_terms(rule)
-    assert phrase == "every 6 hours, at 00:00, 06:00, 12:00 and 18:00 your time"
+    assert phrase == "every 6 hours, around the clock, 4 times a day, your time"
     assert "your time" in phrase  # wall-clock-anchored, not elapsed
+    assert "06:00" not in phrase, "the mark list must not come back; it is what bloated this"
+
+
+def test_every_hour_says_every_hour() -> None:
+    """The owner's complaint, in one assertion: an hourly rule reads as "every hour"."""
+    rule = pattern_to_rule(RecurrencePattern(kind=RecurrenceKind.HOURLY, interval=1, minute=0))
+    assert render_recurrence_terms(rule) == "every hour, around the clock, your time"
+
+
+def test_an_off_the_hour_minute_is_still_stated() -> None:
+    """Dropping the marks must not drop the phase: :30 is not :00."""
+    rule = pattern_to_rule(RecurrencePattern(kind=RecurrenceKind.HOURLY, interval=1, minute=30))
+    assert "30 minutes past" in render_recurrence_terms(rule)
 
 
 def test_yearly_on_date_renders() -> None:

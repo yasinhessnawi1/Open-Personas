@@ -111,7 +111,10 @@ def test_hourly_divisor_normalizes_to_pinned_hours() -> None:
     parsed = parse_recurrence("FREQ=HOURLY;INTERVAL=2", "Europe/Oslo", phrase="every 2 hours")
     assert parsed.recurrence is not None
     assert parsed.recurrence.byhour == tuple(range(0, 24, 2))
-    assert parsed.human_terms.startswith("every 2 hours, at 00:00, 02:00")
+    # The RULE still pins the marks (that is what makes it wall-clock); the PHRASE no longer
+    # recites them, because this branch only matches a set starting at 00:00 and stepping
+    # evenly, so the list never said anything the interval had not.
+    assert parsed.human_terms == "every 2 hours, around the clock, 12 times a day, your time"
 
 
 def test_whole_hour_minutely_folds_to_hours_and_whole_day_hourly_to_daily() -> None:

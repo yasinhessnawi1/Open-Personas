@@ -373,13 +373,25 @@ def render_recurrence_terms(rule: RecurrenceRule) -> str:
                 f"every {minute_step} minutes, around the clock, {per_day} times a day, your time"
             )
             return _with_bound(base, rule)
-        # every-N-hours (wall-clock) — name the interval AND the local marks (A8-D-8), so it
-        # can never read as elapsed-time-under-DST.
+        # every-N-hours (wall-clock) — the same shape as the minute grid above: name the
+        # interval and the daily VOLUME, never the mark list.
+        #
+        # This used to spell out every local mark, on the A8-D-8 reasoning that naming them
+        # stops the phrase reading as an elapsed-time promise under DST. The marks did not
+        # earn that: ``_even_hour_step`` only matches a set that STARTS at 00:00 and steps
+        # evenly, so the list is always 0, N, 2N … and carries nothing the interval has not
+        # already said. What it did carry was length. "every hour" rendered as a
+        # twenty-four-mark sentence, repeated on every line of the agenda, which is how one
+        # hourly schedule turned a week's calendar into thousands of tokens of the same
+        # string. "your time" is what keeps it wall-clock, and it is still here.
         step = _even_hour_step(rule.byhour)
         if step is not None:
             minute = rule.byminute[0] if rule.byminute else 0
-            marks = _join([f"{h:02d}:{minute:02d}" for h in range(0, 24, step)])
-            base = f"every {step} hours, at {marks} your time"
+            past = "" if minute == 0 else f" at {minute} minutes past"
+            cadence = "every hour" if step == 1 else f"every {step} hours"
+            # The volume is stated where it is not already obvious from the interval.
+            volume = "" if step == 1 else f", {24 // step} times a day"
+            base = f"{cadence}{past}, around the clock{volume}, your time"
             return _with_bound(base, rule)
 
     if rule.freq is RecurrenceFreq.YEARLY and rule.bymonth and rule.bymonthday:

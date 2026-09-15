@@ -139,10 +139,50 @@ async def test_occurrence_line_carries_time_subject_cadence_and_id() -> None:
     result = await _tool(reader).execute(scope="mine")
 
     line = result.content.splitlines()[1]
-    assert line.startswith("- Tue 04 Aug 2026, 08:00 Europe/Oslo")  # rendered in ITS zone
+    # A schedule is listed once, by what it does, with its next fire in ITS OWN zone.
+    # It used to lead with the timestamp and repeat per occurrence; an hourly rule then
+    # wrote the same sentence 168 times into a tool result a model reads back every ask.
     assert "Morning briefing" in line
     assert "every weekday at 08:00" in line
+    assert "next Tue 04 Aug 2026, 08:00 Europe/Oslo" in line  # rendered in ITS zone
     assert "schedule sched-abc" in line
+    assert "times in this window" not in line, "a single fire is not a count worth printing"
+
+
+@pytest.mark.asyncio
+async def test_a_recurring_schedule_is_one_line_with_its_firing_count() -> None:
+    """The owner's report: one hourly schedule turned a week's agenda into thousands of
+    tokens. One commitment, one line, and the count stated because the cadence alone does
+    not tell you that "every hour" means 48 real firings over two days."""
+    reader = _FakeReader(
+        occurrences=[
+            _occurrence("sched-hourly", fire_at=_NOW + timedelta(hours=h), subject="Sweep")
+            for h in range(1, 49)
+        ]
+    )
+    result = await _tool(reader).execute(scope="mine")
+
+    body = result.content.splitlines()[1:]
+    assert len(body) == 1, f"48 fires of ONE schedule must be one line, got {len(body)}"
+    assert "48 times in this window" in body[0]
+    assert body[0].count("Sweep") == 1
+
+
+@pytest.mark.asyncio
+async def test_separate_schedules_still_get_separate_lines() -> None:
+    """Grouping must not merge two different commitments into one."""
+    reader = _FakeReader(
+        occurrences=[
+            _occurrence("sched-a", fire_at=_NOW + timedelta(hours=1), subject="A"),
+            _occurrence("sched-b", fire_at=_NOW + timedelta(hours=2), subject="B"),
+        ]
+    )
+    result = await _tool(reader).execute(scope="mine")
+
+    body = result.content.splitlines()[1:]
+    assert len(body) == 2
+    assert "schedule sched-a" in body[0]  # soonest first, still
+    assert "schedule sched-b" in body[1]
 
 
 @pytest.mark.asyncio

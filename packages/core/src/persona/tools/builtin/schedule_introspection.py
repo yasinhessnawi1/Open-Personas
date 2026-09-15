@@ -145,7 +145,7 @@ def _render_agenda(agenda: ScheduleAgenda, *, scope: ScheduleScope, days_ahead: 
     if not agenda.occurrences:
         return f"Nothing is scheduled in {window} ({header_scope})."
     lines = [f"Scheduled in {window} ({header_scope}):"]
-    lines.extend(_render_occurrence(o) for o in _sorted_occurrences(agenda.occurrences))
+    lines.extend(_render_schedule(group) for group in _grouped_by_schedule(agenda.occurrences))
     if agenda.truncated:
         lines.append(
             "That list was capped, so there may be more — ask for a shorter window to see the rest."
@@ -153,14 +153,39 @@ def _render_agenda(agenda: ScheduleAgenda, *, scope: ScheduleScope, days_ahead: 
     return "\n".join(lines)
 
 
-def _render_occurrence(occurrence: ScheduledOccurrence) -> str:
-    """One line: when it fires (in its own zone), what it does, how often, and its id."""
-    parts = [_format_local(occurrence.fire_at, occurrence.timezone)]
-    if occurrence.subject:
-        parts.append(occurrence.subject)
-    if occurrence.human_terms:
-        parts.append(occurrence.human_terms)
-    parts.append(f"schedule {occurrence.schedule_id}")
+def _grouped_by_schedule(
+    occurrences: Sequence[ScheduledOccurrence],
+) -> list[list[ScheduledOccurrence]]:
+    """Occurrences gathered per schedule, each group soonest-first, groups by next fire.
+
+    A recurring schedule is ONE commitment. Listing it once per fire says the same sentence
+    168 times for an hourly rule over a week, and the repetition is not free: this is a tool
+    result a model reads back into its context on every ask.
+    """
+    groups: dict[str, list[ScheduledOccurrence]] = {}
+    for occurrence in _sorted_occurrences(occurrences):
+        groups.setdefault(occurrence.schedule_id, []).append(occurrence)
+    return sorted(groups.values(), key=lambda g: g[0].fire_at)
+
+
+def _render_schedule(group: list[ScheduledOccurrence]) -> str:
+    """One line per SCHEDULE: what it does, how often, when it next fires, and its id.
+
+    The count is stated only when a schedule fires more than once in the window, because
+    "1 time" is noise and because the count is the thing the cadence alone cannot tell you:
+    "every hour" over seven days is 168 real firings, and a person deciding whether to keep
+    a routine wants that number in front of them.
+    """
+    first = group[0]
+    parts: list[str] = []
+    if first.subject:
+        parts.append(first.subject)
+    if first.human_terms:
+        parts.append(first.human_terms)
+    parts.append(f"next {_format_local(first.fire_at, first.timezone)}")
+    if len(group) > 1:
+        parts.append(f"{len(group)} times in this window")
+    parts.append(f"schedule {first.schedule_id}")
     return "- " + " · ".join(parts)
 
 
