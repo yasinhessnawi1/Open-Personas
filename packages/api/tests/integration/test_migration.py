@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from persona_api.db.rls import RLS_EXEMPT_TABLES
 from sqlalchemy import create_engine, inspect, text
 
 pytestmark = pytest.mark.integration
@@ -81,21 +82,56 @@ def test_migration_upgrade_creates_everything(database_url: str) -> None:
                 text("SELECT tablename FROM pg_policies WHERE policyname = 'user_isolation'")
             )
         }
-    expected = {
-        "personas",
-        "conversations",
-        "runs",
-        "messages",
-        "turn_logs",
-        "memory_chunks",
-        "credits",
-        "credit_transactions",
-        # Spec 30 (migration 009): both BYO-MCP tables are RLS-forced + policied.
-        "user_mcp_servers",
-        "persona_mcp_assignments",
-    }
-    assert expected.issubset(forced)
-    assert expected.issubset(policied)
+    # The invariant is "RLS on every tenant-scoped table" (ENGINEERING_STANDARDS), so ASK THE
+    # SCHEMA which tables those are rather than listing the ones we already know about.
+    #
+    # This assertion used to be `expected.issubset(forced)` over eleven table names from the
+    # migration-009 era. It could not fail on the thing it existed to catch: a NEW tenant
+    # table with no policy is not in `expected`, and `issubset` never fails on an addition.
+    # Forty-two tenant-scoped tables later it was still checking the original eleven.
+    with engine.connect() as conn:
+        tenant_scoped = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT DISTINCT c.table_name FROM information_schema.columns c "
+                    "JOIN information_schema.tables t "
+                    "  ON t.table_name = c.table_name AND t.table_schema = c.table_schema "
+                    "WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE' "
+                    "  AND c.column_name IN ('owner_id', 'user_id')"
+                )
+            )
+        }
+    # Tables scoped through an FK chain instead of a user column of their own — they carry no
+    # owner_id, so the discovery above cannot see them, and they must still be covered.
+    tenant_scoped |= {"messages", "turn_logs", "memory_chunks"}
+    must_have_rls = tenant_scoped - set(RLS_EXEMPT_TABLES)
+
+    assert must_have_rls, "discovery found no tenant-scoped tables — the query is wrong"
+    missing_force = sorted(must_have_rls - forced)
+    missing_policy = sorted(must_have_rls - policied)
+    assert not missing_force, (
+        f"tenant-scoped tables without FORCED row-level security: {missing_force}. "
+        "Add the ENABLE/FORCE + user_isolation policy in the migration, or add the table to "
+        "persona_api.db.rls.RLS_EXEMPT_TABLES with the reason it is not tenant-scoped."
+    )
+    assert not missing_policy, (
+        f"tenant-scoped tables without a user_isolation policy: {missing_policy}. "
+        "Forcing RLS without a policy denies ALL rows, which fails closed but silently."
+    )
+    # The exemptions must be real tables, so a renamed table cannot leave a stale excuse.
+    with engine.connect() as conn:
+        all_tables = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+                )
+            )
+        }
+    stale = sorted(set(RLS_EXEMPT_TABLES) - all_tables)
+    assert not stale, f"RLS_EXEMPT_TABLES names tables that no longer exist: {stale}"
     engine.dispose()
 
 

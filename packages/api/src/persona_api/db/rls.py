@@ -28,7 +28,29 @@ own limiter, not per-tenant queries. Spec 08 confirms their access patterns.
 
 from __future__ import annotations
 
-__all__ = ["RLS_TABLES", "downgrade_rls_sql", "upgrade_rls_sql"]
+__all__ = [
+    "RLS_EXEMPT_TABLES",
+    "RLS_TABLES",
+    "downgrade_rls_sql",
+    "upgrade_rls_sql",
+]
+
+#: Tenant-shaped tables that are deliberately NOT under RLS, with the reason each is exempt.
+#:
+#: A constant rather than only the prose above, because the invariant "row-level security on
+#: every tenant-scoped table" (ENGINEERING_STANDARDS) is now CHECKED against the live schema
+#: rather than against a hand-written list of known-good tables. A check needs somewhere to
+#: read the exceptions from, and a documented exception that the enforcing code cannot see is
+#: how the rule drifts.
+#:
+#: Adding a name here is a deliberate act: it means "this table has a user column and is
+#: still not tenant-scoped", and it should carry the reason on the line beside it.
+RLS_EXEMPT_TABLES: tuple[str, ...] = (
+    # Append-only platform forensics, read by admins rather than per tenant (Spec 08).
+    "audit_log",
+    # Keyed by user_id but accessed by the platform's own limiter, never per-tenant (Spec 08).
+    "rate_limit_buckets",
+)
 
 _CUR = "current_setting('app.current_user_id', true)"
 
