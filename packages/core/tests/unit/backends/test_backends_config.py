@@ -219,3 +219,57 @@ class TestExtraBody:
     def test_rejects_non_dict(self) -> None:
         with pytest.raises(ValidationError):
             BackendConfig(api_key=SecretStr("k"), extra_body="not-a-dict")  # type: ignore[arg-type]
+
+
+class TestTierPrefixReplacesRatherThanMerges:
+    """A configured tier reads ONLY its own names — the globals do not reach it.
+
+    `from_env(prefix=...)` builds a subclass whose settings config is replaced, not merged,
+    so `PERSONA_MAX_TOKENS` never arrives at the mid tier. It is silent: no warning, and the
+    tier simply uses the code default, which looks identical to "the value was applied and
+    happened to equal the default".
+
+    Pinned rather than changed. Making the globals inherit would be a real semantic change to
+    a config system, and it is the owner's to make; what was wrong was that nobody could find
+    this out except by reading `config.py`. It is now in `.env.example` too.
+    """
+
+    _GLOBALS = ("PERSONA_MAX_TOKENS", "PERSONA_TEMPERATURE")
+    _TIERED = ("PERSONA_MID_MAX_TOKENS", "PERSONA_MID_TEMPERATURE")
+
+    def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for k in (*self._GLOBALS, *self._TIERED):
+            monkeypatch.delenv(k, raising=False)
+
+    def test_a_global_does_not_reach_a_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PERSONA_MAX_TOKENS", "32000")
+
+        assert BackendConfig.from_env().max_tokens == 32000
+        assert BackendConfig.from_env(prefix="PERSONA_MID_").max_tokens == 4096, (
+            "the tier must fall back to the DEFAULT, not inherit the global — if this "
+            "changes, .env.example's 'Model backend defaults' note is now wrong"
+        )
+
+    def test_the_per_tier_name_is_what_works(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PERSONA_MAX_TOKENS", "32000")
+        monkeypatch.setenv("PERSONA_MID_MAX_TOKENS", "9000")
+
+        assert BackendConfig.from_env(prefix="PERSONA_MID_").max_tokens == 9000
+
+    def test_the_same_holds_for_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Not a quirk of one field: the whole settings config is replaced."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PERSONA_TEMPERATURE", "0.7")
+
+        assert BackendConfig.from_env().temperature == 0.7
+        assert BackendConfig.from_env(prefix="PERSONA_MID_").temperature == 0.0
+
+    def test_one_tier_does_not_leak_into_another(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The isolation cuts both ways, which is the argument FOR the current semantics."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PERSONA_MID_MAX_TOKENS", "9000")
+
+        assert BackendConfig.from_env(prefix="PERSONA_MID_").max_tokens == 9000
+        assert BackendConfig.from_env(prefix="PERSONA_SMALL_").max_tokens == 4096
