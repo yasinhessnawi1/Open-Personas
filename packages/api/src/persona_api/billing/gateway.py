@@ -13,12 +13,83 @@ methods land in T2b / T3.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
+
+from persona.errors import PersonaError
+from persona.logging import get_logger
 
 if TYPE_CHECKING:
     import stripe
 
-__all__ = ["StripeGateway"]
+__all__ = [
+    "AUTO_TOPUP_SOURCE",
+    "AutoTopupPriceNotConfiguredError",
+    "OffSessionAuthenticationRequiredError",
+    "OffSessionChargeFailedError",
+    "StripeGateway",
+]
+
+_log = get_logger("api.billing.gateway")
+
+#: The ``metadata.source`` stamp on an auto top-up invoice AND its PaymentIntent. The
+#: webhook handlers tell a top-up apart from a subscription renewal by this, never by shape.
+AUTO_TOPUP_SOURCE = "auto_topup"
+
+#: The two spellings Stripe uses for "the saved card needs the cardholder" (3DS/SCA):
+#: ``authentication_required`` on a PaymentIntent confirm, and
+#: ``invoice_payment_intent_requires_action`` on an invoice pay. One outcome for the caller.
+_REQUIRES_ACTION_CODES = frozenset(
+    {"authentication_required", "invoice_payment_intent_requires_action"}
+)
+
+
+class AutoTopupPriceNotConfiguredError(PersonaError):
+    """No Stripe Price is configured for the pack the auto top-up bills.
+
+    Raised BEFORE any Stripe call. ``PERSONA_STRIPE_PRICE_PACK_10`` is the same Price the
+    Checkout pack path uses; without it there is no taxed line to bill, and inventing an
+    ad-hoc amount is exactly what R9-177 B9 forbids.
+    """
+
+
+class OffSessionAuthenticationRequiredError(PersonaError):
+    """The saved card needs the cardholder (3DS); the off-session charge cannot complete.
+
+    The caller (``autotopup.maybe_auto_topup``) keys on ``code == "authentication_required"``
+    and falls back to an on-session top-up prompt. The class attribute keeps that contract
+    identical to the ``stripe.CardError`` the bare PaymentIntent used to raise, whichever
+    of Stripe's two spellings the invoice pay came back with.
+    """
+
+    code = "authentication_required"
+
+
+class OffSessionChargeFailedError(PersonaError):
+    """The saved card was refused for a reason that is not 3DS (declined, expired, ...).
+
+    ``context["code"]`` carries Stripe's decline code for the log; the caller treats this
+    as a swallowed ``ERROR`` outcome, the next genuine crossing being the natural retry.
+    """
+
+
+def _invoice_payment_intent_id(invoice: Any) -> str | None:  # noqa: ANN401 (a StripeObject)
+    """The id of the PaymentIntent a finalized ``charge_automatically`` invoice created.
+
+    Reads the 2025+ shape ``invoice.payments.data[0].payment.payment_intent`` (an id, or
+    the expanded object). ``None`` when Stripe has not surfaced one, which is a stamp we
+    skip, never a charge we skip: the grant is anchored on the invoice, not the PI.
+    """
+    payments = getattr(invoice, "payments", None)
+    data = getattr(payments, "data", None) or []
+    for entry in data:
+        payment = getattr(entry, "payment", None)
+        pi = getattr(payment, "payment_intent", None)
+        if isinstance(pi, str) and pi:
+            return pi
+        pi_id = getattr(pi, "id", None)
+        if isinstance(pi_id, str) and pi_id:
+            return pi_id
+    return None
 
 
 class StripeGateway:
@@ -36,9 +107,20 @@ class StripeGateway:
         webhook_secret: ``PERSONA_STRIPE_WEBHOOK_SECRET`` (used by the T3 webhook to
             verify the ``Stripe-Signature`` — held here so the whole billing config
             has one home).
+        autotopup_price_id: the Stripe Price the off-session auto top-up bills, which is
+            the SAME ``PERSONA_STRIPE_PRICE_PACK_10`` the Checkout pack path uses (R9-177
+            B9: one Price, one tax code, one truth). Empty means the auto top-up refuses
+            before any Stripe call (:class:`AutoTopupPriceNotConfiguredError`).
     """
 
-    def __init__(self, *, secret_key: str, publishable_key: str, webhook_secret: str) -> None:
+    def __init__(
+        self,
+        *,
+        secret_key: str,
+        publishable_key: str,
+        webhook_secret: str,
+        autotopup_price_id: str = "",
+    ) -> None:
         # Lazy import: the ONLY place the SDK is imported at runtime. The active-billing
         # gate upstream guarantees we never reach here on community / flag-off, so a
         # self-host install that never enables billing never imports stripe.
@@ -47,11 +129,17 @@ class StripeGateway:
         self._client: stripe.StripeClient = stripe.StripeClient(secret_key)
         self._publishable_key = publishable_key
         self._webhook_secret = webhook_secret
+        self._autotopup_price_id = autotopup_price_id
 
     @property
     def client(self) -> stripe.StripeClient:
         """The underlying Stripe client (the checkout / portal / webhook surface uses it)."""
         return self._client
+
+    @property
+    def autotopup_price_id(self) -> str:
+        """The Price the auto top-up invoice bills (empty when the pack is unconfigured)."""
+        return self._autotopup_price_id
 
     @property
     def publishable_key(self) -> str:
@@ -174,39 +262,163 @@ class StripeGateway:
         )
         return session.url
 
-    # --- T7b: Pro auto-top-up (off-session charge on the saved card) -----------
+    # --- T7b: Pro auto-top-up (off-session TAXED invoice on the saved card) ----
 
     def create_off_session_topup(
         self, *, customer_id: str, credit_amount: int, user_id: str, idempotency_key: str
     ) -> tuple[str, str]:
-        """Charge the customer's saved card OFF-SESSION and return ``(payment_intent_id, status)``.
+        """Bill the pack OFF-SESSION as a taxed Invoice; return ``(invoice_id, status)``.
 
-        Spec M4 T7b: the Pro auto-top-up charge — ``payment_intents.create(off_session=True,
-        confirm=True)`` bills the customer's default (saved) payment method WITHOUT the user
-        present (the subscription checkout saved the card as the customer default, D-M4 T2b).
-        ``amount`` is ``credit_amount`` cents (1 credit = 1¢, so ``$10`` ⇒ ``1000``); the grant
-        is NOT done here — ``metadata.payg_credits`` rides to the existing
-        ``payment_intent.succeeded`` webhook, which grants the PAYG lot idempotent on the PI id.
+        Spec M4 T7b, reshaped by R9-177 B9. The bare ``PaymentIntent`` this used to create
+        could not take ``automatic_tax``, so the same pack bought by auto top-up was the
+        only untaxed sale in the product. A Stripe Invoice can, and paying it off-session
+        is Stripe's documented route for a taxed charge without the customer present:
 
-        ``idempotency_key`` (the hourly-bucketed ``autotopup:{user}:{YYYY-MM-DD-HH}``) makes a
-        RETRIED trigger for the same low-balance crossing return the SAME PaymentIntent — one
-        charge, never a double-charge. A card needing 3DS raises ``stripe.CardError`` with
-        ``code == "authentication_required"`` (off-session can't complete the challenge); the
-        caller catches it and falls back to an on-session top-up prompt (never a hard fail).
+        1. ``invoices.create`` with ``automatic_tax.enabled``, ``charge_automatically`` and
+           ``auto_advance`` OFF (we finalize and pay in-line; Stripe never retries or
+           voids on its own schedule);
+        2. ``invoice_items.create`` for the pack's own Price (``autotopup_price_id``, the
+           SAME object the Checkout pack path bills) attached to that invoice, never an
+           ad-hoc amount, so the tax code and the price are one truth;
+        3. ``finalize_invoice`` (computes tax, mints the PaymentIntent);
+        4. stamp the same metadata on that PaymentIntent, so the T3b tripwire can
+           cross-check ``user_id`` on either object;
+        5. ``pay`` with ``off_session`` against the customer's default payment method.
+
+        The returned id is the INVOICE id (it used to be a PaymentIntent id); ``status`` is
+        the invoice's (``"paid"`` on success). The grant is NOT done here: the invoice
+        carries ``metadata.payg_credits`` + ``source=auto_topup`` and the ``invoice.paid``
+        webhook grants the PAYG lot idempotent on the invoice id. The invoice's own
+        ``payment_intent.succeeded`` is left alone by that handler (same ``source`` stamp),
+        so the credits land exactly once.
+
+        ``idempotency_key`` (the hourly-bucketed ``autotopup:{user}:{YYYY-MM-DD-HH}``) roots
+        every request in the chain (``:invoice`` / ``:item`` / ``:finalize`` / ``:pi-meta``
+        / ``:pay``), so a RETRIED trigger for the same crossing replays the SAME invoice
+        and Stripe never charges twice. A card needing 3DS raises
+        :class:`OffSessionAuthenticationRequiredError` (``code == "authentication_required"``,
+        the contract the caller already keys on) and any other refusal
+        :class:`OffSessionChargeFailedError`; in both cases the invoice is voided so no
+        open obligation lingers behind the on-session prompt.
+
+        Raises:
+            AutoTopupPriceNotConfiguredError: no pack Price configured; nothing was sent.
+            OffSessionAuthenticationRequiredError: the saved card needs the cardholder.
+            OffSessionChargeFailedError: the saved card was refused for another reason.
         """
-        meta = {"user_id": user_id, "payg_credits": str(credit_amount), "source": "auto_topup"}
-        intent = self._client.payment_intents.create(
+        import stripe  # noqa: PLC0415 (active-billing path only, keeps the SDK lazy)
+
+        price_id = self._autotopup_price_id
+        if not price_id:
+            raise AutoTopupPriceNotConfiguredError(
+                "auto top-up has no Stripe Price to bill; set PERSONA_STRIPE_PRICE_PACK_10",
+                context={"user_id": user_id, "credit_amount": str(credit_amount)},
+            )
+        meta = {
+            "user_id": user_id,
+            "payg_credits": str(credit_amount),
+            "source": AUTO_TOPUP_SOURCE,
+        }
+
+        invoice = self._client.invoices.create(
             params={
-                "amount": credit_amount,  # 1 credit = 1¢ → credits == cents (M3 accounting)
-                "currency": "usd",
                 "customer": customer_id,
-                "off_session": True,
-                "confirm": True,
+                "collection_method": "charge_automatically",
+                "auto_advance": False,
+                "automatic_tax": {"enabled": True},  # the fix: the Checkout paths already do
+                # Only the line we attach below may ride on this invoice; a pending item
+                # from anywhere else must never be swept into an off-session charge.
+                "pending_invoice_items_behavior": "exclude",
                 "metadata": meta,
             },
-            options={"idempotency_key": idempotency_key},
+            options={"idempotency_key": f"{idempotency_key}:invoice"},
         )
-        return intent.id, intent.status or ""
+        self._client.invoice_items.create(
+            params={
+                "customer": customer_id,
+                "invoice": invoice.id,
+                "pricing": {"price": price_id},  # the pack's Price, tax code included
+                "quantity": 1,
+                "metadata": meta,
+            },
+            options={"idempotency_key": f"{idempotency_key}:item"},
+        )
+        finalized = self._client.invoices.finalize_invoice(
+            invoice.id,
+            params={"auto_advance": False},
+            options={"idempotency_key": f"{idempotency_key}:finalize"},
+        )
+        self._stamp_invoice_payment_intent(finalized, meta=meta, idempotency_key=idempotency_key)
+
+        try:
+            paid = self._client.invoices.pay(
+                invoice.id,
+                params={"off_session": True},
+                options={"idempotency_key": f"{idempotency_key}:pay"},
+            )
+        except stripe.CardError as exc:
+            code = str(exc.code or "")
+            self._void_best_effort(invoice.id, idempotency_key=idempotency_key)
+            context = {"invoice_id": invoice.id, "user_id": user_id, "code": code}
+            if code in _REQUIRES_ACTION_CODES:
+                raise OffSessionAuthenticationRequiredError(
+                    "the saved card needs the cardholder for this charge", context=context
+                ) from exc
+            raise OffSessionChargeFailedError(
+                "the saved card was refused for the auto top-up", context=context
+            ) from exc
+        return paid.id, paid.status or ""
+
+    def _stamp_invoice_payment_intent(
+        self, invoice: stripe.Invoice, *, meta: dict[str, str], idempotency_key: str
+    ) -> None:
+        """Copy the top-up metadata onto the invoice's PaymentIntent (the T3b tripwire).
+
+        Stripe does not copy invoice metadata to the PaymentIntent it mints, and the
+        ``payment_intent.succeeded`` handler reads only the PI. Best-effort: a PI we
+        cannot see, or a stamp Stripe refuses, is logged and the charge still proceeds,
+        because the grant rides ``invoice.paid`` on the invoice's own metadata.
+        """
+        import stripe  # noqa: PLC0415 (active-billing path only, keeps the SDK lazy)
+
+        pi_id = _invoice_payment_intent_id(invoice)
+        if pi_id is None:
+            _log.warning(
+                "auto top-up invoice shows no payment intent after finalize; skipping the stamp",
+                invoice_id=invoice.id,
+            )
+            return
+        try:
+            self._client.payment_intents.update(
+                pi_id,
+                params={"metadata": meta},
+                options={"idempotency_key": f"{idempotency_key}:pi-meta"},
+            )
+        except stripe.StripeError:
+            _log.opt(exception=True).warning(
+                "auto top-up payment intent metadata stamp failed; the invoice still pays",
+                invoice_id=invoice.id,
+                payment_intent_id=pi_id,
+            )
+
+    def _void_best_effort(self, invoice_id: str, *, idempotency_key: str) -> None:
+        """Void a finalized invoice whose off-session payment was refused.
+
+        Without this an open invoice would sit in the customer's portal next to the
+        on-session prompt, two live routes to one intent. Best-effort: a void that fails
+        is logged; the payment outcome the caller needs is raised regardless.
+        """
+        import stripe  # noqa: PLC0415 (active-billing path only, keeps the SDK lazy)
+
+        try:
+            self._client.invoices.void_invoice(
+                invoice_id, options={"idempotency_key": f"{idempotency_key}:void"}
+            )
+        except stripe.StripeError:
+            _log.opt(exception=True).warning(
+                "auto top-up invoice could not be voided after a refused payment",
+                invoice_id=invoice_id,
+            )
 
     # --- T3a: webhook signature verification ----------------------------------
 

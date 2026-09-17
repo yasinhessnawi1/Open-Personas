@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 from persona.billing import get_plan
 from persona.logging import get_logger
 
+from persona_api.billing.gateway import AUTO_TOPUP_SOURCE
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services import subscription_service
 
@@ -191,18 +192,55 @@ def handle_subscription_deleted(event: stripe.Event, context: WebhookContext) ->
     )
 
 
-def handle_invoice_paid(event: stripe.Event, context: WebhookContext) -> None:
-    """``invoice.paid`` — RESET the allowance to the plan amount, exactly once per invoice.
+def _stamped_payg_credits(container: Any) -> int | None:  # noqa: ANN401
+    """The exact, tax-free credits we stamped as ``metadata.payg_credits``, else ``None``.
 
-    The plan is resolved from the invoice LINE's Price id (robust vs event ordering); the
-    reset is idempotent on the invoice id (a re-delivery does not re-inflate a spent-down
-    balance). PAYG lots are untouched.
+    Read from OUR stamp, never from the charged amount (which includes tax). Absent,
+    unparseable or non-positive → ``None`` (the caller no-ops).
+    """
+    raw = _field(container, "metadata", "payg_credits")
+    if not raw:
+        return None
+    try:
+        amount = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
+def _is_auto_topup(container: Any) -> bool:  # noqa: ANN401
+    """Whether the object carries the ``source=auto_topup`` stamp the gateway sets.
+
+    The one signal that tells a top-up invoice (and its PaymentIntent) apart from a
+    subscription invoice (and its PaymentIntent). Metadata, never a guess from the shape.
+    """
+    return str(_field(container, "metadata", "source") or "") == AUTO_TOPUP_SOURCE
+
+
+def handle_invoice_paid(event: stripe.Event, context: WebhookContext) -> None:
+    """``invoice.paid``: a renewal RESETS the allowance; a top-up invoice GRANTS a lot.
+
+    Both exactly once per invoice, keyed on the invoice id, so a re-delivery neither
+    re-inflates a spent-down balance nor grants a second lot.
+
+    A top-up invoice is the off-session auto top-up (R9-177 B9: a taxed Invoice, not a
+    bare PaymentIntent). It is told apart by the ``source=auto_topup`` stamp the gateway
+    set at create time, and its lot is the stamped ``payg_credits`` (tax-free), never the
+    charged amount. Its own ``payment_intent.succeeded`` is left alone by that handler.
+
+    Otherwise the plan is resolved from the invoice LINE's Price id (robust vs event
+    ordering) and the allowance reset to the plan amount. PAYG lots are untouched.
     """
     invoice = _obj(event)
-    plan_code = context.config.plan_code_for_price(_nested_price_id(invoice) or "")
     invoice_id = str(_field(invoice, "id") or "")
-    if plan_code is None or not invoice_id:
-        return  # not our plan, or no invoice id to key on → no-op
+    if not invoice_id:
+        return  # no invoice id to key on → no-op
+    if _is_auto_topup(invoice):
+        _grant_topup_invoice(context, invoice, invoice_id=invoice_id)
+        return
+    plan_code = context.config.plan_code_for_price(_nested_price_id(invoice) or "")
+    if plan_code is None:
+        return  # not our plan → no-op
     allowance = get_plan(plan_code).included_allowance_credits
     period = _utc_month()
 
@@ -220,9 +258,43 @@ def handle_invoice_paid(event: stripe.Event, context: WebhookContext) -> None:
     _apply_scoped(context, invoice, _write)
 
 
+def _grant_topup_invoice(context: WebhookContext, invoice: Any, *, invoice_id: str) -> None:  # noqa: ANN401
+    """Grant the auto top-up's PAYG lot, exactly once, keyed on the invoice id.
+
+    The same ledger seam the Checkout pack path uses (``grant_payg_lot_idempotent``), so
+    a pack bought either way lands as the same kind of lot with the same expiry; only the
+    ``reason`` says which door it came through.
+    """
+    credit_amount = _stamped_payg_credits(invoice)
+    if credit_amount is None:
+        _log.warning(
+            "stripe webhook: auto top-up invoice without usable payg_credits, no-op",
+            invoice_id=invoice_id,
+        )
+        return
+
+    def _write(user_id: str) -> None:
+        context.credits_policy.grant_payg_lot_idempotent(
+            rls_engine=context.rls_engine,
+            user_id=user_id,
+            credit_amount=credit_amount,
+            reason="auto_topup",
+            source_billing_key=invoice_id,
+            cost_basis="topup_payg",
+        )
+
+    _apply_scoped(context, invoice, _write)
+
+
 def handle_invoice_payment_failed(event: stripe.Event, context: WebhookContext) -> None:
-    """``invoice.payment_failed`` — flip the subscription to ``past_due`` (no grant)."""
+    """``invoice.payment_failed``: flip the subscription to ``past_due`` (no grant).
+
+    A refused auto top-up invoice is NOT a missed subscription payment: the gateway
+    voids it and the user gets the on-session prompt, so it must never flip the plan.
+    """
     invoice = _obj(event)
+    if _is_auto_topup(invoice):
+        return
     _apply_scoped(
         context,
         invoice,
@@ -238,18 +310,18 @@ def handle_payment_intent_succeeded(event: stripe.Event, context: WebhookContext
     (which includes tax). The lot is idempotent on the payment_intent id — a re-delivery
     grants ONE lot. Only fires for our PAYG intents (those carrying ``payg_credits``); a
     subscription invoice's own PI has no such metadata → no-op.
+
+    The auto top-up invoice's PI carries the same stamp (for the tripwire) plus
+    ``source=auto_topup``; that lot is ``invoice.paid``'s to grant, keyed on the invoice
+    id, so this handler steps aside for it rather than granting the same pack twice.
     """
     pi = _obj(event)
     pi_id = str(_field(pi, "id") or "")
-    credits_raw = _field(pi, "metadata", "payg_credits")
-    if not pi_id or not credits_raw:
+    if not pi_id or _is_auto_topup(pi):
+        return  # no id to key on, or the invoice path owns this grant → no-op
+    credit_amount = _stamped_payg_credits(pi)
+    if credit_amount is None:
         return  # not a PAYG pack purchase we stamped → no-op
-    try:
-        credit_amount = int(credits_raw)
-    except (TypeError, ValueError):
-        return
-    if credit_amount <= 0:
-        return
 
     def _write(user_id: str) -> None:
         context.credits_policy.grant_payg_lot_idempotent(

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona.logging import get_logger
+
 from persona_api.config import Edition
 from persona_api.editions.credits_policy import (
     CreditsPolicy,
@@ -26,6 +28,8 @@ if TYPE_CHECKING:
     from persona_api.config import APIConfig
 
 __all__ = ["build_credits_policy", "build_owner_resolver", "build_stripe_gateway"]
+
+_log = get_logger("api.editions.factory")
 
 
 def build_owner_resolver(config: APIConfig) -> OwnerResolver:
@@ -62,9 +66,21 @@ def build_stripe_gateway(config: APIConfig) -> StripeGateway | None:
     if not config.stripe_billing_active():
         return None
     from persona_api.billing import StripeGateway  # noqa: PLC0415 — active path only
+    from persona_api.billing.autotopup import AUTO_TOPUP_PACK_KEY  # noqa: PLC0415
 
+    # R9-177 B9: the off-session auto top-up bills the SAME pack Price the Checkout path
+    # sells, as a taxed invoice. Unset means the top-up refuses at the call, loudly, rather
+    # than inventing an untaxed amount; say so once at boot instead of once per crossing.
+    autotopup_price_id = config.stripe_price_for_pack(AUTO_TOPUP_PACK_KEY)
+    if not autotopup_price_id:
+        _log.warning(
+            "billing is active but the auto top-up pack Price is not configured; "
+            "auto top-ups will not charge until PERSONA_STRIPE_PRICE_PACK_{} is set",
+            AUTO_TOPUP_PACK_KEY,
+        )
     return StripeGateway(
         secret_key=config.stripe_secret_key,
         publishable_key=config.stripe_publishable_key,
         webhook_secret=config.stripe_webhook_secret,
+        autotopup_price_id=autotopup_price_id,
     )

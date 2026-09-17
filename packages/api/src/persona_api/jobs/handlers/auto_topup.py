@@ -50,8 +50,8 @@ class AutoTopupHandler:
 
     Idempotent by construction, at three layers beyond the queue's own ``ON CONFLICT``:
     the crossing guard cannot fire twice for one low-balance episode, the hourly outbound
-    Stripe key collapses concurrent charges to a single PaymentIntent, and the grant
-    itself rides ``payment_intent.succeeded`` keyed on that PI id. So a re-delivered or
+    Stripe key collapses concurrent charges to a single taxed invoice, and the grant
+    itself rides ``invoice.paid`` keyed on that invoice id. So a re-delivered or
     retried job cannot produce a second charge.
     """
 

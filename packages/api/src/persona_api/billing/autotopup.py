@@ -1,11 +1,12 @@
 """Pro opt-in auto-top-up — off-session charge on a low-balance crossing (Spec M4, T7b).
 
 When a **Pro, opted-in** user's balance CROSSES below $2 (200 credits) on a background
-deduct, fire ONE off-session $10 charge on the saved card. The charge is created here; the
-GRANT is NOT — the off-session PaymentIntent carries ``metadata.payg_credits`` and the
-existing ``payment_intent.succeeded`` webhook (T4a) grants the PAYG lot idempotent on the
-PI id. So a retried/re-delivered trigger for the same crossing (same hourly idempotency
-key ⇒ same PI) never double-charges, and a re-delivered webhook never double-grants.
+deduct, bill ONE off-session $10 pack on the saved card. The charge is created here as a
+taxed Stripe Invoice for the same pack Price the Checkout path sells (R9-177 B9); the
+GRANT is NOT: the invoice carries ``metadata.payg_credits`` + ``source=auto_topup`` and
+the ``invoice.paid`` webhook grants the PAYG lot idempotent on the invoice id. So a
+retried/re-delivered trigger for the same crossing (same hourly idempotency key ⇒ same
+invoice) never double-charges, and a re-delivered webhook never double-grants.
 
 Safety rails (all enforced BEFORE any Stripe call):
 - **crossing only** — ``old_balance >= 200 and new_balance < 200`` (fires once per
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AUTO_TOPUP_AMOUNT_CREDITS",
+    "AUTO_TOPUP_PACK_KEY",
     "AUTO_TOPUP_THRESHOLD_CREDITS",
     "AutoTopupOutcome",
     "maybe_auto_topup",
@@ -48,6 +50,12 @@ __all__ = [
 # Owner-locked Phase-4 numbers (D-M4-6): trigger below $2, top up $10 (1 credit = 1¢).
 AUTO_TOPUP_THRESHOLD_CREDITS = 200  # $2 — the low-balance crossing threshold
 AUTO_TOPUP_AMOUNT_CREDITS = 1000  # $10 — the off-session top-up charge (== the granted lot)
+
+#: The PAYG pack the auto top-up bills, as the ``get_payg_pack`` / ``stripe_price_for_pack``
+#: key (the dollar amount). Derived from the amount rather than written beside it, so the
+#: pack that is charged and the lot that is granted cannot drift apart (R9-177 B9: the
+#: top-up bills the SAME Stripe Price the Checkout pack path does).
+AUTO_TOPUP_PACK_KEY = str(AUTO_TOPUP_AMOUNT_CREDITS // 100)
 
 
 class AutoTopupOutcome(StrEnum):
@@ -64,8 +72,8 @@ class AutoTopupOutcome(StrEnum):
 
 def _hourly_idempotency_key(user_id: str, now: datetime) -> str:
     """``autotopup:{user}:{YYYY-MM-DD-HH}`` (UTC) — a retried trigger for the SAME crossing
-    reuses the SAME PaymentIntent ⇒ exactly one charge. A rare same-hour 2nd crossing is
-    blocked gracefully (Stripe returns the first PI; the balance is already topped up)."""
+    replays the SAME invoice ⇒ exactly one charge. A rare same-hour 2nd crossing is
+    blocked gracefully (Stripe returns the first invoice; the balance is already topped up)."""
     return f"autotopup:{user_id}:{now:%Y-%m-%d-%H}"
 
 
@@ -171,15 +179,19 @@ def maybe_auto_topup(
         _notify_outcome(rls_engine, user_id=user_id, outcome=AutoTopupOutcome.NO_CUSTOMER, now=now)
         return AutoTopupOutcome.NO_CUSTOMER
 
-    # 4. The off-session charge (idempotent per hourly crossing). The GRANT is the webhook's.
+    # 4. The off-session taxed invoice (idempotent per hourly crossing). The GRANT is the
+    #    ``invoice.paid`` webhook's, keyed on the invoice id.
     try:
-        pi_id, status = gateway.create_off_session_topup(
+        invoice_id, status = gateway.create_off_session_topup(
             customer_id=customer_id,
             credit_amount=AUTO_TOPUP_AMOUNT_CREDITS,
             user_id=user_id,
             idempotency_key=_hourly_idempotency_key(user_id, now),
         )
     except Exception as exc:  # noqa: BLE001 — a billing side effect must NEVER break the turn
+        # The gateway raises ``OffSessionAuthenticationRequiredError`` for 3DS; it carries
+        # ``code == "authentication_required"`` so the branch is one attribute read, the
+        # same contract the bare ``stripe.CardError`` had before the invoice flow.
         if getattr(exc, "code", None) == "authentication_required":
             # 3DS: off-session can't complete the challenge → on-session top-up prompt.
             # B2: THE outcome that most needs a human. Without this the charge never
@@ -193,9 +205,9 @@ def maybe_auto_topup(
         return AutoTopupOutcome.ERROR
 
     logger.info(
-        "auto-top-up charged user {} (pi={} status={}); grant rides payment_intent.succeeded",
+        "auto-top-up invoiced user {} (invoice={} status={}); grant rides invoice.paid",
         user_id,
-        pi_id,
+        invoice_id,
         status,
     )
     return AutoTopupOutcome.CHARGED

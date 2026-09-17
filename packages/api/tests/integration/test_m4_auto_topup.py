@@ -2,18 +2,19 @@
 
 ``maybe_auto_topup`` fires ONE off-session $10 charge when a Pro, opted-in user's balance
 CROSSES below $2 — and NEVER for anyone else. The grant is not done here: the off-session
-PaymentIntent carries ``metadata.payg_credits`` and the existing ``payment_intent.succeeded``
-webhook grants the PAYG lot idempotent on the PI id (proven in T4a). These tests assert the
-CONCRETE decision + the Stripe call (mocked — NO real charges):
+invoice (a taxed Stripe Invoice for the pack's Price, R9-177 B9) carries
+``metadata.payg_credits`` + ``source=auto_topup`` and the ``invoice.paid`` webhook grants the
+PAYG lot idempotent on the invoice id. These tests assert the CONCRETE decision + the Stripe
+call (mocked, NO real charges):
 
 - crossing (Pro, opted-in) → exactly ONE ``create_off_session_topup`` call → CHARGED;
 - a retried trigger for the SAME crossing → the SAME hourly ``idempotency_key`` (Stripe then
-  returns the same PaymentIntent ⇒ one charge; the grant is PI-idempotent on top);
+  replays the same invoice ⇒ one charge; the grant is invoice-idempotent on top);
 - non-Pro (free / plus) → NEVER calls Stripe (NOT_ELIGIBLE);
 - Pro opted-OUT → NEVER calls Stripe (NOT_ELIGIBLE);
 - 3DS ``authentication_required`` → REQUIRES_ACTION, no crash, no raise;
 - not a crossing / no saved card / community (no gateway) → no Stripe call;
-- the gateway builds an off-session, confirmed PI for $10 with the grant metadata + the key.
+- the gateway bills the $10 pack as a taxed off-session invoice with the grant metadata + the key.
 """
 
 from __future__ import annotations
@@ -129,7 +130,7 @@ def test_pro_opted_in_crossing_charges_once(migrated_engine: Engine) -> None:
 
 def test_retried_trigger_same_crossing_reuses_idempotency_key(migrated_engine: Engine) -> None:
     """Retry/re-delivery of the SAME crossing → the SAME hourly idempotency_key, so Stripe
-    returns the SAME PaymentIntent (one charge). The grant is PI-idempotent on top (T4a)."""
+    replays the SAME invoice (one charge). The grant is invoice-idempotent on top."""
     uid = "u_t7b_retry"
     _seed(migrated_engine, uid, plan_code="pro", enabled=True)
     gw = _FakeGateway()
@@ -140,7 +141,7 @@ def test_retried_trigger_same_crossing_reuses_idempotency_key(migrated_engine: E
     assert first is AutoTopupOutcome.CHARGED
     assert second is AutoTopupOutcome.CHARGED
     assert len(gw.calls) == 2
-    # The load-bearing anti-double-charge contract: identical key ⇒ Stripe dedupes to one PI.
+    # The load-bearing anti-double-charge contract: identical key ⇒ Stripe dedupes to one invoice.
     assert gw.calls[0]["idempotency_key"] == gw.calls[1]["idempotency_key"]
 
 
@@ -272,57 +273,83 @@ def test_absent_subscription_row_never_fires(migrated_engine: Engine) -> None:
 
 
 # --- The gateway builds the correct off-session Stripe request -----------------
+#
+# The wire shape (a taxed Invoice for the pack's own Price, paid off-session; R9-177 B9)
+# is pinned in the unit suite, ``tests/unit/billing/test_autotopup_tax_invoice.py``.
+# This leg keeps one end-to-end assertion here: the amount this module decides is the
+# credits the gateway stamps, so the webhook grants exactly what was charged.
 
 
-class _FakePI:
-    def __init__(self, pid: str, status: str) -> None:
-        self.id = pid
+class _FakeInvoice:
+    def __init__(self, invoice_id: str, status: str) -> None:
+        self.id = invoice_id
         self.status = status
+        self.payments = None  # no PI surfaced: the stamp is skipped, the pay is not
 
 
-class _RecordingPaymentIntents:
+class _RecordingInvoices:
+    def __init__(self) -> None:
+        self.create_params: dict[str, Any] | None = None
+        self.create_options: dict[str, Any] | None = None
+
+    def create(self, *, params: dict[str, Any], options: dict[str, Any]) -> _FakeInvoice:
+        self.create_params = params
+        self.create_options = options
+        return _FakeInvoice("in_live_1", "draft")
+
+    def finalize_invoice(self, invoice_id: str, **_kw: Any) -> _FakeInvoice:  # noqa: ANN401
+        return _FakeInvoice(invoice_id, "open")
+
+    def pay(self, invoice_id: str, **_kw: Any) -> _FakeInvoice:  # noqa: ANN401
+        return _FakeInvoice(invoice_id, "paid")
+
+
+class _RecordingInvoiceItems:
     def __init__(self) -> None:
         self.params: dict[str, Any] | None = None
-        self.options: dict[str, Any] | None = None
 
-    def create(self, *, params: dict[str, Any], options: dict[str, Any]) -> _FakePI:
+    def create(self, *, params: dict[str, Any], options: dict[str, Any]) -> object:  # noqa: ARG002
         self.params = params
-        self.options = options
-        return _FakePI("pi_live_1", "succeeded")
+        return object()
 
 
 class _FakeStripeClient:
-    def __init__(self, recorder: _RecordingPaymentIntents) -> None:
-        self.payment_intents = recorder
+    def __init__(self, invoices: _RecordingInvoices, items: _RecordingInvoiceItems) -> None:
+        self.invoices = invoices
+        self.invoice_items = items
 
 
-def test_gateway_builds_off_session_confirmed_ten_dollar_pi() -> None:
-    """The gateway sends an off-session, confirmed $10 PI whose metadata carries the grant
-    (payg_credits) + user_id, keyed by the idempotency_key — so the existing
-    payment_intent.succeeded webhook grants 1000 credits idempotent on the PI id."""
+def test_gateway_bills_the_ten_dollar_pack_as_a_taxed_off_session_invoice() -> None:
+    """The gateway bills the $10 pack's Price on a taxed invoice whose metadata carries the
+    grant (payg_credits) + user_id, rooted on the idempotency_key, so the invoice.paid
+    webhook grants 1000 credits idempotent on the invoice id."""
     from persona_api.billing.gateway import StripeGateway
 
     gw = StripeGateway(
-        secret_key="sk_test_dummy", publishable_key="pk_test", webhook_secret="whsec"
+        secret_key="sk_test_dummy",
+        publishable_key="pk_test",
+        webhook_secret="whsec",
+        autotopup_price_id="price_pack_10_test",
     )
-    recorder = _RecordingPaymentIntents()
-    gw._client = _FakeStripeClient(recorder)  # type: ignore[assignment]  # swap the whole client
+    invoices, items = _RecordingInvoices(), _RecordingInvoiceItems()
+    gw._client = _FakeStripeClient(invoices, items)  # type: ignore[assignment]  # swap the whole client
 
-    pi_id, status = gw.create_off_session_topup(
+    invoice_id, status = gw.create_off_session_topup(
         customer_id="cus_x",
         credit_amount=AUTO_TOPUP_AMOUNT_CREDITS,
         user_id="u_gw",
         idempotency_key="autotopup:u_gw:2026-07-24-15",
     )
 
-    assert (pi_id, status) == ("pi_live_1", "succeeded")
-    assert recorder.params is not None
-    p = recorder.params
-    assert p["amount"] == 1000  # $10 in cents (1 credit = 1¢)
-    assert p["currency"] == "usd"
+    assert (invoice_id, status) == ("in_live_1", "paid")
+    assert invoices.create_params is not None
+    p = invoices.create_params
     assert p["customer"] == "cus_x"
-    assert p["off_session"] is True
-    assert p["confirm"] is True
+    assert p["automatic_tax"] == {"enabled": True}  # the same pack is taxed either way
     assert p["metadata"]["payg_credits"] == "1000"  # the webhook grants exactly this
     assert p["metadata"]["user_id"] == "u_gw"
-    assert recorder.options == {"idempotency_key": "autotopup:u_gw:2026-07-24-15"}
+    assert p["metadata"]["source"] == "auto_topup"
+    assert invoices.create_options == {"idempotency_key": "autotopup:u_gw:2026-07-24-15:invoice"}
+    assert items.params is not None
+    assert items.params["pricing"] == {"price": "price_pack_10_test"}  # never an ad-hoc amount
+    assert "amount" not in items.params
