@@ -5,9 +5,15 @@ over real Streamable HTTP), a REAL tier registry from env, and a REAL
 ConversationLoop for the gap turn. Writes a dispositioned transcript to the
 spec's evidence/ folder and asserts zero FAIL.
 
-Marked ``external`` (real APIs + network + subprocesses) — skipped by default;
-run with: ``uv run pytest -m external -k op27 -s``. Requires the project .env
-(PERSONA_* provider keys) loaded into the environment; this module loads it.
+The live pass is marked ``external`` (real APIs + network + subprocesses) and
+skipped by default; run with: ``uv run pytest -m external -k op27 -s``. It
+requires the project .env (PERSONA_* provider keys) loaded into the
+environment; this module loads it.
+
+The store double's contract check (``test_stub_carries_every_store_method_the_
+gap_turn_reads``) is hermetic and runs in the default suite, so the harness can
+never again drift behind the ``MemoryStore`` protocol unnoticed (AUDIT-F-02: the
+double lacked ``recent`` for 77 days and scenario 7 could not go green).
 """
 
 # ruff: noqa: E501, ANN202 — harness test: dense disposition lines + nested
@@ -16,15 +22,17 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from persona.config import PersonaCoreConfig
 from persona.history import ConversationHistoryManager
+from persona.schema.chunks import PersonaChunk
 from persona.schema.conversation import Conversation
 from persona.schema.persona import Persona, PersonaIdentity
 from persona.skills import SkillInjector, SkillScanner
+from persona.stores.protocol import MemoryStore
 from persona.tools import Toolbox
 from persona.tools.mcp.client import MCPClient
 from persona_api.mcp import BuiltinMCPSupervisor
@@ -32,12 +40,18 @@ from persona_api.services import authoring_service
 from persona_runtime.logging import MemoryTurnLogWriter
 from persona_runtime.loop import ConversationLoop
 from persona_runtime.prompt import PromptBuilder
+from persona_runtime.retrieval import retrieve_context
 from persona_runtime.router import Router
 from persona_runtime.tier import tier_registry_from_env
 
-pytestmark = [pytest.mark.external, pytest.mark.asyncio]
-
 _EVIDENCE = Path(__file__).resolve().parents[4] / "docs/specs/phase2/spec_27/evidence"
+
+#: Port-open wait for the REAL server subprocesses this pass spawns. The product
+#: default (20 s) stays untouched in the launcher; a cold ``python -m`` spawn
+#: measured 17 s on a dev machine at load average 22, so the harness gives the
+#: same real spawn more headroom and a disposition reflects the product, not
+#: the host's load.
+_SPAWN_TIMEOUT_S = 60.0
 
 
 class _Stub:  # minimal in-memory MemoryStore double (memory is orthogonal)
@@ -52,6 +66,10 @@ class _Stub:  # minimal in-memory MemoryStore double (memory is orthogonal)
 
     def get_all(self, *a, **k):  # noqa: ANN002,ANN003,ARG002
         return list(self._all)
+
+    def recent(self, persona_id: str, limit: int) -> list[PersonaChunk]:  # noqa: ARG002
+        # Faithful to MemoryStore.recent: newest first, capped at ``limit``.
+        return sorted(self._all, key=lambda c: c.created_at, reverse=True)[:limit]
 
     def delete(self, *a, **k) -> None: ...  # noqa: ANN002,ANN003
     def remove_documents(self, *a, **k) -> None: ...  # noqa: ANN002,ANN003
@@ -115,6 +133,52 @@ def _load_env() -> None:
             os.environ.setdefault(k.strip(), v)
 
 
+def _chunk(text: str, *, created_at: datetime) -> PersonaChunk:
+    return PersonaChunk(id=f"ep-{text}", text=text, metadata={}, created_at=created_at)
+
+
+def test_stub_carries_every_store_method_the_gap_turn_reads() -> None:
+    """The store double must satisfy the same protocol the live gap turn reads.
+
+    Scenario 7 runs a REAL ``ConversationLoop.turn``, whose per-turn retrieval
+    (``retrieve_context`` with ``history_turns`` set) reads the episodic store
+    through ``recent`` as well as ``query``. This drives that exact call site
+    against the double, so a method the protocol grows and the double lacks
+    reds here in the default suite instead of only in the live pass
+    (AUDIT-F-02). Newest-first + limit are asserted directly on ``recent`` so
+    the double is faithful to ``MemoryStore.recent``, not a short-circuit.
+    """
+    episodic = _Stub()
+    t0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    episodic.write(
+        "astrid",
+        [
+            _chunk("first", created_at=t0),
+            _chunk("third", created_at=t0 + timedelta(minutes=2)),
+            _chunk("second", created_at=t0 + timedelta(minutes=1)),
+        ],
+        source=None,
+    )
+    assert isinstance(episodic, MemoryStore)
+    assert [c.text for c in episodic.recent("astrid", 2)] == ["third", "second"]
+
+    stores = {
+        "identity": _Stub(),
+        "self_facts": _Stub(),
+        "worldview": _Stub(),
+        "episodic": episodic,
+    }
+    ctx = retrieve_context(stores, "astrid", "hello again", history_turns=1)  # type: ignore[arg-type]
+    # ``query`` returns nothing, so every episodic chunk here came through
+    # ``recent``; retrieval re-sorts the recency tail oldest-first for the prompt.
+    assert [c.text for c in ctx.episodic] == ["first", "second", "third"]
+
+
+# Four real server spawns plus six live model calls; the repo's 120 s backstop is
+# sized for unit tests and killed this pass before it could reach a verdict.
+@pytest.mark.external
+@pytest.mark.asyncio
+@pytest.mark.timeout(900)
 async def test_op27_operator_pass() -> None:
     _load_env()
     results: list[tuple[str, str, str]] = []
@@ -124,12 +188,13 @@ async def test_op27_operator_pass() -> None:
         results.append((disp, title, detail))
         lines.append(f"[{disp}] {title}\n    {detail}")
 
-    sandbox = tempfile.mkdtemp(prefix="op27_fs_")
-    os.environ["PERSONA_TOOLS_SANDBOX_ROOT"] = sandbox
+    sandbox = Path(tempfile.mkdtemp(prefix="op27_fs_"))
     os.environ["PERSONA_MCP_BUILTIN_ENABLED"] = "time,calculator,filesystem,weather"
 
     registry = tier_registry_from_env()
-    sup = BuiltinMCPSupervisor(PersonaCoreConfig().mcp_builtin_enabled_parsed)
+    sup = BuiltinMCPSupervisor(
+        PersonaCoreConfig().mcp_builtin_enabled_parsed, spawn_timeout_s=_SPAWN_TIMEOUT_S
+    )
 
     # S1 time
     try:
@@ -163,19 +228,25 @@ async def test_op27_operator_pass() -> None:
     except Exception as e:  # noqa: BLE001
         rec("FAIL", "2 calculator", f"{type(e).__name__}: {e}")
 
-    # S3 filesystem (sandbox + escape)
+    # S3 filesystem (scoped child + escape). Since Spec P4 the filesystem child is
+    # scope-keyed: the production path threads the (owner, persona) root through
+    # ``resolve(..., filesystem_scope_root=...)``; a bare ``ensure("filesystem")``
+    # deliberately serves-and-denies, so the pass drives the scoped path.
     try:
-        c = MCPClient(server_name="filesystem", server_url=await sup.ensure("filesystem"))
+        fs_url = (await sup.resolve(["mcp:filesystem:write_file"], filesystem_scope_root=sandbox))[
+            "filesystem"
+        ]
+        c = MCPClient(server_name="filesystem", server_url=fs_url)
         await c.connect(strict=True)
         w = await _dispatch(c, "mcp:filesystem:write_file", path="notes/a.txt", content="live")
         r = await _dispatch(c, "mcp:filesystem:read_file", path="notes/a.txt")
         esc = await _dispatch(c, "mcp:filesystem:write_file", path="../escaped.txt", content="x")
         await c.disconnect()
-        wrote = not w.is_error and (Path(sandbox) / "notes" / "a.txt").read_text() == "live"
-        blocked = esc.is_error and not (Path(sandbox).parent / "escaped.txt").exists()
+        wrote = not w.is_error and (sandbox / "notes" / "a.txt").read_text() == "live"
+        blocked = esc.is_error and not (sandbox.parent / "escaped.txt").exists()
         rec(
             "PASS" if (wrote and "live" in r.content and blocked) else "FAIL",
-            "3 filesystem (sandboxed; ../escape rejected)",
+            "3 filesystem (scoped child; ../escape rejected)",
             f"write_read={wrote and 'live' in r.content} | escape_blocked={blocked}",
         )
     except Exception as e:  # noqa: BLE001
@@ -198,7 +269,9 @@ async def test_op27_operator_pass() -> None:
 
     # S5 lazy spawn
     try:
-        s2 = BuiltinMCPSupervisor(("time", "calculator", "filesystem"))
+        s2 = BuiltinMCPSupervisor(
+            ("time", "calculator", "filesystem"), spawn_timeout_s=_SPAWN_TIMEOUT_S
+        )
         start = s2.running_server_count
         urls = await s2.resolve(["web_search", "mcp:calculator:calculate"])
         math1 = s2.running_server_count
@@ -282,7 +355,9 @@ async def test_op27_operator_pass() -> None:
 
     # S8 backward compat
     try:
-        s3 = BuiltinMCPSupervisor(PersonaCoreConfig().mcp_builtin_enabled_parsed)
+        s3 = BuiltinMCPSupervisor(
+            PersonaCoreConfig().mcp_builtin_enabled_parsed, spawn_timeout_s=_SPAWN_TIMEOUT_S
+        )
         urls = await s3.resolve(["web_search", "calculator", "file_read"])
         running = s3.running_server_count
         await s3.aclose()
