@@ -668,6 +668,8 @@
     "partOfTask": "Part of a task",
     "noteCallSkipped": "Reused this run's earlier {tool} result instead of running it again.",
     "noteContextPruned": "Trimmed older tool output to keep this run affordable.",
+    "noteOriginated": "Sent the result on as a message, without waiting to be asked.",
+    "noteOriginatedLink": "Open that conversation",
     "answerOnTask": "This one is waiting for you. Answer on its task page.",
     "answerOnTaskLink": "Open the task"
   },
@@ -854,6 +856,8 @@
     "error": "Something went wrong while streaming. The conversation was reloaded.",
     "empty": "Send a message to start.",
     "tierLabel": "Model tier: {tier}",
+    "originatedBadge": "Started this",
+    "originatedLabel": "{name} sent this without being asked",
     "actions": {
       "copy": "Copy message",
       "copied": "Copied",

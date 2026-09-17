@@ -2410,7 +2410,7 @@
       "post": {
         "tags": ["uploads"],
         "summary": "Create Upload",
-        "description": "Validate + store an upload under the caller's persona.\n\nDispatches by content-type per CSA-2 + D-14-X-uploads-coordination:\n\n- ``image/*`` (PNG / JPEG / WebP / GIF) \u2192 :func:`image_service.upload`\n  (Spec 13). Returns ``{\"workspace_path\", \"media_type\", \"size_bytes\"}``.\n- **Document MIME types** (PDF / DOCX / XLSX / CSV / TXT / MD / code)\n  \u2192 :func:`document_service.upload` (Spec 14). Requires a\n  ``conversation_id`` form field (documents are conversation-scoped per\n  Dominant Concern #1; the conversation existence + ownership are\n  verified via :func:`chat_service.get_conversation`). Returns the\n  :class:`document_service.DocumentRef` as JSON.\n- Anything else \u2192 415 Unsupported Media Type.\n\nCross-tenant persona id \u2192 404 (persona pre-flight); cross-tenant\nconversation_id \u2192 404 (chat_service.get_conversation under RLS).\nValidation errors \u2192 422 with structured body. Scanned PDFs raise\n:exc:`VisionHandoffRequiredError` \u2192 422 ``\"vision_handoff_required\"``\n(T13 / T21 interim contract \u2014 Spec 13 fail-loud at Spec 14's interim\nstate).",
+        "description": "Validate + store an upload under the caller's persona.\n\nDispatches by content-type per CSA-2 + D-14-X-uploads-coordination:\n\n- ``image/*`` (PNG / JPEG / WebP / GIF) \u2192 :func:`image_service.upload`\n  (Spec 13). Returns ``{\"workspace_path\", \"media_type\", \"size_bytes\"}``.\n- **Document MIME types** (PDF / DOCX / XLSX / CSV / TXT / MD / code)\n  \u2192 :func:`document_service.upload` (Spec 14). Requires a\n  ``conversation_id`` form field (documents are conversation-scoped per\n  Dominant Concern #1; the conversation existence + ownership are\n  verified via :func:`chat_service.get_conversation`). Returns the\n  :class:`document_service.DocumentRef` as JSON.\n- Anything else \u2192 415 Unsupported Media Type.\n\nCross-tenant persona id \u2192 404 (persona pre-flight); cross-tenant\nconversation_id \u2192 404 (chat_service.get_conversation under RLS).\nValidation errors \u2192 422 with structured body. A scanned PDF is not one of\nthem: T21 rasterises its pages and the returned\n:class:`document_service.DocumentRef` carries them as ``ImageContent``\nreferences for the vision tier (Spec 13's PDF contract).",
         "operationId": "create_upload_v1_personas__persona_id__uploads_post",
         "parameters": [
           {
@@ -2463,7 +2463,7 @@
       "get": {
         "tags": ["uploads"],
         "summary": "Get Upload",
-        "description": "Read an uploaded image by its workspace-relative ref.\n\nCross-tenant access returns 404 by design (existence-disclosure-safe).\nPath-traversal attempts (``..``) reject as 404 via the sandbox resolver.",
+        "description": "Read an uploaded or generated file by its workspace-relative ref.\n\nServes every artifact the workspace holds, whatever produced it: uploads,\ngenerated images, charts, the Spec 28 rich-output set, and the office\ndocuments Spec 24 generates (R9-149).\n\nCross-tenant access returns 404 by design (existence-disclosure-safe).\nPath-traversal attempts (``..``) reject as 404 via the sandbox resolver.\n\nThe response always carries ``X-Content-Type-Options: nosniff``. Office\ndocuments (docx / pptx / xlsx) additionally come back as an attachment: no\nbrowser renders them inline, so a download is the only honest offer.",
         "operationId": "get_upload_v1_personas__persona_id__uploads__ref__get",
         "parameters": [
           {
@@ -6812,7 +6812,7 @@
           "total_micros"
         ],
         "title": "LedgerOut",
-        "description": "The cost ledger, per kind + total (\u00b5-dollars)."
+        "description": "The cost ledger, per kind + total, in ledger micros.\n\nA micro is a hundredth of a US cent, so 10 000 micros is one dollar\n(``persona.tasks.MICROS_PER_DOLLAR``). This docstring said \"\u00b5-dollars\" until\n2026-09-15, which is a millionth of a dollar and wrong by a factor of a hundred. It\nmisled a careful reader inside the very audit that found it, and the error was mirrored\ninto the generated web client, so it was costing real time."
       },
       "MCPCatalogResponse": {
         "properties": {
@@ -7681,6 +7681,11 @@
               }
             ],
             "title": "Events"
+          },
+          "originated": {
+            "type": "boolean",
+            "title": "Originated",
+            "default": false
           }
         },
         "additionalProperties": false,

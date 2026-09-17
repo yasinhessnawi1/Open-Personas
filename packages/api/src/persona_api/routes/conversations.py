@@ -138,6 +138,8 @@ async def get_conversation(
                 # an empty/NULL column collapses to ``None`` → text-only render
                 # (byte-exact back-compat, criterion 5).
                 events=_coerce_stream_events(m.get("stream_events")) or None,
+                # Spec C0: the persona spoke first here; the badge survives a reload.
+                originated=bool(m.get("originated", False)),
             )
             for m in messages
         ],

@@ -43,6 +43,9 @@ export function chatSseToOutputContent(event: ChatEvent): OutputContent[] {
     case "activity_end":
     // The routed tier is a badge on the message, not content in it.
     case "tier":
+    // Spec C0: a message the persona started renders as the bubble's own text (the
+    // reducer folds it in like a chunk) plus a badge; it is not rich output content.
+    case "persona_originated":
       return [];
     case "tool_calling":
       return projectToolCalling(event.data.tool_calls);

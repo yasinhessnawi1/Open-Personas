@@ -24,12 +24,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from persona_runtime.agentic.step import PersonaOriginatedNote
 from sqlalchemy import insert, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import runs as runs_t
-from persona_api.errors import RunPersonaOwnerMismatchError
+from persona_api.errors import RunPersonaOwnerMismatchError, RunRecordEmptyError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -42,6 +43,7 @@ __all__ = [
     "insert_run",
     "persist_error",
     "persist_final",
+    "persist_origination",
     "persist_progress",
     "persist_terminal",
 ]
@@ -145,6 +147,45 @@ def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None
             "error": run.error,
             "finished_at": run.finished_at,
         },
+    )
+
+
+def persist_origination(
+    engine: Engine,
+    *,
+    run_id: str,
+    run: Run,
+    conversation_id: str,
+    owner_id: str | None = None,
+) -> None:
+    """Stamp the terminal record with the message the run's persona sent on its own.
+
+    Within-runtime origination (Spec C0) fires only AFTER :func:`persist_final`, and the
+    ``persona_originated`` event it pushes never enters the event log, so the durable
+    record used to end in silence while the live stream showed the persona speaking. This
+    rewrites ``steps`` with a :class:`PersonaOriginatedNote` appended to the LAST step's
+    ``notes`` (the channel R9-157 introduced for exactly this: a run event whose story must
+    outlive the run). Nothing else on the row changes, and the notification the terminal
+    write already sent is not repeated.
+
+    Raises:
+        RunRecordEmptyError: ``run`` has no steps to carry the note. A completed run always
+            has its final step, so this is a caller bug, not a runtime condition.
+    """
+    if not run.steps:
+        raise RunRecordEmptyError(
+            "cannot stamp origination on a run with no steps",
+            context={"run_id": run_id, "conversation_id": conversation_id},
+        )
+    note = PersonaOriginatedNote(conversation_id=conversation_id)
+    last = run.steps[-1]
+    stamped = last.model_copy(update={"notes": [*last.notes, note]})
+    steps = [*run.steps[:-1], stamped]
+    _update(
+        engine,
+        run_id,
+        owner_id,
+        {"steps": [s.model_dump(mode="json") for s in steps]},
     )
 
 

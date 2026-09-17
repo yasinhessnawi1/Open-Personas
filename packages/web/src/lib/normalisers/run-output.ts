@@ -63,6 +63,9 @@ export function runEventToOutputContent(event: RunEvent): OutputContent[] {
     // (step.notes), never capability output.
     case "call_skipped":
     case "context_pruned":
+    // Spec C0: the persona sending its conclusion on is a note on the last step
+    // (step.notes), never capability output.
+    case "persona_originated":
     case "completed":
     case "cancelled":
     case "max_steps":

@@ -233,6 +233,11 @@ export type ChatEvent =
   // turn, and a guard that cries wolf every turn is a guard nobody reads. It exists to
   // catch dropped-event bugs, which is exactly the class this sweep was chasing.
   | { event: "tier"; data: ChatTierData }
+  // Spec C0: the persona started this message itself. The api pushes it inline on the
+  // open stream at a run's conclusion (within-runtime origination); the same payload
+  // shape rides the run stream as a RunEvent. Rendered as an assistant bubble with the
+  // "started this" badge, and stamped on the run record so a reopened run says so too.
+  | { event: "persona_originated"; data: PersonaOriginatedData }
   | { event: "done"; data: ChatDoneData };
 
 const CHAT_EVENTS = new Set([
@@ -245,14 +250,8 @@ const CHAT_EVENTS = new Set([
   "memory_recall",
   "thinking",
   "tier",
+  "persona_originated",
   "done",
-  // PENDING-web seam (Spec C0, D-C0-X-within-runtime-default-off): the api can
-  // push a "persona_originated" event (a persona-initiated message) inline on the
-  // open stream when PERSONA_API_WITHIN_RUNTIME_ORIGINATION is enabled. C0 (Layer
-  // 1+3) does not render it; enabling the feature pairs with a Layer-4 follow-up
-  // here — add "persona_originated" to CHAT_EVENTS + a render case in use-chat,
-  // and an "originated" badge on the assistant bubble. Until then the message is
-  // never lost: it is a persisted assistant message, rendered present-on-next-open.
 ]);
 
 /**
@@ -264,8 +263,7 @@ export function warnUnhandledSseEvent(stream: string, eventName: string): void {
   if (process.env.NODE_ENV !== "production") {
     // Intentional dev-only trace so a missed live-render is loud, not silent.
     console.warn(
-      `[sse] unhandled ${stream} event "${eventName}" — dropped (no Layer-4 handler). ` +
-        `If this is "persona_originated", see the Spec C0 PENDING-web seam.`,
+      `[sse] unhandled ${stream} event "${eventName}" — dropped (no Layer-4 handler).`,
     );
   }
 }
@@ -338,17 +336,12 @@ export type RunEventType =
   | "reasoning"
   | "call_skipped"
   | "context_pruned"
+  | "persona_originated"
   | "completed"
   | "cancelled"
   | "max_steps"
   | "error"
   | "finished";
-// PENDING-web seam (Spec C0): a "persona_originated" run event (a persona-initiated
-// message inline on the run stream) is NOT in this union — C0 (Layer 1+3) emits it
-// (api) but does not render it (Layer 4). Enabling PERSONA_API_WITHIN_RUNTIME_ORIGINATION
-// pairs with adding "persona_originated" here + a case in run.ts `runViewFromEvents`
-// + an "originated" badge. Until then it is dropped (loudly — see run.ts default),
-// and the message is never lost (persisted, rendered present-on-next-open).
 
 interface RunEventBase {
   step: number;
@@ -430,6 +423,22 @@ export interface AskingUserData {
    */
   proposal?: ProactiveProposal;
 }
+/**
+ * Spec C0: a message the persona started itself, pushed inline on the open stream at a
+ * run's conclusion (within-runtime origination). Same shape on the chat stream (bare
+ * payload) and the run stream (under the RunEvent envelope, `step: -1`). The message is
+ * already persisted as an `originated` assistant row in `conversation_id` by the time
+ * this arrives, so the live render is a courtesy, never the only copy.
+ */
+export interface PersonaOriginatedData {
+  content: string;
+  persona_id: string;
+  persona_name: string;
+  /** The persona's avatar reference; empty string when it has none. */
+  visual_ref: string;
+  /** The conversation the message landed in; empty string only if unknown. */
+  conversation_id: string;
+}
 export interface CompletedData {
   output: string;
 }
@@ -459,6 +468,7 @@ export type RunEvent =
   | (RunEventBase & { type: "reasoning"; data: ReasoningData })
   | (RunEventBase & { type: "call_skipped"; data: CallSkippedData })
   | (RunEventBase & { type: "context_pruned"; data: ContextPrunedData })
+  | (RunEventBase & { type: "persona_originated"; data: PersonaOriginatedData })
   | (RunEventBase & { type: "completed"; data: CompletedData })
   | (RunEventBase & { type: "cancelled"; data: EmptyData })
   | (RunEventBase & { type: "max_steps"; data: MaxStepsData })

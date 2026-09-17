@@ -30,7 +30,14 @@ from typing import Annotated, Literal
 from persona.schema.tools import ToolCall, ToolResult  # noqa: TC002 — Pydantic needs runtime refs
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["CallSkippedNote", "ContextPrunedNote", "Step", "StepNote", "StepType"]
+__all__ = [
+    "CallSkippedNote",
+    "ContextPrunedNote",
+    "PersonaOriginatedNote",
+    "Step",
+    "StepNote",
+    "StepType",
+]
 
 
 class StepType(StrEnum):
@@ -87,11 +94,35 @@ class ContextPrunedNote(BaseModel):
     after_tokens: int = Field(ge=0)
 
 
-#: One guard outcome on a step, discriminated by ``kind`` so a note can never carry the
-#: fields of the other guard. The union is the extension point: a new kind of note is a
+class PersonaOriginatedNote(BaseModel):
+    """The run's conclusion went out as a message the persona started (Spec C0, T7).
+
+    Within-runtime origination fires AFTER the terminal write, so without this note the
+    durable record never says the run spoke first: the ``persona_originated`` event exists
+    only on the live stream, and a run opened later reads as if it ended in silence. The
+    note is stamped onto the run's last step once the message has actually been recorded
+    and delivered, never before.
+
+    Attributes:
+        kind: The discriminator; always ``"persona_originated"``.
+        conversation_id: The conversation the message landed in (started for the run
+            when it had none, D-C0-3), so a reopened run can point at it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["persona_originated"] = "persona_originated"
+    conversation_id: str
+
+
+#: One disclosure on a step, discriminated by ``kind`` so a note can never carry the
+#: fields of another kind. The union is the extension point: a new kind of note is a
 #: new member here plus a branch in the run-detail rebuild, never a new field on
 #: :class:`Step`.
-StepNote = Annotated[CallSkippedNote | ContextPrunedNote, Field(discriminator="kind")]
+StepNote = Annotated[
+    CallSkippedNote | ContextPrunedNote | PersonaOriginatedNote,
+    Field(discriminator="kind"),
+]
 
 
 class Step(BaseModel):
@@ -113,11 +144,12 @@ class Step(BaseModel):
         user_answer: The user's answer (``None`` if no ``user_respond`` callback
             was supplied — the loop then proceeds with best judgment).
         content: The text for a ``FINAL`` or ``REASONING`` step.
-        notes: What this run's deterministic guards did on this step (Spec W1;
-            R9-157): a call the ledger answered, or tool output trimmed at the cost
-            ceiling. Persisted with the step so a run opened after the fact tells the
-            same story as one watched live; empty on every step no guard touched, and
-            absent from records written before this field existed.
+        notes: What happened on this step that no other field states (Spec W1;
+            R9-157): a call the ledger answered, tool output trimmed at the cost
+            ceiling, or (on the last step) the conclusion sent on as a message the
+            persona started. Persisted with the step so a run opened after the fact
+            tells the same story as one watched live; empty on every step nothing
+            touched, and absent from records written before this field existed.
         tier_used: The model tier this step ran on (telemetry; D-06-3).
         tokens: Total tokens for this step's model call (telemetry).
         latency_ms: Wall-clock latency for this step's model call (telemetry).

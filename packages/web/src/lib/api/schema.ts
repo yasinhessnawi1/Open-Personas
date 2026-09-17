@@ -1413,10 +1413,10 @@ export interface paths {
      *
      *     Cross-tenant persona id → 404 (persona pre-flight); cross-tenant
      *     conversation_id → 404 (chat_service.get_conversation under RLS).
-     *     Validation errors → 422 with structured body. Scanned PDFs raise
-     *     :exc:`VisionHandoffRequiredError` → 422 ``"vision_handoff_required"``
-     *     (T13 / T21 interim contract — Spec 13 fail-loud at Spec 14's interim
-     *     state).
+     *     Validation errors → 422 with structured body. A scanned PDF is not one of
+     *     them: T21 rasterises its pages and the returned
+     *     :class:`document_service.DocumentRef` carries them as ``ImageContent``
+     *     references for the vision tier (Spec 13's PDF contract).
      */
     post: operations["create_upload_v1_personas__persona_id__uploads_post"];
     delete?: never;
@@ -1434,10 +1434,18 @@ export interface paths {
     };
     /**
      * Get Upload
-     * @description Read an uploaded image by its workspace-relative ref.
+     * @description Read an uploaded or generated file by its workspace-relative ref.
+     *
+     *     Serves every artifact the workspace holds, whatever produced it: uploads,
+     *     generated images, charts, the Spec 28 rich-output set, and the office
+     *     documents Spec 24 generates (R9-149).
      *
      *     Cross-tenant access returns 404 by design (existence-disclosure-safe).
      *     Path-traversal attempts (``..``) reject as 404 via the sandbox resolver.
+     *
+     *     The response always carries ``X-Content-Type-Options: nosniff``. Office
+     *     documents (docx / pptx / xlsx) additionally come back as an attachment: no
+     *     browser renders them inline, so a download is the only honest offer.
      */
     get: operations["get_upload_v1_personas__persona_id__uploads__ref__get"];
     put?: never;
@@ -3995,7 +4003,13 @@ export interface components {
     };
     /**
      * LedgerOut
-     * @description The cost ledger, per kind + total (µ-dollars).
+     * @description The cost ledger, per kind + total, in ledger micros.
+     *
+     *     A micro is a hundredth of a US cent, so 10 000 micros is one dollar
+     *     (``persona.tasks.MICROS_PER_DOLLAR``). This docstring said "µ-dollars" until
+     *     2026-09-15, which is a millionth of a dollar and wrong by a factor of a hundred. It
+     *     misled a careful reader inside the very audit that found it, and the error was mirrored
+     *     into the generated web client, so it was costing real time.
      */
     LedgerOut: {
       /** Model Micros */
@@ -4505,6 +4519,11 @@ export interface components {
             [key: string]: unknown;
           }[]
         | null;
+      /**
+       * Originated
+       * @default false
+       */
+      originated: boolean;
     };
     /**
      * ModelOut

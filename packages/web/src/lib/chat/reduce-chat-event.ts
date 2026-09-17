@@ -163,6 +163,22 @@ export function reduceChatEvent(
       routing: ev.data.routing ?? a.routing,
     };
   }
+  if (ev.event === "persona_originated") {
+    // Spec C0: the persona started this message itself. The text lands in the bubble
+    // like a chunk would (so the interleaved log keeps stream order), and `originated`
+    // is what puts the "started this" badge on it. The persisted row carries the same
+    // flag (`MessageView.originated`), so a reload shows the badge the live view did.
+    return {
+      ...a,
+      working: false,
+      originated: true,
+      content: a.content + ev.data.content,
+      events: [
+        ...(a.events ?? []),
+        { kind: "text", delta: ev.data.content } as const,
+      ],
+    };
+  }
   if (ev.event === "done") {
     // Spec 31 (D-31-1/2): carry the model decision + budget snapshot alongside the
     // tier. NB: `done` never appears in the PERSISTED log (the worker routes tier to
@@ -207,6 +223,8 @@ export interface PersistedMessage {
   content: string;
   tier_used?: string | null;
   events?: Record<string, unknown>[] | null;
+  /** Spec C0: the persona started this message itself (the durable half of the badge). */
+  originated?: boolean;
 }
 
 /**
@@ -221,15 +239,19 @@ export interface PersistedMessage {
  */
 export function persistedToView(m: PersistedMessage): ChatMessageView {
   const tier = m.tier_used ?? undefined;
+  // Spec C0: only ever set on a row the persona started; left absent otherwise so the
+  // text-only view stays byte-exact for every ordinary reply (criterion 5).
+  const originated = m.originated ? true : undefined;
   const events = m.events;
   if (!events || events.length === 0) {
-    return { id: m.id, role: m.role, content: m.content, tier };
+    return { id: m.id, role: m.role, content: m.content, tier, originated };
   }
   let view: ChatMessageView = {
     id: m.id,
     role: m.role,
     content: "",
     tier,
+    originated,
     events: [],
     tools: [],
   };

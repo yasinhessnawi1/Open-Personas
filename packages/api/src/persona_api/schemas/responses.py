@@ -345,6 +345,11 @@ class MessageView(_Output):
     # column) → byte-exact text-only render (criterion 5; the ``tier_used``
     # nullable-additive precedent).
     events: list[dict[str, object]] | None = None
+    # Spec C0 (migration 013): the persona started this message itself, unprompted (an
+    # agentic run's conclusion, or a future autonomous trigger). Exposed so a reopened
+    # conversation can badge it the way the live stream does; ``False`` on every reply
+    # and on every row written before the column existed (NOT NULL DEFAULT false).
+    originated: bool = False
 
 
 class ConversationDetail(_Output):

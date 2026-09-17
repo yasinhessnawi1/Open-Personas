@@ -227,6 +227,15 @@ class RunPersonaOwnerMismatchError(PersonaError):
     """
 
 
+class RunRecordEmptyError(PersonaError):
+    """Raised when a terminal run record has no step to carry a note (→ 500).
+
+    A completed run always ends on its final step, so a stamp that finds no steps has a
+    broken caller upstream, not a runtime condition; raising is what keeps the origination
+    stamp from silently vanishing. ``context`` carries ``run_id`` / ``conversation_id``.
+    """
+
+
 class MemoryNodeNotFoundError(PersonaError):
     """Raised when a Memory (graph) node is not the current user's (→ 404; Spec K5).
 

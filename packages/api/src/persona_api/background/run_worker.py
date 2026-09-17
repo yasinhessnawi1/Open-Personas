@@ -425,7 +425,18 @@ class RunRegistry:
         if self._origination is None or run.status is not RunStatus.COMPLETED:
             return
         try:
-            await self._origination.originate_run_conclusion(handle, run)
+            conversation_id = await self._origination.originate_run_conclusion(handle, run)
+            if conversation_id is not None:
+                # The terminal write already happened (above), and the originated event
+                # never enters the event log, so the record would otherwise never say the
+                # persona spoke. Stamp it now that the message has actually landed; a
+                # reopened run then tells the same story as the live stream did.
+                run_record.persist_origination(
+                    self._engine,
+                    run_id=handle.run_id,
+                    run=run,
+                    conversation_id=conversation_id,
+                )
         except Exception as exc:  # noqa: BLE001 — origination is additive; never fail the run
             _log.warning(
                 "within-runtime origination failed run={rid}: {err}",

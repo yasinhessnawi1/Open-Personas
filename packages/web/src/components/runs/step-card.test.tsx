@@ -125,4 +125,29 @@ describe("StepCard guard notes (Spec W1, T10)", () => {
 
     expect(container.querySelector('[data-slot="step-notes"]')).toBeNull();
   });
+
+  it("(Spec C0) says the persona sent the result on, with a way into that conversation", () => {
+    const { container } = withNotes([
+      { kind: "persona_originated", conversationId: "conv_1" },
+    ]);
+    const note = container.querySelector('[data-note="persona_originated"]');
+    const link = container.querySelector(
+      '[data-slot="step-note-originated-link"]',
+    );
+
+    expect(note?.textContent).toContain(messages.runs.noteOriginated);
+    expect(link?.getAttribute("href")).toBe("/chat/conv_1");
+    expect(link?.textContent).toBe(messages.runs.noteOriginatedLink);
+  });
+
+  it("(Spec C0) still says it when the conversation is unknown, just without the link", () => {
+    const { container } = withNotes([{ kind: "persona_originated" }]);
+
+    expect(
+      container.querySelector('[data-note="persona_originated"]')?.textContent,
+    ).toContain(messages.runs.noteOriginated);
+    expect(
+      container.querySelector('[data-slot="step-note-originated-link"]'),
+    ).toBeNull();
+  });
 });

@@ -52,6 +52,8 @@ const ASTRID = {
 const messages = {
   chat: {
     tierLabel: "{tier} tier",
+    originatedBadge: "Started this",
+    originatedLabel: "{name} sent this without being asked",
     toolUsing: "Using {tool}",
     toolError: "error",
     thinking: "{name} is thinking…",
@@ -691,5 +693,58 @@ describe("MessageElement — R9-025 leg C inline edit (tail-only user message)",
       name: "Edit message",
     }) as HTMLButtonElement;
     expect(editButton.disabled).toBe(true);
+  });
+});
+
+describe("MessageElement — Spec C0 the persona started this message", () => {
+  it("shows the started-this badge on a terminal originated turn, even with no tier", () => {
+    const msg = personaMsg("I finished the summary.", { originated: true });
+    const { container } = renderWithIntl(
+      <MessageElement message={msg} persona={ASTRID} />,
+    );
+    const badge = container.querySelector('[data-slot="originated-badge"]');
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("Started this");
+    expect(badge?.getAttribute("title")).toBe(
+      "Astrid sent this without being asked",
+    );
+    // The foot opens for the badge alone; a tier is not required to say so.
+    expect(container.querySelector('[data-slot="tier-badge"]')).toBeNull();
+  });
+
+  it("sits beside the tier badge when both are known", () => {
+    const msg = personaMsg("I finished the summary.", {
+      originated: true,
+      tier: "frontier",
+    });
+    const { container } = renderWithIntl(
+      <MessageElement message={msg} persona={ASTRID} />,
+    );
+    expect(
+      container.querySelector('[data-slot="originated-badge"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-slot="tier-badge"]')).not.toBeNull();
+  });
+
+  it("never marks an ordinary reply", () => {
+    const { container } = renderWithIntl(
+      <MessageElement message={personaMsg("Sure.")} persona={ASTRID} />,
+    );
+    expect(
+      container.querySelector('[data-slot="originated-badge"]'),
+    ).toBeNull();
+  });
+
+  it("waits for the turn to settle, like the tier badge does", () => {
+    const msg = personaMsg("Streaming...", {
+      originated: true,
+      streaming: true,
+    });
+    const { container } = renderWithIntl(
+      <MessageElement message={msg} persona={ASTRID} />,
+    );
+    expect(
+      container.querySelector('[data-slot="originated-badge"]'),
+    ).toBeNull();
   });
 });

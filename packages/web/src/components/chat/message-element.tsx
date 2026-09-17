@@ -68,6 +68,7 @@ import { cn } from "@/lib/utils";
 import { AuthedImage } from "./authed-image";
 import { BudgetIndicator } from "./budget-indicator";
 import { MessageActionBar } from "./message-action-bar";
+import { OriginatedBadge } from "./originated-badge";
 import { OutputDispatcher } from "./output/dispatcher";
 import { ImageLightbox } from "./output/image-lightbox";
 import { StreamingTextRenderer } from "./streaming-text-renderer";
@@ -130,6 +131,12 @@ export interface MessageElementView {
   /** Spec 31 (D-31-1/2): the model decision + budget for this turn, when intelligent routing ran. */
   routing?: RoutingSummary;
   budget?: BudgetSnapshot;
+  /**
+   * Spec C0: the persona started this message itself (a run's conclusion sent on as a
+   * message). Set by the live `persona_originated` frame and by the persisted row's
+   * `originated` flag, so the "started this" badge shows live and on reload alike.
+   */
+  originated?: boolean;
   tools?: ToolEntry[];
   /** D-F2-15: ordered event log. When present, MessageElement renders interleaved. */
   events?: MessageEvent[];
@@ -591,9 +598,14 @@ function PersonaMessage({
           />
         ) : null}
 
-        {message.tier && !message.streaming ? (
+        {(message.tier || message.originated) && !message.streaming ? (
           <div className="v-msg__foot" data-slot="turn-transparency">
-            <TierBadge tier={message.tier} routing={message.routing} />
+            {message.originated ? (
+              <OriginatedBadge personaName={persona.name} />
+            ) : null}
+            {message.tier ? (
+              <TierBadge tier={message.tier} routing={message.routing} />
+            ) : null}
             <BudgetIndicator budget={message.budget} />
           </div>
         ) : null}

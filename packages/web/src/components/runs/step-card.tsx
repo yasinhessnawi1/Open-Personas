@@ -120,7 +120,9 @@ export function StepCard({
 
         {/* Spec W1 (T10): what the run's deterministic guards did on this step. A call the
             ledger answered, or older output trimmed at the cost ceiling, is something the
-            model asked for and did not get in full; muted, but never invisible. */}
+            model asked for and did not get in full; muted, but never invisible.
+            Spec C0: the same list says when the persona sent the conclusion on as a
+            message it started, with a way into that conversation. */}
         {step.notes?.length ? (
           <ul className="flex flex-col gap-1" data-slot="step-notes">
             {step.notes.map((note, i) => (
@@ -130,9 +132,27 @@ export function StepCard({
                 data-slot="step-note"
                 data-note={note.kind}
               >
-                {note.kind === "call_skipped"
-                  ? t("noteCallSkipped", { tool: note.tool })
-                  : t("noteContextPruned")}
+                {note.kind === "call_skipped" ? (
+                  t("noteCallSkipped", { tool: note.tool })
+                ) : note.kind === "context_pruned" ? (
+                  t("noteContextPruned")
+                ) : (
+                  <>
+                    {t("noteOriginated")}
+                    {note.conversationId ? (
+                      <>
+                        {" "}
+                        <Link
+                          href={`/chat/${note.conversationId}`}
+                          className="underline underline-offset-2"
+                          data-slot="step-note-originated-link"
+                        >
+                          {t("noteOriginatedLink")}
+                        </Link>
+                      </>
+                    ) : null}
+                  </>
+                )}
               </li>
             ))}
           </ul>

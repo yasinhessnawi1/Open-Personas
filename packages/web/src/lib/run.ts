@@ -119,7 +119,13 @@ export interface RunStep {
  */
 export type RunStepNote =
   | { kind: "call_skipped"; tool: string }
-  | { kind: "context_pruned" };
+  | { kind: "context_pruned" }
+  /**
+   * Spec C0: the run's conclusion went out as a message the persona started. Lives on the
+   * LAST step (the event is run-level, `step: -1`, and the record stamps the final step),
+   * with the conversation it landed in so the viewer can link to it.
+   */
+  | { kind: "persona_originated"; conversationId?: string };
 
 /** The whole run, as the viewer renders it. */
 export interface RunView {
@@ -272,6 +278,23 @@ export function runViewFromEvents(
         st.notes = [...(st.notes ?? []), { kind: "context_pruned" }];
         break;
       }
+      case "persona_originated": {
+        // Spec C0: the persona sent the conclusion on as a message. The event is
+        // run-level (`step: -1`, which the step list drops), so it lands on the last
+        // step, which is where the durable record stamps it too; the two paths then
+        // put the note in the same place. Idempotent on replay (one note per run).
+        const last = Math.max(0, ...map.keys());
+        const st = ensure(last);
+        const note: RunStepNote = {
+          kind: "persona_originated",
+          conversationId: ev.data.conversation_id || undefined,
+        };
+        st.notes = [
+          ...(st.notes ?? []).filter((n) => n.kind !== "persona_originated"),
+          note,
+        ];
+        break;
+      }
       case "completed": {
         const st = ensure(ev.step);
         st.thinking = false;
@@ -303,12 +326,10 @@ export function runViewFromEvents(
         status = (ev.data.status as RunStatus) ?? status;
         break;
       default:
-        // PENDING-web seam (Spec C0): an unhandled run event — e.g. the api's
-        // "persona_originated" inline message when within-runtime origination is
-        // enabled — is dropped here. Loud, not silent: the durable render
-        // (persisted message, present-on-next-open) is the backstop, so this is a
-        // missed live-render, not data loss. Enabling the feature pairs with a
-        // case above + an "originated" badge (see sse-types.ts RunEventType seam).
+        // An unhandled run event is dropped here. Loud, not silent: the durable render
+        // (the persisted record, present on next open) is the backstop, so this is a
+        // missed live render, not data loss, and the warning is what turns it into a
+        // finding rather than a mystery.
         warnUnhandledSseEvent("run", (ev as { type: string }).type);
         break;
     }
@@ -360,6 +381,7 @@ interface PersistedStepNote {
   kind?: string;
   tool?: string;
   guard?: string;
+  conversation_id?: string;
 }
 interface PersistedStep {
   type: string;
@@ -373,10 +395,11 @@ interface PersistedStep {
 }
 
 /**
- * Read the guard notes off a persisted step, so a REOPENED run says what the run's
- * guards did (R9-157). The live stream reduces the `call_skipped` / `context_pruned`
- * events into the same {@link RunStep.notes}; this is the other half, and without it the
- * disclosure exists only while someone is watching.
+ * Read the notes off a persisted step, so a REOPENED run says what the run's guards did
+ * (R9-157) and whether its persona spoke first (Spec C0). The live stream reduces the
+ * `call_skipped` / `context_pruned` / `persona_originated` events into the same
+ * {@link RunStep.notes}; this is the other half, and without it the disclosure exists
+ * only while someone is watching.
  */
 function persistedNotes(
   raw: PersistedStepNote[] | null | undefined,
@@ -387,6 +410,13 @@ function persistedNotes(
       notes.push({ kind: "call_skipped", tool: note.tool });
     } else if (note.kind === "context_pruned") {
       notes.push({ kind: "context_pruned" });
+    } else if (note.kind === "persona_originated") {
+      // Spec C0: the stamp the worker writes once the message has landed; the
+      // conversation id is what lets a reopened run open the chat it started.
+      notes.push({
+        kind: "persona_originated",
+        conversationId: note.conversation_id || undefined,
+      });
     }
   }
   return notes;

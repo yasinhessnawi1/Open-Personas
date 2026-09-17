@@ -92,6 +92,25 @@ class RunStreamRegistry:
         return None
 
 
+class _ReceiptRecorder:
+    """The recorder, keeping its own write receipt (the conversation the message hit).
+
+    :class:`~persona.originator.Originator` reports delivery, not the write, and the
+    conversation is started inside the recorder when the run has none (D-C0-3). The run
+    record needs that id to say where the persona's message went, so this wrapper holds
+    on to the receipt the recorder already returns instead of widening the core seam.
+    """
+
+    def __init__(self, inner: OriginationRecorder) -> None:
+        self._inner = inner
+        self.conversation_id: str | None = None
+
+    async def record(self, message: OriginatedMessage) -> str:
+        """Delegate the write and remember the conversation it resolved to."""
+        self.conversation_id = await self._inner.record(message)
+        return self.conversation_id
+
+
 class WithinRuntimeOriginator:
     """Fires within-runtime origination at a run's conclusion (criterion 7).
 
@@ -122,25 +141,32 @@ class WithinRuntimeOriginator:
             audit_logger=audit_logger or JSONLAuditLogger(audit_root),
         )
 
-    async def originate_run_conclusion(self, handle: RunHandle, run: Run) -> None:
+    async def originate_run_conclusion(self, handle: RunHandle, run: Run) -> str | None:
         """Originate the run's conclusion as a first-class, delivered message.
 
         Runs under the run worker's owner RLS scope. Starts a conversation
         (D-C0-3 — a run has no conversation), persists the message + episodic, and
         delivers it inline on the run's open stream. No-ops when the run produced
         no output.
+
+        Returns:
+            The write receipt: the id of the conversation the message landed in, so
+            the caller can stamp the run record with where the persona spoke. ``None``
+            when nothing was originated (no output, or no persona row to speak as).
         """
         content = run.output
         if not content:
-            return
+            return None
         tag = self._persona_tag(run.persona_id)
         if tag is None:
-            return
+            return None
         sessions = RunStreamRegistry(handle)
         web = WebAppDeliverer(rls_engine=self._engine, sessions=sessions)
         router = DeliveryRouter(deliverers={"web": web}, rls_engine=self._engine)
-        recorder = OriginationRecorder(
-            rls_engine=self._engine, episodic_store=self._episodic, edition=self._edition
+        recorder = _ReceiptRecorder(
+            OriginationRecorder(
+                rls_engine=self._engine, episodic_store=self._episodic, edition=self._edition
+            )
         )
         originator = Originator(recorder=recorder, deliverer=router)
         await originator.originate(
@@ -149,6 +175,7 @@ class WithinRuntimeOriginator:
             content=content,
             created_at=datetime.now(UTC),
         )
+        return recorder.conversation_id
 
     def _persona_tag(self, persona_id: str) -> PersonaIdentityTag | None:
         """Build the persona identity tag from the persona row (RLS-scoped)."""
