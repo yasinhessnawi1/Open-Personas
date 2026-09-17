@@ -144,7 +144,10 @@ export function projectToolResult(data: ToolResultData): OutputContent[] {
     {
       kind: "result-block",
       stdout: data.content,
-      truncated: false,
+      // R9-163: the frame carries the producer's own report of a cut; absence is "not
+      // cut" (pre-R9-163 frames never had the key). This is what lets the result
+      // block's upstream-truncation indicator fire at all.
+      truncated: data.truncated === true,
       language: data.tool_name === "code_execution" ? "python" : undefined,
     },
   ];

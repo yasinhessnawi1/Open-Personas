@@ -144,6 +144,12 @@ export interface ToolResultData {
    * on pre-Spec-28 frames and tools that persist nothing.
    */
   artifacts?: ArtifactRef[];
+  /**
+   * R9-163: the tool cut this result to fit a budget (`web_fetch` past `max_chars`,
+   * `file_read` past 1 MB, the sandbox and text tools). Additive, omitted when false,
+   * so a frame from before the field existed reads as "not cut".
+   */
+  truncated?: boolean;
 }
 
 // =================== CHAT stream (bare-payload frames) ===================

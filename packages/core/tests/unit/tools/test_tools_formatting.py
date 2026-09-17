@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 from persona.schema.tools import ToolCall, ToolResult
-from persona.tools.formatting import format_tool_result
+from persona.tools.formatting import TRUNCATED_MARKER, format_tool_result
 
 
 def _call() -> ToolCall:
@@ -215,3 +215,70 @@ class TestConversationMessageInvariants:
         msg = format_tool_result(_call(), _result(), provider_name="openai")
         with pytest.raises(ValidationError):
             msg.role = "assistant"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Section: a cut result says so (R9-163)
+# ---------------------------------------------------------------------------
+
+
+class TestTruncatedMarker:
+    """A ``ToolResult.truncated=True`` result carries a marker the model can act on.
+
+    ``web_fetch``, ``file_read``, the sandbox tool and the text tools all SET
+    ``truncated`` when they cut a result to fit a budget; before R9-163 nothing
+    on the model-facing path READ it, so a persona fetched a long page, got the
+    first few thousand characters, and reasoned from them as if they were the
+    whole article. Same defect the pruner's ``PRUNED_MARKER`` closed one layer
+    up (D-W1-13): a silently shortened result reads to the model as the whole
+    truth. The marker is provider-independent, so every branch (native shapes,
+    the ollama/local shim, and the forced ``native=False`` shim) carries it.
+    """
+
+    @pytest.mark.parametrize(
+        ("provider", "native"),
+        [
+            ("anthropic", True),
+            ("openai", True),
+            ("openrouter", True),
+            ("ollama", True),
+            ("openai", False),
+        ],
+    )
+    def test_truncated_result_carries_marker(self, provider: str, native: bool) -> None:
+        result = ToolResult(
+            tool_name="web_fetch", content="first 4000 chars", call_id="tcid-1", truncated=True
+        )
+        msg = format_tool_result(_call(), result, provider_name=provider, native=native)
+        assert isinstance(msg.content, str)
+        assert TRUNCATED_MARKER in msg.content
+        assert "first 4000 chars" in msg.content  # the body the model does get stays intact
+        assert msg.content.index("first 4000 chars") < msg.content.index(TRUNCATED_MARKER)
+
+    @pytest.mark.parametrize(
+        ("provider", "native"),
+        [("anthropic", True), ("openai", True), ("ollama", True), ("openai", False)],
+    )
+    def test_intact_result_carries_no_marker(self, provider: str, native: bool) -> None:
+        result = ToolResult(tool_name="web_fetch", content="whole page", call_id="tcid-1")
+        msg = format_tool_result(_call(), result, provider_name=provider, native=native)
+        assert isinstance(msg.content, str)
+        assert TRUNCATED_MARKER not in msg.content
+
+    def test_marker_is_one_line_and_says_what_to_do(self) -> None:
+        # It lands in the model's context on every cut result, so it stays short,
+        # and it must name a way forward, not just report the cut.
+        assert "\n" not in TRUNCATED_MARKER
+        assert "cut" in TRUNCATED_MARKER
+        assert "narrow" in TRUNCATED_MARKER.lower()
+
+    def test_error_and_truncated_both_show(self) -> None:
+        # An error result that was also cut keeps the error prefix AND the marker;
+        # the OpenAI-family branch prefixes after the marker is appended.
+        result = ToolResult(
+            tool_name="web_fetch", content="boom", call_id="tcid-1", is_error=True, truncated=True
+        )
+        msg = format_tool_result(_call(), result, provider_name="openai")
+        assert isinstance(msg.content, str)
+        assert msg.content.startswith("Error: boom")
+        assert TRUNCATED_MARKER in msg.content

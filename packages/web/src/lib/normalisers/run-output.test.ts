@@ -210,6 +210,31 @@ describe("runEventToOutputContent (T04)", () => {
         },
       ]);
     });
+
+    it("truncated: true on the frame → result-block reports the cut (R9-163)", () => {
+      // The tool cut its output to fit a budget and said so on the frame. Before
+      // R9-163 the classifier hardcoded false here, so the result block's
+      // upstream-truncation indicator could never fire on a live run.
+      const event: RunEvent = {
+        type: "tool_result",
+        step: 0,
+        data: {
+          tool_name: "web_fetch",
+          is_error: false,
+          content: "first 4000 chars",
+          truncated: true,
+        },
+        timestamp: TS,
+      };
+      expect(runEventToOutputContent(event)).toEqual([
+        {
+          kind: "result-block",
+          stdout: "first 4000 chars",
+          truncated: true,
+          language: undefined,
+        },
+      ]);
+    });
   });
 
   describe("D-09-1 transport-shape leakage stops at the normaliser", () => {

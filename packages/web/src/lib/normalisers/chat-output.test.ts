@@ -130,6 +130,26 @@ describe("chatSseToOutputContent (T03)", () => {
   });
 
   describe("tool_result → failure / produced files / result-block", () => {
+    it("truncated: true on the frame → result-block reports the cut (R9-163)", () => {
+      const event: ChatEvent = {
+        event: "tool_result",
+        data: {
+          tool_name: "web_fetch",
+          is_error: false,
+          content: "first 4000 chars",
+          truncated: true,
+        },
+      };
+      expect(chatSseToOutputContent(event)).toEqual([
+        {
+          kind: "result-block",
+          stdout: "first 4000 chars",
+          truncated: true,
+          language: undefined,
+        },
+      ]);
+    });
+
     it("is_error=true → failure variant with operation=tool_name", () => {
       const event: ChatEvent = {
         event: "tool_result",

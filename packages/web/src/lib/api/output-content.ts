@@ -75,8 +75,9 @@ export interface ResultBlockOutput {
   /** Full `ToolResult.content` string: stdout + rendered `--- outcome ---`
    *  + rendered `-- files --`. The renderer chooses how to crop / expand. */
   stdout: string;
-  /** Producer-reported truncation. Pre-T02b runtime amendment defaults to
-   *  false (chat SSE does not carry truncated today). */
+  /** Producer-reported truncation: the tool cut its output to fit a budget.
+   *  Both transports carry it on the `tool_result` frame since R9-163 (omitted
+   *  when false); a frame without the key reads as false. */
   truncated: boolean;
   /** Optional code echoed for F1 instrument-transparency (D-F4-1 collapsible
    *  default-collapsed); rendered via Shiki dynamic-import per

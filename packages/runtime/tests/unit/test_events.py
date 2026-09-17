@@ -452,3 +452,34 @@ class TestMemoryRecall:
         restored = RunEvent.model_validate_json(event.model_dump_json())
         assert restored.type == "memory_recall"
         assert restored.data == {"store": "worldview", "count": 2}
+
+
+class TestToolResultTruncatedForwarding:
+    """R9-163: additive ``truncated`` forwarding on ``tool_result``.
+
+    The tools set ``ToolResult.truncated`` and the durable ``Step`` round-trips
+    it, but the live frame dropped it, so the web's upstream-truncation
+    indicator could never fire while someone watched a run. Same single-site,
+    omitted-when-absent shape as ``produced_files`` / ``artifacts`` above: one
+    constructor edit lights up both the chat SSE and the RunEvent transports.
+    """
+
+    def test_truncated_forwarded_when_set(self) -> None:
+        result = ToolResult(
+            tool_name="web_fetch", content="first 4000 chars", call_id="c-1", truncated=True
+        )
+        ev = RunEvent.tool_result(1, "web_fetch", result)
+        assert ev.data["truncated"] is True
+
+    def test_truncated_omitted_when_false(self) -> None:
+        # Absence IS the back-compat shape: pre-R9-163 frames never carried the key,
+        # and the web reads a missing key as "not cut".
+        result = ToolResult(tool_name="web_fetch", content="whole page", call_id="c-1")
+        ev = RunEvent.tool_result(1, "web_fetch", result)
+        assert "truncated" not in ev.data
+
+    def test_truncated_survives_json_round_trip(self) -> None:
+        result = ToolResult(tool_name="web_fetch", content="head", call_id="c-1", truncated=True)
+        ev = RunEvent.tool_result(1, "web_fetch", result)
+        again = RunEvent.model_validate_json(ev.model_dump_json())
+        assert again.data["truncated"] is True

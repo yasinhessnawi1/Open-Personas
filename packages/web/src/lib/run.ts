@@ -343,6 +343,12 @@ interface PersistedToolResult {
    * lift so a reopened run and a watched one classify identically.
    */
   data?: Record<string, unknown> | null;
+  /**
+   * R9-163: the tool's own report that it cut this result. The durable Step round-trips
+   * the whole ToolResult, so the record has it; the reopen path forwards it exactly as
+   * `RunEvent.tool_result` does on the live frame.
+   */
+  truncated?: boolean;
 }
 /**
  * One `Step.notes` entry as the durable record carries it (R9-157). Every field is
@@ -396,7 +402,9 @@ function isRunEventDict(x: unknown): x is RunEvent {
  *
  * `produced_files` is lifted out of `data` exactly as `RunEvent.tool_result` lifts it, and
  * an empty list is omitted rather than passed as `[]`, because the classifier treats
- * absence as "fall back" and an empty array would read as "there were none".
+ * absence as "fall back" and an empty array would read as "there were none". `truncated`
+ * is forwarded the same way (R9-163): set only when the record says the tool cut the
+ * result, so a reopened run shows the same indicator a watched one did.
  */
 function persistedResultAsFrame(r: PersistedToolResult): ToolResultData {
   const frame: ToolResultData = {
@@ -410,6 +418,9 @@ function persistedResultAsFrame(r: PersistedToolResult): ToolResultData {
   const pf = r.data?.produced_files;
   if (Array.isArray(pf) && pf.length > 0) {
     frame.produced_files = pf as ToolResultData["produced_files"];
+  }
+  if (r.truncated === true) {
+    frame.truncated = true;
   }
   return frame;
 }

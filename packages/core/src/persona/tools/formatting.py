@@ -46,14 +46,26 @@ fail-fast posture) — see the case arms below.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from persona.schema.conversation import ConversationMessage
 
 if TYPE_CHECKING:
     from persona.schema.tools import ToolCall, ToolResult
 
-__all__ = ["format_tool_result"]
+__all__ = ["TRUNCATED_MARKER", "format_tool_result"]
+
+#: What a cut result ends with (R9-163). The tools set ``ToolResult.truncated`` when they
+#: shorten a result to fit a budget (``web_fetch`` past ``max_chars``, ``file_read`` past
+#: 1 MB, the sandbox and text tools); until this marker nothing on the model-facing path read
+#: it, so the model took the first few thousand characters of a page for the whole article.
+#: Same shape as the pruner's ``PRUNED_MARKER`` (D-W1-13): it says the content was cut and
+#: names a way forward, so a fragment never reads as the whole answer. One line, because it
+#: lands in the model's context on every cut result.
+TRUNCATED_MARKER: Final = (
+    "[tool output cut at the tool's size limit. "
+    "Narrow the request or ask for a specific part if you need the rest.]"
+)
 
 
 def format_tool_result(
@@ -112,6 +124,12 @@ def format_tool_result(
     disagree by construction.
     """
     now = datetime.now(UTC)
+    # R9-163: the marker is provider-independent, so it goes on the body ONCE here and
+    # every branch below reads ``body`` instead of the raw result text. The OpenAI-family
+    # error prefix is applied after, so an error that was also cut shows both.
+    body = result.content
+    if result.truncated:
+        body = f"{body.rstrip()}\n{TRUNCATED_MARKER}"
 
     if not native:
         # Shim form: the active backend will NOT emit native tool_calls, so
@@ -122,7 +140,7 @@ def format_tool_result(
         # treat it as text rather than lifting it into a structured block.
         return ConversationMessage(
             role="user",
-            content=f"{result.tool_name} returned: {result.content}",
+            content=f"{result.tool_name} returned: {body}",
             created_at=now,
             metadata={
                 "tool_call_id": tool_call.call_id,
@@ -142,7 +160,7 @@ def format_tool_result(
             # tool round-trip the moment Astrid/Kai actually used a tool.
             return ConversationMessage(
                 role="tool",
-                content=result.content,
+                content=body,
                 created_at=now,
                 metadata={
                     "tool_call_id": tool_call.call_id,
@@ -153,7 +171,7 @@ def format_tool_result(
             )
 
         case "openai" | "deepseek" | "groq" | "together" | "nvidia" | "openrouter" | "cloudflare":
-            content = result.content
+            content = body
             if result.is_error and not content.startswith("Error:"):
                 content = f"Error: {content}"
             return ConversationMessage(
@@ -171,7 +189,7 @@ def format_tool_result(
         case "ollama" | "local":
             return ConversationMessage(
                 role="user",
-                content=f"{result.tool_name} returned: {result.content}",
+                content=f"{result.tool_name} returned: {body}",
                 created_at=now,
                 metadata={
                     "tool_call_id": tool_call.call_id,

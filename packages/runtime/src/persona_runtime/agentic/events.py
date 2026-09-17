@@ -209,6 +209,12 @@ class RunEvent(BaseModel):
         # falls back to produced_files only when artifacts is absent.
         if result.artifacts:
             data["artifacts"] = [a.model_dump() for a in result.artifacts]
+        # R9-163: the tool cut its result to fit a budget and said so on ToolResult;
+        # forward that so the web's upstream-truncation indicator can fire on a live
+        # run (the durable Step already round-trips the field for reopened runs).
+        # Same additive, omitted-when-false shape as produced_files/artifacts above.
+        if result.truncated:
+            data["truncated"] = True
         return cls(
             type="tool_result",
             step=step,

@@ -910,3 +910,67 @@ describe("runViewFromSnapshot: rich outputs survive a reopen", () => {
     expect(view.steps[0].outputs[0].kind).toBe("failure");
   });
 });
+
+describe("runViewFromSnapshot: a cut result stays cut on a REOPENED run (R9-163)", () => {
+  // The durable Step round-trips ToolResult.truncated; the reopen path rebuilds the
+  // live frame from it, so the upstream-truncation indicator renders on a reopened run
+  // exactly as it did while someone was watching.
+  const reopened = (result: Record<string, unknown>): RunStatusResponse => ({
+    id: "run_1",
+    persona_id: "p1",
+    task: "Read the article",
+    status: "completed",
+    output: "Final answer",
+    steps: [
+      {
+        type: "tool_call",
+        tool_calls: [
+          { name: "web_fetch", call_id: "c1", args: { url: "https://x" } },
+        ],
+        results: [result],
+      },
+    ],
+  });
+
+  it("carries truncated: true from the record onto the result block", () => {
+    const view = runViewFromSnapshot(
+      reopened({
+        tool_name: "web_fetch",
+        call_id: "c1",
+        content: "first 4000 chars",
+        is_error: false,
+        truncated: true,
+      }),
+    );
+    expect(view.steps[0].outputs).toEqual([
+      {
+        kind: "result-block",
+        stdout: "first 4000 chars",
+        truncated: true,
+        language: undefined,
+      },
+    ]);
+  });
+
+  it("reads an intact result, and one persisted before the field existed, as not cut", () => {
+    const intact = runViewFromSnapshot(
+      reopened({
+        tool_name: "web_fetch",
+        call_id: "c1",
+        content: "whole page",
+        is_error: false,
+        truncated: false,
+      }),
+    );
+    const legacy = runViewFromSnapshot(
+      reopened({
+        tool_name: "web_fetch",
+        call_id: "c1",
+        content: "whole page",
+        is_error: false,
+      }),
+    );
+    expect(intact.steps[0].outputs[0]).toMatchObject({ truncated: false });
+    expect(legacy.steps[0].outputs[0]).toMatchObject({ truncated: false });
+  });
+});
