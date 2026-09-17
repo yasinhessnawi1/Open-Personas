@@ -108,6 +108,7 @@ from persona_api.sandbox import (
 from persona_api.services import persona_service
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
+from persona_api.services.flag_report import log_effective_flags
 from persona_api.services.model_tiers import (
     build_free_tier_registry,
     resolve_openrouter_subscription_mode,
@@ -201,6 +202,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     client, D-05-4 / spec-06 handoff).
     """
     config: APIConfig = app.state.config
+    # R9-170 / sweep part2 N: say what is switched on, once, before anything else starts.
+    # Until 2026-09-18 nothing in the process could answer "what is on"; the register that
+    # did was built by hand from Fly secrets and code defaults, and local and production
+    # had diverged silently for months. One greppable line, no secrets, every flag.
+    log_effective_flags(config)
     # The embedder for persona memory population (D-08-8). Lazy: weights load on
     # first encode, not at startup. Shared (thread-safe read path). Built early so
     # the community Chroma memory backend can compose it.
