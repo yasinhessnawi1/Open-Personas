@@ -383,6 +383,9 @@ class AgenticLoop:
             # six lookups is six or seven messages, and a tail counted in messages would cut the
             # oldest results of a step the model has not been sent yet.
             step_message_counts: list[int] = []
+            # part3 F12: the tier the last frame announced, so the stream carries changes
+            # and not restatements. ``None`` until step 0 announces the first one.
+            announced_tier: str | None = None
 
             for step_num in range(self._max_steps):
                 if cancel_token is not None and cancel_token.is_cancelled:
@@ -407,6 +410,20 @@ class AgenticLoop:
 
                 tier = self._tier_for_step(step_num, steps[-1].type if steps else None)
                 backend = self._tiers.get(tier)
+                # part3 F12: say which tier this step runs on, before it runs. The run
+                # viewer reduces `tier` onto the run header, and it had nothing to reduce
+                # from a run: the tier was resolved here, spent on the model call, and
+                # recorded only on the finished step, so the badge a watched run showed
+                # was blank for the whole run while a reopened one could read it off
+                # ``Step.tier_used``. A CHANGE is worth a frame because it is news, the
+                # one moment the header would otherwise be wrong; a repeat is not, so a
+                # twenty step run on one tier sends one frame rather than twenty
+                # restatements of a badge that already says the right thing. Collapsing
+                # the repeats is what makes the live sequence equal the sequence a
+                # reopened run derives from ``tier_used``.
+                if tier != announced_tier:
+                    await self._emit(on_event, RunEvent.tier(tier, step=step_num))
+                    announced_tier = tier
 
                 await self._emit(on_event, RunEvent.thinking(step_num))
                 context_before_step = len(context)

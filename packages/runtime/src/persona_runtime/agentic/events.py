@@ -71,8 +71,8 @@ class RunEvent(BaseModel):
         return cls(type="started", step=-1, data={"task": task}, timestamp=datetime.now(UTC))
 
     @classmethod
-    def tier(cls, tier: str, routing: dict[str, Any] | None = None) -> RunEvent:
-        """The model tier chosen for this turn/step (run-level; ``step=-1``).
+    def tier(cls, tier: str, routing: dict[str, Any] | None = None, *, step: int = -1) -> RunEvent:
+        """The model tier chosen for this turn/step.
 
         Used by the chat SSE stream (``ConversationLoop.turn``) to surface the
         router's actual tier choice — and available to the run viewer too. One
@@ -86,11 +86,16 @@ class RunEvent(BaseModel):
                 model-within-tier selection ran this turn; absent ⇒ the
                 pre-Spec-31 bare-tier payload (back-compat). The raw score
                 vector is never on the wire — it stays in the JSONL TurnLog.
+            step: The step the tier applies to. Defaults to ``-1``, the
+                run-level index the chat turn uses (one turn, no steps).
+                The agentic loop (part3 F12) passes the real step index,
+                because there a tier belongs to a step and a later step can
+                resolve to a different one.
         """
         data: dict[str, Any] = {"tier": tier}
         if routing is not None:
             data["routing"] = routing
-        return cls(type="tier", step=-1, data=data, timestamp=datetime.now(UTC))
+        return cls(type="tier", step=step, data=data, timestamp=datetime.now(UTC))
 
     @classmethod
     def thinking(cls, step: int) -> RunEvent:

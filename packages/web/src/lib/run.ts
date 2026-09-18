@@ -598,7 +598,11 @@ export function runViewFromSnapshot(snap: RunStatusResponse): RunView {
   return {
     task: snap.task,
     status,
-    tier: steps.find((s) => s.tier)?.tier,
+    // part3 F12: the LAST step that names a tier, not the first. The live stream sends a
+    // tier frame at step 0 and again only when a step re-grades, so the watched header
+    // ends on the tier the run ended on; a reopened header reading the first step would
+    // contradict it on exactly the runs where the answer is interesting.
+    tier: [...steps].reverse().find((s) => s.tier)?.tier,
     recall: persistedRecall(persisted[0]),
     steps,
     output: snap.output ?? undefined,
