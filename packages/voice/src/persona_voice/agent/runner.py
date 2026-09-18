@@ -794,6 +794,10 @@ async def build_agent_session(
         conversation_id=conversation_id,
         rls_engine=rls_engine,
     )
+    # The session exists from here on, so say so on the lifecycle seam. A call that
+    # never reaches ``active`` (the participant drops during connect) then still has a
+    # create on record instead of leaving the whole session untraced.
+    await session.mark_created()
 
     # --- real V2 STT seam (Deepgram + Silero); echo-mute reads the orchestrator ---
     # The VAD's TTS-mute provider needs the orchestrator's ``is_agent_speaking``,

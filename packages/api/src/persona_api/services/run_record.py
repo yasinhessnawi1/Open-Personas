@@ -24,13 +24,19 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-from persona_runtime.agentic.step import PersonaOriginatedNote
+from persona_runtime.agentic.run import RunStatus
+from persona_runtime.agentic.step import PersonaOriginatedNote, StepType
 from sqlalchemy import insert, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import runs as runs_t
 from persona_api.errors import RunPersonaOwnerMismatchError, RunRecordEmptyError
+from persona_api.middleware.rls_context import current_user_id
+from persona_api.services.user_facing_errors import (
+    owner_on_free_plan,
+    user_facing_error_message_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -135,19 +141,53 @@ def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None
     reopened run can ever show is exactly what :class:`~persona_runtime.agentic.step.Step`
     carries. A run event that is never reduced onto a step does not survive this write
     (R9-157: that is how the guard disclosure came to exist only while a run was watched).
+
+    A failed run is rewritten for its reader on the way in (R9-097): ``runs.error`` is
+    shown on the run page, and a capacity exhaustion stringifies to our provider names,
+    model ids and routing strategy. The loop hands the failure over honestly and this
+    picks the sentence a person sees, in both places the record states it.
     """
+    error, steps = _reader_safe_failure(engine, run, owner_id)
     _update(
         engine,
         run_id,
         owner_id,
         {
             "status": str(run.status),
-            "steps": [s.model_dump(mode="json") for s in run.steps],
+            "steps": steps,
             "output": run.output,
-            "error": run.error,
+            "error": error,
             "finished_at": run.finished_at,
         },
     )
+
+
+def _reader_safe_failure(
+    engine: Engine, run: Run, owner_id: str | None
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """``(error, steps)`` as the record should state them, for a person (R9-097).
+
+    Returns the run's own text and steps untouched unless the failure is one the message
+    catalogue rewrites. When it is, the sentence replaces BOTH the row's ``error`` and the
+    closing ``ERROR`` step's text, because the run page reads the first and the step
+    timeline reads the second, and two different accounts of one failure is worse than
+    either alone. The plan lookup only happens on that path, so a healthy run pays nothing.
+    """
+    steps = [s.model_dump(mode="json") for s in run.steps]
+    if run.status is not RunStatus.ERROR or run.error_class is None:
+        return run.error, steps
+    # The ambient scope is the run worker's own bind for the run's lifetime; a caller
+    # that passed an owner explicitly wins over it.
+    owner = owner_id or current_user_id.get() or ""
+    safe = user_facing_error_message_for(
+        run.error_class, on_free_plan=owner_on_free_plan(engine, owner)
+    )
+
+    if safe is None:
+        return run.error, steps
+    if steps and steps[-1].get("type") == StepType.ERROR.value:
+        steps[-1] = {**steps[-1], "content": safe}
+    return safe, steps
 
 
 def persist_origination(

@@ -42,7 +42,23 @@ from persona_api.sandbox import (
 from persona_api.services import notifications_service, run_record
 from persona_api.services.persona_service import persona_name_from_yaml
 from persona_api.services.synthesis_trigger import enqueue_run_synthesis
-from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
+from persona_api.services.user_facing_errors import (
+    owner_on_free_plan,
+    user_facing_error_message,
+    user_facing_error_message_for,
+)
+
+
+def _error_class_of(event: RunEvent) -> str | None:
+    """The failure class an ``error`` frame carries, when it carries one.
+
+    ``RunEvent.data`` is ``dict[str, Any]`` by design, so this is where the value is
+    narrowed to what the message catalogue takes. An older frame, or one from a loop
+    that recorded no class, simply has none and its message stands.
+    """
+    value = event.data.get("error_class")
+    return value if isinstance(value, str) else None
+
 
 # Spec P6 (D4-c): terminal run status → (bell level, i18n key). Copy is stored
 # locale-neutral (P6-D-5); the web resolves the key. A status not here is not
@@ -320,8 +336,24 @@ class RunRegistry:
         # VIEWABLE (S08-2: progress visible, not resumable). The final Run (with
         # the authoritative Step objects) overwrites this on completion.
         event_log: list[dict[str, object]] = []
+        # R9-097 on the LIVE path. The loop describes a failure honestly, and the raw
+        # text names our providers, model ids and routing strategy. It used to reach
+        # nobody because a failure left as an exception and no ``error`` frame was ever
+        # streamed; now one is, and it goes to the watching reader AND into the snapshot
+        # a reopen reads until the terminal write replaces it. So the frame is rewritten
+        # here, with the same sentence ``persist_final`` will store, and the full text
+        # stays in the log line the failure handler already writes. The plan lookup is a
+        # DB read, so it happens at most once per run rather than once per frame.
+        free_plan: bool | None = None
 
         async def _on_event(event: RunEvent) -> None:
+            nonlocal free_plan
+            if event.type == "error":
+                if free_plan is None:
+                    free_plan = owner_on_free_plan(self._engine, handle.owner_id)
+                safe = user_facing_error_message_for(_error_class_of(event), on_free_plan=free_plan)
+                if safe is not None:
+                    event = event.model_copy(update={"data": {**event.data, "message": safe}})
             await handle.on_event(event)
             event_log.append(event.model_dump(mode="json"))
             self._persist_progress(handle.run_id, event_log)
@@ -364,13 +396,18 @@ class RunRegistry:
             # assigns its own internal id, distinct from the API's row id.
             self._persist_final(handle.run_id, run)
             # Spec K2 (T8d): a completed agentic run feeds synthesis (D-06-8 — what
-            # the run revealed about the user enters the graph, criterion 12).
-            enqueue_run_synthesis(
-                self._job_queue,
-                owner_id=handle.owner_id,
-                run_id=handle.run_id,
-                persona_id=run.persona_id,
-            )
+            # the run revealed about the user enters the graph, criterion 12). A run
+            # that broke revealed nothing, and it used to leave as an exception, so it
+            # never reached this line; it returns as an ERROR run now (R9-180) and the
+            # rule stays what it always was in practice.
+            if run.status is not RunStatus.ERROR:
+                enqueue_run_synthesis(
+                    self._job_queue,
+                    owner_id=handle.owner_id,
+                    run_id=handle.run_id,
+                    persona_id=run.persona_id,
+                )
+
             # Within-runtime origination (Spec C0, T7, criterion 7): a completed
             # run originates its conclusion as a delivered message, pushed inline
             # on this run's open stream BEFORE the end sentinel. Best-effort — a

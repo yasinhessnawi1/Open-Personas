@@ -13,8 +13,13 @@ The decisions that shape this file:
 - **D-06-2 (status-based termination):** the loop NEVER raises ``MaxStepsReached``
   / ``RunCancelled`` — every terminal outcome returns a ``Run`` with the right
   ``RunStatus``. A best-effort max-steps summary is an *output*, never a
-  ``completed`` signal.
-- **D-06-5 (loop-appends the agentic framing):** the persona block, the task, and
+  ``completed`` signal. An unrecoverable failure is a terminal outcome too: it
+  returns a ``Run`` with ``RunStatus.ERROR``, the failure on ``error``, and a
+  closing ``StepType.ERROR`` step carrying the same text, so a run opened later
+  can point at the step it stopped on. The A3 approval gate is the one exception,
+  because it is a control signal rather than a failure: it travels on untouched.
+- **D-06-5 (loop-appends the agentic framing):**
+ the persona block, the task, and
   the ``[ASK_USER]``/``[FINAL]`` marker instructions are merged into ONE floor
   system message (``context[0]``) — the compactor's invariant. ``PromptBuilder``
   stays chat-focused.
@@ -41,7 +46,11 @@ from typing import TYPE_CHECKING
 
 from persona.audit import AuditAction
 from persona.autonomy import policy_for, resolve_autonomy
-from persona.errors import SkillCompositionDepthError, SkillCycleError
+from persona.errors import (
+    GatedActionProposedError,
+    SkillCompositionDepthError,
+    SkillCycleError,
+)
 from persona.logging import get_logger
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
@@ -279,7 +288,16 @@ class AgenticLoop:
         ``user_respond`` when the model asks a question (D-06-10). Respects
         ``cancel_token`` at each step boundary (D-06-7; never mid-step).
 
+        A failure the run cannot recover from ends it the same way every other
+        terminal condition does (D-06-2): status ``ERROR``, the failure on
+        ``error``, its class on ``error_class``, an ``error`` event on the stream,
+        and a closing ``StepType.ERROR`` step whose text is that same failure. The
+        paths that reach it are enumerated at the handler below. The A3 approval
+        gate's ``GatedActionProposedError`` propagates unchanged: it means the leg
+        is waiting for a person, not that the run broke.
+
         Args:
+
             task: The task to execute.
             on_event: Optional async callback for each :class:`RunEvent`.
             user_respond: Optional async callback the loop ``await``\\ s on an
@@ -347,157 +365,204 @@ class AgenticLoop:
         status = RunStatus.RUNNING
         output: str | None = None
         error: str | None = None
+        error_class: str | None = None
+        # Bound before the try, because the recall notes are attached below on EVERY path
+        # out of the loop and the very read that produces them can be what fails.
+        recall_notes: list[MemoryRecallNote] = []
 
         # `started` first (the run began), then build the initial context — which
         # emits the P2 memory_recall events for the stores it consults (so the recall
         # signals follow `started`, mirroring the chat turn's ordering).
         await self._emit(on_event, RunEvent.started(task))
-        context, recall_notes = await self._build_initial_context(persona_id, task, on_event)
+        try:
+            context, recall_notes = await self._build_initial_context(persona_id, task, on_event)
 
-        last_bad_tool: str | None = None  # for the hallucinated-twice escalation (§5.2)
-        # Spec W1 (D-W1-41): how many messages each step appended, newest last. The pruner
-        # protects whole STEPS, and only the loop knows where one begins: a step that batches
-        # six lookups is six or seven messages, and a tail counted in messages would cut the
-        # oldest results of a step the model has not been sent yet.
-        step_message_counts: list[int] = []
+            last_bad_tool: str | None = None  # for the hallucinated-twice escalation (§5.2)
+            # Spec W1 (D-W1-41): how many messages each step appended, newest last. The pruner
+            # protects whole STEPS, and only the loop knows where one begins: a step that batches
+            # six lookups is six or seven messages, and a tail counted in messages would cut the
+            # oldest results of a step the model has not been sent yet.
+            step_message_counts: list[int] = []
 
-        for step_num in range(self._max_steps):
-            if cancel_token is not None and cancel_token.is_cancelled:
-                status = RunStatus.CANCELLED
-                # R9-109: salvage the work before stopping. Max-steps already summarises
-                # (see this loop's ``else`` branch); cancellation is the same situation,
-                # real work done and a terminal condition reached, but it used to discard
-                # everything. In production a task leg is cancelled by its wall-clock box,
-                # and every such leg left ``output`` empty: ~200s and 9 to 19 tool calls of
-                # genuine research, thrown away. Worse, the checkpoint accumulates progress
-                # ONLY from ``run.output``, so an empty output meant leg N+1 inherited
-                # nothing and reran the same searches; the task could never advance.
-                #
-                # Two guards. Cancellation before any step has run has nothing to salvage,
-                # so it must not spend a model call. And a summary that fails must not turn
-                # a salvageable cancellation into an error, so on failure ``output`` stays
-                # None and the run terminates exactly as it did before this change.
-                if steps:
-                    output = await self._safe_best_effort_summary(context)
-                await self._emit(on_event, RunEvent.cancelled(step_num))
-                break
-
-            tier = self._tier_for_step(step_num, steps[-1].type if steps else None)
-            backend = self._tiers.get(tier)
-
-            await self._emit(on_event, RunEvent.thinking(step_num))
-            context_before_step = len(context)
-            step_started = time.perf_counter()
-            response = await backend.chat(context, tools=self._toolbox.get_specs())
-            latency_ms = (time.perf_counter() - step_started) * 1000.0
-            tokens = response.usage.total_tokens
-            # Spec M3 (T4a): surface this step's real model-call usage for
-            # incremental billing. The caller meters + may flip ``cancel_token``;
-            # the next iteration's boundary check (top of the loop) then stops the
-            # run cleanly — the in-flight step below completes first.
-            if on_step_usage is not None:
-                await on_step_usage(
-                    StepUsage(
-                        step=step_num,
-                        provider=backend.provider_name,
-                        model=backend.model_name,
-                        prompt_tokens=response.usage.prompt_tokens,
-                        completion_tokens=response.usage.completion_tokens,
-                        cost_usd=response.usage.cost_usd,
-                    )
-                )
-
-            if response.tool_calls:
-                step, last_bad_tool, context = await self._handle_tool_calls(
-                    step_num,
-                    response,
-                    backend,
-                    context,
-                    tier,
-                    tokens,
-                    latency_ms,
-                    last_bad_tool,
-                    on_event,
-                )
-                steps.append(step)
-            elif self._is_ask_user(response):
-                step, context, parked = await self._handle_ask_user(
-                    step_num,
-                    response,
-                    context,
-                    tier,
-                    tokens,
-                    latency_ms,
-                    user_respond,
-                    on_event,
-                )
-                steps.append(step)
-                if parked:
-                    # Spec W1 (D-W1-34): stop cleanly ON the question. The step carries it,
-                    # unanswered, and NO output is set: a question is not a deliverable, and
-                    # writing one into ``output`` is how the raw marker used to reach the
-                    # user's own conclusions.
-                    status = RunStatus.AWAITING_USER
+            for step_num in range(self._max_steps):
+                if cancel_token is not None and cancel_token.is_cancelled:
+                    status = RunStatus.CANCELLED
+                    # R9-109: salvage the work before stopping. Max-steps already summarises
+                    # (see this loop's ``else`` branch); cancellation is the same situation,
+                    # real work done and a terminal condition reached, but it used to discard
+                    # everything. In production a task leg is cancelled by its wall-clock box,
+                    # and every such leg left ``output`` empty: ~200s and 9 to 19 tool calls of
+                    # genuine research, thrown away. Worse, the checkpoint accumulates progress
+                    # ONLY from ``run.output``, so an empty output meant leg N+1 inherited
+                    # nothing and reran the same searches; the task could never advance.
+                    #
+                    # Two guards. Cancellation before any step has run has nothing to salvage,
+                    # so it must not spend a model call. And a summary that fails must not turn
+                    # a salvageable cancellation into an error, so on failure ``output`` stays
+                    # None and the run terminates exactly as it did before this change.
+                    if steps:
+                        output = await self._safe_best_effort_summary(context)
+                    await self._emit(on_event, RunEvent.cancelled(step_num))
                     break
-            elif self._is_final(response):
-                output = self._clean_output(response.content)
-                steps.append(
-                    Step(
-                        type=StepType.FINAL,
-                        content=output,
-                        tier_used=tier,
-                        tokens=tokens,
-                        latency_ms=latency_ms,
-                    )
-                )
-                status = RunStatus.COMPLETED
-                await self._emit(on_event, RunEvent.completed(step_num, output))
-                break
-            else:
-                # Reasoning step: append the assistant text, then a user-role
-                # continuation nudge so the context ends user-role before the
-                # next chat() (Bug fix — no assistant-prefill 400) and the loop
-                # actually progresses toward a tool call or [FINAL].
-                context = [
-                    *context,
-                    self._assistant(response.content),
-                    self._user(_REASONING_CONTINUE_NUDGE),
-                ]
-                steps.append(
-                    Step(
-                        type=StepType.REASONING,
-                        content=response.content,
-                        tier_used=tier,
-                        tokens=tokens,
-                        latency_ms=latency_ms,
-                    )
-                )
-                await self._emit(on_event, RunEvent.reasoning(step_num, response.content))
 
-            step_message_counts.append(max(0, len(context) - context_before_step))
-            compacted = await self._maybe_compact(context, backend)
-            if compacted is not context:
-                # The compactor rewrote history into a summary, so the counts no longer
-                # describe this context. What survived IS the recent tail, so treat it as
-                # one step: nothing of it is prunable until the run moves on.
-                context = compacted
-                step_message_counts = [max(0, len(context) - 1)]
-            context, prune_note = await self._maybe_prune(
-                context,
-                step_num,
-                on_event,
-                protect_from=_protected_boundary(context, step_message_counts),
+                tier = self._tier_for_step(step_num, steps[-1].type if steps else None)
+                backend = self._tiers.get(tier)
+
+                await self._emit(on_event, RunEvent.thinking(step_num))
+                context_before_step = len(context)
+                step_started = time.perf_counter()
+                response = await backend.chat(context, tools=self._toolbox.get_specs())
+                latency_ms = (time.perf_counter() - step_started) * 1000.0
+                tokens = response.usage.total_tokens
+                # Spec M3 (T4a): surface this step's real model-call usage for
+                # incremental billing. The caller meters + may flip ``cancel_token``;
+                # the next iteration's boundary check (top of the loop) then stops the
+                # run cleanly, the in-flight step below completes first.
+                if on_step_usage is not None:
+                    await on_step_usage(
+                        StepUsage(
+                            step=step_num,
+                            provider=backend.provider_name,
+                            model=backend.model_name,
+                            prompt_tokens=response.usage.prompt_tokens,
+                            completion_tokens=response.usage.completion_tokens,
+                            cost_usd=response.usage.cost_usd,
+                        )
+                    )
+
+                if response.tool_calls:
+                    step, last_bad_tool, context = await self._handle_tool_calls(
+                        step_num,
+                        response,
+                        backend,
+                        context,
+                        tier,
+                        tokens,
+                        latency_ms,
+                        last_bad_tool,
+                        on_event,
+                    )
+                    steps.append(step)
+                elif self._is_ask_user(response):
+                    step, context, parked = await self._handle_ask_user(
+                        step_num,
+                        response,
+                        context,
+                        tier,
+                        tokens,
+                        latency_ms,
+                        user_respond,
+                        on_event,
+                    )
+                    steps.append(step)
+                    if parked:
+                        # Spec W1 (D-W1-34): stop cleanly ON the question. The step carries it,
+                        # unanswered, and NO output is set: a question is not a deliverable, and
+                        # writing one into ``output`` is how the raw marker used to reach the
+                        # user's own conclusions.
+                        status = RunStatus.AWAITING_USER
+                        break
+                elif self._is_final(response):
+                    output = self._clean_output(response.content)
+                    steps.append(
+                        Step(
+                            type=StepType.FINAL,
+                            content=output,
+                            tier_used=tier,
+                            tokens=tokens,
+                            latency_ms=latency_ms,
+                        )
+                    )
+                    status = RunStatus.COMPLETED
+                    await self._emit(on_event, RunEvent.completed(step_num, output))
+                    break
+                else:
+                    # Reasoning step: append the assistant text, then a user-role
+                    # continuation nudge so the context ends user-role before the
+                    # next chat() (Bug fix, no assistant-prefill 400) and the loop
+                    # actually progresses toward a tool call or [FINAL].
+                    context = [
+                        *context,
+                        self._assistant(response.content),
+                        self._user(_REASONING_CONTINUE_NUDGE),
+                    ]
+                    steps.append(
+                        Step(
+                            type=StepType.REASONING,
+                            content=response.content,
+                            tier_used=tier,
+                            tokens=tokens,
+                            latency_ms=latency_ms,
+                        )
+                    )
+                    await self._emit(on_event, RunEvent.reasoning(step_num, response.content))
+
+                step_message_counts.append(max(0, len(context) - context_before_step))
+                compacted = await self._maybe_compact(context, backend)
+                if compacted is not context:
+                    # The compactor rewrote history into a summary, so the counts no longer
+                    # describe this context. What survived IS the recent tail, so treat it as
+                    # one step: nothing of it is prunable until the run moves on.
+                    context = compacted
+                    step_message_counts = [max(0, len(context) - 1)]
+                context, prune_note = await self._maybe_prune(
+                    context,
+                    step_num,
+                    on_event,
+                    protect_from=_protected_boundary(context, step_message_counts),
+                )
+                if prune_note is not None and steps:
+                    # R9-157: the trim belongs to the step that just ran. This iteration
+                    # appended exactly one step, so that is ``steps[-1]``. The step is frozen
+                    # by then (it has to be: the loop hands out finished steps), so the note
+                    # lands by replacing it rather than by mutating it.
+                    steps[-1] = _with_note(steps[-1], prune_note)
+            else:
+                status = RunStatus.MAX_STEPS_REACHED
+                output = self._clean_output(await self._best_effort_summary(context))
+                await self._emit(on_event, RunEvent.max_steps(self._max_steps, output))
+        except GatedActionProposedError:
+            # The A3 approval gate is a control signal, not a failure. The proposal is
+            # already recorded durably and the leg parks the task on it, so this one
+            # travels untouched, exactly as it did before this file learned to record
+            # failures at all.
+            raise
+        except Exception as exc:  # noqa: BLE001, every terminal outcome is a status (D-06-2)
+            # An unrecoverable failure is a terminal outcome like any other, so it ends
+            # the same way: a status, a described run, and a step that says WHERE it
+            # stopped. Before this, the exception left the loop and the record kept only
+            # a run-level message, so a reopened run could not point at the step that
+            # broke. What reaches here, in practice:
+            #
+            #   - the step's model call, a provider 5xx / rate limit / timeout, or
+            #     ``AllModelsFailedError`` when every model in the tier is exhausted;
+            #   - the tier lookup, when a configured tier resolves to nothing
+            #     (``TierNotConfiguredError``);
+            #   - the two off-step model calls: the compaction summary and the
+            #     best-effort summary at the step cap;
+            #   - a tool dispatch whose failure is NOT a result, ``@tool`` bodies never
+            #     raise (spec 03 converts them to ``is_error`` results the model recovers
+            #     from), so this is a toolbox that raises something the dispatcher does
+            #     not already translate;
+            #   - the caller's own awaited callbacks: ``user_respond`` and the per-step
+            #     billing meter, which cuts a run off when the owner runs out;
+            #   - building the step's context: the typed-store reads and skill injection.
+            #
+            # ``BaseException`` (a cancelled asyncio task, KeyboardInterrupt) is NOT
+            # caught: that is the process going away, not a run failing.
+            status = RunStatus.ERROR
+            error = str(exc)
+            error_class = type(exc).__name__
+            _logger.error(
+                "agentic run failed at step {step} ({cls}): {err}",
+                step=len(steps),
+                cls=error_class,
+                err=error,
             )
-            if prune_note is not None and steps:
-                # R9-157: the trim belongs to the step that just ran. This iteration
-                # appended exactly one step, so that is ``steps[-1]``. The step is frozen
-                # by then (it has to be: the loop hands out finished steps), so the note
-                # lands by replacing it rather than by mutating it.
-                steps[-1] = _with_note(steps[-1], prune_note)
-        else:
-            status = RunStatus.MAX_STEPS_REACHED
-            output = self._clean_output(await self._best_effort_summary(context))
-            await self._emit(on_event, RunEvent.max_steps(self._max_steps, output))
+            steps.append(Step(type=StepType.ERROR, content=error))
+            await self._emit(
+                on_event, RunEvent.error(len(steps) - 1, error, error_class=error_class)
+            )
 
         if steps:
             # part3 F10: the recall happened before step 0 existed, and it is run level, so
@@ -505,6 +570,10 @@ class AgenticLoop:
             # run could never say which memory the persona read. It belongs to the first
             # step, which is the step that consumed the context it fed. A run that produced
             # no step at all consumed nothing, so there is nothing to claim.
+            #
+            # A run that broke has a step here too, its ERROR step (R9-180), and it gets the
+            # note for the same reason: the persona did read that memory before it died, and
+            # a failed run is exactly when someone wants to know what it was working from.
             steps[0] = _with_notes(steps[0], recall_notes)
 
         run = Run(
@@ -514,12 +583,16 @@ class AgenticLoop:
             steps=steps,
             output=output,
             error=error,
+            error_class=error_class,
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
         run_id = run.id
         _logger.info("agentic run finished run_id={rid} status={st}", rid=run_id, st=str(status))
-        self._write_episodic_summary(persona_id, run)
+        if status is not RunStatus.ERROR:
+            # A run that broke has no outcome to remember, and the environment that broke
+            # it is the last place to add a write. The failure is recorded on the run.
+            self._write_episodic_summary(persona_id, run)
         await self._emit(on_event, RunEvent.finished(run))
         return run
 

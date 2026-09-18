@@ -357,6 +357,65 @@ describe("runViewFromSnapshot", () => {
   });
 });
 
+describe("the failing step on a REOPENED run (R9-180)", () => {
+  // The loop ends an unrecoverable failure as an ERROR run with a closing ERROR step,
+  // so the terminal record carries the failure ON the step it happened at. Watching the
+  // run live shows that through the `error` event; reopening it has to show the same
+  // thing, and the reopen path is the one that gets forgotten.
+  const failed: RunStatusResponse = {
+    id: "run_1",
+    persona_id: "p1",
+    task: "Research",
+    status: "error",
+    error: "the sandbox is gone",
+    steps: [
+      {
+        type: "tool_call",
+        tool_calls: [{ name: "web_search", call_id: "c1", args: { q: "x" } }],
+        results: [
+          {
+            tool_name: "web_search",
+            call_id: "c1",
+            content: "hit",
+            is_error: false,
+          },
+        ],
+        tier_used: "small",
+      },
+      { type: "error", content: "the sandbox is gone", tier_used: "mid" },
+    ],
+  };
+
+  it("puts the failure on the step it happened at, not only on the run", () => {
+    const view = runViewFromSnapshot(failed);
+    expect(view.status).toBe("error");
+    expect(view.steps).toHaveLength(2);
+    // The work that DID happen is still there, and the last step is where it stopped.
+    expect(view.steps[0].tools[0].result).toBe("hit");
+    expect(view.steps[1].error).toBe("the sandbox is gone");
+  });
+
+  it("says the same thing reopened as it did live", () => {
+    const live = runViewFromEvents(
+      [
+        ev.thinking(0),
+        ev.toolCalling(0, "web_search", "c1"),
+        ev.toolResult(0, "web_search", "hit"),
+        {
+          type: "error",
+          step: 1,
+          data: { message: "the sandbox is gone" },
+          timestamp: "2026-01-01T00:00:00Z",
+        },
+      ],
+      { task: "Research" },
+    );
+    const reopened = runViewFromSnapshot(failed);
+    expect(reopened.steps[1].error).toBe(live.steps[1].error);
+    expect(reopened.status).toBe(live.status);
+  });
+});
+
 describe("runViewFromSnapshot: the guard notes on a REOPENED run (R9-157)", () => {
   // The bug this pins: `call_skipped` / `context_pruned` reduced into step.notes from the
   // LIVE event stream only. The durable record carried nothing, so every run opened after

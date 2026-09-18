@@ -81,7 +81,16 @@ class Run(BaseModel):
             its work forward too, since the checkpoint accumulates progress from
             this field alone). ``None`` while running, on early error, when a run
             is cancelled before its first step, or when the salvage summary fails.
-        error: The error description; set only when ``status == ERROR``.
+        error: The error description; set only when ``status == ERROR``. This is the
+            failure as it really was, which is what diagnosis needs; the sentence a
+            person reads is chosen at the boundary that renders it, from
+            ``error_class``.
+        error_class: The exception class that ended the run (``type(exc).__name__``),
+            set only when ``status == ERROR``. It travels with the run so the surface
+            that stores the failure can pick safe, useful copy for the reader without
+            having to parse ``error``: a capacity exhaustion names our providers, model
+            ids and routing strategy, and that must never reach a person (R9-097). Not a
+            column on the ``runs`` row, it is consumed on the way there.
         started_at: tz-aware UTC start time.
         finished_at: tz-aware UTC end time; ``None`` while running.
     """
@@ -95,6 +104,7 @@ class Run(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     output: str | None = None
     error: str | None = None
+    error_class: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
 

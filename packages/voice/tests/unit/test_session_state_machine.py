@@ -54,6 +54,7 @@ def test_session_lifecycle_event_values_are_stable_strings() -> None:
     name; if these strings change, replay-aggregate stops matching."""
     assert SessionLifecycleEvent.USER_STARTED_SPEAKING.value == "user_started_speaking"
     assert SessionLifecycleEvent.AGENT_STARTED_SPEAKING.value == "agent_started_speaking"
+    assert SessionLifecycleEvent.SESSION_CREATED.value == "session_created"
     assert SessionLifecycleEvent.SESSION_ENDED.value == "session_ended"
 
 
@@ -112,6 +113,54 @@ def test_rls_engine_property_returns_injected_engine() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_created_announces_the_session_before_anything_else() -> None:
+    """The create is a lifecycle event in its own right, dispatched at create.
+
+    Without it the seam only ever heard about sessions that reached ``active``, so a
+    call that died during connect left no trace at all.
+    """
+    events: list[tuple[SessionLifecycleEvent, str]] = []
+
+    async def _on(ev: SessionLifecycleEvent, sess: Session) -> None:
+        events.append((ev, sess.state))
+
+    sm = _build_sm(on_event=_on)
+    await sm.mark_created()
+    assert events == [(SessionLifecycleEvent.SESSION_CREATED, "created")]
+
+
+@pytest.mark.asyncio
+async def test_mark_created_is_idempotent() -> None:
+    on_event = AsyncMock()
+    sm = _build_sm(on_event=on_event)
+    await sm.mark_created()
+    await sm.mark_created()
+    await sm.mark_active()
+    assert on_event.await_count == 2  # one create, one active
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_ends_before_active_still_has_a_created_record() -> None:
+    """The failure this exists for: an abrupt drop between create and active.
+
+    The session never becomes ``active``, so ``SESSION_ACTIVE`` never fires; the create
+    still has to be on record, and in the right order, or the end reads as the end of
+    something that was never there.
+    """
+    events: list[tuple[SessionLifecycleEvent, str]] = []
+
+    async def _on(ev: SessionLifecycleEvent, sess: Session) -> None:
+        events.append((ev, sess.state))
+
+    sm = _build_sm(on_event=_on)
+    await sm.end()
+    assert events == [
+        (SessionLifecycleEvent.SESSION_CREATED, "created"),
+        (SessionLifecycleEvent.SESSION_ENDED, "ended"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_mark_active_transitions_created_to_active_and_emits_event() -> None:
     events: list[tuple[SessionLifecycleEvent, str]] = []
 
@@ -121,7 +170,10 @@ async def test_mark_active_transitions_created_to_active_and_emits_event() -> No
     sm = _build_sm(on_event=_on)
     await sm.mark_active()
     assert sm.state == "active"
-    assert events == [(SessionLifecycleEvent.SESSION_ACTIVE, "active")]
+    assert events == [
+        (SessionLifecycleEvent.SESSION_CREATED, "created"),
+        (SessionLifecycleEvent.SESSION_ACTIVE, "active"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -131,8 +183,8 @@ async def test_mark_active_is_idempotent() -> None:
     await sm.mark_active()
     await sm.mark_active()
     assert sm.state == "active"
-    # The event fires exactly once for the actual transition.
-    assert on_event.await_count == 1
+    # The transition fires once, after the one-time create announcement.
+    assert on_event.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -149,8 +201,9 @@ async def test_end_disposes_engine_and_emits_event() -> None:
     assert sm.state == "ended"
     assert sm.session.ended_at is not None
     engine.dispose.assert_called_once()  # type: ignore[attr-defined]
-    # Order matters: SESSION_ACTIVE then SESSION_ENDED.
+    # Order matters: the create, then SESSION_ACTIVE, then SESSION_ENDED.
     assert events == [
+        SessionLifecycleEvent.SESSION_CREATED,
         SessionLifecycleEvent.SESSION_ACTIVE,
         SessionLifecycleEvent.SESSION_ENDED,
     ]

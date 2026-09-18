@@ -69,6 +69,42 @@ describe("StepCard awaiting a task-linked answer", () => {
   });
 });
 
+describe("StepCard on the step a run died at (R9-180)", () => {
+  // The ERROR step is the one the run stopped on, live and reopened alike. It gets the
+  // card's error treatment so the timeline SHOWS where the work ended instead of leaving
+  // the reader to infer it from a run-level message.
+  function errored() {
+    return render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <ol>
+          <StepCard
+            step={{
+              step: 3,
+              thinking: false,
+              tools: [],
+              outputs: [],
+              answered: false,
+              error: "the sandbox is gone",
+            }}
+            awaiting={false}
+            onAnswer={() => Promise.resolve()}
+            personaId="kai"
+          />
+        </ol>
+      </NextIntlClientProvider>,
+    );
+  }
+
+  it("shows the failure on the step, marked as an error", () => {
+    const { container } = errored();
+    const shown = container.querySelector('[data-slot="step-error"]');
+
+    expect(shown?.textContent).toBe("the sandbox is gone");
+    expect(shown?.getAttribute("role")).toBe("alert");
+    expect(container.querySelector('[data-error="true"]')).not.toBeNull();
+  });
+});
+
 describe("StepCard guard notes (Spec W1, T10)", () => {
   function withNotes(notes: RunStep["notes"]) {
     return render(

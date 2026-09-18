@@ -40,7 +40,9 @@ __all__ = [
     "CAPACITY_BUSY_MESSAGE",
     "owner_on_free_plan",
     "user_facing_error_message",
+    "user_facing_error_message_for",
 ]
+
 
 _log = get_logger("services.user_facing_errors")
 
@@ -75,6 +77,32 @@ def user_facing_error_message(exc: Exception, *, on_free_plan: bool = False) -> 
         one this module rewrites (the caller then keeps whatever it had).
     """
     if isinstance(exc, AllModelsFailedError):
+        return user_facing_error_message_for(type(exc).__name__, on_free_plan=on_free_plan)
+    return None
+
+
+def user_facing_error_message_for(
+    error_class: str | None, *, on_free_plan: bool = False
+) -> str | None:
+    """The safe message for a failure known only by its class name, or ``None``.
+
+       The agentic loop
+    ends an unrecoverable failure as a run rather than an exception
+       (D-06-2), so the boundary that stores the failure no longer holds the exception ,
+       only the class name the run carried out on ``Run.error_class``. The mapping itself
+       lives in one place, here, so the two doors cannot drift apart.
+
+       Args:
+           error_class: ``type(exc).__name__`` of the failure that ended the run, or
+               ``None`` when nothing recorded one.
+           on_free_plan: Whether the affected owner is on the free plan (see
+               :func:`user_facing_error_message`).
+
+       Returns:
+           A sentence safe to show a person, or ``None`` when this is not a failure the
+           module rewrites (the caller then keeps whatever text it had).
+    """
+    if error_class == AllModelsFailedError.__name__:
         return CAPACITY_BUSY_FREE_MESSAGE if on_free_plan else CAPACITY_BUSY_MESSAGE
     return None
 

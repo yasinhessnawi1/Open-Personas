@@ -64,6 +64,12 @@ class InteractionKind(StrEnum):
     synthesise the same way. The values match the ``synthesis_markers``
     ``interaction_kind`` CHECK constraint (D-K2-X-migration-placeholder), so the
     extraction input and the idempotency marker share one vocabulary.
+
+    ``VOICE`` is reserved and deliberately unproduced: a call persists to the
+    messages table exactly as chat does, so
+    :func:`persona_voice.session.synthesis_enqueue.enqueue_voice_synthesis`
+    enqueues it as ``CONVERSATION`` with ``channel="voice"`` rather than as its own
+    kind. It stays for a voice-shaped interaction that is not a conversation.
     """
 
     CONVERSATION = "conversation"

@@ -180,6 +180,11 @@ class SessionStateMachine:
         self._state: SessionState = "created"
         self._created_at = self._clock()
         self._ended_at: datetime | None = None
+        # Whether SESSION_CREATED has gone out yet. The session record is born in this
+        # constructor, which cannot await, so the event goes out at the first async
+        # moment the session has: the runner announces it right after construction, and
+        # the first transition announces it for anything that did not.
+        self._created_announced = False
 
     # ----- inspection --------------------------------------------------
 
@@ -207,6 +212,21 @@ class SessionStateMachine:
 
     # ----- state transitions ------------------------------------------
 
+    async def mark_created(self) -> None:
+        """Announce the session to the V4 seam. Idempotent (fires at most once).
+
+        Emits :attr:`SessionLifecycleEvent.SESSION_CREATED` with the session still in
+        its ``created`` state. The agent runner calls this as soon as it has built the
+        session, so a call that dies during connect, before it was ever ``active`` ,
+        still leaves a lifecycle trace rather than nothing at all. The two transitions
+        below call it too, so the first event a listener ever sees is the create,
+        whoever got there first.
+        """
+        if self._created_announced:
+            return
+        self._created_announced = True
+        await self._dispatch(SessionLifecycleEvent.SESSION_CREATED)
+
     async def mark_active(self) -> None:
         """``created`` → ``active``. Idempotent (no-op if already active).
 
@@ -221,6 +241,8 @@ class SessionStateMachine:
             raise InvalidSessionStateError(
                 msg, context={"session_id": self._session_id, "state": self._state}
             )
+        # Before the flip, so the create is announced with the session as it was created.
+        await self.mark_created()
         self._state = "active"
         await self._dispatch(SessionLifecycleEvent.SESSION_ACTIVE)
 
@@ -235,7 +257,9 @@ class SessionStateMachine:
         """
         if self._state == "ended":
             return
+        await self.mark_created()
         self._state = "ended"
+
         self._ended_at = self._clock()
         # Engine disposal happens before the event dispatch so listeners see
         # a fully-torn-down state and can't accidentally start a new

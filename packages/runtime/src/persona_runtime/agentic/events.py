@@ -419,9 +419,20 @@ class RunEvent(BaseModel):
         )
 
     @classmethod
-    def error(cls, step: int, message: str) -> RunEvent:
-        """An unrecoverable error terminated the run."""
-        return cls(type="error", step=step, data={"message": message}, timestamp=datetime.now(UTC))
+    def error(cls, step: int, message: str, *, error_class: str | None = None) -> RunEvent:
+        """An unrecoverable error terminated the run.
+
+        ``message`` is the failure as it really was, which is what the log needs.
+        ``error_class`` is ``type(exc).__name__``, and it rides along for the same
+        reason :attr:`~persona_runtime.agentic.run.Run.error_class` does: the surface
+        that shows this frame to a person decides what a person should read, and a
+        capacity exhaustion stringifies to our provider names, model ids and routing
+        strategy (R9-097). Absent ⇒ nothing recorded a class, and the message stands.
+        """
+        data: dict[str, Any] = {"message": message}
+        if error_class is not None:
+            data["error_class"] = error_class
+        return cls(type="error", step=step, data=data, timestamp=datetime.now(UTC))
 
     @classmethod
     def finished(cls, run: Run) -> RunEvent:
