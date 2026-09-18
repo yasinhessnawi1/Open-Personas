@@ -8,6 +8,7 @@ battery run in test_task_origination_no_accidental.py).
 from __future__ import annotations
 
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from persona.backends.types import ChatResponse, TokenUsage
@@ -331,3 +332,134 @@ def test_the_draft_shape_reaches_the_frozen_contract() -> None:
     )
 
     assert build_contract(draft).deliverable.format is DeliverableFormat.TABLE
+
+
+# --- acceptance criteria (completion sweep, part 2, finding C) --------------
+
+
+@pytest.mark.asyncio
+async def test_the_judge_authors_the_contracts_acceptance_criteria() -> None:
+    """The reader, the renderer, the report and the REST schema for criteria were all built
+    and nothing in production ever wrote one, so every contract block a leg re-read had zero
+    criteria lines and "done" was whatever the model decided on the day. The judge is the
+    producer: what it extracts here is what the frozen contract carries to every leg."""
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "find the cheapest Oslo to Bergen fare", '
+        '"acceptance_criteria": ["a fare under 500 USD is reported", '
+        '"the report names the airline and the date"]}'
+    )
+
+    draft = judgment.draft  # type: ignore[attr-defined]
+    assert draft.acceptance_criteria == (
+        "a fare under 500 USD is reported",
+        "the report names the airline and the date",
+    )
+    contract = build_contract(draft)
+    assert [c.statement for c in contract.acceptance_criteria] == [
+        "a fare under 500 USD is reported",
+        "the report names the airline and the date",
+    ]
+    assert [c.id for c in contract.acceptance_criteria] == ["ac1", "ac2"]
+
+
+@pytest.mark.asyncio
+async def test_criteria_are_bounded_cleaned_and_deduplicated() -> None:
+    """Short and checkable is the whole value: a wall of criteria is as unanchoring as none,
+    a blank one anchors nothing, and a repeat is one criterion the assessor would settle
+    twice. Anything past the cap is dropped rather than the contract refused."""
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "g", "acceptance_criteria": '
+        '["  one ", "", "one", 7, "two", "three", "four", "five", "six", "seven"]}'
+    )
+
+    assert judgment.draft.acceptance_criteria == (  # type: ignore[attr-defined]
+        "one",
+        "7",
+        "two",
+        "three",
+        "four",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    ['"acceptance_criteria": "a single string"', '"acceptance_criteria": null', ""],
+)
+async def test_missing_or_malformed_criteria_leave_the_contract_without_any(raw: str) -> None:
+    """A model that answers in the wrong shape has told us nothing about done-ness; the task
+    still gets created, with the goal and scope as its only anchor, which is what it had."""
+    extra = f", {raw}" if raw else ""
+    judgment = await _judge('{"verdict": "standing", "goal": "track the rules"' + extra + "}")
+
+    assert judgment.draft.acceptance_criteria == ()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_criterion_that_points_at_detail_it_does_not_carry_is_dropped() -> None:
+    """R9-095 for criteria: a leg sees the statement and never the conversation, so "matches
+    the description above" can never be checked. Dropping the one bad line keeps the others
+    rather than degrading a clear standing intent to a clarifying question."""
+    judgment = await _judge(
+        '{"verdict": "standing", "goal": "g", "acceptance_criteria": '
+        '["matches the description above", "each repo has a one line summary"]}'
+    )
+
+    assert judgment.draft.acceptance_criteria == (  # type: ignore[attr-defined]
+        "each repo has a one line summary",
+    )
+
+
+# --- deadline + leg cap (completion sweep, part 2, finding O) ---------------
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_is_resolved_in_the_users_timezone_and_reaches_the_contract() -> None:
+    """ "Until Friday at five" is a wall-clock in the user's zone, the way a one-time schedule
+    is; the contract stores the instant, and the REST API that always advertised the field
+    finally has something to show."""
+    judge = ModelStandingIntentJudge(
+        backend=_StubBackend(
+            '{"verdict": "standing", "goal": "find a flat", "deadline": "2099-09-19T17:00:00"}'
+        ),
+        timezone_provider=lambda: "Europe/Oslo",
+    )
+
+    judgment = await judge.judge("find me a flat, work on it until Friday at five", language="en")
+
+    draft = judgment.draft
+    assert draft is not None
+    assert draft.deadline is not None
+    assert draft.deadline.utcoffset() is not None  # tz-aware
+    assert draft.deadline.astimezone(ZoneInfo("Europe/Oslo")).hour == 17
+    assert build_contract(draft).bounds.deadline == draft.deadline
+
+
+@pytest.mark.asyncio
+async def test_a_leg_cap_reaches_the_contract() -> None:
+    judgment = await _judge('{"verdict": "standing", "goal": "g", "max_legs": 10}')
+
+    draft = judgment.draft  # type: ignore[attr-defined]
+    assert draft.max_legs == 10
+    assert build_contract(draft).bounds.max_legs == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '"deadline": "2020-01-01T09:00:00"',  # already passed: a bound the task would start over
+        '"deadline": "next Friday"',
+        '"deadline": 5',
+        '"max_legs": 0',
+        '"max_legs": -3',
+        '"max_legs": true',
+        '"max_legs": "ten"',
+    ],
+)
+async def test_a_bound_that_cannot_be_honoured_is_left_unset(raw: str) -> None:
+    judgment = await _judge('{"verdict": "standing", "goal": "g", ' + raw + "}")
+
+    draft = judgment.draft  # type: ignore[attr-defined]
+    assert draft.deadline is None
+    assert draft.max_legs is None

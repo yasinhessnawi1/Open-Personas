@@ -61,6 +61,7 @@ from persona.tasks import (
     TaskState,
     WaitKind,
     bind_leg_spend_reporter,
+    bound_reached,
     is_terminal,
     micros_from_cents,
     reset_leg_spend_reporter,
@@ -792,6 +793,16 @@ class TaskLegHandler:
         # The job firing IS the trigger arriving — resume a waiting task (one resume point).
         if task.state == TaskState.WAITING:
             task = self._tasks.resume(owner, payload.task_id, now=now)
+        # Finding O: the contract's deadline and leg cap, checked at the door for a leg the
+        # CLOCK or the WORLD fired. A recurring task's occurrences complete rather than
+        # continue, so the boundary check below never sees a bound on one; without this a
+        # task told "until Friday" would run its Saturday fire in full. A leg the PERSON
+        # started (a pickup, a reply, a revival) is not the clock: it runs, once, and the
+        # boundary check parks it again.
+        if isinstance(payload.trigger, (ScheduledFire, EventFire)) and self._park_if_bound(
+            owner, task, now=now
+        ):
+            return
 
         prior = self._checkpoints.get_latest(owner, payload.task_id)
         seq = 0 if payload.predecessor_seq is None else payload.predecessor_seq + 1
@@ -985,6 +996,12 @@ class TaskLegHandler:
             ):
                 _log.info("task paused at budget cap; next leg withheld", task_id=task.id)
                 return
+            # Finding O: the other two stated bounds, at the same boundary as the spend cap.
+            # The leg that just ran counts; the next one is what a reached bound withholds.
+            if outcome.disposition is LegDisposition.CONTINUE and self._park_if_bound(
+                owner, outcome.task, now=now
+            ):
+                return
             trigger = payload.trigger
             fired_at = trigger.fire_time if isinstance(trigger, ScheduledFire) else None
             # A7 standing watch: an EventFire-fired leg that completes returns to WAITING(on_event).
@@ -1126,6 +1143,25 @@ class TaskLegHandler:
             claimed=len(claims),
             rejected=[f"{r.criterion_id}: {r.reason}" for r in rejected],
         )
+
+    def _park_if_bound(self, owner: str, task: Task, *, now: datetime) -> bool:
+        """Park the task if a stated contract bound is reached; return whether it was (finding O).
+
+        ``legs_run`` is the head sequence plus one: the checkpoint chain is the durable count
+        of legs that landed. Goes through the continuation's bound park (the approval park's
+        shape); with no continuation wired the bare state change is the floor, as it is for
+        the over-budget checkpoint.
+        """
+        legs_run = 0 if task.head_checkpoint_seq is None else task.head_checkpoint_seq + 1
+        reason = bound_reached(task.contract.bounds, legs_run=legs_run, now=now)
+        if reason is None:
+            return False
+        _log.info("task reached a contract bound; parking", task_id=task.id, reason=reason)
+        if self._continuation is not None:
+            self._continuation.park_at_bound(owner, task, reason, now=now)
+        else:
+            self._tasks.begin_wait(owner, task.id, WaitKind.ON_USER, now=now)
+        return True
 
     async def _park_stuck(self, owner: str, task: Task, *, cause: str, now: datetime) -> None:
         """Park the task ``waiting(on_user)`` with an honest cause + voice it (R9-005).

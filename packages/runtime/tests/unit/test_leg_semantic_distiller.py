@@ -426,3 +426,108 @@ async def test_the_distiller_carries_the_legs_real_files_not_the_models_word() -
     assert checkpoint.artifact_pointers == (
         ArtifactPointer(kind="workspace", ref="out/summary.md"),
     )
+
+
+# --- idle_until: "nothing to do until Thursday" (completion sweep, part 2, finding E) ---
+
+
+def _unfinished_run(**kwargs: object) -> Run:
+    """A leg the box stopped: the only kind whose successor is enqueued by the task itself."""
+    return Run(
+        persona_id="p",
+        task="x",
+        status=RunStatus.MAX_STEPS_REACHED,
+        steps=[_search_step("when does the sale open")],
+        output=None,
+        started_at=_NOW,
+        finished_at=_NOW,
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_leg_can_say_there_is_nothing_to_do_before_a_time() -> None:
+    """Three consumers honoured a timed wait and nothing produced one, so every continuation
+    re-enqueued at once and a task that should sleep until Thursday paid for a leg per fire
+    to learn it was still too early. The distiller is the producer."""
+    thursday = "2026-09-17T09:00:00+00:00"
+    checkpoint = await _write(
+        _writer(_ScriptedBackend(_distillation(idle_until=thursday))), run=_unfinished_run()
+    )
+
+    assert checkpoint.idle_until == datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_iso_time_is_read_as_utc_as_the_prompt_asks() -> None:
+    checkpoint = await _write(
+        _writer(_ScriptedBackend(_distillation(idle_until="2026-09-13T06:30:00"))),
+        run=_unfinished_run(),
+    )
+
+    assert checkpoint.idle_until == datetime(2026, 9, 13, 6, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        ("in the past", "2026-09-12T08:00:00+00:00"),
+        ("right now", "2026-09-12T09:00:00+00:00"),
+        ("past the ceiling", "2026-10-30T09:00:00+00:00"),
+        ("not a time", "Thursday morning"),
+        ("the wrong type", 7),
+        ("empty", ""),
+    ],
+)
+async def test_an_idle_time_that_cannot_be_honoured_is_dropped_not_guessed(
+    name: str, raw: object
+) -> None:
+    """A wait in the past is an immediate continuation wearing a directive; a wait past the
+    ceiling is a task that has gone to sleep for good without the user agreeing to it. Either
+    way the checkpoint keeps everything else the distillation said."""
+    del name
+    checkpoint = await _write(
+        _writer(_ScriptedBackend(_distillation(idle_until=raw))), run=_unfinished_run()
+    )
+
+    assert checkpoint.idle_until is None
+    assert checkpoint.current_plan  # the rest of the distillation survived
+
+
+@pytest.mark.asyncio
+async def test_the_ceiling_is_the_writers_and_the_worker_can_set_it() -> None:
+    from datetime import timedelta
+
+    writer = SemanticCheckpointWriter(
+        backend_provider=lambda: _ScriptedBackend(  # type: ignore[arg-type, return-value]
+            _distillation(idle_until="2026-09-12T10:00:00+00:00")
+        ),
+        max_idle=timedelta(minutes=30),
+    )
+
+    checkpoint = await _write(writer, run=_unfinished_run())
+
+    assert checkpoint.idle_until is None  # an hour out, against a 30 minute ceiling
+
+
+@pytest.mark.asyncio
+async def test_a_finished_leg_cannot_idle() -> None:
+    """A run that reached its final answer completes the task (or its occurrence); an idle
+    time on it would be a durable claim nothing acts on. Only a leg the box stopped has a
+    successor to delay."""
+    checkpoint = await _write(
+        _writer(_ScriptedBackend(_distillation(idle_until="2026-09-17T09:00:00+00:00")))
+    )  # the default run COMPLETED
+
+    assert checkpoint.idle_until is None
+
+
+@pytest.mark.asyncio
+async def test_the_distiller_is_told_the_time() -> None:
+    """It cannot turn "Thursday" into an instant without knowing when now is."""
+    backend = _ScriptedBackend(_distillation())
+
+    await _write(_writer(backend), run=_unfinished_run())
+
+    assert "NOW (UTC): 2026-09-12T09:00:00+00:00" in backend.prompts[0]

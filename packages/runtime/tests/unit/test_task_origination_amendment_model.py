@@ -173,3 +173,89 @@ async def test_prompt_is_now_anchored_when_a_schedule_frame_exists() -> None:
     await interp.interpret("once at 9 30", _DRAFT)
     assert "current local time:" in backend.seen
     assert _TZ in backend.seen
+
+
+# --- acceptance criteria (completion sweep, part 2, finding C) --------------
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_can_rewrite_the_done_when_list() -> None:
+    """The criteria are part of what the user confirms, so a reply like "and make sure it
+    names the airline" has to land on the draft the same way a new cap does."""
+    with_criteria = _DRAFT.model_copy(
+        update={"acceptance_criteria": ("a fare under 500 USD is reported",)}
+    )
+    amended = await _amend(
+        '{"amends": true, "acceptance_criteria": '
+        '["a fare under 500 USD is reported", "the report names the airline"]}',
+        with_criteria,
+    )
+
+    assert amended is not None
+    assert amended.acceptance_criteria == (
+        "a fare under 500 USD is reported",
+        "the report names the airline",
+    )
+    assert amended.goal == _DRAFT.goal  # unspecified clauses preserved
+
+
+@pytest.mark.asyncio
+async def test_a_criteria_patch_in_the_wrong_shape_is_skipped_not_coerced() -> None:
+    assert await _amend('{"amends": true, "acceptance_criteria": "one string"}') is None
+
+
+@pytest.mark.asyncio
+async def test_the_interpreter_shows_the_model_the_current_criteria() -> None:
+    """A patch replaces the whole list, so the model must see the list it is editing."""
+
+    class _CapturingBackend(_StubBackend):
+        def __init__(self) -> None:
+            super().__init__('{"amends": false}')
+            self.seen: str = ""
+
+        async def chat(self, messages: object, **kwargs: Any) -> ChatResponse:  # noqa: ANN401
+            assert isinstance(messages, list)
+            self.seen = str(messages[-1].content)
+            return await super().chat(messages, **kwargs)
+
+    backend = _CapturingBackend()
+    draft = _DRAFT.model_copy(update={"acceptance_criteria": ("the airline is named",)})
+    await ModelAmendmentInterpreter(backend=backend).interpret("also the date", draft)
+
+    assert "the airline is named" in backend.seen
+
+
+# --- deadline + leg cap (completion sweep, part 2, finding O) ---------------
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_can_set_and_clear_the_leg_cap() -> None:
+    amended = await _amend('{"amends": true, "max_legs": 5}')
+    assert amended is not None
+    assert amended.max_legs == 5
+
+    capped = _DRAFT.model_copy(update={"max_legs": 5})
+    cleared = await _amend('{"amends": true, "clear_max_legs": true}', capped)
+    assert cleared is not None
+    assert cleared.max_legs is None
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_resolves_a_deadline_in_the_drafts_timezone() -> None:
+    from zoneinfo import ZoneInfo
+
+    amended = await _amend('{"amends": true, "deadline": "2099-09-19T17:00:00"}')
+    assert amended is not None
+    assert amended.deadline is not None
+    assert amended.deadline.astimezone(ZoneInfo(_TZ)).hour == 17
+
+    cleared = await _amend('{"amends": true, "clear_deadline": true}', amended)
+    assert cleared is not None
+    assert cleared.deadline is None
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_that_has_passed_or_cannot_be_read_is_skipped() -> None:
+    assert await _amend('{"amends": true, "deadline": "2020-01-01T09:00:00"}') is None
+    assert await _amend('{"amends": true, "deadline": "Friday-ish"}') is None
+    assert await _amend('{"amends": true, "max_legs": 0}') is None

@@ -44,6 +44,7 @@ from persona.tasks.contract import (
     DeliverableFormat,
     UpdateGranularity,
     UpdatePreference,
+    bound_reached,
 )
 from persona.tasks.entity import TASK_SCHEMA_VERSION, Task
 from persona.tasks.ledger import (
@@ -176,6 +177,7 @@ __all__ = [
     "WaitKind",
     "project_task_state",
     "summarise_task",
+    "bound_reached",
     "build_cancellation_summary",
     "build_completion_report",
     "build_stuck_report",

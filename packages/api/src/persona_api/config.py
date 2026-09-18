@@ -633,6 +633,14 @@ class APIConfig(BaseSettings):
         gt=0,
         validation_alias="PERSONA_TASK_SEMANTIC_DISTILLER_TIMEOUT_SECONDS",
     )
+    # Finding E (completion sweep, part 2): the furthest ahead a leg may defer itself. The
+    # distiller can say there is nothing to do before a known time and the next leg is then
+    # scheduled for it instead of at once; past this many days the instant is dropped and
+    # the leg continues immediately, because a longer wait belongs on the schedule where
+    # the user can see and change it. Declared with the other leg bounds.
+    task_leg_max_idle_days: int = Field(
+        default=7, ge=1, validation_alias="PERSONA_TASK_LEG_MAX_IDLE_DAYS"
+    )
     # R9-164: the acceptance assessor, which lets a leg's work move a contract's acceptance
     # criteria off ``pending``. On, because a checklist that can never be ticked is worse than
     # no checklist; the safety is not this flag but the core gate the claims pass through

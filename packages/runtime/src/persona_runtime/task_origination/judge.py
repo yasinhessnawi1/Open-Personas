@@ -9,7 +9,8 @@ fascinating"), and information questions that merely mention a routine ("remind 
 the Eiffel Tower is") are NOT standing tasks; the guidance is engineered to reject them.
 
 The judge never *creates* anything — it returns a verdict and, for standing intent, a minimal
-draft (goal/scope, a spend grant if one was offered, and the parsed cadence). The cadence is
+draft (goal/scope, the done-when statements, a spend grant if one was offered, and the parsed
+cadence). The cadence is
 extracted here (an RFC-5545 RRULE or a one-time instant the model emits) and validated through the
 parse-honesty boundary; it is anchored in ``default_timezone`` (Spec A4 — the config default until
 K6's per-user timezone lands). A STANDING task with no representable cadence falls back to a
@@ -39,11 +40,11 @@ if TYPE_CHECKING:
 
     from persona.backends.protocol import ChatBackend
 
-__all__ = ["JUDGE_PROMPT_VERSION", "ModelStandingIntentJudge"]
+__all__ = ["JUDGE_PROMPT_VERSION", "ModelStandingIntentJudge", "deadline_from", "max_legs_from"]
 
 _logger = get_logger("runtime.task_origination")
 
-JUDGE_PROMPT_VERSION = "a4-judge-v3"
+JUDGE_PROMPT_VERSION = "a4-judge-v5"
 
 _SYSTEM_PROMPT = """\
 You decide whether a user's message is asking YOU to take on a STANDING task — ongoing or \
@@ -75,12 +76,21 @@ research), "prose" (a short written answer), "table" (rows and columns, for a co
 a list), or "file" (something the user opens; give the filename). Use what the user asked \
 for; when they did not say, use "findings_markdown".
 
-The goal and scope must be SELF-CONTAINED. Whoever runs this task later sees ONLY these two \
-fields — never this conversation. So never point at information you have not written down: no \
-"the specified X", "the description above", "as described", "the given list". If the user gave \
-you the detail that makes the task doable — a description to match, a list, a source, a format, \
-a name — put that detail IN the goal or scope, in full. Prefer a longer goal that can be acted \
-on over a short one that refers to something the runner cannot see.
+If the user set a LIMIT on the work, state it: "deadline" is the local datetime after which \
+you stop ("work on this until Friday at five"); "max_legs" is the most work sessions you may \
+spend ("give it at most ten goes"). Omit both when the user set no such limit; never invent one.
+
+State DONE WHEN: one to five short statements that say when the task is complete, each one \
+checkable from the task's own output ("a fare under 500 USD is reported", "every repo has a one \
+line summary", "the brief names its sources"). Whoever runs the task re-reads these on every \
+step, so they anchor what "finished" means. Keep each under a sentence.
+
+The goal, scope and done-when statements must be SELF-CONTAINED. Whoever runs this task later \
+sees ONLY these fields — never this conversation. So never point at information you have not \
+written down: no "the specified X", "the description above", "as described", "the given list". \
+If the user gave you the detail that makes the task doable — a description to match, a list, a \
+source, a format, a name — put that detail IN the goal or scope, in full. Prefer a longer goal \
+that can be acted on over a short one that refers to something the runner cannot see.
 
 Reply with ONLY a JSON object, no prose:
 {"verdict": "standing"|"now_work"|"ambiguous", \
@@ -90,14 +100,24 @@ Reply with ONLY a JSON object, no prose:
 "spend_note": "<one short line restating the spend permission, if any>", \
 "deliverable_format": "findings_markdown"|"prose"|"table"|"file", \
 "deliverable_filename": "<the filename, only for the file format>", \
+"acceptance_criteria": ["<short checkable statement>", "..."], \
+"deadline": "<ISO-8601 local datetime to stop at, only if the user set one>", \
+"max_legs": <positive integer, only if the user set one>, \
 "recurrence_rrule": "<an RFC-5545 RRULE if recurring, else omit>", \
 "one_time_at": "<ISO-8601 local datetime if a single future moment, else omit>"}
 For "now_work" or "ambiguous", reply with just {"verdict": "now_work"} or \
 {"verdict": "ambiguous"}.
 """
 
-_MAX_TOKENS = 400
+_MAX_TOKENS = 560
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+#: The most done-when statements a contract carries, and the longest one. Past five the
+#: list stops anchoring and starts being a second scope; past a sentence a statement is
+#: not checkable, it is prose. Both bound what the judge can hand the assessor, never
+#: what the user may say.
+_MAX_CRITERIA = 5
+_MAX_CRITERION_CHARS = 200
 
 #: Phrases that point AT detail rather than carrying it (R9-095). A leg sees only
 #: ``goal`` + ``scope``, never the conversation that produced them, so any of these
@@ -139,6 +159,74 @@ def _deliverable_from(payload: dict[str, object]) -> Deliverable:
     if fmt is not DeliverableFormat.FILE:
         return Deliverable(format=fmt)
     return Deliverable(format=fmt, filename=filename)
+
+
+def _criteria_from(payload: dict[str, object]) -> tuple[str, ...]:
+    """The done-when statements, read conservatively from the judge's JSON (finding C).
+
+    The list was always readable, renderable and reportable; this is where it is first
+    WRITTEN in production. Read the way the deliverable is: a wrong shape yields none and
+    the task still gets created, because losing a task over a malformed list is a worse
+    trade than a contract anchored by goal and scope alone. Each statement is trimmed,
+    deduplicated, bounded in length and count, and refused when it points at detail the
+    runner cannot see (the R9-095 rule, applied per line so one bad statement does not
+    cost the good ones).
+    """
+    raw = payload.get("acceptance_criteria")
+    if not isinstance(raw, list):
+        return ()
+    kept: list[str] = []
+    for item in raw:
+        statement = str(item).strip()
+        if not statement or statement in kept or len(statement) > _MAX_CRITERION_CHARS:
+            continue
+        if dangling_reference(statement):
+            _logger.info("dropping a criterion that references detail it does not carry")
+            continue
+        kept.append(statement)
+        if len(kept) == _MAX_CRITERIA:
+            break
+    return tuple(kept)
+
+
+def max_legs_from(payload: dict[str, object]) -> int | None:
+    """The leg cap the user set, or ``None`` (finding O).
+
+    A positive integer only. ``True`` is an int in Python and "ten" is not a number to a
+    parser; either would make a cap the user never stated, so both are left unset.
+    """
+    raw = payload.get("max_legs")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return None
+    return raw
+
+
+def deadline_from(
+    payload: dict[str, object], *, timezone: str, now: datetime, key: str = "deadline"
+) -> datetime | None:
+    """The instant the user wants the work to stop by, or ``None`` (finding O).
+
+    Read the way a one-time schedule instant is: an ISO-8601 wall-clock in the user's zone
+    (``timezone``), kept IN that zone so the echo can read it back as their time. A deadline
+    that has already passed would park the task before its first leg, so it is left unset
+    rather than honoured; the echo then shows no deadline and the user can state one again.
+    """
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo
+
+    raw = payload.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = _datetime.fromisoformat(raw.strip())
+        aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=ZoneInfo(timezone))
+    except (ValueError, KeyError):
+        _logger.info("deadline unreadable; leaving the contract without one")
+        return None
+    if aware <= now:
+        _logger.info("deadline already passed; leaving the contract without one")
+        return None
+    return aware
 
 
 def dangling_reference(text: str) -> bool:
@@ -255,9 +343,12 @@ class ModelStandingIntentJudge:
             draft=ContractDraft(
                 goal=goal,
                 scope=scope,
+                acceptance_criteria=_criteria_from(payload),
                 grants=self._spend_grant(payload),
                 schedule=self._build_schedule(payload),
                 deliverable=_deliverable_from(payload),
+                deadline=deadline_from(payload, timezone=self._resolve_timezone(), now=self._now()),
+                max_legs=max_legs_from(payload),
             ),
         )
 

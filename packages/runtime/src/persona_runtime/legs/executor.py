@@ -115,8 +115,10 @@ class LegOutcome:
             spend is not ledgered (no ``Run`` to meter; the proposal is the value).
         resume_at: A timed-wait directive — when set, the task should go
             ``waiting(until_time)`` and the continuation is scheduled for this instant (a
-            "re-check in 4h" leg). ``None`` (the v1 basic path) → an immediate continuation;
-            the model-backed distiller sets it when the leg decides to wait (T11).
+            "re-check in 4h" leg). ``None`` → an immediate continuation. Read off the
+            checkpoint's ``idle_until``, which the model-backed distiller writes when the
+            leg finds nothing to do before a known time (finding E); only a ``CONTINUE``
+            outcome carries it, because only a continuing leg has a successor to delay.
         proposal_id: The recorded :class:`~persona.approvals.ActionProposal` id on a
             ``WAITING_APPROVAL`` gate (the durable referent the approval flow resumes against);
             ``None`` otherwise.
@@ -454,13 +456,18 @@ class LegExecutor:
                 spend=spend,
             )
         updated = self._sink.append(task, checkpoint, spend=spend, now=now)
+        disposition = leg_disposition(run.status)
         return LegOutcome(
             task=updated,
             checkpoint=checkpoint,
             run=run,
-            disposition=_disposition(run.status),
+            disposition=disposition,
             box_limit=watcher.box_limit,
             spend=spend,
+            # Finding E: the producer of the timed wait, at last. The writer validated the
+            # instant (future, under the ceiling); this is where it becomes the directive
+            # the continuation schedules on. A finished leg carries none by construction.
+            resume_at=checkpoint.idle_until if disposition is LegDisposition.CONTINUE else None,
         )
 
     @staticmethod
@@ -574,8 +581,12 @@ def _settle_open_questions(
     return type(checkpoint).model_validate(fields)
 
 
-def _disposition(status: RunStatus) -> LegDisposition:
-    """Map a run status to what it implies for the task."""
+def leg_disposition(status: RunStatus) -> LegDisposition:
+    """Map a run status to what it implies for the task.
+
+    Public because the checkpoint writer asks the same question (does this leg have a
+    successor?) and two copies of the mapping would drift.
+    """
     if status == RunStatus.COMPLETED:
         return LegDisposition.COMPLETED
     if status == RunStatus.ERROR:

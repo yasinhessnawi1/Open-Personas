@@ -57,11 +57,17 @@ def changed_clauses(before: ContractDraft, after: ContractDraft) -> tuple[Clause
         clauses.append(Clause.GOAL)
     if before.scope != after.scope:
         clauses.append(Clause.SCOPE)
+    if before.acceptance_criteria != after.acceptance_criteria:
+        clauses.append(Clause.CRITERIA)
     if before.schedule != after.schedule:
         clauses.append(Clause.SCHEDULE)
     if before.trigger != after.trigger:
         clauses.append(Clause.TRIGGER)
-    if before.grants != after.grants:
+    if (before.grants, before.deadline, before.max_legs) != (
+        after.grants,
+        after.deadline,
+        after.max_legs,
+    ):
         clauses.append(Clause.BOUNDS)
     if before.updates != after.updates:
         clauses.append(Clause.UPDATES)
@@ -134,6 +140,30 @@ def _amendment_payloads(
         # A7: changing WHAT you watch (sender/platform/keyword/task) is material — re-confirm, never
         # a silent phrasing tweak (A4-D-4 reuse; the trigger is the event-"when", a material key).
         _set("schedule_cadence", _trigger_terms(before), _trigger_terms(after))
+    if (before.deadline, before.max_legs) != (after.deadline, after.max_legs):
+        # A bound on how long or how much the task may run is material (finding O): it
+        # decides when the work stops, so the user re-reads the whole contract.
+        _set(
+            "limit",
+            f"{before.deadline}:{before.max_legs}",
+            f"{after.deadline}:{after.max_legs}",
+        )
+    if (before.deadline, before.max_legs) != (after.deadline, after.max_legs):
+        # A bound on how long or how much the task may run is material (finding O): it
+        # decides when the work stops, so the user re-reads the whole contract.
+        _set(
+            "limit",
+            f"{before.deadline}:{before.max_legs}",
+            f"{after.deadline}:{after.max_legs}",
+        )
+    if before.acceptance_criteria != after.acceptance_criteria:
+        # Rewriting what counts as done changes what the task will deliver; a non-phrasing
+        # key, so the whole contract is re-read before it is confirmed again (finding C).
+        _set(
+            "acceptance",
+            "; ".join(before.acceptance_criteria),
+            "; ".join(after.acceptance_criteria),
+        )
     if before.scope != after.scope:
         _set("description", before.scope, after.scope)  # phrasing → tuning
     if before.updates != after.updates:

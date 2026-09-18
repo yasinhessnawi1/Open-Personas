@@ -298,3 +298,13 @@ def test_a_worker_built_from_the_default_config_assesses_criteria() -> None:
 def test_the_kill_switch_restores_the_old_behaviour_exactly() -> None:
     """Off is not a degraded assessment; it is no assessment, so criteria stay pending."""
     assert _assessor(PERSONA_TASK_ACCEPTANCE_ASSESSOR_ENABLED="false") is None
+
+
+def test_the_idle_ceiling_is_configured_not_hardcoded() -> None:
+    """Finding E: how long a leg may defer itself is an operator knob, declared with the
+    other leg bounds, so a deployment whose tasks legitimately wait a fortnight can say so."""
+    from datetime import timedelta
+
+    writer = _writer(task_semantic_distiller_enabled=True, task_leg_max_idle_days=3)
+
+    assert writer._max_idle == timedelta(days=3)  # noqa: SLF001 (the wiring IS the assertion)

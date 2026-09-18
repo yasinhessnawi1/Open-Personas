@@ -203,3 +203,32 @@ def test_voice_echo_has_no_url_or_code_artifacts() -> None:
     # A spoken echo must never carry a URL or code/markdown token (the V12 leak-gate discipline).
     echo = render_echo(_draft_with_two_grants(), EchoMode.VOICE)
     assert not re.search(r"https?://|www\.|\{\{|\}\}|```|<[a-z/]", echo)
+
+
+def test_voice_criteria_fold_into_one_spoken_sentence() -> None:
+    from persona_runtime.task_origination import render_echo
+
+    draft = ContractDraft(
+        goal="g",
+        schedule=_schedule(),
+        acceptance_criteria=("a fare under 500 USD is reported", "the airline is named"),
+    )
+    line = render_clause(draft, Clause.CRITERIA, EchoMode.VOICE)
+    assert line == "It's done when a fare under 500 USD is reported, and the airline is named."
+    assert line in render_echo(draft, EchoMode.VOICE)
+
+
+def test_voice_bounds_speak_the_deadline_and_the_leg_cap() -> None:
+    from datetime import UTC, datetime
+
+    draft = ContractDraft(
+        goal="g",
+        schedule=_schedule(),
+        deadline=datetime(2099, 9, 19, 15, 0, tzinfo=UTC),
+        max_legs=10,
+    )
+    line = render_clause(draft, Clause.BOUNDS, EchoMode.VOICE)
+    assert line == (
+        "This stays within your usual permissions. I'll work on it until Saturday 19 September "
+        "at 17:00 your time, and for at most 10 legs."
+    )

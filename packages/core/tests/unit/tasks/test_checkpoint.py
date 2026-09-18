@@ -198,7 +198,11 @@ def test_a_checkpoint_written_before_the_ledgers_existed_still_reads_back() -> N
     task would break on its next leg."""
     current = _checkpoint(progress_conclusions=("found it",))
     blob = current.model_dump(mode="json")
-    legacy = {k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen"}}
+    # The shape a pre-W1 row has: no ledgers, and no ``idle_until`` either (that key joined
+    # the model later still, and a stored row from before it simply lacks it).
+    legacy = {
+        k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen", "idle_until"}
+    }
     payload = json.dumps(
         {k: v for k, v in legacy.items() if k not in {"content_hash", "updated_at"}},
         sort_keys=True,
@@ -217,7 +221,9 @@ def test_the_pre_ledger_path_does_not_excuse_a_tampered_checkpoint() -> None:
     become a way to edit a checkpoint's content and keep its old hash."""
     current = _checkpoint(progress_conclusions=("found it",))
     blob = current.model_dump(mode="json")
-    legacy = {k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen"}}
+    legacy = {
+        k: v for k, v in blob.items() if k not in {"queries_run", "sources_seen", "idle_until"}
+    }
     payload = json.dumps(
         {k: v for k, v in legacy.items() if k not in {"content_hash", "updated_at"}},
         sort_keys=True,
@@ -300,3 +306,34 @@ def test_enforce_respects_custom_budget() -> None:
     enforce_checkpoint_budget(cp, token_budget=1000)
     with pytest.raises(CheckpointTooLargeError):
         enforce_checkpoint_budget(cp, token_budget=1)
+
+
+# --- idle_until: a leg that has nothing to do before a known time (finding E) -
+
+
+def test_idle_until_is_tz_aware_and_normalised_to_utc() -> None:
+    oslo = timezone(timedelta(hours=2))
+    cp = _checkpoint(idle_until=datetime(2026, 6, 25, 9, 0, tzinfo=oslo))
+    assert cp.idle_until == datetime(2026, 6, 25, 7, 0, tzinfo=UTC)
+    with pytest.raises(ValidationError):
+        _checkpoint(idle_until=datetime(2026, 6, 25, 9, 0))  # naive
+
+
+def test_a_checkpoint_stored_before_idle_until_existed_keeps_its_hash() -> None:
+    """Every checkpoint already in a database was hashed without this key. It joins the
+    hashed payload only when it is set, so a stored row reads back exactly as it did and a
+    checkpoint that does idle is still tamper-evident on the instant it names."""
+    current = _checkpoint(progress_conclusions=("found it",))
+    blob = current.model_dump(mode="json")
+    legacy = {k: v for k, v in blob.items() if k != "idle_until"}
+    assert "idle_until" not in legacy  # the shape a pre-existing row deserialises from
+
+    restored = TaskCheckpoint.model_validate(legacy)
+
+    assert restored.content_hash == current.content_hash
+    idle = _checkpoint(progress_conclusions=("found it",), idle_until=_NOW + timedelta(days=1))
+    assert idle.content_hash != current.content_hash
+    with pytest.raises(ValidationError):
+        TaskCheckpoint.model_validate(
+            {**idle.model_dump(mode="json"), "idle_until": (_NOW + timedelta(days=2)).isoformat()}
+        )

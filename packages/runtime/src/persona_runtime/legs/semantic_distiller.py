@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from persona.logging import get_logger
@@ -48,7 +48,9 @@ from persona.tasks import (
     merge_artifact_pointers,
 )
 
+from persona_runtime.agentic.run import RunStatus
 from persona_runtime.legs.distiller import CompactingCheckpointWriter
+from persona_runtime.legs.executor import LegDisposition, leg_disposition
 from persona_runtime.legs.ledger import (
     LEDGER_TOKEN_SHARE,
     artifacts_from_run,
@@ -67,6 +69,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_DISTILL_TIMEOUT_S",
+    "DEFAULT_MAX_IDLE",
     "DISTILLER_PROMPT_VERSION",
     "SemanticCheckpointWriter",
 ]
@@ -75,7 +78,7 @@ _log = get_logger("legs.semantic_distiller")
 
 #: Bump on any wording change to the prompt below, so an eval result names the prompt it
 #: judged (the Spec 10 discipline the K3 guidance artifact follows).
-DISTILLER_PROMPT_VERSION: Final = "w1-distiller-v1"
+DISTILLER_PROMPT_VERSION: Final = "w1-distiller-v2"
 
 #: How long the distillation may take before the leg falls back to the deterministic writer.
 #: The checkpoint write happens after the run, inside the worker's drain margin, so this is
@@ -88,6 +91,13 @@ DISTILLER_PROMPT_VERSION: Final = "w1-distiller-v1"
 #: standalone one. 45 leaves room for that and still lands inside the drain margin: a leg that
 #: used its whole 180s wall clock plus this is 225s against a 270s drain.
 DEFAULT_DISTILL_TIMEOUT_S: Final = 45.0
+
+#: The furthest ahead a leg may defer itself (finding E). A wait longer than this is not a
+#: leg pacing its own work, it is a task going to sleep without the user agreeing to it; a
+#: wait that long belongs on the schedule, where the user can see and change it. Seven days
+#: covers "nothing to do until Thursday" from any weekday. The worker injects the operator's
+#: value (``PERSONA_TASK_LEG_MAX_IDLE_DAYS``); this is the default it documents.
+DEFAULT_MAX_IDLE: Final = timedelta(days=7)
 
 #: The most steps of the run summarised into the prompt. A leg is bounded at ten steps
 #: today; the cap is here so a future wider box cannot turn one distillation into a
@@ -115,11 +125,15 @@ for the sake of it; the next leg should recognise them.
 - PLAN is what remains, in order. NEXT_STEP is the single concrete action the next leg \
 starts with: an instruction, never an answer. If the task is finished, leave next_step empty.
 - OPEN_QUESTIONS are things only the user can settle. Leave the list empty if there are none.
+- IDLE_UNTIL: if the leg stopped because nothing can be done before a known time (a sale \
+opens Thursday, a reply is due Monday, a page updates at 09:00), give that time as an \
+ISO-8601 UTC datetime and the next leg waits for it instead of running at once. NOW is given \
+below. Leave it empty when there is work to do now, or when the task is finished.
 - Write for a reader who has never seen this conversation.
 
 Reply with ONLY a JSON object, no prose:
 {"conclusions": ["..."], "lessons": ["..."], "plan": ["..."], "next_step": "...", \
-"open_questions": ["..."]}
+"open_questions": ["..."], "idle_until": ""}
 """
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -137,6 +151,8 @@ class SemanticCheckpointWriter:
         token_budget: The checkpoint's accumulating-core budget, the same number the store
             gates on.
         timeout_s: How long the distillation may take before the floor takes over.
+        max_idle: The furthest ahead a leg may defer itself through ``idle_until``
+            (finding E); a later instant is dropped and the leg continues at once.
     """
 
     def __init__(
@@ -146,6 +162,7 @@ class SemanticCheckpointWriter:
         fallback: CompactingCheckpointWriter | None = None,
         token_budget: int = DEFAULT_CHECKPOINT_TOKEN_BUDGET,
         timeout_s: float = DEFAULT_DISTILL_TIMEOUT_S,
+        max_idle: timedelta = DEFAULT_MAX_IDLE,
     ) -> None:
         self._backend_provider = backend_provider
         self._fallback = fallback or CompactingCheckpointWriter(token_budget=token_budget)
@@ -153,6 +170,7 @@ class SemanticCheckpointWriter:
         self._target = int(token_budget * 0.8)
         self._ledger_target = int(token_budget * LEDGER_TOKEN_SHARE)
         self._timeout_s = timeout_s
+        self._max_idle = max_idle
 
     async def write(
         self,
@@ -165,7 +183,7 @@ class SemanticCheckpointWriter:
         now: datetime,
     ) -> TaskCheckpoint:
         """Distil the leg into the next checkpoint, or hand the floor the job."""
-        distilled = await self._distil(task=task, prior=prior, run=run)
+        distilled = await self._distil(task=task, prior=prior, run=run, now=now)
         if distilled is not None:
             candidate = self._build(
                 task=task,
@@ -193,13 +211,13 @@ class SemanticCheckpointWriter:
         )
 
     async def _distil(
-        self, *, task: Task, prior: TaskCheckpoint | None, run: Run
+        self, *, task: Task, prior: TaskCheckpoint | None, run: Run, now: datetime
     ) -> dict[str, object] | None:
         """One model call, or ``None`` for every way it can fail to produce an answer."""
         backend = self._backend_provider()
         if backend is None:
             return None
-        prompt = _render_prompt(task=task, prior=prior, run=run)
+        prompt = _render_prompt(task=task, prior=prior, run=run, now=now)
         asked_at = datetime.now(UTC)
         try:
             response = await asyncio.wait_for(
@@ -264,6 +282,9 @@ class SemanticCheckpointWriter:
             current_plan=tuple(_strings(distilled.get("plan"))),
             next_step=_safe_next_step(distilled.get("next_step"), run=run),
             open_questions=tuple(_strings(distilled.get("open_questions"))),
+            idle_until=_idle_until(
+                distilled.get("idle_until"), run=run, now=now, max_idle=self._max_idle
+            ),
             queries_run=queries,
             sources_seen=sources,
             # R9-162: the leg's real files, not an empty tuple copied forward. Deliberately
@@ -276,6 +297,41 @@ class SemanticCheckpointWriter:
             event_log_cursor=run.id,
             updated_at=now,
         )
+
+
+def _idle_until(raw: object, *, run: Run, now: datetime, max_idle: timedelta) -> datetime | None:
+    """The instant before which there is nothing to do, or ``None`` (finding E).
+
+    Kept only when every one of these holds, and dropped without guessing otherwise:
+
+    - the leg has a successor to delay: a run the box stopped continues, a run that reached
+      its answer completes the task or its occurrence, and an idle time on the latter would
+      be a durable claim nothing acts on;
+    - the value parses as an ISO-8601 datetime, read as UTC when it names no zone, because
+      that is the frame the prompt asked for;
+    - it is strictly in the future: a wait that has passed is an immediate continuation
+      wearing a directive;
+    - it is within ``max_idle`` of now: further out is a task going to sleep without the
+      user agreeing to it, and belongs on the schedule where they can see it.
+    """
+    if leg_disposition(run.status) is not LegDisposition.CONTINUE:
+        return None
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        _log.info("idle_until is not a datetime; continuing at once: {raw}", raw=text[:40])
+        return None
+    instant = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if instant <= now:
+        _log.info("idle_until is not in the future; continuing at once")
+        return None
+    if instant > now + max_idle:
+        _log.info("idle_until is past the ceiling; continuing at once", ceiling=str(max_idle))
+        return None
+    return instant.astimezone(UTC)
 
 
 def _safe_next_step(raw: object, *, run: Run) -> str:
@@ -318,9 +374,13 @@ def _normalise(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def _render_prompt(*, task: Task, prior: TaskCheckpoint | None, run: Run) -> str:
-    """What the distiller is shown: the contract, the prior state, and the leg's work."""
-    lines = [f"CONTRACT GOAL: {task.contract.goal}"]
+def _render_prompt(*, task: Task, prior: TaskCheckpoint | None, run: Run, now: datetime) -> str:
+    """What the distiller is shown: the time, the contract, the prior state, and the leg's work."""
+    # The time first (finding E): "until Thursday" is only an instant relative to a now.
+    lines = [
+        f"NOW (UTC): {now.astimezone(UTC).isoformat()}",
+        f"CONTRACT GOAL: {task.contract.goal}",
+    ]
     if task.contract.scope:
         lines.append(f"SCOPE: {task.contract.scope}")
     lines.append(f"DELIVERABLE: {task.contract.deliverable.render()}")
@@ -339,6 +399,8 @@ def _render_prompt(*, task: Task, prior: TaskCheckpoint | None, run: Run) -> str
     if run.output:
         lines.append(f"\nTHIS LEG'S OUTPUT:\n{run.output[: _MAX_STEP_CHARS * 2]}")
     lines.append(f"\nTHIS LEG ENDED: {run.status}")
+    if run.status is not RunStatus.COMPLETED:
+        lines.append("(the leg was stopped before it finished; the task continues)")
     return "\n".join(lines)
 
 

@@ -33,6 +33,7 @@ __all__ = [
     "DeliverableFormat",
     "UpdateGranularity",
     "UpdatePreference",
+    "bound_reached",
 ]
 
 
@@ -70,7 +71,9 @@ class ContractBounds(BaseModel):
     """Stated task-level bounds the contract agreed (A4 authors; A3 enforces).
 
     All optional — A2 carries the *data*; A3 owns budgets-as-policy. The per-leg box
-    (steps/budget/wall-clock) is separate (D-A2-2); these are whole-task limits.
+    (steps/budget/wall-clock) is separate (D-A2-2); these are whole-task limits. The spend
+    cap is enforced by the budget enforcer; the deadline and the leg cap by
+    :func:`bound_reached` at the same leg boundary.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -83,6 +86,31 @@ class ContractBounds(BaseModel):
     @classmethod
     def _deadline_tz_aware(cls, value: datetime | None) -> datetime | None:
         return _ensure_utc(value) if value is not None else None
+
+
+def bound_reached(bounds: ContractBounds, *, legs_run: int, now: datetime) -> str | None:
+    """Which stated bound the task has hit, as the one sentence the user reads, or ``None``.
+
+    "Work on this until Friday" and "give it at most ten legs" were storable and shown on
+    every task and never enforced (completion sweep, finding O). This is the check the leg
+    handler runs where the budget cap is checked: before another leg is spent. The sentence
+    names the contract on purpose, so the stuck classifier reads it as deterministic and no
+    sweep retries the task behind the user's back; the user picks it up or cancels.
+
+    Args:
+        bounds: The contract's stated bounds.
+        legs_run: How many legs have run so far (the head checkpoint sequence plus one).
+        now: The current tz-aware instant.
+
+    Returns:
+        The reason the task must stop, or ``None`` while every bound still has room.
+    """
+    if bounds.max_legs is not None and legs_run >= bounds.max_legs:
+        return f"The contract allowed at most {bounds.max_legs} legs and they have all run."
+    if bounds.deadline is not None and _ensure_utc(now) >= bounds.deadline:
+        stamp = bounds.deadline.strftime("%d %B %Y at %H:%M UTC")
+        return f"The contract's deadline passed on {stamp}."
+    return None
 
 
 class DeliverableFormat(StrEnum):

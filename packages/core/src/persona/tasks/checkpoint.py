@@ -128,6 +128,13 @@ class TaskCheckpoint(BaseModel):
             Written where a park learns the obstacle (an approval it cannot grant itself, a
             leg that died after its retries) and never carried forward, so a task that got
             moving again is not still described as stuck.
+        idle_until: The instant before which there is **nothing to do**, when the leg that
+            wrote this found one (a sale that opens Thursday, a reply due Monday). The
+            executor turns it into the outcome's timed wait, so the next leg is scheduled
+            for then instead of at once. Written only by a leg the box stopped (a finished
+            leg has no successor to delay), validated by the writer against the current
+            time and a ceiling, and never carried forward: a leg that ran has, by running,
+            stopped idling.
         artifact_pointers: References to workspace artifacts / key sources.
         event_log_cursor: Offset/id into the durable run records for just-in-time recall.
         schema_version: The checkpoint schema version.
@@ -154,6 +161,7 @@ class TaskCheckpoint(BaseModel):
 
     open_questions: tuple[str, ...] = ()
     blocked_on: str | None = None
+    idle_until: datetime | None = None
 
     artifact_pointers: tuple[ArtifactPointer, ...] = ()
     event_log_cursor: str | None = None
@@ -166,6 +174,11 @@ class TaskCheckpoint(BaseModel):
     @classmethod
     def _updated_at_must_be_tz_aware(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
+
+    @field_validator("idle_until", mode="after")
+    @classmethod
+    def _idle_until_must_be_tz_aware(cls, value: datetime | None) -> datetime | None:
+        return _ensure_utc(value) if value is not None else None
 
     @model_validator(mode="after")
     def _populate_or_verify_content_hash(self) -> TaskCheckpoint:
@@ -194,10 +207,24 @@ class TaskCheckpoint(BaseModel):
             return False
         data = self.model_dump(
             mode="json",
-            exclude={"content_hash", "updated_at", "queries_run", "sources_seen"},
+            exclude=self._unhashed() | {"queries_run", "sources_seen"},
         )
         payload = json.dumps(data, sort_keys=True, ensure_ascii=False)
         return self.content_hash == hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _unhashed(self) -> set[str]:
+        """The fields the hash leaves out: the hash itself, the write time, and an unset idle.
+
+        ``idle_until`` joined the model after every checkpoint in production had been hashed
+        without it. Excluding it while it is ``None`` keeps every stored row reading back
+        with the hash it was written with, and including it once set keeps the instant a
+        leg named tamper-evident. The ledgers took a separate legacy path because they are
+        tuples, whose empty value still serialises into the payload.
+        """
+        unhashed = {"content_hash", "updated_at"}
+        if self.idle_until is None:
+            unhashed.add("idle_until")
+        return unhashed
 
     def _compute_content_hash(self) -> str:
         """SHA-256 over the content fields (excludes ``updated_at`` + ``content_hash``).
@@ -205,7 +232,7 @@ class TaskCheckpoint(BaseModel):
         Deterministic: ``model_dump(mode="json")`` + ``sort_keys`` → same content, same hash,
         regardless of key order. Tuple order is preserved (it is semantically meaningful).
         """
-        data = self.model_dump(mode="json", exclude={"content_hash", "updated_at"})
+        data = self.model_dump(mode="json", exclude=self._unhashed())
         payload = json.dumps(data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

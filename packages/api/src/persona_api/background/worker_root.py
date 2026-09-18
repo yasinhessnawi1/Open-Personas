@@ -743,10 +743,13 @@ def _checkpoint_writer(
             metered=True,
         )
 
+    from datetime import timedelta
+
     return SemanticCheckpointWriter(
         backend_provider=_backend,
         fallback=floor,
         timeout_s=config.task_semantic_distiller_timeout_seconds,
+        max_idle=timedelta(days=config.task_leg_max_idle_days),
     )
 
 

@@ -21,6 +21,8 @@ from persona.tasks import (
 )
 from pydantic import ValidationError
 
+_NOW = datetime(2026, 9, 18, 9, 0, tzinfo=UTC)
+
 
 def test_acceptance_status_values() -> None:
     assert {s.value for s in AcceptanceStatus} == {"pending", "done", "failed"}
@@ -152,3 +154,35 @@ def test_contract_updates_round_trips_through_json() -> None:
     assert restored == contract
     assert restored.updates is not None
     assert restored.updates.granularity is UpdateGranularity.EVERY_LEG
+
+
+# --- the two bounds nothing could set (completion sweep, part 2, finding O) ---
+
+
+def test_a_bound_that_is_not_set_is_never_reached() -> None:
+    from persona.tasks import bound_reached
+
+    assert bound_reached(ContractBounds(), legs_run=10_000, now=_NOW) is None
+
+
+def test_the_leg_cap_is_reached_when_that_many_legs_have_run() -> None:
+    from persona.tasks import bound_reached
+
+    bounds = ContractBounds(max_legs=3)
+    assert bound_reached(bounds, legs_run=2, now=_NOW) is None
+    reason = bound_reached(bounds, legs_run=3, now=_NOW)
+    assert reason is not None
+    assert "3 legs" in reason
+    assert "contract" in reason  # classified deterministic: never retried behind the user's back
+
+
+def test_the_deadline_is_reached_at_the_instant_not_before() -> None:
+    from datetime import timedelta
+
+    from persona.tasks import bound_reached
+
+    bounds = ContractBounds(deadline=_NOW)
+    assert bound_reached(bounds, legs_run=0, now=_NOW - timedelta(seconds=1)) is None
+    reason = bound_reached(bounds, legs_run=0, now=_NOW)
+    assert reason is not None
+    assert "deadline" in reason

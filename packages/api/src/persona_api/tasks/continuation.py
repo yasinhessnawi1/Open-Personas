@@ -206,6 +206,21 @@ class TaskContinuation:
             return False  # the schedule is gone (deleted/compensated) → nothing to recur on
         return next_fire_after(schedule, after=after) is not None
 
+    def park_at_bound(self, owner_id: str, task: Task, reason: str, *, now: datetime) -> None:
+        """Park a task that hit a stated contract bound: the deadline or the leg cap (finding O).
+
+        The SAME park the approval gate uses, not a new mechanism: the reason lands on the
+        head checkpoint as ``blocked_on`` (R9-163, so the task page, the grounded answer and
+        the next leg's reconstruction all name it) and the task waits on the user at zero
+        cost. It is a park rather than the budget cap's pause because there is no
+        "extend" reply for a deadline: the user picks the task up for one more leg, or
+        cancels it. Recording the obstacle is safe here for the reason it is safe for the
+        gate: the leg's own job succeeded, so no dead job is keyed at this head.
+        """
+        self._record_obstacle(owner_id, task, reason, now=now)
+        self.wait_on_user(owner_id, task.id, now=now)
+        _log.info("task waiting(on_user) — contract bound", task_id=task.id, reason=reason)
+
     def wait_on_user(self, owner_id: str, task_id: str, *, now: datetime) -> None:
         """Park the task on the user at ZERO cost (a state row, no job). A3/A4 drive this.
 

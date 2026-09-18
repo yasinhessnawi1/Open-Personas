@@ -686,3 +686,69 @@ async def test_the_system_putting_work_back_does_not_answer_the_open_questions(
     )
     assert outcome.checkpoint is not None
     assert outcome.checkpoint.open_questions == (question,)
+
+
+# --- idle_until → resume_at (completion sweep, part 2, finding E) -------------
+
+
+class _IdlingWriter:
+    """A writer whose checkpoint says there is nothing to do before ``idle_until``."""
+
+    def __init__(self, idle_until: datetime) -> None:
+        self._idle_until = idle_until
+
+    async def write(
+        self,
+        *,
+        task: Task,
+        prior: TaskCheckpoint | None,  # noqa: ARG002 — part of the writer contract
+        run: Run,
+        leg_id: str,
+        seq: int,
+        now: datetime,
+    ) -> TaskCheckpoint:
+        return TaskCheckpoint(
+            task_id=task.id,
+            leg_id=leg_id,
+            checkpoint_seq=seq,
+            progress_conclusions=(run.output,) if run.output else (),
+            idle_until=self._idle_until,
+            updated_at=now,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_that_idles_becomes_a_timed_continuation() -> None:
+    """The outcome's ``resume_at`` was documented as set by the distiller and never was.
+    The executor reads it off the checkpoint the writer produced, so the api's continuation
+    schedules the next leg for that instant instead of at once."""
+    clock = _FakeClock()
+    thursday = datetime(2026, 6, 25, 9, 0, tzinfo=UTC)
+    runner = _FakeRunner(
+        max_steps=2, status=RunStatus.MAX_STEPS_REACHED, clock=clock, step_seconds=1.0
+    )
+    executor = LegExecutor(
+        runner=runner, writer=_IdlingWriter(thursday), sink=_RecordingSink(), meter=_meter
+    )
+
+    outcome = await executor.run_leg(task=_task(), trigger=_TRIGGER, now=_NOW)
+
+    assert outcome.disposition == LegDisposition.CONTINUE
+    assert outcome.resume_at == thursday
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_finished_carries_no_resume_time() -> None:
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    executor = LegExecutor(
+        runner=runner,
+        writer=_IdlingWriter(datetime(2026, 6, 25, 9, 0, tzinfo=UTC)),
+        sink=_RecordingSink(),
+        meter=_meter,
+    )
+
+    outcome = await executor.run_leg(task=_task(), trigger=_TRIGGER, now=_NOW)
+
+    assert outcome.disposition == LegDisposition.COMPLETED
+    assert outcome.resume_at is None

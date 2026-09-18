@@ -138,6 +138,10 @@ class ContractDraft(BaseModel):
         deliverable: The shape the finished work takes (Spec W1, T11). Defaulted to
             structured findings markdown, so a user who never said how they want it still
             gets something with a shape; the judge fills it when they did say.
+        deadline: "Work on this until Friday": the tz-aware instant after which no further
+            leg runs (finding O). Kept in the zone it was stated in, so the echo can read it
+            back as the user's wall-clock; the contract stores it in UTC.
+        max_legs: "Give it at most ten legs": the most legs the task may run (finding O).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -150,6 +154,15 @@ class ContractDraft(BaseModel):
     grants: tuple[GrantSpec, ...] = ()
     updates: UpdatePreference = UpdatePreference()
     deliverable: Deliverable = Deliverable()
+    deadline: datetime | None = None
+    max_legs: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _deadline_tz_aware(self) -> ContractDraft:
+        if self.deadline is not None and self.deadline.tzinfo is None:
+            msg = "deadline must be tz-aware"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _one_impulse(self) -> ContractDraft:
@@ -164,7 +177,8 @@ def build_contract(draft: ContractDraft) -> Contract:
     """Assemble a frozen :class:`persona.tasks.Contract` from a draft (A4-D-1).
 
     The draft's permissions become the A3 ``CategoryPolicy`` overrides (A4 authors; A3
-    enforces); a ``SPEND`` grant's ``cap_micros`` becomes ``ContractBounds.total_budget_micros``.
+    enforces); a ``SPEND`` grant's ``cap_micros`` becomes ``ContractBounds.total_budget_micros``,
+    and the draft's deadline and leg cap the other two bounds (finding O).
     Acceptance-criterion ids are assigned deterministically (``ac1``, ``ac2``, …) so a
     rebuilt draft yields a stable contract. The cadence is intentionally absent — it rides
     ``Task.schedule_id`` (A2's design), not the contract.
@@ -192,7 +206,9 @@ def build_contract(draft: ContractDraft) -> Contract:
         ),
         None,
     )
-    bounds = ContractBounds(total_budget_micros=spend_cap)
+    bounds = ContractBounds(
+        total_budget_micros=spend_cap, deadline=draft.deadline, max_legs=draft.max_legs
+    )
     return Contract(
         goal=draft.goal,
         scope=draft.scope,

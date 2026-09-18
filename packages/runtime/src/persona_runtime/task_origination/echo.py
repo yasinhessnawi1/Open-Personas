@@ -24,6 +24,8 @@ from persona.tasks import UpdateGranularity, UpdatePreference, format_micros
 from persona.tools.categories import ActionCategory
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from persona_runtime.task_origination.draft import ContractDraft, GrantSpec, ParsedSchedule
 
 __all__ = [
@@ -33,7 +35,10 @@ __all__ = [
     "ECHO_PROMPT_VOICE_VERSION",
     "Clause",
     "EchoMode",
+    "amend_criteria",
+    "amend_deadline",
     "amend_goal",
+    "amend_max_legs",
     "amend_schedule",
     "amend_scope",
     "amend_updates",
@@ -130,6 +135,7 @@ class Clause(StrEnum):
 
     GOAL = "goal"
     SCOPE = "scope"
+    CRITERIA = "criteria"
     SCHEDULE = "schedule"
     TRIGGER = "trigger"
     BOUNDS = "bounds"
@@ -149,6 +155,10 @@ def render_echo(draft: ContractDraft, mode: EchoMode = EchoMode.CHAT) -> str:
     lines = [render_clause(draft, Clause.GOAL)]
     if draft.scope:
         lines.append(render_clause(draft, Clause.SCOPE))
+    # The done-when list (finding C): rendered only when the judge authored one, so a draft
+    # without criteria echoes byte-identically to the snapshot-pinned A4 echo.
+    if draft.acceptance_criteria:
+        lines.append(render_clause(draft, Clause.CRITERIA))
     # The single "When:" line is time-driven XOR event-driven (A7-D-3): render the trigger clause
     # when the contract watches an event, else the schedule clause.
     when_clause = Clause.TRIGGER if draft.trigger is not None else Clause.SCHEDULE
@@ -169,6 +179,8 @@ def _render_echo_voice(draft: ContractDraft) -> str:
     sentences = [render_clause(draft, Clause.GOAL, EchoMode.VOICE)]
     if draft.scope:
         sentences.append(render_clause(draft, Clause.SCOPE, EchoMode.VOICE))
+    if draft.acceptance_criteria:
+        sentences.append(render_clause(draft, Clause.CRITERIA, EchoMode.VOICE))
     sentences.append(render_clause(draft, Clause.SCHEDULE, EchoMode.VOICE))
     sentences.append(render_clause(draft, Clause.BOUNDS, EchoMode.VOICE))
     sentences.append(render_clause(draft, Clause.UPDATES, EchoMode.VOICE))
@@ -188,6 +200,8 @@ def render_clause(draft: ContractDraft, clause: Clause, mode: EchoMode = EchoMod
         return f"Goal: {draft.goal}"
     if clause is Clause.SCOPE:
         return f"Scope: {draft.scope}" if draft.scope else "Scope: (whatever it takes)"
+    if clause is Clause.CRITERIA:
+        return _render_criteria(draft)
     if clause is Clause.SCHEDULE:
         # The authoritative schedule line — it always states exactly what will happen, so even a
         # judge goal that reads "brief you every morning" cannot imply a cadence it won't keep:
@@ -230,6 +244,8 @@ def _render_clause_voice(draft: ContractDraft, clause: Clause) -> str:
         return f"Here's what I'll do: {draft.goal}."
     if clause is Clause.SCOPE:
         return f"Scope: {draft.scope}." if draft.scope else ""
+    if clause is Clause.CRITERIA:
+        return _render_criteria_voice(draft)
     if clause is Clause.SCHEDULE:
         sched = draft.schedule
         if sched is None:
@@ -249,14 +265,41 @@ def _render_clause_voice(draft: ContractDraft, clause: Clause) -> str:
     raise ValueError(msg)
 
 
+def _render_criteria(draft: ContractDraft) -> str:
+    """The done-when clause: each criterion on its own line, in the judge's stated order.
+
+    What the user confirms here is what every leg re-reads as the definition of finished
+    (finding C), so it is shown whole rather than summarised.
+    """
+    if not draft.acceptance_criteria:
+        return "Done when: (when the goal is met)"
+    lines = "\n".join(f"  - {statement}" for statement in draft.acceptance_criteria)
+    return f"Done when:\n{lines}"
+
+
+def _render_criteria_voice(draft: ContractDraft) -> str:
+    """The done-when clause for the ear: the criteria folded into one spoken sentence."""
+    if not draft.acceptance_criteria:
+        return ""
+    spoken = ", and ".join(draft.acceptance_criteria)
+    return f"It's done when {spoken}."
+
+
 def _render_bounds(draft: ContractDraft) -> str:
-    """The bounds clause — each beyond-default grant on its own prominent line."""
-    if not draft.grants:
+    """The bounds clause — each beyond-default grant on its own prominent line.
+
+    A deadline or a leg cap the user set (finding O) is a term of the contract too, so it
+    gets its own line under the grants; a draft with neither renders byte-identically to
+    the snapshot-pinned A4 clause.
+    """
+    limits = _render_limits(draft)
+    if not draft.grants and not limits:
         return "Within bounds: nothing beyond your usual permissions."
-    grant_lines = "\n".join(
-        f"  - {grant.human or _default_grant_text(grant)}" for grant in draft.grants
-    )
-    return f"Within bounds:\n{grant_lines}"
+    grants = [grant.human or _default_grant_text(grant) for grant in draft.grants] or [
+        "nothing beyond your usual permissions"
+    ]
+    lines = "\n".join(f"  - {line}" for line in (*grants, *limits))
+    return f"Within bounds:\n{lines}"
 
 
 def _render_bounds_voice(draft: ContractDraft) -> str:
@@ -264,11 +307,36 @@ def _render_bounds_voice(draft: ContractDraft) -> str:
 
     Each beyond-default grant is still named (the completeness guarantee — no grant dropped on
     voice); they are joined into one sentence rather than a bulleted block (a list is not spoken).
+    A deadline or leg cap follows as one more spoken sentence.
     """
     if not draft.grants:
-        return "This stays within your usual permissions."
-    spoken = "; ".join(grant.human or _default_grant_text(grant) for grant in draft.grants)
-    return f"I'll also be allowed to: {spoken}."
+        sentence = "This stays within your usual permissions."
+    else:
+        spoken = "; ".join(grant.human or _default_grant_text(grant) for grant in draft.grants)
+        sentence = f"I'll also be allowed to: {spoken}."
+    limits = _render_limits(draft)
+    if not limits:
+        return sentence
+    return f"{sentence} I'll work on it {', and '.join(_spoken_limit(line) for line in limits)}."
+
+
+def _render_limits(draft: ContractDraft) -> list[str]:
+    """The deadline and leg cap as echo lines, in the user's wall-clock (finding O)."""
+    limits: list[str] = []
+    if draft.deadline is not None:
+        local = draft.deadline
+        if draft.schedule is not None:
+            from zoneinfo import ZoneInfo
+
+            local = draft.deadline.astimezone(ZoneInfo(draft.schedule.timezone))
+        limits.append(f"until {local:%A %d %B} at {local:%H:%M} your time")
+    if draft.max_legs is not None:
+        limits.append(f"at most {draft.max_legs} legs")
+    return limits
+
+
+def _spoken_limit(line: str) -> str:
+    return f"for {line}" if line.startswith("at most") else line
 
 
 def _render_updates(updates: UpdatePreference) -> str:
@@ -303,6 +371,21 @@ def amend_goal(draft: ContractDraft, goal: str) -> ContractDraft:
 def amend_scope(draft: ContractDraft, scope: str) -> ContractDraft:
     """Return a copy of ``draft`` with a new scope."""
     return draft.model_copy(update={"scope": scope})
+
+
+def amend_criteria(draft: ContractDraft, criteria: tuple[str, ...]) -> ContractDraft:
+    """Return a copy of ``draft`` with a new done-when list (the whole list, in order)."""
+    return draft.model_copy(update={"acceptance_criteria": criteria})
+
+
+def amend_deadline(draft: ContractDraft, deadline: datetime | None) -> ContractDraft:
+    """Return a copy of ``draft`` with a new deadline (``None`` clears it)."""
+    return draft.model_copy(update={"deadline": deadline})
+
+
+def amend_max_legs(draft: ContractDraft, max_legs: int | None) -> ContractDraft:
+    """Return a copy of ``draft`` with a new leg cap (``None`` clears it)."""
+    return draft.model_copy(update={"max_legs": max_legs})
 
 
 def amend_schedule(draft: ContractDraft, schedule: ParsedSchedule) -> ContractDraft:

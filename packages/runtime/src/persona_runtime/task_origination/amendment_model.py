@@ -28,13 +28,17 @@ from persona.tools.categories import ActionCategory
 from persona_runtime.errors import ScheduleParseError
 from persona_runtime.task_origination.draft import ContractDraft, GrantSpec
 from persona_runtime.task_origination.echo import (
+    amend_criteria,
+    amend_deadline,
     amend_goal,
+    amend_max_legs,
     amend_schedule,
     amend_scope,
     amend_updates,
     clear_grant,
     set_grant,
 )
+from persona_runtime.task_origination.judge import deadline_from, max_legs_from
 from persona_runtime.task_origination.schedule import parse_one_time, parse_recurrence
 
 if TYPE_CHECKING:
@@ -46,13 +50,14 @@ __all__ = ["AMENDMENT_PROMPT_VERSION", "ModelAmendmentInterpreter"]
 
 _logger = get_logger("runtime.task_origination")
 
-AMENDMENT_PROMPT_VERSION = "a4-amendment-v2"
+AMENDMENT_PROMPT_VERSION = "a4-amendment-v4"
 
 _SYSTEM_PROMPT = """\
 The user is replying to a task proposal their assistant just described. Decide whether the reply \
-ADJUSTS the proposal (a new time, a different spending cap, a tightened scope, a change to how \
-they'll be updated) — versus not being an amendment at all (a question, a topic change, a plain \
-yes/no with nothing to change).
+ADJUSTS the proposal (a new time, a different spending cap, a tightened scope, a change to what \
+counts as done, a deadline or a cap on how many work sessions, a change to how they'll be \
+updated) — versus not being an amendment at all (a question, a topic change, a plain yes/no \
+with nothing to change).
 
 Only report the clauses the user actually changed; leave everything else out (unstated clauses \
 are kept as-is). Do NOT restate unchanged clauses.
@@ -62,10 +67,18 @@ For a schedule change, use exactly ONE of the two schedule fields: a RECURRING c
 8") goes in "one_time_at" as an ISO-8601 local datetime. A bare time with no date ("once at \
 9 30") means the NEXT occurrence of that local time after the current time given below.
 
+For a change to what counts as done, give "acceptance_criteria" as the COMPLETE new list of \
+short checkable statements (the current list plus or minus the change), not only the change.
+
 Reply with ONLY a JSON object, no prose:
 {"amends": true|false,
  "goal": "<new goal, if changed>",
  "scope": "<new scope, if changed>",
+ "acceptance_criteria": ["<short checkable statement>", "..."],  // the full list, if changed
+ "deadline": "<ISO-8601 local datetime to stop at, if changed>",
+ "clear_deadline": true,         // only if the user removed the deadline
+ "max_legs": <positive integer, if changed>,
+ "clear_max_legs": true,         // only if the user removed the cap on work sessions
  "spend_cap_usd": <new spending cap in US dollars, if changed>,
  "clear_spend": true,            // only if the user removed the spending permission
  "schedule_rrule": "FREQ=...;BYHOUR=..",  // an RFC-5545 RRULE, if changed to a recurring cadence
@@ -92,7 +105,10 @@ class ModelAmendmentInterpreter:
         now = self._now()
         current = (
             f"goal: {draft.goal}\nscope: {draft.scope or '(none)'}\n"
+            f"done when: {'; '.join(draft.acceptance_criteria) or '(the goal is met)'}\n"
             f"spend_cap_usd: {self._current_cap_usd(draft)}\n"
+            f"deadline: {draft.deadline.isoformat() if draft.deadline else '(none)'}\n"
+            f"max_legs: {draft.max_legs if draft.max_legs is not None else '(none)'}\n"
             f"updates: {draft.updates.granularity.value} / {draft.updates.channel or 'home'}"
         )
         if draft.schedule is not None:
@@ -132,9 +148,11 @@ class ModelAmendmentInterpreter:
         payload = self._load_json(text)
         if payload is None or payload.get("amends") is not True:
             return None
+        now = self._now()
         amended = draft
         amended = self._apply_text_clauses(payload, amended)
         amended = self._apply_spend(payload, amended)
+        amended = self._apply_limits(payload, amended, now=now)
         amended = self._apply_schedule(payload, amended)
         amended = self._apply_updates(payload, amended)
         # Guard: if the patch claimed to amend but changed nothing representable, it is not an
@@ -149,6 +167,13 @@ class ModelAmendmentInterpreter:
         scope = payload.get("scope")
         if isinstance(scope, str) and scope.strip():
             draft = amend_scope(draft, scope.strip())
+        criteria = payload.get("acceptance_criteria")
+        if isinstance(criteria, list):
+            # The patch carries the WHOLE list (the prompt says so), so it replaces rather
+            # than appends; a wrong shape is skipped, the same as every other clause.
+            cleaned = tuple(dict.fromkeys(str(c).strip() for c in criteria if str(c).strip()))
+            if cleaned:
+                draft = amend_criteria(draft, cleaned)
         return draft
 
     def _apply_spend(self, payload: dict[str, object], draft: ContractDraft) -> ContractDraft:
@@ -161,6 +186,33 @@ class ModelAmendmentInterpreter:
                 GrantSpec(category=ActionCategory.SPEND, cap_micros=micros_from_dollars(cap)),
             )
         return draft
+
+    @staticmethod
+    def _apply_limits(
+        payload: dict[str, object], draft: ContractDraft, *, now: datetime
+    ) -> ContractDraft:
+        """The deadline and leg cap (finding O): set through the judge's own readers, or cleared.
+
+        A deadline is a wall-clock in the draft's cadence zone, the same frame a one-time
+        retiming uses; without a schedule the existing deadline's zone, else UTC.
+        """
+        if payload.get("clear_deadline") is True:
+            draft = amend_deadline(draft, None)
+        else:
+            timezone = (
+                draft.schedule.timezone
+                if draft.schedule is not None
+                else str(draft.deadline.tzinfo or "UTC")
+                if draft.deadline is not None
+                else "UTC"
+            )
+            deadline = deadline_from(payload, timezone=timezone, now=now)
+            if deadline is not None:
+                draft = amend_deadline(draft, deadline)
+        if payload.get("clear_max_legs") is True:
+            return amend_max_legs(draft, None)
+        max_legs = max_legs_from(payload)
+        return amend_max_legs(draft, max_legs) if max_legs is not None else draft
 
     def _apply_schedule(self, payload: dict[str, object], draft: ContractDraft) -> ContractDraft:
         rrule = payload.get("schedule_rrule")

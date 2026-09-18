@@ -186,3 +186,67 @@ def test_render_clause_cadence_note_is_spoken_never_silent() -> None:
     assert "every 5, 10, 15, 20, 30 or 60 minutes" in chat_line
     voice_line = render_clause(draft, Clause.SCHEDULE, EchoMode.VOICE)
     assert "couldn't set that exact cadence" in voice_line
+
+
+# --- acceptance criteria (completion sweep, part 2, finding C) --------------
+
+
+def test_the_echo_reads_the_done_when_list_back() -> None:
+    """The user confirms the criteria along with everything else, so the echo has to show
+    them, one per line, in the order the judge stated them."""
+    from persona_runtime.task_origination import amend_criteria, changed_clauses
+
+    draft = ContractDraft(
+        goal="g",
+        schedule=_schedule(),
+        acceptance_criteria=("a fare under 500 USD is reported", "the airline is named"),
+    )
+
+    echo = render_echo(draft)
+
+    assert "Done when:\n  - a fare under 500 USD is reported\n  - the airline is named" in echo
+    assert render_clause(draft, Clause.CRITERIA) == (
+        "Done when:\n  - a fare under 500 USD is reported\n  - the airline is named"
+    )
+    amended = amend_criteria(draft, ("the airline is named",))
+    assert changed_clauses(draft, amended) == (Clause.CRITERIA,)
+
+
+def test_a_draft_without_criteria_echoes_exactly_as_before() -> None:
+    """The A4 echo is snapshot-pinned; a contract that authored no criteria must not grow a
+    line saying so."""
+    echo = render_echo(ContractDraft(goal="g", schedule=_schedule()))
+
+    assert "Done when" not in echo
+
+
+# --- deadline + leg cap (completion sweep, part 2, finding O) ---------------
+
+
+def test_the_bounds_clause_states_the_deadline_and_the_leg_cap() -> None:
+    """A bound the user set is a term of the contract, so it is read back with the grants
+    and in their own timezone, the way the schedule line is."""
+    from datetime import UTC, datetime
+
+    from persona_runtime.task_origination import amend_deadline, amend_max_legs, changed_clauses
+
+    draft = ContractDraft(
+        goal="g",
+        schedule=_schedule(),  # Europe/Oslo
+        deadline=datetime(2099, 9, 19, 15, 0, tzinfo=UTC),  # 17:00 in Oslo that September
+        max_legs=10,
+    )
+
+    line = render_clause(draft, Clause.BOUNDS)
+
+    assert line == (
+        "Within bounds:\n"
+        "  - nothing beyond your usual permissions\n"
+        "  - until Saturday 19 September at 17:00 your time\n"
+        "  - at most 10 legs"
+    )
+    assert changed_clauses(draft, amend_max_legs(draft, None)) == (Clause.BOUNDS,)
+    assert changed_clauses(draft, amend_deadline(draft, None)) == (Clause.BOUNDS,)
+    assert "Within bounds: nothing beyond your usual permissions." in render_echo(
+        ContractDraft(goal="g", schedule=_schedule())
+    )
