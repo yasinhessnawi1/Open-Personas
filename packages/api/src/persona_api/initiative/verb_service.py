@@ -7,7 +7,10 @@ the tenant, this service owns the mutation):
 - **dial verbs** — write ``personas.initiative_dial`` (+ ``_updated_at``),
   audit the transition, and ENSURE the persona's scan schedule when the dial
   is not OFF (the lazy provisioning call site, A5-D-1). OFF leaves the
-  schedule in place — the handler exit is the one source of truth.
+  schedule in place — the handler exit is the one source of truth — and
+  records the durable half of a stop verb: the initiatives already in front of
+  the user are declined (``stop_verb``), so restraint remembers WHAT was
+  stopped and not merely that it was.
 - **confirm** — execute the LEDGER-pending proposal through the executor's
   ``execute_confirmed`` (implicit task or the A8 door — the real doors only).
 - **decline** — record the durable decline (``declined_reply``, user-level,
@@ -27,6 +30,7 @@ from persona.logging import get_logger
 from persona_runtime.initiative.verbs import InitiativeVerb
 
 from persona_api.initiative.handler import ensure_initiative_schedule, set_initiative_dial
+from persona_api.initiative.store import DeclineSource
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -109,7 +113,9 @@ class InitiativeVerbService:
         if not set_initiative_dial(self._engine, owner_id, persona_id, dial, now=now):
             _log.warning("dial write matched no persona; ignoring")
             return
-        if dial is not InitiativeDial.OFF:
+        if dial is InitiativeDial.OFF:
+            self._record_stop_verb_declines(owner_id, persona_id, now=now)
+        else:
             timezone = "UTC"
             if callable(self._timezone_resolver):
                 try:
@@ -128,6 +134,54 @@ class InitiativeVerbService:
                 seam="initiative_dial_verb",
             )
 
+    def _record_stop_verb_declines(self, owner_id: str, persona_id: str, *, now: datetime) -> None:
+        """Record what a STOP verb declines, not only the posture it sets (``stop_verb``).
+
+        "Stop suggesting things" carries two messages and only one of them was
+        being kept. The posture half is the dial, which silences this persona
+        from here on. The durable half is what the user was reacting to: the
+        initiatives this persona actually put in front of them that still own
+        their opportunity slot. Those are declined through the SAME store
+        method the reply path uses, so restraint learns from a stop verb
+        exactly as it learns from a typed "no" — user-level, binding every
+        persona until an explicit revival (A5-D-4).
+
+        **The ruling on a GLOBAL stop.** The decline table is keyed by
+        opportunity, so a record with no opportunity is not representable, and
+        a record per HISTORICAL opportunity would suppress topics the user
+        never saw. The truth is one record per DELIVERED, still-live notice
+        inside the answerable window (``hold_max_days``, the same window that
+        makes a proposal confirmable): the things in front of the user when
+        they said stop, and nothing else. A stop verb with nothing delivered
+        writes no decline — the dial alone carries it and there is no topic to
+        remember. Unlike the silence-driven expiry sweep this covers ``act``
+        reports as well as proposals: an explicit stop is the user speaking
+        about everything the persona has been doing, not only what it asked.
+
+        The dial write has already committed when this runs, and a decline
+        failure must never read as "the dial did not apply" — hence its own
+        fail-soft guard.
+        """
+        try:
+            shown = self._ledger.delivered_in_window(
+                owner_id,
+                persona_id,
+                max_age_days=self._settings.hold_max_days,
+                now=now,
+            )
+            for notice in shown:
+                self._declines.record_decline(
+                    owner_id,
+                    opportunity_key=notice.opportunity_key,
+                    trigger=notice.trigger,
+                    source=DeclineSource.STOP_VERB,
+                    persona_id=persona_id,
+                    now=now,
+                )
+                self._ledger.supersede(owner_id, notice.opportunity_key, now=now)
+        except Exception:  # noqa: BLE001 — the dial write stands; the ledger retries nothing
+            _log.warning("stop-verb decline recording failed (dial write stands)")
+
     async def _apply_confirm(self, owner_id: str, notice_id: str) -> None:
         executed = await self._executor.execute_confirmed(owner_id, notice_id)
         audit_service.record(
@@ -139,8 +193,6 @@ class InitiativeVerbService:
         )
 
     def _apply_decline(self, owner_id: str, persona_id: str, notice_id: str) -> None:
-        from persona_api.initiative.store import DeclineSource
-
         notice = self._ledger.get_notice(owner_id, notice_id)
         if notice is None:
             return

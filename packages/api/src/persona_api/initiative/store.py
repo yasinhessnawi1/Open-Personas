@@ -62,7 +62,21 @@ _log = get_logger("api.initiative.store")
 
 
 class DeclineSource(StrEnum):
-    """How a decline was expressed (app-layer gate over the TEXT column)."""
+    """How a decline was expressed (app-layer gate over the TEXT column).
+
+    All three sources SUPPRESS IDENTICALLY — the weighting rule, stated once
+    here and enforced by :meth:`DeclineStore.suppressed_keys` reading no source
+    at all. A person who ignores five unprompted messages has declined them as
+    surely as the person who took the trouble to type "no", and the ledger that
+    only heard the typed "no" would keep proposing to the quieter one. The
+    source is provenance for the audit trail and the A6 surface, never weight.
+
+    - ``DECLINED_REPLY`` — a clean "no" to a pending proposal (the verb path).
+    - ``STOP_VERB`` — "stop suggesting things": the dial moves AND what the
+      persona had in front of the user is declined (the verb path).
+    - ``IGNORED_EXPIRY`` — a delivered proposal that passed out of its
+      answerable window unanswered (the expiry sweep).
+    """
 
     DECLINED_REPLY = "declined_reply"
     STOP_VERB = "stop_verb"
@@ -142,7 +156,13 @@ class DeclineStore:
     # --- reads (CQS: no writes) --------------------------------------------
 
     def suppressed_keys(self, owner_id: str, keys: Sequence[str]) -> set[str]:
-        """The subset of ``keys`` with a LIVE decline (the scan-batch suppression check)."""
+        """The subset of ``keys`` with a LIVE decline (the scan-batch suppression check).
+
+        Deliberately source-blind: a live decline suppresses whether it was
+        typed, spoken as a stop verb, or expressed by silence (see
+        :class:`DeclineSource`). Adding a source filter here would quietly
+        restore the asymmetry the three sources exist to remove.
+        """
         if not keys:
             return set()
         with rls_connection(self._engine, owner_id) as conn:
@@ -309,6 +329,35 @@ class InitiativeLedger:
         if datetime.now(UTC) - record.delivered_at > cutoff_interval:
             return None  # expired — a stale proposal is not confirmable (bar 2's negative)
         return record
+
+    def delivered_in_window(
+        self, owner_id: str, persona_id: str, *, max_age_days: int, now: datetime
+    ) -> list[NoticeRecord]:
+        """What this persona has in front of the user right now (the stop-verb read).
+
+        DELIVERED (the user saw it), not superseded (it still owns its
+        opportunity slot), and inside the SAME ``max_age_days`` window that
+        makes a proposal answerable — one window definition, no new time
+        semantics. Newest first; a read (CQS), RLS-scoped.
+        """
+        cutoff = now - timedelta(days=max_age_days)
+        with rls_connection(self._engine, owner_id) as conn:
+            rows = (
+                conn.execute(
+                    select(notices_t)
+                    .where(
+                        notices_t.c.persona_id == persona_id,
+                        notices_t.c.disposition == NoticeDisposition.DELIVERED.value,
+                        notices_t.c.superseded_at.is_(None),
+                        notices_t.c.delivered_at.isnot(None),
+                        notices_t.c.delivered_at > cutoff,
+                    )
+                    .order_by(notices_t.c.delivered_at.desc())
+                )
+                .mappings()
+                .all()
+            )
+        return [_notice_from_row(r) for r in rows]
 
     def held_for_owner(self, owner_id: str) -> list[NoticeRecord]:
         """The owner's held notices, oldest first (the flush read)."""

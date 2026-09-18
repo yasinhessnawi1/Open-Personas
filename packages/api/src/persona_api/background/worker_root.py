@@ -81,6 +81,7 @@ from persona_api.initiative.handler import (
     read_initiative_dial,
     register_initiative_scan_handler,
 )
+from persona_api.initiative.ignored_sweep import IgnoredProposalSweeper
 from persona_api.initiative.pipeline_wiring import (
     ApiGroundingSource,
     ApiPipelineAuditor,
@@ -1662,6 +1663,23 @@ def start_in_process_worker(
             tombstone_window_days=config.schedule_tombstone_window_days,
         )
 
+    def _ignored_proposal_sweep_builder(
+        dispatch_engine: Engine, worker_rls_engine: Engine
+    ) -> IgnoredProposalSweeper | None:
+        # Spec A5 (T3): the leader-gated ignored-proposal expiry sweep — the third
+        # decline source, so restraint learns from silence and not only from the
+        # users who reply. Built ONLY when initiative is enabled (the same gate as
+        # the tenant and the provisioner; OFF ⇒ the worker loop is unchanged).
+        settings = InitiativeSettings()
+        if not settings.enabled:
+            return None
+        return IgnoredProposalSweeper(
+            dispatch_engine=dispatch_engine,
+            declines=DeclineStore(worker_rls_engine),
+            ledger=InitiativeLedger(worker_rls_engine),
+            settings=settings,
+        )
+
     worker = build_worker(
         config,
         registry,
@@ -1669,6 +1687,7 @@ def start_in_process_worker(
         catalog_sync_builder=_catalog_sync_builder,
         skill_catalog_sync_builder=_skill_catalog_sync_builder,
         initiative_provisioner_builder=_initiative_provisioner_builder,
+        ignored_proposal_sweep_builder=_ignored_proposal_sweep_builder,
         approval_sweep_builder=_approval_sweep_builder,
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,

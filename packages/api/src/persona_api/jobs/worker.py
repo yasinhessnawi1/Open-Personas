@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
     # N2's catalog auto-sync plugs into the loop the same additive way (Spec N2, T3):
     # a third ownerless periodic task; None on a worker without it → behaves as before.
+    from persona_api.initiative.ignored_sweep import IgnoredProposalSweeper
     from persona_api.initiative.provisioner import InitiativeProvisioner
     from persona_api.jobs.catalog_sync import CatalogSyncTask
 
@@ -123,6 +124,8 @@ class Worker:
         skill_catalog_sync_interval_seconds: float = 86_400.0,
         initiative_provisioner: InitiativeProvisioner | None = None,
         initiative_provisioner_interval_seconds: float = 3_600.0,
+        ignored_proposal_sweep: IgnoredProposalSweeper | None = None,
+        ignored_proposal_sweep_interval_seconds: float = 3_600.0,
         approval_sweep: ApprovalSweepRunner | None = None,
         approval_sweep_interval_seconds: float = 300.0,
         dead_leg_sweep: DeadLegSweeper | None = None,
@@ -164,6 +167,10 @@ class Worker:
         # built-but-inert killer). None → inert (initiative disabled).
         self._initiative_provisioner = initiative_provisioner
         self._initiative_provisioner_interval = initiative_provisioner_interval_seconds
+        # Spec A5 (T3): the leader-gated ignored-proposal expiry sweep — the third decline
+        # source. None → inert (initiative disabled), exactly like the provisioner above.
+        self._ignored_proposal_sweep = ignored_proposal_sweep
+        self._ignored_proposal_sweep_interval = ignored_proposal_sweep_interval_seconds
         # Spec A3 (T9/T13): the two lifecycle sweeps — approval reminder/expiry + dead-leg
         # voicing. Additive; None on a worker without them → the loop is unchanged. Each is
         # leader-gated on its OWN advisory key inside run_once and best-effort (a failure is
@@ -184,6 +191,7 @@ class Worker:
         self._last_catalog_sync: float | None = None
         self._last_skill_catalog_sync: float | None = None
         self._last_initiative_provision: float | None = None
+        self._last_ignored_proposal_sweep: float | None = None
         self._last_approval_sweep: float | None = None
         self._last_dead_leg_sweep: float | None = None
         self._last_revival_sweep: float | None = None
@@ -277,6 +285,7 @@ class Worker:
             await self._maybe_run_catalog_sync()
             await self._maybe_run_skill_catalog_sync()
             await self._maybe_run_initiative_provisioner()
+            await self._maybe_run_ignored_proposal_sweep()
             await self._maybe_run_approval_sweep()
             await self._maybe_run_dead_leg_sweep()
             await self._maybe_run_revival_sweep()
@@ -458,6 +467,31 @@ class Worker:
             _log.exception("initiative provisioning failed", worker_id=self._worker_id)
         self._last_initiative_provision = time.monotonic()
 
+    async def _maybe_run_ignored_proposal_sweep(self) -> None:
+        """Run the A5 ignored-proposal expiry sweep if wired + its cadence elapsed (T3).
+
+        The provisioner shape exactly: a no-op when unwired (None); leader-gated on its
+        OWN advisory key inside ``run_once``; DB-bound work offloaded to a thread; a
+        failure is logged, never crashing the loop (fail-soft; retried next cadence).
+        This is what lets restraint learn from silence — without it the decline ledger
+        only ever hears from the users who reply.
+        """
+        if self._ignored_proposal_sweep is None:
+            return
+        if (
+            self._last_ignored_proposal_sweep is not None
+            and time.monotonic() - self._last_ignored_proposal_sweep
+            < self._ignored_proposal_sweep_interval
+        ):
+            return
+        from datetime import UTC, datetime
+
+        try:
+            await asyncio.to_thread(self._ignored_proposal_sweep.run_once, now=datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — a sweep failure must not crash the worker loop
+            _log.exception("ignored-proposal sweep failed", worker_id=self._worker_id)
+        self._last_ignored_proposal_sweep = time.monotonic()
+
     async def _maybe_run_approval_sweep(self) -> None:
         """Run the A3 approval reminder/expiry sweep if wired + its cadence has elapsed (T9).
 
@@ -619,6 +653,8 @@ def build_worker(
     skill_catalog_sync_builder: Callable[[Engine], SkillCatalogSyncTask | None] | None = None,
     initiative_provisioner_builder: Callable[[Engine, Engine], InitiativeProvisioner | None]
     | None = None,
+    ignored_proposal_sweep_builder: Callable[[Engine, Engine], IgnoredProposalSweeper | None]
+    | None = None,
     approval_sweep_builder: Callable[[Engine, Engine], ApprovalSweepRunner | None] | None = None,
     dead_leg_sweep_builder: Callable[[Engine, Engine], DeadLegSweeper | None] | None = None,
     revival_sweep_builder: Callable[[Engine, Engine], RevivalSweeper | None] | None = None,
@@ -683,6 +719,11 @@ def build_worker(
         if initiative_provisioner_builder is not None
         else None
     )
+    ignored_proposal_sweep = (
+        ignored_proposal_sweep_builder(dispatch_engine, rls_engine)
+        if ignored_proposal_sweep_builder is not None
+        else None
+    )
     # A3 lifecycle sweeps — additive, each leader-gated on its own advisory key, built on the
     # worker's two engines (dispatch for the leader session + cross-tenant scans; RLS for the
     # owner-scoped store actions + persona-tag voicing). None when unwired → the loop is unchanged.
@@ -712,6 +753,7 @@ def build_worker(
         skill_catalog_sync=skill_catalog_sync,
         skill_catalog_sync_interval_seconds=config.skill_catalog_sync_interval_seconds,
         initiative_provisioner=initiative_provisioner,
+        ignored_proposal_sweep=ignored_proposal_sweep,
         approval_sweep=approval_sweep,
         approval_sweep_interval_seconds=config.approval_sweep_interval_seconds,
         dead_leg_sweep=dead_leg_sweep,
