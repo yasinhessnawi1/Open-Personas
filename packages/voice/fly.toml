@@ -68,9 +68,16 @@ kill_timeout = "30s"
     interval = "30s"
     timeout = "5s"
 
-# No [mounts]: the agent's JSONL audit log writes to the OS temp dir
-# (tempfile.gettempdir(), ephemeral /tmp) — nothing needs to persist across
-# deploys. The embedder warm-up + STT/TTS clients are in-memory only.
+# No [mounts]. This used to say the agent's JSONL audit log writes to the OS temp
+# dir and "nothing needs to persist across deploys", which was wrong (R9-188):
+# every typed-store write a spoken turn makes, the session lifecycle record and
+# the per-turn latency log went there and were swept. The audit destination now
+# follows PERSONA_VOICE_AUDIT_BACKEND / PERSONA_VOICE_AUDIT_ROOT, and with
+# PERSONA_EDITION=cloud the process REFUSES to boot when that resolves to the temp
+# dir. Set the backend to "postgres" (the records join the api's own
+# store_audit_events table over the DB this service already holds, no volume, no
+# cost) or give the root a mounted volume. The embedder warm-up + STT/TTS clients
+# are in-memory only.
 #
 # KNOWN EXPOSURE (R9-027, OWNER DECISION pending): with no volume, the HF
 # model cache lives in the container layer, so a machine REPLACEMENT

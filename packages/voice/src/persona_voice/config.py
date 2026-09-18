@@ -82,6 +82,28 @@ class VoiceConfig(BaseSettings):
     # every connection via the request-scoped contextvar.
     database_url: str = Field(default="")
 
+    # --- Audit sink (R9-188) ---
+    # Where the voice runtime's durable records land: every typed-store write a
+    # spoken turn makes, the session lifecycle record, and the per-turn VoiceLog
+    # latency rows. The pair mirrors the api's PERSONA_API_AUDIT_BACKEND /
+    # PERSONA_API_AUDIT_ROOT; the voice service reads its own copy because it is
+    # its own process with its own deployment, and being MIT it cannot read
+    # APIConfig.
+    #
+    # ``audit_backend``: "jsonl" (default: the per-persona files under
+    # ``audit_root``, the community posture) or "postgres" (the shared
+    # ``store_audit_events`` table, written on the call's own RLS engine, the same
+    # rows the api writes). "postgres" with no database handle degrades to JSONL,
+    # exactly as the api's factory does.
+    #
+    # ``audit_root``: the JSONL directory. EMPTY (the default) resolves to the
+    # system temp dir, which is swept, so a cloud deployment that leaves it empty
+    # while the backend resolves to JSONL fails at boot rather than writing
+    # records nobody will ever read (``persona_voice.agent.audit_sink``). Set it
+    # to a path on a persistent volume, or select the postgres backend.
+    audit_backend: str = Field(default="jsonl")
+    audit_root: str = Field(default="")
+
     # --- CORS (browser → voice service is cross-origin, like persona-api) ---
     # The web app (default :3000) calls POST /v1/voice/token + GET /v1/voices
     # directly from the browser. Bearer auth (no cookies). Empty disables CORS.

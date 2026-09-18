@@ -597,7 +597,15 @@ def build_app(config: VoiceConfig) -> FastAPI:
     launcher = None
     if config.agent_inprocess:
         from persona_voice.agent import InProcessAgentLauncher
+        from persona_voice.agent.audit_sink import check_voice_audit_sink
 
+        # R9-188: this process is about to host the agent worker, so it is about
+        # to write audit, lifecycle and latency records for every call. Resolve
+        # the sink NOW and refuse to start when a cloud deployment would write
+        # them into the swept temp dir. Community is allowed the temp dir and is
+        # warned once. Checked here rather than per call so a misconfigured deploy
+        # fails at boot, not on someone's first conversation.
+        check_voice_audit_sink(config, engine_available=bool(config.database_url.strip()))
         launcher = InProcessAgentLauncher(config)
 
     @asynccontextmanager

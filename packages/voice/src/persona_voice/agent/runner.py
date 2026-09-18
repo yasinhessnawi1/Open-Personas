@@ -33,13 +33,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import tempfile
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from livekit import api
-from persona.audit import JSONLAuditLogger
 from persona.billing import BillingConfig, CoreCreditsLedger
 from persona.config import PersonaCoreConfig
 from persona.errors import PersonaNotFoundError
@@ -60,6 +57,7 @@ from persona_runtime.routing import FirstTokenLatencyTracker, PolicyRouter
 from persona_runtime.tier import tier_registry_from_env
 from sqlalchemy import text
 
+from persona_voice.agent.audit_sink import VoiceAuditSink, build_voice_audit_sink
 from persona_voice.agent.language import (
     maybe_apply_stt_route,
     maybe_apply_tts_route,
@@ -106,6 +104,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
 
+    from persona.audit import AuditLogger
     from persona.schema.tools import ToolCall
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
@@ -276,7 +275,7 @@ def _select_voice_tier_registry(
 
 
 def _load_core_block(
-    engine: Engine, embedder: Embedder, persona_id: str, audit_root: Path
+    engine: Engine, embedder: Embedder, persona_id: str, audit_logger: AuditLogger
 ) -> str | None:
     """Read the persona's K9 core-memory block ONCE at session setup (R9-002).
 
@@ -300,7 +299,7 @@ def _load_core_block(
             return None
         store = CoreMemoryStore(
             backend=PostgresBackend(engine=engine, embedder=embedder),
-            audit_logger=JSONLAuditLogger(audit_root),
+            audit_logger=audit_logger,
         )
         block = read_core_block(store, persona_id)
     except Exception:  # noqa: BLE001 — the head start is a nicety; never break a call
@@ -309,15 +308,21 @@ def _load_core_block(
     return block.text if block is not None else None
 
 
-def _build_stores(engine: Engine, embedder: Embedder, audit_root: Path) -> dict[str, MemoryStore]:
+def _build_stores(
+    engine: Engine, embedder: Embedder, audit_logger: AuditLogger
+) -> dict[str, MemoryStore]:
     """The four typed stores over ``PostgresBackend`` (RLS-scoped session engine).
 
     Identical shape to the persona-api ``RuntimeFactory._build_stores`` so voice
     memory is the **same** unified episodic store the text path writes — a voice
     turn's memory is recalled in text and vice versa.
+
+    Takes the call's audit logger rather than a directory to build one from
+    (R9-188): the sink is chosen once from configuration at the composition root,
+    and every consumer shares that one instance.
     """
     backend = PostgresBackend(engine=engine, embedder=embedder)
-    audit = JSONLAuditLogger(audit_root)
+    audit = audit_logger
     return {
         "identity": IdentityStore(backend=backend, audit_logger=audit),
         "self_facts": SelfFactsStore(backend=backend, audit_logger=audit),
@@ -539,7 +544,7 @@ async def build_agent_session(
     core_config: PersonaCoreConfig | None = None,
     stt_config: StreamingSTTConfig | None = None,
     tts_config: StreamingTTSConfig | None = None,
-    audit_root: Path | None = None,
+    audit_sink: VoiceAuditSink | None = None,
     room_factory: Callable[[], VoiceRoom] = build_voice_room,
     broadcaster_factory: Callable[[VoiceRoom], DataChannelBroadcaster] | None = None,
 ) -> AgentSession:
@@ -568,7 +573,6 @@ async def build_agent_session(
     core_config = core_config or PersonaCoreConfig()
     stt_config = stt_config or StreamingSTTConfig()
     tts_config = tts_config or StreamingTTSConfig()
-    audit_root = audit_root or (Path(tempfile.gettempdir()) / "persona-voice-agent-audit")
     if embedder is None:
         from persona.stores import SentenceTransformerEmbedder
 
@@ -589,6 +593,13 @@ async def build_agent_session(
 
     # --- session RLS engine + persona + stores (tenant-isolated) ---
     rls_engine = make_session_rls_engine(config.database_url, user_id=user_id)
+    # R9-188: the call's ONE audit destination, chosen here from the two voice
+    # settings and shared by every writer below: the four typed stores, the
+    # core-memory read, the graph store, the session lifecycle auditor and the
+    # per-turn VoiceLog. It used to be a hard-coded temp directory, so every one
+    # of those records was swept off the voice machine. Composed after the session
+    # engine because the postgres backend writes ``store_audit_events`` on it.
+    audit = audit_sink or build_voice_audit_sink(config=config, engine=rls_engine)
     # Spec M4 (T5c): free-tier no-paid-fallback — a FREE caller's voice LLM resolves the
     # free-only registry (voice wires no preferred override, so the registry swap covers the
     # whole generation + summariser/gate chain). Paid / community byte-identical. Resolved
@@ -601,7 +612,7 @@ async def build_agent_session(
         user_id=user_id,
     )
     persona = _load_persona(rls_engine, persona_id)
-    stores = _build_stores(rls_engine, embedder, audit_root)
+    stores = _build_stores(rls_engine, embedder, audit.audit_logger)
     # K6 (K6-D-6): resolve the caller's name ONCE at session setup (off the
     # per-utterance turn loop) so the persona speaks it in the call, exactly as in
     # chat — one persona, one user, coherent across channels. ``None`` ⇒ nameless ⇒
@@ -615,7 +626,7 @@ async def build_agent_session(
     # first-word latency: the provider is a closure over this pre-fetched value —
     # no fetch ever runs on the turn path. ``None`` (gate off / no block / error)
     # ⇒ provider stays ``None`` ⇒ byte-identical prompt ⇒ the plain-hello branch.
-    core_block_text = _load_core_block(rls_engine, embedder, persona_id, audit_root)
+    core_block_text = _load_core_block(rls_engine, embedder, persona_id, audit.audit_logger)
     core_block_provider: Callable[[], str | None] | None = (
         (lambda: core_block_text) if core_block_text is not None else None
     )
@@ -639,7 +650,7 @@ async def build_agent_session(
         graph_store = build_graph_store(
             engine=rls_engine,
             embedder=embedder,
-            audit_logger=JSONLAuditLogger(audit_root),
+            audit_logger=audit.audit_logger,
         )
         if RecallSettings().unified_enabled:
             # K9 (T9): the unified recall REPLACES the separate graph shell (fuse-don't-route,
@@ -792,17 +803,18 @@ async def build_agent_session(
     # R9-184: the lifecycle seam gets its production consumer here. Without this
     # listener the three session events dispatch into ``None`` and the call leaves
     # no lifecycle trace anywhere: a producer with nobody reading it. The auditor
-    # writes through the SAME core audit port the four typed stores above already
-    # use for every spoken turn (``_build_stores``, same ``audit_root``), so the
-    # call and its turns land on one record. Fail-soft inside: a failed audit
-    # write degrades the record, never the call.
+    # writes through the SAME core audit port instance the four typed stores above
+    # already use for every spoken turn (``_build_stores``, the same ``audit``
+    # sink), so the call and its turns land on one record wherever configuration
+    # points it. Fail-soft inside: a failed audit write degrades the record, never
+    # the call.
     session = SessionStateMachine(
         session_id=session_id,
         user_id=user_id,
         persona_id=persona_id,
         conversation_id=conversation_id,
         rls_engine=rls_engine,
-        on_event=SessionLifecycleAuditor(audit_logger=JSONLAuditLogger(audit_root)),
+        on_event=SessionLifecycleAuditor(audit_logger=audit.audit_logger),
     )
     # The session exists from here on, so say so on the lifecycle seam. A call that
     # never reaches ``active`` (the participant drops during connect) then still has a
@@ -922,8 +934,11 @@ async def build_agent_session(
     # ``VoiceLog`` was modelled, tested and never constructed anywhere outside its
     # own unit tests, so every turn's latency segments went nowhere and the numbers
     # built on them (the round-trip, V4's per-hop attribution) had no input. The
-    # rows land beside the call's audit trail, under the SAME ``audit_root`` the
-    # typed stores and the session lifecycle auditor write to, one file per persona.
+    # rows land beside the call's audit trail, under the SAME configured root the
+    # typed stores and the session lifecycle auditor resolve from, one file per
+    # persona. They stay JSONL even on the postgres backend: there is no table for
+    # per-turn voice latency (``turn_logs`` is the chat turn's tier/model row and
+    # carries none of these anchors), so the root is what keeps them (R9-188).
     # Fail-soft inside the loop: a failed write degrades the record, never the call.
     loop = StreamingLoop(
         voice_room=voice_room,
@@ -932,7 +947,7 @@ async def build_agent_session(
         tts=tts_seam,
         model=producer,
         first_audio_timeout_s=config.turn_first_audio_timeout_s,
-        voice_log_writer=JSONLVoiceLogWriter(audit_root / f"{persona_id}.voice-turns.jsonl"),
+        voice_log_writer=JSONLVoiceLogWriter(audit.voice_log_path(persona_id)),
     )
     # The A1 data-channel broadcaster implements BOTH the V4 state-listener seam
     # (orb) AND the V6 caption-listener seam (captions) over one room+topic, so it
