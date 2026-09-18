@@ -158,6 +158,13 @@ def task_leg_idempotency_key(payload: TaskLegPayload, *, retry: int = 0) -> str:
     pickup, or an approval answered after the park, collided with the dead row's key and was
     silently absorbed until the archive sweep freed it a day later (R9-130). A double enqueue
     of the same retry still dedups; a re-delivery still no-ops at the store CAS.
+
+    The anchor is ``head_checkpoint_seq`` wearing a second hat (R9-173): the revival sweep
+    (``persona_api.tasks.revival_sweep.RevivalSweeper._dead_cause_at_head``, via ``_head_key``)
+    finds a dead leg by matching its dead job on ``task:{id}:after:{current head}``, and the
+    field itself is documented on ``persona.tasks.entity.Task``. So a park or gate path that
+    appends a checkpoint must re-key or re-enqueue, or the dead-job match is lost. Change the
+    shape here and the sweep's prefix together, or a revival silently finds nothing.
     """
     anchor = "init" if payload.predecessor_seq is None else str(payload.predecessor_seq)
     base = f"task:{payload.task_id}:after:{anchor}"

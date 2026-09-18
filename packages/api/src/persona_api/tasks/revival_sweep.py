@@ -232,6 +232,14 @@ class RevivalSweeper:
         fresh transient failure and resume a leg the task is not waiting for. The head is what
         makes a dead row current, so the key is what is matched: ``task:{id}:after:{head}``,
         with or without the ``:retry:N`` suffix a later attempt appends.
+
+        That makes ``head_checkpoint_seq`` a correlation key as well as a chain pointer
+        (R9-173). The key is minted by ``persona_api.tasks.handler.task_leg_idempotency_key``
+        and the field is defined on ``persona.tasks.entity.Task``; the three sites must agree.
+        The rule that follows: a park or gate path that appends a checkpoint must re-key or
+        re-enqueue, or the dead-job match is lost. The stuck park records no obstacle
+        checkpoint for exactly this reason (``TaskContinuation.react_to_dead_leg``), and the
+        approval gate may append because no dead job exists at its head.
         """
         prefix = f"task:{task_id}:after:{_head_key(head)}"
         stmt = (
@@ -365,5 +373,9 @@ class RevivalSweeper:
 
 
 def _head_key(head: int | None) -> str:
-    """The head a revival is keyed on; ``init`` before the first checkpoint (the leg-key shape)."""
+    """The head a revival is keyed on; ``init`` before the first checkpoint (the leg-key shape).
+
+    Must stay byte-identical to the anchor ``task_leg_idempotency_key`` writes (R9-173): the
+    sweep matches dead jobs on it, so the two spellings drifting apart reads as "no dead leg".
+    """
     return "init" if head is None else str(head)

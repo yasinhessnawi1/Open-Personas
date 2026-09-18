@@ -354,6 +354,9 @@ async def test_pickup_after_a_dead_letter_enqueues_a_claimable_leg_the_worker_ru
     assert res.json()["changed"] is True
     jobs = _jobs_for(su_engine, task_id)
     assert [j["state"] for j in jobs] == ["dead", "queued"]
+    # ``after:init`` because the park left the head where the dead job was enqueued; had the park
+    # appended a checkpoint, the pickup would key ``after:0`` and the revival sweep would no
+    # longer find the dead row at all (R9-173).
     assert jobs[1]["idempotency_key"] == f"task:{task_id}:after:init:retry:1"  # not absorbed
 
     # A second pickup dedups to that one queued job (A0's invariant, kept).

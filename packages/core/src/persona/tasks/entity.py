@@ -63,6 +63,13 @@ class Task(BaseModel):
         ledger: Cumulative spend (A2 accounts what A0 meters).
         head_checkpoint_seq: The latest committed checkpoint sequence (``None`` before the
             first checkpoint); the CAS predecessor a re-delivered leg keys on (A2-R-4).
+            It has a second job (R9-173): it is the correlation key between a task and
+            the job that died on it. ``persona_api.tasks.handler.task_leg_idempotency_key``
+            keys every enqueued leg ``task:{id}:after:{head}``, and the revival sweep
+            (``persona_api.tasks.revival_sweep.RevivalSweeper._dead_cause_at_head``) finds
+            a dead leg by matching a dead job on that same key at the CURRENT head. So a
+            park or gate path that appends a checkpoint must re-key or re-enqueue, or the
+            dead-job match is lost and a transient failure is never picked up again.
         conversation_id: Originating/linked conversation (A4/A6 consume).
         run_ids: The leg run ids accumulated so far.
         workspace_id: The task-scoped Spec-12 workspace.

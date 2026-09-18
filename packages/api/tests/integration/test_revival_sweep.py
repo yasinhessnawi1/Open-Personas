@@ -325,6 +325,8 @@ async def test_a_transient_dead_letter_is_picked_up_once_on_the_users_behalf(
     assert await sweeper.run_once(now=datetime.now(UTC)) == 1
     states = _jobs(su_engine, task.id)
     assert [s for s, _ in states] == ["dead", "queued"], states
+    # ``after:init`` is the head the dead job was enqueued at: the sweep found the dead row by
+    # that same head, and the pickup is keyed past it (R9-173, the coupling in one line).
     assert states[1][1] == f"task:{task.id}:after:init:retry:1"  # past the dead row
 
     # ONCE per park: a second tick does not pick the same one up again.
@@ -338,6 +340,73 @@ async def test_a_transient_dead_letter_is_picked_up_once_on_the_users_behalf(
             {"a": REVIVAL_AUDIT_ACTION, "t": task.id},
         ).scalar_one()
     assert marks == 1  # the once-marker, written before the resume
+
+
+@pytest.mark.asyncio
+async def test_appending_a_checkpoint_at_the_park_loses_the_dead_leg(
+    app_engine: Engine, su_engine: Engine
+) -> None:
+    """R9-173, by name: ``head_checkpoint_seq`` is the dead-job correlation key, not only a pointer.
+
+    Two tasks dead-letter the same transient way at head ``init`` and both park through the
+    REAL dead-leg reaction. One is left exactly as the stuck park leaves it. The other then
+    has an obstacle checkpoint appended by the real park-path append routine
+    (``_record_obstacle``, the approval gate's), which is what an earlier stuck-park draft
+    did. The head moves to ``0``; the dead job still says ``after:init``; the sweep looks for
+    a dead job at ``after:0``, finds none, and returns zero for that task, silently.
+
+    This asserts the CURRENT behaviour precisely, so that changing any of the three sites
+    (the key the handler mints, the prefix the sweep matches, a park path that starts
+    appending) trips here with the finding's name on it. Decoupling the two roles (reading the
+    cause off the head checkpoint) is its own spec; until then the rule stands: a park or gate
+    path that appends a checkpoint must re-key or re-enqueue.
+
+    Its near neighbour ``test_a_dead_leg_at_an_older_head_is_not_read_as_a_fresh_failure``
+    moves the head by hand and reads the same silence as the WANTED outcome, because there the
+    task really did move on. Same mechanism, opposite verdict, and that is the trap: nothing in
+    the row says which of the two happened. The same agreement without a database, for the runs
+    that have none, is ``packages/api/tests/unit/tasks/test_dead_leg_correlation_key.py``.
+    """
+    kept = _task(app_engine, "t_head_kept", "brief hacker news", at=datetime.now(UTC))
+    moved = _task(app_engine, "t_head_moved", "summarise the inbox", at=datetime.now(UTC))
+    for task in (kept, moved):
+        enqueue_task_leg(
+            JobQueue(app_engine),
+            owner_id=_UID,
+            task_id=task.id,
+            predecessor_seq=None,
+            trigger=_fire(),
+        )
+        _dead_letter(su_engine, task.id, "rate limit exceeded on every provider")
+    _park_on_the_dead_leg(app_engine, su_engine, kept.id)  # one sweep parks both dead letters
+    parked = TaskStore(app_engine).get(_UID, moved.id)
+    assert parked.state is TaskState.WAITING
+    assert parked.head_checkpoint_seq is None  # the dead job was enqueued at ``init``
+
+    # The append the finding describes: real routine, real store, on the parked task.
+    continuation = TaskContinuation(
+        task_store=TaskStore(app_engine),
+        queue=JobQueue(app_engine),
+        checkpoint_store=CheckpointStore(app_engine),
+    )
+    continuation._record_obstacle(
+        _UID, parked, "the portal rejected the login", now=datetime.now(UTC)
+    )
+    assert TaskStore(app_engine).get(_UID, moved.id).head_checkpoint_seq == 0  # head moved
+    assert _jobs(su_engine, moved.id) == [("dead", f"task:{moved.id}:after:init")]  # key did not
+
+    for task in (kept, moved):
+        _age(su_engine, task.id, by=TRANSIENT_RETRY_AFTER + timedelta(minutes=1))
+    assert await _sweeper(app_engine, su_engine).run_once(now=datetime.now(UTC)) == 1
+
+    kept_jobs = _jobs(su_engine, kept.id)
+    assert [s for s, _ in kept_jobs] == ["dead", "queued"], kept_jobs
+    assert kept_jobs[1][1] == f"task:{kept.id}:after:init:retry:1"  # matched at the unmoved head
+    # Same cause, same dead row, and the sweep cannot see it. It skips the candidate down the
+    # same branch a deterministic failure takes, so there is no error and no line a user would
+    # ever see: the task just sits there. That silence is what R9-173 is about.
+    assert _jobs(su_engine, moved.id) == [("dead", f"task:{moved.id}:after:init")]
+    assert TaskStore(app_engine).get(_UID, moved.id).state is TaskState.WAITING
 
 
 @pytest.mark.asyncio
