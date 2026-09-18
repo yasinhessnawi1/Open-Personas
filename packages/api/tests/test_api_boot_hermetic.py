@@ -134,30 +134,42 @@ class TestOfflineBootDegrades:
         fresh = CrisisEncoder()
         monkeypatch.setattr(crisis_mod, "build_crisis_encoder", lambda: fresh)
 
-        started = time.monotonic()
+        boot_started = time.monotonic()
         app = create_app(_community_config(tmp_path))
+        boot_s = time.monotonic() - boot_started
         with TestClient(app) as client:
             resp = client.get("/openapi.json")
             assert resp.status_code == 200, resp.text
-            # The warmup runs in the background, so wait (bounded) for its verdict. 15s
-            # measured too tight on a real machine: the lazy `import sentence_transformers`
-            # inside the locked loader, plus first-time app-boot imports competing for the
-            # GIL, can alone take longer than that when this is the first test in the
-            # process to touch either. 45s keeps real headroom under the 60s outer bound
-            # below and pytest's 120s backstop, without weakening what this asserts.
-            deadline = time.monotonic() + 45.0
+            # The warmup runs in the background, so wait (bounded) for its verdict. The
+            # wait is dominated by the lazy `import sentence_transformers` inside the locked
+            # loader plus app-boot imports competing for the GIL, both of which stretch
+            # with whatever else the machine is running (R9-156: ~37 s solo, 2.6x beside
+            # the integration suite, and a constant bound had no headroom left). So the
+            # bound scales off THIS process's own measured boot cost, floored at 45 s and
+            # kept under pytest's 120 s backstop; the guarantee itself is asserted from
+            # the log below, not from the clock.
+            poll_s = min(110.0, max(45.0, 6.0 * boot_s))
+            deadline = time.monotonic() + poll_s
             while time.monotonic() < deadline:
                 if any("crisis-encoder warm-up" in line for line in loguru_capture):
                     break
                 time.sleep(0.05)
-            assert any("crisis-encoder warm-up failed" in line for line in loguru_capture), (
-                f"expected the offline cold-cache load to fail fast and WARN; got {loguru_capture}"
+            failed_lines = [ln for ln in loguru_capture if "crisis-encoder warm-up failed" in ln]
+            assert failed_lines, (
+                f"expected the offline cold-cache load to fail fast and WARN within "
+                f"{poll_s:.0f}s (boot took {boot_s:.1f}s); got {loguru_capture}"
             )
             assert fresh._head is None  # noqa: SLF001 — degraded: unfitted, lexical-only
             # Degraded ≠ down: the app keeps serving while lexical-only.
             assert client.get("/openapi.json").status_code == 200
-        elapsed = time.monotonic() - started
-        assert elapsed < 60.0, f"offline boot+shutdown took {elapsed:.1f}s — retry-ladder class"
+        # The guarantee, stated from the app's own record rather than a stopwatch: the
+        # load failed ONCE (no retry ladder re-entered it) and the hang-guard deadline
+        # never had to fire (the failure came from the loader raising fast, which is the
+        # pre-fix retry-ladder class this test exists to keep out).
+        assert len(failed_lines) == 1, f"the warm-up failed more than once: {failed_lines}"
+        assert not any("exceeded its" in line and "deadline" in line for line in loguru_capture), (
+            f"the warm-up hit the hang-guard deadline instead of failing fast: {loguru_capture}"
+        )
 
     def test_shutdown_returns_within_bound_with_a_stuck_loader(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: Embedder

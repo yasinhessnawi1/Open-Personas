@@ -188,6 +188,10 @@ class TestAgenticPathWiring:
 
 class TestWarmupHelpers:
     def test_build_crisis_encoder_is_lazy(self) -> None:
+        # R9-153: the builder is ``@lru_cache(maxsize=1)``, a process-wide singleton, so an
+        # earlier test in the same process that warmed it would make "no head yet" false.
+        # Clear the cache so the assertion is about construction, not about test order.
+        build_crisis_encoder.cache_clear()
         enc = build_crisis_encoder()
         assert isinstance(enc, CrisisEncoder)
         assert enc._head is None  # noqa: SLF001 — no model loaded at construction (lazy)
@@ -291,7 +295,10 @@ class TestWarmupBounds:
         await task  # must RETURN at the deadline — never wait for the stuck load
         elapsed = time.monotonic() - started
         assert elapsed < 5.0, f"warm-up task did not detach at the deadline ({elapsed:.1f}s)"
-        assert body.entered.wait(timeout=5.0), "the load thread never started loading"
+        # The load thread imports the encoder stack before it reaches the body; under a
+        # loaded machine (R9-153 sibling, seen at load 19) that took longer than 5 s.
+        # The bound is the embedder's own 30 s safety ceiling: green costs nothing more.
+        assert body.entered.wait(timeout=30.0), "the load thread never started loading"
 
         # Degraded posture: unfitted; a call-time score raises CrisisEncoderError
         # (the single fail-soft seam) and classify absorbs it to lexical-only.
