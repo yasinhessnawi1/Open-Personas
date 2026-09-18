@@ -72,6 +72,8 @@ from persona_runtime.legs import (
     LegDisposition,
     LegExecutor,
     evidence_from_run,
+    milestone_for,
+    render_milestone_summary,
 )
 
 from persona_api.services import run_record
@@ -93,6 +95,7 @@ if TYPE_CHECKING:
         AgenticRunner,
         CheckpointWriter,
         LegOutcome,
+        MilestoneRecorder,
     )
     from sqlalchemy import Engine
 
@@ -604,6 +607,7 @@ class TaskLegHandler:
         recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
         retrieval: LegRetrieval | None = None,
         acceptance: AcceptanceAssessor | None = None,
+        milestones: MilestoneRecorder | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -627,6 +631,12 @@ class TaskLegHandler:
         # contract's criteria it settled. Optional; ``None`` leaves every criterion pending,
         # which is what the system did before it existed. The core gate decides what lands.
         self._acceptance = acceptance
+        # Spec A2 (T10, D-A2-4): the persona's episodic memory of its own task. ``None`` (a
+        # plain A2 worker, the unit shape) leaves a task with no narrative trace at all, which
+        # is what every install had until this was wired: the recorder, the gate and the sink
+        # were written and tested and no production module ever constructed one, so a persona
+        # that ran a task for five days could not afterwards say that it had.
+        self._milestones = milestones
         # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
         # continuation applies. Optional + best-effort; a plain A2 worker wires none.
         self._on_milestone = on_milestone
@@ -971,6 +981,13 @@ class TaskLegHandler:
             LegDisposition.WAITING_USER,
         ):
             await self._bill_leg(owner, payload.task_id, seq, cost)
+        # Spec A2 (T10, D-A2-4): what the persona will REMEMBER of this leg. At the same
+        # boundary as the spend accounting and before the continuation, because a FAILED
+        # outcome raises out of ``apply`` and a failure the persona cannot recall is the one
+        # a user is most likely to ask about afterwards.
+        self._record_milestone(
+            task, prior=prior, outcome=outcome, is_first_leg=payload.predecessor_seq is None
+        )
         # Spec W1 (D-W1-21): a leg a control stopped enqueues nothing further. Its checkpoint
         # landed above (the salvage rode the CAS append) and the task row already carries the
         # user's decision; a continuation would only create a job the claim skips.
@@ -1054,6 +1071,63 @@ class TaskLegHandler:
                 _log.warning(
                     "task lifecycle emit failed task_id={tid}: {err}", tid=task.id, err=str(exc)
                 )
+
+    def _record_milestone(
+        self,
+        task: Task,
+        *,
+        prior: TaskCheckpoint | None,
+        outcome: LegOutcome,
+        is_first_leg: bool,
+    ) -> None:
+        """Leave one episodic memory of this leg, if the leg was worth remembering (D-A2-4).
+
+        The gate is :func:`~persona_runtime.legs.milestone_for`, unchanged and pure: a terminal
+        outcome, the first leg, or a leg that reached a NEW conclusion. An ordinary CONTINUE leg
+        that merely advanced records nothing, which is the whole restraint. WAITING is not
+        decided here; it belongs to the wait transition, and
+        :meth:`~persona_api.tasks.continuation.TaskContinuation.wait_on_user` emits it.
+
+        A gated leg (``WAITING_APPROVAL``) carries no checkpoint because it executed nothing, so
+        there is nothing to compare and nothing to record; its park writes the waiting note.
+
+        At-least-once, like the leg's ``runs`` row and its A0 metering: a re-delivered leg
+        re-runs and writes a second note, while the checkpoint and the ledger stay exactly-once
+        on the store CAS. Milestones are the rare shape (the gate rejects the common leg), and
+        the alternative is a read on every write along a path whose point is restraint.
+
+        Fail-soft, deliberately: memory is a side effect of the work, never a precondition for
+        it. A leg whose milestone could not be written has still done its job.
+        """
+        if self._milestones is None or outcome.checkpoint is None:
+            return
+        milestone = milestone_for(
+            is_first_leg=is_first_leg,
+            prior_checkpoint=prior,
+            new_checkpoint=outcome.checkpoint,
+            disposition=outcome.disposition,
+        )
+        if milestone is None:
+            return
+        conclusions = outcome.checkpoint.progress_conclusions
+        try:
+            self._milestones.record(
+                task.persona_id,
+                milestone,
+                render_milestone_summary(
+                    milestone,
+                    goal=task.contract.goal,
+                    detail=conclusions[-1] if conclusions else None,
+                ),
+                task_id=task.id,
+            )
+        except Exception as exc:  # noqa: BLE001 — memory is additive; never fail a done leg
+            _log.warning(
+                "task milestone memory write failed task_id={tid} milestone={m}: {err}",
+                tid=task.id,
+                m=milestone.value,
+                err=str(exc),
+            )
 
     def _leg_box(self, owner: str, task: Task) -> LegBox:
         """This leg's bounds: the configured box, plus the task's remaining budget (R9-176).
@@ -1262,6 +1336,7 @@ def register_task_leg_handler(
     recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
     retrieval: LegRetrieval | None = None,
     acceptance: AcceptanceAssessor | None = None,
+    milestones: MilestoneRecorder | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -1290,6 +1365,7 @@ def register_task_leg_handler(
                 recent_leg_summaries=recent_leg_summaries,
                 retrieval=retrieval,
                 acceptance=acceptance,
+                milestones=milestones,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=TASK_LEG_RETRY_POLICY,

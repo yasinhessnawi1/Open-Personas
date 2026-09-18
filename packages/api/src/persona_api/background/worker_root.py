@@ -65,7 +65,7 @@ from persona.stores.summarizer import TierSummarizer
 from persona.tasks import LegBox
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
-from persona_runtime.legs import CompactingCheckpointWriter
+from persona_runtime.legs import CompactingCheckpointWriter, MilestoneRecorder
 from persona_runtime.legs.acceptance import AcceptanceAssessor
 from persona_runtime.legs.semantic_distiller import SemanticCheckpointWriter
 from persona_runtime.routing import tier_for
@@ -860,6 +860,17 @@ def _register_task_leg_tenant(
     # what a leg is allowed to carry forward.
     checkpoint_token_budget = config.task_checkpoint_token_budget
 
+    # Spec A2 (T10, D-A2-4): the task's own memory. The recorder writes into the SAME episodic
+    # store the persona reads from in chat and the same one a leg's retrieval queries
+    # (``runtime_factory.build_task_episodic_store`` composes both), so a milestone lands
+    # where the persona will actually look for it. One instance for every leg this worker
+    # runs: the store takes the persona per call and the worker binds the job owner's RLS
+    # scope before the handler runs, exactly as the shared graph store relies on.
+    #
+    # Wired at BOTH emitters: the handler records what a leg achieved, the continuation
+    # records the wait, and they share one recorder so a task's memory has one voice.
+    milestones = MilestoneRecorder(runtime_factory.build_task_episodic_store())
+
     # Spec A11/A6 (W8): a background task transition pings the owner's open tabs (task.updated),
     # which refetch A6's Review/Tasks/Approvals live. Best-effort over the A11 channel; no channel
     # (community / no open tab) → the surface catches up on its next poll (the durable floor).
@@ -874,6 +885,7 @@ def _register_task_leg_tenant(
         # WAITING (recurring, more fires) vs task-complete (one-time / exhausted).
         schedule_store=ScheduleStore(rls_engine),
         on_state_change=_emit_task_updated,
+        milestones=milestones,
     )
     on_milestone = _build_milestone_hook(
         rls_engine=rls_engine,
@@ -944,6 +956,10 @@ def _register_task_leg_tenant(
         # user agreed, through the core gate that refuses an unevidenced claim.
         acceptance=acceptance,
         on_milestone=on_milestone,
+        # Spec A2 (T10): the EPISODIC half of a milestone. ``on_milestone`` above delivers the
+        # digest the user reads; this is what the persona itself remembers afterwards. Two
+        # different audiences, so two hooks, off one gate.
+        milestones=milestones,
         on_leg_settled=on_leg_settled,
         runnable_guard=runnable_guard,
         budget_gate=budget_gate,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 
@@ -32,11 +32,18 @@ if TYPE_CHECKING:
     from persona_runtime.legs.executor import LegDisposition
 
 __all__ = [
+    "MILESTONE_TEXT_CAP",
     "MilestoneRecorder",
     "TaskEpisodicSink",
     "TaskMilestone",
     "milestone_for",
+    "render_milestone_summary",
 ]
+
+#: How much of a goal (or of a leg's conclusion) one milestone note carries. A goal can run to
+#: a paragraph; the note is a memory of what happened, not a second copy of the contract, and
+#: it competes for the persona's recall budget with everything else it remembers.
+MILESTONE_TEXT_CAP: Final = 200
 
 
 class TaskMilestone(StrEnum):
@@ -123,6 +130,50 @@ def milestone_for(
     if len(new_checkpoint.progress_conclusions) > prior_n:
         return TaskMilestone.MAJOR_PROGRESS
     return None
+
+
+def render_milestone_summary(
+    milestone: TaskMilestone, *, goal: str, detail: str | None = None
+) -> str:
+    """The one sentence a milestone leaves in the persona's episodic memory.
+
+    ONE renderer for both emitters (the leg handler at the leg boundary, the continuation at
+    the wait transition), so a task's memory reads the same whichever of them recorded it.
+
+    It names the GOAL, because the persona recalls this months later with no task row in
+    hand: "did you ever look into the flat search?" is answered from this text alone.
+    ``detail`` is the new conclusion a major-progress leg reached and is carried only there;
+    for the other four the news is what happened, not what was learned.
+
+    Args:
+        milestone: Which milestone this is.
+        goal: The task contract's goal, as the person stated it.
+        detail: The conclusion this leg added, for ``MAJOR_PROGRESS``.
+
+    Returns:
+        A first-person sentence, single-line, with the goal capped at
+        :data:`MILESTONE_TEXT_CAP`.
+    """
+    named = _one_line(goal) or "an unnamed task"
+    if milestone is TaskMilestone.TASK_STARTED:
+        return f"I started working on a task: {named}."
+    if milestone is TaskMilestone.MAJOR_PROGRESS:
+        line = f"I made progress on a task: {named}."
+        found = _one_line(detail or "")
+        return f"{line} What I found: {found}" if found else line
+    if milestone is TaskMilestone.WAITING:
+        return f"I paused a task and I am waiting on you before I carry on: {named}."
+    if milestone is TaskMilestone.COMPLETED:
+        return f"I completed a task: {named}."
+    return f"A task of mine failed and I could not finish it: {named}."
+
+
+def _one_line(text: str) -> str:
+    """Whitespace-collapsed, trimmed, capped at :data:`MILESTONE_TEXT_CAP`."""
+    flat = " ".join(text.split())
+    if len(flat) <= MILESTONE_TEXT_CAP:
+        return flat
+    return flat[: MILESTONE_TEXT_CAP - 1].rstrip() + "…"
 
 
 class MilestoneRecorder:

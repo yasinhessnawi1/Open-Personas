@@ -38,7 +38,7 @@ from persona.tasks import (
     build_cancellation_summary,
     build_stuck_report,
 )
-from persona_runtime.legs import LegDisposition
+from persona_runtime.legs import LegDisposition, TaskMilestone, render_milestone_summary
 
 from persona_api.tasks.handler import (
     TASK_LEG_JOB_TYPE,
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         StuckReport,
         Task,
     )
-    from persona_runtime.legs import LegOutcome
+    from persona_runtime.legs import LegOutcome, MilestoneRecorder
 
     from persona_api.jobs.queue import JobQueue
     from persona_api.schedules.store import ScheduleStore
@@ -83,6 +83,7 @@ class TaskContinuation:
         checkpoint_store: CheckpointStore | None = None,
         schedule_store: ScheduleStore | None = None,
         on_state_change: TaskStateSignal | None = None,
+        milestones: MilestoneRecorder | None = None,
     ) -> None:
         self._tasks = task_store
         self._queue = queue
@@ -96,6 +97,12 @@ class TaskContinuation:
         # surfaces care about — terminal + waiting(on_user). Best-effort + AFTER the durable write
         # (surface-lags-truth). None → no ping (the surface catches up on its next poll).
         self._on_state_change = on_state_change
+        # Spec A2 (T10, D-A2-4): the persona's episodic memory of its own task. WAITING is the
+        # one milestone ``milestone_for`` does not decide, because waiting is a property of the
+        # TRANSITION rather than of the leg that ran, and every wait transition there is goes
+        # through :meth:`wait_on_user`. ``None`` → no milestone memory (the plain A2 shape, and
+        # the routes and tests that build a continuation of their own).
+        self._milestones = milestones
 
     def _signal(self, owner_id: str, task_id: str, state: str) -> None:
         """Best-effort task.updated ping — a subscriber failure never breaks the transition."""
@@ -226,10 +233,44 @@ class TaskContinuation:
 
         The leg posed an approval/question (C0 delivers it); the task is dormant until
         :meth:`resume` is called with the reply. No job is enqueued — that is the zero-cost.
+
+        This is also the ONE wait transition, so it is where the WAITING milestone is
+        remembered (D-A2-4). All three parks arrive here: the approval gate, the leg that
+        ended on a question, and :meth:`park_at_bound`.
         """
         self._tasks.begin_wait(owner_id, task_id, WaitKind.ON_USER, now=now)
         _log.info("task waiting(on_user)", task_id=task_id)
         self._signal(owner_id, task_id, TaskState.WAITING.value)  # waiting_on_user — A11 ping
+        self._record_waiting(owner_id, task_id)
+
+    def _record_waiting(self, owner_id: str, task_id: str) -> None:
+        """Remember that this task is waiting on the person (Spec A2, T10; D-A2-4).
+
+        The task row is read here rather than taken as an argument because the three parks
+        reach :meth:`wait_on_user` with a task id and nothing else, and the note needs the
+        persona it belongs to and the goal it names. One indexed read on a path that runs
+        once per park, which is the rarest transition a task makes.
+
+        Fail-soft: the park is the durable outcome and it has already happened. A memory the
+        store would not take is worth a warning, never the state change.
+        """
+        if self._milestones is None:
+            return
+        try:
+            task = self._tasks.get(owner_id, task_id)
+            self._milestones.record(
+                task.persona_id,
+                TaskMilestone.WAITING,
+                render_milestone_summary(TaskMilestone.WAITING, goal=task.contract.goal),
+                task_id=task_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — additive; the park stands either way
+            _log.warning(
+                "task milestone memory write failed task_id={tid} milestone={m}: {err}",
+                tid=task_id,
+                m=TaskMilestone.WAITING.value,
+                err=str(exc),
+            )
 
     def resume(
         self,

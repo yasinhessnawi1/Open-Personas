@@ -55,6 +55,17 @@ class _StubRuntimeFactory:
     def build_task_recall(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover
         return None
 
+    def build_task_episodic_store(self) -> _NoEpisodicSink:
+        """The milestone recorder is composed over this at registration and never called here."""
+        return _NoEpisodicSink()
+
+
+class _NoEpisodicSink:
+    """A sink nothing writes to: composition only needs an object to hand the recorder."""
+
+    def add(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover
+        raise AssertionError("no leg runs in this test, so nothing should be remembered")
+
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:

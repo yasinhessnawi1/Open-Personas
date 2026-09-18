@@ -2011,6 +2011,24 @@ class RuntimeFactory:
         """
         return self._build_unified_recall(persona_id)
 
+    def build_task_episodic_store(self) -> MemoryStore:
+        """The persona's REAL episodic store, for a task's milestone memory (Spec A2, T10).
+
+        The same store the chat turn writes its turns to and the same one
+        :meth:`build_task_recall` reads from: one backend
+        (:meth:`_memory_backend_for` picks Postgres on cloud, Chroma on community) and the
+        edition's audit logger, exactly as ``_build_stores`` and ``_build_unified_recall``
+        compose them. A task's milestone has to land where the persona later looks, so it is
+        composed here rather than assembled a second time at the worker root.
+
+        Persona-agnostic on purpose: the store takes ``persona_id`` per call, and the worker
+        binds the job owner's RLS scope before the handler runs, so one instance serves every
+        leg the worker executes.
+        """
+        return EpisodicStore(
+            backend=self._memory_backend_for(), audit_logger=self._resolve_audit_logger()
+        )
+
     def _context_cost_ceiling(self) -> int:
         """The per-step context cost above which a run trims old tool results (D-W1-13).
 
