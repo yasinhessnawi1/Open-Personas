@@ -17,10 +17,12 @@ import logging
 import pytest
 from persona.backends.config import DEFAULT_BASE_URLS
 from persona.backends.credentials import (
+    FREE_BY_DEFINITION_OPENROUTER_SLUGS,
     ProviderCredentialResolver,
     ProviderCredentials,
     TierResolution,
     filter_openrouter_free_mode,
+    is_free_openrouter_slot,
     parse_models_list,
     resolve_tier_config,
 )
@@ -480,3 +482,52 @@ class TestFilterOpenRouterFreeMode:
             models, mode="free", tier_name="frontier", keep_free_suffix=True
         )
         assert out == []
+
+
+class TestFreeByDefinitionAllowlist:
+    """R9-179 item 1, ``openrouter/free`` is free without the ``:free`` suffix."""
+
+    def test_allowlisted_slug_is_kept_in_free_mode(self) -> None:
+        # The free-only auto-router is the LAST fallback of both free chains; the
+        # suffix rule alone dropped it, so free-mode silently lost its safety net.
+        models = [("openrouter", "free")]
+        out = filter_openrouter_free_mode(
+            models, mode="free", tier_name="frontier", keep_free_suffix=True
+        )
+        assert out == models
+
+    def test_paid_slug_is_still_dropped_in_free_mode(self) -> None:
+        # The allowlist is an exception, not an amnesty: a paid slug still goes.
+        out = filter_openrouter_free_mode(
+            [("openrouter", "anthropic/claude-3.5-sonnet")],
+            mode="free",
+            tier_name="frontier",
+            keep_free_suffix=True,
+        )
+        assert out == []
+
+    def test_free_suffix_is_still_kept_in_free_mode(self) -> None:
+        models = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free")]
+        out = filter_openrouter_free_mode(
+            models, mode="free", tier_name="frontier", keep_free_suffix=True
+        )
+        assert out == models
+
+    def test_allowlisted_slug_is_dropped_on_the_image_posture(self) -> None:
+        # keep_free_suffix=False drops every OpenRouter entry: the auto-router is a
+        # CHAT router, so no image tier should be reprieved by the allowlist.
+        out = filter_openrouter_free_mode(
+            [("openrouter", "free")], mode="free", tier_name="imagegen", keep_free_suffix=False
+        )
+        assert out == []
+
+    def test_predicate_agrees_with_the_filter(self) -> None:
+        assert is_free_openrouter_slot("openrouter", "free")
+        assert is_free_openrouter_slot("openrouter", "meta-llama/llama-3.3-70b-instruct:free")
+        assert not is_free_openrouter_slot("openrouter", "anthropic/claude-3.5-sonnet")
+        # Only OpenRouter bills per free-account request; a same-named slug elsewhere is not it.
+        assert not is_free_openrouter_slot("nvidia", "free")
+
+    def test_allowlist_names_the_auto_router(self) -> None:
+        # Pins the constant's CONTENT: emptying it is the mutation this test catches.
+        assert "openrouter/free" in FREE_BY_DEFINITION_OPENROUTER_SLUGS

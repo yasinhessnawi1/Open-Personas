@@ -13,6 +13,11 @@ preferred; else the resolver estimate; else the floor), charge idempotently
 
 **Fail-soft everywhere** — a billing hiccup must NEVER break the background op (the
 op is the deliverable; the charge is enrichment).
+
+R9-179 item 3: the served ``(provider, model)`` pair this helper already receives is
+also the api's attribution point for background surfaces, so the free-model daily
+request meter reads it here, background jobs on a free chain spend the same
+account-wide cap a free user's turn does.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from typing import TYPE_CHECKING
 from persona.billing import BillingConfig, credits_charged
 from persona.logging import get_logger
 from persona_runtime.cost import compute_turn_cost
+
+from persona_api.services.free_model_usage import FreeModelDailyCounter
 
 if TYPE_CHECKING:
     from persona_runtime.cost import CostSource
@@ -73,6 +80,11 @@ def bill_background_llm(
     # A surface that made no real model call (0 tokens, no cost) charges nothing.
     if prompt_tokens <= 0 and completion_tokens <= 0 and not cost_usd:
         return
+    # R9-179 item 3, a background op on a free chain spends the SAME account-wide
+    # daily cap a free user's turn does, and this is where the api already knows which
+    # model served it. Meter it from that pair rather than from a second attribution.
+    # Fail-soft inside the counter; a paid model is not counted.
+    FreeModelDailyCounter.from_env(rls_engine).record_served(provider=provider, model=model)
     config = billing_config or BillingConfig()
     try:
         cost_cents, basis = compute_turn_cost(

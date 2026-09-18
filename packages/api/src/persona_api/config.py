@@ -790,6 +790,18 @@ class APIConfig(BaseSettings):
     # from ``PERSONA_API_MAX_TURN_CREDITS``.
     max_turn_credits: int = 500
 
+    # R9-179 item 3: OpenRouter's free-model request ceiling, per UTC day and
+    # ACCOUNT-WIDE, shared by every free-plan user's turn and every background job
+    # that runs on a free chain. 1,000 since credits were bought on the account; it
+    # was 50 before that, and OpenRouter can change it, so it is a knob rather than a
+    # constant. Read by ``FreeModelDailyCounter``, which counts free-model requests
+    # per UTC day and logs at 25/50/75 percent (INFO) and 90 percent (WARNING).
+    # ``<= 0`` disables the meter entirely (a deployment not on a capped free plan).
+    # Read from ``PERSONA_OPENROUTER_FREE_DAILY_CAP``.
+    openrouter_free_daily_cap: int = Field(
+        default=1000, ge=0, validation_alias="PERSONA_OPENROUTER_FREE_DAILY_CAP"
+    )
+
     # CORS origins allowed to call the API from a browser (spec-09 web app).
     # Comma-separated; the web dev server is http://localhost:3000 by default.
     # Empty disables CORS (server-to-server only). Read from PERSONA_API_CORS_ORIGINS.

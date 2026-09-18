@@ -109,6 +109,7 @@ from persona_api.services import persona_service
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.flag_report import log_effective_flags
+from persona_api.services.free_model_usage import FreeModelDailyCounter
 from persona_api.services.model_tiers import (
     build_free_tier_registry,
     resolve_openrouter_subscription_mode,
@@ -667,8 +668,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 tier_registry=tier_registry,
                 # Spec M4 (T5a): the free-only registry (cloud) or None (community → no gating).
                 free_tier_registry=free_tier_registry,
-                # Postgres turn_logs (D-08-7); RLS-scoped via conversations.
-                turn_log_writer=PostgresTurnLogWriter(rls_engine),
+                # Postgres turn_logs (D-08-7); RLS-scoped via conversations. The
+                # served pair on that row also feeds the free-model daily meter
+                # (R9-179 item 3), one attribution point, two readers.
+                turn_log_writer=PostgresTurnLogWriter(
+                    rls_engine,
+                    free_model_counter=FreeModelDailyCounter(
+                        rls_engine, daily_cap=config.openrouter_free_daily_cap
+                    ),
+                ),
                 audit_root=Path(config.audit_root),
                 # R5-D-2: the app-selected audit backend (Postgres when
                 # multi-worker). audit_root stays the JSONL fallback.

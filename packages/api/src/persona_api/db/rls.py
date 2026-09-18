@@ -50,6 +50,12 @@ RLS_EXEMPT_TABLES: tuple[str, ...] = (
     "audit_log",
     # Keyed by user_id but accessed by the platform's own limiter, never per-tenant (Spec 08).
     "rate_limit_buckets",
+    # R9-179 item 3: the free-model daily request meter. Account-wide by nature, the cap
+    # it measures belongs to OUR OpenRouter account, shared by every free user and every
+    # background job, so the table carries no user column at all and a per-tenant view of
+    # it would be meaningless. Named here so the exemption is deliberate and discoverable,
+    # not merely invisible to the owner_id/user_id discovery query.
+    "free_model_daily_usage",
 )
 
 _CUR = "current_setting('app.current_user_id', true)"

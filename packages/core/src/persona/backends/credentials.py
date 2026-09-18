@@ -40,10 +40,12 @@ if TYPE_CHECKING:
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
 
 __all__ = [
+    "FREE_BY_DEFINITION_OPENROUTER_SLUGS",
     "ProviderCredentials",
     "ProviderCredentialResolver",
     "TierResolution",
     "filter_openrouter_free_mode",
+    "is_free_openrouter_slot",
     "parse_models_list",
     "resolve_tier_config",
 ]
@@ -311,6 +313,45 @@ def parse_models_list(tier_name: str, raw_value: str) -> list[tuple[Provider, st
     return results
 
 
+#: OpenRouter slugs that are free BY DEFINITION although they carry no ``:free`` suffix.
+#:
+#: The free-mode filter's ``:free``-suffix test is a PROXY for "this model costs a
+#: free-plan user nothing". The proxy is right for every ``<vendor>/<model>:free``
+#: entry and wrong for exactly one slug, so the exception is named here rather than
+#: widening the proxy into a guess:
+#:
+#: * ``openrouter/free``, OpenRouter's own free-only auto-router. It selects among
+#:   free models ONLY, so it can never reach a paid model, which is the property the
+#:   free plan's promise (D-M4-9, "free NEVER reaches a paid model") actually needs.
+#:   Without this entry the suffix rule dropped it from BOTH free chains in free-mode,
+#:   silently removing their last fallback (R9-179 item 1, observed at the v145 boot).
+#:
+#: Add a slug here only when the PROVIDER guarantees it is free by construction; a
+#: model that merely happens to be free today belongs in the ``:free`` set.
+FREE_BY_DEFINITION_OPENROUTER_SLUGS: Final[frozenset[str]] = frozenset({"openrouter/free"})
+
+
+def is_free_openrouter_slot(provider: str, model: str) -> bool:
+    """Is this ``(provider, model)`` slot an OpenRouter model that is free to call?
+
+    The ONE place "is this free?" is decided. Shared by the free-mode tier filter
+    (:func:`filter_openrouter_free_mode`) and by the api's free-daily-request meter,
+    so what the filter KEEPS and what the meter COUNTS can never drift apart.
+
+    Args:
+        provider: The slot's provider token; only ``openrouter`` can be free here
+            (every other provider bills, and a local backend is not metered).
+        model: The slot's model token, e.g. ``qwen/qwen3-30b-a3b:free`` or ``free``.
+
+    Returns:
+        ``True`` for a ``:free``-suffixed OpenRouter model, or for a slug listed in
+        :data:`FREE_BY_DEFINITION_OPENROUTER_SLUGS`.
+    """
+    if provider != "openrouter":
+        return False
+    return model.endswith(":free") or f"{provider}/{model}" in FREE_BY_DEFINITION_OPENROUTER_SLUGS
+
+
 def filter_openrouter_free_mode(
     models: list[tuple[_ProviderStr, str]],
     *,
@@ -329,11 +370,16 @@ def filter_openrouter_free_mode(
     Two postures, selected by ``keep_free_suffix``:
 
     * **Chat (D-22-2, ``keep_free_suffix=True``):** in free-mode, drop only
-      ``openrouter/<model>`` entries that LACK the ``:free`` suffix (free-tier
-      users haven't paid for paid models). ``:free`` entries are kept.
+      ``openrouter/<model>`` entries that are not free to call (free-tier users
+      haven't paid for paid models). "Free to call" is
+      :func:`is_free_openrouter_slot`: the ``:free`` suffix, OR membership of
+      :data:`FREE_BY_DEFINITION_OPENROUTER_SLUGS`, today just ``openrouter/free``,
+      the free-only auto-router, which the suffix test alone dropped (R9-179 item 1).
     * **Image (D-22-20, ``keep_free_suffix=False``):** in free-mode, drop ALL
       ``openrouter/<model>`` entries — zero ``:free`` image-output models exist,
       so any OpenRouter image entry is unusable; fail-fast over a call-time 402.
+      The free-by-definition allowlist does NOT reprieve anything here: it names a
+      chat auto-router, which is not an image-output model either.
 
     Non-OpenRouter entries are never touched, and ``mode != "free"`` (paid or
     ``None`` = mode unknown/probe-skipped) is a pass-through no-op (fail-soft:
@@ -354,7 +400,7 @@ def filter_openrouter_free_mode(
     kept: list[tuple[_ProviderStr, str]] = []
     for provider, model in models:
         is_openrouter = provider == "openrouter"
-        is_usable_free = keep_free_suffix and model.endswith(":free")
+        is_usable_free = keep_free_suffix and is_free_openrouter_slot(provider, model)
         if is_openrouter and not is_usable_free:
             _LOG.warning(
                 "dropping OpenRouter entry unusable in free-mode "

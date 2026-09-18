@@ -70,6 +70,7 @@ __all__ = [
     "credit_transactions",
     "credits",
     "day_spend",
+    "free_model_daily_usage",
     "graph_consolidation_markers",
     "graph_edges",
     "graph_entities",
@@ -1826,6 +1827,24 @@ cadence_counters = Table(
     Column("day", Date, nullable=False),
     Column("count", Integer, nullable=False, server_default=text("0")),
     PrimaryKeyConstraint("owner_id", "persona_id", "day", name="pk_cadence_counters"),
+)
+
+# Spec R9-179 item 3, the free-model daily request meter. OpenRouter caps free-model
+# calls per UTC DAY ACCOUNT-WIDE (1,000 since credits were bought; 50 before), and that
+# one ceiling is shared by every free-plan user's turn AND every background job that runs
+# on a free chain. Nothing measured it, so exhaustion would first show up as free users'
+# turns failing in the afternoon.
+#
+# One row per UTC day, incremented at the api's existing served-model attribution points.
+# Deliberately OWNERLESS and NOT RLS-scoped: the cap is a property of OUR OpenRouter
+# account, not of any tenant, and a per-tenant view of it would be meaningless (also in
+# ``db.rls.RLS_EXEMPT_TABLES`` with that reason). Persisted rather than in-process so a
+# restart mid-day continues the day's count instead of silently resetting the alarm.
+free_model_daily_usage = Table(
+    "free_model_daily_usage",
+    metadata,
+    Column("day", Date, primary_key=True),
+    Column("request_count", Integer, nullable=False, server_default=text("0")),
 )
 
 # The platform-wide autonomy controls — operational, ownerless (the global "big red button":
