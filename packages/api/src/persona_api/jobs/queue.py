@@ -443,6 +443,32 @@ class JobQueue:
         with rls_connection(self._engine, owner_id) as conn:
             return int(conn.execute(hot).scalar_one()) + int(conn.execute(cold).scalar_one())
 
+    def latest(
+        self, *, owner_id: str, job_type: str, idempotency_key_prefix: str
+    ) -> JobRecord | None:
+        """The newest hot job of ``job_type`` for ``owner_id`` under a key prefix, or ``None``.
+
+        The tenant-facing read behind a persona's ``avatar_status``: the create
+        and regenerate jobs share the ``avatar:{persona_id}:`` prefix, so the
+        newest row is the one the web is waiting on. Hot table only: the archive
+        sweep ages terminal rows out after a day, and a failure that old is not
+        worth telling anyone about. Owner-scoped (RLS + the explicit predicate).
+        Read-only (CQS).
+        """
+        stmt = (
+            jobs.select()
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.type == job_type,
+                jobs.c.idempotency_key.like(f"{idempotency_key_prefix}%"),
+            )
+            .order_by(jobs.c.created_at.desc())
+            .limit(1)
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            row = conn.execute(stmt).mappings().first()
+        return _record(row) if row is not None else None
+
     def dead_letters(self, *, limit: int = 50, offset: int = 0) -> list[JobRecord]:
         """List dead-lettered jobs (newest first) — the A3/A6 observability seam.
 

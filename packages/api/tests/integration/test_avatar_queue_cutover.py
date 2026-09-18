@@ -1,21 +1,23 @@
-"""The AVATAR_VIA_QUEUE cutover is COMPLETE and gate-unified (R9-013).
+"""The durable avatar path is the default wherever a worker carries the handler (flag retired).
 
 Pre-fix, ``PERSONA_API_AVATAR_VIA_QUEUE=true`` made the create route enqueue
 ``avatar_generation`` jobs while :func:`register_avatar_handler` had zero
 callers — every enqueued job was unknown-type poison and avatar generation via
-the queue was completely dead. Proves, against real Postgres + the real FastAPI
+the queue was completely dead. The flag was then never flipped in production, so
+the queue path stayed dark; it is gone, and the route enqueues iff the started
+in-process worker's registered types include the avatar tenant
+(``avatar_queue_available``). Proves, against real Postgres + the real FastAPI
 create route + the real Worker claim→execute path:
 
-1. **The real trigger chain** — flag on + image backend composed: persona-create
-   enqueues exactly one job (create-keyed), a real worker run invokes the
-   generator, and the handler persists ``avatar_url`` (+ ``avatar_source=
-   'generated'``) through its compare-and-set;
-2. **Gate unification** — flag on + NO image backend: the route does NOT enqueue
-   (``avatar_queue_ready`` is the producer's AND the registration's one
-   predicate) and falls back to the inline fail-soft path (avatar stays null,
-   create still 201s);
-3. **Registration follows the same gate** — ``build_worker_registry`` registers
-   the ``avatar_generation`` tenant iff the shared predicate passes.
+1. **The real trigger chain** — a worker carrying the handler + image backend
+   composed: persona-create enqueues exactly one job (create-keyed), a real
+   worker run invokes the generator, and the handler persists ``avatar_url``
+   (+ ``avatar_source='generated'``) through its compare-and-set;
+2. **Enqueue implies handler** — a worker WITHOUT the avatar tenant (no image
+   backend at its composition): the route does NOT enqueue and falls back to the
+   inline fail-soft path (avatar stays null, create still 201s);
+3. **Registration follows the substrate** — ``build_worker_registry`` registers
+   the ``avatar_generation`` tenant iff image backend + file storage are composed.
 """
 
 # ruff: noqa: ANN401, ARG001, ARG002, SLF001 — fixtures + protocol args + private internals.
@@ -25,6 +27,7 @@ import asyncio
 import hashlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -181,7 +184,6 @@ def client(
         app_database_url=app_url,
         audit_root=str(tmp_path / "audit"),
         workspace_root=workspace_root,
-        avatar_via_queue=True,  # the cutover flag ON — the R9-013 shape
     )
     app = create_app(cfg)
 
@@ -232,10 +234,17 @@ def test_flag_on_with_backend_enqueues_and_real_worker_generates_and_persists(
     c, _ws = client
     provider = _CountingBackend()
     c.app.state.image_backend = provider  # type: ignore[attr-defined]
+    # The producer gate reads the started worker's registered types; the app under
+    # test boots worker-less (no tier registry), so stand in the handle the lifespan
+    # would have set. The real Worker below is the consumer.
+    c.app.state.in_process_worker = SimpleNamespace(  # type: ignore[attr-defined]
+        job_types=frozenset({AVATAR_JOB_TYPE})
+    )
 
     detail = _create(c)
     pid = detail["id"]
     assert detail["avatar_url"] is None  # async-create: the queue fills it in
+    assert detail["avatar_status"] == "pending"
 
     # The producer enqueued exactly one create-keyed durable job.
     jobs = _avatar_jobs(migrated_engine)
@@ -269,38 +278,42 @@ def test_flag_on_with_backend_enqueues_and_real_worker_generates_and_persists(
     body = c.get(f"/v1/personas/{pid}", headers=_auth()).json()
     assert body["avatar_url"] == f"uploads/{_PNG_REF}.png"
     assert body["avatar_source"] == "generated"
+    assert body["avatar_status"] is None  # settled: nothing pending, nothing failed
 
 
-def test_flag_on_without_backend_does_not_enqueue_and_falls_back_inline(
+def test_worker_without_the_avatar_tenant_does_not_enqueue_and_falls_back_inline(
     client: tuple[TestClient, Path], migrated_engine: Engine
 ) -> None:
-    """Gate unification: no image backend ⇒ the producer must NOT enqueue a dead job."""
+    """Enqueue implies handler: a worker that lacks the tenant must never receive a dead job."""
     c, _ws = client
     c.app.state.image_backend = None  # type: ignore[attr-defined]
+    c.app.state.in_process_worker = SimpleNamespace(  # type: ignore[attr-defined]
+        job_types=frozenset({"synthesis"})
+    )
 
     detail = _create(c)
     pid = detail["id"]
 
-    # No job — the shared predicate failed, so the route took the inline path
-    # (which fail-softs to avatar_url=null when no backend is configured).
+    # No job — the worker carries no avatar handler, so the route took the inline
+    # path (which fail-softs to avatar_url=null when no backend is configured).
     assert _avatar_jobs(migrated_engine) == []
     body = c.get(f"/v1/personas/{pid}", headers=_auth()).json()
     assert body["avatar_url"] is None
 
 
-def test_registry_registers_avatar_tenant_iff_shared_gate_passes(
+def test_registry_registers_avatar_tenant_iff_substrate_is_composed(
     app_engine: Engine, tmp_path: Path
 ) -> None:
-    """The registration side of the ONE gate (build_worker_registry)."""
+    """The registration side (build_worker_registry): image backend + file storage, no flag."""
 
-    def types_for(*, flag: bool, backend: object | None, storage: object | None) -> set[str]:
+    def types_for(*, backend: object | None, storage: object | None) -> set[str]:
         return set(
             build_worker_registry(
                 rls_engine=app_engine,
                 embedder=_Emb(),  # type: ignore[arg-type]
                 tier_registry=_TierRegistry(),  # type: ignore[arg-type]
                 free_tier_registry=None,  # R9-096: no plans here — gating off, stated
-                config=APIConfig(audit_root=str(tmp_path), avatar_via_queue=flag),
+                config=APIConfig(audit_root=str(tmp_path)),
                 synthesis_tier="small",
                 image_backend=backend,  # type: ignore[arg-type]
                 file_storage=storage,  # type: ignore[arg-type]
@@ -309,7 +322,6 @@ def test_registry_registers_avatar_tenant_iff_shared_gate_passes(
 
     backend = _CountingBackend()
     storage = _FakeStorage()
-    assert AVATAR_JOB_TYPE in types_for(flag=True, backend=backend, storage=storage)
-    assert AVATAR_JOB_TYPE not in types_for(flag=True, backend=None, storage=storage)
-    assert AVATAR_JOB_TYPE not in types_for(flag=True, backend=backend, storage=None)
-    assert AVATAR_JOB_TYPE not in types_for(flag=False, backend=backend, storage=storage)
+    assert AVATAR_JOB_TYPE in types_for(backend=backend, storage=storage)
+    assert AVATAR_JOB_TYPE not in types_for(backend=None, storage=storage)
+    assert AVATAR_JOB_TYPE not in types_for(backend=backend, storage=None)

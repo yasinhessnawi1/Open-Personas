@@ -746,24 +746,28 @@ class ImagegenAvatarGenerator:
 
     The durable-queue counterpart of the inline create hook
     (``routes/personas.py::_maybe_generate_avatar``), composed at the worker root
-    when the ``avatar_via_queue`` cutover gate passes. It reuses the SAME
-    generation + persistence implementation the inline path runs: the
-    demographic-safe crafted prompt (D-29-1) over the persona's declared
-    identity, then the free build-time entry :func:`generate_avatar` (hard-line
+    whenever the image backend + file storage are present (the worker then
+    carries the handler, and the routes enqueue because it does). It reuses the
+    SAME generation + persistence + billing implementation the inline path runs:
+    the demographic-safe crafted prompt (D-29-1) over the persona's declared
+    identity, then the build-time entry :func:`generate_avatar` (hard-line
     filter, provider dispatch, D-13-4 workspace persist, one system-initiated
-    audit event), bounded by the same ``avatar_gen_timeout_s`` wall clock.
+    audit event), bounded by the same ``avatar_gen_timeout_s`` wall clock, then
+    the owner charge through :func:`~persona_api.services.avatar_billing.bill_avatar_owner`
+    (Spec M3 D-M3-11, the one seam both paths share).
 
     Outcome mapping onto the ``AvatarGenerator`` Protocol:
 
     - **content rejection** (hard-line backstop or provider moderation) →
       ``None`` — a deterministic decline, NOT a failure: the persona simply
-      keeps no avatar (the handler's documented no-op outcome);
+      keeps no avatar (the handler's documented no-op outcome); nothing is billed;
     - **provider error / timeout** → raise — the A0 retry policy retries the
       transient class with backoff, then dead-letters honestly (the durable
       queue's improvement over the inline hook's single fail-soft shot);
     - **success** → the bare workspace ref (``uploads/<blake2b>.<ext>``) —
       exactly the value the inline hook stores, which the web's authed-image
-      hook resolves; ``cost_micros=0`` (build-time avatar gen is free, D-29-2).
+      hook resolves; ``cost_micros`` carries the provider cost the owner was
+      charged (0 when no billing seam is composed, or billing fail-softed).
     """
 
     def __init__(
@@ -773,20 +777,29 @@ class ImagegenAvatarGenerator:
         file_storage: FileStorage,
         audit_logger: ToolAuditLogger | None = None,
         timeout_s: float = 25.0,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        image_credit_floor: int = 1,
     ) -> None:
         self._backend = backend
         self._file_storage = file_storage
         self._audit_logger = audit_logger
         self._timeout_s = timeout_s
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._image_credit_floor = image_credit_floor
 
     async def generate(
-        self, *, persona_id: str, owner_id: str, yaml_str: str
+        self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
     ) -> AvatarResult | None:
         # Local imports: AvatarResult lives in the handler module (which this
         # module must not import at module scope — the handler seam stays
         # mechanism-agnostic) and persona_service pulls the store stack.
         from persona_api.jobs.handlers.avatar import AvatarResult
         from persona_api.services import persona_service
+        from persona_api.services.avatar_billing import bill_avatar_owner
 
         persona = persona_service.load_persona_from_yaml(
             yaml_str, persona_id=persona_id, owner_id=owner_id
@@ -814,4 +827,24 @@ class ImagegenAvatarGenerator:
         workspace_path = result.images[0].workspace_path if result.images else None
         if not workspace_path:
             return None  # defensive — nothing to point at (mirrors the inline hook)
-        return AvatarResult(avatar_url=workspace_path, cost_micros=0, provider=result.provider)
+        # The owner pays the real image cost, post-success, through the SAME seam
+        # the request path uses; keyed so a redelivery never charges twice.
+        charge = (
+            bill_avatar_owner(
+                credits_policy=self._credits_policy,
+                rls_engine=self._rls_engine,
+                cost_source=self._cost_source,
+                image_credit_floor=self._image_credit_floor,
+                owner_id=owner_id,
+                persona_id=persona_id,
+                result=result,
+                billing_key=billing_key,
+            )
+            if self._rls_engine is not None
+            else None
+        )
+        return AvatarResult(
+            avatar_url=workspace_path,
+            cost_micros=charge.cost_micros if charge is not None else 0,
+            provider=result.provider,
+        )

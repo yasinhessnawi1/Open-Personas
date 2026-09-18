@@ -372,11 +372,17 @@ class APIConfig(BaseSettings):
     # `skill_github_repos_parsed` / persona.skills.sources.github.parse_github_repo_specs).
     # Empty (default) -> no GitHub repos synced.
     skill_github_repos: str = Field(default="", validation_alias="PERSONA_SKILL_GITHUB_REPOS")
-    # A0 T9 enqueue→worker cutover flag. OFF (default) → avatar generation runs the
-    # legacy in-process BackgroundTasks path (contract unchanged). ON → the create
-    # path ENQUEUES a durable avatar job for the worker (survives an api restart).
-    # The orchestrator flips this at close-out once the worker is deployed.
-    avatar_via_queue: bool = Field(default=False, validation_alias="PERSONA_API_AVATAR_VIA_QUEUE")
+    # Avatar generation path. The durable queue is the DEFAULT wherever this process's
+    # worker carries the ``avatar_generation`` handler (an api restart mid-generation no
+    # longer loses the avatar); the in-request BackgroundTasks path remains the automatic
+    # fallback when no worker consumes (community without one, keyless boots). This is
+    # the explicit opt-OUT for an operator who needs the request path even with a worker
+    # running (a worker being drained, a queue incident). It replaced the never-flipped
+    # PERSONA_API_AVATAR_VIA_QUEUE cutover flag: the code is complete, so the path follows
+    # the code rather than a flag someone has to remember.
+    avatar_inline_only: bool = Field(
+        default=False, validation_alias="PERSONA_API_AVATAR_INLINE_ONLY"
+    )
 
     # Spec K2 (T8d) — the synthesis-pipeline activation flags. The deploy is a
     # single uvicorn process (D-08-5), so the durable A0 worker + A1 scheduler tick

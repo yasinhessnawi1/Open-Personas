@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast, get_args
 
@@ -27,7 +28,6 @@ from persona.billing import BillingConfig, credits_charged
 from persona.imagegen import ContentRejectedError, ImageGenError, craft_avatar_prompt
 from persona.logging import get_logger
 from persona.tools.audit import JSONLToolAuditLogger, ToolAuditEvent
-from persona_runtime.cost import compute_turn_cost
 from persona_runtime.routing import tier_for
 
 from persona_api.auth import AuthenticatedUser, get_current_user
@@ -35,7 +35,13 @@ from persona_api.config import Edition
 from persona_api.db.engine import rls_connection
 from persona_api.errors import RefinementLimitError
 from persona_api.imagegen import service as imagegen_service
-from persona_api.jobs.handlers.avatar import avatar_queue_ready, enqueue_avatar_generation
+from persona_api.jobs.handlers.avatar import (
+    AVATAR_JOB_TYPE,
+    avatar_billing_key,
+    avatar_queue_available,
+    avatar_status_from_job,
+    enqueue_avatar_generation,
+)
 from persona_api.middleware.rate_limit import rate_limit
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.routes._runtime_guard import require_model_backend
@@ -60,6 +66,7 @@ from persona_api.schemas import (
 from persona_api.services import (
     audit_service,
     authoring_service,
+    avatar_billing,
     catalog_service,
     consent_service,
     notifications_service,
@@ -77,6 +84,8 @@ if TYPE_CHECKING:
     from persona.imagegen import GenerationResult
     from persona.schema.skills import SkillSpec
     from persona_runtime.tier import TierRegistry
+
+    from persona_api.jobs.handlers.avatar import AvatarStatus
 
 # The 3-round refinement cap (D-10-5): the UI owns the counter, the server is
 # the backstop. `round` is the count of refinements already applied.
@@ -166,6 +175,7 @@ def _persona_detail(
     conversation_count: int = 0,
     tasks_run_count: int = 0,
     memory_count: int = 0,
+    avatar_status: AvatarStatus | None = None,
 ) -> PersonaDetail:
     avatar = row.get("avatar_url")
     consent = row.get("consent_to_auto_dispatch")
@@ -183,6 +193,7 @@ def _persona_detail(
         avatar_url=str(avatar) if avatar is not None else None,
         avatar_source=avatar_src,
         avatar_ai_generated=avatar_ai_generated,
+        avatar_status=avatar_status,
         capabilities=_capabilities_from_registry(tier_registry),
         consent_to_auto_dispatch=bool(consent) if consent is not None else None,
         consent_updated_at=row.get("consent_updated_at"),  # type: ignore[arg-type]
@@ -235,18 +246,27 @@ def _emit_avatar_build_audit(
 
 
 async def _maybe_generate_avatar(
-    request: Request, *, owner_id: str, persona_id: str, yaml_str: str
+    request: Request,
+    *,
+    owner_id: str,
+    persona_id: str,
+    yaml_str: str,
+    billing_key: str | None = None,
 ) -> None:
     """Build-time avatar auto-generation hook (Spec 29 D-29-3, fail-soft).
 
-    Runs after the persona row is committed, only when the builder supplied no
-    avatar (the caller guards on ``body.avatar_url is None``). Crafts a
-    demographic-safe prompt (D-29-1), generates through the free build-time
-    entry bounded by ``avatar_gen_timeout_s`` (D-29-3), and on success points
-    ``avatar_url`` at the served uploads path. **Every failure mode fail-softs
-    to ``avatar_url=null`` and audits — this coroutine never raises into the
-    create path** (D-29-X-fail-soft): a persona must never fail to exist because
-    its avatar could not be drawn. F1's default renders until one is set.
+    The in-request path, taken when no worker in this process carries the
+    durable avatar handler (``avatar_queue_available``). Runs after the persona
+    row is committed, only when the builder supplied no avatar (the caller
+    guards on ``body.avatar_url is None``). Crafts a demographic-safe prompt
+    (D-29-1), generates through the build-time entry bounded by
+    ``avatar_gen_timeout_s`` (D-29-3), and on success points ``avatar_url`` at
+    the served uploads path and bills the owner under ``billing_key`` (the
+    create-time key when ``None``; a regeneration passes its own). **Every
+    failure mode fail-softs to ``avatar_url=null`` and audits — this coroutine
+    never raises into the create path** (D-29-X-fail-soft): a persona must never
+    fail to exist because its avatar could not be drawn. F1's default renders
+    until one is set.
     """
     state = request.app.state
     # R5-D-2: the app-selected tool-audit backend (Postgres when multi-worker),
@@ -308,7 +328,13 @@ async def _maybe_generate_avatar(
     # Spec M3 (T3b, D-M3-11): the avatar flips free → OWNER-billed at its real
     # image cost, post-success. Fail-soft + idempotent (a persona must never fail
     # to exist over a billing hiccup; a re-run keys to the same billing row).
-    _bill_avatar_owner(request, owner_id=owner_id, persona_id=persona_id, result=result)
+    _bill_avatar_owner(
+        request,
+        owner_id=owner_id,
+        persona_id=persona_id,
+        result=result,
+        billing_key=billing_key or avatar_billing_key(persona_id),
+    )
 
 
 def _bill_avatar_owner(
@@ -317,46 +343,27 @@ def _bill_avatar_owner(
     owner_id: str,
     persona_id: str,
     result: GenerationResult,
+    billing_key: str,
 ) -> None:
     """Owner-bill a successfully generated avatar (Spec M3, T3b — D-M3-11).
 
-    Prices the avatar generation like any image (``compute_turn_cost`` over the
-    served model's usage; OpenRouter ``usage.cost`` actual preferred), charges the
-    persona OWNER the real cost through the credit formula (floored — infra rides
-    the floor), and records ``cost_cents``/``cost_basis``. **Fail-soft** — any
-    error is logged, never raised (avatar gen must never break persona-create).
-    **Idempotent** — keyed on ``avatar:{persona_id}`` so a re-run (a retried
-    enrichment) does not double-charge (D-M3-R5).
+    The request path's entry into the ONE avatar billing seam
+    (:func:`persona_api.services.avatar_billing.bill_avatar_owner`), which the
+    durable queue's generator calls too, so the two paths cannot drift on price
+    or key. **Fail-soft** (the seam logs, never raises) and **idempotent** on
+    ``billing_key`` (a retried enrichment does not double-charge, D-M3-R5).
     """
-    try:
-        state = request.app.state
-        cost_cents, basis = compute_turn_cost(
-            provider=result.provider,
-            model=result.model,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            actual_cost_usd=result.cost_usd,
-            source=getattr(state, "metadata_resolver", None),
-        )
-        charge = credits_charged(
-            provider_cents=cost_cents,
-            infra_flat_cents=0.0,  # infra via the floor (D-M3-4 amendment)
-            markup=BillingConfig().credit_markup,
-            floor=state.config.image_credit_floor,
-        )
-        state.credits_policy.deduct_idempotent(
-            rls_engine=state.rls_engine,
-            user_id=owner_id,
-            amount=charge,
-            reason=f"avatar_gen:{basis}",
-            billing_key=f"avatar:{persona_id}",
-            cost_cents=cost_cents,
-            cost_basis=basis,
-        )
-    except Exception as exc:  # noqa: BLE001 — billing must NEVER break persona-create
-        _LOG.warning(
-            "avatar owner-billing failed (fail-soft)", persona_id=persona_id, error=str(exc)
-        )
+    state = request.app.state
+    avatar_billing.bill_avatar_owner(
+        credits_policy=getattr(state, "credits_policy", None),
+        rls_engine=state.rls_engine,
+        cost_source=getattr(state, "metadata_resolver", None),
+        image_credit_floor=getattr(getattr(state, "config", None), "image_credit_floor", 1),
+        owner_id=owner_id,
+        persona_id=persona_id,
+        result=result,
+        billing_key=billing_key,
+    )
 
 
 async def _enrich_persona_after_create(
@@ -471,42 +478,69 @@ async def create_persona(
         reason="persona.created",
     )
     # Defer voice auto-pick + avatar generation OFF the create critical path.
-    # Voice always runs in-process (BackgroundTasks). Avatar generation routes to
-    # the DURABLE queue when the cutover flag is on (A0 T9) — owner_id is the
-    # authenticated user (server-side, never the request body) — else it runs
-    # in-process as before. Either way the response carries ``avatar_url=null``;
-    # the avatar appears on a later GET. Both paths stay fail-soft.
-    config = request.app.state.config
-    job_queue = getattr(request.app.state, "job_queue", None)
-    # R9-013 gate unification: the producer consults avatar_queue_ready — the SAME
-    # predicate the worker root's registration consults — so a job is enqueued iff
-    # the worker has the avatar handler. Flag on without an image backend (or
-    # queue) falls back to the inline path (which no-ops fail-soft + audits);
-    # never enqueue a job no handler can run (the unknown-type poison loop).
-    # The why is logged once at boot (app.py, next to _compose_image_backend).
-    avatar_via_queue = (
-        body.avatar_url is None
-        and job_queue is not None
-        and avatar_queue_ready(
-            avatar_via_queue=getattr(config, "avatar_via_queue", False),
-            image_backend=getattr(request.app.state, "image_backend", None),
-            file_storage=getattr(request.app.state, "file_storage", None),
-        )
-    )
+    # Voice always runs in-process (BackgroundTasks). Avatar generation follows
+    # what can consume it, not a flag: the DURABLE queue when this process's
+    # worker carries the avatar handler (``avatar_queue_available`` reads the
+    # started worker's registered types, so a job is never enqueued into a
+    # process that cannot run it, the R9-013 poison loop), the in-request path
+    # otherwise (community without a worker, keyless boots) or when the operator
+    # opted out (PERSONA_API_AVATAR_INLINE_ONLY). owner_id is the authenticated
+    # user (server-side, never the request body). Either way the response carries
+    # ``avatar_url=null``; the avatar appears on a later GET, and ``avatar_status``
+    # tells the web whether anything is on its way. Both paths stay fail-soft.
+    state = request.app.state
+    job_queue = getattr(state, "job_queue", None)
+    queue_avatar = body.avatar_url is None and _avatar_queue_available(request)
     background_tasks.add_task(
         _enrich_persona_after_create,
         request,
         owner_id=user.id,
         persona_id=persona_id,
         yaml_str=body.yaml,
-        generate_avatar=body.avatar_url is None and not avatar_via_queue,
+        generate_avatar=body.avatar_url is None and not queue_avatar,
     )
-    if avatar_via_queue and job_queue is not None:
+    if queue_avatar and job_queue is not None:
         enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
-    row = persona_service.get_persona(
-        rls_engine=request.app.state.rls_engine, persona_id=persona_id
+    row = persona_service.get_persona(rls_engine=state.rls_engine, persona_id=persona_id)
+    # "pending" only when something will actually draw: the queue, or the inline
+    # hook with an image backend to call. Without either, saying pending would
+    # keep the web polling for an avatar that can never arrive.
+    avatar_pending = queue_avatar or (
+        body.avatar_url is None and getattr(state, "image_backend", None) is not None
     )
-    return _persona_detail(row, tier_registry=_tier_registry(request))
+    return _persona_detail(
+        row,
+        tier_registry=_tier_registry(request),
+        avatar_status="pending" if avatar_pending else None,
+    )
+
+
+def _avatar_queue_available(request: Request) -> bool:
+    """Whether this process may enqueue an avatar job right now (see ``avatar_queue_available``)."""
+    state = request.app.state
+    return avatar_queue_available(
+        job_queue=getattr(state, "job_queue", None),
+        in_process_worker=getattr(state, "in_process_worker", None),
+        inline_only=getattr(getattr(state, "config", None), "avatar_inline_only", False),
+    )
+
+
+def _avatar_status(request: Request, *, owner_id: str, persona_id: str) -> AvatarStatus | None:
+    """The persona's ``avatar_status``, read from the latest durable avatar job.
+
+    ``None`` when this process has no consuming worker: nothing was enqueued from
+    here, so there is no durable record to read (the inline path leaves none).
+    """
+    if not _avatar_queue_available(request):
+        return None
+    job_queue = request.app.state.job_queue
+    return avatar_status_from_job(
+        job_queue.latest(
+            owner_id=owner_id,
+            job_type=AVATAR_JOB_TYPE,
+            idempotency_key_prefix=f"avatar:{persona_id}:",
+        )
+    )
 
 
 def _sse(event: str, data: dict[str, object]) -> bytes:
@@ -1033,6 +1067,8 @@ async def get_persona(
         conversation_count=count,
         tasks_run_count=_tasks_run_count(rls_engine, user.id, persona_id),
         memory_count=_memory_count(request, user.id, persona_id),
+        # The durable record: a failed avatar job is visible on a reopened page.
+        avatar_status=_avatar_status(request, owner_id=user.id, persona_id=persona_id),
     )
 
 
@@ -1112,23 +1148,52 @@ async def regenerate_avatar(
         rls_engine=request.app.state.rls_engine, persona_id=persona_id
     )
     yaml_str = str(row["yaml"])
-    job_queue = getattr(request.app.state, "job_queue", None)
-    config = request.app.state.config
-    if job_queue is not None and avatar_queue_ready(
-        avatar_via_queue=getattr(config, "avatar_via_queue", False),
-        image_backend=getattr(request.app.state, "image_backend", None),
-        file_storage=getattr(request.app.state, "file_storage", None),
-    ):
-        enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+    # A regeneration is its own generation: a per-request token keys both the
+    # durable job (never deduped against the create job, which the create key
+    # would have done) and the owner charge (a new portrait costs real money).
+    regen_token = secrets.token_hex(8)
+    if _avatar_queue_available(request):
+        enqueue_avatar_generation(
+            request.app.state.job_queue,
+            persona_id=persona_id,
+            owner_id=user.id,
+            regen_token=regen_token,
+        )
         return AvatarRegenerateResult(queued=True)
     background_tasks.add_task(
-        _maybe_generate_avatar,
+        _regenerate_avatar_inline,
         request,
         owner_id=user.id,
         persona_id=persona_id,
         yaml_str=yaml_str,
+        billing_key=avatar_billing_key(persona_id, regen_token=regen_token),
     )
     return AvatarRegenerateResult(queued=False)
+
+
+async def _regenerate_avatar_inline(
+    request: Request, *, owner_id: str, persona_id: str, yaml_str: str, billing_key: str
+) -> None:
+    """The in-request regeneration, under the owner's RLS scope.
+
+    A ``BackgroundTasks`` job runs after the request's contextvar is reset, so
+    without re-binding it the cloud pool listener fails closed and the avatar
+    write touches zero rows (the same trap ``_enrich_persona_after_create``
+    documents). Community has no RLS and runs the same write unscoped.
+    """
+    edition = getattr(getattr(request.app.state, "config", None), "edition", None)
+    reset_token = current_user_id.set(owner_id) if edition is Edition.cloud else None
+    try:
+        await _maybe_generate_avatar(
+            request,
+            owner_id=owner_id,
+            persona_id=persona_id,
+            yaml_str=yaml_str,
+            billing_key=billing_key,
+        )
+    finally:
+        if reset_token is not None:
+            current_user_id.reset(reset_token)
 
 
 @router.patch("/{persona_id}", response_model=PersonaDetail)

@@ -656,20 +656,20 @@ def build_worker_registry(
                 wellbeing=ApiEventWellbeingCheck(graph_store),
                 audit=_event_candidate_audit,
             )
-    # Avatar generation (Spec A0 T9 → completed at R9-013): the durable create-time
-    # avatar tenant. Registered under avatar_queue_ready — the ONE gate the create
-    # route's producer shares — so an ``avatar_generation`` job is enqueued iff
-    # this handler exists (the half-shipped cutover enqueued into a handler-less
-    # worker → the unknown-type poison loop). The generator is the SAME
-    # generation+persist implementation the inline hook runs (ImagegenAvatarGenerator
-    # over the free build-time entry); the tool-audit sink follows the config-selected
-    # backend, same as the route (R5-D-2 worker parity).
+    # Avatar generation (Spec A0 T9 → completed at R9-013, default path since the
+    # cutover-flag retirement): the durable avatar tenant, create and regenerate.
+    # Registered whenever this worker CAN generate (image backend + file storage
+    # composed); the create/regenerate routes enqueue iff the started worker's
+    # registered types include it (``avatar_queue_available``), so "enqueue implies
+    # handler" is read off the registry that runs the job rather than re-derived
+    # (the half-shipped cutover enqueued into a handler-less worker → the
+    # unknown-type poison loop). The generator is the SAME generation + persist +
+    # owner-billing implementation the inline hook runs (ImagegenAvatarGenerator
+    # over the build-time entry and the M3 ``bill_avatar_owner`` seam); the
+    # tool-audit sink follows the config-selected backend, same as the route
+    # (R5-D-2 worker parity).
     if (
-        avatar_queue_ready(
-            avatar_via_queue=config.avatar_via_queue,
-            image_backend=image_backend,
-            file_storage=file_storage,
-        )
+        avatar_queue_ready(image_backend=image_backend, file_storage=file_storage)
         # Redundant with the predicate; repeated only to type-narrow the Optionals.
         and image_backend is not None
         and file_storage is not None
@@ -683,16 +683,21 @@ def build_worker_registry(
                 file_storage=file_storage,
                 audit_logger=build_tool_audit_logger(config, rls_engine),
                 timeout_s=config.avatar_gen_timeout_s,
+                credits_policy=build_credits_policy(config),
+                rls_engine=rls_engine,
+                cost_source=(
+                    runtime_factory.metadata_resolver if runtime_factory is not None else None
+                ),
+                image_credit_floor=config.image_credit_floor,
             ),
         )
-    elif config.avatar_via_queue:
-        # Flag on but the gate fails (no image backend / no file storage composed
-        # for this worker): the route's shared predicate falls back to the inline
-        # no-op path — no dead jobs — and THIS is the once-per-boot why.
-        _log.warning(
-            "avatar_via_queue is ON but the avatar tenant was NOT registered "
-            "(image backend / file storage not composed); persona-create avatars "
-            "fall back to the inline path",
+    else:
+        # No image backend / no file storage composed for this worker: the routes
+        # see no avatar handler and keep the inline path (which no-ops fail-soft
+        # and audits). Stated once per boot so a missing avatar has a named why.
+        _log.info(
+            "avatar tenant not registered (image backend / file storage not composed); "
+            "persona avatars stay on the in-request path",
             image_backend_present=image_backend is not None,
             file_storage_present=file_storage is not None,
         )
@@ -1239,9 +1244,20 @@ _WORKER_RESTART_MAX_CONSECUTIVE_FAILURES = 10
 class InProcessWorker:
     """Owns the in-process ``Worker.run()`` task (start on boot, drain on shutdown)."""
 
-    def __init__(self, worker: Worker) -> None:
+    def __init__(self, worker: Worker, *, job_types: frozenset[str] = frozenset()) -> None:
         self._worker = worker
+        self._job_types = job_types
         self._task: asyncio.Task[None] | None = None
+
+    @property
+    def job_types(self) -> frozenset[str]:
+        """The job types this process's worker will consume (its composed registry).
+
+        The producer side of "enqueue implies handler": a route enqueues a job
+        type iff it is in here (``avatar_queue_available``), so a job is never
+        written for a handler this process does not carry.
+        """
+        return self._job_types
 
     @property
     def last_beat_at(self) -> datetime | None:
@@ -1588,6 +1604,6 @@ def start_in_process_worker(
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,
     )
-    handle = InProcessWorker(worker)
+    handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()
     return handle

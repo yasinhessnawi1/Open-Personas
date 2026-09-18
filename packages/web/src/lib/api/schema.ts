@@ -4838,6 +4838,8 @@ export interface components {
       avatar_source?: string | null;
       /** Avatar Ai Generated */
       avatar_ai_generated?: boolean | null;
+      /** Avatar Status */
+      avatar_status?: ("pending" | "failed") | null;
       capabilities?: components["schemas"]["PersonaCapabilities"] | null;
       /** Consent To Auto Dispatch */
       consent_to_auto_dispatch?: boolean | null;

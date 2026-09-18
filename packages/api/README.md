@@ -74,8 +74,9 @@ identical across editions. Community just feeds them a constant.
   restart, run while nobody is connected, and resume after a crash: lease and
   heartbeat crash resume, retry, backoff, dead letter, claim time fairness caps,
   terminal job archival, graceful drain. Delivery is at least once with idempotent
-  by contract handlers. Avatar generation is the first tenant (behind
-  `PERSONA_API_AVATAR_VIA_QUEUE`), knowledge graph **synthesis** the second, and the
+  by contract handlers. Avatar generation is the first tenant (the default path
+  whenever the worker runs; `PERSONA_API_AVATAR_INLINE_ONLY` opts a deployment back to
+  the in request path), knowledge graph **synthesis** the second, and the
   episodic **sleep time engine** the third (gists plus graph candidates, kill switch
   `PERSONA_EPISODIC_ENGINE_ENABLED`, summarizer tier
   `PERSONA_API_EPISODIC_SUMMARY_TIER`, cadence via `PERSONA_EPISODIC_*`).

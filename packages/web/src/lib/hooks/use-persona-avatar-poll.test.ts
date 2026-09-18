@@ -13,10 +13,14 @@ vi.mock("@clerk/nextjs", () => ({
 const INTERVAL_MS = 2500;
 const MAX_MS = 40_000;
 
-function personaResponse(avatarUrl: string | null): Response {
+function personaResponse(
+  avatarUrl: string | null,
+  avatarStatus: "pending" | "failed" | null = null,
+): Response {
   const res = new Response(null, { status: 200 });
   Object.defineProperty(res, "json", {
-    value: () => Promise.resolve({ avatar_url: avatarUrl }),
+    value: () =>
+      Promise.resolve({ avatar_url: avatarUrl, avatar_status: avatarStatus }),
   });
   return res;
 }
@@ -114,6 +118,35 @@ describe("usePersonaAvatarPoll — async-persona-create bounded poll", () => {
       await vi.advanceTimersByTimeAsync(MAX_MS * 2);
     });
     expect(fetchCalls.length).toBe(atCap);
+  });
+
+  it("stops early when the server says the durable generation failed", async () => {
+    // Tick 1: still pending. Tick 2: the job dead-lettered. Nothing will arrive.
+    let i = 0;
+    const statuses: Array<"pending" | "failed"> = ["pending", "failed"];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      fetchCalls.push({
+        url: typeof url === "string" ? url : url.toString(),
+        init,
+      });
+      const status = statuses[Math.min(i, statuses.length - 1)];
+      i += 1;
+      return personaResponse(null, status);
+    }) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => usePersonaAvatarPoll("p", null));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_MS * 2);
+    });
+    expect(result.current).toBeNull();
+    const callsAtFailure = fetchCalls.length;
+    expect(callsAtFailure).toBe(2);
+
+    // Well before the cap: no further polls once the failure is known.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MAX_MS);
+    });
+    expect(fetchCalls.length).toBe(callsAtFailure);
   });
 
   it("cancels in-flight fetch + clears the interval on unmount", async () => {

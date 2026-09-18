@@ -187,6 +187,13 @@ class PersonaDetail(_Output):
     # both default None so legacy rows + unit fixtures stay byte-identical.
     avatar_source: str | None = None
     avatar_ai_generated: bool | None = None
+    # Where the auto-generated avatar stands: ``pending`` while a generation is
+    # queued or running (the web keeps polling), ``failed`` when the durable job
+    # dead-lettered (the web stops polling and says so), ``None`` when nothing is
+    # in flight. Derived on the read side from the latest avatar job, so a
+    # failure is visible on a reopened page, not only to whoever was watching.
+    # Additive; ``None`` for legacy rows, user-supplied avatars and unit fixtures.
+    avatar_status: Literal["pending", "failed"] | None = None
     capabilities: PersonaCapabilities | None = None
     # Spec 21 T09 (D-21-7): tri-state auto-dispatch consent surfaced to the
     # settings UI. None = never asked / revoked-to-ask, True = granted,

@@ -1735,6 +1735,7 @@
       "regenHint": "Regenerating drafts a new portrait from the persona's identity. It takes a moment, and the new image appears when it's ready.",
       "regenTimeout": "Still working. Check back in a moment.",
       "regenFailed": "Couldn't start regeneration. Try again.",
+      "regenGaveUp": "We couldn't draw a new portrait this time. Try again in a bit, or upload your own image.",
       "uploadFailed": "Couldn't upload that image. Try another file.",
       "done": "Done"
     },

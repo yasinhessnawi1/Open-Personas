@@ -311,8 +311,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.memory_backend = memory_backend
     # A0 (T9): the durable enqueue surface. A JobQueue on the cross-tenant dispatch
     # engine (admin/superuser for v0.1; a job_dispatcher role to harden). Present
-    # only when a dispatch engine exists; the create path uses it iff
-    # ``avatar_via_queue`` is on (the orchestrator's cutover flag).
+    # only when a dispatch engine exists; the persona create/regenerate routes use
+    # it iff the in-process worker started below carries the avatar handler
+    # (``avatar_queue_available``), in-request BackgroundTasks otherwise.
     _dispatch_engine = admin_engine if admin_engine is not None else rls_engine
     app.state.job_queue = JobQueue(_dispatch_engine) if _dispatch_engine is not None else None
     app.state.audit_root = Path(config.audit_root)
@@ -615,15 +616,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the chat TierRegistry (D-22-2 filter). ``None`` when OpenRouter is unused.
     openrouter_mode = resolve_openrouter_subscription_mode()
     app.state.image_backend = _compose_image_backend(openrouter_mode)
-    if config.avatar_via_queue and app.state.image_backend is None:
-        # R9-013 once-per-boot honesty: the cutover flag is on but the shared
-        # avatar_queue_ready gate can never pass without an image backend, so
-        # persona-create falls back to the inline no-op avatar path (no queue
-        # job is ever enqueued — a dead job would poison-loop a handler-less
-        # worker). Configure PERSONA_IMAGEGEN_* to activate the queue cutover.
+    if config.avatar_inline_only:
+        # Once-per-boot honesty: the operator opted out of the durable avatar
+        # path, so even with a worker carrying the handler, persona avatars run
+        # inside the request process and a restart mid-generation loses them.
         _LOG.warning(
-            "PERSONA_API_AVATAR_VIA_QUEUE is on but image generation is not "
-            "configured; persona-create avatars fall back to the inline no-op path"
+            "PERSONA_API_AVATAR_INLINE_ONLY is on; persona avatars run in the request "
+            "process and skip the durable queue even when a worker could run them"
         )
 
     # Runtime composition root (T10): the TierRegistry (app-scoped) + the

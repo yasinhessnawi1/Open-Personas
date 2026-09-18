@@ -8177,6 +8177,18 @@
             ],
             "title": "Avatar Ai Generated"
           },
+          "avatar_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["pending", "failed"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Status"
+          },
           "capabilities": {
             "anyOf": [
               {

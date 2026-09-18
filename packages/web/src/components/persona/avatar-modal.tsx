@@ -91,6 +91,13 @@ export function AvatarModal({
           setRegenerating(false);
           return;
         }
+        if (detail.data?.avatar_status === "failed") {
+          // The durable job gave up after its retries: say so now instead
+          // of spinning to the cap and calling it "still working".
+          setRegenerating(false);
+          setError(t("regenGaveUp"));
+          return;
+        }
         if (attempts >= REGEN_POLL_MAX) {
           setRegenerating(false);
           setError(t("regenTimeout"));

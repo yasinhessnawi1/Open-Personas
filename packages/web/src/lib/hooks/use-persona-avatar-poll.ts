@@ -80,11 +80,19 @@ export function usePersonaAvatarPoll(
           },
         );
         if (cancelled || !res.ok) return;
-        const body = (await res.json()) as { avatar_url?: string | null };
+        const body = (await res.json()) as {
+          avatar_url?: string | null;
+          avatar_status?: "pending" | "failed" | null;
+        };
         if (cancelled) return;
         if (body.avatar_url) {
           setAvatarUrl(body.avatar_url);
           stop(); // goal reached — stop polling.
+        } else if (body.avatar_status === "failed") {
+          // The durable job gave up (dead-lettered after its retries): nothing
+          // will arrive, so stop now rather than at the cap. The default mark
+          // stays; the avatar editor offers a retry or an upload.
+          stop();
         }
       } catch {
         // Network hiccup / abort → ignore; the next tick (if any) retries, and
