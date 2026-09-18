@@ -39,13 +39,9 @@ import { FileRendererProvider } from "./file-renderer-context";
 import { FileRendererPanel } from "./file-renderer-panel";
 import { type ChatMessageView, MessageElement } from "./message-element";
 import { MicDictation } from "./mic-dictation";
+import { useChatScrollAnchor } from "./use-chat-scroll-anchor";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
-
-// Spec 35 — "stick to bottom" follow logic. The reader counts as pinned to the
-// latest when within this many px of the bottom; beyond it, streaming chunks
-// stop auto-scrolling so they can read earlier turns undisturbed.
-const PIN_THRESHOLD_PX = 80;
 
 /**
  * F3 (T19) — strangler-fig composer wiring.
@@ -170,12 +166,13 @@ export function ChatWindow({
   useEffect(() => {
     setPendingDocs([]);
   }, [conversationId]);
-  const scrollerRef = useRef<HTMLDivElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // True while the reader is near the bottom and should follow new content.
-  // Flipped false the moment they scroll up; re-armed when they return or send.
-  const pinnedRef = useRef(true);
+  // Issue #15: open the conversation on its latest turn, keep following it
+  // while the reader wants to be followed, and never yank one who scrolled up.
+  // See use-chat-scroll-anchor.ts for the three rules it enforces.
+  const { scrollerRef, contentRef, onScroll, pinToBottom } =
+    useChatScrollAnchor(conversationId, messages);
 
   // Conversation-scoped document state (separate slice from message-scoped
   // image attachments — D-F3-X-cap-attached-state-on-conversation-switch
@@ -263,25 +260,6 @@ export function ChatWindow({
     },
   });
 
-  // Track whether the reader is pinned to the bottom. Cheap, ref-only (no
-  // re-render on scroll); read by the follow effect below.
-  const handleScroll = useCallback(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    pinnedRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < PIN_THRESHOLD_PX;
-  }, []);
-
-  // Follow the newest content ONLY while pinned — so streaming doesn't drag the
-  // reader down while they scroll up to re-read (instant, not smooth, to avoid
-  // self-fighting animations across rapid chunk updates).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: follow newest, pinned-only
-  useEffect(() => {
-    if (!pinnedRef.current) return;
-    const el = scrollerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
-
   // Spec 35 D-35-7: broadcast the live/composing state so the chat-header
   // presence orb (rendered above this component, in the page) can pulse while
   // the persona is live — decoupled, no streaming prop-drilled up to the page.
@@ -329,7 +307,7 @@ export function ChatWindow({
     setInput("");
     setSendError(null);
     // The reader's own send always returns them to the latest turn.
-    pinnedRef.current = true;
+    pinToBottom();
     // Clear the composer NOW — the attachments are captured and ride the sent
     // message + persist in the Files viewer. `await send()` only resolves after
     // the whole reply streams, so clearing there would leave the chips lingering
@@ -377,10 +355,13 @@ export function ChatWindow({
         <FileRendererPanel personaId={persona.id} />
         <div
           ref={scrollerRef}
-          onScroll={handleScroll}
+          onScroll={onScroll}
           className="flex-1 overflow-y-auto"
         >
-          <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-4 py-6">
+          <div
+            ref={contentRef}
+            className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-4 py-6"
+          >
             {messages.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
                 {t("empty")}
