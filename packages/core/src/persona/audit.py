@@ -49,7 +49,11 @@ __all__ = [
 # graph mutation emits exactly one AuditEvent through this same port; existing
 # stores are unaffected) + the skill-injection event sentinel (Spec S1 T4 —
 # skill injection is not a store mutation, so ``"skill"`` is the honest
-# non-store ``store`` value, additive like ``knowledge_graph``).
+# non-store ``store`` value, additive like ``knowledge_graph``) + the voice
+# session lifecycle (R9-184: the same non-store sentinel shape as ``"skill"``:
+# a voice call being created, going active and ending is not a store mutation,
+# but it IS something the durable record has to carry, and the voice runtime
+# already writes every spoken turn through this very port).
 StoreKind = Literal[
     "identity",
     "self_facts",
@@ -59,6 +63,7 @@ StoreKind = Literal[
     "core_memory",
     "knowledge_graph",
     "skill",
+    "voice_session",
 ]
 
 
@@ -69,7 +74,11 @@ class AuditAction(StrEnum):
     surfaced via ``persona.logging`` instead. Skill events (Spec S1, S1-D-7) are
     the exception: a skill *injection* is audited, and a consent *refusal* is
     audited too, because a blocked injection of an untrusted skill is itself a
-    security signal worth the durable trail.
+    security signal worth the durable trail. The three voice session lifecycle
+    actions (R9-184) are the second exception, on the same reasoning: the voice
+    runtime already writes every spoken turn through this port, so the call that
+    carried those turns belongs on the same record. Their producer is
+    ``persona_voice.session.lifecycle_audit.SessionLifecycleAuditor``.
     """
 
     WRITE = "write"
@@ -82,6 +91,13 @@ class AuditAction(StrEnum):
     # Spec S1 (S1-D-7): one event per skill injection; one per consent refusal.
     SKILL_INJECTED = "skill_injected"
     SKILL_REFUSED = "skill_refused"
+    # R9-184: the three voice session lifecycle events, one row each. Values
+    # mirror ``persona_voice.session.state_machine.SessionLifecycleEvent``
+    # verbatim, so the wire format is the same string on both sides of the seam
+    # and an operator greps one vocabulary rather than two.
+    SESSION_CREATED = "session_created"
+    SESSION_ACTIVE = "session_active"
+    SESSION_ENDED = "session_ended"
 
 
 class AuditEvent(BaseModel):

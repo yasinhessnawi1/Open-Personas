@@ -93,8 +93,24 @@ def audit(
             f"{event.source.value:<13} "
             f"by={event.written_by or '-':<20} "
             f"{chunk_summary} "
-            f"reason={event.reason or '-'}",
+            f"reason={event.reason or '-'}"
+            f"{_metadata_suffix(event.metadata)}",
         )
+
+
+def _metadata_suffix(metadata: dict[str, str]) -> str:
+    """Render an event's metadata, or nothing when it has none.
+
+    Some events carry their whole identity here and nowhere else: a voice session
+    lifecycle row (R9-184) is ``session_id`` + ``conversation_id`` in metadata, so
+    without this three different calls read back as three identical lines. A
+    rollback's ``to_version`` was equally invisible. Chunk-writing events usually
+    have empty metadata and print exactly as before.
+    """
+    if not metadata:
+        return ""
+    pairs = " ".join(f"{k}={v}" for k, v in sorted(metadata.items()))
+    return f" {pairs}"
 
 
 def _resolve_audit_root(config: PersonaCoreConfig) -> Path:

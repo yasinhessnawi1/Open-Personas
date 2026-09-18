@@ -88,6 +88,7 @@ from persona_voice.model.transcript import VoiceTranscriptWriter
 from persona_voice.session.call_record import CallRecorder, EndReason
 from persona_voice.session.delegation_dispatch import DelegationDispatcher
 from persona_voice.session.delegation_handback import DelegationHandbackPoller
+from persona_voice.session.lifecycle_audit import SessionLifecycleAuditor
 from persona_voice.session.state_machine import SessionStateMachine, make_session_rls_engine
 from persona_voice.stt import StreamingSTTConfig, load_streaming_stt
 from persona_voice.stt.cost_gate import DEFAULT_REOPEN_PREROLL_MS, IdleAwareGate
@@ -787,12 +788,20 @@ async def build_agent_session(
     )
 
     # --- session state machine ---
+    # R9-184: the lifecycle seam gets its production consumer here. Without this
+    # listener the three session events dispatch into ``None`` and the call leaves
+    # no lifecycle trace anywhere: a producer with nobody reading it. The auditor
+    # writes through the SAME core audit port the four typed stores above already
+    # use for every spoken turn (``_build_stores``, same ``audit_root``), so the
+    # call and its turns land on one record. Fail-soft inside: a failed audit
+    # write degrades the record, never the call.
     session = SessionStateMachine(
         session_id=session_id,
         user_id=user_id,
         persona_id=persona_id,
         conversation_id=conversation_id,
         rls_engine=rls_engine,
+        on_event=SessionLifecycleAuditor(audit_logger=JSONLAuditLogger(audit_root)),
     )
     # The session exists from here on, so say so on the lifecycle seam. A call that
     # never reaches ``active`` (the participant drops during connect) then still has a

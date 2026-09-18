@@ -8,9 +8,11 @@ talk to a real ChromaBackend (this file covers validate/init/audit/run).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import yaml
+from persona.audit import StoreKind
 from persona.cli.main import app
 from typer.testing import CliRunner
 
@@ -142,19 +144,7 @@ class TestAuditCommand:
         )
         assert result.exit_code != 0
 
-    @pytest.mark.parametrize(
-        "store",
-        [
-            "identity",
-            "self_facts",
-            "worldview",
-            "episodic",
-            "episodic_gist",
-            "core_memory",
-            "knowledge_graph",
-            "skill",
-        ],
-    )
+    @pytest.mark.parametrize("store", get_args(StoreKind))
     def test_audit_accepts_every_current_store_kind(
         self,
         runner: CliRunner,
@@ -167,7 +157,12 @@ class TestAuditCommand:
         (episodic_gist, knowledge_graph, skill — and now core_memory). It is
         now derived from ``persona.audit.StoreKind`` itself, so it can never
         drift again — this pins every CURRENT member accepted, not a
-        hand-copied subset."""
+        hand-copied subset.
+
+        R9-184: this parametrize list WAS a hand-copied subset, which is the
+        very drift the docstring above claims is impossible: it silently
+        stopped covering the newest kind the moment one was added. It now reads
+        ``get_args(StoreKind)``, the same source the command itself reads."""
         monkeypatch.setenv("PERSONA_CHROMA_PATH", str(tmp_path / "chroma"))
         monkeypatch.setenv("PERSONA_AUDIT_PATH", str(tmp_path / "audit_dir"))
         result = runner.invoke(
@@ -176,6 +171,54 @@ class TestAuditCommand:
         )
         assert result.exit_code == 0, result.stderr
         assert "no audit events" in result.stdout
+
+    def test_audit_renders_a_voice_session_lifecycle_row(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R9-184: a lifecycle event has to be READABLE once reopened, not just stored.
+
+        The three voice session events carry their identity in ``metadata``
+        (``session_id``), and the printed line dropped metadata entirely, so a
+        durable record of three calls read back as three indistinguishable rows.
+        """
+        from datetime import UTC, datetime
+
+        from persona.audit import AuditAction, AuditEvent, JSONLAuditLogger
+        from persona.schema.chunks import WriteSource
+        from persona.schema.persona import Persona
+
+        audit_root = tmp_path / "audit_dir"
+        monkeypatch.setenv("PERSONA_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.setenv("PERSONA_AUDIT_PATH", str(audit_root))
+        persona_id = Persona.from_yaml(VALID_FIXTURES[0]).persona_id
+        assert persona_id is not None
+
+        logger = JSONLAuditLogger(audit_root)
+        for action in (
+            AuditAction.SESSION_CREATED,
+            AuditAction.SESSION_ACTIVE,
+            AuditAction.SESSION_ENDED,
+        ):
+            logger.emit(
+                AuditEvent(
+                    timestamp=datetime.now(UTC),
+                    persona_id=persona_id,
+                    action=action,
+                    store="voice_session",
+                    source=WriteSource.SYSTEM,
+                    written_by="u-owner",
+                    metadata={"session_id": "sess-42", "conversation_id": "conv-7"},
+                )
+            )
+
+        result = runner.invoke(app, ["audit", str(VALID_FIXTURES[0]), "--store", "voice_session"])
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.count("sess-42") == 3
+        for action in ("session_created", "session_active", "session_ended"):
+            assert action in result.stdout
 
     def test_audit_invalid_since_value_is_rejected(
         self,
