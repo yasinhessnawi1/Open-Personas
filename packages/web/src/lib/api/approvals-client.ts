@@ -19,7 +19,7 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-/** One pending approval, faithfully (the exact recorded payload). */
+/** One approval, faithfully (the exact recorded payload) plus what the record says about it. */
 export interface ApprovalOut {
   proposal_id: string;
   task_id: string;
@@ -30,6 +30,10 @@ export interface ApprovalOut {
   categories: string[];
   created_at: string;
   expires_at: string;
+  /** pending | approved | modified | denied | expired | consumed (the durable ProposalStatus). */
+  status: string;
+  /** True when the user changed the action before saying yes (from the durable decision trail). */
+  edited: boolean;
 }
 
 export type InboxDecision = "approve" | "deny" | "modify";
@@ -70,7 +74,20 @@ export function fetchApprovals(
   return authFetch<ApprovalOut[]>("/v1/approvals", token);
 }
 
-/** One pending approval, faithfully. */
+/**
+ * The most recently handled approvals, newest first.
+ *
+ * The pending list drops a proposal the moment it is decided, so without this the sentence the
+ * inbox showed after a decision lived only as long as the tab did. These are the same durable
+ * rows read back, which is what lets a reopened inbox still say "Approved with your edits".
+ */
+export function fetchHandledApprovals(
+  token: string | null | undefined,
+): Promise<ApprovalOut[]> {
+  return authFetch<ApprovalOut[]>("/v1/approvals/handled", token);
+}
+
+/** One approval, faithfully, whatever its status. */
 export function getApproval(
   token: string | null | undefined,
   proposalId: string,

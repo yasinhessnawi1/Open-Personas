@@ -22,6 +22,53 @@ export interface CardResolution {
   note: string;
 }
 
+/** The statuses that mean the proposal is decided and the card should rest. */
+const TERMINAL_STATUSES = new Set([
+  "approved",
+  "modified",
+  "denied",
+  "expired",
+  "consumed",
+]);
+
+/**
+ * Which reflection sentence this card shows, from the durable record first.
+ *
+ * One function for both halves of the surface: a card answered a moment ago (it has a live
+ * `resolution`) and a card read back from `/v1/approvals/handled` on a fresh page (it has only
+ * its own row). Both end up at the same sentence, which is the point. Before this, "what
+ * happened to that approval" was something only the tab that did it could tell you.
+ *
+ * The edit is the part worth getting right. `modified` is the status a decided-with-edits
+ * proposal holds until the action runs; after that everything is `consumed`, so `edited` (the
+ * durable decision trail) is what still remembers whose version of the action went out.
+ *
+ * Returns null when there is nothing to say yet (still pending, nothing decided).
+ */
+export function reflectionKey(
+  approval: Pick<ApprovalOut, "status" | "edited">,
+  resolution: CardResolution | null,
+): string | null {
+  // The race loser: the durable record is someone else's decision, so say so and stop.
+  if (resolution !== null && resolution.outcome === null)
+    return "alreadyHandled";
+  const status = resolution?.status ?? approval.status;
+  const edited =
+    approval.edited ||
+    status === "modified" ||
+    resolution?.outcome === "modify";
+  if (status === "modified") return "approvedWithEdits";
+  if (status === "approved" || status === "consumed")
+    return edited ? "approvedWithEdits" : "approved";
+  if (status === "denied") return "denied";
+  if (status === "expired") return "expiredReflection";
+  // Still pending. Only a live answer can say anything, and the only one that leaves a
+  // proposal pending is the material edit that has gone back for a second confirmation.
+  if (resolution === null) return null;
+  if (resolution.outcome === "modify") return "reconfirm";
+  return "resolvedGeneric";
+}
+
 interface ApprovalCardProps {
   approval: ApprovalOut;
   personaName: string;
@@ -54,22 +101,14 @@ function expiryLabel(
 
 /** The calm A6-D-3 reflection: what the durable record says happened, never an error. */
 function ResolutionBanner({
-  resolution,
+  reflection,
   t,
 }: {
-  resolution: CardResolution;
+  reflection: string;
   t: ReturnType<typeof useTranslations>;
 }) {
-  const { outcome } = resolution;
-  let key = "resolvedGeneric";
-  let good = false;
-  if (outcome === null)
-    key = "alreadyHandled"; // the race loser — reflect, never error
-  else if (outcome === "approve") {
-    key = "approved";
-    good = true;
-  } else if (outcome === "deny") key = "denied";
-  else if (outcome === "modify") key = "reconfirm";
+  const key = reflection;
+  const good = key === "approved" || key === "approvedWithEdits";
   return (
     <output
       className={cn(
@@ -96,12 +135,17 @@ export function ApprovalCard({
   const [modifying, setModifying] = useState(false);
   const [edited, setEdited] = useState<Record<string, string>>({});
 
-  // A terminal reflection (approved / denied / already handled) — the card rests, resolved.
+  const reflection = reflectionKey(approval, resolution);
+  // The card rests once the record is decided: either the row itself is terminal (a handled
+  // card read back on a fresh page) or the live answer settled it. Only the material edit's
+  // re-confirm leaves it open, which is exactly the case that still needs the buttons.
   const resolved =
-    resolution !== null &&
-    (resolution.outcome === null ||
-      resolution.outcome === "approve" ||
-      resolution.outcome === "deny");
+    TERMINAL_STATUSES.has(approval.status) ||
+    (resolution !== null &&
+      (resolution.outcome === null ||
+        resolution.outcome === "approve" ||
+        resolution.outcome === "deny" ||
+        TERMINAL_STATUSES.has(resolution.status)));
 
   const args = Object.entries(approval.arguments);
 
@@ -140,8 +184,8 @@ export function ApprovalCard({
     <Card
       style={personaIdentityStyle({ id: approval.persona_id })}
       className={cn(
-        "overflow-hidden border-l-2 border-l-amber-500",
-        resolved && "opacity-70",
+        "overflow-hidden border-l-2",
+        resolved ? "border-l-border opacity-70" : "border-l-amber-500",
       )}
       data-slot="approval-card"
     >
@@ -158,20 +202,26 @@ export function ApprovalCard({
             }}
           />
           <span className="text-sm font-medium">{personaName}</span>
-          <Badge
-            variant="outline"
-            className="text-amber-600 dark:text-amber-500"
-          >
-            {t("needsApproval")}
-          </Badge>
-          <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-            {expiryLabel(approval.expires_at, t)}
-          </span>
+          {/* A decided card is not waiting on anyone, so it carries neither the amber
+              "needs approval" badge nor a countdown to a deadline that no longer applies. */}
+          {resolved ? null : (
+            <>
+              <Badge
+                variant="outline"
+                className="text-amber-600 dark:text-amber-500"
+              >
+                {t("needsApproval")}
+              </Badge>
+              <span className="ml-auto text-xs tabular-nums text-muted-foreground">
+                {expiryLabel(approval.expires_at, t)}
+              </span>
+            </>
+          )}
         </div>
 
         <p className="type-body">{approval.description}</p>
 
-        {resolution ? <ResolutionBanner resolution={resolution} t={t} /> : null}
+        {reflection ? <ResolutionBanner reflection={reflection} t={t} /> : null}
 
         {/* see-then-grant: the proposal + actions are gated behind expand — you cannot approve
             without first seeing the exact recorded payload (the informed-consent grammar). */}

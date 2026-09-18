@@ -56,10 +56,15 @@ def _ensure_utc(value: datetime) -> datetime:
 class ProposalStatus(StrEnum):
     """The proposal lifecycle; the api store transitions it under a CAS (A3-D-X-approved-execution).
 
-    ``pending`` → awaiting the user. ``approved`` → decided yes, not yet executed. ``denied``
-    → decided no. ``modified`` → decided with an edit (material edits re-confirm before
-    execution). ``expired`` → auto-paused after the reminder grace. ``consumed`` → the
-    approved payload has been executed exactly once (the at-most-once terminal).
+    ``pending`` → awaiting the user. ``approved`` → decided yes **as proposed**, not yet
+    executed. ``modified`` → decided yes **carrying the user's edits**, not yet executed: the
+    same green light as ``approved`` (see :meth:`executable`), recorded separately so the
+    durable record can tell "I approved what it asked" from "I approved my own version of it".
+    A material edit still re-confirms first (it stays ``pending`` while the revised payload is
+    put back to the user), so a proposal reaches ``modified`` only once the user has said yes
+    to the edited action. ``denied`` → decided no. ``expired`` → auto-paused after the
+    reminder grace. ``consumed`` → the decided payload has been executed exactly once (the
+    at-most-once terminal, reached from either green light).
     """
 
     PENDING = "pending"
@@ -68,6 +73,20 @@ class ProposalStatus(StrEnum):
     MODIFIED = "modified"
     EXPIRED = "expired"
     CONSUMED = "consumed"
+
+    @classmethod
+    def executable(cls) -> frozenset[ProposalStatus]:
+        """The statuses that mean "the user said yes": the ONE admission predicate.
+
+        Execution, and the consume CAS that follows it, admit exactly these. It is a single
+        named door on purpose: ``modified`` was added to the enum long before anything wrote
+        it, and the way that kind of member stays unreachable is a second site that checks
+        ``status is APPROVED`` by hand and quietly excludes it.
+
+        Returns:
+            ``{approved, modified}``: decided yes as proposed, and decided yes with edits.
+        """
+        return frozenset({cls.APPROVED, cls.MODIFIED})
 
 
 class DecisionType(StrEnum):

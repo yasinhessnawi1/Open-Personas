@@ -4,7 +4,9 @@ Three thin, RLS-scoped endpoints over the shared approval machinery:
 
 - ``GET /v1/approvals`` — every pending proposal, rendered FAITHFULLY (the exact ``arguments`` +
   ``description``, verbatim — a safety surface, not a summary; the web renders them as text).
-- ``GET /v1/approvals/{id}`` — one proposal, faithfully.
+- ``GET /v1/approvals/handled``: the most recently DECIDED proposals, newest first, so a
+  reopened inbox can still say what happened (and, for an edited one, whose version went out).
+- ``GET /v1/approvals/{id}``: one proposal, faithfully, whatever its status.
 - ``POST /v1/approvals/{id}/decision`` — approve / deny / modify through the shared
   :class:`ApprovalResolutionService`, the SAME floor + CAS + durable record as the chat twin. A
   chat-vs-inbox race resolves ONCE: the loser gets ``not_pending`` and the durable status shows
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/v1/approvals", tags=["approvals"])
 
 
-def _to_out(proposal: ActionProposal) -> ApprovalOut:
+def _to_out(proposal: ActionProposal, *, edited: bool) -> ApprovalOut:
     """Render a proposal FAITHFULLY — verbatim arguments + description + the expiry countdown."""
     return ApprovalOut(
         proposal_id=proposal.proposal_id,
@@ -43,7 +45,17 @@ def _to_out(proposal: ActionProposal) -> ApprovalOut:
         categories=sorted(c.value for c in proposal.categories),
         created_at=proposal.created_at,
         expires_at=proposal.created_at + EXPIRE_AFTER_DEFAULT,
+        status=proposal.status.value,
+        edited=edited,
     )
+
+
+def _render(
+    store: ApprovalStore, owner_id: str, proposals: list[ActionProposal]
+) -> list[ApprovalOut]:
+    """Render a page of proposals, asking the decision trail ONCE which of them carry edits."""
+    edited = store.list_edited_proposal_ids(owner_id, [p.proposal_id for p in proposals])
+    return [_to_out(p, edited=p.proposal_id in edited) for p in proposals]
 
 
 @router.get("", response_model=list[ApprovalOut])
@@ -53,7 +65,28 @@ async def list_approvals(
 ) -> list[ApprovalOut]:
     """Every pending approval across the caller's tasks, oldest-first (RLS-scoped, faithful)."""
     store = ApprovalStore(request.app.state.rls_engine)
-    return [_to_out(p) for p in store.list_pending_for_owner(user.id)]
+    return _render(store, user.id, store.list_pending_for_owner(user.id))
+
+
+@router.get("/handled", response_model=list[ApprovalOut])
+async def list_handled_approvals(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+    limit: int = 10,
+) -> list[ApprovalOut]:
+    """The caller's most recently DECIDED approvals, newest first: the reopenable half.
+
+    Declared before ``/{proposal_id}`` so the literal path wins the match. A decision used to
+    leave nothing a reopened inbox could read: the list endpoint returns pending proposals only,
+    so "Approved with your edits" existed for as long as the tab stayed open and not a moment
+    longer. This is the same durable rows, read back.
+    """
+    store = ApprovalStore(request.app.state.rls_engine)
+    return _render(
+        store,
+        user.id,
+        store.list_recently_resolved_for_owner(user.id, limit=max(1, min(limit, 50))),
+    )
 
 
 @router.get("/{proposal_id}", response_model=ApprovalOut)
@@ -62,13 +95,13 @@ async def get_approval(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> ApprovalOut:
-    """One pending approval, faithfully. 404 when it isn't the caller's / doesn't exist."""
+    """One approval, faithfully (any status). 404 when it isn't the caller's / doesn't exist."""
     store = ApprovalStore(request.app.state.rls_engine)
     try:
         proposal = store.get_proposal(user.id, proposal_id)
     except ApprovalNotFoundError as exc:
         raise HTTPException(status_code=404, detail="approval not found") from exc
-    return _to_out(proposal)
+    return _render(store, user.id, [proposal])[0]
 
 
 @router.post("/{proposal_id}/decision", response_model=ApprovalDecisionResult)

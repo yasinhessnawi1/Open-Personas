@@ -1379,11 +1379,16 @@ class EpisodicMembersResponse(_Output):
 
 
 class ApprovalOut(_Output):
-    """One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
+    """One approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
 
     The proposal's exact ``arguments`` + ``description`` are returned VERBATIM — the inbox is a
     safety surface, not a summary (approving a paraphrase would approve a different action). The
     web client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content).
+
+    ``status`` and ``edited`` are what make a DECIDED approval readable again after the fact.
+    Between the decision and the execution the status itself says ``modified``; once the action
+    has run the status is ``consumed`` for everything, and ``edited`` (read from the durable
+    decision trail) is the part that still remembers whose version of the action went out.
     """
 
     proposal_id: str
@@ -1397,6 +1402,10 @@ class ApprovalOut(_Output):
     created_at: datetime
     #: ``created_at`` + the 72h expiry — the inbox's countdown (the sweep auto-pauses past it).
     expires_at: datetime
+    #: The durable ProposalStatus: pending | approved | modified | denied | expired | consumed.
+    status: str
+    #: True when the user changed the action before saying yes (a ``modify`` decision exists).
+    edited: bool = False
 
 
 class ApprovalDecisionResult(_Output):

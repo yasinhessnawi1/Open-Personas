@@ -14,6 +14,7 @@ import {
   type ApprovalOut,
   decideApproval,
   fetchApprovals,
+  fetchHandledApprovals,
   getApproval,
 } from "@/lib/api/approvals-client";
 import { useTaskSignal } from "@/lib/task-signal";
@@ -32,6 +33,7 @@ export function ApprovalsInbox({
   const { getToken } = useAuth();
   const toast = useToast();
   const [approvals, setApprovals] = useState<ApprovalOut[] | null>(null);
+  const [handled, setHandled] = useState<ApprovalOut[]>([]);
   const [resolutions, setResolutions] = useState<
     Record<string, CardResolution>
   >({});
@@ -39,7 +41,13 @@ export function ApprovalsInbox({
 
   const load = useCallback(async () => {
     try {
-      setApprovals(await fetchApprovals(await getToken()));
+      const token = await getToken();
+      const [pending, recent] = await Promise.all([
+        fetchApprovals(token),
+        fetchHandledApprovals(token),
+      ]);
+      setApprovals(pending);
+      setHandled(recent);
     } catch {
       setApprovals([]);
       toast.error(t("loadFailed"));
@@ -84,6 +92,9 @@ export function ApprovalsInbox({
               note: result.note,
             },
           }));
+          // Re-read the handled half so the same sentence survives the next page load. This
+          // is the durable record catching up with the card that is already showing it.
+          setHandled(await fetchHandledApprovals(await getToken()));
         }
       } catch {
         toast.error(t("decideFailed"));
@@ -103,28 +114,45 @@ export function ApprovalsInbox({
     );
   }
 
-  if (approvals.length === 0) {
-    return (
-      <EmptyState
-        icon={<ShieldCheck className="size-6" />}
-        title={t("emptyTitle")}
-        description={t("emptyBody")}
-      />
-    );
-  }
+  // A proposal decided in this session is still in the pending list we loaded; the handled
+  // list has it too. Show it once, in the pending slot, so the card does not jump on answer.
+  const pendingIds = new Set(approvals.map((a) => a.proposal_id));
+  const recent = handled.filter((a) => !pendingIds.has(a.proposal_id));
+
+  const card = (approval: ApprovalOut) => (
+    <ApprovalCard
+      key={approval.proposal_id}
+      approval={approval}
+      personaName={personaNames[approval.persona_id] ?? approval.persona_id}
+      resolution={resolutions[approval.proposal_id] ?? null}
+      busy={busy[approval.proposal_id] ?? false}
+      onDecide={(req) => onDecide(approval.proposal_id, req)}
+    />
+  );
 
   return (
-    <Stack gap={3}>
-      {approvals.map((approval) => (
-        <ApprovalCard
-          key={approval.proposal_id}
-          approval={approval}
-          personaName={personaNames[approval.persona_id] ?? approval.persona_id}
-          resolution={resolutions[approval.proposal_id] ?? null}
-          busy={busy[approval.proposal_id] ?? false}
-          onDecide={(req) => onDecide(approval.proposal_id, req)}
+    <Stack gap={6}>
+      {approvals.length === 0 ? (
+        <EmptyState
+          icon={<ShieldCheck className="size-6" />}
+          title={t("emptyTitle")}
+          description={t("emptyBody")}
         />
-      ))}
+      ) : (
+        <Stack gap={3}>{approvals.map(card)}</Stack>
+      )}
+
+      {recent.length > 0 ? (
+        <Stack gap={3}>
+          <div>
+            <h2 className="type-heading">{t("handledTitle")}</h2>
+            <p className="type-caption text-muted-foreground">
+              {t("handledBody")}
+            </p>
+          </div>
+          {recent.map(card)}
+        </Stack>
+      ) : null}
     </Stack>
   );
 }

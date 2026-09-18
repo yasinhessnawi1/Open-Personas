@@ -11,10 +11,12 @@ some channel; the resolver:
 3. **records** the verbatim decision (the audit trail);
 4. **resolves**:
    - **approve** (or an immaterial **modify**) → the **at-most-once execution gate** (the
-     proposal CAS ``pending → approved``) — only the winner **replays the EXACT recorded
-     payload verbatim** (the model never re-derives), folds the result into a **resolution
-     checkpoint** (the A2 ``CheckpointStore.append`` CAS), marks the proposal ``consumed``,
-     and resumes the task;
+     proposal CAS ``pending → approved``, or ``pending → modified`` when what is about to run
+     is the user's edited payload). Only the winner **replays the EXACT recorded payload
+     verbatim** (the model never re-derives), folds the result into a **resolution
+     checkpoint** (the A2 ``CheckpointStore.append`` CAS), marks the proposal ``consumed``
+     (admitted from either green light via :meth:`ProposalStatus.executable`), and resumes
+     the task;
    - **deny** → the CAS ``pending → denied`` gates a one-time denial checkpoint + resume (the
      leg adapts gracefully — denial is information, not an error);
    - **material modify** → revise the pending payload + re-confirm (stays pending);
@@ -266,11 +268,12 @@ class ApprovalResolver:
         The one path both the NL reply and the structured inbox decision converge on: the floor
         (never bypassed), the durable verbatim decision record, and the outcome dispatch.
         """
-        clarifications_used = sum(
-            1
-            for d in self._approvals.list_decisions(owner_id, proposal.proposal_id)
-            if d.type is DecisionType.CLARIFY
-        )
+        prior_decisions = self._approvals.list_decisions(owner_id, proposal.proposal_id)
+        clarifications_used = sum(1 for d in prior_decisions if d.type is DecisionType.CLARIFY)
+        # A material edit revised this payload earlier and is now being re-confirmed, so the
+        # plain "approve" arriving here is an approval OF THE USER'S OWN VERSION of the action.
+        # The durable record has to say so; the decision trail is where that is already written.
+        already_edited = any(d.type is DecisionType.MODIFY for d in prior_decisions)
         resolved = resolve_reply(
             raw, original_arguments=proposal.arguments, clarifications_used=clarifications_used
         )
@@ -288,7 +291,12 @@ class ApprovalResolver:
         )
         if resolved.outcome is DecisionType.APPROVE:
             return await self._execute_and_resume(
-                owner_id, proposal, proposal.arguments, verbatim_reply, now
+                owner_id,
+                proposal,
+                proposal.arguments,
+                verbatim_reply,
+                now,
+                carries_edit=already_edited,
             )
         if resolved.outcome is DecisionType.MODIFY:
             return await self._handle_modify(owner_id, proposal, resolved, verbatim_reply, now)
@@ -322,8 +330,11 @@ class ApprovalResolver:
             if revised is not None:
                 await self._notifier.reconfirm(revised)
             return ResolutionOutcome(outcome=DecisionType.MODIFY, note="reconfirm")
-        # Immaterial edit → execute the edited payload directly (phrasing change).
-        return await self._execute_and_resume(owner_id, proposal, edited, reply, now)
+        # Immaterial edit → execute the edited payload directly (phrasing change). It is still
+        # the user's own wording that goes out, so the record lands MODIFIED, not APPROVED.
+        return await self._execute_and_resume(
+            owner_id, proposal, edited, reply, now, carries_edit=True
+        )
 
     async def _execute_and_resume(
         self,
@@ -332,13 +343,23 @@ class ApprovalResolver:
         exec_arguments: Mapping[str, JsonValue],
         reply: str,
         now: datetime,
+        *,
+        carries_edit: bool,
     ) -> ResolutionOutcome:
-        """The at-most-once execution gate: CAS-win → verbatim replay → resolution checkpoint."""
+        """The at-most-once execution gate: CAS-win → verbatim replay → resolution checkpoint.
+
+        ``carries_edit`` picks which green light the record keeps: ``modified`` when the payload
+        about to run is the user's edited version (an immaterial edit executing straight away, or
+        the re-confirmation of a material one), ``approved`` when it is the action exactly as the
+        persona proposed it. Both execute identically and both consume; the difference is only
+        what the record can tell you afterwards, which until now it could not.
+        """
+        decided = ProposalStatus.MODIFIED if carries_edit else ProposalStatus.APPROVED
         approved = self._approvals.transition_proposal(
             owner_id,
             proposal.proposal_id,
             expected=ProposalStatus.PENDING,
-            new=ProposalStatus.APPROVED,
+            new=decided,
             now=now,
         )
         if approved is None:
@@ -348,17 +369,21 @@ class ApprovalResolver:
 
         # Verbatim replay — the EXACT recorded payload, never re-derived by the model.
         result = await self._executor.execute(proposal.tool_name, exec_arguments)
+        headline = "Approved with your edits" if carries_edit else "Approved"
         self._write_resolution_checkpoint(
             owner_id,
             proposal.task_id,
-            conclusion=f"Approved + executed: {proposal.description} → {result.summary}",
+            conclusion=f"{headline} + executed: {proposal.description} → {result.summary}",
             produced=pointers_from_artifacts(result.artifacts),
             now=now,
         )
         self._approvals.transition_proposal(
             owner_id,
             proposal.proposal_id,
-            expected=ProposalStatus.APPROVED,
+            # The one admission predicate: whichever green light the decision wrote, it
+            # consumes. Naming the set here is what keeps `modified` from being a status that
+            # executes and then never reaches the terminal it is supposed to reach.
+            expected=ProposalStatus.executable(),
             new=ProposalStatus.CONSUMED,
             now=now,
         )

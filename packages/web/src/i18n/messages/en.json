@@ -495,14 +495,18 @@
     "expiresInDays": "expires in {days} days",
     "emptyTitle": "Nothing waiting on you",
     "emptyBody": "When a persona needs your go-ahead, it shows up here with the exact action to approve.",
+    "handledTitle": "Recently handled",
+    "handledBody": "What you decided, and what the record says happened.",
     "loadFailed": "Couldn't load your approvals. Try again in a moment.",
     "decideFailed": "That didn't go through. Try again in a moment.",
     "reflection": {
       "approved": "Approved.",
+      "approvedWithEdits": "Approved with your edits.",
       "denied": "Denied.",
       "reconfirm": "Updated. Please confirm the change again.",
       "alreadyHandled": "Already handled.",
-      "resolvedGeneric": "Done."
+      "resolvedGeneric": "Done.",
+      "expiredReflection": "This expired before it was answered."
     },
     "valueNone": "Not set"
   },

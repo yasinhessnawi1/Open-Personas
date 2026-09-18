@@ -46,6 +46,7 @@ from persona_api.db.models import tasks as tasks_t
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from sqlalchemy import Engine
@@ -118,6 +119,62 @@ class ApprovalStore:
                 .all()
             )
         return [row_to_proposal(r) for r in rows]
+
+    def list_recently_resolved_for_owner(
+        self, owner_id: str, *, limit: int = 10
+    ) -> list[ActionProposal]:
+        """The owner's most recently DECIDED proposals, newest first (the inbox's "handled" half).
+
+        Everything that is no longer ``pending``: approved, modified, denied, expired, consumed.
+        Without this the inbox could only ever show open proposals, so what the record said about
+        a decision lived exactly as long as the browser tab did. Reopening the page now shows
+        the same sentence the decision showed, read back from the durable row.
+
+        RLS-scoped, with the explicit owner predicate alongside it (Spec W1 T5). Ordered by
+        ``updated_at`` (the status-change time), so the thing just decided sits first.
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            rows = (
+                conn.execute(
+                    select(proposals_t)
+                    .where(
+                        proposals_t.c.owner_id == owner_id,
+                        proposals_t.c.status != ProposalStatus.PENDING.value,
+                    )
+                    .order_by(proposals_t.c.updated_at.desc())
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
+        return [row_to_proposal(r) for r in rows]
+
+    def list_edited_proposal_ids(
+        self, owner_id: str, proposal_ids: Sequence[str]
+    ) -> frozenset[str]:
+        """Which of these proposals carry a user edit, from the durable decision trail.
+
+        A ``modify`` decision row is the permanent evidence that the user changed the action
+        before saying yes. The proposal's own status carries that too (``modified``), but only
+        until execution consumes it, and ``consumed`` alone cannot tell an edited action from
+        an as-proposed one. This read is what lets a reopened record still say "with your
+        edits" a week later.
+
+        One query for the whole page (never one per row). An empty input asks nothing.
+        """
+        if not proposal_ids:
+            return frozenset()
+        with rls_connection(self._engine, owner_id) as conn:
+            rows = conn.execute(
+                select(decisions_t.c.proposal_id)
+                .where(
+                    decisions_t.c.owner_id == owner_id,
+                    decisions_t.c.proposal_id.in_(list(proposal_ids)),
+                    decisions_t.c.type == "modify",
+                )
+                .distinct()
+            ).all()
+        return frozenset(str(r[0]) for r in rows)
 
     def get_pending_for_conversation(
         self, owner_id: str, conversation_id: str
@@ -199,27 +256,41 @@ class ApprovalStore:
         owner_id: str,
         proposal_id: str,
         *,
-        expected: ProposalStatus,
+        expected: ProposalStatus | frozenset[ProposalStatus],
         new: ProposalStatus,
         now: datetime,
     ) -> ActionProposal | None:
         """Atomic status CAS (A3-D-X-approved-execution): the at-most-once enforcement point.
 
-        ``UPDATE ... SET status=:new WHERE id=:id AND status=:expected RETURNING`` — exactly one
-        of two concurrent transitions from ``expected`` wins (the DB serialises the row); the
-        loser returns ``None``. Only the transition that wins should run the side effect
+        ``UPDATE ... SET status=:new WHERE id=:id AND status IN :expected RETURNING``: exactly
+        one of two concurrent transitions out of ``expected`` wins (the DB serialises the row);
+        the loser returns ``None``. Only the transition that wins should run the side effect
         (e.g. replay the approved payload), so a racing double-approve cannot double-execute.
 
-        Returns the post-transition :class:`ActionProposal`, or ``None`` if no row was in the
-        ``expected`` state (already transitioned / lost the race).
+        ``expected`` takes a SET as well as a single status so the consume step can name
+        :meth:`ProposalStatus.executable` (approved **or** modified) as one predicate rather
+        than spelling the members out at the call site and forgetting one. A set is still a
+        single CAS: ``IN`` narrows the same one row, and only one caller can leave it.
+
+        Args:
+            owner_id: The RLS scope.
+            proposal_id: The proposal to transition.
+            expected: The status, or set of statuses, the row must currently hold.
+            new: The status to move it to.
+            now: The transition time (tz-aware UTC).
+
+        Returns:
+            The post-transition :class:`ActionProposal`, or ``None`` if no row was in an
+            ``expected`` state (already transitioned / lost the race).
         """
+        allowed = frozenset({expected}) if isinstance(expected, ProposalStatus) else expected
         with rls_connection(self._engine, owner_id) as conn:
             row = (
                 conn.execute(
                     update(proposals_t)
                     .where(
                         proposals_t.c.id == proposal_id,
-                        proposals_t.c.status == expected.value,
+                        proposals_t.c.status.in_(sorted(s.value for s in allowed)),
                     )
                     .values(status=new.value, updated_at=now)
                     .returning(*proposals_t.c)
@@ -234,7 +305,7 @@ class ApprovalStore:
             owner_id,
             f"approval.proposal.{new.value}",
             proposal_id,
-            {"from": expected.value, "to": new.value},
+            {"from": ",".join(sorted(s.value for s in allowed)), "to": new.value},
         )
         return proposal
 

@@ -2069,6 +2069,31 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/approvals/handled": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Handled Approvals
+     * @description The caller's most recently DECIDED approvals, newest first: the reopenable half.
+     *
+     *     Declared before ``/{proposal_id}`` so the literal path wins the match. A decision used to
+     *     leave nothing a reopened inbox could read: the list endpoint returns pending proposals only,
+     *     so "Approved with your edits" existed for as long as the tab stayed open and not a moment
+     *     longer. This is the same durable rows, read back.
+     */
+    get: operations["list_handled_approvals_v1_approvals_handled_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/approvals/{proposal_id}": {
     parameters: {
       query?: never;
@@ -2078,7 +2103,7 @@ export interface paths {
     };
     /**
      * Get Approval
-     * @description One pending approval, faithfully. 404 when it isn't the caller's / doesn't exist.
+     * @description One approval, faithfully (any status). 404 when it isn't the caller's / doesn't exist.
      */
     get: operations["get_approval_v1_approvals__proposal_id__get"];
     put?: never;
@@ -2846,11 +2871,16 @@ export interface components {
     };
     /**
      * ApprovalOut
-     * @description One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
+     * @description One approval, rendered FAITHFULLY for the A6 inbox (criterion 5).
      *
      *     The proposal's exact ``arguments`` + ``description`` are returned VERBATIM — the inbox is a
      *     safety surface, not a summary (approving a paraphrase would approve a different action). The
      *     web client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content).
+     *
+     *     ``status`` and ``edited`` are what make a DECIDED approval readable again after the fact.
+     *     Between the decision and the execution the status itself says ``modified``; once the action
+     *     has run the status is ``consumed`` for everything, and ``edited`` (read from the durable
+     *     decision trail) is the part that still remembers whose version of the action went out.
      */
     ApprovalOut: {
       /** Proposal Id */
@@ -2879,6 +2909,13 @@ export interface components {
        * Format: date-time
        */
       expires_at: string;
+      /** Status */
+      status: string;
+      /**
+       * Edited
+       * @default false
+       */
+      edited: boolean;
     };
     /**
      * ArtifactItem
@@ -8712,6 +8749,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ApprovalOut"][];
+        };
+      };
+    };
+  };
+  list_handled_approvals_v1_approvals_handled_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApprovalOut"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };

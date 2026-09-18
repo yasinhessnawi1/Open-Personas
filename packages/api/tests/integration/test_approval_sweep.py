@@ -192,6 +192,29 @@ def test_fresh_proposal_untouched(migrated_engine: Engine, app_engine: Engine) -
     assert ApprovalStore(app_engine).get_proposal("user_a", "p1").status is ProposalStatus.PENDING
 
 
+def test_a_modified_proposal_is_never_swept(migrated_engine: Engine, app_engine: Engine) -> None:
+    """A decided-with-edits approval is decided: the sweep neither reminds it nor expires it.
+
+    ``modified`` is a green light the sweep had never seen a row hold. Expiring one would undo a
+    decision the user already made, and reminding about it would ask them to make it again.
+    """
+    _seed_waiting_task(migrated_engine, "user_a", "persona_a", "t1")
+    store = ApprovalStore(app_engine)
+    store.create_proposal(_proposal("user_a", "persona_a", "t1", "p1", created_at=_T0))
+    decided = store.transition_proposal(
+        "user_a", "p1", expected=ProposalStatus.PENDING, new=ProposalStatus.MODIFIED, now=_T0
+    )
+    assert decided is not None
+
+    sweeper = _sweeper(migrated_engine, app_engine)
+    at_reminder = sweeper.sweep(now=_AT_25H)
+    past_expiry = sweeper.sweep(now=_AT_73H)
+
+    assert at_reminder.reminded == ()
+    assert past_expiry.expired == ()
+    assert store.get_proposal("user_a", "p1").status is ProposalStatus.MODIFIED
+
+
 # --- the worker runner: leader-gating + best-effort C0 voicing (GAP #1a wiring) ----------------
 
 

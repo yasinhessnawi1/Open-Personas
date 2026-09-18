@@ -165,3 +165,22 @@ class TestMateriality:
     def test_removing_a_phrasing_key_is_immaterial(self) -> None:
         edited = {k: v for k, v in self.ORIGINAL.items() if k != "body"}
         assert classify_modification(self.ORIGINAL, edited) is Materiality.IMMATERIAL
+
+
+# --- the executable admission predicate (the one door onto execution) -----------------------
+
+
+def test_executable_admits_both_green_lights() -> None:
+    """ "The user said yes" is two statuses, and both of them run the action."""
+    assert ProposalStatus.executable() == {ProposalStatus.APPROVED, ProposalStatus.MODIFIED}
+
+
+def test_executable_excludes_everything_that_is_not_a_yes() -> None:
+    """Pending, denied, expired and the consumed terminal are not green lights."""
+    for status in (
+        ProposalStatus.PENDING,
+        ProposalStatus.DENIED,
+        ProposalStatus.EXPIRED,
+        ProposalStatus.CONSUMED,
+    ):
+        assert status not in ProposalStatus.executable()

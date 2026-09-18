@@ -278,8 +278,12 @@ async def test_raced_approve_cas_executes_once(migrated_engine: Engine, app_engi
     _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
     proposal = approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
 
-    first = await resolver._execute_and_resume("user_a", proposal, _ARGS, "yes", _NOW)
-    second = await resolver._execute_and_resume("user_a", proposal, _ARGS, "yes", _NOW)
+    first = await resolver._execute_and_resume(
+        "user_a", proposal, _ARGS, "yes", _NOW, carries_edit=False
+    )
+    second = await resolver._execute_and_resume(
+        "user_a", proposal, _ARGS, "yes", _NOW, carries_edit=False
+    )
 
     assert first.executed is True
     assert second.executed is False  # lost the CAS race — no second execution
@@ -541,3 +545,191 @@ async def test_a_denial_carries_the_prior_pointers_through_unchanged(
     head = checkpoints.get_latest("user_a", "t1")
     assert head is not None
     assert [p.ref for p in head.artifact_pointers] == ["notes/earlier.md"]
+
+
+# --- what the record says about an EDITED approval (part1 F10) ------------------------------
+
+
+class _ScriptedInterpreter:
+    """Returns one reading per reply, in order (the last one repeats).
+
+    A two-reply conversation needs two readings (the edit, then the confirmation) and the
+    point of the test is that the SECOND reply travels the real chain, not that some state was
+    set by hand in between.
+    """
+
+    def __init__(self, *readings: RawInterpretation) -> None:
+        self._readings = list(readings)
+        self._seen = 0
+
+    async def interpret(self, reply: str, proposal: ActionProposal) -> RawInterpretation:  # noqa: ARG002
+        index = min(self._seen, len(self._readings) - 1)
+        self._seen += 1
+        return self._readings[index]
+
+
+class _StatusProbeExecutor:
+    """Reads the proposal's durable status from INSIDE the replay.
+
+    ``modified`` only exists between the decision and the consume CAS, which is a few
+    milliseconds of wall clock and the entire point of the finding: the status the record keeps
+    while the action runs is what tells "approved as proposed" from "approved with my edits".
+    Asserting after the fact would only ever see ``consumed``, so the probe looks while it is
+    there. The approval's own execution is the real trigger chain; nothing here forces a state.
+    """
+
+    def __init__(self, approvals: ApprovalStore, owner_id: str, proposal_id: str) -> None:
+        self._approvals = approvals
+        self._owner_id = owner_id
+        self._proposal_id = proposal_id
+        self.calls: list[tuple[str, dict]] = []
+        self.status_during_replay: ProposalStatus | None = None
+
+    async def execute(self, tool_name: str, arguments: Mapping) -> ExecutedAction:
+        self.calls.append((tool_name, dict(arguments)))
+        self.status_during_replay = self._approvals.get_proposal(
+            self._owner_id, self._proposal_id
+        ).status
+        return ExecutedAction(summary="sent")
+
+
+def _probe_resolver(
+    engine: Engine, interp: _FakeInterpreter | _ScriptedInterpreter
+) -> tuple[ApprovalResolver, ApprovalStore, _StatusProbeExecutor, _FakeNotifier, CheckpointStore]:
+    """A resolver whose executor reports the status the record holds mid-replay."""
+    approvals = ApprovalStore(engine)
+    tasks = TaskStore(engine)
+    checkpoints = CheckpointStore(engine)
+    continuation = TaskContinuation(
+        task_store=tasks,
+        queue=_FakeQueue(),  # type: ignore[arg-type]
+        checkpoint_store=checkpoints,
+    )
+    executor = _StatusProbeExecutor(approvals, "user_a", "p1")
+    notifier = _FakeNotifier()
+    resolver = ApprovalResolver(
+        approvals=approvals,
+        tasks=tasks,
+        checkpoints=checkpoints,
+        continuation=continuation,
+        interpreter=interp,
+        executor=executor,
+        notifier=notifier,
+    )
+    return resolver, approvals, executor, notifier, checkpoints
+
+
+async def test_an_edited_approval_lands_modified_and_still_executes(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """An immaterial edit runs the user's wording, and the record says it was the user's."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    edited = {**_ARGS, "subject": "the appeal (final)"}  # phrasing → immaterial → executes
+    modify = _FakeInterpreter(
+        RawInterpretation(intent=InterpretedIntent.MODIFY, confidence=0.95, edited_arguments=edited)
+    )
+    resolver, approvals, executor, _n, _cp = _probe_resolver(app_engine, modify)
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes, tweak the subject", "telegram", now=_NOW)
+
+    assert executor.calls == [("send_email", edited)]  # it really ran, on the edited payload
+    assert executor.status_during_replay is ProposalStatus.MODIFIED
+    # And the consume CAS admits MODIFIED, so an edited approval still reaches the terminal.
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+
+
+async def test_an_as_proposed_approval_still_lands_approved(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The plain yes is untouched: approving what the persona asked for stays ``approved``."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, executor, _n, _cp = _probe_resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes", "telegram", now=_NOW)
+
+    assert executor.calls == [("send_email", _ARGS)]
+    assert executor.status_during_replay is ProposalStatus.APPROVED
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+
+
+async def test_the_reconfirmed_material_edit_lands_modified(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The whole chain: a material edit re-confirms, and the yes that follows is still an edit.
+
+    This is the case the plain reading misses. The user changed the amount, said yes to their
+    own version a moment later, and until now the record of that was indistinguishable from
+    approving the persona's original figure.
+    """
+    _seed(migrated_engine, "user_a", "persona_a")
+    conversation = _ScriptedInterpreter(
+        RawInterpretation(
+            intent=InterpretedIntent.MODIFY,
+            confidence=0.95,
+            edited_arguments={**_ARGS, "amount": 3000},  # material → re-confirm, no execution
+        ),
+        RawInterpretation(intent=InterpretedIntent.APPROVE, confidence=0.95),
+    )
+    resolver, approvals, executor, notifier, checkpoints = _probe_resolver(app_engine, conversation)
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes but 3000kr", "telegram", now=_NOW)
+    assert notifier.reconfirms == 1
+    assert executor.calls == []
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.PENDING
+
+    # The user confirms the revised action: a second reply down the SAME live chain.
+    await resolver.resolve("user_a", "p1", "yes", "telegram", now=_NOW)
+
+    assert executor.calls == [("send_email", {**_ARGS, "amount": 3000})]
+    assert executor.status_during_replay is ProposalStatus.MODIFIED
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED
+    # The reopened task record says so too, not only the approval row.
+    latest = checkpoints.get_latest("user_a", "t1")
+    assert latest is not None
+    assert "Approved with your edits" in latest.progress_conclusions[-1]
+
+
+async def test_an_as_proposed_approval_does_not_claim_an_edit_in_the_task_record(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The conclusion a reopened task shows must not say "with your edits" for a plain yes."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, _e, _n, checkpoints = _probe_resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    await resolver.resolve("user_a", "p1", "yes", "telegram", now=_NOW)
+
+    latest = checkpoints.get_latest("user_a", "t1")
+    assert latest is not None
+    assert latest.progress_conclusions[-1].startswith("Approved + executed")
+
+
+async def test_the_structured_inbox_edit_lands_modified_too(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """Twin parity: the inbox click that carries an edit records the same thing chat does."""
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, executor, _n, _cp = _probe_resolver(app_engine, _approve())
+    _waiting_task(TaskStore(app_engine), owner="user_a", persona="persona_a", task_id="t1")
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    edited = {**_ARGS, "body": "shorter"}  # phrasing → immaterial
+    await resolver.resolve_structured(
+        "user_a",
+        "p1",
+        decision=InboxDecision.MODIFY,
+        edited_arguments=edited,
+        verbatim_reply="tighten it",
+        channel="web",
+        now=_NOW,
+    )
+
+    assert executor.status_during_replay is ProposalStatus.MODIFIED
+    assert approvals.get_proposal("user_a", "p1").status is ProposalStatus.CONSUMED

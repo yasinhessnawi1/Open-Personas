@@ -3899,11 +3899,57 @@
         }
       }
     },
+    "/v1/approvals/handled": {
+      "get": {
+        "tags": ["approvals"],
+        "summary": "List Handled Approvals",
+        "description": "The caller's most recently DECIDED approvals, newest first: the reopenable half.\n\nDeclared before ``/{proposal_id}`` so the literal path wins the match. A decision used to\nleave nothing a reopened inbox could read: the list endpoint returns pending proposals only,\nso \"Approved with your edits\" existed for as long as the tab stayed open and not a moment\nlonger. This is the same durable rows, read back.",
+        "operationId": "list_handled_approvals_v1_approvals_handled_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalOut"
+                  },
+                  "title": "Response List Handled Approvals V1 Approvals Handled Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/approvals/{proposal_id}": {
       "get": {
         "tags": ["approvals"],
         "summary": "Get Approval",
-        "description": "One pending approval, faithfully. 404 when it isn't the caller's / doesn't exist.",
+        "description": "One approval, faithfully (any status). 404 when it isn't the caller's / doesn't exist.",
         "operationId": "get_approval_v1_approvals__proposal_id__get",
         "parameters": [
           {
@@ -5208,6 +5254,15 @@
             "type": "string",
             "format": "date-time",
             "title": "Expires At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "edited": {
+            "type": "boolean",
+            "title": "Edited",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -5221,10 +5276,11 @@
           "description",
           "categories",
           "created_at",
-          "expires_at"
+          "expires_at",
+          "status"
         ],
         "title": "ApprovalOut",
-        "description": "One pending approval, rendered FAITHFULLY for the A6 inbox (criterion 5).\n\nThe proposal's exact ``arguments`` + ``description`` are returned VERBATIM \u2014 the inbox is a\nsafety surface, not a summary (approving a paraphrase would approve a different action). The\nweb client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content)."
+        "description": "One approval, rendered FAITHFULLY for the A6 inbox (criterion 5).\n\nThe proposal's exact ``arguments`` + ``description`` are returned VERBATIM \u2014 the inbox is a\nsafety surface, not a summary (approving a paraphrase would approve a different action). The\nweb client renders them as TEXT, never HTML (XSS-safe: an email body is untrusted content).\n\n``status`` and ``edited`` are what make a DECIDED approval readable again after the fact.\nBetween the decision and the execution the status itself says ``modified``; once the action\nhas run the status is ``consumed`` for everything, and ``edited`` (read from the durable\ndecision trail) is the part that still remembers whose version of the action went out."
       },
       "ArtifactItem": {
         "properties": {
