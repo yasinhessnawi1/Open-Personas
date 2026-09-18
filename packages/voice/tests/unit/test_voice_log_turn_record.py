@@ -23,6 +23,9 @@ WHAT THESE TESTS COVER.
    degrades the record, never the call).
 6. The runner actually composes the writer (the structural half; without it the
    behaviour above is unreachable in production and the record ships dark again).
+7. R9-189: the token tee is the single writer of ``llm_first_token_at``, so a turn
+   whose reply never came from the model's generation stream (the safety bypass,
+   a gate-owned turn, a narrated tool line) is still anchored.
 """
 
 from __future__ import annotations
@@ -310,6 +313,50 @@ async def test_a_failing_writer_never_breaks_the_turn() -> None:
     await harness.turn("still works")
 
     assert len(writer.attempts) == 1
+
+
+class _OneLineProducer:
+    """A producer that speaks one line and returns, without a generation stream.
+
+    The shape of the V5 turn paths that bypass generation entirely: the R1-hard
+    safety bypass (``reply_producer.py:255``) and a gate-owned origination turn
+    (``reply_producer.py:307``) each yield a single spoken line and return.
+    """
+
+    def __init__(self, line: str) -> None:
+        self._line = line
+
+    async def __call__(self, _final_transcript: Transcript) -> AsyncIterator[str]:
+        return self._speak()
+
+    async def _speak(self) -> AsyncIterator[str]:
+        yield self._line
+
+
+@pytest.mark.asyncio
+async def test_a_reply_the_generation_stream_never_produced_still_gets_the_anchor(
+    tmp_path: Path,
+) -> None:
+    """The token tee owns ``llm_first_token_at`` because it sees every turn path (R9-189).
+
+    A seam inside the producer's generation stream would leave this turn's anchor
+    blank: the safety bypass and the gate-owned turn never reach that stream, and
+    the narrated tool lines (preamble, deferral, overflow) do not come from it
+    either. The tee is the one boundary all of them cross, so it is the single
+    writer of the field.
+    """
+    writer = JSONLVoiceLogWriter(tmp_path / "voice-turns.jsonl")
+    harness = _Harness(
+        model=_OneLineProducer("I can't help with that, but here is who can."),
+        tts=_TTS(),
+        writer=writer,
+    )
+
+    await harness.turn("something acute")
+
+    (log,) = writer.read_all()
+    assert log.llm_first_token_at is not None
+    assert log.started_at <= log.llm_first_token_at < log.tts_first_audio_at  # type: ignore[operator]
 
 
 @pytest.mark.asyncio

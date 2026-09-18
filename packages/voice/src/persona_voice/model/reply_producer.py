@@ -24,11 +24,14 @@ One turn:
    conservative v1, not the text loop's multi-round sub-loop). A **deferred**
    (heavy) tool call is acknowledged in voice and emitted as a
    :class:`DeferredArtifact` intent to be produced off the live path (F5);
-5. first-token latency is stamped per round into the shared
-   :class:`~persona_runtime.routing.FirstTokenLatencyTracker` (the D-V5-2 routing
-   refinement + the same number Spec 18 records) and the optional
-   ``first_token_listener`` is notified with the wall-clock instant (the VoiceLog
-   ``llm_first_token_at`` stamping seam).
+5. first-token latency is stamped once per turn, at the first spoken delta, into
+   the shared :class:`~persona_runtime.routing.FirstTokenLatencyTracker` (the
+   D-V5-2 routing refinement + the same number Spec 18 records). That tracker is
+   this measurement's consumer. The VoiceLog ``llm_first_token_at`` anchor is NOT
+   stamped here (R9-189): it is stamped at the streaming loop's token tee, the one
+   boundary every turn path crosses (the R1-hard safety bypass and a gate-owned
+   origination turn below never reach this generation stream, and neither do the
+   narrated tool lines), so the record has one writer and no blank turns.
 
 Cancellation (R-V5-4, verified in T5): the generator is a plain ``async for`` over
 ``chat_stream``; when V4 cancels the consuming task on barge-in the
@@ -101,7 +104,13 @@ GATE_BUDGET_S: float = 4.0
 
 @dataclass
 class _RoundTiming:
-    """Per-generation first-token bookkeeping (reset per round; notified once)."""
+    """Per-turn first-token bookkeeping.
+
+    ``t_start`` is re-read at the start of every round (a tool round and its
+    re-prompt are measured separately); ``notified`` is turn-scoped, so the
+    latency tracker gets exactly one sample per turn, from the first round that
+    actually speaks.
+    """
 
     t_start: float
     notified: bool = False
@@ -121,9 +130,6 @@ class VoiceModelReplyProducer:
         tool_policy: The voice-tools scope policy (D-V5-4); default built if omitted.
         narrator: The preamble-as-contract narrator (D-V5-5); default if omitted.
         tool_timeout_s: Hard wall-clock bound for a live voice tool (D-V5-4).
-        first_token_listener: Optional callback notified with the wall-clock
-            instant the LLM's first token arrives — the VoiceLog
-            ``llm_first_token_at`` stamping seam. MUST NOT raise.
         deferred_artifact_listener: Optional callback notified when a deferred
             (heavy) tool is acknowledged in voice — the off-path F5 intent
             (D-V5-4-f5-artifact-shape). MUST NOT raise.
@@ -154,7 +160,6 @@ class VoiceModelReplyProducer:
         tool_policy: VoiceToolPolicy | None = None,
         narrator: VoiceToolNarrator | None = None,
         tool_timeout_s: float = DEFAULT_VOICE_TOOL_TIMEOUT_S,
-        first_token_listener: Callable[[datetime], None] | None = None,
         deferred_artifact_listener: Callable[[DeferredArtifact], None] | None = None,
         async_artifact_listener: Callable[[ToolCall], None] | None = None,
         expressivity_listener: Callable[[VoiceExpressivity | None], None] | None = None,
@@ -171,7 +176,6 @@ class VoiceModelReplyProducer:
         self._tool_policy = tool_policy or VoiceToolPolicy()
         self._narrator = narrator or VoiceToolNarrator()
         self._tool_timeout_s = tool_timeout_s
-        self._first_token_listener = first_token_listener
         self._deferred_listener = deferred_artifact_listener
         # V10 T3 (V10-D-X-async-lane): the off-turn production lane's submit hook.
         # When present, an ASYNC_ARTIFACT call (e.g. generate_image) is handed to
@@ -518,7 +522,9 @@ class VoiceModelReplyProducer:
 
         Spoken text only — ``chunk.reasoning`` is never forwarded to TTS. First
         token latency is measured from this round's start (``timing.t_start`` reset
-        here) and recorded once per generation.
+        here) and recorded into the routing tracker once per turn, at the first
+        round that speaks. The VoiceLog ``llm_first_token_at`` anchor is the
+        streaming loop's to stamp, not this one's (R9-189).
         """
         timing.t_start = time.perf_counter()
         names: dict[str, str] = {}
@@ -542,8 +548,6 @@ class VoiceModelReplyProducer:
                         self._ctx.latency_tracker.record(
                             backend.model_name, (time.perf_counter() - timing.t_start) * 1000.0
                         )
-                    if self._first_token_listener is not None:
-                        self._first_token_listener(self._clock())
                 text_out.append(chunk.delta)
                 spoken = strip_converter.feed(chunk.delta)
                 if spoken:

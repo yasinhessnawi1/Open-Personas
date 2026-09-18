@@ -800,8 +800,15 @@ class StreamingLoop:
         synthesis — over-counting only by the buffered-but-unplayed tail V3
         flushes (the documented MAINTENANCE.md limitation).
 
-        The same boundary stamps the T10 ``llm_first_token_at`` anchor (R9-185):
-        the first token to reach it is the first the model produced for this turn.
+        The same boundary stamps the T10 ``llm_first_token_at`` anchor (R9-185),
+        and it is the field's ONLY writer (R9-189). V5 also measures its own
+        first-token instant, but only inside its generation stream, and several
+        real turn paths never enter that stream: the R1-hard safety bypass and a
+        gate-owned origination turn each speak one line and return, and the
+        narrated tool lines (preamble, deferral, overflow) are the producer's own
+        words. Those turns would carry a blank anchor if V5 owned the stamp. V5's
+        measurement keeps its own consumer, the routing
+        ``FirstTokenLatencyTracker``; this one is the record's.
         """
         async for token in token_stream:
             if self._llm_first_token_at is None:

@@ -3,8 +3,9 @@
 The anti-bypass checkpoint (criterion 1, the product-killer line): the prompt the
 voice model receives carries the FULL persona conditioning — identity,
 constraints, and retrieved typed memory — via the shared ``PromptBuilder``. Plus:
-the producer streams spoken text only (never reasoning), and stamps first-token
-latency into the tracker + the VoiceLog listener.
+the producer streams spoken text only (never reasoning), and records its
+first-token latency into the routing tracker (the VoiceLog ``llm_first_token_at``
+anchor is the streaming loop's, not the producer's - R9-189).
 """
 
 # ruff: noqa: ANN401, ARG001, ARG002 — test doubles with intentionally loose signatures.
@@ -12,6 +13,7 @@ latency into the tracker + the VoiceLog listener.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -220,17 +222,38 @@ class TestFirstTokenStamping:
         assert tracker.sample_count("test-model") == 1
 
     @pytest.mark.asyncio
-    async def test_notifies_first_token_listener_once_with_timestamp(self) -> None:
-        stamps: list[datetime] = []
-        fixed = datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC)
-        backend = _ScriptedBackend([StreamChunk(delta="a"), StreamChunk(delta="b"), _final()])
-        producer = VoiceModelReplyProducer(
-            _context(backend), first_token_listener=stamps.append, clock=lambda: fixed
+    async def test_records_one_sample_per_turn_even_when_two_rounds_speak(self) -> None:
+        """A tool round and its re-prompt are one turn, so the tracker gets one sample."""
+        tracker = FirstTokenLatencyTracker()
+        backend = _MultiRoundBackend(
+            [
+                [
+                    StreamChunk(delta="Let me check. "),
+                    _tool_call_chunk("web_search", '{"query": "rights"}'),
+                    _final(),
+                ],
+                [StreamChunk(delta="Here it is."), _final()],
+            ]
         )
+        toolbox = Toolbox([_web_search], allow_list=None)  # type: ignore[list-item]
+        producer = VoiceModelReplyProducer(_context(backend, tracker=tracker, toolbox=toolbox))
 
         await _drain(producer)
 
-        assert stamps == [fixed]  # exactly once, on the first token
+        assert tracker.sample_count("test-model") == 1
+
+    def test_exposes_no_first_token_listener_seam(self) -> None:
+        """R9-189: the VoiceLog anchor has one writer, the streaming loop's token tee.
+
+        The producer used to take a ``first_token_listener`` that called itself the
+        ``llm_first_token_at`` stamping seam and that nothing ever bound (the runner
+        builds the producer before the loop). It cannot own that field anyway: the
+        safety bypass, a gate-owned origination turn and the narrated tool lines all
+        speak without entering the generation stream where the seam lived. This pins
+        the parameter gone so the dark seam is not re-added.
+        """
+        params = inspect.signature(VoiceModelReplyProducer.__init__).parameters
+        assert "first_token_listener" not in params
 
 
 class _ParkingBackend:
