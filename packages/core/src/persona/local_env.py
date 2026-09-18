@@ -17,6 +17,10 @@ import os
 from pathlib import Path
 
 _TRUE = {"1", "true", "yes", "on"}
+# The opt-out words for PERSONA_DOTENV_LOAD. Falsy is the enumerated set, not
+# "anything that is not truthy": an operator who writes PERSONA_DOTENV_LOAD=y
+# means yes, and silently skipping their .env would be the worse surprise.
+_FALSE = {"0", "false", "no", "off"}
 
 
 def _repo_root() -> Path | None:
@@ -42,21 +46,48 @@ def _swap_userinfo(dsn: str, user: str, password: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def _dotenv_load_enabled() -> bool:
+    """Whether ``PERSONA_DOTENV_LOAD`` permits reading the ``.env`` file.
+
+    ``.env.example`` has advertised this gate since D-02-4 while the loader read
+    the file unconditionally, so an operator who set it to ``0`` got their
+    ``.env`` anyway. ``0``, ``false``, ``no`` and ``off`` (any case, surrounding
+    whitespace ignored) skip the file. Unset, empty, or any other value loads it,
+    which is the behaviour every existing dev entrypoint already relies on.
+
+    Returns:
+        ``True`` when the ``.env`` file may be read.
+    """
+    return os.environ.get("PERSONA_DOTENV_LOAD", "").strip().lower() not in _FALSE
+
+
 def load_local_env() -> None:
     """Load the repo-root ``.env`` + a few dev-derived vars into ``os.environ``.
 
     Idempotent and safe outside a checkout (no ``.env`` ⇒ the load is a no-op).
     ``override=False`` throughout: an explicitly-exported var always wins over
     ``.env``, so ``PERSONA_FOO=x uvicorn persona_api.dev:create_app`` still works.
+
+    ``PERSONA_DOTENV_LOAD=0`` (or ``false`` / ``no`` / ``off``) skips the ``.env``
+    file for an operator who exports everything themselves. It gates the FILE
+    only: the dev-derived vars below still run, because someone who exports their
+    own ``DATABASE_URL`` still wants the ``APP_DATABASE_URL`` derivation.
     """
     root = _repo_root()
 
     # 1) the .env file — the single source of truth for every PERSONA_* var.
+    #    Read the gate from os.environ BEFORE touching the file: the .env itself
+    #    must not be able to decide whether the .env gets read.
     try:
         from dotenv import load_dotenv
     except ImportError:
         load_dotenv = None  # type: ignore[assignment]
-    if load_dotenv is not None and root is not None and (root / ".env").exists():
+    if (
+        _dotenv_load_enabled()
+        and load_dotenv is not None
+        and root is not None
+        and (root / ".env").exists()
+    ):
         load_dotenv(root / ".env", override=False)
 
     # 1a) Derive the app/voice DB URLs + voice LiveKit creds from the primaries, so

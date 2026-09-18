@@ -12,8 +12,9 @@ Two surfaces are exercised:
    testable without a live sandbox.
 
 2. :class:`persona_api.sandbox.config.SandboxWallClockConfig` — the
-   env-tunable caps (D-25-3): ``PERSONA_SANDBOX_WALLCLOCK_EXEC_S`` (default
-   30) and ``PERSONA_SANDBOX_WALLCLOCK_SETUP_S`` (default 120).
+   env-tunable caps (D-25-3): ``PERSONA_SANDBOX_EXEC_CAP_S`` (default 30) and
+   ``PERSONA_SANDBOX_SETUP_CAP_S`` (default 120), each with an accepted
+   ``..._WALLCLOCK_..._S`` alias that the canonical name outranks.
 
 3. :meth:`HostedSandbox.execute` cap selection — a pip-install-style code
    string selects the 120s setup cap; a ``time.sleep(35)`` code string keeps
@@ -115,6 +116,79 @@ def test_wallclock_config_rejects_non_positive(
     monkeypatch.setenv("PERSONA_SANDBOX_WALLCLOCK_EXEC_S", "0")
     with pytest.raises(ValidationError, match="> 0"):
         SandboxWallClockConfig()
+
+
+# ====================== the caps answer to exactly two names (sweep part2, L)
+
+
+def _clear_cap_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "PERSONA_SANDBOX_EXEC_CAP_S",
+        "PERSONA_SANDBOX_SETUP_CAP_S",
+        "PERSONA_SANDBOX_WALLCLOCK_EXEC_S",
+        "PERSONA_SANDBOX_WALLCLOCK_SETUP_S",
+        "EXEC_CAP_S",
+        "SETUP_CAP_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_documented_cap_names_are_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``PERSONA_SANDBOX_EXEC_CAP_S`` / ``_SETUP_CAP_S`` are what .env.example lists."""
+    _clear_cap_names(monkeypatch)
+    monkeypatch.setenv("PERSONA_SANDBOX_EXEC_CAP_S", "99")
+    monkeypatch.setenv("PERSONA_SANDBOX_SETUP_CAP_S", "199")
+    cfg = SandboxWallClockConfig()
+    assert cfg.exec_cap_s == 99.0
+    assert cfg.setup_cap_s == 199.0
+
+
+def test_the_wallclock_alias_is_still_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The older ``..._WALLCLOCK_EXEC_S`` spelling keeps working.
+
+    A deployment may already have a secret set under it, and silently ignoring a
+    secret somebody set is worse than carrying two names for one knob.
+    """
+    _clear_cap_names(monkeypatch)
+    monkeypatch.setenv("PERSONA_SANDBOX_WALLCLOCK_EXEC_S", "45")
+    monkeypatch.setenv("PERSONA_SANDBOX_WALLCLOCK_SETUP_S", "200")
+    cfg = SandboxWallClockConfig()
+    assert cfg.exec_cap_s == 45.0
+    assert cfg.setup_cap_s == 200.0
+
+
+def test_the_canonical_name_wins_over_the_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The name an operator can look up is the one that takes effect.
+
+    The alias used to outrank the documented name, which is an hour lost the next
+    time a pip install keeps dying at a cap the operator believes they raised.
+    """
+    _clear_cap_names(monkeypatch)
+    monkeypatch.setenv("PERSONA_SANDBOX_EXEC_CAP_S", "99")
+    monkeypatch.setenv("PERSONA_SANDBOX_WALLCLOCK_EXEC_S", "77")
+    monkeypatch.setenv("PERSONA_SANDBOX_SETUP_CAP_S", "199")
+    monkeypatch.setenv("PERSONA_SANDBOX_WALLCLOCK_SETUP_S", "177")
+    cfg = SandboxWallClockConfig()
+    assert cfg.exec_cap_s == 99.0
+    assert cfg.setup_cap_s == 199.0
+
+
+def test_a_bare_unprefixed_name_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrelated ``EXEC_CAP_S`` in a shell or base image must not reach the sandbox."""
+    _clear_cap_names(monkeypatch)
+    monkeypatch.setenv("EXEC_CAP_S", "55")
+    monkeypatch.setenv("SETUP_CAP_S", "155")
+    cfg = SandboxWallClockConfig()
+    assert cfg.exec_cap_s == 30.0
+    assert cfg.setup_cap_s == 120.0
+
+
+def test_construction_by_field_name_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hosted sandbox and its tests build this config by keyword."""
+    _clear_cap_names(monkeypatch)
+    cfg = SandboxWallClockConfig(exec_cap_s=42.0, setup_cap_s=84.0)
+    assert cfg.exec_cap_s == 42.0
+    assert cfg.setup_cap_s == 84.0
 
 
 # ============================================ HostedSandbox cap selection

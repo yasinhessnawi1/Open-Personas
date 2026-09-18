@@ -40,16 +40,25 @@ class SandboxWallClockConfig(BaseSettings):
     Both caps are tunable via env (folds in the Spec 25 kickoff's
     ``D-25-X-cap-env-overrides``):
 
-      - ``PERSONA_SANDBOX_WALLCLOCK_EXEC_S`` — ordinary code-execution cap
+      - ``PERSONA_SANDBOX_EXEC_CAP_S``: ordinary code-execution cap
         (D-25-3 default: 30s; unchanged from Spec 12).
-      - ``PERSONA_SANDBOX_WALLCLOCK_SETUP_S`` — env-setup cap (D-25-3
-        default: 120s).
+      - ``PERSONA_SANDBOX_SETUP_CAP_S``: env-setup cap (D-25-3 default: 120s).
+
+    Those two prefixed names are canonical: they are what ``.env.example``
+    lists and they win whenever both spellings are set. ``..._WALLCLOCK_EXEC_S``
+    and ``..._WALLCLOCK_SETUP_S`` are kept as accepted aliases because a running
+    deployment may already hold a secret under them, and quietly ignoring a
+    secret somebody set is the worse failure. The alias order below is the
+    precedence order: ``pydantic-settings`` takes the first choice it finds.
+
+    The bare, unprefixed ``exec_cap_s`` / ``setup_cap_s`` aliases used to be
+    honoured as environment variables too, so a stray ``EXEC_CAP_S`` in a shell
+    or a base image silently changed the sandbox timeout. They are gone.
+    ``populate_by_name`` stays on so the caps can still be passed by keyword.
 
     Read once at process start by the composition root and passed into
     :class:`persona_api.sandbox.hosted.HostedSandbox`. Shares the
-    ``PERSONA_SANDBOX_`` prefix with :class:`SandboxPoolConfig`; the env-var
-    names use explicit aliases so they read ``..._WALLCLOCK_EXEC_S`` rather
-    than the field-derived ``..._EXEC_CAP_S``.
+    ``PERSONA_SANDBOX_`` prefix with :class:`SandboxPoolConfig`.
     """
 
     model_config = SettingsConfigDict(
@@ -58,7 +67,9 @@ class SandboxWallClockConfig(BaseSettings):
 
     exec_cap_s: float = Field(
         default=30.0,
-        validation_alias=AliasChoices("exec_cap_s", "PERSONA_SANDBOX_WALLCLOCK_EXEC_S"),
+        validation_alias=AliasChoices(
+            "PERSONA_SANDBOX_EXEC_CAP_S", "PERSONA_SANDBOX_WALLCLOCK_EXEC_S"
+        ),
         description=(
             "Wall-clock cap (seconds) for ordinary code execution. D-25-3 "
             "default: 30s (unchanged from Spec 12)."
@@ -66,7 +77,9 @@ class SandboxWallClockConfig(BaseSettings):
     )
     setup_cap_s: float = Field(
         default=120.0,
-        validation_alias=AliasChoices("setup_cap_s", "PERSONA_SANDBOX_WALLCLOCK_SETUP_S"),
+        validation_alias=AliasChoices(
+            "PERSONA_SANDBOX_SETUP_CAP_S", "PERSONA_SANDBOX_WALLCLOCK_SETUP_S"
+        ),
         description=(
             "Wall-clock cap (seconds) for env-setup commands (package-manager "
             "invocations per D-25-2). D-25-3 default: 120s."
