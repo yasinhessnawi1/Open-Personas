@@ -70,7 +70,7 @@ class _FakeGenerator:
         self._fail_after_persist = fail_after_persist
 
     async def generate(
-        self, *, persona_id: str, owner_id: str, yaml_str: str
+        self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
     ) -> AvatarResult | None:
         self.calls += 1
         url = f"avatars/{persona_id}.png"  # deterministic → re-gen overwrites, no orphan

@@ -58,7 +58,9 @@ class _FakeAvatarGen:
     def __init__(self) -> None:
         self.calls: dict[str, int] = {}
 
-    async def generate(self, *, persona_id: str, owner_id: str, yaml_str: str) -> AvatarResult:
+    async def generate(
+        self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
+    ) -> AvatarResult:
         self.calls[persona_id] = self.calls.get(persona_id, 0) + 1
         return AvatarResult(avatar_url=f"avatars/{persona_id}.png", cost_micros=1, provider="fake")
 

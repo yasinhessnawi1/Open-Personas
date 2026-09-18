@@ -278,7 +278,7 @@ def test_b3_patch_without_avatar_leaves_source_untouched(
 
 class _FakeGenerator:
     async def generate(
-        self, *, persona_id: str, owner_id: str, yaml_str: str
+        self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
     ) -> AvatarResult | None:
         return AvatarResult(
             avatar_url=f"avatars/{persona_id}.png", cost_micros=1000, provider="fake"

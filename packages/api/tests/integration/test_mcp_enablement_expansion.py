@@ -194,13 +194,18 @@ async def test_bare_time_grant_spawns_the_real_server_and_advertises_its_tool(
 
         toolbox = await factory._build_toolbox(persona, scanned_skills=[])  # noqa: SLF001
 
+        # The toolbox's own vocabulary keeps the MCP id; since 13e2c4cf only the specs
+        # the MODEL sees carry the wire name (providers require [a-zA-Z0-9_-]), and the
+        # toolbox resolves the wire name back to the id on dispatch and admission.
         names = toolbox.names()  # type: ignore[attr-defined]
         assert "mcp:time:datetime" in names, (
             f"the real time server's advertised tool must reach the model; got {names!r}"
         )
+        assert toolbox.real_name("mcp_time_datetime") == "mcp:time:datetime"  # type: ignore[attr-defined]
         assert toolbox.is_allowed("mcp:time:datetime")  # type: ignore[attr-defined]
+        assert toolbox.is_allowed("mcp_time_datetime")  # type: ignore[attr-defined]
         spec_names = {s.name for s in toolbox.get_specs()}  # type: ignore[attr-defined]
-        assert "mcp:time:datetime" in spec_names
+        assert "mcp_time_datetime" in spec_names
         # The bare grant is the documented allow-list form but no tool ever
         # registers under it — it is never itself advertised (byte-for-byte T1b).
         assert "mcp:time" not in names
