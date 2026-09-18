@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from persona.initiative import InitiativeCandidate
@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from persona_api.db.engine import rls_connection
+from persona_api.db.engine import aware_utc, rls_connection
 from persona_api.db.models import initiative_declines as declines_t
 from persona_api.db.models import initiative_notices as notices_t
 from persona_api.services import audit_service
@@ -127,6 +127,19 @@ class NoticeRecord(BaseModel):
 
 
 def _notice_from_row(row: RowMapping) -> NoticeRecord:
+    """Build a :class:`NoticeRecord` from a ``initiative_notices`` row.
+
+    **R9-182.** Every instant on the row goes through
+    :func:`~persona_api.db.engine.aware_utc`. The community SQLite engine stores
+    no tzinfo and hands these back NAIVE, and the record's own consumers do
+    Python arithmetic against an aware ``now``, :meth:`InitiativeLedger.latest_pending_proposal`
+    raised ``TypeError`` for every live proposal, which the runtime factory's
+    fail-soft pending provider swallowed into "nothing pending", so the confirm
+    and decline verbs could never fire in the community edition. Postgres values
+    are already aware and pass through untouched. Coercing the whole row (not
+    just ``delivered_at``) is deliberate: a naive sibling is the same bug waiting
+    for its first Python comparison.
+    """
     return NoticeRecord(
         id=row["id"],
         owner_id=row["owner_id"],
@@ -137,10 +150,12 @@ def _notice_from_row(row: RowMapping) -> NoticeRecord:
         disposition=NoticeDisposition(row["disposition"]),
         envelope_action=row["envelope_action"],
         candidate=InitiativeCandidate.model_validate(row["candidate"]),
-        held_until=row["held_until"],
-        delivered_at=row["delivered_at"],
-        superseded_at=row["superseded_at"],
-        created_at=row["created_at"],
+        held_until=aware_utc(row["held_until"]),
+        delivered_at=aware_utc(row["delivered_at"]),
+        superseded_at=aware_utc(row["superseded_at"]),
+        # NOT NULL column, the cast is the chat_service precedent for aware_utc's
+        # optional return over a column the schema guarantees.
+        created_at=cast("datetime", aware_utc(row["created_at"])),
     )
 
 

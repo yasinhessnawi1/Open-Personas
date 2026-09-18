@@ -605,6 +605,10 @@ def build_worker_registry(
                 scanner=scanner,
                 dial_reader=_dial_reader,
                 sink=pipeline,
+                # R9-183: flush-on-next-scan (Phase-1 ruling 4), the daily fire is what
+                # releases (or expires) the owner's held batch. Same object as the sink;
+                # a distinct seam because A7's event door gets the sink and not this.
+                held_batch=pipeline,
                 pause_check=kill_switch.is_owner_autonomy_paused,
                 # Spec M3 (T5b): owner-billed scan cost, idempotent + fail-soft.
                 credits_policy=build_credits_policy(config),

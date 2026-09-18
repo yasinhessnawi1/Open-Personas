@@ -57,6 +57,7 @@ __all__ = [
     "INITIATIVE_SCAN_JOB_TYPE",
     "CandidateSink",
     "EnsureScheduleResult",
+    "HeldBatchFlush",
     "InitiativeScanHandler",
     "InitiativeScanPayload",
     "ensure_initiative_schedule",
@@ -91,6 +92,28 @@ class CandidateSink(Protocol):
 
     async def submit(self, candidates: tuple[InitiativeCandidate, ...]) -> None:
         """Run the pipeline over one scan's candidates."""
+        ...
+
+
+@runtime_checkable
+class HeldBatchFlush(Protocol):
+    """The held-batch release this fire owes the owner (T7's pipeline flush).
+
+    **R9-183.** Phase-1 ruling 4 is *flush-on-next-scan*: a candidate held for
+    quiet hours, a cadence cap, or the batch default is released at the owner's
+    NEXT daily scan fire, re-validated both ways a hold can rot (the hold-age
+    bound, the why-now half, the T4 grounding re-run). The daily scan fire is
+    the only production trigger the design names for it, and nothing was calling
+    it, a held proposal sat in the ledger forever, because even its expiry bound
+    is only checked inside the flush. This seam is that call site.
+
+    Separate from :class:`CandidateSink` on purpose: A7's event door submits
+    candidates into the same pipeline but owes no batch release, an event
+    arriving at 2am must not become the thing that opens the morning window.
+    """
+
+    async def flush(self, owner_id: str) -> None:
+        """Release (or expire) the owner's held notices; never raises."""
         ...
 
 
@@ -151,6 +174,7 @@ class InitiativeScanHandler:
         scanner: InitiativeScanner,
         dial_reader: Callable[[str, str], InitiativeDial],
         sink: CandidateSink | None = None,
+        held_batch: HeldBatchFlush | None = None,
         pause_check: AutonomyPauseCheck = never_paused,
         credits_policy: CreditsPolicy | None = None,
         rls_engine: Engine | None = None,
@@ -162,6 +186,9 @@ class InitiativeScanHandler:
         The composition root binds ``dial_reader`` to :func:`read_initiative_dial`
         over the RLS engine; tests inject a plain callable (DI, no DB).
 
+        ``held_batch`` (R9-183), the flush-on-next-scan call site. The pipeline fills both
+        this and ``sink``; ``None`` keeps the pre-R9-183 behaviour (nothing releases a hold).
+
         ``pause_check`` (A6-D-8 completeness) — the per-owner autonomy-pause gate the scan
         consults BEFORE reading the dial or spending: a paused owner originates no initiative,
         even for personas whose dial is on. Default :func:`never_paused` (green pre-A6); the
@@ -170,6 +197,7 @@ class InitiativeScanHandler:
         self._scanner = scanner
         self._dial_reader = dial_reader
         self._sink = sink
+        self._held_batch = held_batch
         self._pause_check = pause_check
         # Spec M3 (T5b): OWNER-billed scan, idempotent + fail-soft. Both None → no
         # billing. The scanner runs through a usage-collecting backend (wired at the
@@ -193,6 +221,14 @@ class InitiativeScanHandler:
             _log.info("initiative dial off; scan exits", persona_id=payload.persona_id)
             return
         with collect_llm_usage() as usage:
+            # R9-183: the held batch goes out FIRST, it is older than anything this
+            # scan can find, so it gets the cadence budget first, and the morning
+            # window the hold was waiting for is exactly this fire. Inside the usage
+            # block so the flush's grounding re-runs are billed with the fire that
+            # caused them, under the one idempotent billing key below. Behind the
+            # pause + dial gates for the same reason the scan is: the flush spends
+            # and can speak, and "no scan, no spend, no message" has to mean it.
+            await self._flush_held_batch(context.owner_id)
             candidates = await self._scanner.scan(
                 context.owner_id, payload.persona_id, fire_time=payload.fire_time
             )
@@ -239,6 +275,15 @@ class InitiativeScanHandler:
             await self._sink.submit(candidates)
         except Exception:  # noqa: BLE001 — the pipeline must not crash the job into retries
             _log.warning("initiative sink failed; degrading to silence (fail-soft)")
+
+    async def _flush_held_batch(self, owner_id: str) -> None:
+        """Release the owner's held notices (R9-183); fail-soft like every other stage."""
+        if self._held_batch is None:
+            return
+        try:
+            await self._held_batch.flush(owner_id)
+        except Exception:  # noqa: BLE001, a rotten batch never costs the owner their scan
+            _log.warning("initiative held-batch flush failed; degrading to silence (fail-soft)")
 
 
 def register_initiative_scan_handler(
