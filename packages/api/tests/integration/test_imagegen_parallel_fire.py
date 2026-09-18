@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -71,7 +72,7 @@ from persona_api.middleware.rls_context import make_rls_engine
 from sqlalchemy import select, text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from persona.imagegen.result import ImageMediaType
@@ -113,6 +114,12 @@ _TINY_PNG: bytes = bytes.fromhex(
 #: ``tasks.md`` §T17's scope ("holds ~500ms then returns success").
 _BACKEND_HOLD_SECONDS: float = 0.5
 
+#: R9-151: the backend no longer trusts the clock. It holds until the test reports that
+#: every OTHER request has been turned away (``release_when``), so the ten are concurrent
+#: by construction rather than by scheduling luck; this is the ceiling on that wait, after
+#: which it returns anyway and the assertions below fail honestly instead of hanging.
+_BACKEND_RELEASE_TIMEOUT_SECONDS: float = 30.0
+
 
 #: Spec M3 (T3a): the per-image CEILING pre-deducted before the provider call
 #: (``config.image_ceiling_credits`` default) and the real charge the true-up
@@ -144,8 +151,12 @@ class _SlowBackend:
         *,
         hold_seconds: float = _BACKEND_HOLD_SECONDS,
         media_type: ImageMediaType = "image/png",
+        release_when: Callable[[], bool] | None = None,
     ) -> None:
         self._hold_seconds = hold_seconds
+        #: R9-151: when set, the hold ends when this reports True (bounded by
+        #: ``_BACKEND_RELEASE_TIMEOUT_SECONDS``), not when a timer fires.
+        self.release_when = release_when
         self._media_type: ImageMediaType = media_type
         #: Tracks how many times :meth:`generate` was actually entered.
         #: With the cap + pre-deduct combination, exactly ONE call must
@@ -173,7 +184,12 @@ class _SlowBackend:
         # loop; the surrounding service-layer transaction (which owns
         # the advisory lock) remains open on the underlying psycopg
         # connection — exactly the property under test.
-        await asyncio.sleep(self._hold_seconds)
+        if self.release_when is None:
+            await asyncio.sleep(self._hold_seconds)
+        else:
+            deadline = time.monotonic() + _BACKEND_RELEASE_TIMEOUT_SECONDS
+            while not self.release_when() and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
         return GenerationResult(
             images=[
                 GeneratedImage(
@@ -374,18 +390,37 @@ def test_parallel_fire_only_one_request_succeeds_and_deducts(
     # would not exercise the concurrent acquisition path.
     barrier = threading.Barrier(_PARALLEL_REQUESTS)
 
+    # R9-151: the barrier makes the ten ENTER together; it cannot make them race the cap
+    # together. Under load one thread can run its whole request before the next is
+    # scheduled, and a second 201 is then the cap admitting a request that was sequential
+    # in practice. So the holder is released only once every other request has been
+    # turned away: the ten are concurrent by construction, and the assertion is about
+    # the guarantee (one in flight at a time), not about the scheduler.
+    turned_away = 0
+    turned_away_lock = threading.Lock()
+
+    def _all_others_turned_away() -> bool:
+        with turned_away_lock:
+            return turned_away >= _PARALLEL_REQUESTS - 1
+
+    slow_backend.release_when = _all_others_turned_away
+
     def _fire_one(_index: int) -> int:
         """Fire one POST /imagegen request and return its HTTP status.
 
         Args:
             _index: Worker index (unused; ``pool.map`` passes one per call).
         """
+        nonlocal turned_away
         barrier.wait()
         resp = c.post(
             f"/v1/personas/{pid}/imagegen",
             json={"prompt": "a red bicycle", "size": "1024x1024", "count": 1},
             headers=_auth(uid_a),
         )
+        if resp.status_code != 201:
+            with turned_away_lock:
+                turned_away += 1
         return resp.status_code
 
     with ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS) as pool:
