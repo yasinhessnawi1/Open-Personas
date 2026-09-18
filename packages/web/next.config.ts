@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
 
+import { clerkFrontendApiHost } from "./src/lib/clerk-frontend-api-host";
 import { LEGACY_REDIRECTS } from "./src/lib/legacy-redirects";
 
 // Spec 33 (D-33-2): the auth layer is edition-selected at BUILD time. Build is
@@ -30,11 +31,23 @@ const authResolveAlias: Record<string, string> = {
 // reach its API via `<current-host>/__clerk/*`. Without an edge rewrite, those
 // paths 404 on Vercel. We rewrite them server-side to Clerk's actual CDN.
 //
-// The host is read from a build-time env var so dev / preview / production each
-// pick up the right CDN. Default falls back to the public path (Clerk's own
-// shared CDN) so local + Preview builds without the var still work.
-const CLERK_FRONTEND_API_HOST =
-  process.env.NEXT_PUBLIC_CLERK_FRONTEND_API_HOST ?? "clerk.openpersona.online";
+// The host is `NEXT_PUBLIC_CLERK_FRONTEND_API_HOST` when set, else the host the
+// publishable key itself names (completion sweep part2 G: the old fallback was this
+// project's production hostname, which silently pointed any third party's cloud build
+// at a foreign Clerk instance). No host means no rewrite, and the build says so.
+const CLERK_FRONTEND_API_HOST = clerkFrontendApiHost({
+  NEXT_PUBLIC_CLERK_FRONTEND_API_HOST:
+    process.env.NEXT_PUBLIC_CLERK_FRONTEND_API_HOST,
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+});
+if (EDITION === "cloud" && CLERK_FRONTEND_API_HOST === null) {
+  console.warn(
+    "[next.config] cloud edition without a Clerk Frontend API host: set " +
+      "NEXT_PUBLIC_CLERK_FRONTEND_API_HOST or a valid NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY; " +
+      "the /__clerk/* rewrite is not installed for this build",
+  );
+}
 
 const nextConfig: NextConfig = {
   turbopack: { resolveAlias: authResolveAlias },
@@ -44,7 +57,7 @@ const nextConfig: NextConfig = {
     return [...LEGACY_REDIRECTS];
   },
   // The Clerk auto-proxy rewrite is cloud-only — community has no Clerk.
-  ...(EDITION === "cloud"
+  ...(EDITION === "cloud" && CLERK_FRONTEND_API_HOST !== null
     ? {
         async rewrites() {
           return [
