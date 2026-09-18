@@ -560,6 +560,7 @@ async def build_agent_session(
     # the agent package stays cheap to import for tests that only touch the
     # lifecycle). The orchestrator import would otherwise pull the full turn-
     # taking subpackage.
+    from persona_voice.logging import JSONLVoiceLogWriter
     from persona_voice.loop.streaming import StreamingLoop, Transcript
     from persona_voice.turn_taking.bridge import wire_orchestrated_loop
     from persona_voice.turn_taking.states import ConversationalState
@@ -917,6 +918,13 @@ async def build_agent_session(
 
     # --- transport + loop + orchestrator ---
     voice_room = room_factory()
+    # R9-185: the T10 per-turn latency record gets its production producer here.
+    # ``VoiceLog`` was modelled, tested and never constructed anywhere outside its
+    # own unit tests, so every turn's latency segments went nowhere and the numbers
+    # built on them (the round-trip, V4's per-hop attribution) had no input. The
+    # rows land beside the call's audit trail, under the SAME ``audit_root`` the
+    # typed stores and the session lifecycle auditor write to, one file per persona.
+    # Fail-soft inside the loop: a failed write degrades the record, never the call.
     loop = StreamingLoop(
         voice_room=voice_room,
         session=session,
@@ -924,6 +932,7 @@ async def build_agent_session(
         tts=tts_seam,
         model=producer,
         first_audio_timeout_s=config.turn_first_audio_timeout_s,
+        voice_log_writer=JSONLVoiceLogWriter(audit_root / f"{persona_id}.voice-turns.jsonl"),
     )
     # The A1 data-channel broadcaster implements BOTH the V4 state-listener seam
     # (orb) AND the V6 caption-listener seam (captions) over one room+topic, so it

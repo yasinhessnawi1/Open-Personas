@@ -97,9 +97,7 @@ class TestListModels:
         assert first.id == "anthropic/claude-3.5-sonnet"
         assert first.supports_tools is True
         assert first.supports_vision is True
-        assert first.is_free is False
         assert first.pricing.prompt == Decimal("0.000003")
-        assert models[1].is_free is True
         assert models[1].supports_vision is False
         client.close()
 

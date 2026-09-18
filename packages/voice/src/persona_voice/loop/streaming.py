@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime  # noqa: TC003 — runtime for Pydantic field validation
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -56,6 +56,7 @@ from persona.errors import PersonaError
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from persona_voice.logging import VoiceLog
 from persona_voice.session.state_machine import (
     SessionLifecycleEvent,
     SessionStateMachine,
@@ -67,8 +68,9 @@ from persona_voice.transport.room import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
+    from persona_voice.logging import VoiceLogWriter
     from persona_voice.stt.protocol import SpeechActivityListener
     from persona_voice.transport.room import VoiceRoom
 
@@ -326,6 +328,8 @@ class StreamingLoop:
         turn_transcript_listener: ReplyHeardListener | None = None,
         caption_listener: VoiceCaptionListener | None = None,
         first_audio_timeout_s: float = DEFAULT_TURN_FIRST_AUDIO_TIMEOUT_S,
+        voice_log_writer: VoiceLogWriter | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         # Spec V2 D-V2-X-streaming-loop-additivity-shape — ADDITIVE
         # ``speech_activity`` injected port; backwards-compatible default
@@ -355,6 +359,18 @@ class StreamingLoop:
         # verbatim) to the data-channel broadcaster; None preserves V1/V2/V5.
         self._caption_listener = caption_listener
         self._first_audio_timeout_s = first_audio_timeout_s
+        # R9-185: the T10 per-turn latency record's production sink. The record
+        # was modelled, tested and never once constructed outside its own tests:
+        # ``invoke_model_for_turn`` is the one place a turn's anchors all exist,
+        # so this is where the row is written. ``None`` keeps every pre-existing
+        # construction (echo/dev baselines, the V1/V2/V3 suites) byte-identical.
+        self._voice_log_writer = voice_log_writer
+        self._clock = clock or (lambda: datetime.now(UTC))
+        #: Monotonic per-call turn counter: the VoiceLog row's ``turn_index``.
+        self._turn_index = 0
+        #: Stamped by the token tee as the model's first token passes to V3;
+        #: reset at the start of every turn.
+        self._llm_first_token_at: datetime | None = None
         self._pipeline_task: asyncio.Task[None] | None = None
         # V1 wires the inbound dispatcher into the VoiceRoom at construction
         # so frames that arrive during connect are not dropped on the floor.
@@ -542,6 +558,16 @@ class StreamingLoop:
         started = time.perf_counter()
         first_audio_ms: float | None = None
         outcome = "completed"
+        # R9-185: the turn's T10 latency anchors. ``started_at`` opens the row,
+        # the token tee stamps the model's first token, and the two audio anchors
+        # below bracket the first chunk's hop onto the outbound rail. Anything the
+        # turn never reached stays ``None`` rather than being fabricated.
+        turn_index = self._turn_index
+        self._turn_index += 1
+        started_at = self._clock()
+        self._llm_first_token_at = None
+        tts_first_audio_at: datetime | None = None
+        audio_first_play_at: datetime | None = None
         _LOG.info(
             "voice turn started chars={chars} synthetic={synthetic}",
             chars=len(final_transcript.text),
@@ -563,7 +589,11 @@ class StreamingLoop:
                 audio = self._tts.synthesize(source).__aiter__()
                 first_chunk = await anext(audio, None)
             if first_chunk is not None:
+                # The first synthesised audio of the turn, then the instant it is
+                # actually on V1's outbound rail (the round-trip end anchor).
+                tts_first_audio_at = self._clock()
                 await self._push_audio_chunk(first_chunk)
+                audio_first_play_at = self._clock()
                 produced_audio = True
                 first_audio_ms = (time.perf_counter() - started) * 1000.0
                 # First persona audio on the rail: PROCESSING to PERSONA_SPEAKING.
@@ -655,6 +685,72 @@ class StreamingLoop:
             # a final even when the turn was cut short.
             if self._caption_listener is not None:
                 await self._caption_listener.on_persona_text("".join(heard), is_final=True)
+            # R9-185: one T10 row per turn, spoken or silent, written last so the
+            # anchors above are all settled. Fail-soft inside.
+            await self._write_voice_log(
+                final_transcript,
+                turn_index=turn_index,
+                started_at=started_at,
+                tts_first_audio_at=tts_first_audio_at,
+                audio_first_play_at=audio_first_play_at,
+            )
+
+    async def _write_voice_log(
+        self,
+        final_transcript: Transcript,
+        *,
+        turn_index: int,
+        started_at: datetime,
+        tts_first_audio_at: datetime | None,
+        audio_first_play_at: datetime | None,
+    ) -> None:
+        """Write this turn's :class:`~persona_voice.logging.VoiceLog` row (best-effort).
+
+        The T10 per-turn latency record, produced at the one point in the system
+        where a turn's anchors all exist (R9-185). Identity comes off the live
+        session so a row is attributable to its call, persona and owner.
+
+        Fail-soft by design: instrumentation may degrade the record, never the
+        call, so a writer that raises is logged and swallowed exactly as the
+        episodic and call-record writes are.
+
+        Args:
+            final_transcript: The turn's final transcript. Its ``eou_at`` is the
+                round-trip start anchor V4 stamped at the END_TURN decision.
+            turn_index: This turn's position in the call, from zero.
+            started_at: When the loop picked the turn up.
+            tts_first_audio_at: First synthesised chunk, or ``None`` if the turn
+                produced no audio.
+            audio_first_play_at: That chunk's arrival on the outbound rail, or
+                ``None``.
+        """
+        writer = self._voice_log_writer
+        if writer is None:
+            return
+        session = self._session.session
+        try:
+            await writer.write(
+                VoiceLog(
+                    session_id=session.session_id,
+                    user_id=session.user_id,
+                    persona_id=session.persona_id,
+                    conversation_id=session.conversation_id,
+                    turn_index=turn_index,
+                    started_at=started_at,
+                    ended_at=self._clock(),
+                    eou_at=final_transcript.eou_at,
+                    llm_first_token_at=self._llm_first_token_at,
+                    tts_first_audio_at=tts_first_audio_at,
+                    audio_first_play_at=audio_first_play_at,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001, the record never breaks the call
+            _LOG.warning(
+                "voice turn latency record not written turn={turn} session={session}: {err}",
+                turn=turn_index,
+                session=session.session_id,
+                err=repr(exc)[:200],
+            )
 
     async def _speak_turn_failed(self, *, already_speaking: bool) -> bool:
         """Say :data:`TURN_FAILED_SPOKEN_LINE` through V3; return whether audio hit the rail.
@@ -693,9 +789,8 @@ class StreamingLoop:
         else:
             await self._orchestrator.notify_processing_yielded_no_audio()
 
-    @staticmethod
     async def _accumulate_heard(
-        token_stream: AsyncIterator[str], sink: list[str]
+        self, token_stream: AsyncIterator[str], sink: list[str]
     ) -> AsyncIterator[str]:
         """Tee the V5 token stream into ``sink`` as each token passes to V3.
 
@@ -704,8 +799,13 @@ class StreamingLoop:
         cancelled mid-stream, so ``sink`` holds exactly the prefix delivered for
         synthesis — over-counting only by the buffered-but-unplayed tail V3
         flushes (the documented MAINTENANCE.md limitation).
+
+        The same boundary stamps the T10 ``llm_first_token_at`` anchor (R9-185):
+        the first token to reach it is the first the model produced for this turn.
         """
         async for token in token_stream:
+            if self._llm_first_token_at is None:
+                self._llm_first_token_at = self._clock()
             sink.append(token)
             yield token
 

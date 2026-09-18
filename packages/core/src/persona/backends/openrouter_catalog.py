@@ -147,8 +147,16 @@ class OpenRouterModelEntry(BaseModel):
     The capability properties implement D-22-10b: tools is gated on
     ``"tools" in supported_parameters`` (NOT ``tool_choice``); vision on
     ``"image" in architecture.input_modalities`` (the array, never the
-    derived modality string). ``is_free`` follows D-22-14 — the ``:free``
-    suffix is authoritative, NOT zero pricing.
+    derived modality string).
+
+    This entry deliberately carries NO free/paid judgement (R9-186). It used to
+    expose an ``is_free`` property doing a bare ``:free``-suffix test on the
+    native model id, which nothing ever read and which contradicted the system's
+    one free predicate: :func:`persona.backends.credentials.is_free_openrouter_slot`
+    calls OpenRouter's own free-only auto-router (``openrouter/free``, no suffix)
+    free, and the catalog property called it paid. Free-ness is decided on
+    ``(provider, model)`` SLOTS, which is what the tier lists and the free-daily
+    meter actually hold, so the catalog does not get a second, disagreeing opinion.
 
     ``expiration_date`` IS this catalog's deprecation signal (an ISO date
     string; set on ~5/346 live entries, verified 2026-07-09 — see
@@ -168,11 +176,6 @@ class OpenRouterModelEntry(BaseModel):
     pricing: OpenRouterPricing = Field(default_factory=OpenRouterPricing)
     architecture: OpenRouterArchitecture = Field(default_factory=OpenRouterArchitecture)
     supported_parameters: tuple[str, ...] = ()
-
-    @property
-    def is_free(self) -> bool:
-        """Whether this is a free-tier model (``:free`` suffix — D-22-14)."""
-        return self.id.endswith(":free")
 
     @property
     def supports_tools(self) -> bool:

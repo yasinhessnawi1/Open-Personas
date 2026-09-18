@@ -17,6 +17,7 @@ from __future__ import annotations
 import inspect
 
 from persona.backends import openrouter_catalog
+from persona.backends.credentials import is_free_openrouter_slot
 from persona.backends.openrouter_catalog import (
     OpenRouterCatalogClient,
     OpenRouterKeyInfo,
@@ -99,10 +100,25 @@ class TestModelEntryMetadataSurface:
             assert name in fields, f"OpenRouterModelEntry must expose '{name}' for Spec 23"
 
     def test_capability_properties_present(self) -> None:
-        for prop in ("is_free", "supports_tools", "supports_vision"):
+        for prop in ("supports_tools", "supports_vision"):
             assert isinstance(getattr(OpenRouterModelEntry, prop), property), (
                 f"OpenRouterModelEntry.{prop} must remain a property for Spec 23"
             )
+
+    def test_the_catalog_entry_carries_no_free_paid_judgement(self) -> None:
+        """R9-186: free-ness is decided in ONE place, and it is not here.
+
+        The entry used to expose ``is_free`` as a bare ``:free``-suffix test on the
+        native model id. Nothing read it, and it disagreed with the predicate that
+        every live free/paid decision does use: ``openrouter/free``, OpenRouter's
+        free-only auto-router, is free although it carries no suffix. Re-adding a
+        free judgement to a catalog entry re-opens that split, so this guard names
+        the predicate that owns the question instead.
+        """
+        assert not hasattr(OpenRouterModelEntry, "is_free")
+        assert is_free_openrouter_slot("openrouter", "free")
+        assert is_free_openrouter_slot("openrouter", "deepseek/deepseek-chat:free")
+        assert not is_free_openrouter_slot("openrouter", "anthropic/claude-3.5-sonnet")
 
     def test_key_info_fields_present(self) -> None:
         for name in ("is_free_tier", "limit", "limit_remaining", "usage"):
