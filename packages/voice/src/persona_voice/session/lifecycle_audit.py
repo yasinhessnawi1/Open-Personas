@@ -119,7 +119,7 @@ class SessionLifecycleAuditor:
                     },
                 )
             )
-        except Exception:  # noqa: BLE001: a failed audit write must never break the call
+        except Exception:  # noqa: BLE001 (a failed audit write must never break the call)
             _LOG.warning(
                 "voice lifecycle audit emit failed (session={sid} event={ev})",
                 sid=session.session_id,
