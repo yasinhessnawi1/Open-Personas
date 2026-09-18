@@ -55,6 +55,13 @@ from persona.tasks.ledger import (
     micros_from_cents,
     micros_from_dollars,
 )
+from persona.tasks.leg_spend import (
+    SUBSUMED_EXTERNAL_CALL_CENTS,
+    LegSpendReporter,
+    bind_leg_spend_reporter,
+    report_leg_spend,
+    reset_leg_spend_reporter,
+)
 from persona.tasks.reader import (
     IntrospectionStatus,
     TaskStateReader,
@@ -149,6 +156,11 @@ __all__ = [
     "format_micros",
     "micros_from_cents",
     "micros_from_dollars",
+    "SUBSUMED_EXTERNAL_CALL_CENTS",
+    "LegSpendReporter",
+    "bind_leg_spend_reporter",
+    "report_leg_spend",
+    "reset_leg_spend_reporter",
     "Task",
     "TaskCheckpoint",
     "TaskKind",

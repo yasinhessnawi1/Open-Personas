@@ -35,7 +35,6 @@ from persona.tasks import (
     SpendKind,
     Task,
     TaskCheckpoint,
-    micros_from_cents,
 )
 from persona_api.services.llm_usage_collector import collect_llm_usage
 from persona_api.tasks.handler import _LegCost
@@ -151,7 +150,7 @@ async def _run_leg(*, budget_micros: int | None, steps: int = 6):  # noqa: ANN20
             box=LegBox(max_steps=50, wall_clock_seconds=3_600.0, budget_micros=budget_micros),
             now=_NOW,
             on_step_usage=cost.on_step_usage,
-            spent_micros=lambda: micros_from_cents(cost.result()[0]),
+            spent_micros=cost.spent_micros,
         )
     return outcome, runner, sink
 

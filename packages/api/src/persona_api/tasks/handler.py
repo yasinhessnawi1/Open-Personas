@@ -60,8 +60,10 @@ from persona.tasks import (
     SpendKind,
     TaskState,
     WaitKind,
+    bind_leg_spend_reporter,
     is_terminal,
     micros_from_cents,
+    reset_leg_spend_reporter,
 )
 from persona_runtime.cost import compute_turn_cost
 from persona_runtime.legs import (
@@ -184,7 +186,7 @@ class RunnableGuard(Protocol):
 
 
 class _LegCost:
-    """Prices one leg's real model cost, once, for the two things that need it.
+    """Prices one leg's real cost, once, for the three things that need it.
 
     The leg's ``on_step_usage`` callback: each step's model-call usage is priced like
     a chat turn (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual preferred;
@@ -193,21 +195,37 @@ class _LegCost:
     summed with them (D-W1-44): it is a call made because this leg ran, so it is part
     of what the leg cost, not a surface of its own.
 
-    Two readers, one accumulation (the M2 one-pricing-truth rule):
+    The leg's :class:`~persona.tasks.LegSpendReporter` too (:meth:`report`): the spend a
+    TOOL makes inside the leg, which the loop's usage callback never sees. The hosted
+    sandbox tool reports each execution it billed the owner for, at the figure it
+    billed; the MCP adapter reports each external call at the value M3 rules for it.
+    Bound around the run by :func:`_run_metered_leg`, so a tool dispatched anywhere
+    inside the leg reaches this accumulator and a tool dispatched outside one reaches
+    nothing.
+
+    Three readers, one accumulation (the M2 one-pricing-truth rule):
 
     * **The owner-billed deduct** (Spec M3, T4b): :meth:`result` in cents, billed ONCE
       after the CAS append commits. On a re-delivery the leg re-runs and re-accumulates
-      the SAME cost, harmlessly discarded by the billing_key idempotency gate.
+      the SAME cost, harmlessly discarded by the billing_key idempotency gate. It is the
+      MODEL cost only, deliberately: what a tool reported here has already been billed
+      (the sandbox, inside the tool) or is subsumed by this very deduct's floor (an
+      external call, M3 T7), so adding it here would charge the owner twice.
     * **The task ledger** (R9-161): :meth:`ledger_spend` in ledger micros, the CURRENCY
-      unit the contract's ``total_budget_micros`` cap is written in. It is the executor's
-      injected meter, so a leg accrues what it really cost instead of, as before, the run's
-      raw token count. It records the PROVIDER cost, not the credit charge: the ledger is
-      an accounting of what the work costs (its kinds are model / sandbox / external, not
-      billing surfaces), the charge adds a markup and a per-leg floor that would make a
-      task of many near-free legs look expensive against its bound, and a safety bound must
-      not change meaning between the hosted and community editions.
+      unit the contract's ``total_budget_micros`` cap is written in, ALL THREE kinds. It
+      is the executor's injected meter, so a leg accrues what it really cost instead of,
+      as before, the run's raw token count. It records the PROVIDER cost, not the credit
+      charge: the ledger is an accounting of what the work costs (its kinds are model /
+      sandbox / external, not billing surfaces), the charge adds a markup and a per-leg
+      floor that would make a task of many near-free legs look expensive against its
+      bound, and a safety bound must not change meaning between the hosted and community
+      editions.
+    * **The per-leg spend probe** (R9-176): :meth:`spent_micros`, the running total of
+      every kind, read by the box watcher at each step boundary. It is the ledger's own
+      sum through the ledger's own conversion, so the bound that stops a leg and the
+      figure recorded against it cannot disagree.
 
-    Both are **reads**: the distillation is priced from the live usage sink at read time,
+    All are **reads**: the distillation is priced from the live usage sink at read time,
     never folded in by a mutation, so the ledger read (inside the leg, after the distiller
     has run) and the billing read (after it) return the same figure and neither can
     double-count the other.
@@ -218,6 +236,26 @@ class _LegCost:
         self._distillation = distillation
         self._step_cents = 0.0
         self._basis: str | None = None
+        #: What tools reported through the leg spend door, in cents, by kind. Every
+        #: kind starts present at zero so the ledger is WRITTEN for each of them: a
+        #: column that reads zero because a writer recorded zero is a measurement; one
+        #: that reads zero because nothing ever wrote it is the defect this closes.
+        self._reported: dict[SpendKind, float] = {
+            SpendKind.SANDBOX: 0.0,
+            SpendKind.EXTERNAL: 0.0,
+        }
+
+    def report(self, kind: SpendKind, cost_cents: float) -> None:
+        """Account a tool's priced cost under ``kind`` (the ``LegSpendReporter`` port).
+
+        ``cost_cents`` is what the tool charged, or what M3 rules the call costs where
+        nothing is charged per call; it is never re-priced here. A negative figure (a
+        defensive case the tools already rule out) is clamped rather than credited back
+        against the cap, the same discipline as :func:`micros_from_cents`. Model spend
+        does not come through this door: it arrives per step via :meth:`on_step_usage`,
+        priced there, and a MODEL report would be accounted under the same column.
+        """
+        self._reported[kind] = self._reported.get(kind, 0.0) + max(cost_cents, 0.0)
 
     async def on_step_usage(self, usage: StepUsage) -> None:
         cost_cents, basis = compute_turn_cost(
@@ -273,7 +311,7 @@ class _LegCost:
         self,
         run: Run,  # noqa: ARG002 (part of the meter port; see the docstring)
     ) -> Mapping[SpendKind, int]:
-        """The executor's meter: this leg's priced cost in ledger micros (R9-161).
+        """The executor's meter: this leg's priced cost in ledger micros, by kind (R9-161).
 
         ``run`` is part of the meter port and is deliberately unused: what a leg cost
         cannot be read off the run, because the served provider, model and response-side
@@ -281,15 +319,72 @@ class _LegCost:
         is exactly why the old stand-in metered ``sum(step.tokens)`` and why a money cap
         ended up enforced against a token count.
 
-        Only ``MODEL`` is recorded. ``SANDBOX`` and ``EXTERNAL`` stay zero because nothing
-        reports a per-leg figure for them: a sandbox execution charges the owner from
-        inside the tool (``sandbox/runtime_tool.py``, basis ``infra_flat``) and tells the
-        enclosing leg nothing, and connector / MCP infra is by M3's T7 ruling subsumed by
-        the leg's own credit floor rather than charged per call. Inventing a number for
-        either would be worse than a zero that is honest about what is measured.
+        Every kind is recorded, through the one conversion. ``MODEL`` is the priced
+        step usage plus the distillation; ``SANDBOX`` is what the hosted sandbox tool
+        reported per execution, the same figure it billed the owner
+        (``sandbox/runtime_tool.py``); ``EXTERNAL`` is what the MCP adapter reported per
+        call, which under M3's T7 ruling is zero because the call's infra is subsumed by
+        this leg's own credit floor. Until 2026-09-18 the last two were never written at
+        all, so a task that ran the sandbox hard passed its cap invisibly.
         """
-        cost_cents, _ = self.result()
-        return {SpendKind.MODEL: micros_from_cents(cost_cents)}
+        return self._spend()
+
+    def spent_micros(self) -> int:
+        """The box watcher's probe: everything this leg has spent so far, every kind."""
+        return sum(self._spend().values())
+
+    def _spend(self) -> dict[SpendKind, int]:
+        """Every kind in ledger micros, through the one conversion, at read time."""
+        model_cents, _ = self.result()
+        spend = {SpendKind.MODEL: micros_from_cents(model_cents)}
+        for kind, cents in self._reported.items():
+            spend[kind] = spend.get(kind, 0) + micros_from_cents(cents)
+        return spend
+
+
+async def _run_metered_leg(
+    cost: _LegCost,
+    executor: LegExecutor,
+    *,
+    task: Task,
+    trigger: ResumeTrigger,
+    prior_checkpoint: TaskCheckpoint | None = None,
+    recent_legs: tuple[RecentLegSummary, ...] = (),
+    retrieval: tuple[str, ...] = (),
+    seq: int | None = None,
+    box: LegBox | None = None,
+    now: datetime,
+) -> LegOutcome:
+    """Run one leg with ``cost`` as its meter, its spend probe AND its spend reporter.
+
+    The three are one accumulator by construction: the executor's meter is
+    ``cost.ledger_spend`` (wired at construction by the caller), the box watcher's probe
+    is :meth:`_LegCost.spent_micros`, the loop's usage callback is
+    :meth:`_LegCost.on_step_usage`, and for the duration of the run ``cost`` is the
+    ambient :class:`~persona.tasks.LegSpendReporter` every tool dispatched inside the leg
+    reports to. The binding is reset on every exit, so a dispatch after the leg (or on a
+    context this leg never ran in) lands on nobody's ledger. This is the ONE production
+    path a leg runs through; the handler calls it and the tests drive the same function.
+    """
+    token = bind_leg_spend_reporter(cost)
+    try:
+        return await executor.run_leg(
+            task=task,
+            trigger=trigger,
+            prior_checkpoint=prior_checkpoint,
+            recent_legs=recent_legs,
+            retrieval=retrieval,
+            seq=seq,
+            box=box,
+            now=now,
+            on_step_usage=cost.on_step_usage,
+            # The probe and the ledger read the SAME accumulator through the same
+            # conversion, so the bound that stops a leg and the figure recorded
+            # against it cannot disagree (R9-176).
+            spent_micros=cost.spent_micros,
+        )
+    finally:
+        reset_leg_spend_reporter(token)
 
 
 class _LegRunRecord:
@@ -590,6 +685,11 @@ class TaskLegHandler:
         Uses ``capture_up_to_idempotent`` (floored) — a completed leg captures what
         the owner can afford rather than hard-failing already-done work. Fail-soft:
         a billing error never fails the (already-committed) leg.
+
+        Prices the leg's MODEL cost only (:meth:`_LegCost.result`). The sandbox spend
+        the ledger now carries was billed by the tool itself, per execution, and an
+        external call's infra is subsumed by this deduct's floor (M3 T7); either one
+        added here would be a second charge for the same work.
         """
         if self._credits_policy is None or self._rls_engine is None:
             return
@@ -738,7 +838,12 @@ class TaskLegHandler:
                 meter=cost.ledger_spend,
             )
             try:
-                outcome = await executor.run_leg(
+                # The sandbox tool and the MCP adapter report what they spent to
+                # ``cost`` through the ambient reporter this binds, so the ledger
+                # and the per-leg bound see every kind, not the model alone.
+                outcome = await _run_metered_leg(
+                    cost,
+                    executor,
                     task=task,
                     trigger=payload.trigger,
                     prior_checkpoint=prior,
@@ -747,11 +852,6 @@ class TaskLegHandler:
                     seq=seq,
                     box=self._leg_box(owner, task),
                     now=now,
-                    on_step_usage=cost.on_step_usage,
-                    # The probe and the ledger read the SAME accumulator through the same
-                    # conversion, so the bound that stops a leg and the figure recorded
-                    # against it cannot disagree (R9-176).
-                    spent_micros=lambda: micros_from_cents(cost.result()[0]),
                 )
             except CheckpointTooLargeError as exc:
                 # The RUN itself finished — settle its record from what the wrapped runner
@@ -804,21 +904,30 @@ class TaskLegHandler:
         # R9-161: this is the leg's priced cost in ledger micros, the same money the ledger
         # took, not the run's token count. The token shape stays visible in ``leg_profile``
         # (``tokens_total`` / ``tokens_per_step_max``), which is where it belongs.
-        total = sum(outcome.spend.values())
+        # One event per spend kind, under its own name: the ledger now carries what the
+        # sandbox and the external calls cost as well as the model, and A0's ``kind`` is
+        # that same spend class. The model event is always recorded (it carries the leg's
+        # profile); the other kinds only when the leg actually spent in them.
+        leg_detail = {
+            "surface": TASK_LEG_JOB_TYPE,
+            "task_id": payload.task_id,
+            "checkpoint_seq": str(seq),
+            "disposition": outcome.disposition.value,
+        }
         context.meter(
-            amount_micros=total,
-            kind="model",
+            amount_micros=outcome.spend.get(SpendKind.MODEL, 0),
+            kind=SpendKind.MODEL.value,
             detail={
-                "surface": TASK_LEG_JOB_TYPE,
-                "task_id": payload.task_id,
-                "checkpoint_seq": str(seq),
-                "disposition": outcome.disposition.value,
+                **leg_detail,
                 # Spec W1 (T14): the leg's measured shape, so the close-out can argue about
                 # the bounds (§2.4) from what legs actually do rather than from the one
                 # datapoint that arrived by accident. No bound moves in W1.
                 **leg_profile(outcome),
             },
         )
+        for kind in (SpendKind.SANDBOX, SpendKind.EXTERNAL):
+            if outcome.spend.get(kind, 0) > 0:
+                context.meter(amount_micros=outcome.spend[kind], kind=kind.value, detail=leg_detail)
         _log.info(
             "task leg ran",
             task_id=payload.task_id,

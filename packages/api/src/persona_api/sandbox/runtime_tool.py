@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 from persona.sandbox.result import SandboxFile
 from persona.sandbox.tool import make_code_execution_tool
+from persona.tasks import SpendKind, report_leg_spend
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.sandbox.context import get_sandbox_request_context
@@ -159,7 +160,18 @@ def make_pool_code_execution_tool(
         per-exec infra rate, not a provider cost), ``cost_cents=0.0`` (no provider
         cost to record), reason ``sandbox:infra_flat``. The flat ``credit_cost``
         amount is unchanged (D-12-3).
+
+        Inside a task leg the execution is ALSO reported to the leg's ledger, under
+        ``SANDBOX``, at the same ``credit_cost`` this hook bills (one credit is one
+        US cent under M3), so the task's budget cap sees what the sandbox spent and
+        the ledger cannot disagree with the charge. The report accounts; it never
+        bills: the deduct below is the one charge, exactly as before. It is made
+        whether or not a request context is bound, because the ledger is an
+        accounting of what the work cost and a leg owes that truth regardless of
+        whether the owner deduct fires (the task worker binds no request context).
+        Outside a leg nobody is listening and the report is dropped.
         """
+        report_leg_spend(SpendKind.SANDBOX, float(credit_cost))
         ctx = get_sandbox_request_context()
         if ctx is None:
             # No request context → CLI / one-shot path; no billing.

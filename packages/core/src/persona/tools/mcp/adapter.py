@@ -14,6 +14,12 @@ per spec §7.3 — no exception escapes.
 Per-call dispatch audits are skipped per D-03-21. The lifecycle
 events (connect / disconnect / server_unavailable) are emitted by
 :class:`persona.tools.mcp.client.MCPClient`, not the adapter.
+
+Inside a task leg, each call that reached the server is reported to the leg's
+ledger under the ``EXTERNAL`` spend kind (:func:`persona.tasks.report_leg_spend`)
+at the value Spec M3 rules for it, :data:`~persona.tasks.SUBSUMED_EXTERNAL_CALL_CENTS`.
+The adapter is the one dispatch point every MCP tool passes through, which is
+what makes it the writer for that column; outside a leg the report is dropped.
 """
 
 from __future__ import annotations
@@ -22,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from persona.logging import get_logger
 from persona.schema.tools import ToolResult
+from persona.tasks.ledger import SpendKind
+from persona.tasks.leg_spend import SUBSUMED_EXTERNAL_CALL_CENTS, report_leg_spend
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -113,11 +121,24 @@ class MCPToolAdapter:
                         result = await new_session.call_tool(self._mcp_tool_name, arguments=kwargs)
                     except Exception as retry_exc:  # noqa: BLE001 — one retry, then fail closed
                         return self._error_result(retry_exc)
-                    return self._to_result(result)
+                    return self._settle(result)
             # Includes connection-died errors from the SDK (anyio.EndOfStream,
             # ClosedResourceError, httpx.HTTPError) — all become a graceful
             # ToolResult per spec §7.3.
             return self._error_result(e)
+        return self._settle(result)
+
+    def _settle(self, result: Any) -> ToolResult:  # noqa: ANN401
+        """Account a call that reached the server to the enclosing leg, then map it.
+
+        The value is M3's ruled cost for an external call made inside a billed op:
+        zero, because its infra is subsumed by that op's credit floor (T7). It is
+        still written, by this real writer, so a leg's ``external`` column is a
+        measurement rather than a default; a ruling that prices these calls changes
+        the constant and nothing here. A transport failure never gets here, so it
+        records nothing: the call cost nothing because it never happened.
+        """
+        report_leg_spend(SpendKind.EXTERNAL, SUBSUMED_EXTERNAL_CALL_CENTS)
         return self._to_result(result)
 
     def _error_result(self, e: BaseException) -> ToolResult:

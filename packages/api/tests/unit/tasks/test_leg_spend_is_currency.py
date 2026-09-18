@@ -140,7 +140,7 @@ async def test_the_ledger_accrues_the_legs_money_not_its_tokens() -> None:
     comparison, and a completely different promise to the user."""
     task, spend = await _run_one_leg(_task())
 
-    assert spend == {SpendKind.MODEL: _COST_MICROS}
+    assert spend == {SpendKind.MODEL: _COST_MICROS, SpendKind.SANDBOX: 0, SpendKind.EXTERNAL: 0}
     assert task.ledger.model_micros == _COST_MICROS
     assert _COST_MICROS != _RUN_TOKENS, "the fixture must keep money and tokens apart"
 
@@ -167,14 +167,16 @@ async def test_a_cap_set_to_the_legs_real_cost_is_reached_and_a_token_sized_one_
 
 
 @pytest.mark.asyncio
-async def test_the_unrecorded_spend_kinds_stay_honestly_zero() -> None:
-    """``SANDBOX`` and ``EXTERNAL`` are zero because nothing reports a per-leg figure for
-    them, not because a leg is free of them: a sandbox execution bills the owner from inside
-    the tool and tells the enclosing leg nothing, and connector / MCP infra is subsumed by
-    the leg's own credit floor rather than charged per call. A fabricated number in either
-    column would read as a measurement."""
-    task, _ = await _run_one_leg(_task())
+async def test_a_leg_that_ran_no_tool_writes_zero_in_the_other_columns() -> None:
+    """``SANDBOX`` and ``EXTERNAL`` are zero here because this leg dispatched no tool, and
+    they are WRITTEN as zero rather than left unwritten: the meter carries every kind on
+    every leg. A leg that does run the sandbox or an MCP tool records what those reported
+    (``test_leg_spend_all_kinds``); before that door existed the two columns were never
+    written at all and a cap set in money could not see a sandbox-heavy task."""
+    task, spend = await _run_one_leg(_task())
 
+    assert spend[SpendKind.SANDBOX] == 0
+    assert spend[SpendKind.EXTERNAL] == 0
     assert task.ledger.sandbox_micros == 0
     assert task.ledger.external_micros == 0
 
