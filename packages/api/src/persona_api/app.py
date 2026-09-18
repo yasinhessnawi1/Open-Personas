@@ -762,6 +762,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     memory_backend=memory_backend,
                     audit_root=app.state.audit_root,
                     audit_logger=app.state.audit_logger,
+                    # Finding K (completion sweep, part 2): an APPROVE resumes a leg and
+                    # writes its checkpoint, so it honours the same configured core budget
+                    # the worker's leg path does. One knob, both writers.
+                    checkpoint_token_budget=config.task_checkpoint_token_budget,
                 )
 
                 def _build_approval_resolver(

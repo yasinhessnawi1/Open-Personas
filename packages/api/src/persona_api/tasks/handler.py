@@ -1070,11 +1070,19 @@ class TaskLegHandler:
         first step. That is correct rather than harsh: the leg-boundary gate should have
         paused the task before this leg was enqueued, so arriving here at all means
         something upstream let it through, and the cheap stop is the right one.
+
+        **When the operator ALSO configured a per-leg cap** (``PERSONA_TASK_LEG_BUDGET_MICROS``,
+        carried on ``self._box``), the effective cap is the SMALLER of the two. The configured
+        number is a ceiling, never a grant: the per-task budget is a promise made to the user
+        and an operator convenience may not raise a leg above what that promise has left.
+        In the other direction the operator wins, which is the whole point of setting it.
         """
         if self._leg_budget_micros is None:
             return self._box
-        remaining = self._leg_budget_micros(owner, task)
-        return self._box.model_copy(update={"budget_micros": max(0, remaining)})
+        remaining = max(0, self._leg_budget_micros(owner, task))
+        configured = self._box.budget_micros
+        effective = remaining if configured is None else min(configured, remaining)
+        return self._box.model_copy(update={"budget_micros": effective})
 
     def _open_run_record(self, owner: str, task: Task, now: datetime) -> _LegRunRecord | None:
         """Open the leg's ``runs`` row and link it to the task, before any model spend.

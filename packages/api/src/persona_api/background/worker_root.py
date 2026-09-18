@@ -62,6 +62,7 @@ from persona.stores.engine import EpisodicConsolidationEngine
 from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.pyramid import EpisodicPyramid
 from persona.stores.summarizer import TierSummarizer
+from persona.tasks import LegBox
 from persona_runtime.extraction.synthesizer import build_synthesizer
 from persona_runtime.initiative import GroundingChecker, InitiativePipeline, InitiativeScanner
 from persona_runtime.legs import CompactingCheckpointWriter
@@ -165,7 +166,12 @@ if TYPE_CHECKING:
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
     from persona_api.tasks.revival_sweep import RevivalSweeper
 
-__all__ = ["InProcessWorker", "build_worker_registry", "start_in_process_worker"]
+__all__ = [
+    "InProcessWorker",
+    "build_leg_box",
+    "build_worker_registry",
+    "start_in_process_worker",
+]
 
 _log = get_logger("api.worker_root")
 
@@ -446,6 +452,9 @@ def build_worker_registry(
             # R5-D-2 worker parity: the origination audit sink follows the same
             # config-selected backend; audit_root stays the JSONL fallback path.
             audit_root=Path(config.audit_root),
+            # Findings F+K (completion sweep, part 2): the leg bounds + the checkpoint token
+            # budget are read off the config here, where every other leg knob already is.
+            config=config,
             audit_logger=build_audit_logger(config, rls_engine),
             live_sessions=live_sessions,
             event_channel=event_channel,
@@ -786,6 +795,31 @@ def _acceptance_assessor(
     )
 
 
+def build_leg_box(config: APIConfig) -> LegBox:
+    """The per-leg bounds an operator asked for (completion sweep part 2, Finding F).
+
+    The ONE place a production ``LegBox`` is built, so no second construction site can drift
+    from it and so a test can cross each bound through the same function the worker calls.
+    That matters more than it looks: the bounds were dark precisely because every production
+    path fell through to ``LegBox()`` with no arguments, and every test of the mechanism
+    passed throughout.
+
+    ``budget_micros`` is a ceiling rather than a grant. The handler still narrows it to the
+    task's remaining budget when that is smaller (:meth:`TaskLegHandler._leg_box`).
+
+    Args:
+        config: The process configuration carrying the three ``PERSONA_TASK_LEG_*`` knobs.
+
+    Returns:
+        The box every leg this worker runs is bounded by.
+    """
+    return LegBox(
+        max_steps=config.task_leg_max_steps,
+        wall_clock_seconds=config.task_leg_wallclock_seconds,
+        budget_micros=config.task_leg_budget_micros,
+    )
+
+
 def _register_task_leg_tenant(
     registry: JobRegistry,
     *,
@@ -794,6 +828,7 @@ def _register_task_leg_tenant(
     memory_backend: Backend | None,
     edition: object | None,
     audit_root: Path,
+    config: APIConfig,
     audit_logger: AuditLogger | None = None,
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
@@ -813,8 +848,17 @@ def _register_task_leg_tenant(
     ``runnable_guard`` (Spec A3/A6-D-8) — the kill-switch guard consulted before every leg: a
     terminal / budget-paused / persona-suspended / globally-paused / owner-autonomy-paused task
     runs no new leg. The primary origination gate for the owner pause — wired live at merge-back.
+
+    ``config`` (completion sweep part 2, Findings F+K) — the per-leg bounds and the checkpoint
+    token budget. .env.example documented all four as "injected by the worker composition" since
+    Spec A2 and this is the composition that finally does it, so an operator can bound a leg.
     """
     task_store = TaskStore(rls_engine)
+    # Findings F+K: every checkpoint store on the leg path enforces the CONFIGURED core budget.
+    # The continuation's is the one that actually writes (``CheckpointStore.append`` runs the
+    # gate); the handler's reads. Both take the number so the two can never disagree about
+    # what a leg is allowed to carry forward.
+    checkpoint_token_budget = config.task_checkpoint_token_budget
 
     # Spec A11/A6 (W8): a background task transition pings the owner's open tabs (task.updated),
     # which refetch A6's Review/Tasks/Approvals live. Best-effort over the A11 channel; no channel
@@ -825,7 +869,7 @@ def _register_task_leg_tenant(
     continuation = TaskContinuation(
         task_store=task_store,
         queue=JobQueue(rls_engine),
-        checkpoint_store=CheckpointStore(rls_engine),
+        checkpoint_store=CheckpointStore(rls_engine, token_budget=checkpoint_token_budget),
         # Spec A4 recurrence: the continuation reads the schedule to decide occurrence-complete →
         # WAITING (recurring, more fires) vs task-complete (one-time / exhausted).
         schedule_store=ScheduleStore(rls_engine),
@@ -868,7 +912,13 @@ def _register_task_leg_tenant(
     register_task_leg_handler(
         registry,
         task_store=task_store,
-        checkpoint_store=CheckpointStore(rls_engine),
+        checkpoint_store=CheckpointStore(rls_engine, token_budget=checkpoint_token_budget),
+        # Finding F (completion sweep, part 2): the per-leg bounds an operator configured.
+        # Until now both construction sites built ``LegBox()`` with no arguments, so the
+        # four documented knobs bounded nothing and the shipped numbers were the only
+        # numbers. The budget here is a ceiling; the handler still narrows it to the task's
+        # remaining budget when that is smaller.
+        box=build_leg_box(config),
         # Spec W1 (D-W1-1): the leg runner builds the loop over A3's policy-gated toolbox,
         # recording gated proposals in the ApprovalStore. Until W1 no production module
         # constructed the gate, so every leg ran ungated; this is the wiring A3 named.

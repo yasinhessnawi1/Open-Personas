@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from persona.approvals import LexiconReplyInterpreter
 from persona.audit import JSONLAuditLogger
 from persona.stores.episodic import EpisodicStore
+from persona.tasks import DEFAULT_CHECKPOINT_TOKEN_BUDGET
 
 from persona_api.approvals.resolver import ApprovalResolver, InboxDecision
 from persona_api.approvals.store import ApprovalStore
@@ -59,10 +60,15 @@ class ApprovalResolutionService:
         memory_backend: Backend,
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
+        checkpoint_token_budget: int = DEFAULT_CHECKPOINT_TOKEN_BUDGET,
     ) -> None:
         self._engine = engine
         self._factory = factory
         self._edition = edition
+        # Finding K (completion sweep, part 2): an APPROVE resumes a leg and writes its
+        # checkpoint here, so this path enforces the same operator-configured core budget the
+        # worker does. Left at the core default it behaves exactly as it always has.
+        self._checkpoint_token_budget = checkpoint_token_budget
         # The C0 episodic recorder for the notifier — the same construction as
         # OriginatorFailureNotifier (backend-selected audit when supplied; JSONL fallback).
         self._episodic = EpisodicStore(
@@ -78,7 +84,7 @@ class ApprovalResolutionService:
         """
         engine = self._engine
         tasks = TaskStore(engine)
-        checkpoints = CheckpointStore(engine)
+        checkpoints = CheckpointStore(engine, token_budget=self._checkpoint_token_budget)
         continuation = TaskContinuation(
             task_store=tasks,
             queue=JobQueue(engine),

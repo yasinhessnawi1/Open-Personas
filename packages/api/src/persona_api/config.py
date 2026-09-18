@@ -18,9 +18,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona.tasks import (
+    DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+    DEFAULT_LEG_MAX_STEPS,
+    DEFAULT_LEG_WALL_CLOCK_SECONDS,
+)
 from persona_runtime.legs.acceptance import DEFAULT_ASSESS_TIMEOUT_S
 from persona_runtime.legs.semantic_distiller import DEFAULT_DISTILL_TIMEOUT_S
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:
@@ -641,6 +646,58 @@ class APIConfig(BaseSettings):
     task_leg_max_idle_days: int = Field(
         default=7, ge=1, validation_alias="PERSONA_TASK_LEG_MAX_IDLE_DAYS"
     )
+    # Finding F (completion sweep, part 2): the three per-leg bounds. .env.example has
+    # documented them since Spec A2 and said the worker composition injected them; nothing
+    # read any of the three, so both ``LegBox`` construction sites took the in-code defaults
+    # and an operator who needed a tighter leg had no way to ask for one.
+    #
+    # The defaults are the CORE constants, imported rather than retyped, because the pair
+    # has already drifted once: the documentation still claimed a step bound of 10 long
+    # after R9-102 raised the enforced default to 20.
+    task_leg_max_steps: int = Field(
+        default=DEFAULT_LEG_MAX_STEPS, gt=0, validation_alias="PERSONA_TASK_LEG_MAX_STEPS"
+    )
+    # The drain-critical bound: it must stay inside the worker's drain window with room for
+    # the checkpoint commit (D-A2-2 / D-A0-5), so a deployment with a different drain is
+    # exactly the case that needs to set it.
+    task_leg_wallclock_seconds: float = Field(
+        default=DEFAULT_LEG_WALL_CLOCK_SECONDS,
+        gt=0,
+        validation_alias="PERSONA_TASK_LEG_WALLCLOCK_SECONDS",
+    )
+    # The optional per-leg spend ceiling. Unset (the shipped posture) means no configured
+    # cap and the box bounds on steps and wall clock alone. Set, it is a CEILING and never a
+    # grant: the effective per-leg cap is the SMALLER of this and what the task's own budget
+    # has left (``TaskLegHandler._leg_box``), so raising it can never let a leg outspend the
+    # promise the per-task cap made to the user.
+    task_leg_budget_micros: int | None = Field(
+        default=None, ge=0, validation_alias="PERSONA_TASK_LEG_BUDGET_MICROS"
+    )
+    # Finding K (completion sweep, part 2): the cap on a checkpoint's accumulating core, in
+    # tokens. Overflow makes the leg reflect-and-compact before persisting; a write that is
+    # still over after compaction fails fast rather than persisting an ossifying checkpoint.
+    # Documented since A2 with the same "the composition injects it" claim, and likewise
+    # read by nothing: ``CheckpointStore`` took the core default at every call site.
+    task_checkpoint_token_budget: int = Field(
+        default=DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+        gt=0,
+        validation_alias="PERSONA_TASK_CHECKPOINT_TOKEN_BUDGET",
+    )
+
+    @field_validator("task_leg_budget_micros", mode="before")
+    @classmethod
+    def _blank_budget_means_no_cap(cls, value: object) -> object:
+        """Read a set-but-empty per-leg spend cap as "no cap" rather than refusing to boot.
+
+        ``.env.example`` documents the knob with an empty value, so an operator who copies
+        the file and uncomments the line hands the process an empty string. That spelling
+        means "no cap" to every person who writes it, and a worker that would not start on
+        it would be punishing someone for reading the documentation.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     # R9-164: the acceptance assessor, which lets a leg's work move a contract's acceptance
     # criteria off ``pending``. On, because a checklist that can never be ticked is worse than
     # no checklist; the safety is not this flag but the core gate the claims pass through
