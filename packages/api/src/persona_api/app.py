@@ -1035,6 +1035,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.voice_remap_task = voice_remap_task
 
+    # R9-165: summarise every over-budget skill ONCE at boot (built-ins + the synced
+    # mirror), cached by the body's content hash, so a turn that activates a long skill
+    # gets the summary the architecture promises instead of a character cut, with no
+    # model call on the turn path. Same guard shape as the warm tasks above: a plain
+    # ``asyncio.create_task`` never awaited here (a slow small tier cannot delay serving;
+    # the first turns simply truncate until it lands), held on ``app.state`` so it is not
+    # GC'd, cancelled at shutdown below. A warm cache makes this a no-op per boot.
+    skill_summary_task: asyncio.Task[None] | None = None
+    if runtime_factory is not None:
+        _summary_factory = runtime_factory
+
+        async def _run_skill_summary_warm() -> None:
+            try:
+                await _summary_factory.warm_skill_summaries()
+            except Exception:  # noqa: BLE001 — a boot task must never surface/crash
+                _LOG.warning("skill summary warm-up failed unexpectedly")
+
+        skill_summary_task = asyncio.create_task(
+            _run_skill_summary_warm(), name="skill-summary-warm"
+        )
+        app.state.skill_summary_task = skill_summary_task
+
     try:
         yield
     finally:
@@ -1062,6 +1084,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             voice_remap_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await voice_remap_task
+        # R9-165: the (usually long-finished) skill summary warm-up, cancelled before the
+        # registry it may still be calling through closes.
+        if skill_summary_task is not None:
+            skill_summary_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await skill_summary_task
         # Flush + stop telemetry FIRST so a final drain lands before engines close
         # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:

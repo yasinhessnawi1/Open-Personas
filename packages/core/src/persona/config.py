@@ -167,6 +167,16 @@ class PersonaCoreConfig(BaseSettings):
     # path is used. Fail-soft: absent/corrupt → empty external set (builtins unaffected).
     skill_mirror_path: Path | None = None
 
+    # R9-165 — an over-budget skill is summarised ONCE (small tier, at boot or at the mirror
+    # sync) and the summary is cached by the body's content hash, so injection never calls a
+    # model and the same skill always injects the same body. ``False`` keeps the pre-fix
+    # behaviour end to end: no summaries are made and an over-budget skill is truncated with
+    # its WARNING. The cache file lives beside the skill mirror when one is configured, else
+    # under ``chroma_path``; ``skill_summary_cache_path`` overrides both. See
+    # :func:`persona.skills.summary.resolve_skill_summary_cache_path`.
+    skill_summaries_enabled: bool = True
+    skill_summary_cache_path: Path | None = None
+
     # Spec 27 (D-27-4) — which built-in MCP servers an operator opts into. Stored
     # as a raw string so the "unset" case (None → catalog safe-subset) is
     # distinguishable from the "explicit empty" case ("" → opt out of all). The

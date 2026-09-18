@@ -31,8 +31,17 @@ from persona.history import ConversationHistoryManager
 from persona.imagegen import make_generate_image_tool
 from persona.logging import get_logger
 from persona.schema.persona import Persona
-from persona.skills import BUILTIN_ROOT, SkillInjector, SkillScanner, make_use_skill_tool
+from persona.skills import (
+    BUILTIN_ROOT,
+    SkillInjector,
+    SkillScanner,
+    SkillSummaryCache,
+    ensure_skill_summaries,
+    make_use_skill_tool,
+    resolve_skill_summary_cache_path,
+)
 from persona.skills.document_generation import apply_docgen_fidelity
+from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_read_path
 from persona.stores import (
     EpisodicStore,
     IdentityStore,
@@ -65,7 +74,7 @@ from persona_api.editions import MeteredCreditsPolicy
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
-from persona_api.services.model_tiers import select_plan_tier_registry
+from persona_api.services.model_tiers import ownerless_background_backend, select_plan_tier_registry
 from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
 
@@ -81,6 +90,8 @@ if TYPE_CHECKING:
     from persona.schedules import QuietHours
     from persona.schedules.reader import ScheduleReader
     from persona.schema.chunks import PersonaChunk
+    from persona.schema.skills import SkillSpec
+    from persona.skills.summary import SkillSummaryReport
     from persona.stores.backend import Backend
     from persona.stores.core_memory import CoreMemoryStore
     from persona.stores.embedder import Embedder
@@ -201,6 +212,23 @@ class RuntimeFactory:
         # produced artifacts through. None ⇒ persistence disabled (CLI / test).
         self._file_storage = file_storage
         self._core_config = core_config or PersonaCoreConfig()
+        # R9-165: the once-and-cached skill summaries every loop's injector reads. A skill
+        # is static content, so it is summarised ONCE (``warm_skill_summaries`` at boot, and
+        # the worker after each mirror sync) and served by hash; ``inject`` never calls a
+        # model. ``None`` (PERSONA_SKILL_SUMMARIES_ENABLED=false) is the pre-fix behaviour:
+        # an over-budget skill is truncated, with its WARNING. The cache file sits beside the
+        # skill mirror (the hosted volume) or under chroma_path (dev / community).
+        self._skill_summaries: SkillSummaryCache | None = (
+            SkillSummaryCache(
+                resolve_skill_summary_cache_path(
+                    self._core_config.skill_summary_cache_path,
+                    mirror_path=self._core_config.skill_mirror_path,
+                    data_root=self._core_config.chroma_path,
+                )
+            )
+            if self._core_config.skill_summaries_enabled
+            else None
+        )
         # Spec 12 T10 — hosted sandbox pool. None when E2B_API_KEY is unset
         # (dev environments without an account boot cleanly); the
         # ``code_execution`` tool is absent from the toolbox in that case
@@ -1369,6 +1397,65 @@ class RuntimeFactory:
             )
         )
 
+    # -- R9-165: skill summaries (once, cached by content hash, never per turn) ---------
+
+    @property
+    def skill_summaries(self) -> SkillSummaryCache | None:
+        """The summary cache the loops' injectors read; ``None`` when summaries are off.
+
+        Shared with the in-process worker's skill-catalog sync so a summary made after a
+        sync is visible to the next turn without a restart (memory-only caches would
+        otherwise diverge; file-backed ones also reload on mtime).
+        """
+        return self._skill_summaries
+
+    def _build_skill_injector(self) -> SkillInjector:
+        """The ONE injector construction both loops use, wired to the summary cache."""
+        return SkillInjector(summaries=self._skill_summaries)
+
+    def _all_injectable_skills(self) -> list[SkillSpec]:
+        """Every skill any persona could inject: built-ins as delivered, plus the mirror.
+
+        Built-ins go through the same ``apply_docgen_fidelity`` step ``_scan_skills`` applies,
+        because the summary must be made from the body that is actually injected (the cache
+        key is that body's hash). The mirror is read the way ``_declared_mirror_skills`` reads
+        it (fail-soft: absent or corrupt is the empty set).
+        """
+        names = sorted(d.name for d in BUILTIN_ROOT.iterdir() if (d / "SKILL.md").is_file())
+        scanned = SkillScanner(skill_paths=[BUILTIN_ROOT]).scan(declared_skills=names)
+        specs = [
+            apply_docgen_fidelity(s, full_fidelity=self._docgen_full_fidelity) for s in scanned
+        ]
+        specs.extend(
+            load_skill_mirror(resolve_skill_mirror_read_path(self._core_config.skill_mirror_path))
+        )
+        return specs
+
+    async def warm_skill_summaries(self) -> SkillSummaryReport | None:
+        """Summarise every over-budget skill whose current body has no cached summary yet.
+
+        Run once at boot as a background task (never on a request path). Idempotent and
+        free on a warm cache; with no background-tier backend it produces nothing and names
+        each over-budget skill at WARNING, leaving injection to the truncation fallback.
+        Returns ``None`` when summaries are disabled.
+        """
+        if self._skill_summaries is None:
+            return None
+        report = await ensure_skill_summaries(
+            self._all_injectable_skills(),
+            cache=self._skill_summaries,
+            backend=ownerless_background_backend(self._tier_registry, surface="skill summariser"),
+        )
+        _logger.info(
+            "skill summaries warmed",
+            summarised=list(report.summarised),
+            cached=list(report.cached),
+            unavailable=list(report.unavailable),
+            failed=list(report.failed),
+            cache=str(self._skill_summaries.path),
+        )
+        return report
+
     # -- the closures the routes call ---------------------------------------
 
     def _build_task_origination(
@@ -1749,7 +1836,7 @@ class RuntimeFactory:
             stores=self._build_stores(),
             toolbox=toolbox,  # type: ignore[arg-type]
             skill_scanner=scanner,
-            skill_injector=SkillInjector(),
+            skill_injector=self._build_skill_injector(),
             scanned_skills=scanned,  # type: ignore[arg-type]
             history_manager=ConversationHistoryManager(),
             prompt_builder=PromptBuilder(),
@@ -1890,7 +1977,7 @@ class RuntimeFactory:
             persona=persona,
             stores=self._build_stores(),
             toolbox=toolbox,  # type: ignore[arg-type]
-            skill_injector=SkillInjector(),
+            skill_injector=self._build_skill_injector(),
             scanned_skills=scanned,  # type: ignore[arg-type]
             prompt_builder=PromptBuilder(),
             # Spec P9 (P9-D-1): step tiers come from _tier_for_step (D-06-6),

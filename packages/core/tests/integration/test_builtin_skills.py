@@ -247,21 +247,30 @@ class TestInjectorEndToEnd:
         assert web_research_spec.content.startswith(prefix)
 
     @pytest.mark.asyncio
-    async def test_web_research_summarised_with_summariser(
+    async def test_web_research_served_from_its_cached_summary(
         self,
         web_research_spec,  # noqa: ANN001
     ) -> None:
-        captured: list[str] = []
+        """R9-165: a summary cached for THIS body is what gets injected, no model call."""
+        from datetime import UTC, datetime
 
-        async def fake_summariser(content: str) -> str:
-            captured.append(content)
-            return "Brief summary of the web_research skill body."
+        from persona.skills.injector import content_hash_of
+        from persona.skills.summary import SkillSummary, SkillSummaryCache
 
-        injector = SkillInjector(summariser=fake_summariser)
+        cache = SkillSummaryCache()
+        cache.put(
+            SkillSummary(
+                content_hash=content_hash_of(web_research_spec),
+                summary="Brief summary of the web_research skill body.",
+                summary_token_count=count_tokens("Brief summary of the web_research skill body."),
+                budget=SkillInjector.TOKEN_BUDGET,
+                model="fake/tiny",
+                created_at=datetime.now(UTC),
+            )
+        )
+        injector = SkillInjector(summaries=cache)
         out = await injector.inject(web_research_spec)
         assert out == "Brief summary of the web_research skill body."
-        assert len(captured) == 1
-        assert captured[0] == web_research_spec.content
 
 
 class TestIndexRendering:

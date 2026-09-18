@@ -33,11 +33,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.backends.errors import AuthenticationError
+from persona.backends.errors import AuthenticationError, ProviderError
 from persona.backends.errors import TierNotConfiguredError as BackendTierNotConfiguredError
 from persona.logging import get_logger
 from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription
+from persona_runtime.routing import tier_for
 from persona_runtime.tier import free_tier_registry_from_env
 
 from persona_api.config import Edition
@@ -403,3 +404,31 @@ def plan_scoped_background_backend(
         free_tier_registry=free_tier_registry,
     )
     return UsageCollectingBackend(backend) if metered else backend
+
+
+def ownerless_background_backend(
+    registry: TierRegistry | None, *, surface: str
+) -> ChatBackend | None:
+    """The background-tier backend for work no owner started, or ``None`` when unavailable.
+
+    R9-165's skill summariser runs at boot and after the mirror sync, on static shared
+    content: there is no owner to plan-gate or to bill, so it does NOT go through
+    :func:`plan_scoped_background_backend` (which resolves the calling owner's plan from the
+    RLS scope and would fail closed outside a request). It resolves the app's paid registry
+    once, at the ``background`` tier (Spec P9: summarisation is the small surface).
+
+    Fail-soft, like the factory's ``text_summarize`` composition: a keyless boot, an
+    unconfigured tier or a provider that refuses construction yields ``None`` with one
+    WARNING naming the surface, and the surface degrades (for skills: truncation).
+    """
+    if registry is None:
+        return None
+    try:
+        return registry.get(tier_for("background"))
+    except (ProviderError, BackendTierNotConfiguredError, RegistryTierNotConfiguredError) as exc:
+        _LOG.warning(
+            "{surface} not wired: background-tier backend unavailable ({error})",
+            surface=surface,
+            error=type(exc).__name__,
+        )
+        return None

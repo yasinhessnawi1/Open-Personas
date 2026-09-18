@@ -36,16 +36,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
-from persona.skills.skill_mirror import resolve_skill_mirror_write_path
+from persona.skills.skill_mirror import load_skill_mirror, resolve_skill_mirror_write_path
 from persona.skills.skill_mirror_reconcile import SkillMirrorSyncResult
 from persona.skills.skill_sources_sync import GithubSourceCheckout, clone_at_ref, sync_skill_mirror
 from persona.skills.sources.anthropic import ANTHROPIC_PINNED_COMMIT, ANTHROPIC_REPO_URL
+from persona.skills.summary import (
+    SkillSummaryCache,
+    SkillSummaryReport,
+    ensure_skill_summaries,
+    resolve_skill_summary_cache_path,
+)
 
 from persona_api.schedules.leadership import SchedulerLeader
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from persona.backends import ChatBackend
     from persona.skills.sources.github import GithubRepoSpec
     from sqlalchemy import Engine
 
@@ -90,6 +97,10 @@ class SkillCatalogSyncTask:
         lock_key: The skill-catalog-sync advisory-lock key (defaults to the module key).
         leader_factory: Test seam — builds the per-run leader (default ``SchedulerLeader``).
         sync_runner: Test seam — runs the clone+sync (default clones the curated sources).
+        summary_cache: R9-165 — the content-hash keyed summary cache the injector reads;
+            ``None`` ⇒ no summaries are made after a sync (over-budget skills truncate).
+        summary_backend: The background-tier backend that produces the summaries; ``None``
+            (no small tier configured) ⇒ each over-budget skill is named at WARNING instead.
     """
 
     def __init__(
@@ -103,6 +114,8 @@ class SkillCatalogSyncTask:
         lock_key: int = SKILL_CATALOG_SYNC_LEADER_LOCK_KEY,
         leader_factory: Callable[[], LeaderGate] | None = None,
         sync_runner: Callable[[], SkillMirrorSyncResult] | None = None,
+        summary_cache: SkillSummaryCache | None = None,
+        summary_backend: ChatBackend | None = None,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._mirror_path = mirror_path
@@ -114,6 +127,8 @@ class SkillCatalogSyncTask:
             lambda: SchedulerLeader(dispatch_engine, lock_key=lock_key)
         )
         self._sync_runner: Callable[[], SkillMirrorSyncResult] = sync_runner or self._clone_and_sync
+        self._summary_cache = summary_cache
+        self._summary_backend = summary_backend
 
     def run_once(self) -> SkillMirrorSyncResult | None:
         """Run one sync if this process wins the leader lock; else a clean no-op.
@@ -146,6 +161,31 @@ class SkillCatalogSyncTask:
             path=str(self._mirror_path),
         )
         return result
+
+    async def summarise_synced(self) -> SkillSummaryReport | None:
+        """After a completed sync: cache a summary for every over-budget mirrored skill.
+
+        The ingest-time half of R9-165. Runs on the worker's loop (the backend is async),
+        right after the leader's ``run_once`` wrote the mirror, over the skills the mirror
+        now holds. Keyed on the body's content hash, so an unchanged skill costs a lookup
+        and an updated one is re-summarised exactly once. ``None`` when no cache is wired.
+        """
+        if self._summary_cache is None:
+            return None
+        report = await ensure_skill_summaries(
+            load_skill_mirror(self._mirror_path),
+            cache=self._summary_cache,
+            backend=self._summary_backend,
+        )
+        _log.info(
+            "skill mirror summaries refreshed",
+            summarised=list(report.summarised),
+            cached=list(report.cached),
+            unavailable=list(report.unavailable),
+            failed=list(report.failed),
+            path=str(self._mirror_path),
+        )
+        return report
 
     def _clone_and_sync(self) -> SkillMirrorSyncResult:
         """Clone the enabled curated + BYO sources into temp dirs, ingest+tier, reconcile.
@@ -186,7 +226,11 @@ class SkillCatalogSyncTask:
 
 
 def build_skill_catalog_sync(
-    config: APIConfig, *, dispatch_engine: Engine
+    config: APIConfig,
+    *,
+    dispatch_engine: Engine,
+    summary_backend: ChatBackend | None = None,
+    summary_cache: SkillSummaryCache | None = None,
 ) -> SkillCatalogSyncTask | None:
     """Compose the skill-catalog-sync task from config, or ``None`` when disabled.
 
@@ -196,23 +240,38 @@ def build_skill_catalog_sync(
     fallback ONLY (N2-D-1 posture), never a write target — writing it would mutate committed
     package data in a checkout (R9-011) and fails on a deployed image anyway (root-owned
     ``/app``). Otherwise builds the task on the worker's dispatch engine.
+
+    ``summary_backend`` / ``summary_cache`` (R9-165): the post-sync summariser's backend and
+    cache. The cache defaults to the same file the runtime factory reads (beside the mirror)
+    when summaries are enabled; pass the factory's own instance to share it in-process.
     """
     if not config.skill_catalog_sync_enabled:
         _log.info("skill catalog auto-sync disabled (PERSONA_SKILL_SYNC_ENABLED=false)")
         return None
     from persona.config import PersonaCoreConfig
 
-    mirror_path = resolve_skill_mirror_write_path(PersonaCoreConfig().skill_mirror_path)
+    core = PersonaCoreConfig()
+    mirror_path = resolve_skill_mirror_write_path(core.skill_mirror_path)
     if mirror_path is None:
         _log.warning(
             "skill catalog auto-sync skipped: PERSONA_SKILL_MIRROR_PATH unset — the bundled "
             "snapshot is read-only; set an explicit writable path to enable the sync"
         )
         return None
+    if summary_cache is None and core.skill_summaries_enabled:
+        summary_cache = SkillSummaryCache(
+            resolve_skill_summary_cache_path(
+                core.skill_summary_cache_path,
+                mirror_path=core.skill_mirror_path,
+                data_root=core.chroma_path,
+            )
+        )
     return SkillCatalogSyncTask(
         dispatch_engine=dispatch_engine,
         mirror_path=mirror_path,
         openclaw_repo_url=config.skill_openclaw_repo_url or None,
         openclaw_ref=config.skill_openclaw_ref or None,
         github_repos=config.skill_github_repos_parsed,
+        summary_cache=summary_cache,
+        summary_backend=summary_backend,
     )

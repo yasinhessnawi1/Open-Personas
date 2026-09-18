@@ -538,7 +538,13 @@ class Worker:
         ):
             return
         try:
-            await asyncio.to_thread(self._skill_catalog_sync.run_once)
+            result = await asyncio.to_thread(self._skill_catalog_sync.run_once)
+            if result is not None:
+                # R9-165: the leader that just wrote the mirror summarises its over-budget
+                # skills once (content-hash keyed, so an unchanged skill costs nothing). On
+                # the loop, not the thread: the backend is async. Not-leader / failed sync
+                # ⇒ nothing changed ⇒ nothing to summarise.
+                await self._skill_catalog_sync.summarise_synced()
         except Exception:  # noqa: BLE001 — a sync failure must not crash the worker loop
             _log.exception("skill catalog sync failed", worker_id=self._worker_id)
         self._last_skill_catalog_sync = time.monotonic()

@@ -1,8 +1,10 @@
 """Small test fakes shared across the ``persona.skills`` test modules.
 
-A real :class:`persona.backends.ChatBackend` is too heavy for unit tests
-of the injector — the injector only needs a ``Callable[[str],
-Awaitable[str]]``. These fakes implement that shape directly.
+The injector reads cached summaries through the ``SkillSummaryLookup`` shape
+(one ``get(content_hash, *, budget)`` call); a full
+:class:`persona.skills.summary.SkillSummaryCache` is more than a unit test of
+the injector's branching needs. This fake implements that shape directly and
+records what it was asked.
 """
 
 # ruff: noqa: ANN401, ARG001, ARG002
@@ -10,31 +12,17 @@ Awaitable[str]]``. These fakes implement that shape directly.
 from __future__ import annotations
 
 
-class FakeSummariser:
-    """Deterministic summariser that returns a fixed short string.
+class FakeSummaryLookup:
+    """A lookup that answers every hash with one fixed value (or a miss).
 
-    ``calls`` records every input it received; ``return_value`` is what it
-    sends back. Letting tests construct the output gives precise control
-    over budget edge cases.
+    ``calls`` records every ``(content_hash, budget)`` it was asked, so a test can
+    assert the injector keyed on the right hash, or never asked at all.
     """
 
-    def __init__(self, return_value: str = "summarised.") -> None:
+    def __init__(self, return_value: str | None = "summarised.") -> None:
         self.return_value = return_value
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, int]] = []
 
-    async def __call__(self, content: str) -> str:
-        self.calls.append(content)
-        return self.return_value
-
-
-class OverBudgetSummariser:
-    """Returns text longer than the budget — exercises the defensive
-    truncation fallback in :meth:`SkillInjector.inject`."""
-
-    def __init__(self, return_value: str) -> None:
-        self.return_value = return_value
-        self.calls: list[str] = []
-
-    async def __call__(self, content: str) -> str:
-        self.calls.append(content)
+    def get(self, content_hash: str, *, budget: int) -> str | None:
+        self.calls.append((content_hash, budget))
         return self.return_value

@@ -1428,8 +1428,22 @@ def start_in_process_worker(
 
     # S2 skill-catalog auto-sync — same additive, leader-gated shape (distinct key).
     # ``build_skill_catalog_sync`` returns None when disabled (PERSONA_SKILL_SYNC_ENABLED=false).
+    # R9-165: the post-sync skill summariser rides the app's background tier as ownerless
+    # system work (no owner to plan-gate or bill) and shares the runtime factory's cache
+    # when one is present, so a summary made after a sync serves the very next turn.
     def _skill_catalog_sync_builder(dispatch_engine: Engine) -> SkillCatalogSyncTask | None:
-        return build_skill_catalog_sync(config, dispatch_engine=dispatch_engine)
+        from persona_api.services.model_tiers import ownerless_background_backend
+
+        return build_skill_catalog_sync(
+            config,
+            dispatch_engine=dispatch_engine,
+            summary_backend=ownerless_background_backend(
+                tier_registry, surface="skill mirror summariser"
+            ),
+            summary_cache=(
+                runtime_factory.skill_summaries if runtime_factory is not None else None
+            ),
+        )
 
     # Spec A3 (T9) — the approval reminder/expiry sweep, leader-gated on APPROVAL_SWEEP_LOCK_KEY.
     # Always wired (the reminder/expiry state changes are un-gated — an approval must never rot);

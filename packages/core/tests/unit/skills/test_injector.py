@@ -1,13 +1,14 @@
 """Tests for ``persona.skills.injector.SkillInjector`` (T06, D-04-7, D-04-8).
 
-Three branches per spec §9 #3-#5:
+Three branches per spec §9 #3-#5 (the middle one reshaped by R9-165):
 
 - Content fits → verbatim pass-through.
-- Content over budget + summariser → summariser output.
-- Content over budget + no summariser → truncation with ``[truncated]`` marker.
+- Content over budget + a cached summary for THIS body → the summary.
+- Content over budget + no summary → truncation with ``[truncated]`` marker.
 
-Plus defensive fall-through: summariser returns over-budget output →
-truncate the summary.
+Plus defensive fall-through: a lookup hands back over-budget text →
+truncate the summary. The real chain (a summary produced once, cached by
+content hash, then served by ``inject``) is driven in ``test_summary.py``.
 
 Also pins ``TOKEN_BUDGET == 2000`` as a regression guard.
 """
@@ -22,9 +23,9 @@ import pytest
 from loguru import logger as _loguru_logger
 from persona.schema.skills import SkillSpec
 from persona.skills._tokens import count_tokens
-from persona.skills.injector import MARKER, SkillInjector
+from persona.skills.injector import MARKER, SkillInjector, content_hash_of
 
-from ._fakes import FakeSummariser, OverBudgetSummariser
+from ._fakes import FakeSummaryLookup
 
 
 def _spec(
@@ -79,20 +80,20 @@ class TestUnderBudgetVerbatim:
         assert out == spec.content
 
     @pytest.mark.asyncio
-    async def test_summariser_not_called_when_under_budget(
+    async def test_summary_lookup_not_consulted_when_under_budget(
         self,
         tmp_path: Path,
     ) -> None:
         spec = _spec(tmp_path, "x", "Short content.")
-        summariser = FakeSummariser()
-        injector = SkillInjector(summariser=summariser)
+        lookup = FakeSummaryLookup()
+        injector = SkillInjector(summaries=lookup)
         await injector.inject(spec)
-        assert summariser.calls == []
+        assert lookup.calls == []
 
 
-class TestOverBudgetWithSummariser:
+class TestOverBudgetWithCachedSummary:
     @pytest.mark.asyncio
-    async def test_summariser_called_and_output_returned(
+    async def test_cached_summary_returned_keyed_on_content_hash(
         self,
         tmp_path: Path,
     ) -> None:
@@ -101,45 +102,75 @@ class TestOverBudgetWithSummariser:
         spec = _spec(tmp_path, "x", big)
         assert spec.content_token_count > SkillInjector.TOKEN_BUDGET
 
-        summariser = FakeSummariser(return_value="brief summary.")
-        injector = SkillInjector(summariser=summariser)
+        lookup = FakeSummaryLookup(return_value="brief summary.")
+        injector = SkillInjector(summaries=lookup)
         out = await injector.inject(spec)
         assert out == "brief summary."
-        assert summariser.calls == [big]
+        # The key is the hash of the body being injected, at the effective budget.
+        assert lookup.calls == [(content_hash_of(spec), SkillInjector.TOKEN_BUDGET)]
 
     @pytest.mark.asyncio
-    async def test_summariser_output_within_budget(self, tmp_path: Path) -> None:
+    async def test_per_skill_budget_is_what_the_lookup_is_asked_for(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        big = "x " * 5000
+        spec = _spec(tmp_path, "x", big).model_copy(update={"token_budget": 300})
+        lookup = FakeSummaryLookup(return_value="a short summary.")
+        out = await SkillInjector(summaries=lookup).inject(spec)
+        assert out == "a short summary."
+        assert lookup.calls == [(content_hash_of(spec), 300)]
+
+    @pytest.mark.asyncio
+    async def test_summary_output_within_budget(self, tmp_path: Path) -> None:
         big = "x " * 5000  # well over 2000 tokens
         spec = _spec(tmp_path, "x", big)
-        summariser = FakeSummariser(return_value="a short summary.")
-        injector = SkillInjector(summariser=summariser)
+        lookup = FakeSummaryLookup(return_value="a short summary.")
+        injector = SkillInjector(summaries=lookup)
         out = await injector.inject(spec)
         assert count_tokens(out) <= SkillInjector.TOKEN_BUDGET
 
     @pytest.mark.asyncio
-    async def test_over_budget_summariser_falls_through_to_truncation(
+    async def test_over_budget_cached_summary_falls_through_to_truncation(
         self,
         tmp_path: Path,
     ) -> None:
-        # Summariser returns something STILL over budget — defensive
+        # A lookup hands back something STILL over budget — defensive
         # fall-through to truncation. Use plenty of headroom so the
         # truncated result must still contain the marker.
         big = "x " * 5000
         over_budget_summary = "y " * 5000  # ~5000 tokens
         spec = _spec(tmp_path, "x", big)
-        summariser = OverBudgetSummariser(return_value=over_budget_summary)
-        injector = SkillInjector(summariser=summariser)
+        lookup = FakeSummaryLookup(return_value=over_budget_summary)
+        injector = SkillInjector(summaries=lookup)
         out = await injector.inject(spec)
         assert count_tokens(out) <= SkillInjector.TOKEN_BUDGET
         assert out.endswith(MARKER)
 
+    @pytest.mark.asyncio
+    async def test_lookup_miss_truncates_and_warns(self, tmp_path: Path) -> None:
+        """No summary for this body → exactly the pre-fix behaviour, warning included."""
+        big = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 600
+        spec = _spec(tmp_path, "web_research", big)
+        lookup = FakeSummaryLookup(return_value=None)
+        captured: list[str] = []
+        sink = _loguru_logger.add(lambda m: captured.append(str(m)), level="WARNING")
+        try:
+            out = await SkillInjector(summaries=lookup).inject(spec)
+        finally:
+            _loguru_logger.remove(sink)
+        assert out.endswith(MARKER)
+        assert big.startswith(out[: -len(MARKER)])
+        assert lookup.calls == [(content_hash_of(spec), SkillInjector.TOKEN_BUDGET)]
+        assert any("web_research" in m and "truncated" in m.lower() for m in captured)
 
-class TestOverBudgetWithoutSummariser:
+
+class TestOverBudgetWithoutSummaries:
     @pytest.mark.asyncio
     async def test_truncates_with_marker(self, tmp_path: Path) -> None:
         big = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 600
         spec = _spec(tmp_path, "x", big)
-        injector = SkillInjector()  # no summariser
+        injector = SkillInjector()  # no summaries wired
         out = await injector.inject(spec)
         assert out.endswith(MARKER)
         assert count_tokens(out) <= SkillInjector.TOKEN_BUDGET

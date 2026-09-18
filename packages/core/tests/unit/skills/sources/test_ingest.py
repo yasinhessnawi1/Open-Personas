@@ -211,3 +211,44 @@ def test_a_skipped_skill_genuinely_warns_with_a_diagnosable_reason(tmp_path: Pat
     assert "no_desc" in blob
     assert "github:o/r" in blob
     assert "missing required field" in blob or "description" in blob
+
+
+def test_over_budget_external_skill_is_named_at_ingest_with_its_numbers(tmp_path: Path) -> None:
+    """R9-165: the budget check moves to ingest, so an over-budget skill is caught at authoring.
+
+    Before this, an externally ingested skill had no budget check at all; one on the owner's
+    machine measured 17,627 tokens against 2,000 and was found by a manual sweep.
+    """
+    body = "Step: evaluate the source. Step: record the claim. " * 400
+    skill_md = _make_external_skill(
+        tmp_path,
+        "huge",
+        "---\nname: huge\ndescription: Far over the injection budget.\n---\n" + body,
+    )
+    captured: list[str] = []
+    sink = logger.add(lambda m: captured.append(str(m)), level="WARNING")
+    try:
+        spec = ingest_external_skill(skill_md, trust=SkillTrust.COMMUNITY, source="openclaw")
+    finally:
+        logger.remove(sink)
+
+    assert spec is not None, "over budget is a warning, never a skip"
+    said = " ".join(captured)
+    assert "huge" in said
+    assert "over its budget" in said
+    assert str(spec.content_token_count) in said
+    assert str(spec.content_token_count - 2000) in said
+    assert "openclaw" in said
+
+
+def test_under_budget_external_skill_ingests_silently(tmp_path: Path) -> None:
+    skill_md = _make_external_skill(
+        tmp_path, "tiny", "---\nname: tiny\ndescription: Fits.\n---\nShort body."
+    )
+    captured: list[str] = []
+    sink = logger.add(lambda m: captured.append(str(m)), level="WARNING")
+    try:
+        assert ingest_external_skill(skill_md, trust=SkillTrust.COMMUNITY, source="x") is not None
+    finally:
+        logger.remove(sink)
+    assert captured == []

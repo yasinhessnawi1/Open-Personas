@@ -31,6 +31,7 @@ from persona.logging import get_logger
 from persona.schema.skills import SkillProvenance, SkillSpec, SkillTrust
 from persona.skills._frontmatter import parse_skill_markdown
 from persona.skills._tokens import count_tokens
+from persona.skills.injector import skill_budget
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -144,6 +145,24 @@ def ingest_external_skill(
             exc=str(e)[:200],
         )
         return None
+
+    # R9-165: the budget check at ingest. An over-budget external skill used to be found only
+    # by a manual sweep (one on the owner's machine measured 17,627 tokens against 2,000). Say
+    # so here, with the numbers, where the author or the curator is looking. The summary
+    # itself is made after the sync (``SkillCatalogSyncTask.summarise_synced``) when a small
+    # tier is configured; without one the skill is truncated at injection, audibly.
+    budget = skill_budget(spec)
+    if spec.content_token_count > budget:
+        _logger.warning(
+            "external skill {skill} is {over} tokens over its budget (tokens={tokens}, "
+            "budget={budget}, source={source}); it will be summarised after the sync when a "
+            "small-tier model is configured, else truncated at injection",
+            skill=spec.name,
+            over=spec.content_token_count - budget,
+            tokens=spec.content_token_count,
+            budget=budget,
+            source=source,
+        )
 
     return spec
 

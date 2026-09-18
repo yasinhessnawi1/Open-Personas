@@ -11,7 +11,11 @@ Public surface:
 - :func:`render_skill_index` — pure function producing the compact
   "available skills" Markdown block injected into every system prompt.
 - :class:`SkillInjector` — enforces the 2000-token-per-turn skill content
-  budget; verbatim / summarise / truncate branches.
+  budget; verbatim / cached-summary / truncate branches.
+- :class:`SkillSummaryCache` + :func:`ensure_skill_summaries` — the
+  once-and-cached summariser behind the middle branch (R9-165): summaries
+  are made at boot or at the mirror sync, keyed on the body's content
+  hash, and never inside ``inject``.
 - :func:`make_use_skill_tool` — factory producing the synthetic
   ``use_skill`` :class:`persona.tools.AsyncTool` (Pattern-1 activation per
   D-04-9). Spec 05's runtime composes this into the toolbox when the
@@ -43,8 +47,14 @@ from persona.skills.guard import (
     subordinate,
 )
 from persona.skills.index import render_skill_index
-from persona.skills.injector import SkillInjector
+from persona.skills.injector import SkillInjector, SkillSummaryLookup
 from persona.skills.scanner import SkillScanner
+from persona.skills.summary import (
+    SkillSummaryCache,
+    SkillSummaryReport,
+    ensure_skill_summaries,
+    resolve_skill_summary_cache_path,
+)
 from persona.skills.use_skill_tool import collect_skill_supplements, make_use_skill_tool
 
 #: Filesystem path to the bundled built-in skills directory. Shared by
@@ -65,12 +75,17 @@ __all__ = [
     "SkillManifestError",
     "SkillScanner",
     "SkillSpec",
+    "SkillSummaryCache",
+    "SkillSummaryLookup",
+    "SkillSummaryReport",
     "collect_skill_supplements",
     "count_tokens",
     "default_nonce",
+    "ensure_skill_summaries",
     "injection_consent_state",
     "make_use_skill_tool",
     "render_skill_index",
+    "resolve_skill_summary_cache_path",
     "self_framed",
     "skill_audit_event",
     "subordinate",
