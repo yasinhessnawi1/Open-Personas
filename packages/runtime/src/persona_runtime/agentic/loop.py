@@ -67,6 +67,7 @@ from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
 from persona_runtime.agentic.step import (
     CallSkippedNote,
     ContextPrunedNote,
+    MemoryRecallNote,
     Step,
     StepNote,
     StepType,
@@ -79,7 +80,7 @@ from persona_runtime.routing import tier_for
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from persona.audit import AuditLogger
     from persona.backends import ChatBackend, ChatResponse
@@ -155,14 +156,22 @@ def _protected_boundary(context: list[ConversationMessage], step_message_counts:
     return max(1, len(context) - protected)
 
 
-def _with_note(step: Step, note: StepNote) -> Step:
-    """The step with one more guard note on it (Spec W1; R9-157).
+def _with_notes(step: Step, notes: Sequence[StepNote]) -> Step:
+    """The step with those notes appended to whatever it already carries (R9-157).
 
-    :class:`Step` is frozen, and a guard that fires at the step's boundary (the pruner)
-    only knows what it did after the step is built, so the note lands as a replacement
-    rather than a mutation.
+    :class:`Step` is frozen, and a disclosure that belongs to a step is often known only
+    after the step is built: the pruner fires at the step's boundary, and the run's memory
+    recall happens before step 0 exists. Both land as a replacement rather than a mutation,
+    and both append, so one never writes over the other.
     """
-    return step.model_copy(update={"notes": [*step.notes, note]})
+    if not notes:
+        return step
+    return step.model_copy(update={"notes": [*step.notes, *notes]})
+
+
+def _with_note(step: Step, note: StepNote) -> Step:
+    """The step with one more guard note on it (Spec W1; R9-157)."""
+    return _with_notes(step, [note])
 
 
 def _backend_max_tokens(backend: ChatBackend) -> int:
@@ -343,7 +352,7 @@ class AgenticLoop:
         # emits the P2 memory_recall events for the stores it consults (so the recall
         # signals follow `started`, mirroring the chat turn's ordering).
         await self._emit(on_event, RunEvent.started(task))
-        context = await self._build_initial_context(persona_id, task, on_event)
+        context, recall_notes = await self._build_initial_context(persona_id, task, on_event)
 
         last_bad_tool: str | None = None  # for the hallucinated-twice escalation (§5.2)
         # Spec W1 (D-W1-41): how many messages each step appended, newest last. The pruner
@@ -489,6 +498,14 @@ class AgenticLoop:
             status = RunStatus.MAX_STEPS_REACHED
             output = self._clean_output(await self._best_effort_summary(context))
             await self._emit(on_event, RunEvent.max_steps(self._max_steps, output))
+
+        if steps:
+            # part3 F10: the recall happened before step 0 existed, and it is run level, so
+            # the terminal write (steps, not events) had nothing to carry it and a reopened
+            # run could never say which memory the persona read. It belongs to the first
+            # step, which is the step that consumed the context it fed. A run that produced
+            # no step at all consumed nothing, so there is nothing to claim.
+            steps[0] = _with_notes(steps[0], recall_notes)
 
         run = Run(
             persona_id=persona_id,
@@ -1081,7 +1098,7 @@ class AgenticLoop:
         persona_id: str,
         task: str,
         on_event: Callable[[RunEvent], Awaitable[None]] | None = None,
-    ) -> list[ConversationMessage]:
+    ) -> tuple[list[ConversationMessage], list[MemoryRecallNote]]:
         """Build the floor: ONE system message (persona block + agentic framing) + task.
 
         The persona prompt is assembled by the reused ``PromptBuilder`` (D-06-9);
@@ -1094,11 +1111,21 @@ class AgenticLoop:
         (``loop.py``), which was the only surface emitting it (Spec 35 D-35-4). Emitted
         at ``step=-1`` (run-level, mirroring the chat turn) since the recall feeds the
         run's whole initial context, before the first step.
+
+        Returns:
+            The floor context, and the same recall as :class:`MemoryRecallNote` values for
+            the caller to record on the run's first step (part3 F10). The live event is
+            what a watched run renders; the note is what a reopened one reads, and the two
+            are built from one walk over the stores so they cannot disagree.
         """
         retrieved = self._retrieve(persona_id, task)
+        recall_notes = [
+            MemoryRecallNote(store=store, count=len(getattr(retrieved, store)))
+            for store in _RECALL_ORDER
+        ]
         if on_event is not None:
-            for store in _RECALL_ORDER:
-                await on_event(RunEvent.memory_recall(-1, store, len(getattr(retrieved, store))))
+            for note in recall_notes:
+                await on_event(RunEvent.memory_recall(-1, note.store, note.count))
         skill_index = render_skill_index(self._scanned_skills)
         built = self._builder.build(
             self._persona,
@@ -1116,7 +1143,7 @@ class AgenticLoop:
             content=f"{system.content}\n\n{_AGENTIC_INSTRUCTIONS}\n\nTASK: {task}",
             created_at=datetime.now(UTC),
         )
-        return [floor]
+        return [floor], recall_notes
 
     def _retrieve(self, persona_id: str, task: str) -> RetrievedContext:
         identity = self._stores["identity"].get_all(persona_id)

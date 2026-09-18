@@ -127,11 +127,28 @@ export type RunStepNote =
    */
   | { kind: "persona_originated"; conversationId?: string };
 
+/**
+ * One typed memory store the run read for its initial context. Same shape the chat
+ * surface uses for its "Recalling from <store> memory" state, so the two surfaces speak
+ * one vocabulary rather than two that drift.
+ */
+export interface RunRecall {
+  store: string;
+  count?: number;
+}
+
 /** The whole run, as the viewer renders it. */
 export interface RunView {
   task: string;
   status: RunStatus;
   tier?: string;
+  /**
+   * part3 F10: the typed memory this run read before its first step, in the order the
+   * loop consulted the stores. It belongs to the RUN, not to a step: the loop emits it
+   * at `step: -1`, and the step list drops everything below zero, so a step-level home
+   * for it could never render. Absent on a run that recalled nothing.
+   */
+  recall?: RunRecall[];
   steps: RunStep[];
   output?: string;
   error?: string;
@@ -154,6 +171,9 @@ export function runViewFromEvents(
   base: { task: string },
 ): RunView {
   const map = new Map<number, RunStep>();
+  // Keyed by store so a replayed stream cannot list `episodic` twice; insertion order is
+  // the order the loop consulted the stores, which is the order worth showing.
+  const recall = new Map<string, RunRecall>();
   let tier: string | undefined;
   let status: RunStatus = "running";
   let task = base.task;
@@ -181,9 +201,16 @@ export function runViewFromEvents(
         ensure(ev.step).thinking = true;
         break;
       case "memory_recall":
-        // Spec 35 (D-35-4): the typed-memory recall state is a chat surface for
-        // v1 (the agentic loop does not emit it yet). The run viewer accepts the
-        // frame for vocabulary parity but renders nothing — no-op.
+        // part3 F10: the run read this typed store for its initial context. It is a RUN
+        // level fact (`step: -1`, before any step exists), so it folds onto the header
+        // next to the tier; a step-level home would be filtered out and never seen. The
+        // comment here used to say the agentic loop did not emit this, which stopped
+        // being true when the loop started emitting it, and a stale "not emitted yet" is
+        // how a wired feature stays unwired.
+        recall.set(ev.data.store, {
+          store: ev.data.store,
+          count: ev.data.count,
+        });
         break;
       case "tool_calling": {
         const st = ensure(ev.step);
@@ -338,7 +365,15 @@ export function runViewFromEvents(
   const steps = [...map.values()]
     .filter((s) => s.step >= 0)
     .sort((a, b) => a.step - b.step);
-  return { task, status, tier, steps, output, error };
+  return {
+    task,
+    status,
+    tier,
+    recall: recall.size > 0 ? [...recall.values()] : undefined,
+    steps,
+    output,
+    error,
+  };
 }
 
 // ----- persisted Step reduction (the terminal-final snapshot shape) -----
@@ -382,6 +417,8 @@ interface PersistedStepNote {
   tool?: string;
   guard?: string;
   conversation_id?: string;
+  store?: string;
+  count?: number;
 }
 interface PersistedStep {
   type: string;
@@ -400,6 +437,10 @@ interface PersistedStep {
  * `call_skipped` / `context_pruned` / `persona_originated` events into the same
  * {@link RunStep.notes}; this is the other half, and without it the disclosure exists
  * only while someone is watching.
+ *
+ * `memory_recall` notes are deliberately not among the kinds read here: the recall is a
+ * run level fact and {@link persistedRecall} lifts it to the header, the same place the
+ * live stream puts it.
  */
 function persistedNotes(
   raw: PersistedStepNote[] | null | undefined,
@@ -420,6 +461,25 @@ function persistedNotes(
     }
   }
   return notes;
+}
+
+/**
+ * Read the run's memory recall off the FIRST persisted step (part3 F10). The loop records
+ * it there because step 0 is the step that consumed the context the recall fed, and the
+ * viewer lifts it back to the run header, which is where the live stream puts it. Without
+ * this half the recall exists only while someone watches the run, which on a task that
+ * runs for days is nobody.
+ */
+function persistedRecall(
+  first: PersistedStep | undefined,
+): RunRecall[] | undefined {
+  const recall: RunRecall[] = [];
+  for (const note of first?.notes ?? []) {
+    if (note.kind === "memory_recall" && note.store) {
+      recall.push({ store: note.store, count: note.count });
+    }
+  }
+  return recall.length > 0 ? recall : undefined;
 }
 
 function isRunEventDict(x: unknown): x is RunEvent {
@@ -533,11 +593,13 @@ export function runViewFromSnapshot(snap: RunStatusResponse): RunView {
     };
   }
 
-  const steps = (raw as unknown as PersistedStep[]).map(stepToRunStep);
+  const persisted = raw as unknown as PersistedStep[];
+  const steps = persisted.map(stepToRunStep);
   return {
     task: snap.task,
     status,
     tier: steps.find((s) => s.tier)?.tier,
+    recall: persistedRecall(persisted[0]),
     steps,
     output: snap.output ?? undefined,
     error: snap.error ?? undefined,

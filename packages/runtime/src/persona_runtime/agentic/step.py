@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "CallSkippedNote",
     "ContextPrunedNote",
+    "MemoryRecallNote",
     "PersonaOriginatedNote",
     "Step",
     "StepNote",
@@ -94,6 +95,30 @@ class ContextPrunedNote(BaseModel):
     after_tokens: int = Field(ge=0)
 
 
+class MemoryRecallNote(BaseModel):
+    """A typed memory store the run read for its initial context (part3 F10).
+
+    The loop emits one ``memory_recall`` event per typed store before the first step, at
+    run level. Run level is nowhere on a step, so the terminal write dropped it and the
+    recall was visible only to whoever watched the run happen: on a task that runs for
+    days, the surface where the persona's memory use is least obvious. The note lands on
+    the FIRST step, which is the step that consumes the context the recall fed.
+
+    Attributes:
+        kind: The discriminator; always ``"memory_recall"``.
+        store: Which typed store was read: ``identity`` / ``self_facts`` / ``worldview``
+            / ``episodic``. Same vocabulary as the ``memory_recall`` run event.
+        count: How many chunks came back, zero included. A store that was consulted and
+            returned nothing is part of the story.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["memory_recall"] = "memory_recall"
+    store: str
+    count: int = Field(ge=0)
+
+
 class PersonaOriginatedNote(BaseModel):
     """The run's conclusion went out as a message the persona started (Spec C0, T7).
 
@@ -120,7 +145,7 @@ class PersonaOriginatedNote(BaseModel):
 #: new member here plus a branch in the run-detail rebuild, never a new field on
 #: :class:`Step`.
 StepNote = Annotated[
-    CallSkippedNote | ContextPrunedNote | PersonaOriginatedNote,
+    CallSkippedNote | ContextPrunedNote | MemoryRecallNote | PersonaOriginatedNote,
     Field(discriminator="kind"),
 ]
 
@@ -146,8 +171,9 @@ class Step(BaseModel):
         content: The text for a ``FINAL`` or ``REASONING`` step.
         notes: What happened on this step that no other field states (Spec W1;
             R9-157): a call the ledger answered, tool output trimmed at the cost
-            ceiling, or (on the last step) the conclusion sent on as a message the
-            persona started. Persisted with the step so a run opened after the fact
+            ceiling, (on the first step) the typed memory the run read for its
+            initial context, or (on the last step) the conclusion sent on as a message
+            the persona started. Persisted with the step so a run opened after the fact
             tells the same story as one watched live; empty on every step nothing
             touched, and absent from records written before this field existed.
         tier_used: The model tier this step ran on (telemetry; D-06-3).

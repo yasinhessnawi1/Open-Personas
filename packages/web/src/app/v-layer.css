@@ -1184,6 +1184,11 @@
   .v-recall-dot[data-store="episodic"] {
     background: var(--store-episodic);
   }
+  /* part3 F10: the run header states memory the run ALREADY read, so the dot keeps its
+     store colour and drops the pulse; a pulse there would claim something is in flight. */
+  .v-recall-dot[data-static="true"] {
+    animation: none;
+  }
   /* P2 (T5) — the live "using <X>…" activity pulse. Generalises .v-recall-dot to
      every capability: identity-tinted (--v-id, the persona working), shares v-pulse.
      data-kind is carried for optional future per-kind theming; data-awaiting (A3 gate)

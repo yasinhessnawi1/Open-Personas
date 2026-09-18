@@ -534,10 +534,17 @@ async def test_a_batched_step_is_trimmed_once_two_further_steps_have_run() -> No
 # JSON ``persist_final`` writes to ``runs.steps``.
 
 
+#: What the run's deterministic guards put on a step. ``notes`` is a shared disclosure
+#: channel, and since part3 F10 the FIRST step also carries the memory the run read, which
+#: no guard did. These tests are about the guards, so they read their own kinds and let the
+#: rest of the channel alone.
+_GUARD_NOTE_KINDS = frozenset({"call_skipped", "context_pruned"})
+
+
 def _notes_json(run: Run, index: int) -> list[dict[str, object]]:
-    """A step's notes exactly as the api persists them (``Step.model_dump(mode="json")``)."""
+    """A step's GUARD notes as the api persists them (``Step.model_dump(mode="json")``)."""
     dumped = run.steps[index].model_dump(mode="json")
-    return list(dumped["notes"])
+    return [note for note in dumped["notes"] if note["kind"] in _GUARD_NOTE_KINDS]
 
 
 @pytest.mark.asyncio
@@ -631,9 +638,9 @@ async def test_a_trim_is_recorded_on_the_step_it_happened_on() -> None:
 
 @pytest.mark.asyncio
 async def test_a_run_whose_guards_never_fired_records_no_notes() -> None:
-    """The contrast. Notes are what the guards DID, so a run that repeated nothing and
-    never crossed the ceiling must carry none: an empty list on every step, so a reopened
-    run of honest work shows a clean trace rather than a manufactured one."""
+    """The contrast. Guard notes are what the guards DID, so a run that repeated nothing
+    and never crossed the ceiling must carry none on any step, so a reopened run of honest
+    work shows a clean trace rather than a manufactured one."""
     calls = _Calls()
     script = [
         _search("deposit rules", "c1"),
@@ -646,8 +653,8 @@ async def test_a_run_whose_guards_never_fired_records_no_notes() -> None:
 
     assert len(calls.searched) == 2  # both searches really ran
     assert _guards(events) == []
-    assert all(s.notes == [] for s in run.steps)
-    assert all(step.model_dump(mode="json")["notes"] == [] for step in run.steps)
+    assert all([n for n in s.notes if n.kind in _GUARD_NOTE_KINDS] == [] for s in run.steps)
+    assert all(_notes_json(run, i) == [] for i in range(len(run.steps)))
 
 
 def test_a_step_persisted_before_notes_existed_still_loads() -> None:

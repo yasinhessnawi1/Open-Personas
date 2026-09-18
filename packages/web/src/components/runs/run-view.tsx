@@ -8,6 +8,7 @@ import { buttonVariants } from "@/components/ui/button";
 import type { RunStatusResponse } from "@/lib/api";
 import { useRun } from "@/lib/hooks/use-run";
 import { cn } from "@/lib/utils";
+import { RunRecallLine } from "./run-recall-line";
 import { RunStatusBadge } from "./run-status-badge";
 import { RunTimeline } from "./run-timeline";
 
@@ -64,10 +65,10 @@ export function RunView({
   return (
     <Stack gap={5} data-slot="run-view">
       <div
-        className="flex items-center justify-between gap-3"
+        className="flex flex-wrap items-center justify-between gap-3"
         data-slot="run-view-header"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <RunStatusBadge status={view.status} />
           {view.tier ? (
             <span
@@ -78,6 +79,10 @@ export function RunView({
               {view.tier}
             </span>
           ) : null}
+          {/* part3 F10: which typed memory this run read, beside the tier. Both the live
+              stream and the reopened record feed it, so a run watched and a run opened
+              later say the same thing. */}
+          {view.recall ? <RunRecallLine recall={view.recall} /> : null}
         </div>
         {view.status === "running" ? (
           <button

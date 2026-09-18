@@ -665,6 +665,15 @@
     "answer": "Answer",
     "answerPlaceholder": "Type your answer…",
     "tierLabel": "Model tier: {tier}",
+    "recallTitle": "The typed memory this run read before its first step",
+    "recallLabel": "Recalled from",
+    "recallStore": "{store} ({count})",
+    "recallStores": {
+      "identity": "identity",
+      "self_facts": "self facts",
+      "worldview": "worldview",
+      "episodic": "episodic"
+    },
     "cancel": "Cancel run",
     "working": "Working…",
     "noSteps": "No steps recorded.",
