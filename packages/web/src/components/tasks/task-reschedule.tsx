@@ -8,6 +8,7 @@ import { useAuth } from "@/auth";
 import { useToast } from "@/components/patterns/toast";
 import {
   type CadenceInput,
+  canSeedBuilder,
   RecurrenceBuilder,
 } from "@/components/schedule/recurrence-builder";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ import {
   applyReschedule,
   previewReschedule,
   type ReschedulePreview,
+  type ScheduleCadence,
 } from "@/lib/api/schedule-client";
 
 /**
@@ -23,22 +25,35 @@ import {
  * Rides the SAME A8 CAS door as chat + the calendar (`applyReschedule` — no second write path). The
  * preview always shows the ENGINE's own computation of the resulting cadence; a stale edit surfaces
  * the conflict and re-previews the current state (optimistic-concurrency honest — never clobbers).
+ *
+ * R9-178: the picker opens on the schedule's CURRENT cadence (`current`, read back from the task
+ * detail), so an untouched Apply re-applies what is set rather than the builder's default. When
+ * the cadence cannot be shown in the picker (or was not loaded), the dialog says so and the
+ * button reads "Replace", because that is what it does. The edit keeps the schedule's own
+ * timezone, as the calendar does; the browser zone is only the fallback.
  */
 export function TaskReschedule({
   scheduleId,
+  current = null,
   onRescheduled,
 }: {
   scheduleId: string;
+  current?: ScheduleCadence | null;
   onRescheduled: () => void;
 }) {
   const t = useTranslations("taskDetail");
   const { getToken } = useAuth();
   const toast = useToast();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tz =
+    current?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [open, setOpen] = useState(false);
   const [cadence, setCadence] = useState<CadenceInput | null>(null);
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
   const [busy, setBusy] = useState(false);
+  const initial: CadenceInput | null = current
+    ? { pattern: current.pattern, one_time_at: current.one_time_at }
+    : null;
+  const seedable = canSeedBuilder(initial);
 
   const doPreview = useCallback(async () => {
     if (!cadence) return;
@@ -96,7 +111,29 @@ export function TaskReschedule({
       className="flex flex-col gap-3 rounded-md border border-border-soft bg-muted/30 p-3"
       data-slot="task-reschedule"
     >
-      <RecurrenceBuilder timezone={tz} onChange={setCadence} />
+      {current && seedable ? (
+        <p
+          className="type-caption text-muted-foreground"
+          data-slot="current-cadence"
+        >
+          {t("currentCadence", { terms: current.human_terms })}
+        </p>
+      ) : null}
+      {seedable ? null : (
+        <p
+          className="type-caption text-amber-600 dark:text-amber-500"
+          role="note"
+        >
+          {current
+            ? t("cadenceNotPickable", { terms: current.human_terms })
+            : t("cadenceUnknown")}
+        </p>
+      )}
+      <RecurrenceBuilder
+        timezone={tz}
+        onChange={setCadence}
+        initial={initial}
+      />
       {preview ? (
         <div className="type-caption flex flex-col gap-0.5 text-muted-foreground">
           <span>{preview.human_terms}</span>
@@ -117,7 +154,7 @@ export function TaskReschedule({
           {t("preview")}
         </Button>
         <Button size="sm" disabled={busy || !cadence} onClick={doApply}>
-          {t("applyReschedule")}
+          {seedable ? t("applyReschedule") : t("replaceReschedule")}
         </Button>
         <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
           {t("cancel")}

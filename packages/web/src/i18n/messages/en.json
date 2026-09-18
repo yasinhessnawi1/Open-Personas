@@ -395,7 +395,11 @@
     "runs": "Runs",
     "runsEmpty": "No runs yet. The first one starts as soon as a worker picks it up.",
     "runStarted": "Started {time}",
-    "runLive": "Running now"
+    "runLive": "Running now",
+    "currentCadence": "Now: {terms}",
+    "cadenceNotPickable": "This runs {terms}. That cadence can't be shown in this picker, so applying will replace it with what you set here.",
+    "cadenceUnknown": "Couldn't load the current cadence, so applying will replace it with what you set here.",
+    "replaceReschedule": "Replace"
   },
   "activity": {
     "area": "Activity",
@@ -1151,7 +1155,10 @@
       "truncationNotice": "Showing through {date}. Narrow the range to see more.",
       "fireRan": "Ran",
       "fireRanLate": "Ran late",
-      "fireMissed": "Missed"
+      "fireMissed": "Missed",
+      "currentCadence": "Now: {terms}",
+      "cadenceNotPickable": "This runs {terms}. That cadence can't be shown in this picker, so applying will replace it with what you set here.",
+      "cadenceUnknown": "Couldn't load the current cadence, so applying will replace it with what you set here."
     },
     "recurrence": {
       "cadence": "Cadence",
@@ -1198,7 +1205,8 @@
       "confirm": "Confirm",
       "preview": "Preview",
       "whenLabel": "When:",
-      "nextRun": "next run {when}"
+      "nextRun": "next run {when}",
+      "replace": "Replace"
     }
   },
   "notifications": {

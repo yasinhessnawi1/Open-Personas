@@ -7,6 +7,8 @@
  * truth on load (A6-R-4): the list/detail is fetched, never inferred.
  */
 
+import type { ScheduleCadence } from "@/lib/api/schedule-client";
+
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -129,6 +131,8 @@ export interface TaskDetail {
   checkpoints: Checkpoint[];
   conversation_id: string | null;
   schedule_id: string | null;
+  /** R9-178: the backing schedule's cadence in picker vocabulary; null without a schedule. */
+  schedule_cadence?: ScheduleCadence | null;
   run_ids: string[];
   /** The task's runs, newest first (Spec W1, D-W1-3): the detail is their home. */
   runs: TaskRun[];

@@ -8,6 +8,8 @@
  * grep the web tree for `rrule`/`recurrence` math and you find none.
  */
 
+import type { ScheduleCadence } from "@/lib/api/schedule-client";
+
 export type FireStatus = "ran" | "ran_late" | "missed";
 
 export interface Occurrence {
@@ -39,6 +41,8 @@ export interface OccurrencesResult {
   window_to: string;
   /** True iff the server capped the window/count — render honestly, never an infinite calendar. */
   truncated: boolean;
+  /** R9-178: each listed schedule's current cadence in picker vocabulary, keyed by schedule_id. */
+  cadences?: Record<string, ScheduleCadence>;
 }
 
 export interface DayGroup {

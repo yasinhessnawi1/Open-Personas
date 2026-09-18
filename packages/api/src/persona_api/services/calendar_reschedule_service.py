@@ -23,10 +23,12 @@ from persona.schedules import (
     pattern_to_rule,
     quiet_hours_edge,
     render_human_terms,
+    rule_to_pattern,
 )
 from pydantic import BaseModel, ConfigDict
 
 from persona_api.schedules.reschedule import RescheduleActor, reschedule
+from persona_api.schemas.responses import ScheduleCadenceOut
 from persona_api.services import user_service
 
 if TYPE_CHECKING:
@@ -38,9 +40,31 @@ if TYPE_CHECKING:
 __all__ = [
     "ReschedulePreview",
     "apply_calendar_reschedule",
+    "current_cadence",
     "preview_calendar_reschedule",
     "preview_schedule_cadence",
 ]
+
+
+def current_cadence(schedule: Schedule) -> ScheduleCadenceOut:
+    """The schedule's cadence in picker vocabulary, for seeding the reschedule builder (R9-178).
+
+    The inverse of :func:`_resolve_cadence`: ``rule_to_pattern`` maps the recurring rule back
+    to the humane :class:`RecurrencePattern`; a one-time schedule carries its instant instead.
+    A rule outside the picker's vocabulary yields neither (the honest decline the dialog turns
+    into a "this will replace it" warning), while ``human_terms`` still says what is set today.
+    """
+    pattern = rule_to_pattern(schedule.recurrence) if schedule.recurrence is not None else None
+    return ScheduleCadenceOut(
+        pattern=pattern,
+        one_time_at=schedule.one_time_at,
+        timezone=schedule.timezone,
+        human_terms=render_human_terms(
+            recurrence=schedule.recurrence,
+            one_time_at=schedule.one_time_at,
+            timezone=schedule.timezone,
+        ),
+    )
 
 
 class ReschedulePreview(BaseModel):

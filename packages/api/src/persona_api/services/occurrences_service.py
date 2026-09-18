@@ -23,6 +23,8 @@ from sqlalchemy import bindparam, text
 
 from persona_api.db.engine import rls_connection
 from persona_api.schedules.store import ScheduleStore
+from persona_api.schemas.responses import ScheduleCadenceOut
+from persona_api.services.calendar_reschedule_service import current_cadence
 from persona_api.services.schedule_create_service import REMINDER_GOAL_PREFIX
 from persona_api.textline import one_line
 
@@ -83,6 +85,10 @@ class OccurrencesResult(BaseModel):
     truncated: (
         bool  # True iff the horizon or count cap bound the result (ask for a narrower window)
     )
+    #: R9-178 (additive): each listed schedule's cadence in picker vocabulary, keyed by
+    #: ``schedule_id``, so the calendar's reschedule dialog opens on the real setting. Once per
+    #: schedule, not per occurrence row (an hourly schedule is 168 rows a week).
+    cadences: dict[str, ScheduleCadenceOut] = {}
 
 
 def list_occurrences(
@@ -120,11 +126,13 @@ def list_occurrences(
     task_by_schedule = _task_by_schedule(engine, owner_id)
 
     collected: list[Occurrence] = []
+    cadences: dict[str, ScheduleCadenceOut] = {}
     for schedule in schedules:
         if persona_id is not None:
             resolved = _resolved_persona_id(schedule, task_by_schedule)
             if resolved != persona_id:
                 continue
+        cadences[schedule.id] = current_cadence(schedule)
         # Cap each schedule at the global budget; the merged list is truncated below.
         for fire_at in occurrences_between(schedule, from_, effective_to, cap=max_count):
             task = task_by_schedule.get(schedule.id)
@@ -156,6 +164,7 @@ def list_occurrences(
     return OccurrencesResult(
         occurrences=tuple(collected),
         history=tuple(history),
+        cadences=cadences,
         window_from=from_,
         window_to=effective_to,
         truncated=truncated,

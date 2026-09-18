@@ -56,6 +56,16 @@ _ALL_PATTERNS: list[RecurrencePattern] = [
 ]
 
 
+def test_round_trip_surface_covers_every_recurrence_kind() -> None:
+    """The lossless round-trip below is only a full proof if EVERY kind sits in the fixture.
+
+    R9-178 leans on ``rule_to_pattern`` to repopulate the reschedule picker; a kind missing from
+    ``_BASE_PATTERNS`` would pass the parametrised test and still open the picker on a guess.
+    """
+    covered = {p.kind for p in _BASE_PATTERNS}
+    assert covered == set(RecurrenceKind)
+
+
 @pytest.mark.parametrize("pattern", _ALL_PATTERNS, ids=lambda p: f"{p.kind}-{p.interval}")
 def test_pattern_rule_round_trip_is_lossless(pattern: RecurrencePattern) -> None:
     """picker-state → rule → picker-state is the identity across the whole v1 vocabulary."""

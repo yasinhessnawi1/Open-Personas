@@ -4729,6 +4729,13 @@ export interface components {
       window_to: string;
       /** Truncated */
       truncated: boolean;
+      /**
+       * Cadences
+       * @default {}
+       */
+      cadences: {
+        [key: string]: components["schemas"]["ScheduleCadenceOut"];
+      };
     };
     /**
      * PackCheckoutRequest
@@ -5251,6 +5258,30 @@ export interface components {
       transcript: string;
     };
     /**
+     * ScheduleCadenceOut
+     * @description A schedule's current cadence in the picker vocabulary, so an edit opens on what is set.
+     *
+     *     R9-178: the reschedule builder used to open on its own default ("Every day, 09:00") whatever
+     *     the schedule really was, and an untouched Apply rewrote the real cadence. This is the read
+     *     side the picker seeds from: the same RRULE-free :class:`RecurrencePattern` the create and
+     *     reschedule inputs already speak (A8-D-1), never a raw rule.
+     *
+     *     Exactly one of ``pattern`` / ``one_time_at`` is set for a pickable schedule. BOTH ``None``
+     *     is the honest decline: the recurring rule is outside the picker's vocabulary
+     *     (:func:`~persona.schedules.rule_to_pattern` returned ``None``), so the dialog says it cannot
+     *     show the current cadence and that applying will replace it. ``human_terms`` always carries
+     *     the prose, so the user still sees what is set today.
+     */
+    ScheduleCadenceOut: {
+      pattern: components["schemas"]["RecurrencePattern"] | null;
+      /** One Time At */
+      one_time_at: string | null;
+      /** Timezone */
+      timezone: string;
+      /** Human Terms */
+      human_terms: string;
+    };
+    /**
      * ScheduleCreateRequest
      * @description A user-initiated schedule create (Spec A10, A10-D-1 — the third verb on A8's door).
      *
@@ -5499,6 +5530,7 @@ export interface components {
       conversation_id: string | null;
       /** Schedule Id */
       schedule_id: string | null;
+      schedule_cadence?: components["schemas"]["ScheduleCadenceOut"] | null;
       /** Run Ids */
       run_ids: string[];
       /** Runs */

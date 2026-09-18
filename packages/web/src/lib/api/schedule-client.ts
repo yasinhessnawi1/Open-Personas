@@ -34,6 +34,19 @@ export interface RecurrencePatternInput {
   until?: string | null;
 }
 
+/**
+ * A schedule's current cadence in the picker vocabulary (R9-178), read back from the API so the
+ * reschedule dialog opens on what is really set. Both `pattern` and `one_time_at` null means the
+ * rule is outside the picker's vocabulary: the dialog says so and labels the apply "Replace".
+ * `human_terms` always carries the prose.
+ */
+export interface ScheduleCadence {
+  pattern: RecurrencePatternInput | null;
+  one_time_at: string | null;
+  timezone: string;
+  human_terms: string;
+}
+
 export interface RescheduleBody {
   pattern?: RecurrencePatternInput | null;
   one_time_at?: string | null;

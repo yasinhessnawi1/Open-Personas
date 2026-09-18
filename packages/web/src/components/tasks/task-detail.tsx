@@ -415,6 +415,7 @@ export function TaskDetail({
               {detail.schedule_id ? (
                 <TaskReschedule
                   scheduleId={detail.schedule_id}
+                  current={detail.schedule_cadence ?? null}
                   onRescheduled={refetch}
                 />
               ) : null}

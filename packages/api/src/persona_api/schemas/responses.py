@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — Pydantic needs it at runtime
 from typing import Literal
 
+from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
@@ -1485,6 +1486,27 @@ class TaskSummaryOut(_Output):
     stuck_cause: str | None = None
 
 
+class ScheduleCadenceOut(_Output):
+    """A schedule's current cadence in the picker vocabulary, so an edit opens on what is set.
+
+    R9-178: the reschedule builder used to open on its own default ("Every day, 09:00") whatever
+    the schedule really was, and an untouched Apply rewrote the real cadence. This is the read
+    side the picker seeds from: the same RRULE-free :class:`RecurrencePattern` the create and
+    reschedule inputs already speak (A8-D-1), never a raw rule.
+
+    Exactly one of ``pattern`` / ``one_time_at`` is set for a pickable schedule. BOTH ``None``
+    is the honest decline: the recurring rule is outside the picker's vocabulary
+    (:func:`~persona.schedules.rule_to_pattern` returned ``None``), so the dialog says it cannot
+    show the current cadence and that applying will replace it. ``human_terms`` always carries
+    the prose, so the user still sees what is set today.
+    """
+
+    pattern: RecurrencePattern | None
+    one_time_at: datetime | None
+    timezone: str
+    human_terms: str
+
+
 class TaskDetailOut(_Output):
     """The task, above the run viewer: contract + grants, state, ledger, budget, report, waits."""
 
@@ -1510,6 +1532,10 @@ class TaskDetailOut(_Output):
     checkpoints: list[TaskCheckpointOut]  # recent, human-readable
     conversation_id: str | None
     schedule_id: str | None
+    #: R9-178 (additive): the backing schedule's cadence in picker vocabulary, so the
+    #: Reschedule dialog opens on the real setting. ``None`` when there is no schedule (or its
+    #: row is gone); present-but-empty when the rule is outside the picker's vocabulary.
+    schedule_cadence: ScheduleCadenceOut | None = None
     run_ids: list[str]  # the Spec 08 runs the leg timeline drills into
     #: The task's runs, newest first (Spec W1, D-W1-3): the task detail is the home of its
     #: run history, so a dispatched run stays reachable after navigating away.

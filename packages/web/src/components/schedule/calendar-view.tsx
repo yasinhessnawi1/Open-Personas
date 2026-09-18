@@ -31,6 +31,7 @@ import {
   previewReschedule,
   type ReschedulePreview,
   ScheduleApiError,
+  type ScheduleCadence,
 } from "@/lib/api/schedule-client";
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { personaIdentityStyle } from "@/lib/persona-identity";
@@ -52,7 +53,11 @@ import {
   CreateReminderDialog,
   type ReminderPersona,
 } from "./create-reminder-dialog";
-import { type CadenceInput, RecurrenceBuilder } from "./recurrence-builder";
+import {
+  type CadenceInput,
+  canSeedBuilder,
+  RecurrenceBuilder,
+} from "./recurrence-builder";
 
 const DISPLAY_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const WINDOW_DAYS = 45;
@@ -184,6 +189,7 @@ export function CalendarView({
         {editing && (
           <RescheduleDialog
             occurrence={editing}
+            current={data?.cadences?.[editing.schedule_id] ?? null}
             personaName={panelPersona?.name ?? null}
             onClose={() => setEditing(null)}
             onApplied={async () => {
@@ -286,6 +292,7 @@ export function CalendarView({
       {editing && (
         <RescheduleDialog
           occurrence={editing}
+          current={data?.cadences?.[editing.schedule_id] ?? null}
           personaName={nameOf(editing.persona_id)}
           onClose={() => setEditing(null)}
           onApplied={async () => {
@@ -489,6 +496,8 @@ function GridView({
 
 interface RescheduleDialogProps {
   occurrence: Occurrence;
+  /** R9-178: the schedule's current cadence, so the picker opens on it (null = unknown). */
+  current: ScheduleCadence | null;
   personaName: string | null;
   onClose: () => void;
   onApplied: () => Promise<void>;
@@ -502,6 +511,7 @@ interface RescheduleDialogProps {
  * conflict toast; any other failure surfaces a generic one. Never an uncaught rejection. */
 function RescheduleDialog({
   occurrence,
+  current,
   personaName,
   onClose,
   onApplied,
@@ -517,6 +527,12 @@ function RescheduleDialog({
   const [preview, setPreview] = useState<ReschedulePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const tz = occurrence.timezone;
+  // R9-178: seed the picker with what is set; when it cannot be shown, say so and make the
+  // confirm read as the replacement it is.
+  const initial: CadenceInput | null = current
+    ? { pattern: current.pattern, one_time_at: current.one_time_at }
+    : null;
+  const seedable = canSeedBuilder(initial);
 
   const surfaceFailure = useCallback(
     (e: unknown, fallback: string) => {
@@ -604,7 +620,23 @@ function RescheduleDialog({
         {personaName ? `${personaName} · ` : null}
         {occLabel(occurrence)}
       </p>
-      <RecurrenceBuilder timezone={tz} onChange={setCadence} />
+      {current && seedable ? (
+        <p className="v-dialog-sub" data-slot="current-cadence">
+          {t("currentCadence", { terms: current.human_terms })}
+        </p>
+      ) : null}
+      {seedable ? null : (
+        <p className="v-reschedule-preview" role="note">
+          {current
+            ? t("cadenceNotPickable", { terms: current.human_terms })
+            : t("cadenceUnknown")}
+        </p>
+      )}
+      <RecurrenceBuilder
+        timezone={tz}
+        onChange={setCadence}
+        initial={initial}
+      />
       {/* The confirm echo — the SAME full clause chat re-echoes, from the engine preview. */}
       {preview && (
         <p className="v-reschedule-preview">
@@ -637,7 +669,7 @@ function RescheduleDialog({
         </Button>
         {preview ? (
           <Button type="button" onClick={doApply} disabled={busy || !cadence}>
-            {tCommon("confirm")}
+            {seedable ? tCommon("confirm") : tCommon("replace")}
           </Button>
         ) : (
           <Button type="button" onClick={doPreview} disabled={busy || !cadence}>

@@ -8022,6 +8022,14 @@
           "truncated": {
             "type": "boolean",
             "title": "Truncated"
+          },
+          "cadences": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ScheduleCadenceOut"
+            },
+            "type": "object",
+            "title": "Cadences",
+            "default": {}
           }
         },
         "additionalProperties": false,
@@ -8965,6 +8973,45 @@
         "title": "STTProxyResponse",
         "description": "Result of ``POST /v1/stt`` (transcript passthrough from persona-voice)."
       },
+      "ScheduleCadenceOut": {
+        "properties": {
+          "pattern": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecurrencePattern"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "one_time_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "One Time At"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "human_terms": {
+            "type": "string",
+            "title": "Human Terms"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["pattern", "one_time_at", "timezone", "human_terms"],
+        "title": "ScheduleCadenceOut",
+        "description": "A schedule's current cadence in the picker vocabulary, so an edit opens on what is set.\n\nR9-178: the reschedule builder used to open on its own default (\"Every day, 09:00\") whatever\nthe schedule really was, and an untouched Apply rewrote the real cadence. This is the read\nside the picker seeds from: the same RRULE-free :class:`RecurrencePattern` the create and\nreschedule inputs already speak (A8-D-1), never a raw rule.\n\nExactly one of ``pattern`` / ``one_time_at`` is set for a pickable schedule. BOTH ``None``\nis the honest decline: the recurring rule is outside the picker's vocabulary\n(:func:`~persona.schedules.rule_to_pattern` returned ``None``), so the dialog says it cannot\nshow the current cadence and that applying will replace it. ``human_terms`` always carries\nthe prose, so the user still sees what is set today."
+      },
       "ScheduleCreateRequest": {
         "properties": {
           "pattern": {
@@ -9523,6 +9570,16 @@
               }
             ],
             "title": "Schedule Id"
+          },
+          "schedule_cadence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleCadenceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "run_ids": {
             "items": {

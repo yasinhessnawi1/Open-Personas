@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from persona.errors import TaskNotFoundError
+from persona.errors import ScheduleNotFoundError, TaskNotFoundError
 from persona.logging import get_logger
 from persona.tasks import TaskState, is_terminal
 from persona.tasks.reader import IntrospectionStatus, project_task_state, summarise_task
@@ -41,6 +41,7 @@ from persona_api.schemas.responses import (
     BudgetOut,
     GrantOut,
     LedgerOut,
+    ScheduleCadenceOut,
     TaskAuditEntryOut,
     TaskCheckpointOut,
     TaskCommandResult,
@@ -48,7 +49,12 @@ from persona_api.schemas.responses import (
     TaskReportOut,
     TaskSummaryOut,
 )
-from persona_api.services import audit_service, run_service, task_control_service
+from persona_api.services import (
+    audit_service,
+    calendar_reschedule_service,
+    run_service,
+    task_control_service,
+)
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -163,6 +169,28 @@ def _stuck_causes(engine: Engine, owner_id: str, task_ids: list[str]) -> dict[st
             .order_by(checkpoints_t.c.task_id, checkpoints_t.c.checkpoint_seq.desc())
         ).all()
     return {r.task_id: r.cause for r in rows}
+
+
+def _schedule_cadence(
+    engine: Engine, owner_id: str, schedule_id: str | None
+) -> ScheduleCadenceOut | None:
+    """The backing schedule's cadence in picker vocabulary, or ``None`` when there is none.
+
+    R9-178: what the Reschedule dialog seeds its builder from. A dangling ``schedule_id`` (the
+    row was deleted under the task) reads as "no schedule" rather than failing the whole detail;
+    the task's own fields are still worth showing.
+    """
+    if schedule_id is None:
+        return None
+    try:
+        schedule = ScheduleStore(engine).get(owner_id, schedule_id)
+    except ScheduleNotFoundError:
+        _log.warning(
+            "task detail: backing schedule not found; cadence omitted schedule_id={sid}",
+            sid=schedule_id,
+        )
+        return None
+    return calendar_reschedule_service.current_cadence(schedule)
 
 
 def _report(task: Task, checkpoint: TaskCheckpoint | None, now: datetime) -> TaskReportOut | None:
@@ -281,6 +309,7 @@ async def get_task(
         ],
         conversation_id=task.conversation_id,
         schedule_id=task.schedule_id,
+        schedule_cadence=_schedule_cadence(engine, user.id, task.schedule_id),
         run_ids=list(task.run_ids),
         # Spec W1 (D-W1-3): the task detail is the home of its run history.
         runs=[
