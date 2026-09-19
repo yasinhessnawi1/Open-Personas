@@ -202,3 +202,32 @@ def test_an_avatar_with_no_provider_cost_is_priced_not_floored() -> None:
     assert charge.cost_cents == pytest.approx(4.0), "the avatar was not priced from the registry"
     assert charge.cost_basis == "estimate_catalog"
     assert ledger.deducts[-1]["amount"] == 4, "an avatar we can price still billed the floor"
+
+
+def test_an_openai_avatar_is_priced_from_its_vendor_row_too() -> None:
+    """The avatar path reaches the new rows through the same lookup the request path uses.
+
+    Worth its own test because the two charge sites are separate call sites: the request
+    path's true-up and this one. A row added for one and unreachable from the other would
+    silently keep flooring avatars.
+    """
+    from persona_api.services.avatar_billing import bill_avatar_owner
+
+    ledger = _Ledger()
+    charge = bill_avatar_owner(
+        credits_policy=ledger,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+        cost_source=None,
+        image_credit_floor=1,
+        owner_id="u1",
+        persona_id="p1",
+        result=_generation(cost_usd=None).model_copy(
+            update={"provider": "openai", "model": "gpt-image-1"}
+        ),
+        billing_key="avatar:p1:openai",
+    )
+
+    assert charge is not None
+    assert charge.cost_cents == pytest.approx(4.2), "the avatar was not priced from the registry"
+    assert charge.cost_basis == "estimate_static"
+    assert ledger.deducts[-1]["amount"] == 5, "a 4.2 cent avatar still billed the floor"

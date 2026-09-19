@@ -50,3 +50,58 @@ def test_an_unknown_model_on_a_known_provider_still_prices() -> None:
 def test_the_price_is_per_image_not_per_token() -> None:
     """The unit is the image itself: a backend reporting no tokens still owes its real cost."""
     assert image_cents("openrouter", model="gpt-image-2")[0] == image_cents("openrouter")[0]
+
+
+# --- the backends that report nothing are now priced from their own vendor's list price ---
+#
+# Each number here is the vendor's published price for the request this product actually
+# makes (1024x1024 at the default quality); the row's comment in the registry carries the
+# page and the date it was read. These tests are what stops a silent edit of those numbers.
+
+
+def test_an_openai_image_is_priced_at_the_published_medium_quality_price() -> None:
+    """gpt-image-1 at 1024x1024 medium is $0.042, and "standard" maps to medium at the wire."""
+    cents, basis = image_cents("openai", model="gpt-image-1")
+
+    assert cents == 4.2
+    assert basis == "estimate_static"
+
+
+def test_a_fal_image_is_priced_at_one_megapixel() -> None:
+    """FLUX 1.1 [pro] is $0.04 per megapixel and a square 1024 image is one megapixel."""
+    cents, basis = image_cents("fal", model="fal-ai/flux-pro/v1.1")
+
+    assert cents == 4.0
+    assert basis == "estimate_static"
+
+
+def test_a_cloudflare_image_is_priced_at_its_tiles_plus_its_steps() -> None:
+    """flux-1-schnell: 4 tiles at $0.0000528 plus the 4 steps this backend sends at $0.0001056.
+
+    Sub-cent, so the credit floor swallows it at charge time. The row still matters: the
+    ledger records the REAL cost, and "0.06336 cents" and "we have no idea" are not the same
+    fact about the money.
+    """
+    cents, basis = image_cents("cloudflare", model="@cf/black-forest-labs/flux-1-schnell")
+
+    assert cents == 0.06336
+    assert basis == "estimate_static"
+
+
+def test_nvidia_is_still_honestly_unpriced() -> None:
+    """NVIDIA publishes no per-image price for the hosted catalog, so there is no row to add.
+
+    This is the deliberate gap, asserted so that adding a guessed nvidia price has to go
+    through a test that says out loud what it is doing.
+    """
+    cents, basis = image_cents("nvidia", model="nvidia/flux.2-klein-4b")
+
+    assert cents == 0.0
+    assert basis == "unpriced"
+
+
+def test_an_unlisted_cloudflare_model_resolves_downwards_never_upwards() -> None:
+    """The SD-family models Cloudflare no longer prices resolve to the cheapest row we hold."""
+    cents, _ = image_cents("cloudflare", model="@cf/stabilityai/stable-diffusion-xl-base-1.0")
+
+    assert cents <= 0.06336

@@ -12,10 +12,14 @@ so a backend that reports nothing is still billed what its row says it costs.
 
 **Where there is no row, this returns ``unpriced`` and the caller keeps the floor.** That is
 deliberate. A provider price nobody has verified would be a worse defect than the one this
-closes: undercharging costs the house money, while a guessed price overcharges a person. The
-four backends above need real per-image prices from the owner's own invoices before their rows
-can exist; until then the gap is loud (the caller names the provider in a warning) rather than
-silent, which is the part that actually went wrong here.
+closes: undercharging costs the house money, while a guessed price overcharges a person.
+
+openai, fal and cloudflare now have rows, priced from each vendor's own published list price
+for the request this product actually makes (1024x1024 at the default quality), with the page
+and the date it was read recorded in each row's comment. nvidia still has none: its hosted
+catalog is credit-metered for prototyping and it publishes no per-image price, so an nvidia
+image keeps the floor and keeps the warning rather than being charged a number somebody made
+up. The gap being loud rather than silent is the part that actually went wrong here.
 """
 
 from __future__ import annotations

@@ -156,3 +156,75 @@ def test_an_unpriceable_image_says_so_instead_of_billing_the_floor_quietly() -> 
     assert any("fake" in line for line in captured), (
         "an image we cannot price was billed the floor with no signal naming the provider"
     )
+
+
+# --- the backends that report nothing bill their vendor's real price, not the floor -------
+
+
+def test_an_openai_image_bills_its_published_price_not_the_floor() -> None:
+    """gpt-image-1 at 1024x1024 medium costs $0.042. Floored, it was recovered as 1 cent."""
+    policy = _RecordingPolicy()
+    _trueup(policy, _result(provider="openai", model="gpt-image-1", cost_usd=None), ceiling=50)
+
+    method, kw = policy.calls[-1]
+    assert method == "refund"
+    assert kw["cost_cents"] == pytest.approx(4.2), "the image was not priced from the registry"
+    assert kw["cost_basis"] == "estimate_static"
+    assert kw["amount"] == 45, "refunded as though a 4.2 cent image had cost the floor"
+
+
+def test_a_fal_image_bills_its_published_price_not_the_floor() -> None:
+    """FLUX 1.1 [pro] is $0.04 per megapixel and a 1024 square is one megapixel."""
+    policy = _RecordingPolicy()
+    _trueup(
+        policy,
+        _result(provider="fal", model="fal-ai/flux-pro/v1.1", cost_usd=None),
+        ceiling=50,
+    )
+
+    method, kw = policy.calls[-1]
+    assert method == "refund"
+    assert kw["cost_cents"] == pytest.approx(4.0), "the image was not priced from the registry"
+    assert kw["cost_basis"] == "estimate_static"
+    assert kw["amount"] == 46, "refunded as though a 4 cent image had cost the floor"
+
+
+def test_a_cloudflare_image_records_its_real_sub_cent_cost() -> None:
+    """flux-1-schnell really does cost less than a cent, so the floor is the honest CHARGE.
+
+    What was wrong was the recorded cost and basis: 0.0 cents "unpriced" says we do not know
+    what an image cost, and we do. The ledger row is the thing spend reporting reads, so the
+    price has to land on it even when the credit charge does not move.
+    """
+    policy = _RecordingPolicy()
+    _trueup(
+        policy,
+        _result(provider="cloudflare", model="@cf/black-forest-labs/flux-1-schnell", cost_usd=None),
+        ceiling=50,
+    )
+
+    _, kw = policy.calls[-1]
+    assert kw["cost_cents"] == pytest.approx(0.06336), "the image was recorded as unpriced"
+    assert kw["cost_basis"] == "estimate_static"
+    assert kw["amount"] == 49, "a sub-cent image still settles to the 1-credit floor"
+
+
+def test_an_nvidia_image_still_floors_and_still_warns() -> None:
+    """NVIDIA publishes no per-image price, so the gap stays open AND stays loud."""
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    try:
+        policy = _RecordingPolicy()
+        _trueup(
+            policy,
+            _result(provider="nvidia", model="nvidia/flux.2-klein-4b", cost_usd=None),
+            ceiling=50,
+        )
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    _, kw = policy.calls[-1]
+    assert kw["cost_basis"] == "unpriced"
+    assert any("nvidia" in line for line in captured), (
+        "an nvidia image we cannot price was billed the floor with no signal naming it"
+    )
