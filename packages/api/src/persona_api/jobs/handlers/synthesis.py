@@ -38,6 +38,8 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import conversations, messages, synthesis_markers
+from persona_api.services.background_billing import bill_background_llm
+from persona_api.services.llm_usage_collector import UsageTotals, collect_llm_usage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,8 +47,10 @@ if TYPE_CHECKING:
     from persona.extraction import ExtractionInput
     from persona.graph.protocol import MergeOutcome
     from persona.jobs import JobContext, JobRegistry
-    from sqlalchemy import Connection
+    from persona_runtime.cost import CostSource
+    from sqlalchemy import Connection, Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue
 
 # ``SYNTHESIS_JOB_TYPE`` / ``SynthesisJobPayload`` / ``synthesis_idempotency_key`` are
@@ -129,12 +133,32 @@ class SynthesisHandler:
         runner: SynthesisRunner,
         repository: SynthesisRepository,
         enqueue_consolidation: Callable[[str], None] | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        floor: int = 1,
     ) -> None:
         self._runner = runner
         self._repo = repository
         self._enqueue_consolidation = enqueue_consolidation
+        #: Spec M3 (T5): the K2 extractor is a real model call made on the owner's behalf
+        #: with nobody in the loop, which is the background-LLM shape. It was billed to
+        #: nobody. The meter below called itself "attribution-not-deduct... a refinement
+        #: once the extractor surfaces per-call usage"; the usage collector is how it
+        #: surfaces, so this is that refinement. ``None`` leaves an unmetered install
+        #: byte-identical.
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._floor = floor
 
     async def handle(self, payload: SynthesisJobPayload, context: JobContext) -> None:
+        #: What the extractor's model call cost, captured inside and billed AFTER the DB
+        #: connection is released: the deduct is its own short transaction on another
+        #: engine, and this handler already holds a connection across the model await
+        #: (which ``title_refresh`` deliberately does not). Adding a second connection
+        #: inside that window would widen a pool problem rather than pay a cost.
+        billable: UsageTotals | None = None
         with context.connection() as conn:
             data = self._repo.read(conn, owner_id=context.owner_id, payload=payload)
             if data is None:
@@ -151,7 +175,9 @@ class SynthesisHandler:
             if window is None:
                 return  # nothing new past the marker — the idempotency no-op.
 
-            outcomes = await self._runner.synthesise(context.owner_id, window.input)
+            with collect_llm_usage() as usage:
+                outcomes = await self._runner.synthesise(context.owner_id, window.input)
+            billable = usage.totals()
 
             # Spec-08 cost visibility. amount_micros is attribution-not-deduct here
             # (like avatar's credits_charged=0); precise token-cost metering is a
@@ -170,6 +196,26 @@ class SynthesisHandler:
                 owner_id=context.owner_id,
                 payload=payload,
                 high_water_mark=window.high_water_mark,
+            )
+
+        # Spec M3 (T5): owner-bill the extractor's real cost, keyed on the job's own
+        # idempotency key so a re-delivered synthesis re-runs the extractor and hits the
+        # same ON CONFLICT gate instead of charging twice. Outside the connection block
+        # (see ``billable`` above); fail-soft inside the helper.
+        if billable is not None:
+            bill_background_llm(
+                credits_policy=self._credits_policy,
+                rls_engine=self._rls_engine,
+                owner_id=context.owner_id,
+                provider=billable.provider,
+                model=billable.model,
+                prompt_tokens=billable.prompt_tokens,
+                completion_tokens=billable.completion_tokens,
+                cost_usd=billable.cost_usd,
+                surface="synthesis",
+                billing_key=synthesis_idempotency_key(payload),
+                cost_source=self._cost_source,
+                floor=self._floor,
             )
 
         # Synthesis-tail consolidation trigger (K7-D-5): only when knowledge was
@@ -255,6 +301,10 @@ def register_synthesis_handler(
     runner: SynthesisRunner,
     repository: SynthesisRepository,
     enqueue_consolidation: Callable[[str], None] | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
+    cost_source: CostSource | None = None,
+    floor: int = 1,
 ) -> None:
     """Register the synthesis handler (A0's second tenant) with its declared idempotency.
 
@@ -269,6 +319,10 @@ def register_synthesis_handler(
                 runner=runner,
                 repository=repository,
                 enqueue_consolidation=enqueue_consolidation,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
+                cost_source=cost_source,
+                floor=floor,
             ),
             idempotency_key=synthesis_idempotency_key,
             retry=RetryPolicy(max_attempts=3),

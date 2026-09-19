@@ -9,12 +9,16 @@ and the advance only after a successful synthesise.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
+from persona.backends.types import ChatResponse, TokenUsage
 from persona.extraction import ExtractionInput
+from persona_api.background import worker_root
 from persona_api.jobs.handlers.synthesis import (
     SYNTHESIS_JOB_TYPE,
     InteractionData,
@@ -22,6 +26,7 @@ from persona_api.jobs.handlers.synthesis import (
     SynthesisJobPayload,
     synthesis_idempotency_key,
 )
+from persona_api.services.llm_usage_collector import UsageCollectingBackend
 
 
 class _FakeContext:
@@ -126,3 +131,121 @@ async def test_missing_interaction_is_a_noop() -> None:
     await SynthesisHandler(runner=runner, repository=repo).handle(_payload(), ctx)  # type: ignore[arg-type]
     assert runner.calls == []
     assert repo.advanced == []
+
+
+# --- the synthesis model call is owner-billed (M3 T5) -------------------------------------
+
+
+class _BillingBackend:
+    provider_name = "openrouter"
+    model_name = "m"
+    supports_native_tools = False
+    supports_vision = False
+
+    async def chat(self, messages: object, **_kw: object) -> ChatResponse:  # noqa: ARG002
+        return ChatResponse(
+            content="{}",
+            usage=TokenUsage(
+                prompt_tokens=2000, completion_tokens=300, total_tokens=2300, cost_usd=0.02
+            ),
+            model="m",
+            provider="openrouter",
+            latency_ms=1.0,
+        )
+
+
+class _ModelCallingRunner:
+    """The extractor as it really behaves: a wrapped backend call inside synthesise."""
+
+    def __init__(self, backend: object) -> None:
+        self._backend = backend
+
+    async def synthesise(self, owner_id: str, interaction: object) -> list[object]:  # noqa: ARG002
+        await self._backend.chat([])  # records usage into the active sink
+        return [object()]
+
+
+class _RecordingPolicy:
+    def __init__(self) -> None:
+        self.charges: list[dict[str, Any]] = []
+
+    def capture_up_to_idempotent(self, **kw: Any) -> tuple[int, int]:  # noqa: ANN401
+        self.charges.append(kw)
+        return int(kw["amount"]), 100
+
+
+def _billing_handler(policy: _RecordingPolicy | None, repo: _FakeRepo) -> SynthesisHandler:
+    return SynthesisHandler(
+        runner=_ModelCallingRunner(UsageCollectingBackend(_BillingBackend())),  # type: ignore[arg-type]
+        repository=repo,  # type: ignore[arg-type]
+        credits_policy=policy,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_synthesis_pass_bills_its_model_call_to_the_owner() -> None:
+    """The K2 extractor is a real model call on the owner's behalf with nobody in the loop,
+    and it was billed to nobody: the handler never reached bill_background_llm, and its
+    backend was composed unmetered so there was no usage to bill from either."""
+    policy = _RecordingPolicy()
+
+    await _billing_handler(policy, _FakeRepo(_data(0))).handle(_payload(), _FakeContext())  # type: ignore[arg-type]
+
+    assert len(policy.charges) == 1, "the synthesis model call was not billed"
+    charge = policy.charges[0]
+    assert charge["cost_cents"] == pytest.approx(2.0)  # 0.02 USD actual
+    assert charge["cost_basis"] == "actual_openrouter"
+    assert charge["reason"].startswith("synthesis:")
+
+
+@pytest.mark.asyncio
+async def test_the_synthesis_charge_uses_the_jobs_own_key() -> None:
+    """A re-delivered synthesis re-runs the extractor and must hit the ON CONFLICT gate."""
+    policy = _RecordingPolicy()
+
+    await _billing_handler(policy, _FakeRepo(_data(0))).handle(_payload(), _FakeContext())  # type: ignore[arg-type]
+    await _billing_handler(policy, _FakeRepo(_data(0))).handle(_payload(), _FakeContext())  # type: ignore[arg-type]
+
+    keys = {c["billing_key"] for c in policy.charges}
+    assert len(keys) == 1, f"a retry would charge under a different key: {keys}"
+
+
+@pytest.mark.asyncio
+async def test_a_no_op_synthesis_charges_nothing() -> None:
+    """Nothing past the marker means no model call, so there is nothing to charge for."""
+    policy = _RecordingPolicy()
+
+    await _billing_handler(policy, _FakeRepo(_data(99))).handle(_payload(), _FakeContext())  # type: ignore[arg-type]
+
+    assert policy.charges == []
+
+
+def test_the_worker_root_meters_synthesis_and_passes_a_credits_policy() -> None:
+    """The composition half. Both conditions had to hold and neither did, and the two
+    comments justified each other: the root said "no owner-billing seam, so wrapping it
+    would meter nothing" while the handler said its meter was "a refinement once the
+    extractor surfaces per-call usage". Only a check that reads the root can see this."""
+    tree = ast.parse(Path(worker_root.__file__).read_text(encoding="utf-8"))
+
+    metered: list[bool] = []
+    policies: list[bool] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "plan_scoped_background_backend":
+            for kw in node.keywords:
+                if kw.arg == "tier" and "synthesis_tier" in ast.dump(kw.value):
+                    metered.append(
+                        any(
+                            k.arg == "metered"
+                            and isinstance(k.value, ast.Constant)
+                            and k.value.value is True
+                            for k in node.keywords
+                        )
+                    )
+        if node.func.id == "register_synthesis_handler":
+            policies.append("credits_policy" in {kw.arg for kw in node.keywords})
+
+    assert metered == [True], "the synthesis backend is not metered; its usage cannot be billed"
+    assert policies == [True], "the synthesis handler is registered without a credits policy"

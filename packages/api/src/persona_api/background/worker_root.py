@@ -248,14 +248,18 @@ def build_worker_registry(
             produced-file persister writes under).
     """
     # R9-096: plan-scoped, resolved per job inside the owner scope — never once here on
-    # the paid registry. Unmetered: K2 synthesis has no owner-billing seam (no
-    # ``collect_llm_usage`` block in its handler), so wrapping it would meter nothing.
+    # the paid registry. Metered (Spec M3, T5): the handler now has its owner-billing seam.
+    # Until 2026-09-19 this read "Unmetered: K2 synthesis has no owner-billing seam ... so
+    # wrapping it would meter nothing", while the handler's own meter called itself
+    # "attribution-not-deduct ... a refinement once the extractor surfaces per-call usage".
+    # Each half pointed at the other as the reason it could not be done, and the extractor
+    # ran on the owner's behalf for free.
     backend = plan_scoped_background_backend(
         tier=synthesis_tier,
         rls_engine=rls_engine,
         paid_tier_registry=tier_registry,
         free_tier_registry=free_tier_registry,
-        metered=False,
+        metered=True,
     )
     graph_backend = PostgresGraphBackend(engine=rls_engine)
     graph_store = build_graph_store(
@@ -307,6 +311,11 @@ def build_worker_registry(
         runner=synthesizer,
         repository=PgSynthesisRepository(),
         enqueue_consolidation=enqueue_consolidation,
+        # Spec M3 (T5): owner-billed extractor cost, idempotent + fail-soft.
+        credits_policy=build_credits_policy(config),
+        rls_engine=rls_engine,
+        cost_source=(runtime_factory.metadata_resolver if runtime_factory is not None else None),
+        floor=config.agentic_credit_floor,
     )
 
     # Title refresh (R9-020): dynamic self-improving conversation titles. The tier NAME
