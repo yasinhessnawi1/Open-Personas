@@ -342,6 +342,14 @@ class _LegCost:
         """
         return self._spend()
 
+    def sandbox_cents(self) -> float:
+        """What the sandbox reported this leg, in cents: the part the tool did not bill.
+
+        Inside a leg the tool defers its own deduct to the leg (``runtime_tool``), so this
+        figure is unbilled until :meth:`TaskLegHandler._bill_leg` charges it.
+        """
+        return self._reported.get(SpendKind.SANDBOX, 0.0)
+
     def spent_micros(self) -> int:
         """The box watcher's probe: everything this leg has spent so far, every kind."""
         return sum(self._spend().values())
@@ -714,31 +722,42 @@ class TaskLegHandler:
         the owner can afford rather than hard-failing already-done work. Fail-soft:
         a billing error never fails the (already-committed) leg.
 
-        Prices the leg's MODEL cost only (:meth:`_LegCost.result`). The sandbox spend
-        the ledger now carries was billed by the tool itself, per execution, and an
-        external call's infra is subsumed by this deduct's floor (M3 T7); either one
-        added here would be a second charge for the same work.
+        Prices the leg's MODEL cost plus its SANDBOX spend. The sandbox execution inside a
+        leg is NOT billed by the tool: the tool bills only outside a leg (it defers the
+        moment a leg is listening), because the task worker binds no request context and
+        because one charge per leg, keyed to the checkpoint, is the retry story that
+        matches the rest of this handler. Until 2026-09-19 this priced the model alone on
+        the belief the tool had charged it, while the tool skipped its deduct on the
+        matching belief, so sandbox work inside a task leg was free. An EXTERNAL call's
+        infra is still subsumed by this deduct's floor (M3 T7) and is not added.
+
+        Sandbox rides ``infra_flat_cents``, not ``provider_cents``: it is a per-execution
+        infra charge, which is what that parameter of the one credit formula is for.
         """
         if self._credits_policy is None or self._rls_engine is None:
             return
         cost_cents, basis = cost.result()
-        if basis is None:
-            return  # no metered model call this leg (nothing to bill)
+        sandbox_cents = cost.sandbox_cents()
+        if basis is None and sandbox_cents <= 0.0:
+            return  # nothing metered this leg (no model call, no sandbox), nothing to bill
         charge = credits_charged(
             provider_cents=cost_cents,
-            infra_flat_cents=0.0,  # infra via the per-leg floor (D-M3-4 amendment)
+            infra_flat_cents=sandbox_cents,
             markup=self._billing_config.credit_markup,
             floor=self._agentic_floor,
         )
+        # A leg that only ran code has no model basis; the charge is real infra either way,
+        # so record it as such rather than returning early and billing nothing at all.
+        effective_basis = basis or "infra_flat"
         try:
             self._credits_policy.capture_up_to_idempotent(
                 rls_engine=self._rls_engine,
                 user_id=owner,
                 amount=charge,
-                reason=f"task_leg:{basis}",
+                reason=f"task_leg:{effective_basis}",
                 billing_key=f"{task_id}:leg:{seq}",
                 cost_cents=cost_cents,
-                cost_basis=basis,
+                cost_basis=effective_basis,
             )
         except Exception as exc:  # noqa: BLE001 — billing must never fail a committed leg
             _log.warning(

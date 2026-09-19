@@ -61,7 +61,7 @@ from persona_runtime.legs import BasicCheckpointWriter, LegExecutor, LegOutcome
 from sqlalchemy import insert
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
     from persona.tools.protocol import AsyncTool
@@ -147,6 +147,18 @@ def _mcp_adapter() -> MCPToolAdapter:
     )
 
 
+async def _dispatch_sandbox_in_a_leg(tool: AsyncTool) -> None:
+    """Dispatch the sandbox tool the way the TASK WORKER does: with NO request context.
+
+    This is the difference the original test missed. ``_dispatch_sandbox`` binds a context
+    because that is what the interactive worker does; nothing under ``tasks/`` ever binds
+    one (only ``chat_turn_worker`` and ``run_worker`` do), so in a real leg the tool cannot
+    bill and must not try.
+    """
+    result = await tool.execute(code="print('ok')")
+    assert result.is_error is False
+
+
 async def _dispatch_sandbox(tool: AsyncTool) -> None:
     """Dispatch the sandbox tool the way the interactive worker does: with the request
     context bound, so the tool acquires its pool session and bills the owner."""
@@ -173,12 +185,16 @@ class _ToolRunningRunner:
         execs_per_step: int = 1,
         mcp: MCPToolAdapter | None = None,
         model_cost_usd: float | None = _STEP_COST_USD,
+        dispatch: Callable[[AsyncTool], Awaitable[None]] = _dispatch_sandbox,
     ) -> None:
         self._steps = steps
         self._sandbox = sandbox
         self._execs_per_step = execs_per_step
         self._mcp = mcp
         self._model_cost_usd = model_cost_usd
+        #: How the sandbox tool is dispatched: with a request context (the interactive
+        #: worker) or without one (the task worker). The difference decides who bills.
+        self._dispatch = dispatch
         self.steps_run = 0
 
     async def run(
@@ -196,7 +212,7 @@ class _ToolRunningRunner:
             self.steps_run += 1
             if self._sandbox is not None:
                 for _ in range(self._execs_per_step):
-                    await _dispatch_sandbox(self._sandbox)
+                    await self._dispatch(self._sandbox)
             if self._mcp is not None:
                 await self._mcp.execute(q="acme")
             if on_step_usage is not None and self._model_cost_usd is not None:
@@ -298,21 +314,27 @@ async def _run_leg(
 
 
 @pytest.mark.asyncio
-async def test_a_leg_that_runs_the_sandbox_records_what_the_tool_billed(
+async def test_a_leg_records_every_sandbox_execution_in_its_own_column(
     sandbox_tool: tuple[AsyncTool, MagicMock, _FakeSandbox],
 ) -> None:
-    """The load-bearing one. Three executions, one credit each: the tool billed three
-    credits and the ledger's SANDBOX column reads three cents in micros, next to the
-    model money in its own column."""
+    """The load-bearing one. Three executions, one credit each: the ledger's SANDBOX column
+    reads three cents in micros, next to the model money in its own column.
+
+    PREVIOUS PREMISE, FALSE: this asserted that the TOOL billed those three credits inside
+    the leg. It could only pass because the fixture dispatched with a request context bound,
+    which is what the INTERACTIVE worker does; nothing under ``tasks/`` binds one, so in a
+    real leg the tool reached its early return and charged nothing. The ledger half was
+    always true and is kept; the billing half named the wrong payer and is replaced by the
+    fact that matters, which is that the leg owns the charge.
+    """
     tool, policy, fake = sandbox_tool
     runner = _ToolRunningRunner(steps=3, sandbox=tool)
 
     outcome, sink, _ = await _run_leg(runner)
 
     assert fake.executions == 3
-    billed = sum(call.kwargs["amount"] for call in policy.deduct.call_args_list)
-    assert billed == 3 * _EXEC_CREDITS
-    assert sink.spend[SpendKind.SANDBOX] == micros_from_cents(billed) == 3 * _EXEC_MICROS
+    assert policy.deduct.call_count == 0, "the tool must defer to the leg that is listening"
+    assert sink.spend[SpendKind.SANDBOX] == micros_from_cents(3 * _EXEC_CREDITS) == 3 * _EXEC_MICROS
     assert sink.spend[SpendKind.MODEL] == 3 * _STEP_MICROS
     assert outcome.task.ledger.sandbox_micros == 3 * _EXEC_MICROS
     assert outcome.task.ledger.model_micros == 3 * _STEP_MICROS
@@ -354,18 +376,26 @@ async def test_an_interactive_run_records_nothing_and_bills_as_before(
 
 
 @pytest.mark.asyncio
-async def test_the_owner_pays_for_the_sandbox_once_and_the_leg_deduct_prices_the_model_only(
+async def test_in_a_real_leg_the_owner_is_charged_for_the_sandbox_exactly_once(
     sandbox_tool: tuple[AsyncTool, MagicMock, _FakeSandbox],
 ) -> None:
-    """No double charge. The tool billed the owner through the seam once per execution;
-    the leg's own owner deduct, driven through the real ``_bill_leg``, carries the model
-    cost and nothing else. The ledger is an accounting of a charge that already happened,
-    not a second one."""
+    """Nobody charged for sandbox work inside a task leg, and each side said the other had.
+
+    The tool skipped its deduct because the task worker binds no request context (its own
+    docstring says so), and ``_bill_leg`` excluded the sandbox spend believing "it was billed
+    by the tool itself". Both statements were in the tree; only one could be true.
+
+    The previous version of this test bound a request context through ``_dispatch_sandbox``,
+    which is what the INTERACTIVE worker does, and then concluded that the leg deduct should
+    carry the model cost alone. It simulated the path it was not testing, so it went green
+    over the hole. This drives the leg path as production has it: no context bound.
+    """
     tool, policy, _ = sandbox_tool
-    runner = _ToolRunningRunner(steps=2, sandbox=tool)
+    runner = _ToolRunningRunner(steps=2, sandbox=tool, dispatch=_dispatch_sandbox_in_a_leg)
     _, sink, cost = await _run_leg(runner)
-    assert policy.deduct.call_count == 2  # the tool, once per execution
-    assert sink.spend[SpendKind.SANDBOX] == 2 * _EXEC_MICROS
+
+    assert policy.deduct.call_count == 0, "the tool cannot bill in a leg: no request context"
+    assert sink.spend[SpendKind.SANDBOX] == 2 * _EXEC_MICROS  # the cap still sees it
 
     leg_policy = MagicMock()
     handler = TaskLegHandler(
@@ -379,11 +409,51 @@ async def test_the_owner_pays_for_the_sandbox_once_and_the_leg_deduct_prices_the
 
     leg_policy.capture_up_to_idempotent.assert_called_once()
     charged = leg_policy.capture_up_to_idempotent.call_args.kwargs
-    assert charged["cost_cents"] == pytest.approx(2 * _STEP_CENTS)
     assert charged["amount"] == credits_charged(
-        provider_cents=2 * _STEP_CENTS, infra_flat_cents=0.0, markup=1.0, floor=1
+        provider_cents=2 * _STEP_CENTS,
+        infra_flat_cents=2 * _EXEC_CREDITS,
+        markup=1.0,
+        floor=1,
+    ), "the leg deduct still prices the model only, so the sandbox work is free"
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_only_ran_the_sandbox_is_still_billed(
+    sandbox_tool: tuple[AsyncTool, MagicMock, _FakeSandbox],
+) -> None:
+    """The sharper hole: ``_bill_leg`` returned early when no model call was priced, so a leg
+    that did pure code execution was billed nothing at all, not even the floor."""
+    tool, policy, _ = sandbox_tool
+    runner = _ToolRunningRunner(
+        steps=1, sandbox=tool, dispatch=_dispatch_sandbox_in_a_leg, model_cost_usd=None
     )
-    assert policy.deduct.call_count == 2, "the leg deduct must not touch the sandbox seam"
+    _, _, cost = await _run_leg(runner)
+
+    assert policy.deduct.call_count == 0
+    leg_policy = MagicMock()
+    handler = TaskLegHandler(
+        task_store=object(),  # type: ignore[arg-type]
+        checkpoint_store=object(),  # type: ignore[arg-type]
+        runner_builder=object(),  # type: ignore[arg-type]
+        credits_policy=leg_policy,
+        rls_engine=object(),  # type: ignore[arg-type]
+    )
+    await handler._bill_leg("user_a", "t1", 0, cost)  # noqa: SLF001
+
+    leg_policy.capture_up_to_idempotent.assert_called_once()
+    assert leg_policy.capture_up_to_idempotent.call_args.kwargs["amount"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_outside_a_leg_the_tool_still_bills_exactly_as_before(
+    sandbox_tool: tuple[AsyncTool, MagicMock, _FakeSandbox],
+) -> None:
+    """The interactive path is untouched: no leg is listening, so the tool owns the charge."""
+    tool, policy, _ = sandbox_tool
+
+    await _dispatch_sandbox(tool)
+
+    assert policy.deduct.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -523,7 +593,15 @@ async def test_through_the_real_handler_the_sandbox_reaches_the_ledger_and_a0(
         context,  # type: ignore[arg-type] (duck-typed JobContext)
     )
 
-    assert policy.deduct.call_count == 4, "the tool billed once per execution, as before"
+    # PREVIOUS PREMISE, FALSE: this asserted ``call_count == 4`` with the comment "the tool
+    # billed once per execution, as before". It passed only because the fixture binds a
+    # request context the task worker never binds, so the test simulated the interactive
+    # path while claiming to prove the leg path. In a leg the tool defers, and it defers on
+    # whether a LEG IS LISTENING rather than on whether a context happens to be bound, so
+    # this holds even here where one is: the leg owns the charge, once, keyed to its
+    # checkpoint. That is what makes a double charge structurally impossible rather than a
+    # coincidence of which worker bound what.
+    assert policy.deduct.call_count == 0, "the tool billed inside a leg; that is a double charge"
     assert checkpoints.spend[SpendKind.SANDBOX] == 4 * _EXEC_MICROS
     assert checkpoints.spend[SpendKind.MODEL] == 2 * _STEP_MICROS
     assert ("sandbox", 4 * _EXEC_MICROS) in context.metered

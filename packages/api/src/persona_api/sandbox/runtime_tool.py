@@ -171,7 +171,20 @@ def make_pool_code_execution_tool(
         whether the owner deduct fires (the task worker binds no request context).
         Outside a leg nobody is listening and the report is dropped.
         """
-        report_leg_spend(SpendKind.SANDBOX, float(credit_cost))
+        # Who owns this charge is decided HERE, once, instead of each side assuming the
+        # other did it. ``report_leg_spend`` returns True when a task leg is listening.
+        #
+        # Until 2026-09-19 both sides assumed and both were wrong: this hook skipped its
+        # deduct inside a leg (the task worker binds no request context, as the paragraph
+        # below said), while ``TaskLegHandler._bill_leg`` excluded the sandbox spend
+        # because it "was billed by the tool itself". Nobody charged for sandbox work in
+        # a task leg. The leg's ledger saw it, so the budget cap held; the wallet never did.
+        in_leg = report_leg_spend(SpendKind.SANDBOX, float(credit_cost))
+        if in_leg:
+            # The leg bills its whole cost once, keyed to the checkpoint, so a re-delivered
+            # leg cannot double-charge. Billing per execution here as well would be a
+            # second charge for the same work with a different retry story.
+            return
         ctx = get_sandbox_request_context()
         if ctx is None:
             # No request context → CLI / one-shot path; no billing.
