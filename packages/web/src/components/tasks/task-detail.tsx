@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Paperclip } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 
@@ -51,6 +51,7 @@ export function TaskDetail({
   personaNames: Record<string, string>;
 }) {
   const t = useTranslations("taskDetail");
+  const tAttach = useTranslations("tasks.attach");
   const { getToken } = useAuth();
   const refreshSidebar = useSidebarRefresh();
   const toast = useToast();
@@ -185,6 +186,29 @@ export function TaskDetail({
         <h2 className="type-heading">{detail.goal}</h2>
         {detail.scope ? (
           <p className="type-body text-muted-foreground">{detail.scope}</p>
+        ) : null}
+        {/* Issue #16: the files handed over with the task, read back off the contract, so
+            reopening the page shows what the persona actually works from. */}
+        {detail.attachments && detail.attachments.length > 0 ? (
+          <div className="flex flex-col gap-1" data-slot="task-attachments">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {tAttach("detailHeading")}
+            </p>
+            <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0">
+              {detail.attachments.map((file) => (
+                <li
+                  key={file.ref}
+                  data-slot="task-attachment"
+                  className="flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs"
+                >
+                  <Paperclip className="size-3" aria-hidden="true" />
+                  <span className="max-w-60 truncate">
+                    {file.filename || file.ref}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : null}
       </div>
 

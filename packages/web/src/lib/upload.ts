@@ -116,6 +116,66 @@ export async function uploadDocument(
 }
 
 /**
+ * One file handed over with a task or routine (issue #16).
+ *
+ * `ref` is the workspace-relative path the upload returned, the same
+ * `uploads/<hash>.<ext>` shape a chat attachment carries, so the persona opens
+ * the very file the person dropped on the dialog.
+ */
+export interface TaskAttachmentRef {
+  ref: string;
+  filename: string;
+  media_type: string;
+}
+
+/** The task-attachment branch's response body (documents). */
+interface TaskAttachmentResponse {
+  workspace_path: string;
+  filename: string;
+  media_type: string;
+  size_bytes: number;
+}
+
+/**
+ * Upload a file attached to a task or routine hand-off.
+ *
+ * Same endpoint and same workspace directory as a chat attachment. Images go down the
+ * image branch unchanged; anything else is sent with `scope=task`, which stores it
+ * persona-scoped instead of demanding a conversation the dialog does not have.
+ *
+ * @param personaId Persona that will run the work, and whose workspace holds the file.
+ * @param file      Browser `File` uploaded as multipart, never base64.
+ * @param options   Token getter + optional progress + optional abort signal.
+ */
+export async function uploadTaskAttachment(
+  personaId: string,
+  file: File,
+  options: UploadOptions,
+): Promise<TaskAttachmentRef> {
+  if (file.type.startsWith("image/")) {
+    const image = await uploadImage(personaId, file, options);
+    return {
+      ref: image.workspace_path,
+      filename: file.name,
+      media_type: image.media_type,
+    };
+  }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("scope", "task");
+  const body = (await sendMultipart(
+    `${BASE_URL}/v1/personas/${encodeURIComponent(personaId)}/uploads`,
+    form,
+    options,
+  )) as TaskAttachmentResponse;
+  return {
+    ref: body.workspace_path,
+    filename: body.filename || file.name,
+    media_type: body.media_type,
+  };
+}
+
+/**
  * Internal: POST a `FormData` body with the Bearer token + optional
  * progress + optional abort. Maps non-2xx → {@link ApiError}; network
  * failure / abort → distinct messages so the UI can branch on intent.

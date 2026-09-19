@@ -114,6 +114,13 @@ def _render_contract(contract: Contract) -> str:
     # Spec W1 (T11): the agreed shape of the finished work, in the anchor the leg re-reads,
     # so "done" means the same thing on leg 6 as it did on leg 1.
     lines.append(f"DELIVERABLE: {contract.deliverable.render()}")
+    # Issue #16: the files the person attached when they handed the work over. Named in the
+    # anchor the leg re-reads, so leg 6 of a task and occurrence 40 of a routine open the
+    # same files leg 1 did. The paths are workspace-relative, which is exactly what the
+    # file_read tool takes, so this is a pointer and not a copy of the bytes.
+    if contract.attachments:
+        lines.append("ATTACHED FILES (read them with file_read before you start):")
+        lines.extend(f"- {attachment.render()}" for attachment in contract.attachments)
     for criterion in contract.acceptance_criteria:
         lines.append(f"- [{criterion.status.value}] {criterion.id}: {criterion.statement}")
     return "\n".join(lines)

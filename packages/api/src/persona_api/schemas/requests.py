@@ -33,6 +33,7 @@ __all__ = [
     "RefinePersonaRequest",
     "RespondToRunRequest",
     "StartRunRequest",
+    "TaskAttachmentIn",
     "TurnIntoFileRequest",
     "UpdateMCPServerRequest",
     "UpdatePersonaRequest",
@@ -263,10 +264,27 @@ class TaskReplyRequest(_Input):
     reply: str = Field(min_length=1)
 
 
+class TaskAttachmentIn(_Input):
+    """One file the user attached to a task or routine hand-off (issue #16).
+
+    The same workspace-relative ref a chat upload returns (``uploads/<hash>.<ext>``), so the
+    file the persona opens when the task runs is the very file the person dropped on the
+    dialog. The API stores the reference on the task contract; the bytes never travel in
+    this body.
+    """
+
+    ref: str = Field(min_length=1, max_length=512)
+    filename: str = Field(default="", max_length=255)
+    media_type: str = Field(default="", max_length=255)
+
+
 class StartRunRequest(_Input):
     """Start an agentic run for a task (§5.3)."""
 
     task: str = Field(min_length=1)
+    #: Issue #16: files handed over with the task. Capped so one dialog cannot post a
+    #: thousand refs; the web dialog caps at the same number.
+    attachments: list[TaskAttachmentIn] = Field(default_factory=list, max_length=10)
 
 
 class RespondToRunRequest(_Input):
@@ -464,6 +482,9 @@ class ScheduleCreateRequest(_Input):
     # remind-and-update contract; "task" schedules the subject AS the goal verbatim —
     # the Activity dialog's "Schedule for later" leg (same one-door underneath).
     intent: Literal["reminder", "task"] = "reminder"
+    #: Issue #16: files handed over with the routine. Every occurrence's leg reads the same
+    #: ones, because they ride the backing task's contract rather than a single fire.
+    attachments: list[TaskAttachmentIn] = Field(default_factory=list, max_length=10)
 
 
 class BudgetExtendRequest(_Input):

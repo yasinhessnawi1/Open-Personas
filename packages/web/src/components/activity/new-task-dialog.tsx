@@ -4,11 +4,17 @@ import { Dialog } from "@base-ui/react/dialog";
 import { CalendarClock, Play, Plus, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { useAuth } from "@/auth";
+import { MicDictation } from "@/components/chat/mic-dictation";
 import { ExecutorPicker } from "@/components/persona/executor-picker";
+import {
+  HandOffAttachButton,
+  HandOffAttachmentChips,
+  useHandOffAttachments,
+} from "@/components/tasks/hand-off-attachments";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { createSchedule } from "@/lib/api/schedule-client";
@@ -66,18 +72,23 @@ function DialogBody({
   action: NewTaskAction;
 }) {
   const t = useTranslations("tasks");
+  const tAttach = useTranslations("tasks.attach");
   const locale = useLocale();
   const router = useRouter();
   const { getToken } = useAuth();
 
   const [goal, setGoal] = useState("");
   const [personaId, setPersonaId] = useState("");
+  // Issue #16: dictation and attachments on the description, the two things chat has had
+  // all along. The refs ride the create call so the persona opens the real files.
+  const goalRef = useRef<HTMLTextAreaElement | null>(null);
+  const files = useHandOffAttachments(personaId);
   const [when, setWhen] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
 
-  const ready = goal.trim().length > 0 && personaId.length > 0;
+  const ready = goal.trim().length > 0 && personaId.length > 0 && !files.busy;
   const personaName = personas.find((p) => p.id === personaId)?.name;
   const whenDate = when ? new Date(when) : null;
   const whenValid =
@@ -100,6 +111,7 @@ function DialogBody({
         idempotency_key: idempotencyKey,
         notify_on_fire: true,
         intent: "task",
+        attachments: files.refs,
       });
       router.push(`/activity/tasks/${encodeURIComponent(result.task_id)}`);
     } catch {
@@ -117,10 +129,40 @@ function DialogBody({
         <Textarea
           id="nt-goal"
           name="task"
+          ref={goalRef}
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
           placeholder={t("taskPlaceholder")}
           className="min-h-16 field-sizing-content resize-y"
+        />
+        {/* Issue #16: the same two controls the chat composer carries, on the
+            description of the work rather than on a message. */}
+        <div className="flex items-center gap-1">
+          <HandOffAttachButton
+            onFile={files.attach}
+            remaining={files.remaining}
+          />
+          <MicDictation
+            value={goal}
+            onChange={setGoal}
+            textareaRef={goalRef}
+            language={locale}
+          />
+          {files.attachments.length > 0 && personaId.length === 0 ? (
+            <span className="ml-1 text-xs text-muted-foreground">
+              {tAttach("waiting")}
+            </span>
+          ) : null}
+        </div>
+        <HandOffAttachmentChips
+          attachments={files.attachments}
+          onRemove={files.remove}
+        />
+        {/* The server action reads the form, so the landed refs travel as one field. */}
+        <input
+          type="hidden"
+          name="attachments"
+          value={JSON.stringify(files.refs)}
         />
       </div>
       <div className="flex flex-col gap-1.5">

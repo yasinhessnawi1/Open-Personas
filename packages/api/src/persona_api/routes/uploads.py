@@ -48,7 +48,13 @@ from persona.errors import PersonaError, PersonaNotFoundError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.middleware.rate_limit import rate_limit
-from persona_api.services import audit_service, chat_service, document_service, image_service
+from persona_api.services import (
+    audit_service,
+    chat_service,
+    document_service,
+    image_service,
+    task_attachment_service,
+)
 
 router = APIRouter(prefix="/v1/personas", tags=["uploads"])
 
@@ -178,6 +184,7 @@ async def create_upload(
     user: AuthenticatedUser = Depends(get_current_user),
     file: UploadFile = File(...),
     conversation_id: str | None = Form(None),
+    scope: str = Form("conversation"),
 ) -> dict[str, Any]:
     """Validate + store an upload under the caller's persona.
 
@@ -220,6 +227,19 @@ async def create_upload(
         )
 
     if _is_document_filename(filename) or declared_media_type == "application/pdf":
+        # Issue #16: a task or routine hand-off has no conversation, so its attachment is
+        # stored persona-scoped and named on the task contract instead of being ingested
+        # into a conversation's document store. Explicit scope, never an inferred one: a
+        # chat upload that forgot its conversation_id still gets the 422 below.
+        if scope == "task":
+            return _handle_task_attachment_upload(
+                request=request,
+                user=user,
+                persona_id=persona_id,
+                file_bytes=file_bytes,
+                filename=filename,
+                declared_media_type=declared_media_type,
+            )
         if conversation_id is None or not conversation_id.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -247,6 +267,69 @@ async def create_upload(
             "detail": f"Unsupported upload format: {declared_media_type or filename!r}",
         },
     )
+
+
+def _remap_attachment_error(exc: PersonaError) -> Exception:
+    """Translate a task-attachment failure into a 422 that says what went wrong.
+
+    The attachment service raises ``unsupported_media_type`` (a format the document
+    parsers do not know) or ``oversize``. Same structured body shape as the rest of the
+    API, under its own error code so a client never has to read a document failure as an
+    image one.
+    """
+    payload: dict[str, object] = {
+        "error": "attachment_validation_error",
+        "detail": exc.message or "that file could not be attached",
+    }
+    if exc.context:
+        payload["context"] = dict(exc.context)
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
+
+
+def _handle_task_attachment_upload(
+    *,
+    request: Request,
+    user: AuthenticatedUser,
+    persona_id: str,
+    file_bytes: bytes,
+    filename: str,
+    declared_media_type: str,
+) -> dict[str, Any]:
+    """Store a document attached to a task or routine hand-off (issue #16).
+
+    Persona-scoped, no parse, no ingest: the bytes land in the same ``uploads/`` directory
+    a chat image does, and the returned ``workspace_path`` is what the task contract
+    carries so every leg can open it with ``file_read``.
+    """
+    try:
+        ref = task_attachment_service.upload(
+            file_storage=request.app.state.file_storage,
+            owner_id=user.id,
+            persona_id=persona_id,
+            file_bytes=file_bytes,
+            filename=filename,
+            declared_media_type=declared_media_type,
+        )
+    except PersonaError as exc:
+        raise _remap_attachment_error(exc) from exc
+
+    audit_service.record(
+        engine=request.app.state.rls_engine,
+        user_id=user.id,
+        action="upload.create",
+        target=persona_id,
+        metadata={
+            "workspace_path": ref.workspace_path,
+            "media_type": ref.media_type,
+            "size_bytes": str(ref.size_bytes),
+        },
+    )
+    return {
+        "workspace_path": ref.workspace_path,
+        "filename": ref.filename,
+        "media_type": ref.media_type,
+        "size_bytes": ref.size_bytes,
+    }
 
 
 def _handle_image_upload(

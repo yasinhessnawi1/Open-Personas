@@ -123,6 +123,39 @@ describe("TaskDetail", () => {
     expect(client.getTask).toHaveBeenCalledTimes(2); // initial + durable refetch
   });
 
+  it("lists the files handed over with the task on a fresh fetch (issue #16)", async () => {
+    // Reopened parity: the attachments are read off the contract the GET returns, so the
+    // page shows what the persona actually works from, not what a dialog once held.
+    client.getTask.mockResolvedValue(
+      detail({
+        attachments: [
+          {
+            ref: "uploads/9f2c0a.pdf",
+            filename: "quarter.pdf",
+            media_type: "application/pdf",
+          },
+          {
+            ref: "uploads/1a0b.csv",
+            filename: "rows.csv",
+            media_type: "text/csv",
+          },
+        ],
+      }),
+    );
+    renderDetail();
+
+    expect(await screen.findByText("Files handed over")).toBeInTheDocument();
+    expect(screen.getByText("quarter.pdf")).toBeInTheDocument();
+    expect(screen.getByText("rows.csv")).toBeInTheDocument();
+  });
+
+  it("says nothing about files when none were handed over", async () => {
+    client.getTask.mockResolvedValue(detail({}));
+    renderDetail();
+    await screen.findByText("Book the dentist");
+    expect(screen.queryByText("Files handed over")).toBeNull();
+  });
+
   it("renders a stuck terminal report as its own projection (not success)", async () => {
     client.getTask.mockResolvedValue(
       detail({

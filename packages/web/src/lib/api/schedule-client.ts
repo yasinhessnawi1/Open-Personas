@@ -201,6 +201,8 @@ export interface ScheduleCreateBody extends RescheduleBody {
   /** R11-B2: "reminder" (default) composes the remind-and-update contract; "task"
    * schedules the subject AS the goal verbatim (the Activity dialog's Schedule-for-later). */
   intent?: "reminder" | "task";
+  /** Issue #16: files handed over with the routine; every occurrence's leg reads them. */
+  attachments?: { ref: string; filename: string; media_type: string }[];
 }
 
 /** The create confirmation — ids + the same echo shape the preview showed. */

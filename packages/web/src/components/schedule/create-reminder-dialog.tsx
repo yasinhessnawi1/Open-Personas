@@ -12,12 +12,18 @@
  * once per dialog-open (A10-D-6): double-clicks converge, two deliberate opens stay distinct.
  */
 
-import { useTranslations } from "next-intl";
-import { useMemo, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
+import { useMemo, useRef, useState } from "react";
 
 import { useAuth } from "@/auth";
+import { MicDictation } from "@/components/chat/mic-dictation";
 import { ExecutorPicker } from "@/components/persona/executor-picker";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
+import {
+  HandOffAttachButton,
+  HandOffAttachmentChips,
+  useHandOffAttachments,
+} from "@/components/tasks/hand-off-attachments";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -74,9 +80,15 @@ export function CreateReminderDialog({
 }: CreateReminderDialogProps) {
   const t = useTranslations("schedule.create");
   const tCommon = useTranslations("schedule.common");
+  const tAttach = useTranslations("tasks.attach");
+  const locale = useLocale();
   const { getToken } = useAuth();
   const [subject, setSubject] = useState("");
   const [personaId, setPersonaId] = useState(lockedPersona?.id ?? "");
+  // Issue #16: the same two controls the task hand-off dialog carries. The refs ride the
+  // BACKING TASK's contract, so occurrence forty opens the files occurrence one did.
+  const subjectRef = useRef<HTMLInputElement | null>(null);
+  const files = useHandOffAttachments(personaId);
   // Default ON: it's a reminder — you want reminding. Unchecking keeps the schedule but
   // silences its bell (the fire still runs; it just doesn't ping).
   const [notifyOnFire, setNotifyOnFire] = useState(true);
@@ -89,7 +101,10 @@ export function CreateReminderDialog({
   const idempotencyKey = useMemo(() => crypto.randomUUID(), []);
 
   const ready =
-    subject.trim().length > 0 && personaId !== "" && cadence !== null;
+    subject.trim().length > 0 &&
+    personaId !== "" &&
+    cadence !== null &&
+    !files.busy;
 
   async function runPreview(next: CadenceInput | null = cadence) {
     if (!next) return;
@@ -130,6 +145,7 @@ export function CreateReminderDialog({
         subject: subject.trim(),
         idempotency_key: idempotencyKey,
         notify_on_fire: notifyOnFire,
+        attachments: files.refs,
       });
       await onCreated();
     } catch {
@@ -152,6 +168,7 @@ export function CreateReminderDialog({
         {t("subjectLabel")}
         <Input
           id="reminder-subject"
+          ref={subjectRef}
           value={subject}
           maxLength={500}
           placeholder={t("subjectPlaceholder")}
@@ -161,6 +178,34 @@ export function CreateReminderDialog({
           }}
         />
       </label>
+
+      {/* Issue #16: attach a file to the routine, or dictate what it should do. */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-1">
+          <HandOffAttachButton
+            onFile={files.attach}
+            remaining={files.remaining}
+          />
+          <MicDictation
+            value={subject}
+            onChange={(next) => {
+              setSubject(next);
+              setPreview(null);
+            }}
+            textareaRef={subjectRef}
+            language={locale}
+          />
+          {files.attachments.length > 0 && personaId === "" ? (
+            <span className="ml-1 text-xs text-muted-foreground">
+              {tAttach("waiting")}
+            </span>
+          ) : null}
+        </div>
+        <HandOffAttachmentChips
+          attachments={files.attachments}
+          onRemove={files.remove}
+        />
+      </div>
 
       {/* R11-B3 (owner-ruled): the SHARED persona picker — same control as new
           chat / new call — never a bare select of name strings. In the chat

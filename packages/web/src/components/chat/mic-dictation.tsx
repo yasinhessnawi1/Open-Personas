@@ -8,6 +8,10 @@
  * `value`/`onChange`/`textareaRef` directly and does the caret-aware
  * insertion itself (no per-host duplication).
  *
+ * Issue #16 widened the host field to a single-line `<input>` as well, for the task and
+ * routine hand-off dialogs. Nothing else changed: same control, same provider, same
+ * language handling, one dictation button everywhere.
+ *
  * State machine: idle → recording (MediaRecorder) → transcribing (POST
  * /v1/stt via the api proxy) → idle (transcript inserted). `permissionDenied`
  * is a distinct, VISIBLE error state (user-actionable — grant mic access in
@@ -57,11 +61,14 @@ function pickSupportedMimeType(): string | undefined {
   return undefined;
 }
 
-/** Insert `insert` at the textarea's current caret (or append when unknown). */
+/** A field the transcript can be typed into: a textarea, or a single-line input. */
+type DictationField = HTMLTextAreaElement | HTMLInputElement;
+
+/** Insert `insert` at the field's current caret (or append when unknown). */
 function insertAtCaret(
   value: string,
   insert: string,
-  textarea: HTMLTextAreaElement | null,
+  textarea: DictationField | null,
 ): { next: string; caret: number } {
   // Only trust `selectionStart`/`selectionEnd` while the textarea actually
   // HAS focus — an unfocused textarea's selection defaults to 0/0 (start of
@@ -95,8 +102,12 @@ export interface MicDictationProps {
   value: string;
   /** The host's setter — receives the value WITH the transcript inserted. */
   onChange: (next: string) => void;
-  /** The host's textarea ref — read for caret position, refocused after insert. */
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  /**
+   * The host's field ref, read for caret position, refocused after insert. A single-line
+   * `<input>` is allowed too: the New routine dialog's subject is one, and its caret and
+   * selection behave identically.
+   */
+  textareaRef: RefObject<DictationField | null>;
   disabled?: boolean;
   className?: string;
   /**

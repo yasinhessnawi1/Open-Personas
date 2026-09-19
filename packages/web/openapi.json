@@ -5589,6 +5589,11 @@
               }
             ],
             "title": "Conversation Id"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "default": "conversation"
           }
         },
         "type": "object",
@@ -9138,6 +9143,14 @@
             "enum": ["reminder", "task"],
             "title": "Intent",
             "default": "reminder"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/TaskAttachmentIn"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Attachments"
           }
         },
         "additionalProperties": false,
@@ -9361,6 +9374,14 @@
             "type": "string",
             "minLength": 1,
             "title": "Task"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/TaskAttachmentIn"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Attachments"
           }
         },
         "additionalProperties": false,
@@ -9368,6 +9389,54 @@
         "required": ["task"],
         "title": "StartRunRequest",
         "description": "Start an agentic run for a task (\u00a75.3)."
+      },
+      "TaskAttachmentIn": {
+        "properties": {
+          "ref": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Ref"
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Filename",
+            "default": ""
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Media Type",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["ref"],
+        "title": "TaskAttachmentIn",
+        "description": "One file the user attached to a task or routine hand-off (issue #16).\n\nThe same workspace-relative ref a chat upload returns (``uploads/<hash>.<ext>``), so the\nfile the persona opens when the task runs is the very file the person dropped on the\ndialog. The API stores the reference on the task contract; the bytes never travel in\nthis body."
+      },
+      "TaskAttachmentOut": {
+        "properties": {
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "media_type": {
+            "type": "string",
+            "title": "Media Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["ref", "filename", "media_type"],
+        "title": "TaskAttachmentOut",
+        "description": "One file handed over with the task, as the detail page lists it (issue #16).\n\nRead straight off the contract, so reopening the task shows what the persona actually\nworks from rather than what a form once held."
       },
       "TaskAuditEntryOut": {
         "properties": {
@@ -9541,6 +9610,14 @@
             },
             "type": "array",
             "title": "Acceptance Criteria"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/TaskAttachmentOut"
+            },
+            "type": "array",
+            "title": "Attachments",
+            "default": []
           },
           "deadline": {
             "anyOf": [

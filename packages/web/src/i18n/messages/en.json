@@ -523,6 +523,13 @@
     "dialogTitle": "Hand a task to a persona",
     "dialogIntro": "Describe the goal and who should run it. They'll work in the background and check in when they hit a real fork.",
     "goalLabel": "What should get done?",
+    "attach": {
+      "label": "Attach a file",
+      "failed": "didn't upload",
+      "remove": "Remove {filename}",
+      "waiting": "Pick a persona and the files will upload.",
+      "detailHeading": "Files handed over"
+    },
     "whoLabel": "Who runs it?",
     "dialogPreview": "<b>{name}</b> will work toward this in the background. You'll see progress and any approvals here in Activity.",
     "dialogCancel": "Cancel",

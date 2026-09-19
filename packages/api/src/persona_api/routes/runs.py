@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import StreamingResponse
-from persona.tasks import is_terminal
+from persona.tasks import ContractAttachment, is_terminal
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.jobs.queue import JobQueue
@@ -66,6 +66,12 @@ async def start_run(
         owner_id=user.id,
         persona_id=persona_id,
         brief=body.task,
+        # Issue #16: the files the person attached on the hand-off dialog travel with the
+        # ask, so the first leg opens them instead of working from the sentence alone.
+        attachments=[
+            ContractAttachment(ref=a.ref, filename=a.filename, media_type=a.media_type)
+            for a in body.attachments
+        ],
     )
     audit_service.record(
         engine=engine,

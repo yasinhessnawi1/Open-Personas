@@ -28,6 +28,7 @@ __all__ = [
     "AcceptanceCriterion",
     "AcceptanceStatus",
     "Contract",
+    "ContractAttachment",
     "ContractBounds",
     "Deliverable",
     "DeliverableFormat",
@@ -185,6 +186,33 @@ class UpdatePreference(BaseModel):
     channel: str | None = None
 
 
+class ContractAttachment(BaseModel):
+    """A file the user attached when they handed the work over (issue #16).
+
+    Part of the A4-authored anchor, so it cannot drift leg to leg: a routine's every
+    occurrence opens the same files the user attached when they set it up. ``ref`` is the
+    workspace-relative path the upload returned (``uploads/<hash>.<ext>``), the same shape
+    a chat turn carries, so a leg reads it with the ``file_read`` tool inside the persona's
+    own sandbox. Nothing here is file CONTENT: the bytes stay in the workspace and the leg
+    fetches only what it needs.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: Workspace-relative path, e.g. ``uploads/9f2c....pdf``.
+    ref: str
+    #: The name the person knows the file by, shown back to them and named to the leg.
+    filename: str = ""
+    #: IANA media type as uploaded, when the upload knew it.
+    media_type: str = ""
+
+    def render(self) -> str:
+        """One line naming the file and where to read it, for the contract block."""
+        name = self.filename or self.ref
+        kind = f" ({self.media_type})" if self.media_type else ""
+        return f"{name}{kind} at {self.ref}"
+
+
 class Contract(BaseModel):
     """The frozen, A4-authored anchor: goal, scope, acceptance criteria, bounds (D-A2-1).
 
@@ -210,3 +238,7 @@ class Contract(BaseModel):
     # written before this field existed keeps validating, and an ad hoc task that nobody
     # specified a format for still knows what to produce: structured findings markdown.
     deliverable: Deliverable = Deliverable()
+    # Issue #16: the files the user attached to the hand-off. Defaulted to empty, so every
+    # contract written before this field existed keeps validating through this frozen
+    # ``extra="forbid"`` model; rides ``contract_json``, no migration column.
+    attachments: tuple[ContractAttachment, ...] = ()

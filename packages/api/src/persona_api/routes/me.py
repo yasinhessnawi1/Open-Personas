@@ -14,6 +14,7 @@ from persona.errors import (
     ScheduleNeverFiresError,
     ScheduleNotFoundError,
 )
+from persona.tasks import ContractAttachment
 from persona.timezone import validate_timezone
 
 from persona_api.auth import AuthenticatedUser, get_current_user
@@ -480,6 +481,12 @@ async def create_schedule(
             now=datetime.now(UTC),
             notify_on_fire=body.notify_on_fire,
             intent=body.intent,
+            # Issue #16: files handed over with the routine ride the backing task's
+            # contract, so every occurrence's leg opens the same ones.
+            attachments=[
+                ContractAttachment(ref=a.ref, filename=a.filename, media_type=a.media_type)
+                for a in body.attachments
+            ],
         )
         # R9-012: post-commit sidebar liveness ping — the Schedule badge on the
         # owner's OTHER tabs/devices catches up (data-only; best-effort).

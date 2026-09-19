@@ -108,6 +108,13 @@ export interface TaskRun {
   finished_at: string | null;
 }
 
+/** One file handed over with the task (issue #16), as the detail lists it. */
+export interface TaskAttachment {
+  ref: string;
+  filename: string;
+  media_type: string;
+}
+
 export interface TaskDetail {
   task_id: string;
   persona_id: string;
@@ -119,6 +126,8 @@ export interface TaskDetail {
   paused: boolean;
   grants: Grant[];
   acceptance_criteria: AcceptanceCriterion[];
+  /** Issue #16: the files handed over with the task, read back off the contract. */
+  attachments?: TaskAttachment[];
   deadline: string | null;
   max_legs: number | null;
   budget: Budget;

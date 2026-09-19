@@ -27,6 +27,7 @@ __all__ = [
     "TaskAuditEntryOut",
     "TaskCheckpointOut",
     "TaskCommandResult",
+    "TaskAttachmentOut",
     "TaskDetailOut",
     "TaskReportOut",
     "TaskSummaryOut",
@@ -1438,6 +1439,18 @@ class AcceptanceCriterionOut(_Output):
     status: str
 
 
+class TaskAttachmentOut(_Output):
+    """One file handed over with the task, as the detail page lists it (issue #16).
+
+    Read straight off the contract, so reopening the task shows what the persona actually
+    works from rather than what a form once held.
+    """
+
+    ref: str
+    filename: str
+    media_type: str
+
+
 class LedgerOut(_Output):
     """The cost ledger, per kind + total, in ledger micros.
 
@@ -1536,6 +1549,9 @@ class TaskDetailOut(_Output):
     paused: bool
     grants: list[GrantOut]  # the contract's category policy — what you authorised
     acceptance_criteria: list[AcceptanceCriterionOut]
+    #: Issue #16: the files handed over with the task, named on the contract. Empty for a
+    #: task nobody attached anything to.
+    attachments: list[TaskAttachmentOut] = []
     deadline: datetime | None
     max_legs: int | None
     budget: BudgetOut

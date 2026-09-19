@@ -3117,6 +3117,11 @@ export interface components {
       file: string;
       /** Conversation Id */
       conversation_id?: string | null;
+      /**
+       * Scope
+       * @default conversation
+       */
+      scope: string;
     };
     /** Body_post_stt_v1_stt_post */
     Body_post_stt_v1_stt_post: {
@@ -5354,6 +5359,8 @@ export interface components {
        * @enum {string}
        */
       intent: "reminder" | "task";
+      /** Attachments */
+      attachments?: components["schemas"]["TaskAttachmentIn"][];
     };
     /**
      * ScheduleCreateResult
@@ -5458,6 +5465,46 @@ export interface components {
     StartRunRequest: {
       /** Task */
       task: string;
+      /** Attachments */
+      attachments?: components["schemas"]["TaskAttachmentIn"][];
+    };
+    /**
+     * TaskAttachmentIn
+     * @description One file the user attached to a task or routine hand-off (issue #16).
+     *
+     *     The same workspace-relative ref a chat upload returns (``uploads/<hash>.<ext>``), so the
+     *     file the persona opens when the task runs is the very file the person dropped on the
+     *     dialog. The API stores the reference on the task contract; the bytes never travel in
+     *     this body.
+     */
+    TaskAttachmentIn: {
+      /** Ref */
+      ref: string;
+      /**
+       * Filename
+       * @default
+       */
+      filename: string;
+      /**
+       * Media Type
+       * @default
+       */
+      media_type: string;
+    };
+    /**
+     * TaskAttachmentOut
+     * @description One file handed over with the task, as the detail page lists it (issue #16).
+     *
+     *     Read straight off the contract, so reopening the task shows what the persona actually
+     *     works from rather than what a form once held.
+     */
+    TaskAttachmentOut: {
+      /** Ref */
+      ref: string;
+      /** Filename */
+      filename: string;
+      /** Media Type */
+      media_type: string;
     };
     /**
      * TaskAuditEntryOut
@@ -5548,6 +5595,11 @@ export interface components {
       grants: components["schemas"]["GrantOut"][];
       /** Acceptance Criteria */
       acceptance_criteria: components["schemas"]["AcceptanceCriterionOut"][];
+      /**
+       * Attachments
+       * @default []
+       */
+      attachments: components["schemas"]["TaskAttachmentOut"][];
       /** Deadline */
       deadline: string | null;
       /** Max Legs */

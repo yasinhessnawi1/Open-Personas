@@ -15,6 +15,7 @@ import pytest
 from persona.tasks import (
     METHOD_BLOCK,
     Contract,
+    ContractAttachment,
     Decision,
     Deliverable,
     DeliverableFormat,
@@ -48,6 +49,31 @@ def _checkpoint(**overrides: object) -> TaskCheckpoint:
 
 def _stages(blocks: tuple[ReconstructionBlock, ...]) -> list[ReconstructionStage]:
     return [b.stage for b in blocks]
+
+
+def test_attached_files_are_named_in_the_contract_block() -> None:
+    # Issue #16: the files the person attached on the hand-off dialog belong in the anchor
+    # every leg re-reads, so occurrence forty of a routine opens the same ones occurrence
+    # one did. Pointers, not bytes: the leg reads them with file_read from its own sandbox.
+    contract = Contract(
+        goal="summarise the quarter",
+        attachments=(
+            ContractAttachment(
+                ref="uploads/9f2c.pdf", filename="q3.pdf", media_type="application/pdf"
+            ),
+            ContractAttachment(ref="uploads/1a0b.csv", filename="rows.csv"),
+        ),
+    )
+    block = reconstruct_context(contract=contract, trigger=_TRIGGER)[0]
+    assert block.stage is ReconstructionStage.CONTRACT
+    assert "q3.pdf (application/pdf) at uploads/9f2c.pdf" in block.content
+    assert "rows.csv at uploads/1a0b.csv" in block.content
+    assert "file_read" in block.content
+
+
+def test_contract_block_omits_the_attachment_section_when_nothing_is_attached() -> None:
+    block = reconstruct_context(contract=_CONTRACT, trigger=_TRIGGER)[0]
+    assert "ATTACHED FILES" not in block.content
 
 
 def test_first_leg_is_contract_then_method_then_trigger() -> None:

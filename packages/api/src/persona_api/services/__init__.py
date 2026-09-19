@@ -14,6 +14,7 @@ from persona_api.services import (
     image_service,
     persona_service,
     run_service,
+    task_attachment_service,
     user_service,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "dispatch_service",
     "persona_service",
     "run_service",
+    "task_attachment_service",
     "user_service",
 ]

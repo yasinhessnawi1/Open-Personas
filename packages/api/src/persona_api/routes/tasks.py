@@ -42,6 +42,7 @@ from persona_api.schemas.responses import (
     GrantOut,
     LedgerOut,
     ScheduleCadenceOut,
+    TaskAttachmentOut,
     TaskAuditEntryOut,
     TaskCheckpointOut,
     TaskCommandResult,
@@ -287,6 +288,12 @@ async def get_task(
         acceptance_criteria=[
             AcceptanceCriterionOut(id=a.id, statement=a.statement, status=a.status.value)
             for a in contract.acceptance_criteria
+        ],
+        # Issue #16: read back off the contract, so a reopened task lists exactly the files
+        # its legs are told to read.
+        attachments=[
+            TaskAttachmentOut(ref=a.ref, filename=a.filename, media_type=a.media_type)
+            for a in contract.attachments
         ],
         deadline=contract.bounds.deadline,
         max_legs=contract.bounds.max_legs,

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from persona.errors import PersonaNotFoundError
 from persona.logging import get_logger
-from persona.tasks import Contract, Task, TaskKind, UserDispatch
+from persona.tasks import Contract, ContractAttachment, Task, TaskKind, UserDispatch
 from sqlalchemy import select
 
 from persona_api.db.models import personas as personas_t
@@ -34,6 +34,8 @@ from persona_api.tasks.handler import enqueue_task_leg
 from persona_api.tasks.store import TaskStore
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy import Engine
 
     from persona_api.jobs.queue import JobQueue
@@ -124,6 +126,7 @@ def dispatch_ad_hoc(
     owner_id: str,
     persona_id: str,
     brief: str,
+    attachments: Sequence[ContractAttachment] = (),
     now: datetime | None = None,
 ) -> AdHocDispatch:
     """Create an ad hoc task for ``brief``, start it, and enqueue its first leg.
@@ -134,6 +137,8 @@ def dispatch_ad_hoc(
         owner_id: The caller.
         persona_id: The persona that will do the work; must be the caller's.
         brief: The one-off ask, verbatim; becomes the contract goal.
+        attachments: Files the user handed over with the ask (issue #16). They ride the
+            contract, so every leg of the task is told where to read them.
         now: Injected clock (tests); defaults to the current UTC instant.
 
     Returns:
@@ -158,7 +163,7 @@ def dispatch_ad_hoc(
             id=task_id,
             owner_id=owner_id,
             persona_id=persona_id,
-            contract=Contract(goal=text),
+            contract=Contract(goal=text, attachments=tuple(attachments)),
             kind=TaskKind.AD_HOC,
             created_at=at,
             updated_at=at,

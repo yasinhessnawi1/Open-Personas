@@ -39,7 +39,7 @@ from persona.errors import (
 )
 from persona.logging import get_logger
 from persona.schedules import next_fire_after, pattern_to_rule
-from persona.tasks import Contract, Task
+from persona.tasks import Contract, ContractAttachment, Task
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,8 @@ from persona_api.tasks.scheduled_task_builders import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from persona.schedules import RecurrencePattern, RecurrenceRule, Schedule
     from sqlalchemy import Engine
 
@@ -116,6 +118,7 @@ def create_user_schedule(
     notify_on_fire: bool = True,
     intent: Literal["reminder", "task"] = "reminder",
     actor: Literal["user_via_ui", "user_via_chat"] = "user_via_ui",
+    attachments: Sequence[ContractAttachment] = (),
 ) -> ScheduleCreateResult:
     """Create the backing task + schedule for a user-initiated reminder (A10-D-1/2/6).
 
@@ -139,6 +142,9 @@ def create_user_schedule(
     ``originator`` stays ``user`` in both cases, because in both cases the user asked: a
     persona cannot reach this function on its own initiative, only inside a turn the user
     drove, and the audit should not suggest otherwise.
+    ``attachments`` (issue #16): files the user handed over with the routine. They ride the
+    BACKING TASK's contract, not a single fire, so occurrence forty opens the same files
+    occurrence one did.
     """
     cleaned_subject = normalize_subject(subject)
     if not cleaned_subject:
@@ -191,9 +197,9 @@ def create_user_schedule(
         task_id=task_id,
         owner_id=owner_id,
         persona_id=persona_id,
-        contract=_task_contract(cleaned_subject)
+        contract=_task_contract(cleaned_subject, attachments)
         if intent == "task"
-        else _reminder_contract(cleaned_subject),
+        else _reminder_contract(cleaned_subject, attachments),
         conversation_id=None,  # no originating chat turn — the calendar is the door
         schedule_id=schedule_id,
         now=now,
@@ -237,20 +243,22 @@ def _require_owned_persona(engine: Engine, *, owner_id: str, persona_id: str) ->
 REMINDER_GOAL_PREFIX = "Remind and update the user about: "
 
 
-def _reminder_contract(subject: str) -> Contract:
+def _reminder_contract(subject: str, attachments: Sequence[ContractAttachment] = ()) -> Contract:
     """The reminder-shaped contract: the subject IS the goal; defaults bound the rest."""
     return Contract(
         goal=f"{REMINDER_GOAL_PREFIX}{subject}",
         scope="Deliver a short, useful update on this subject at each scheduled fire.",
+        attachments=tuple(attachments),
     )
 
 
-def _task_contract(goal: str) -> Contract:
+def _task_contract(goal: str, attachments: Sequence[ContractAttachment] = ()) -> Contract:
     """The task-shaped contract (R11-B2 intent="task"): the goal verbatim — the user is
     scheduling the work itself for later, not asking to be reminded about it."""
     return Contract(
         goal=goal,
         scope="Work toward this goal when the schedule fires.",
+        attachments=tuple(attachments),
     )
 
 

@@ -18,6 +18,7 @@ from persona.errors import GatedActionProposedError
 from persona.tasks import (
     AutoRetry,
     Contract,
+    ContractAttachment,
     LegBox,
     LegBoxLimit,
     Revived,
@@ -217,6 +218,41 @@ async def test_retrieval_informs_the_leg_input() -> None:
     )
     assert runner.captured_task is not None
     assert "strongly prefers morning departures" in runner.captured_task  # the leg sees it
+
+
+@pytest.mark.asyncio
+async def test_attached_files_reach_the_leg_as_readable_pointers() -> None:
+    # Issue #16: a file attached on the hand-off dialog has to reach the persona that runs
+    # the work, not just decorate the form. The contract carries the workspace ref, the
+    # reconstruction names it, and the leg's own input says where to read it. A routine is
+    # the same contract every occurrence, so occurrence forty sees this too.
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    task = _task()
+    with_files = task.model_copy(
+        update={
+            "contract": task.contract.model_copy(
+                update={
+                    "attachments": (
+                        ContractAttachment(
+                            ref="uploads/9f2c.pdf",
+                            filename="fares.pdf",
+                            media_type="application/pdf",
+                        ),
+                        ContractAttachment(ref="uploads/1a0b.csv", filename="routes.csv"),
+                    )
+                }
+            )
+        }
+    )
+    await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=with_files, trigger=_TRIGGER, now=_NOW
+    )
+    assert runner.captured_task is not None
+    assert "uploads/9f2c.pdf" in runner.captured_task
+    assert "fares.pdf" in runner.captured_task
+    assert "uploads/1a0b.csv" in runner.captured_task
+    assert "file_read" in runner.captured_task  # named the tool that opens them
 
 
 # --- the box wall-clock trip (at a step boundary, never mid-step) ------------
