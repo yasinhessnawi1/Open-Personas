@@ -29,6 +29,10 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import anthropic
 import openai
 
+from persona.backends._text_tool_calls import (
+    TextToolCallFilter,
+    strip_text_tool_calls,
+)
 from persona.backends._tool_shim import (
     ShimState,
     new_shim_state,
@@ -61,7 +65,7 @@ from persona.schema.content import ImageContent, TextContent
 from persona.schema.tools import ToolCall
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Collection
     from pathlib import Path
 
     from persona.schema.conversation import ConversationMessage
@@ -399,6 +403,10 @@ class OpenAICompatibleBackend:
         # process, so a monotonically-increasing counter here never resets
         # mid-turn (a strict superset of "unique within one turn").
         self._shim_call_seq = 0
+        # Same discipline for the ids minted for a tool call the model wrote as
+        # TEXT instead of calling properly (see persona.backends._text_tool_calls):
+        # a per-round reset would collide across rounds of one turn.
+        self._text_call_seq = 0
 
         api_key = config.api_key.get_secret_value()
         base_url = config.base_url or DEFAULT_BASE_URLS.get(self._provider)
@@ -777,7 +785,13 @@ class OpenAICompatibleBackend:
             kwargs["extra_body"] = extra_body
 
         response = await self._openai.chat.completions.create(**kwargs)
-        return _parse_openai_response(response, self._provider, use_native)
+        return _parse_openai_response(
+            response,
+            self._provider,
+            use_native,
+            known_tool_names={t.name for t in tools or []},
+            model=self._model,
+        )
 
     async def _stream_openai(
         self,
@@ -807,6 +821,14 @@ class OpenAICompatibleBackend:
             # R9-046: resume synthetic call_id numbering from the prior
             # round instead of resetting to shim-1 every round.
             shim_state = new_shim_state(starting_call_seq=self._shim_call_seq)
+        # Runs on EVERY openai-shaped stream, native tools or not: a model that
+        # writes its tool call as text does it regardless of which calling
+        # convention it was handed (see persona.backends._text_tool_calls).
+        text_filter = TextToolCallFilter(
+            known_tool_names={t.name for t in tools or []},
+            provider=self._provider,
+            model=self._model,
+        )
 
         # D-20-X-deepseek-reasoning-strip-invariant (mirrors _chat_openai).
         msgs = _strip_reasoning_for_provider(msgs, self._provider)
@@ -869,6 +891,12 @@ class OpenAICompatibleBackend:
             reasoning_delta = getattr(delta, "reasoning_content", None) or getattr(
                 delta, "reasoning", None
             )
+            leaked: list[ToolCall] = []
+            if text:
+                # The tool-call channel must never reach the text channel. The
+                # filter holds back a fragment that could still be markup, so
+                # `text` can come back empty here while a tag is mid-arrival.
+                text, leaked = text_filter.feed(text)
             if text:
                 if shim_state is not None:
                     consumer_text, tc_delta = parse_tool_call_delta(text, shim_state)
@@ -885,7 +913,9 @@ class OpenAICompatibleBackend:
                         reasoning=reasoning_delta if reasoning_delta else None,
                     )
                     reasoning_delta = None  # consumed
-            elif reasoning_delta:
+            for recovered in leaked:
+                yield StreamChunk(delta="", tool_call_delta=self._text_call_delta(recovered))
+            if not text and reasoning_delta:
                 # Reasoning-only chunk (no text delta): emit a StreamChunk
                 # carrying only the reasoning fragment so the runtime can
                 # buffer it for the TurnLog hash.
@@ -911,6 +941,20 @@ class OpenAICompatibleBackend:
                     ),
                 )
 
+        # Flush whatever the filter still holds. An unterminated leaked region
+        # resolves here against everything it captured, so nothing the filter
+        # swallowed can escape unexamined.
+        tail_text, tail_calls = text_filter.finish()
+        if tail_text:
+            if shim_state is not None:
+                consumer_text, tc_delta = parse_tool_call_delta(tail_text, shim_state)
+                if consumer_text or tc_delta is not None:
+                    yield StreamChunk(delta=consumer_text, tool_call_delta=tc_delta)
+            else:
+                yield StreamChunk(delta=tail_text)
+        for recovered in tail_calls:
+            yield StreamChunk(delta="", tool_call_delta=self._text_call_delta(recovered))
+
         if shim_state is not None:
             # R9-046: persist this round's final call_seq so the next
             # round (same backend instance) continues numbering forward.
@@ -919,6 +963,21 @@ class OpenAICompatibleBackend:
         if usage is None:
             usage = TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         yield StreamChunk(delta="", is_final=True, usage=usage)
+
+    def _text_call_delta(self, call: ToolCall) -> ToolCallDelta:
+        """Mint a stream delta for a call the model wrote as text.
+
+        The provider supplied no id for it (it never went down the tool-call
+        channel), and the runtime pairs `tool_call` with `tool_result` by id
+        across the WHOLE turn, so the counter lives on the backend instance and
+        never resets per round (the R9-046 rule, applied to this path).
+        """
+        self._text_call_seq += 1
+        return ToolCallDelta(
+            call_id=f"text-{self._text_call_seq}",
+            name_delta=call.name,
+            arguments_delta=json.dumps(call.args),
+        )
 
     # ------------------------------------------------------------------
     # Error mapping
@@ -1576,7 +1635,26 @@ def _parse_openai_response(
     response: Any,  # noqa: ANN401 — SDK type
     provider: str,
     use_native_tools: bool,
+    *,
+    known_tool_names: Collection[str] = (),
+    model: str = "",
 ) -> ChatResponse:
+    """Read one non-streaming OpenAI-shaped response into a :class:`ChatResponse`.
+
+    Args:
+        response: The provider SDK's response object.
+        provider: Provider id, recorded on the result and used for the
+            OpenRouter-only cost field.
+        use_native_tools: True when the request carried structured ``tools``.
+        known_tool_names: The tool names advertised this round (wire names).
+            Used to decide whether a tool call the model wrote into the TEXT
+            can be turned into a real call; an unknown name is stripped.
+        model: Model id, for the leak WARNING.
+
+    Returns:
+        The parsed response, with any leaked tool-call markup removed from
+        ``content`` and recovered into ``tool_calls`` where it was well formed.
+    """
     choices = getattr(response, "choices", []) or []
     content = ""
     tool_calls: list[ToolCall] = []
@@ -1628,6 +1706,25 @@ def _parse_openai_response(
         if recovered is not None:
             tool_calls.append(recovered)
             content = ""
+
+    # The XML-ish leak (``<tool_call>name(...)`` mid-prose) that GLM-class models
+    # emit through OpenRouter. Runs on BOTH tool conventions and even when the
+    # structured field WAS populated: the same turn often does both.
+    if content:
+        content, from_text = strip_text_tool_calls(
+            content,
+            known_tool_names=known_tool_names,
+            provider=provider,
+            model=model,
+        )
+        # Pair-able ids: the provider gave none (the call never went down the
+        # tool-call channel), and two leaked calls both carrying "" would make
+        # the assistant/tool pairing ambiguous. Mirrors the `call_{idx}` shape
+        # the DeepSeek streaming path already synthesises.
+        tool_calls.extend(
+            call.model_copy(update={"call_id": f"text-{i}"})
+            for i, call in enumerate(from_text, start=1)
+        )
 
     usage_obj = getattr(response, "usage", None)
     prompt_tokens = getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0

@@ -53,6 +53,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
 import type { ActivityView } from "@/lib/activity";
 import type { OutputContent } from "@/lib/api/output-content";
+import { stripToolCallMarkup } from "@/lib/chat/strip-tool-call-markup";
 import { operationFor, projectToolResult } from "@/lib/normalisers/_classify";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import type {
@@ -583,7 +584,7 @@ function PersonaMessage({
         {!message.streaming ? (
           <MessageActionBar
             messageRole="persona"
-            content={message.content}
+            content={stripToolCallMarkup(message.content)}
             personaId={persona.id}
             onRetry={
               onRetryMessage ? () => onRetryMessage(message.id) : undefined
@@ -693,6 +694,9 @@ function StackedContent({
   message: MessageElementView;
   thinkingLabel: string;
 }) {
+  // Same guard as the interleaved path: never render leaked tool-call markup,
+  // live or from a stored record.
+  const safeContent = stripToolCallMarkup(message.content);
   return (
     <>
       {message.tools && message.tools.length > 0 ? (
@@ -705,14 +709,14 @@ function StackedContent({
 
       {message.streaming ? (
         <StreamingTextRenderer
-          text={message.content}
+          text={safeContent}
           streaming
-          thinking={!message.content}
+          thinking={!safeContent}
           thinkingLabel={thinkingLabel}
         />
-      ) : message.content ? (
+      ) : safeContent ? (
         <div className="type-body" data-slot="message-element-content">
-          <Markdown>{message.content}</Markdown>
+          <Markdown>{safeContent}</Markdown>
         </div>
       ) : null}
     </>
@@ -783,7 +787,11 @@ function InterleavedContent({
      * injection (worse); the tight sibling is the honest compromise.
      */
     const flushText = (key: string, showCaret: boolean) => {
-      if (textBuffer) {
+      // A model that wrote its tool call as text is a runtime defect, fixed at
+      // the provider boundary, but conversations written before that fix still
+      // carry the markup, and a reopened thread must not show it either.
+      const safe = stripToolCallMarkup(textBuffer);
+      if (safe) {
         out.push(
           <div
             key={key}
@@ -792,11 +800,11 @@ function InterleavedContent({
               showCaret ? "message-event-text-live" : "message-event-text"
             }
           >
-            <Markdown>{textBuffer}</Markdown>
+            <Markdown>{safe}</Markdown>
           </div>,
         );
-        textBuffer = "";
       }
+      textBuffer = "";
       if (showCaret) {
         out.push(
           <div
