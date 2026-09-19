@@ -4,9 +4,12 @@ Episodic consolidation, persona-voice auto-pick, the initiative scan, the
 conversation retitle, K2 synthesis and the file extraction each make a real model
 call the owner benefits from but no end-user is in the loop for (graph
 consolidation is a deterministic embedding merge, no model call, so it charges
-nothing and is not wired). The last three were added on 2026-09-19, each having
+nothing and is not wired). Three of those were added on 2026-09-19, each having
 been unbilled twice over: the handler never called this helper AND the worker root
 built its backend unmetered, so wiring only one half would have billed the floor.
+Two surfaces here are not model calls at all: a file extraction's sandbox render
+(per-execution infra) and an outbound SMS segment (a per-unit provider meter), and
+they have their own siblings below for exactly that reason.
 
 Each bills the **persona owner** its real cost POST-HOC through this one helper:
 price via the seam (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual
@@ -35,13 +38,13 @@ from persona_runtime.cost import compute_turn_cost
 from persona_api.services.free_model_usage import FreeModelDailyCounter
 
 if TYPE_CHECKING:
-    from persona.billing import InfraUnit
+    from persona.billing import CostBasis, InfraUnit
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
     from persona_api.editions.credits_policy import CreditsPolicy
 
-__all__ = ["bill_background_infra", "bill_background_llm"]
+__all__ = ["bill_background_infra", "bill_background_llm", "bill_background_provider"]
 
 _LOG = get_logger("api.background_billing")
 
@@ -187,6 +190,78 @@ def bill_background_infra(
     except Exception as exc:  # noqa: BLE001 (billing must NEVER break the background op)
         _LOG.warning(
             "background infra owner-billing failed (fail-soft) surface={surface} "
+            "owner={owner} key={key}: {err}",
+            surface=surface,
+            owner=owner_id,
+            key=billing_key,
+            err=str(exc),
+        )
+
+
+def bill_background_provider(
+    *,
+    credits_policy: CreditsPolicy | None,
+    rls_engine: Engine | None,
+    owner_id: str,
+    provider_cents: float,
+    cost_basis: CostBasis,
+    surface: str,
+    billing_key: str,
+    billing_config: BillingConfig | None = None,
+    floor: int = 1,
+) -> None:
+    """Owner-bill one background op's PROVIDER cost, idempotent + fail-soft.
+
+    The third sibling. :func:`bill_background_llm` prices a model call from its token
+    counts and :func:`bill_background_infra` charges an infra rate with no provider at
+    all; this one is for a surface that costs real provider money per unit and has no
+    tokens to price it from, because the provider meters something else. An outbound SMS
+    is the case that needed it: Twilio bills per SEGMENT, reports the segment count on the
+    delivery status callback, and nothing about that is a token.
+
+    The caller brings the price. That is deliberate rather than lazy: a per-unit price
+    this helper cannot verify is worse than no charge at all, since undercharging costs
+    the house money while a guessed price overcharges a person. A caller with no
+    configured price must not call this.
+
+    Args:
+        credits_policy / rls_engine: The billing seam + owner-scoped engine. Either
+            ``None`` -> no billing (the plain / community-unmetered shape).
+        owner_id: The persona owner (the payer, D-M3-8).
+        provider_cents: The op's real provider cost in cents (already multiplied out
+            over however many units the provider metered).
+        cost_basis: The provenance recorded on the ledger row (``"provider_meter"`` for a
+            per-unit provider meter, the SMS segment case).
+        surface: The ledger reason prefix (e.g. ``"sms_segments"``).
+        billing_key: The op's natural idempotency key, which must be DISTINCT from any
+            other charge the same op makes: the conflict gate is unique on
+            ``billing_key`` alone (R9-196), so a shared key means the first claim row
+            silently swallows the second charge.
+        billing_config: The markup + infra rates; ``None`` reads them from env.
+        floor: The minimum charge (D-M3-4 amendment).
+    """
+    if credits_policy is None or rls_engine is None:
+        return
+    config = billing_config or BillingConfig()
+    try:
+        charge = credits_charged(
+            provider_cents=provider_cents,
+            infra_flat_cents=0.0,  # infra via the floor (D-M3-4 amendment)
+            markup=config.credit_markup,
+            floor=floor,
+        )
+        credits_policy.capture_up_to_idempotent(
+            rls_engine=rls_engine,
+            user_id=owner_id,
+            amount=charge,
+            reason=f"{surface}:{cost_basis}",
+            billing_key=billing_key,
+            cost_cents=provider_cents,
+            cost_basis=cost_basis,
+        )
+    except Exception as exc:  # noqa: BLE001 (billing must NEVER break the background op)
+        _LOG.warning(
+            "background provider owner-billing failed (fail-soft) surface={surface} "
             "owner={owner} key={key}: {err}",
             surface=surface,
             owner=owner_id,

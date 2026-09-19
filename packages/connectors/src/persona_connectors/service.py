@@ -84,6 +84,7 @@ from persona_connectors.composition import (
     build_email_recipient_resolver,
     build_persona_name_lister,
     build_reply_runner,
+    build_sms_cost_biller,
 )
 from persona_connectors.config import ConnectorConfig
 from persona_connectors.domain.flow import SharedInboundFlow
@@ -93,10 +94,9 @@ from persona_connectors.email.app import build_email_app
 from persona_connectors.email.connector import EmailConnector
 from persona_connectors.email.flow import EmailInboundFlow
 from persona_connectors.email.linking import EmailLinkingService
-from persona_connectors.errors import ConnectorError
+from persona_connectors.errors import ConnectorError, IdentityNotLinkedError
 from persona_connectors.infra import PostgresConversationStateStore, PostgresLinkStore
 from persona_connectors.rls_guard import verify_rls_engine_role
-from persona_connectors.sms.cost import record_sms_cost
 from persona_connectors.telegram import (
     InboundFlow as TelegramInboundFlow,
 )
@@ -673,6 +673,33 @@ def _build_twilio_client(config: ConnectorConfig, http: httpx.AsyncClient) -> Tw
     )
 
 
+def _status_callback_url(config: ConnectorConfig, platform: str) -> str:
+    """The public URL Twilio posts this channel's delivery status callbacks to.
+
+    ``build_twilio_app`` has served ``/{platform}/status`` since C4 T9, but no send ever
+    asked Twilio to post to it: ``status_callback_url`` defaulted to empty and nothing
+    filled it in, so the route only ever fired if the operator had configured a callback
+    on the number in the Twilio console. The per-segment SMS cost is read off that
+    callback, so the charge depends on the send asking for it. Empty config keeps the old
+    behaviour exactly (no ``StatusCallback`` parameter on the message).
+    """
+    base = config.twilio_status_callback_base_url.rstrip("/")
+    return f"{base}/{platform}/status" if base else ""
+
+
+def _resolve_phone_owner(linking: PhoneLinkingService, phone_number: str) -> str | None:
+    """The owner a phone number is linked to, or ``None`` when it is not linked.
+
+    The exception-free shape the status-callback biller needs: an unlinked number there is
+    a message we can no longer attribute (the link was revoked between the send and the
+    callback), which must be reported and skipped, not raised into a Twilio webhook.
+    """
+    try:
+        return linking.resolve_owner(platform_identity=phone_number)
+    except IdentityNotLinkedError:
+        return None
+
+
 async def _setup_whatsapp(
     *,
     config: ConnectorConfig,
@@ -692,6 +719,7 @@ async def _setup_whatsapp(
         from_address=config.twilio_whatsapp_from,
         conversation_store=conversation_store,
         owner_scope=owner_scope,
+        status_callback_url=_status_callback_url(config, whatsapp_adapter.PLATFORM),
         reengagement_template_sid=config.whatsapp_reengagement_template_sid,
     )
     transport = whatsapp_adapter.WhatsAppFlowTransport(
@@ -754,6 +782,8 @@ async def _setup_sms(
     list_persona_names: Callable[[str], Mapping[str, Sequence[str]]],
     run_turn: Callable[[TurnRequest], Awaitable[str]],
     owner_scope: Callable[[str], contextlib.AbstractContextManager[None]],
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
     emit_message_received: Callable[..., None] | None = None,
 ) -> tuple[MessageDeliverer, FastAPI]:
     """Assemble the SMS adapter → (deliverer, the Twilio webhook/status/issue app)."""
@@ -762,6 +792,7 @@ async def _setup_sms(
         from_address=config.twilio_sms_from,
         conversation_store=conversation_store,
         owner_scope=owner_scope,
+        status_callback_url=_status_callback_url(config, sms_adapter.PLATFORM),
         max_segments=config.sms_max_segments,
     )
     transport = sms_adapter.SmsFlowTransport(
@@ -787,10 +818,20 @@ async def _setup_sms(
         now=_now,
     )
 
+    # SMS is the one channel where verbosity costs money, and until now it cost it to
+    # nobody: the segment count was recorded to a log line and the price it would have
+    # been multiplied by was an argument no caller passed. The biller is the reader.
+    bill_sms_cost = build_sms_cost_biller(
+        credits_policy=credits_policy,
+        rls_engine=rls_engine,
+        resolve_owner=functools.partial(_resolve_phone_owner, phone_linking),
+        price_per_segment_cents=config.sms_price_per_segment_cents,
+    )
+
     async def on_status(params: Mapping[str, str]) -> None:
-        # SMS is the one channel where verbosity costs money — record the per-segment cost
-        # from the same status callback (the T12 single-ingestion seam).
-        record_sms_cost(params)
+        # Records the per-segment cost from the same status callback (the T12
+        # single-ingestion seam) and charges it to the owner the number is linked to.
+        bill_sms_cost(params)
 
     return connector, _build_phone_app(
         config=config,
@@ -1122,6 +1163,8 @@ async def build_connectors(
                 list_persona_names=list_persona_names,
                 run_turn=run_turn,
                 owner_scope=composition.owner_scope,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
                 emit_message_received=emit_message_received,
             )
             deliverers["sms"] = connector

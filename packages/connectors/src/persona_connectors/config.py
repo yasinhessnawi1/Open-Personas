@@ -272,6 +272,20 @@ class ConnectorConfig(BaseSettings):
     # GSM-7 / 67-char UCS-2 parts a single reply may span before it is split into
     # separate messages. A tight default keeps replies cheap + readable.
     sms_max_segments: int = Field(default=3, gt=0)
+    # What ONE SMS segment costs us, in cents, at this deployment (T12 cost truth).
+    # Twilio's per-segment price varies by destination country and by account, so there is
+    # no default that would be right: ``None`` means "no price configured", the charge site
+    # bills nobody and says so in a WARNING rather than guessing a number and overcharging
+    # a person. Set it from the Twilio pricing page for the destinations you actually send
+    # to (US long-code outbound was 0.83 cents at the time of writing).
+    sms_price_per_segment_cents: float | None = Field(default=None, ge=0.0)
+    # The PUBLIC base URL Twilio posts delivery status callbacks to, e.g.
+    # ``https://connectors.example.com``. Each channel appends its own ``/{platform}/status``
+    # path (the route ``build_twilio_app`` already serves). Empty (the default) sends no
+    # ``StatusCallback`` with the message, which leaves delivery outcomes and the per-segment
+    # cost entirely to whatever the Twilio console has configured on the number. Setting it
+    # is what makes the SMS cost recording reachable from our own send.
+    twilio_status_callback_base_url: str = Field(default="")
 
     # --- Email (Spec C5) ---------------------------------------------------------------
     # The Postmark SERVER token — the send credential (``SecretStr``, never logged;

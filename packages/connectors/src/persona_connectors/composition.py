@@ -25,11 +25,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import yaml
+from persona.logging import get_logger
 from persona_api.config import Edition
 from persona_api.db.community import make_community_engine
 from persona_api.db.engine import create_db_engine
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import persona_service
+from persona_api.services.background_billing import bill_background_provider
 from persona_api.services.chat_service import start_chat_turn
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
@@ -38,6 +40,7 @@ from sqlalchemy import text as _sql
 
 from persona_connectors.errors import ConnectorError, TurnFailedError
 from persona_connectors.rls_guard import guard_rls_engine_role
+from persona_connectors.sms.cost import record_sms_cost
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
@@ -63,7 +66,10 @@ __all__ = [
     "build_delivery_router",
     "build_persona_name_lister",
     "build_reply_runner",
+    "build_sms_cost_biller",
 ]
+
+_log = get_logger("connectors.composition")
 
 # A generous upper bound — a single owner's persona roster is small (the web UI
 # lists them); -1/unbounded isn't supported by list_personas, so cap high.
@@ -205,6 +211,84 @@ def build_persona_name_lister(
         return names
 
     return list_persona_names
+
+
+def build_sms_cost_biller(
+    *,
+    credits_policy: CreditsPolicy | None,
+    rls_engine: Engine | None,
+    resolve_owner: Callable[[str], str | None],
+    price_per_segment_cents: float | None,
+) -> Callable[[Mapping[str, str]], None]:
+    """Build the SMS status-callback handler that charges the segments to their owner.
+
+    An outbound SMS costs real money per segment and was billed to nobody. The segment
+    count has been read off the status callback since C4 T12, but the price it was
+    multiplied by was an optional argument no caller ever passed, so the recorded cost
+    could only ever be ``None`` and the recording was a log line with no reader. This is
+    the reader, and the M3 seam is what it reads into.
+
+    Three things must hold before anyone is charged, and each failure says so rather than
+    passing silently:
+
+    * **The callback must be the send.** Twilio charges when the message reaches the
+      carrier, so the shared ``map_delivery`` decides (``SmsCost.billable``). The
+      ``queued`` callback that arrives first already carries ``NumSegments`` and is not
+      yet a cost; a ``failed`` one never becomes one.
+    * **A price must be configured.** With none, nobody is billed and the gap is a
+      WARNING naming the message and the variable to set. No price is invented here:
+      Twilio's per-segment price varies by destination country and by account, and a
+      guessed price overcharges a person (the ``image_pricing`` precedent).
+    * **The message must be attributable.** The payer is the owner the destination number
+      is linked to, resolved through the same C1 binding the inbound path resolves. An
+      unlinked number (the link was revoked between send and callback) is a WARNING, not
+      a charge to whoever happens to be nearby.
+
+    The idempotency key is rooted on the Twilio message SID, which is globally unique, so
+    the queued/sent/delivered burst of callbacks for one message charges exactly once and
+    a Twilio re-delivery charges nothing further. That global uniqueness matters because
+    the conflict gate is unique on the key alone (R9-196).
+
+    Fail-soft: the charge happens after the message is already gone, so nothing about it
+    may raise into the webhook and make Twilio retry a delivered message.
+    """
+
+    def on_sms_cost(params: Mapping[str, str]) -> None:
+        cost = record_sms_cost(params, price_per_segment_cents=price_per_segment_cents)
+        if not cost.billable:
+            return
+        if cost.cost_cents is None:
+            _log.warning(
+                "sms segments went unbilled: no per-segment price configured "
+                "(sid={sid} segments={segments}). Set "
+                "PERSONA_CONNECTORS_SMS_PRICE_PER_SEGMENT_CENTS to the Twilio price for "
+                "the destinations you send to.",
+                sid=cost.message_sid,
+                segments=cost.segments,
+            )
+            return
+        destination = params.get("To", "")
+        owner_id = resolve_owner(destination) if destination else None
+        if owner_id is None:
+            _log.warning(
+                "sms segments went unbilled: no linked owner for the destination number "
+                "(sid={sid} segments={segments} cost_cents={cost})",
+                sid=cost.message_sid,
+                segments=cost.segments,
+                cost=cost.cost_cents,
+            )
+            return
+        bill_background_provider(
+            credits_policy=credits_policy,
+            rls_engine=rls_engine,
+            owner_id=owner_id,
+            provider_cents=cost.cost_cents,
+            cost_basis="provider_meter",
+            surface="sms_segments",
+            billing_key=f"sms_segments:{cost.message_sid}",
+        )
+
+    return on_sms_cost
 
 
 def build_email_recipient_resolver(
