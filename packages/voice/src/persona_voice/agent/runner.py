@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, cast
 
 from livekit import api
 from persona.billing import BillingConfig, CoreCreditsLedger
+from persona.billing.plans import entitled_plan_code
 from persona.config import PersonaCoreConfig
 from persona.errors import PersonaNotFoundError
 from persona.history import ConversationHistoryManager
@@ -229,25 +230,33 @@ def _load_user_name(engine: Engine, user_id: str) -> str | None:
 
 
 def _load_plan_code(engine: Engine, user_id: str) -> str:
-    """The caller's subscription ``plan_code`` (Spec M4, T5c) — raw SELECT, fail-safe to 'free'.
+    """The plan the caller is ENTITLED to (Spec M4, T5c): raw SELECT, fail-safe to 'free'.
 
     A raw ``SELECT`` on the ``subscription`` table (keeps persona-voice free of a persona-api
     dependency — the layering line, mirrors :func:`_load_user_name`), resolved ONCE at session
     setup (off the per-utterance path). Fail-SAFE: no row / any error ⇒ ``'free'`` (the
     restrictive set), so a lookup miss can never open the paid tiers to a free caller.
+
+    Reads ``status`` as well as ``plan_code``, and answers through the one entitlement rule
+    (:func:`persona.billing.plans.entitled_plan_code`, core and MIT, so no layering crossing).
+    ``plan_code`` alone is not entitlement: ``mark_past_due`` leaves it saying "pro", so
+    reading it by itself handed a subscriber who had stopped paying the full paid voice
+    registry. That was the third of three copies of this read; the other two were fixed on
+    the api side first, which for one commit left voice, the fastest-burning surface, as the
+    only place a lapsed subscriber still reached paid models.
     """
     try:
         with engine.begin() as conn:
             row = conn.execute(
-                text("SELECT plan_code FROM subscription WHERE user_id = :uid"),
+                text("SELECT plan_code, status FROM subscription WHERE user_id = :uid"),
                 {"uid": user_id},
             ).first()
     except Exception:  # noqa: BLE001 — a plan read must never break a call; default free (safe)
         _logger.opt(exception=True).warning("voice: plan read failed; defaulting free (fail-safe)")
         return "free"
-    if row is not None and row[0]:
-        return str(row[0])
-    return "free"
+    if row is None:
+        return "free"
+    return entitled_plan_code(str(row[0]) if row[0] else "free", str(row[1]) if row[1] else "")
 
 
 def _select_voice_tier_registry(
