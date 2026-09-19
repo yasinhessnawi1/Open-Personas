@@ -375,10 +375,12 @@ class TaskContinuation:
         """User-initiated cancel → a clean terminal state + an honest where-things-stood.
 
         The latest checkpoint is the durable where-it-stood (finalised at the prior leg end);
-        the task lands ``cancelled``. A leg in flight finishes its box and its append no-ops
-        against the now-terminal task (cancel wins; no corruption) — the cooperative mid-leg
-        ``CancelToken`` trip is the executor's ``external_cancel`` seam (T6), wired by the
-        worker's cancel signal at deploy.
+        the task lands ``cancelled``. A leg in flight stops at its next step boundary and its
+        append no-ops against the now-terminal task (cancel wins; no corruption). The
+        cooperative mid-leg trip is ``_ControlledRunner`` (D-W1-21), which reads this task row
+        at every boundary, so it works whichever process pressed cancel. The executor's
+        ``external_cancel`` seam carries the OTHER stop, the deploy drain (R9-129), which no
+        user presses and which no durable row could carry.
         """
         task = self._tasks.get(owner_id, task_id)
         summary = build_cancellation_summary(

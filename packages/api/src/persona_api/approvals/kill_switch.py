@@ -5,7 +5,9 @@ that keeps them from interfering:
 
 - **task-cancel** — A2's clean cancel (state → ``CANCELLED``, **terminal**). Immediate: the next
   leg is prevented (a terminal task is never runnable) and a running leg reaches its next
-  checkpoint via the executor's ``external_cancel`` token (A2's box mechanism), never mid-step.
+  checkpoint because ``_ControlledRunner`` (D-W1-21) re-reads this row at every step boundary,
+  never mid-step. It is that durable read, not the executor's ``external_cancel`` token, that
+  carries a control pressed in another process; the token carries the deploy drain (R9-129).
   A cancelled task cannot be revived — a budget extension's ``cas_unpause`` requires
   ``paused=true`` (cancel clears it) and a terminal task is non-runnable regardless.
 - **persona-suspend** — owner-scoped + RLS (a user suspends their own persona): no new legs for

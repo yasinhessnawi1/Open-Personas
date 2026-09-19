@@ -135,6 +135,7 @@ class Worker:
         revival_sweep_interval_seconds: float = 300.0,
         title_backfill: UntitledConversationBackfill | None = None,
         title_backfill_interval_seconds: float = 900.0,
+        on_drain: Callable[[], None] | None = None,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._rls_engine = rls_engine
@@ -151,6 +152,12 @@ class Worker:
         self._poll_jitter = poll_jitter_seconds
         self._claim_lease_seconds = claim_lease_seconds
         self._drain_seconds = drain_seconds
+        #: Called once when a drain is first requested, BEFORE the in-flight jobs are waited
+        #: on (R9-129). Stopping claiming is not enough on its own: a task leg can run for
+        #: minutes, so the work already in flight has to be told too, or the drain bound
+        #: expires and the process exits mid-step. The worker root passes the leg drain
+        #: signal here; ``None`` leaves the old behaviour exactly as it was.
+        self._on_drain = on_drain
         self._max_jobs_per_user = max_jobs_per_user
         self._max_jobs_global = max_jobs_global
         self._maintenance_interval = maintenance_interval_seconds
@@ -233,9 +240,13 @@ class Worker:
         Called by the SIGTERM/SIGINT handlers (and directly by tests). Safe to
         call repeatedly — a second signal during drain is absorbed.
         """
-        if not self._draining.is_set():
+        first = not self._draining.is_set()
+        if first:
             _log.info("drain requested", worker_id=self._worker_id)
         self._draining.set()
+        if first and self._on_drain is not None:
+            # Tell the work that is already running, not just the claim loop.
+            self._on_drain()
 
     async def run_once(
         self, *, lease_seconds: int = MEDIUM_LEASE.lease_seconds, batch: int = 1
@@ -693,6 +704,7 @@ def build_worker(
     dead_leg_sweep_builder: Callable[[Engine, Engine], DeadLegSweeper | None] | None = None,
     revival_sweep_builder: Callable[[Engine, Engine], RevivalSweeper | None] | None = None,
     title_backfill_builder: Callable[[Engine], UntitledConversationBackfill | None] | None = None,
+    on_drain: Callable[[], None] | None = None,
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -812,4 +824,5 @@ def build_worker(
         maintenance_interval_seconds=config.worker_maintenance_interval_seconds,
         archive_after_seconds=config.worker_archive_after_seconds,
         archive_retention_seconds=config.worker_archive_retention_seconds,
+        on_drain=on_drain,
     )

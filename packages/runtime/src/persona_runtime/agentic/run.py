@@ -159,12 +159,26 @@ class CancelToken:
 
     def __init__(self) -> None:
         self._cancelled = False
+        self._reason: str | None = None
 
     @property
     def is_cancelled(self) -> bool:
         """True once :meth:`cancel` has been called."""
         return self._cancelled
 
-    def cancel(self) -> None:
-        """Request cancellation. Idempotent."""
+    @property
+    def reason(self) -> str | None:
+        """Why it was tripped, when the caller named one; ``None`` for a bare cancel.
+
+        A leg's token is tripped by three different callers (the box watcher, the user's
+        own controls, the deploy drain), and the outcome has to say which, or every early
+        stop reads alike to whoever opens the task afterwards. The first reason wins:
+        cancellation is idempotent and so is its cause.
+        """
+        return self._reason
+
+    def cancel(self, reason: str | None = None) -> None:
+        """Request cancellation. Idempotent, and the first reason is the one kept."""
+        if not self._cancelled:
+            self._reason = reason
         self._cancelled = True

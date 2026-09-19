@@ -128,6 +128,7 @@ from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.drain import LegDrainSignal
 from persona_api.tasks.handler import (
     DEFAULT_RECENT_LEG_SUMMARIES,
     RunnableGuard,
@@ -191,6 +192,7 @@ def build_worker_registry(
     edition: object | None = None,
     live_sessions: LiveSessionRegistry | None = None,
     event_channel: UserEventChannel | None = None,
+    drain: LegDrainSignal | None = None,
     image_backend: ImageBackend | None = None,
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
@@ -447,6 +449,7 @@ def build_worker_registry(
     if runtime_factory is not None:
         _register_task_leg_tenant(
             registry,
+            drain=drain,
             rls_engine=rls_engine,
             runtime_factory=runtime_factory,
             memory_backend=memory_backend,
@@ -845,6 +848,7 @@ def _register_task_leg_tenant(
     recent_leg_summaries: int = DEFAULT_RECENT_LEG_SUMMARIES,
     writer: CheckpointWriter | None = None,
     acceptance: AcceptanceAssessor | None = None,
+    drain: LegDrainSignal | None = None,
 ) -> None:
     """Register the A4 ``task_leg`` handler: leg execution + continuation + digest (Spec A4).
 
@@ -929,6 +933,10 @@ def _register_task_leg_tenant(
     )
     register_task_leg_handler(
         registry,
+        # R9-129: the deploy drain reaches a leg that is already running, so a redeploy
+        # checkpoints it at its next step boundary instead of killing it mid-step and
+        # paying for the whole leg again when the lease expires and it is reclaimed.
+        drain=drain,
         task_store=task_store,
         checkpoint_store=CheckpointStore(rls_engine, token_budget=checkpoint_token_budget),
         # Finding F (completion sweep, part 2): the per-leg bounds an operator configured.
@@ -1473,6 +1481,10 @@ def start_in_process_worker(
             "PERSONA_API_IN_PROCESS_WORKER.",
             context={"reason": "worker_requires_postgres", "dialect": rls_engine.dialect.name},
         )
+    # R9-129: ONE signal per worker process, held by the leg handler (which takes a token
+    # per running leg) and tripped by the worker's own drain. Built here because this is
+    # where the registry and the worker meet; neither half can reach the other.
+    leg_drain = LegDrainSignal()
     registry = build_worker_registry(
         rls_engine=rls_engine,
         embedder=embedder,
@@ -1486,6 +1498,7 @@ def start_in_process_worker(
         edition=config.edition,
         live_sessions=live_sessions,
         event_channel=event_channel,
+        drain=leg_drain,
         # R9-013: the avatar tenant's substrate — shared with the create route's
         # producer gate (avatar_queue_ready), so enqueue implies handler.
         image_backend=image_backend,
@@ -1716,6 +1729,7 @@ def start_in_process_worker(
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,
         title_backfill_builder=_title_backfill_builder,
+        on_drain=leg_drain.request_drain,
     )
     handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()

@@ -44,6 +44,7 @@ via ``on_task_stuck``), and lets the job SUCCEED — one execution, no retry bur
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -79,6 +80,7 @@ from persona_runtime.legs import (
 from persona_api.services import run_record
 from persona_api.services.llm_usage_collector import collect_llm_usage
 from persona_api.services.user_facing_errors import owner_on_free_plan, user_facing_error_message
+from persona_api.tasks.drain import LegDrainSignal
 from persona_api.tasks.leg_profile import leg_profile
 from persona_api.tasks.leg_retrieval import LegRetrieval  # noqa: TC001 (a constructor arg)
 
@@ -364,6 +366,7 @@ async def _run_metered_leg(
     retrieval: tuple[str, ...] = (),
     seq: int | None = None,
     box: LegBox | None = None,
+    external_cancel: CancelToken | None = None,
     now: datetime,
 ) -> LegOutcome:
     """Run one leg with ``cost`` as its meter, its spend probe AND its spend reporter.
@@ -380,6 +383,7 @@ async def _run_metered_leg(
     token = bind_leg_spend_reporter(cost)
     try:
         return await executor.run_leg(
+            external_cancel=external_cancel,
             task=task,
             trigger=trigger,
             prior_checkpoint=prior_checkpoint,
@@ -536,7 +540,7 @@ class _ControlledRunner:
                         state=current.state.value,
                         paused=current.paused,
                     )
-                    cancel_token.cancel()
+                    cancel_token.cancel("control")
 
         if on_step_usage is not None:
             return await self._inner.run(
@@ -608,6 +612,7 @@ class TaskLegHandler:
         retrieval: LegRetrieval | None = None,
         acceptance: AcceptanceAssessor | None = None,
         milestones: MilestoneRecorder | None = None,
+        drain: LegDrainSignal | None = None,
     ) -> None:
         self._tasks = task_store
         self._checkpoints = checkpoint_store
@@ -637,6 +642,11 @@ class TaskLegHandler:
         # were written and tested and no production module ever constructed one, so a persona
         # that ran a task for five days could not afterwards say that it had.
         self._milestones = milestones
+        #: R9-129: the process-wide drain, or ``None`` on an install that wires none (the A2
+        #: unit shape). Its token is what finally makes the executor's ``external_cancel``
+        #: seam real: a redeploy stops the leg at its next step boundary with its work saved,
+        #: instead of killing it mid-step and paying for the whole leg again on the retry.
+        self._drain = drain
         # Spec A4 (T10): the digest hook — publishes a granularity-gated update after the leg's
         # continuation applies. Optional + best-effort; a plain A2 worker wires none.
         self._on_milestone = on_milestone
@@ -852,7 +862,10 @@ class TaskLegHandler:
         # outside the ledger is the shape M3 exists to end. The sink is inert unless a
         # usage-collecting backend is wired (the worker root wires one for the distiller),
         # so the deterministic writer and an unmetered install record nothing here.
-        with collect_llm_usage() as distillation:
+        # R9-129: one token for this leg, held by the process-wide drain for as long as the
+        # leg runs. ``nullcontext`` keeps the no-drain install byte-identical to before.
+        drain_leg = self._drain.leg_token() if self._drain is not None else nullcontext(None)
+        with collect_llm_usage() as distillation, drain_leg as drain_token:
             # R9-161: ONE priced cost per leg, read by two callers: the owner-billed
             # deduct below and the executor's ledger meter. It is built unconditionally,
             # because the task ledger backs the user's per-task budget cap and that safety
@@ -879,6 +892,7 @@ class TaskLegHandler:
                     retrieval=retrieval,
                     seq=seq,
                     box=self._leg_box(owner, task),
+                    external_cancel=drain_token,
                     now=now,
                 )
             except CheckpointTooLargeError as exc:
@@ -1337,6 +1351,7 @@ def register_task_leg_handler(
     retrieval: LegRetrieval | None = None,
     acceptance: AcceptanceAssessor | None = None,
     milestones: MilestoneRecorder | None = None,
+    drain: LegDrainSignal | None = None,
 ) -> None:
     """Register the ``task_leg`` handler (A0's task tenant) with its declared idempotency."""
     registry.register(
@@ -1366,6 +1381,7 @@ def register_task_leg_handler(
                 retrieval=retrieval,
                 acceptance=acceptance,
                 milestones=milestones,
+                drain=drain,
             ),
             idempotency_key=task_leg_idempotency_key,
             retry=TASK_LEG_RETRY_POLICY,

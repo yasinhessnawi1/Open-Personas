@@ -34,6 +34,7 @@ from persona.errors import GatedActionProposedError
 from persona.logging import get_logger
 from persona.tasks import (
     LegBox,
+    LegBoxLimit,
     SpendKind,
     UserReply,
     reconstruct_context,
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
         AutoRetry,
         EventFire,
         EventTrigger,
-        LegBoxLimit,
         RecentLegSummary,
         Revived,
         ScheduledFire,
@@ -314,7 +314,7 @@ class _BoxWatcher:
         )
         if limit is not None and not self._token.is_cancelled:
             self.box_limit = limit
-            self._token.cancel()
+            self._token.cancel(limit.value)
 
 
 class LegExecutor:
@@ -443,6 +443,13 @@ class LegExecutor:
         )
         checkpoint = _settle_open_questions(checkpoint, run, trigger)
         spend = dict(self._meter(run))
+        # R9-129: the box watcher names the bounds the leg itself reached; a drain is the one
+        # early stop it cannot see, because the token was tripped from outside by the process
+        # shutting down. Ask the token who stopped it, so a leg cut short by a redeploy does
+        # not read as one that ran out of steps, and a leg the user cancelled does not either.
+        stopped_by = watcher.box_limit
+        if stopped_by is None and token.reason == LegBoxLimit.DRAIN.value:
+            stopped_by = LegBoxLimit.DRAIN
         if run.status == RunStatus.ERROR:
             # A failed leg made no durable progress — do NOT append (advancing the head would
             # strand the task: the A0 retry would re-key to the same seq and no-op). Leave the
@@ -452,7 +459,7 @@ class LegExecutor:
                 checkpoint=checkpoint,
                 run=run,
                 disposition=LegDisposition.FAILED,
-                box_limit=watcher.box_limit,
+                box_limit=stopped_by,
                 spend=spend,
             )
         updated = self._sink.append(task, checkpoint, spend=spend, now=now)
@@ -462,7 +469,7 @@ class LegExecutor:
             checkpoint=checkpoint,
             run=run,
             disposition=disposition,
-            box_limit=watcher.box_limit,
+            box_limit=stopped_by,
             spend=spend,
             # Finding E: the producer of the timed wait, at last. The writer validated the
             # instant (future, under the ceiling); this is where it becomes the directive

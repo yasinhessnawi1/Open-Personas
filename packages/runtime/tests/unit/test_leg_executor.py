@@ -752,3 +752,27 @@ async def test_a_run_that_finished_carries_no_resume_time() -> None:
 
     assert outcome.disposition == LegDisposition.COMPLETED
     assert outcome.resume_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_drained_leg_says_the_drain_stopped_it_not_a_box_bound() -> None:
+    """R9-129: the leg profile must not report a redeploy as a leg that hit its own ceiling."""
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=10, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    drain = CancelToken()
+    drain.cancel(LegBoxLimit.DRAIN.value)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW, external_cancel=drain
+    )
+    assert outcome.box_limit is LegBoxLimit.DRAIN
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_ends_on_its_own_names_no_limit() -> None:
+    """The unchanged path: an untripped token leaves ``box_limit`` empty as before."""
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=1, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW, external_cancel=CancelToken()
+    )
+    assert outcome.box_limit is None

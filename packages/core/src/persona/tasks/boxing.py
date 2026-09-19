@@ -61,6 +61,12 @@ class LegBoxLimit(StrEnum):
     STEPS = "steps"
     WALL_CLOCK = "wall_clock"
     BUDGET = "budget"
+    #: Not a bound the leg reached but one the process imposed: the deploy drain asked every
+    #: running leg to stop, so it checkpointed at its next step boundary and its continuation
+    #: waits for the next worker (R9-129). It is named here because this enum is what the leg
+    #: profile reads, and a leg cut short by a redeploy must not read as one that exhausted
+    #: its own ceiling.
+    DRAIN = "drain"
 
 
 class LegBox(BaseModel):
