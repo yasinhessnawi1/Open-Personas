@@ -10,6 +10,7 @@
  */
 
 import { useClerk, useUser } from "@clerk/nextjs";
+import { clearAuthedImageCache } from "@/lib/authed-image-cache";
 import type { Account } from "./types";
 
 export function useAccount(): Account {
@@ -26,6 +27,10 @@ export function useAccount(): Account {
     imageUrl: user?.imageUrl ?? null,
     available: Boolean(user),
     signOut: () => {
+      // Persona portraits are held as object URLs for the life of the page
+      // (lib/authed-image-cache). Drop them with the session so a shared
+      // machine keeps nothing of the signed-out account in memory.
+      clearAuthedImageCache();
       void clerk.signOut();
     },
     manageAccount: () => clerk.openUserProfile(),

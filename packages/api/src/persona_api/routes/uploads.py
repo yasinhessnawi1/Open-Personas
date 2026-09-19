@@ -31,6 +31,7 @@ of scope here.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -50,6 +51,30 @@ from persona_api.middleware.rate_limit import rate_limit
 from persona_api.services import audit_service, chat_service, document_service, image_service
 
 router = APIRouter(prefix="/v1/personas", tags=["uploads"])
+
+#: A content-addressed workspace file name: ``blake2b(bytes, digest_size=16)``
+#: rendered as 32 hex characters (services/image_service.py, imagegen/service.py,
+#: services/workspace_persister.py all mint refs this way).
+_CONTENT_ADDRESSED_STEM = re.compile(r"^[0-9a-f]{32}$")
+
+#: One year, the longest value HTTP caches honour, plus ``immutable`` so a
+#: reload does not even send a revalidation request.
+_IMMUTABLE_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+
+def is_content_addressed_ref(ref: str) -> bool:
+    """Whether ``ref`` names a file whose bytes can never change.
+
+    Content-addressed refs are named after a hash of their own bytes, so a new
+    portrait (an avatar regeneration, a re-upload) is a NEW ref and the old one
+    keeps serving exactly the bytes it always served. That is what makes a
+    year-long ``immutable`` response safe, and why no cache invalidation exists
+    anywhere: there is nothing to invalidate.
+
+    Anything else (a human-named upload, say) gets no caching promise.
+    """
+    return bool(_CONTENT_ADDRESSED_STEM.match(PurePosixPath(ref).stem))
+
 
 # Reasons the image service raises that map to 422 (validation failures).
 # Anything else (e.g. ``decode_failed``, ``malformed_image``) maps to 422 too —
@@ -389,7 +414,10 @@ async def get_upload(
 
     The response always carries ``X-Content-Type-Options: nosniff``. Office
     documents (docx / pptx / xlsx) additionally come back as an attachment: no
-    browser renders them inline, so a download is the only honest offer.
+    browser renders them inline, so a download is the only honest offer. A
+    content-addressed ref also carries a year-long ``immutable`` Cache-Control
+    (see :func:`is_content_addressed_ref`), so the browser stops re-downloading
+    persona avatars on every navigation.
     """
     _ensure_persona_visible(request, persona_id)
 
@@ -414,6 +442,16 @@ async def get_upload(
     # The served type is derived from the extension, so tell the browser to
     # trust it rather than sniff the bytes into something executable.
     headers["X-Content-Type-Options"] = "nosniff"
+    if is_content_addressed_ref(ref):
+        # The bytes behind a hashed ref are immutable, so let the browser keep
+        # them: the web fetches these with a Bearer token (a plain <img> cannot
+        # send one), and without this every persona avatar was re-downloaded on
+        # every navigation. Deliberately NO ``Vary: Authorization``: the token
+        # rotates every few minutes, so varying on it would key the cache to a
+        # value that is always new and nothing would ever be reused. ``private``
+        # keeps shared caches out of it, and a ref is only reachable by the
+        # owner whose persona it belongs to (cross-tenant reads 404).
+        headers["Cache-Control"] = _IMMUTABLE_CACHE_CONTROL
     if media_type in image_service.ATTACHMENT_MEDIA_TYPES:
         # Both parameters per RFC 6266: the quoted ASCII name every client
         # understands, and the percent-encoded UTF-8 name modern browsers
@@ -426,4 +464,4 @@ async def get_upload(
     return Response(content=file_bytes, media_type=media_type, headers=headers)
 
 
-__all__ = ["router"]
+__all__ = ["is_content_addressed_ref", "router"]

@@ -1,5 +1,6 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearAuthedImageCache } from "@/lib/authed-image-cache";
 import {
   avatarWorkspaceRef,
   isDirectAvatarUrl,
@@ -37,8 +38,12 @@ describe("usePersonaAvatarSrc", () => {
   beforeEach(() => {
     global.URL.createObjectURL = vi.fn(() => "blob:fake");
     global.URL.revokeObjectURL = vi.fn();
+    // The blob cache is module state shared by every persona-avatar surface;
+    // each case starts cold so "did it fetch" means what it says.
+    clearAuthedImageCache();
   });
   afterEach(() => {
+    clearAuthedImageCache();
     global.fetch = realFetch;
     vi.restoreAllMocks();
   });
@@ -108,5 +113,30 @@ describe("usePersonaAvatarSrc", () => {
     expect(capturedUrl).toBe(
       "http://localhost:8000/v1/personas/p1/uploads/uploads/abc123.png",
     );
+  });
+
+  it("reuses the portrait the rest of the app already loaded, with no fetch", async () => {
+    const fetchSpy = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(["x"]),
+      } as Response;
+    });
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    // First surface (roster / chat header) loads the portrait.
+    const first = renderHook(() =>
+      usePersonaAvatarSrc("p1", "uploads/abc123.png"),
+    );
+    await waitFor(() => expect(first.result.current).toBe("blob:fake"));
+    first.unmount();
+
+    // The call orb opens on the SAME persona: first frame, no request.
+    const orb = renderHook(() =>
+      usePersonaAvatarSrc("p1", "/v1/personas/p1/uploads/uploads/abc123.png"),
+    );
+    expect(orb.result.current).toBe("blob:fake");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,6 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearAuthedImageCache } from "@/lib/authed-image-cache";
 import { useAuthedImageBlobUrl } from "./use-authed-image-blob-url";
 
 vi.mock("@clerk/nextjs", () => ({
@@ -12,6 +13,7 @@ describe("useAuthedImageBlobUrl — D-F3-X-image-serve-auth", () => {
   let fetchCalls: Array<{ url: string; init?: RequestInit }>;
 
   beforeEach(() => {
+    clearAuthedImageCache();
     fetchCalls = [];
     let n = 0;
     globalThis.URL.createObjectURL = vi.fn(() => {
@@ -36,7 +38,10 @@ describe("useAuthedImageBlobUrl — D-F3-X-image-serve-auth", () => {
       return res;
     }) as unknown as typeof fetch;
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    clearAuthedImageCache();
+    vi.restoreAllMocks();
+  });
 
   it("fetches with Bearer auth and yields a blob URL", async () => {
     const { result } = renderHook(() =>
@@ -77,37 +82,57 @@ describe("useAuthedImageBlobUrl — D-F3-X-image-serve-auth", () => {
     expect(result.current.src).toBeNull();
   });
 
-  it("revokes the blob URL on unmount (no memory leak)", async () => {
+  it("two components asking for one ref trigger a single fetch", async () => {
+    function Probe({ label }: { label: string }) {
+      const { src } = useAuthedImageBlobUrl("p", "uploads/shared.png");
+      return <span data-testid={label}>{src ?? ""}</span>;
+    }
+    render(
+      <>
+        <Probe label="a" />
+        <Probe label="b" />
+      </>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("a").textContent).toMatch(/^blob:authed-/),
+    );
+    expect(screen.getByTestId("b").textContent).toBe(
+      screen.getByTestId("a").textContent,
+    );
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  it("renders a cached ref on the first frame of the next mount", async () => {
+    const first = renderHook(() =>
+      useAuthedImageBlobUrl("p", "uploads/cached.png"),
+    );
+    await waitFor(() => expect(first.result.current.src).not.toBeNull());
+    const cachedSrc = first.result.current.src;
+    first.unmount();
+
+    const second = renderHook(() =>
+      useAuthedImageBlobUrl("p", "uploads/cached.png"),
+    );
+    // No await: the very first render already carries the cached blob URL,
+    // which is what removes the avatar pop-in on navigation.
+    expect(second.result.current.src).toBe(cachedSrc);
+    expect(second.result.current.loading).toBe(false);
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  it("keeps the blob URL alive across unmount (the cache owns it)", async () => {
     const { result, unmount } = renderHook(() =>
       useAuthedImageBlobUrl("p", "uploads/x.png"),
     );
     await waitFor(() => expect(result.current.src).not.toBeNull());
     unmount();
-    expect(URL.revokeObjectURL).toHaveBeenCalled();
+    // Revoking here would break every other mount sharing this object URL;
+    // the cache revokes on eviction instead.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
   });
 
-  it("aborts the in-flight fetch on unmount (AbortController cleanup)", async () => {
-    let abortFired = false;
-    globalThis.fetch = vi.fn(
-      (_url, init) =>
-        new Promise((_, reject) => {
-          (init as RequestInit).signal?.addEventListener("abort", () => {
-            abortFired = true;
-            reject(new Error("aborted"));
-          });
-        }),
-    ) as unknown as typeof fetch;
-    const { unmount } = renderHook(() =>
-      useAuthedImageBlobUrl("p", "uploads/x.png"),
-    );
-    // Wait one microtask so the hook reaches fetch() (after getToken await).
-    await Promise.resolve();
-    await Promise.resolve();
-    unmount();
-    expect(abortFired).toBe(true);
-  });
-
-  it("re-fetches when workspacePath changes (and revokes the old URL)", async () => {
+  it("re-fetches when workspacePath changes", async () => {
     const { rerender, result } = renderHook(
       ({ path }: { path: string }) => useAuthedImageBlobUrl("p", path),
       { initialProps: { path: "uploads/a.png" } },
@@ -116,13 +141,12 @@ describe("useAuthedImageBlobUrl — D-F3-X-image-serve-auth", () => {
     const firstSrc = result.current.src;
     rerender({ path: "uploads/b.png" });
     // Wait for BOTH conditions in one predicate: src is non-null AND
-    // different from the original. The hook briefly nulls src during the
-    // effect cleanup; checking both together avoids racing the null window.
+    // different from the original. The hook briefly nulls src while the new
+    // ref loads; checking both together avoids racing the null window.
     await waitFor(() => {
       expect(result.current.src).not.toBeNull();
       expect(result.current.src).not.toBe(firstSrc);
     });
-    // The old URL was revoked when the effect cleanup fired on path change.
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith(firstSrc);
+    expect(fetchCalls).toHaveLength(2);
   });
 });

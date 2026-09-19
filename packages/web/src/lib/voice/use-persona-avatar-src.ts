@@ -12,13 +12,23 @@
  *
  *   - direct URLs (http/https/blob/data — e.g. a user-supplied avatar) pass
  *     through unchanged, no fetch;
- *   - a bare workspace ref is fetched with the Bearer token (same path as
- *     `useAuthedImageBlobUrl`) and wrapped in an object URL;
+ *   - a bare workspace ref goes through the shared per-session image cache
+ *     (`@/lib/authed-image-cache`), the same one `useAuthedImageBlobUrl` uses
+ *     and under the same key, so a persona whose portrait was already shown in
+ *     the roster or the chat header opens the call orb with no fetch at all;
  *   - null/empty → null, and NO fetch happens (the no-avatar case stays inert).
+ *
+ * The cache owns the object URL, so this hook never revokes: the orb's portrait
+ * is the same object URL the rest of the app is showing.
  */
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/auth";
+import {
+  authedImageCacheKey,
+  loadCachedImage,
+  peekCachedImage,
+} from "@/lib/authed-image-cache";
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
@@ -42,13 +52,25 @@ export function avatarWorkspaceRef(avatarUrl: string): string {
   return match ? match[1] : avatarUrl.replace(/^\/+/, "");
 }
 
+/** The resolved src a persona avatar starts with, before any fetch. */
+function initialSrc(
+  personaId: string,
+  avatarUrl: string | null | undefined,
+): string | null {
+  if (!avatarUrl) return null;
+  if (isDirectAvatarUrl(avatarUrl)) return avatarUrl;
+  return peekCachedImage(
+    authedImageCacheKey(personaId, avatarWorkspaceRef(avatarUrl)),
+  );
+}
+
 export function usePersonaAvatarSrc(
   personaId: string,
   avatarUrl: string | null | undefined,
 ): string | null {
   const { getToken } = useAuth();
-  const [src, setSrc] = useState<string | null>(
-    avatarUrl && isDirectAvatarUrl(avatarUrl) ? avatarUrl : null,
+  const [src, setSrc] = useState<string | null>(() =>
+    initialSrc(personaId, avatarUrl),
   );
 
   useEffect(() => {
@@ -62,36 +84,29 @@ export function usePersonaAvatarSrc(
     }
 
     let cancelled = false;
-    let objectUrl: string | null = null;
-    const controller = new AbortController();
+    const ref = avatarWorkspaceRef(avatarUrl);
 
-    (async () => {
-      try {
-        const token = await getToken(
-          TEMPLATE ? { template: TEMPLATE } : undefined,
-        );
-        const res = await fetch(
-          `${API}/v1/personas/${encodeURIComponent(personaId)}/uploads/${avatarWorkspaceRef(avatarUrl)}`,
-          {
-            signal: controller.signal,
-            headers: token ? { Authorization: `Bearer ${token}` } : {},
-          },
-        );
-        if (cancelled || !res.ok) return;
-        const blob = await res.blob();
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setSrc(objectUrl);
-      } catch {
+    loadCachedImage(authedImageCacheKey(personaId, ref), async () => {
+      const token = await getToken(
+        TEMPLATE ? { template: TEMPLATE } : undefined,
+      );
+      const res = await fetch(
+        `${API}/v1/personas/${encodeURIComponent(personaId)}/uploads/${ref}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      );
+      if (!res.ok) return null;
+      return await res.blob();
+    })
+      .then((url) => {
+        if (!cancelled && url !== null) setSrc(url);
+      })
+      .catch(() => {
         // Avatar is decorative on the call surface — fall back to the orb's
         // identity fill + initials (D-V6-1 works avatar-or-not). Never throw.
-      }
-    })();
+      });
 
     return () => {
       cancelled = true;
-      controller.abort();
-      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
     };
   }, [personaId, avatarUrl, getToken]);
 
