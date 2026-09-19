@@ -50,6 +50,14 @@ class APIScheduleReader:
         ``scope="all"`` half). The window is clamped server-side to the configured horizon
         and the result to the configured count — ``truncated`` carries that fact through
         honestly rather than silently returning a short list.
+
+        The two scopes also differ on SYSTEM-provisioned schedules (the A5 daily initiative
+        scan, :data:`~persona_api.services.occurrences_service.SYSTEM_ORIGINATED_JOB_TYPES`).
+        ``scope="mine"`` is the persona looking at its own commitments, and its own wake-up
+        is one of them, so it is included. ``scope="all"`` is the USER's calendar, the same
+        thing the web calendar shows, and a scan the user never asked for is not an entry on
+        it, so it is excluded. That keeps the persona from reporting four identical 07:00
+        rows back to the user as if they were appointments.
         """
         result = list_occurrences(
             self._engine,
@@ -58,6 +66,7 @@ class APIScheduleReader:
             to=end,
             config=self._config,
             persona_id=persona_id,
+            include_system=persona_id is not None,
         )
         return ScheduleAgenda(
             occurrences=tuple(

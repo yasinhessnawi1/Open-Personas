@@ -1203,7 +1203,7 @@
       "title": "New routine",
       "intro": "Tell a persona what to do, and when. You'll preview it before it's set.",
       "subjectLabel": "What should I do for you?",
-      "subjectPlaceholder": "e.g. stretch for five minutes",
+      "subjectPlaceholder": "e.g. send me a morning brief of my calendar and top news",
       "whoLabel": "Who should run it?",
       "whoPlaceholder": "Choose a persona…",
       "notify": "Notify me in the bell when it runs",

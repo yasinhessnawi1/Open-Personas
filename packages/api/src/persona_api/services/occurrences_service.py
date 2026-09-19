@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import bindparam, text
 
 from persona_api.db.engine import rls_connection
+from persona_api.initiative.handler import INITIATIVE_SCAN_JOB_TYPE
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schemas.responses import ScheduleCadenceOut
 from persona_api.services.calendar_reschedule_service import current_cadence
@@ -34,7 +35,21 @@ if TYPE_CHECKING:
 
     from persona_api.config import APIConfig
 
-__all__ = ["FireEvent", "Occurrence", "OccurrencesResult", "list_occurrences"]
+__all__ = [
+    "SYSTEM_ORIGINATED_JOB_TYPES",
+    "FireEvent",
+    "Occurrence",
+    "OccurrencesResult",
+    "list_occurrences",
+]
+
+#: Schedules the SYSTEM provisioned on the persona's behalf, not routines the user asked for.
+#: Today that is exactly the A5 daily initiative scan: every persona with initiative on gets one
+#: (``InitiativeProvisioner`` / the dial verb call ``ensure_initiative_schedule``), so four
+#: personas meant four identical "every day at 07:00" cards on a calendar the user never put
+#: anything on. The stamp is the schedule's own ``target_job_type`` (what the provisioner already
+#: sets), never the goal text.
+SYSTEM_ORIGINATED_JOB_TYPES: frozenset[str] = frozenset({INITIATIVE_SCAN_JOB_TYPE})
 
 # Schedule-audit actions that describe a past fire/miss (the honest history markers).
 _HISTORY_ACTIONS = ("schedule.fire", "schedule.fire_late", "schedule.miss")
@@ -99,6 +114,7 @@ def list_occurrences(
     to: datetime,
     config: APIConfig,
     persona_id: str | None = None,
+    include_system: bool = False,
 ) -> OccurrencesResult:
     """Compute the owner's occurrences in ``[from_, to]`` + recent history, server-capped.
 
@@ -114,7 +130,15 @@ def list_occurrences(
     already computed for every occurrence's ``task_id``/``persona_id`` fields (no extra query); a
     schedule with no backing task (``initiative_scan``) resolves from its own
     ``payload_template.persona_id``. ``None`` (the default) is byte-identical to pre-R9-024
-    behaviour — no schedule is ever filtered out.
+    behaviour: the persona filter drops nothing.
+
+    ``include_system`` decides whether SYSTEM-provisioned schedules
+    (:data:`SYSTEM_ORIGINATED_JOB_TYPES`, today the A5 daily initiative scan) are part of the
+    answer. It defaults to ``False`` because every user-facing surface reading this model lists
+    routines the USER set up: the web calendar, the chat right panel, the morning digest's
+    "upcoming". The persona's own ``schedule_introspect`` passes ``True`` for its ``scope="mine"``
+    read, where the wake-up genuinely is the persona's own commitment (see
+    :class:`persona_api.schedules.reader.APIScheduleReader`).
     """
     max_count = config.schedule_occurrences_max_count
     horizon = timedelta(days=config.schedule_occurrences_max_horizon_days)
@@ -128,6 +152,8 @@ def list_occurrences(
     collected: list[Occurrence] = []
     cadences: dict[str, ScheduleCadenceOut] = {}
     for schedule in schedules:
+        if not include_system and schedule.target_job_type in SYSTEM_ORIGINATED_JOB_TYPES:
+            continue
         if persona_id is not None:
             resolved = _resolved_persona_id(schedule, task_by_schedule)
             if resolved != persona_id:

@@ -62,7 +62,7 @@ function timeInput(): HTMLInputElement {
 
 async function fillRequired() {
   fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
-    target: { value: "stretch for five minutes" },
+    target: { value: "send me a morning brief" },
   });
   // R11-B3: the shared persona picker replaced the select — open + pick.
   fireEvent.click(screen.getByLabelText(/who should run it/i));
@@ -87,13 +87,29 @@ describe("CreateReminderDialog", () => {
     makeDialog();
     // subject + persona ONLY — do NOT touch the recurrence builder.
     fireEvent.change(screen.getByLabelText(/what should i do for you/i), {
-      target: { value: "stretch for five minutes" },
+      target: { value: "send me a morning brief" },
     });
     fireEvent.click(screen.getByLabelText(/who should run it/i));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Astrid/ }));
     // The builder announced "Every day at 09:00" on mount, so the cadence gate passes
     // without the user touching the picker (R4-C1-24: Preview/Create was dead otherwise).
     expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
+  it("shows an example of something a persona actually does for you (issue #12)", () => {
+    // The old placeholder ("stretch for five minutes") described a chore the USER does,
+    // which taught the wrong thing about the feature on the one screen where it is being
+    // explained. The example has to be work a persona can carry out on your behalf.
+    makeDialog();
+    const field = screen.getByLabelText(/what should i do for you/i);
+    expect(field).toHaveAttribute(
+      "placeholder",
+      messages.schedule.create.subjectPlaceholder,
+    );
+    expect(field.getAttribute("placeholder")).toMatch(
+      /send me a morning brief of my calendar and top news/i,
+    );
+    expect(field.getAttribute("placeholder")).not.toMatch(/stretch/i);
   });
 
   it("reuses A8's builder and gates Preview on subject + persona + cadence", async () => {
@@ -121,7 +137,7 @@ describe("CreateReminderDialog", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
     const body = client.createSchedule.mock.calls[0][1];
     expect(body.persona_id).toBe("p1");
-    expect(body.subject).toBe("stretch for five minutes");
+    expect(body.subject).toBe("send me a morning brief");
     expect(body.timezone).toBe("Europe/Oslo");
     expect(body.pattern?.kind).toBe("daily");
     expect(body.idempotency_key).toMatch(/[0-9a-f-]{36}/); // minted once per dialog-open

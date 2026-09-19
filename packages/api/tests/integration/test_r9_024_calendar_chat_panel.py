@@ -130,17 +130,30 @@ def _task_linked_schedule(
 
 
 def _payload_linked_schedule(
-    store: ScheduleStore, *, owner: str, persona: str, schedule_id: str, hour: int = 9
+    store: ScheduleStore,
+    *,
+    owner: str,
+    persona: str,
+    schedule_id: str,
+    hour: int = 9,
+    job_type: str = "briefing",
 ) -> str:
-    """An ``initiative_scan``-style schedule — persona lives directly in ``payload_template``,
-    no backing ``tasks`` row (mirrors ``initiative.handler.ensure_initiative_schedule``)."""
+    """A payload-linked schedule: the persona lives directly in ``payload_template`` and there
+    is no backing ``tasks`` row (the shape ``initiative.handler.ensure_initiative_schedule``
+    creates).
+
+    ``job_type`` defaults to a NON system-originated one on purpose. The calendar read now
+    hides ``initiative_scan`` rows outright (issue #11), so a persona-filter test built on that
+    job type would pass for the wrong reason. The filter tests below are about persona
+    RESOLUTION through the payload; the exclusion has its own test at the bottom of this file.
+    """
     store.create(
         Schedule(
             id=schedule_id,
             owner_id=owner,
             timezone="Europe/Oslo",
             recurrence=RecurrenceRule(freq=RecurrenceFreq.DAILY, byhour=(hour,), byminute=(0,)),
-            target_job_type="initiative_scan",
+            target_job_type=job_type,
             payload_template={"persona_id": persona},
             created_at=_CREATED,
             updated_at=_CREATED,
@@ -257,6 +270,51 @@ def test_absent_persona_filter_is_unchanged(
     assert r.status_code == 200
     ids = {o["schedule_id"] for o in r.json()["occurrences"]}
     assert ids == {sched_a, sched_b}  # the union — no filtering applied at all
+
+
+# --- the system-provisioned scan is not a routine (issue #11) ---------------------------
+
+
+def test_the_daily_initiative_scan_is_not_on_the_users_calendar(
+    client: TestClient,
+    engine: Engine,
+    store: ScheduleStore,
+    tasks: TaskStore,
+    migrated_engine: Engine,
+) -> None:
+    """Every persona with initiative on gets a provisioned daily scan (its own wake-up). The
+    user never created it, so it is not one of their routines: neither the whole-calendar
+    read nor the chat panel's per-persona read lists it, while the routine they DID create
+    at the same hour stays. Non-vacuous both ways.
+    """
+    owner = "r9024_sysfire"
+    _seed_owner_with_personas(migrated_engine, owner, ["r9024_sa"])
+    scan_id = _payload_linked_schedule(
+        store,
+        owner=owner,
+        persona="r9024_sa",
+        schedule_id="initsched:r9024_sa",
+        hour=7,
+        job_type="initiative_scan",
+    )
+    routine_id = _task_linked_schedule(
+        engine, store, tasks, owner=owner, persona="r9024_sa", key="k-sysfire"
+    )
+
+    whole = client.get("/v1/me/schedule/occurrences", params=_WINDOW, headers=_auth(owner)).json()
+    panel = client.get(
+        "/v1/me/schedule/occurrences",
+        params={**_WINDOW, "persona_id": "r9024_sa"},
+        headers=_auth(owner),
+    ).json()
+
+    for view in (whole, panel):
+        ids = {o["schedule_id"] for o in view["occurrences"]}
+        assert routine_id in ids  # the user's own routine is still there
+        assert scan_id not in ids
+        assert scan_id not in view["cadences"]
+    # The schedule itself is untouched: hidden from the calendar, not deleted from the tick.
+    assert store.get(owner, scan_id).id == scan_id
 
 
 # --- the delete verb -------------------------------------------------------------------

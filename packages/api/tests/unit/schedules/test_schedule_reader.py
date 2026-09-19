@@ -82,6 +82,21 @@ def test_mine_scope_passes_the_persona_filter_through(recorder: _Recorder) -> No
     assert recorder.kwargs["persona_id"] == "astrid"
 
 
+def test_mine_scope_includes_the_personas_own_wake_up(recorder: _Recorder) -> None:
+    """scope="mine" is the persona reading its own commitments, and the A5 daily scan is
+    one of them, so the system-provisioned schedule is asked for."""
+    _reader().read_agenda(start=_NOW, end=_NOW + timedelta(days=1), persona_id="astrid")
+    assert recorder.kwargs["include_system"] is True
+
+
+def test_all_scope_reads_the_users_calendar_without_the_scans(recorder: _Recorder) -> None:
+    """scope="all" is the USER's calendar, the same read the web calendar renders. A wake-up
+    scan the user never created is not an entry on it, so the persona never reports one back
+    as though it were an appointment."""
+    _reader().read_agenda(start=_NOW, end=_NOW + timedelta(days=7), persona_id=None)
+    assert recorder.kwargs["include_system"] is False
+
+
 def test_maps_every_occurrence_field(recorder: _Recorder) -> None:
     agenda = _reader().read_agenda(start=_NOW, end=_NOW + timedelta(days=7), persona_id=None)
 
