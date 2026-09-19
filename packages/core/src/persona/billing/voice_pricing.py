@@ -30,12 +30,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.billing.pricing_registry import PRICING_ROWS, infra_rate_cents
+from persona.billing.pricing_registry import infra_rate_cents, served_row
 
 if TYPE_CHECKING:
     from persona.billing.basis import CostBasis
     from persona.billing.formula import BillingConfig
-    from persona.billing.pricing_registry import PricingRow
 
 __all__ = [
     "livekit_infra_cents",
@@ -48,28 +47,10 @@ _SECONDS_PER_MINUTE = 60.0
 _CHARS_PER_UNIT = 1000.0
 
 
-def _served_row(surface: str, provider: str, model: str | None) -> PricingRow | None:
-    """The registry row for the served ``(surface, provider)``, disambiguated by ``model``.
-
-    A provider with several priced SKUs (ElevenLabs Flash vs Multilingual) is
-    resolved by ``model`` when it matches a row's ``sku``; otherwise the CHEAPEST
-    priced row wins, so ambiguity never over-charges. Rows without a priced
-    ``provider_cost_cents`` (the LLM resolver rows) are ignored here.
-    """
-    rows = [
-        row
-        for row in PRICING_ROWS
-        if row.surface == surface
-        and row.provider == provider
-        and row.provider_cost_cents is not None
-    ]
-    if not rows:
-        return None
-    if model is not None:
-        for row in rows:
-            if row.sku == model:
-                return row
-    return min(rows, key=lambda row: row.provider_cost_cents or 0.0)
+#: The registry lookup both priced surfaces share (promoted to ``pricing_registry`` so voice
+#: and image cannot drift into two answers for one price). Kept as a module-local alias so the
+#: call sites below read unchanged.
+_served_row = served_row
 
 
 def voice_stt_cents(

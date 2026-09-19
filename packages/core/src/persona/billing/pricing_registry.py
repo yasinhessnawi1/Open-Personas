@@ -41,6 +41,7 @@ __all__ = [
     "PricingRow",
     "infra_rate_cents",
     "registry_keys",
+    "served_row",
 ]
 
 #: Which infra flat rate applies to a surface's unit (``"none"`` = a provider
@@ -234,3 +235,29 @@ def infra_rate_cents(config: BillingConfig, unit: InfraUnit) -> float:
         "none": 0.0,
     }
     return mapping[unit]
+
+
+def served_row(surface: str, provider: str, model: str | None = None) -> PricingRow | None:
+    """The registry row for a served ``(surface, provider)``, disambiguated by ``model``.
+
+    A provider with several priced SKUs is resolved by ``model`` when it matches a row's
+    ``sku``; otherwise the CHEAPEST priced row wins, so ambiguity can never over-charge. Rows
+    carrying ``provider_cost_cents=None`` (the LLM resolver rows, priced from token metadata)
+    are ignored: this answers "what does one unit of this surface cost", and those rows do not
+    know. Lives here, with the rows, because voice and image both need the same question
+    answered and a second copy of it is how two surfaces come to disagree about one price.
+    """
+    rows = [
+        row
+        for row in PRICING_ROWS
+        if row.surface == surface
+        and row.provider == provider
+        and row.provider_cost_cents is not None
+    ]
+    if not rows:
+        return None
+    if model is not None:
+        for row in rows:
+            if row.sku == model:
+                return row
+    return min(rows, key=lambda row: row.provider_cost_cents or 0.0)

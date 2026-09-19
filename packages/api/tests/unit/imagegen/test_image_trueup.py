@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from loguru import logger as _loguru_logger
 from persona.billing import BillingConfig
 from persona.imagegen import GeneratedImage, GenerationResult
 from persona_api.imagegen.service import _true_up_image_charge
@@ -108,3 +109,50 @@ def test_unpriced_falls_to_the_floor_and_refunds() -> None:
     assert kw["amount"] == 49
     assert kw["cost_cents"] == pytest.approx(0.0)
     assert kw["cost_basis"] == "unpriced"
+
+
+# --- a backend that reports no cost is still priced, not floored (M-track sweep) ----------
+
+
+def test_a_registry_priced_image_bills_its_real_cost_not_the_floor() -> None:
+    """The headline defect: only the OpenRouter backend sets ``cost_usd``, so every other
+    image priced at 0.0 and billed the 1-credit floor. 50 pre-deducted, 49 refunded, a
+    roughly 4 cent image recovered as 1 cent. With the registry consulted, the same result
+    with NO provider-reported cost bills the row's price."""
+    policy = _RecordingPolicy()
+    _trueup(policy, _result(provider="openrouter", model="gpt-image-2", cost_usd=None), ceiling=50)
+
+    method, kw = policy.calls[-1]
+    assert method == "refund"
+    assert kw["cost_cents"] == pytest.approx(4.0), "the image was not priced from the registry"
+    assert kw["cost_basis"] == "estimate_catalog"
+    assert kw["amount"] == 46, "refunded as though the image had cost the floor"
+
+
+def test_a_provider_reported_actual_still_wins_over_the_registry() -> None:
+    """What we actually paid beats a catalog estimate; the registry is the fallback only."""
+    policy = _RecordingPolicy()
+    _trueup(policy, _result(provider="openrouter", model="gpt-image-2", cost_usd=0.09), ceiling=50)
+
+    _, kw = policy.calls[-1]
+    assert kw["cost_cents"] == pytest.approx(9.0)
+    assert kw["cost_basis"] == "actual_openrouter"
+
+
+def test_an_unpriceable_image_says_so_instead_of_billing_the_floor_quietly() -> None:
+    """A provider with no actual and no row is a REAL gap in the money path. It still floors,
+    because inventing a price would overcharge a person, but it must name itself: the original
+    defect survived precisely because an unpriced image looked exactly like a cheap one."""
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    try:
+        policy = _RecordingPolicy()
+        _trueup(policy, _result(provider="fake", model="fake-1", cost_usd=None), ceiling=50)
+    finally:
+        _loguru_logger.remove(sink_id)
+
+    _, kw = policy.calls[-1]
+    assert kw["cost_basis"] == "unpriced"
+    assert any("fake" in line for line in captured), (
+        "an image we cannot price was billed the floor with no signal naming the provider"
+    )

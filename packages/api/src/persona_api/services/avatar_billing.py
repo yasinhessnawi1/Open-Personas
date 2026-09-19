@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.billing import BillingConfig, credits_charged
+from persona.billing.image_pricing import image_cents
 from persona.logging import get_logger
 from persona_runtime.cost import compute_turn_cost
 from pydantic import BaseModel, ConfigDict
@@ -97,6 +98,18 @@ def bill_avatar_owner(
             actual_cost_usd=result.cost_usd,
             source=cost_source,
         )
+        if basis == "unpriced":
+            # The same gap the generated-image true-up had: only the OpenRouter backend
+            # reports its own cost, and per-token pricing over zero tokens floors the charge.
+            # An avatar is an image, so it is priced from the same registry row.
+            cost_cents, basis = image_cents(result.provider, model=result.model)
+        if basis == "unpriced":
+            _LOG.warning(
+                "avatar billed at the floor: no provider cost and no pricing row "
+                "provider={provider} model={model}",
+                provider=result.provider,
+                model=result.model,
+            )
         charge = credits_charged(
             provider_cents=cost_cents,
             infra_flat_cents=0.0,

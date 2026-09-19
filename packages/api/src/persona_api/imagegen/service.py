@@ -65,6 +65,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.billing import BillingConfig, credits_charged
+from persona.billing.image_pricing import image_cents
 from persona.imagegen import (
     ContentRejectedError,
     GeneratedImage,
@@ -429,6 +430,25 @@ def _true_up_image_charge(
         actual_cost_usd=result.cost_usd,
         source=cost_source,
     )
+    if basis == "unpriced":
+        # Only the OpenRouter backend reports its own cost; openai, fal, nvidia and cloudflare
+        # leave the result's defaults, and ``compute_turn_cost`` prices per TOKEN, so zero
+        # tokens priced every one of their images at nothing and the charge fell to the floor.
+        # A ~4 cent image was recovered as 1 cent. The registry knows what an image costs, so
+        # ask it before giving up. A provider actual still wins: this runs only when there
+        # wasn't one.
+        cost_cents, basis = image_cents(result.provider, model=result.model)
+    if basis == "unpriced":
+        # Still nothing: we genuinely do not know what this image cost. Keep the floor rather
+        # than invent a price (a guess overcharges a person; the floor undercharges us), but
+        # say which provider and model so the gap is visible. The original defect survived
+        # because an unpriced image was indistinguishable from a cheap one.
+        _LOG.warning(
+            "image billed at the floor: no provider cost and no pricing row "
+            "provider={provider} model={model}",
+            provider=result.provider,
+            model=result.model,
+        )
     real_charge = credits_charged(
         provider_cents=cost_cents,
         infra_flat_cents=0.0,  # infra via the credit floor (D-M3-4 amendment)

@@ -175,3 +175,30 @@ def test_bill_avatar_owner_never_raises_when_the_ledger_fails() -> None:
         billing_key="avatar:x",
     )
     assert charge is None
+
+
+# --- an avatar is an image: it is priced from the same registry row ------------------------
+
+
+def test_an_avatar_with_no_provider_cost_is_priced_not_floored() -> None:
+    """Same defect as the generated-image true-up: only the OpenRouter backend reports its own
+    cost, and per-token pricing over a result carrying no tokens floored the charge, so a
+    roughly 4 cent avatar was recovered as 1 cent."""
+    from persona_api.services.avatar_billing import bill_avatar_owner
+
+    ledger = _Ledger()
+    charge = bill_avatar_owner(
+        credits_policy=ledger,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+        cost_source=None,
+        image_credit_floor=1,
+        owner_id="u1",
+        persona_id="p1",
+        result=_generation(cost_usd=None),
+        billing_key="avatar:p1:1",
+    )
+
+    assert charge is not None
+    assert charge.cost_cents == pytest.approx(4.0), "the avatar was not priced from the registry"
+    assert charge.cost_basis == "estimate_catalog"
+    assert ledger.deducts[-1]["amount"] == 4, "an avatar we can price still billed the floor"
