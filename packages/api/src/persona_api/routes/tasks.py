@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Request
 from persona.errors import ScheduleNotFoundError, TaskNotFoundError
 from persona.logging import get_logger
-from persona.tasks import TaskState, is_terminal
+from persona.tasks import TaskState, format_micros, is_terminal
 from persona.tasks.reader import IntrospectionStatus, project_task_state, summarise_task
 from persona.tasks.reports import (
     build_cancellation_summary,
@@ -77,6 +77,16 @@ REPLY_TOO_LONG_MESSAGE = (
 _CHECKPOINT_LIMIT = 10
 #: A single budget extension can't exceed the platform default cap (the bound — never unbounded).
 _MAX_EXTEND_MICROS = PLATFORM_DEFAULT_BUDGET_MICROS
+
+
+def _extension_ceiling_detail() -> str:
+    """The 422 a user earns by asking for too much, in the currency they are charged in.
+
+    R9-172 tail: this said "the maximum of 100000 micros", which is the ledger's own integer
+    and means nothing to the person reading it. The web surfaces this detail on a failed
+    raise-the-cap, so it is user-visible text, not an operator log line.
+    """
+    return f"that is more than you can add at once, which is {format_micros(_MAX_EXTEND_MICROS)}"
 
 
 _log = get_logger("api.routes.tasks")
@@ -526,10 +536,7 @@ async def extend_budget(
 ) -> BudgetExtendResult:
     """Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap."""
     if body.amount_micros > _MAX_EXTEND_MICROS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"extension exceeds the maximum of {_MAX_EXTEND_MICROS} micros",
-        )
+        raise HTTPException(status_code=422, detail=_extension_ceiling_detail())
     engine = request.app.state.rls_engine
     store = TaskStore(engine)
     try:

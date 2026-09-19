@@ -9,7 +9,7 @@ categories → ``allow``, gated-by-default categories → ``gate``). So:
 
 - an **unconfigured** task (``DEFAULT_POLICY``, no overrides) observes/computes/drafts/notifies
   freely and **gates** the four consequential categories (criterion 2);
-- a contract clause (A4) **loosens** one category ("yes, it may ``spend`` up to 1500kr without
+- a contract clause (A4) **loosens** one category ("yes, it may ``spend`` up to $1500 without
   asking" → ``spend: allow``) or **tightens** it (``external_mutate: deny``) without touching
   the rest — granted once, visibly, where the user is paying attention (the grant-at-contract,
   gate-at-the-exception discipline);

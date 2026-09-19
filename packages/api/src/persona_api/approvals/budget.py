@@ -13,7 +13,7 @@ The state machine over ``task.ledger.total_micros`` vs the effective cap:
 - **reached** (≥100%) → the task is **paused** (A2 overlay — no new legs) + a ``budget.reached``
   account; nothing runs past the cap until the user extends.
 
-**The extension is at-most-once.** "add another 50kr" → a single ``budget.extended`` row that
+**The extension is at-most-once.** "add another $2" → a single ``budget.extended`` row that
 raises the cap + resumes the task. The CAS lives in :meth:`TaskStore.cas_unpause` (clear the
 overlay iff set): only the un-pause winner writes the extension, so a duplicated extension reply
 cannot double-extend.

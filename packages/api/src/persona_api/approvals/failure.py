@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from persona.tasks import format_micros
+
 from persona_api.approvals.cadence import MessagePriority
 
 if TYPE_CHECKING:
@@ -108,14 +110,34 @@ def account_for_stuck(report: StuckReport, *, kind: FailureKind) -> FailureAccou
     )
 
 
+#: The amount the budget-pause ask offers as its worked example, in ledger micros ($2.00).
+#: It is deliberately small: a single extension is capped at ``_MAX_EXTEND_MICROS`` ($10) by
+#: ``routes.tasks``, and the previous example ("add another 50kr") parsed to FIFTY dollars, so
+#: the product printed an instruction the product refused. The bound is not enforceable from
+#: here without importing the route layer, so the test crosses it instead: see
+#: ``test_the_worked_example_sits_under_the_server_ceiling``.
+_EXAMPLE_EXTENSION_MICROS = 20_000
+
+
 def account_for_budget_pause(task_id: str, *, cap_micros: int, spent_micros: int) -> FailureAccount:
     """Voice a budget-reached pause (T10) — it asks to extend (an approval-class C0)."""
     return FailureAccount(
         kind=FailureKind.BUDGET_PAUSE,
         task_id=task_id,
         headline="I've reached the budget you set for this task.",
-        cause=f"spent {spent_micros} of {cap_micros} micros; I've paused rather than overrun it",
-        options=("extend the budget (e.g. 'add another 50kr')", "cancel the task"),
+        # R9-172 tail: this is the one message a user reads when a task stops at its cap, and
+        # it stated the money as raw ledger integers and taught the answer in kroner. The
+        # parser reads a bare "50kr" as fifty DOLLARS and the server refuses any single
+        # extension over $10, so the product's own worked example was one the product refused.
+        cause=(
+            f"spent {format_micros(spent_micros)} of {format_micros(cap_micros)}; "
+            "I've paused rather than overrun it"
+        ),
+        options=(
+            "raise the budget (for example, add another "
+            f"{format_micros(_EXAMPLE_EXTENSION_MICROS)})",
+            "cancel the task",
+        ),
         priority=MessagePriority.APPROVAL,  # the extend-ask — also a cadence-bypass class
     )
 
