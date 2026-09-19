@@ -42,6 +42,7 @@ from persona.billing import (
     voice_stt_cents,
     voice_tts_cents,
 )
+from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
 from persona_runtime.cost import compute_turn_cost
 
@@ -277,6 +278,23 @@ class VoiceTurnBillingMeter:
             # once. Fired on the loop (the cutoff speaks + deletes the room); the
             # DB write already happened off-loop above.
             if exhausted and self._on_exhausted is not None and not self._exhausted_fired:
+                self._exhausted_fired = True
+                await self._on_exhausted()
+        except DailySpendCapExceededError as exc:
+            # R7's per-UTC-day cap refused this charge BEFORE the balance was touched, so the
+            # turn is UNBILLED and so is every turn after it. Fail-soft is right for a
+            # transient billing fault and wrong here: the STT, TTS, model and transport cost
+            # is real and still being incurred, so swallowing the refusal would serve the rest
+            # of the call for free and stop recording what it cost. To the person on the call
+            # this is the same situation as an empty wallet, so it takes the same cutoff: say
+            # so, once, and end the call.
+            _LOG.warning(
+                "voice turn refused by the daily spend cap call={call} turn={seq}: {err}",
+                call=self._call_id,
+                seq=turn_seq,
+                err=repr(exc)[:200],
+            )
+            if self._on_exhausted is not None and not self._exhausted_fired:
                 self._exhausted_fired = True
                 await self._on_exhausted()
         except Exception as exc:  # noqa: BLE001 — billing must never break the turn/audio path

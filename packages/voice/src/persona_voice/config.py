@@ -44,10 +44,30 @@ class VoiceConfig(BaseSettings):
     community_owner_id: str = Field(default="local-owner")
     community_owner_email: str = Field(default="local@localhost")
 
+    # --- R7 denial-of-wallet guard (R7-D-6) ---
+    # The SAME unprefixed ``CREDITS_MAX_PER_DAY`` the api reads, and the same default, so one
+    # knob answers for both halves of the product. A voice-only name would let a user's cap
+    # differ depending on which surface they happened to be on.
+    #
+    # Voice built its ledger with no cap at all until 2026-09-19, so R7 was absent on the
+    # surface that spends fastest: a live call meters STT, TTS, the model and LiveKit
+    # transport every turn, and nothing but the wallet itself bounded a day of them.
+    credits_max_per_day: int = Field(default=10_000, ge=0, validation_alias="CREDITS_MAX_PER_DAY")
+
     @property
     def is_cloud(self) -> bool:
         """Whether this process runs the commercial cloud edition."""
         return self.edition.strip().lower() == "cloud"
+
+    @property
+    def effective_daily_cap(self) -> int:
+        """The per-user, per-UTC-day credit cap this process enforces; ``0`` is uncapped.
+
+        Mirrors the api's edition factory (``build_credits_policy``): cloud enforces the
+        configured cap, community is uncapped because a self-host install is single-owner and
+        has no denial-of-wallet surface to guard.
+        """
+        return self.credits_max_per_day if self.is_cloud else 0
 
     # --- LiveKit substrate (D-V1-1 branch (A), D-V1-X-livekit-server-deployment) ---
     # `LIVEKIT_URL` is the WebSocket URL the client uses to connect to the

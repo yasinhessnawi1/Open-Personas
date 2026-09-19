@@ -908,7 +908,9 @@ async def build_agent_session(
             engine.dispose()
 
     turn_billing_meter = VoiceTurnBillingMeter(
-        ledger=CoreCreditsLedger(),
+        # R7: the per-UTC-day cap, which voice did not carry. An unset ``daily_cap`` is
+        # silently uncapped, so the omission looked exactly like working code.
+        ledger=CoreCreditsLedger(daily_cap=config.effective_daily_cap),
         billing_config=BillingConfig(),
         engine_factory=lambda: make_session_rls_engine(config.database_url, user_id=user_id),
         enqueue_topup=_enqueue_topup if config.is_cloud else None,

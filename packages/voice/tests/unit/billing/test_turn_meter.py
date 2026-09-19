@@ -15,6 +15,7 @@ import math
 
 import pytest
 from persona.billing import BillingConfig
+from persona.errors import DailySpendCapExceededError
 from persona_voice.billing import VoiceTurnAccumulator, VoiceTurnBillingMeter
 
 
@@ -508,3 +509,52 @@ def test_real_deduct_chain_drives_the_cutoff_delete_room() -> None:
     asyncio.run(_run())
     assert deleted == ["deleted"]  # reached delete_room once, through the real chain
     assert ledger.balance == 0  # the real capture drained the wallet, never negative
+
+
+# --- the daily cap ends the call instead of serving it free (R7) -------------------------
+
+
+class _CapRefusingLedger(_RecordingLedger):
+    """R7's per-UTC-day cap: the charge is refused BEFORE the balance is touched.
+
+    ``persona.credits.deduct`` raises rather than returning a signal, so the turn is unbilled
+    and so is every turn after it.
+    """
+
+    def capture_up_to_idempotent(self, **_kw: object) -> tuple[int, int]:
+        raise DailySpendCapExceededError("daily cap reached", context={"user_id": "owner-1"})
+
+
+class TestDailyCap:
+    """Wiring the cap without this would have been worse than leaving it unwired."""
+
+    def test_a_capped_turn_ends_the_call(self) -> None:
+        """The refusal used to meet the fail-soft catch, so the call ran on unbilled while the
+        provider cost kept accruing."""
+        fired: list[int] = []
+
+        async def _cutoff() -> None:
+            fired.append(1)
+
+        meter = _meter(_CapRefusingLedger(), streamed_seconds=[60.0], on_exhausted=_cutoff)
+        asyncio.run(meter.bill_turn(1))
+
+        assert fired == [1], "a capped turn did not end the call"
+
+    def test_the_cutoff_fires_once_across_turns(self) -> None:
+        """The cutoff speaks and deletes the room; firing per turn would talk over itself."""
+        fired: list[int] = []
+
+        async def _cutoff() -> None:
+            fired.append(1)
+
+        meter = _meter(_CapRefusingLedger(), streamed_seconds=[60.0], on_exhausted=_cutoff)
+        for seq in (1, 2, 3):
+            asyncio.run(meter.bill_turn(seq))
+
+        assert fired == [1]
+
+    def test_a_capped_turn_still_never_breaks_the_audio_path(self) -> None:
+        """Fail-soft is preserved: the refusal must not escape into the turn recorder."""
+        meter = _meter(_CapRefusingLedger(), streamed_seconds=[60.0])
+        asyncio.run(meter.bill_turn(1))  # no on_exhausted wired: must not raise
