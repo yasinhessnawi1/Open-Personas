@@ -370,7 +370,12 @@ def build_worker_registry(
             rls_engine=rls_engine,
             paid_tier_registry=tier_registry,
             free_tier_registry=free_tier_registry,
-            metered=False,
+            # Spec M3 (T5): metered so the extraction's model call records its usage.
+            # It was ``False``, which is half of why this surface was billed to nobody:
+            # even had the handler asked to bill, there was no usage to bill from and
+            # every extraction would have cost the one-credit floor regardless of the
+            # real price.
+            metered=True,
         )
         episodic_query = (
             build_file_extract_episodic_query(
@@ -385,6 +390,14 @@ def build_worker_registry(
             renderer=SandboxFileRenderer(pool=sandbox_pool, workspace_root=workspace_root),
             episodic_query=episodic_query,
             event_channel=event_channel,
+            # Spec M3 (T5): owner-billed extraction model call AND sandbox render,
+            # idempotent + fail-soft.
+            credits_policy=build_credits_policy(config),
+            rls_engine=rls_engine,
+            cost_source=(
+                runtime_factory.metadata_resolver if runtime_factory is not None else None
+            ),
+            floor=config.agentic_credit_floor,
         )
 
     # The K8 sleep-time engine (Spec K8, K8-D-8) — registered ONLY when enabled

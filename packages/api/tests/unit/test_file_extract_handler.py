@@ -13,13 +13,17 @@ degrades to conversation-window-only).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import Any
 
 import pytest
+from persona.backends.types import ChatResponse, TokenUsage
 from persona.errors import FileExtractionError
 from persona.jobs import MEDIUM_LEASE, JobRegistry, RetryPolicy
+from persona_api.background import worker_root
 from persona_api.jobs.handlers.file_extract import (
     FILE_EXTRACT_JOB_TYPE,
     ExtractedContent,
@@ -28,6 +32,7 @@ from persona_api.jobs.handlers.file_extract import (
     FileExtractJobPayload,
     RenderedFile,
     build_extraction_prompt,
+    build_file_extract_generator,
     conversation_window_excerpt,
     decide_format,
     episodic_context_excerpt,
@@ -37,6 +42,7 @@ from persona_api.jobs.handlers.file_extract import (
     register_file_extract_handler,
     render_sandbox_code,
 )
+from persona_api.services.llm_usage_collector import UsageCollectingBackend
 
 # ----- fakes -------------------------------------------------------------------
 
@@ -555,3 +561,186 @@ def test_registration_declares_type_payload_key_retry_and_lease() -> None:
     # LLM/sandbox hiccup is an ordinary transient background failure).
     assert spec.retry == RetryPolicy()
     assert spec.lease == MEDIUM_LEASE
+
+
+# ----- both of this job's paid surfaces are charged to the owner (M3 T5) ---------
+
+
+class _BillingBackend:
+    """A backend whose one call reports real usage, the way a served model does."""
+
+    provider_name = "openrouter"
+    model_name = "m"
+    supports_native_tools = False
+    supports_vision = False
+
+    def __init__(
+        self, content: str = '{"title": "T", "kind": "prose", "body_markdown": "B"}'
+    ) -> None:
+        self._content = content
+
+    async def chat(self, messages: object, **_kw: object) -> ChatResponse:  # noqa: ARG002
+        return ChatResponse(
+            content=self._content,
+            usage=TokenUsage(
+                prompt_tokens=2000, completion_tokens=300, total_tokens=2300, cost_usd=0.02
+            ),
+            model="m",
+            provider="openrouter",
+            latency_ms=1.0,
+        )
+
+
+class _RecordingPolicy:
+    def __init__(self) -> None:
+        self.charges: list[dict[str, Any]] = []
+
+    def capture_up_to_idempotent(self, **kw: Any) -> tuple[int, int]:  # noqa: ANN401
+        self.charges.append(kw)
+        return int(kw["amount"]), 100
+
+
+def _billing_handler(
+    policy: _RecordingPolicy,
+    *,
+    content: str = '{"title": "T", "kind": "prose", "body_markdown": "B"}',
+    renderer: _RendererStub | None = None,
+) -> FileExtractHandler:
+    backend = UsageCollectingBackend(_BillingBackend(content))  # type: ignore[arg-type]
+    return FileExtractHandler(
+        extractor=build_file_extract_generator(backend),
+        renderer=renderer or _RendererStub(_rendered(format="pdf")),  # type: ignore[arg-type]
+        repository=_Repo(_data()),  # type: ignore[arg-type]
+        credits_policy=policy,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+    )
+
+
+def test_a_file_extract_bills_its_model_call_to_the_owner() -> None:
+    """The extraction is a real model call on the owner's behalf with nobody in the loop,
+    and it was billed to nobody: the handler never reached bill_background_llm, and the
+    worker root composed its backend unmetered so there was no usage to bill from either."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+
+    model_charges = [c for c in policy.charges if c["reason"].startswith("file_extract:")]
+    assert len(model_charges) == 1, "the file_extract model call was not billed"
+    assert model_charges[0]["cost_cents"] == pytest.approx(2.0)  # 0.02 USD actual
+    assert model_charges[0]["cost_basis"] == "actual_openrouter"
+    assert model_charges[0]["billing_key"] == "file_extract:msg_1:auto"
+
+
+def test_an_unusable_extraction_is_still_billed() -> None:
+    """The model call HAPPENED and cost money whether or not its output could be parsed;
+    the reject branch is exactly where that cost would otherwise vanish."""
+    policy = _RecordingPolicy()
+
+    with pytest.raises(FileExtractionError):
+        _run(_billing_handler(policy, content="not json at all"))
+
+    assert [c["reason"].split(":")[0] for c in policy.charges] == ["file_extract"]
+
+
+def test_the_sandbox_render_is_billed_as_per_execution_infra() -> None:
+    """The renderer drives the sandbox inside a background job, so no request context is
+    bound and no task leg is listening: after fb1ad05c its execution was charged to nobody
+    at all. It rides infra_flat_cents, the per-execution infra parameter of the one formula."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+
+    sandbox = [c for c in policy.charges if c["reason"] == "file_extract_sandbox:infra_flat"]
+    assert len(sandbox) == 1, "the sandbox render was not billed"
+    assert sandbox[0]["cost_basis"] == "infra_flat"
+    assert sandbox[0]["cost_cents"] == pytest.approx(0.0)  # infra, no provider cost
+    assert sandbox[0]["amount"] >= 1
+
+
+def test_the_two_charges_use_different_keys_under_the_one_job_key() -> None:
+    """The conflict gate is unique on billing_key alone, so the same key for both would let
+    the model charge's claim row swallow the sandbox charge and the render would be free."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+
+    keys = [c["billing_key"] for c in policy.charges]
+    assert keys == ["file_extract:msg_1:auto", "file_extract:msg_1:auto:sandbox"]
+
+
+def test_a_redelivered_job_reuses_both_keys() -> None:
+    """A retry re-runs the model and the render and must hit the same two conflict gates."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+    _run(_billing_handler(policy))
+
+    assert len(policy.charges) == 4
+    assert len({c["billing_key"] for c in policy.charges}) == 2
+
+
+def test_a_failed_render_bills_the_model_but_not_the_sandbox() -> None:
+    """Nothing was produced, so there is no successful execution to charge for; this mirrors
+    the tool's own hook, which fires on outcome == "ok" only."""
+    policy = _RecordingPolicy()
+    renderer = _RendererStub(error=FileExtractionError("boom", context={"reason": "x"}))
+
+    with pytest.raises(FileExtractionError):
+        _run(_billing_handler(policy, renderer=renderer))
+
+    assert [c["reason"].split(":")[0] for c in policy.charges] == ["file_extract"]
+
+
+def test_billing_never_fails_the_extraction() -> None:
+    """Fail-soft: the file is the deliverable, the charge is enrichment."""
+
+    class _ExplodingPolicy(_RecordingPolicy):
+        def capture_up_to_idempotent(self, **kw: Any) -> tuple[int, int]:  # noqa: ANN401, ARG002
+            msg = "ledger down"
+            raise RuntimeError(msg)
+
+    ctx = _run(_billing_handler(_ExplodingPolicy()))
+
+    assert [m["kind"] for m in ctx.metered] == ["model", "sandbox"]
+
+
+def test_an_unmetered_install_charges_nothing() -> None:
+    """No credits policy (community / self-host) leaves the job byte-identical to before."""
+    handler = FileExtractHandler(
+        extractor=build_file_extract_generator(UsageCollectingBackend(_BillingBackend())),  # type: ignore[arg-type]
+        renderer=_RendererStub(_rendered(format="pdf")),  # type: ignore[arg-type]
+        repository=_Repo(_data()),  # type: ignore[arg-type]
+    )
+
+    ctx = _run(handler)
+
+    assert [m["kind"] for m in ctx.metered] == ["model", "sandbox"]
+
+
+def test_the_worker_root_meters_file_extract_and_passes_a_credits_policy() -> None:
+    """The composition half. Both conditions had to hold and neither did, and a behavioural
+    test cannot see the second one: the handler could ask to bill all it liked while the root
+    composed the backend with metered=False, and the charge would fall back to the floor."""
+    tree = ast.parse(Path(worker_root.__file__).read_text(encoding="utf-8"))
+
+    metered: list[bool] = []
+    policies: list[bool] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "plan_scoped_background_backend":
+            for kw in node.keywords:
+                if kw.arg == "tier" and "file_extract_tier" in ast.dump(kw.value):
+                    metered.append(
+                        any(
+                            k.arg == "metered"
+                            and isinstance(k.value, ast.Constant)
+                            and k.value.value is True
+                            for k in node.keywords
+                        )
+                    )
+        if node.func.id == "register_file_extract_handler":
+            policies.append("credits_policy" in {kw.arg for kw in node.keywords})
+
+    assert metered == [True], "the file_extract backend is not metered; its usage cannot be billed"
+    assert policies == [True], "the file_extract handler is registered without a credits policy"

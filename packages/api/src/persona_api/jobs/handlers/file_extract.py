@@ -114,7 +114,9 @@ from persona_api.services.artifact_metadata import (
     utcnow,
     write_artifact_sidecar,
 )
+from persona_api.services.background_billing import bill_background_infra, bill_background_llm
 from persona_api.services.document_service import DOCUMENT_DIR_NAME, DocumentRef
+from persona_api.services.llm_usage_collector import collect_llm_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -125,8 +127,10 @@ if TYPE_CHECKING:
     from persona.jobs import JobContext, JobRegistry
     from persona.schema.conversation import ConversationMessage
     from persona.stores.backend import Backend
-    from sqlalchemy import Connection
+    from persona_runtime.cost import CostSource
+    from sqlalchemy import Connection, Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue, JobRecord
     from persona_api.realtime.channel import UserEventChannel
     from persona_api.sandbox.pool import SandboxPool
@@ -856,12 +860,26 @@ class FileExtractHandler:
         repository: FileExtractRepository,
         episodic_query: Callable[[str, str], tuple[str, ...]] | None = None,
         event_channel: UserEventChannel | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        floor: int = 1,
     ) -> None:
         self._extract = extractor
         self._renderer = renderer
         self._repo = repository
         self._episodic_query = episodic_query
         self._event_channel = event_channel
+        #: Spec M3 (T5): this job spends the owner's money twice and charged them
+        #: neither time. The extraction is a real model call made on their behalf with
+        #: nobody in the loop (the background-LLM shape), and the render is a real
+        #: sandbox execution. Both are now owner-billed; see :meth:`handle` for why
+        #: they are two charges under two keys rather than one. ``None`` (an unmetered
+        #: install) leaves the job byte-identical to before.
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._floor = floor
 
     async def handle(self, payload: FileExtractJobPayload, context: JobContext) -> None:
         with context.connection() as conn:
@@ -899,8 +917,32 @@ class FileExtractHandler:
             episodic_excerpt=episodic_context_excerpt(episodic_snippets),
         )
         # The model call runs OUTSIDE any DB transaction (never hold a conn
-        # across an LLM await) — the title_refresh discipline, carried here.
-        extracted = await self._extract(prompt)
+        # across an LLM await), the title_refresh discipline, carried here. The
+        # connection above is already released, so the deduct below needs no deferral
+        # (synthesis holds one across its await and must defer; this one does not).
+        with collect_llm_usage() as usage:
+            extracted = await self._extract(prompt)
+        # Spec M3 (T5): bill BEFORE the unusable-extraction branch below. The call
+        # happened and cost real money whether or not its output could be parsed, and
+        # that branch is exactly where the cost would otherwise vanish. Keyed on the
+        # job's own idempotency key, so a re-delivered extraction re-runs the model and
+        # hits the same ON CONFLICT gate instead of charging twice. Fail-soft inside.
+        totals = usage.totals()
+        billing_key = file_extract_idempotency_key(payload)
+        bill_background_llm(
+            credits_policy=self._credits_policy,
+            rls_engine=self._rls_engine,
+            owner_id=context.owner_id,
+            provider=totals.provider,
+            model=totals.model,
+            prompt_tokens=totals.prompt_tokens,
+            completion_tokens=totals.completion_tokens,
+            cost_usd=totals.cost_usd,
+            surface="file_extract",
+            billing_key=billing_key,
+            cost_source=self._cost_source,
+            floor=self._floor,
+        )
         if extracted is None:
             raise FileExtractionError(
                 "file_extract: extraction produced no usable content",
@@ -930,6 +972,31 @@ class FileExtractHandler:
             kind="sandbox",
             detail={"surface": "file_extract", "format": rendered.format},
         )
+        # Spec M3 (T5): the render is a real sandbox execution and it was charged to
+        # nobody. The tool's own per-execution deduct
+        # (``runtime_tool._on_execute_success``) cannot reach it: the renderer drives
+        # ``pool.sandbox.execute`` directly rather than through the ``code_execution``
+        # tool, and a background job binds no request context. After fb1ad05c that hook
+        # also defers whenever a task leg is listening; no leg listens to an A0 job, so
+        # there is nothing to defer AROUND here and no second payer to double-charge.
+        # This is the leg's own settlement said in the same words: the per-execution
+        # infra rate rides ``infra_flat_cents``, not ``provider_cents``, charged once
+        # after a SUCCESSFUL render (the render raises otherwise), which is the same
+        # outcome == "ok" condition the tool's hook fires on.
+        #
+        # A DISTINCT key from the model charge above. The conflict gate is unique on
+        # ``billing_key`` alone, so reusing the job key would let the model charge's
+        # claim row swallow this one and the render would stay free. Same job, same
+        # retry story, two rows.
+        bill_background_infra(
+            credits_policy=self._credits_policy,
+            rls_engine=self._rls_engine,
+            owner_id=context.owner_id,
+            infra_unit="sandbox_exec",
+            surface="file_extract_sandbox",
+            billing_key=f"{billing_key}:sandbox",
+            floor=self._floor,
+        )
 
         # Post-commit-shaped liveness ping (best-effort; see the module's
         # refresh-signal decision above) — mirrors title_refresh's own
@@ -953,6 +1020,10 @@ def register_file_extract_handler(
     repository: FileExtractRepository | None = None,
     episodic_query: Callable[[str, str], tuple[str, ...]] | None = None,
     event_channel: UserEventChannel | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
+    cost_source: CostSource | None = None,
+    floor: int = 1,
 ) -> None:
     """Register the file-extract tenant (R9-025b; the title-refresh registration shape).
 
@@ -972,6 +1043,10 @@ def register_file_extract_handler(
                 repository=repository if repository is not None else PgFileExtractRepository(),
                 episodic_query=episodic_query,
                 event_channel=event_channel,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
+                cost_source=cost_source,
+                floor=floor,
             ),
             idempotency_key=file_extract_idempotency_key,
             retry=RetryPolicy(),

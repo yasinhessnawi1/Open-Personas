@@ -1,11 +1,15 @@
 """Shared owner-billing for background LLM surfaces (Spec M3, T5 — D-M3-8 / D-M3-R5).
 
-Episodic consolidation, persona-voice auto-pick, and the initiative scan each make
-a real model call the owner benefits from but no end-user is in the loop for (graph
-consolidation is a deterministic embedding merge — no model call, so it charges
-nothing and is not wired). Each bills the **persona owner** its real cost POST-HOC
-through this one
-helper: price via the seam (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual
+Episodic consolidation, persona-voice auto-pick, the initiative scan, the
+conversation retitle, K2 synthesis and the file extraction each make a real model
+call the owner benefits from but no end-user is in the loop for (graph
+consolidation is a deterministic embedding merge, no model call, so it charges
+nothing and is not wired). The last three were added on 2026-09-19, each having
+been unbilled twice over: the handler never called this helper AND the worker root
+built its backend unmetered, so wiring only one half would have billed the floor.
+
+Each bills the **persona owner** its real cost POST-HOC through this one helper:
+price via the seam (``compute_turn_cost`` — OpenRouter ``usage.cost`` actual
 preferred; else the resolver estimate; else the floor), charge idempotently
 (``capture_up_to_idempotent`` — floored, keyed on the surface's natural
 ``billing_key`` so a retry / re-fire does not double-charge), record
@@ -24,19 +28,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.billing import BillingConfig, credits_charged
+from persona.billing import BillingConfig, credits_charged, infra_rate_cents
 from persona.logging import get_logger
 from persona_runtime.cost import compute_turn_cost
 
 from persona_api.services.free_model_usage import FreeModelDailyCounter
 
 if TYPE_CHECKING:
+    from persona.billing import InfraUnit
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
     from persona_api.editions.credits_policy import CreditsPolicy
 
-__all__ = ["bill_background_llm"]
+__all__ = ["bill_background_infra", "bill_background_llm"]
 
 _LOG = get_logger("api.background_billing")
 
@@ -113,6 +118,75 @@ def bill_background_llm(
     except Exception as exc:  # noqa: BLE001 — billing must NEVER break the background op
         _LOG.warning(
             "background LLM owner-billing failed (fail-soft) surface={surface} "
+            "owner={owner} key={key}: {err}",
+            surface=surface,
+            owner=owner_id,
+            key=billing_key,
+            err=str(exc),
+        )
+
+
+def bill_background_infra(
+    *,
+    credits_policy: CreditsPolicy | None,
+    rls_engine: Engine | None,
+    owner_id: str,
+    infra_unit: InfraUnit,
+    surface: str,
+    billing_key: str,
+    billing_config: BillingConfig | None = None,
+    floor: int = 1,
+) -> None:
+    """Owner-bill one background op's PER-EXECUTION INFRA cost, idempotent + fail-soft.
+
+    The infra-only sibling of :func:`bill_background_llm`, same formula and same
+    ``capture_up_to_idempotent`` conflict gate, for work that costs real infra and no
+    provider tokens. The rate comes from the one pricing truth
+    (``persona.billing.infra_rate_cents`` over the ``PERSONA_INFRA_RATE_*`` config), so a
+    background surface cannot come to disagree with the interactive one about a price.
+
+    This is the seam ``fb1ad05c`` settled for a task leg's sandbox execution: the leg
+    charges the execution itself, once, keyed to its own checkpoint, with the sandbox
+    riding ``infra_flat_cents`` rather than ``provider_cents``. A background job that
+    drives the sandbox outside a leg needs the same thing said in the same words, and
+    saying it here rather than a third time in a handler is what keeps it one seam.
+
+    Args:
+        credits_policy / rls_engine: The billing seam + owner-scoped engine. Either
+            ``None`` → no billing (the plain / community-unmetered shape).
+        owner_id: The persona owner (the payer, D-M3-8).
+        infra_unit: Which ``PERSONA_INFRA_RATE_*`` rate this execution is charged at.
+        surface: The ledger reason prefix (e.g. ``"file_extract_sandbox"``).
+        billing_key: The op's natural idempotency key. It must be DISTINCT from any
+            other charge the same op makes: the conflict gate is unique on
+            ``billing_key`` alone, so a shared key means the first claim row silently
+            swallows the second charge.
+        billing_config: The markup + infra rates; ``None`` reads them from env.
+        floor: The minimum charge (D-M3-4 amendment).
+    """
+    if credits_policy is None or rls_engine is None:
+        return
+    config = billing_config or BillingConfig()
+    infra_cents = infra_rate_cents(config, infra_unit)
+    try:
+        charge = credits_charged(
+            provider_cents=0.0,  # no provider cost on an infra-only surface
+            infra_flat_cents=infra_cents,
+            markup=config.credit_markup,
+            floor=floor,
+        )
+        credits_policy.capture_up_to_idempotent(
+            rls_engine=rls_engine,
+            user_id=owner_id,
+            amount=charge,
+            reason=f"{surface}:infra_flat",
+            billing_key=billing_key,
+            cost_cents=0.0,
+            cost_basis="infra_flat",
+        )
+    except Exception as exc:  # noqa: BLE001 (billing must NEVER break the background op)
+        _LOG.warning(
+            "background infra owner-billing failed (fail-soft) surface={surface} "
             "owner={owner} key={key}: {err}",
             surface=surface,
             owner=owner_id,
