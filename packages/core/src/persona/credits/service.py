@@ -47,7 +47,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from persona.billing.plans import default_plan
+from persona.billing.plans import ENTITLED_SUBSCRIPTION_STATUSES, default_plan
 from persona.errors import CreditsExhaustedError, DailySpendCapExceededError
 
 if TYPE_CHECKING:
@@ -964,12 +964,20 @@ _UTC_MONTH = "to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM')"
 # Re-run in the same month ⇒ the WHERE matches no row ⇒ no-op (idempotent-per-period). The
 # PAYG lots are a SEPARATE bucket, untouched. RLS scopes both the UPDATE and the subquery to
 # the caller (``:uid`` is the current user), so no cross-tenant read/write is possible.
+# The statuses that count as a PAID subscription here, rendered from the one entitlement
+# constant so this SQL and ``entitled_plan_code`` cannot drift into two answers. Without the
+# status term a past-due subscriber was skipped as "paid" and got no free allowance, while the
+# model gate was handing them the paid models: treated as paid and unpaid at once, against
+# them on the cheap side and in their favour on the expensive one.
+_ENTITLED_STATUS_SQL = ", ".join(f"'{s}'" for s in sorted(ENTITLED_SUBSCRIPTION_STATUSES))
+
 _REFRESH_FREE_ALLOWANCE_SQL = text(
     "UPDATE credits SET balance = :allowance, "
     f"allowance_period = {_UTC_MONTH}, updated_at = now() "
     f"WHERE user_id = :uid AND allowance_period IS DISTINCT FROM {_UTC_MONTH} "
     "AND NOT EXISTS ("
-    "SELECT 1 FROM subscription s WHERE s.user_id = :uid AND s.plan_code <> 'free'"
+    "SELECT 1 FROM subscription s WHERE s.user_id = :uid AND s.plan_code <> 'free' "
+    f"AND s.status IN ({_ENTITLED_STATUS_SQL})"
     ") RETURNING balance"
 )
 

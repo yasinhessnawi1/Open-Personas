@@ -18,11 +18,13 @@ from __future__ import annotations
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "DEFAULT_PLAN_CODE",
+    "ENTITLED_SUBSCRIPTION_STATUSES",
     "PAYG_PACKS",
     "PLANS",
     "PaygPack",
@@ -31,6 +33,7 @@ __all__ = [
     "PlanModelSet",
     "all_plans",
     "credits_to_dollars",
+    "entitled_plan_code",
     "default_plan",
     "dollars_to_credits",
     "format_dollars",
@@ -280,3 +283,39 @@ def payg_pack_code(pack: PaygPack) -> str:
     to the key scheme cannot leave a caller minting keys the lookup no longer resolves.
     """
     return str(pack.price_credits // _CENTS_PER_DOLLAR)
+
+
+#: The subscription statuses that ENTITLE a subscriber to their plan (Spec M4; ruled
+#: 2026-09-19 because the M4 documents never settled it and "trialing" appeared nowhere in
+#: the tree). Stripe's two paid-and-current states. Everything else (past_due, unpaid,
+#: incomplete, incomplete_expired, canceled, paused, and any state Stripe adds later) falls
+#: back to free, because entitlement is what is CURRENTLY being paid for.
+#:
+#: Deliberately NOT the same rule as ``autotopup``'s stricter ``== "active"``: that decides
+#: whether to CHARGE a card off-session, which is rightly narrower than what a customer may
+#: use. Two different questions, two rules, both written down.
+ENTITLED_SUBSCRIPTION_STATUSES: Final[frozenset[str]] = frozenset({"active", "trialing"})
+
+
+def entitled_plan_code(plan_code: str | None, status: str | None) -> str:
+    """The plan this subscriber is entitled to RIGHT NOW; ``"free"`` unless it is being paid for.
+
+    THE entitlement rule, in one place, because it was previously two reads of ``plan_code``
+    that both forgot ``status``: the model gate handed a past-due subscriber the paid models,
+    and the free-allowance refresh skipped that same user for having a non-free plan_code. One
+    person could therefore be treated as paid and as unpaid at once, in their favour on the
+    expensive side and against them on the cheap one.
+
+    Args:
+        plan_code: The subscription row's plan, or ``None`` when there is no row.
+        status: The subscription row's Stripe status, or ``None``.
+
+    Returns:
+        ``plan_code`` when the subscription is paid-and-current, else ``"free"``. A free or
+        absent plan is always ``"free"``, whatever the status says: the ``subscription`` table
+        defaults ``status`` to ``'active'`` for every row, including users who never subscribed.
+    """
+    code = plan_code or "free"
+    if code == "free":
+        return "free"
+    return code if (status or "") in ENTITLED_SUBSCRIPTION_STATUSES else "free"

@@ -581,3 +581,54 @@ def test_the_free_registry_is_a_required_argument_at_both_worker_entry_points() 
         param = inspect.signature(fn).parameters["free_tier_registry"]
         assert param.default is inspect.Parameter.empty, fn.__name__
         assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
+
+
+# --- a subscription only entitles while it is being paid for (M-track sweep) --------------
+
+
+def _set_plan_with_status(eng: Engine, plan_code: str, status: str) -> None:
+    with eng.begin() as conn:
+        conn.execute(
+            insert(subscription_t).values(user_id=_OWNER, plan_code=plan_code, status=status)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_past_due_subscriber_is_served_the_free_models(engine: Engine) -> None:
+    """The defect: ``mark_past_due`` leaves plan_code='pro' and the gate read only plan_code,
+    so a subscriber whose payment failed kept every paid model."""
+    _set_plan_with_status(engine, "pro", "past_due")
+    paid, free = _RecordingBackend("paid-model"), _RecordingBackend("free-model")
+    backend = plan_scoped_background_backend(
+        tier=_TIER,
+        rls_engine=engine,
+        paid_tier_registry=_registry(paid),
+        free_tier_registry=_registry(free),
+        metered=True,
+    )
+
+    with _owner_scope(_OWNER):
+        await _run(backend)
+
+    assert paid.calls == 0, "a past-due subscriber still reached a PAID model"
+    assert free.calls == 1, "a past-due subscriber was not served the free models"
+
+
+@pytest.mark.asyncio
+async def test_an_active_subscriber_still_reaches_the_paid_models(engine: Engine) -> None:
+    """The fix must not cost a paying customer what they are paying for."""
+    _set_plan_with_status(engine, "pro", "active")
+    paid, free = _RecordingBackend("paid-model"), _RecordingBackend("free-model")
+    backend = plan_scoped_background_backend(
+        tier=_TIER,
+        rls_engine=engine,
+        paid_tier_registry=_registry(paid),
+        free_tier_registry=_registry(free),
+        metered=True,
+    )
+
+    with _owner_scope(_OWNER):
+        await _run(backend)
+
+    assert paid.calls == 1
+    assert free.calls == 0

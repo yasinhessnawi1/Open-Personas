@@ -258,3 +258,59 @@ def test_community_policy_never_refreshes(migrated_engine: Engine) -> None:
 
     assert reported == 1_000_000_000  # the unmetered sentinel, not the DB row
     assert _row(migrated_engine, uid) == (7, _STALE_PERIOD)  # DB row NEVER touched
+
+
+# --- a subscription only counts as paid while it is being paid for (M-track sweep) --------
+
+
+def _seed_sub_with_status(engine: Engine, uid: str, plan_code: str, status: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO subscription (user_id, plan_code, status) "
+                "VALUES (:u, :p, :s) "
+                "ON CONFLICT (user_id) DO UPDATE SET plan_code = :p, status = :s"
+            ),
+            {"u": uid, "p": plan_code, "s": status},
+        )
+
+
+def test_a_past_due_subscriber_gets_the_free_allowance(migrated_engine: Engine) -> None:
+    """The other half of the past-due defect. The guard skipped anyone with a non-free
+    plan_code, so a subscriber whose payment failed was denied the free allowance they had
+    fallen back to, while the model gate was still handing them the paid models."""
+    uid = "u_t6_past_due"
+    _seed_user(migrated_engine, uid)
+    _seed_sub_with_status(migrated_engine, uid, "pro", "past_due")
+    _set_credits(migrated_engine, uid, balance=0, period=_STALE_PERIOD)
+
+    landed = refresh_free_allowance_lazy(rls_engine=migrated_engine, user_id=uid)
+
+    assert landed is True, "a past-due subscriber was denied the free monthly allowance"
+    balance, period = _row(migrated_engine, uid)
+    assert balance == default_plan().included_allowance_credits
+    assert period == _current_month()
+
+
+def test_an_active_subscriber_is_still_never_touched(migrated_engine: Engine) -> None:
+    """The fix must not clobber a paying customer's allowance down to the free amount."""
+    uid = "u_t6_active"
+    _seed_user(migrated_engine, uid)
+    _seed_sub_with_status(migrated_engine, uid, "pro", "active")
+    _set_credits(migrated_engine, uid, balance=1750, period=_STALE_PERIOD)
+
+    landed = refresh_free_allowance_lazy(rls_engine=migrated_engine, user_id=uid)
+
+    assert landed is False
+    balance, _ = _row(migrated_engine, uid)
+    assert balance == 1750
+
+
+def test_a_trialing_subscriber_is_treated_as_paid(migrated_engine: Engine) -> None:
+    """A trial is an entitled state: it must not be handed the free allowance either."""
+    uid = "u_t6_trialing"
+    _seed_user(migrated_engine, uid)
+    _seed_sub_with_status(migrated_engine, uid, "pro", "trialing")
+    _set_credits(migrated_engine, uid, balance=1750, period=_STALE_PERIOD)
+
+    assert refresh_free_allowance_lazy(rls_engine=migrated_engine, user_id=uid) is False

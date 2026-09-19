@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 
 from persona.backends.errors import AuthenticationError, ProviderError
 from persona.backends.errors import TierNotConfiguredError as BackendTierNotConfiguredError
+from persona.billing.plans import entitled_plan_code
 from persona.logging import get_logger
 from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription
@@ -223,7 +224,12 @@ def select_plan_tier_registry(
     if user_id:
         row = subscription_service.get_subscription(rls_engine, user_id=user_id)
         if row is not None:
-            plan_code = str(row.get("plan_code") or "free")
+            # Entitlement is what is CURRENTLY being paid for, not what the row was last set
+            # to: ``mark_past_due`` leaves ``plan_code`` alone, so reading it by itself handed
+            # every paid model to a subscriber whose payment had failed.
+            plan_code = entitled_plan_code(
+                str(row.get("plan_code") or "free"), str(row.get("status") or "")
+            )
     return free_tier_registry if plan_code == "free" else paid_tier_registry
 
 
