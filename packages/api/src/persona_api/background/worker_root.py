@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     from persona_api.sandbox.pool import SandboxPool
     from persona_api.schedules.tick import SchedulerTick
     from persona_api.services.runtime_factory import RuntimeFactory
+    from persona_api.services.title_backfill import UntitledConversationBackfill
     from persona_api.services.web_deliverer import LiveSessionRegistry
     from persona_api.storage import FileStorage
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
@@ -1684,6 +1685,25 @@ def start_in_process_worker(
             settings=settings,
         )
 
+    def _title_backfill_builder(dispatch_engine: Engine) -> UntitledConversationBackfill:
+        # Issue #8: connector-born and call-born conversations used to reach the message
+        # count the title trigger wanted only rarely, and the web route's first-turn hook
+        # never ran for them, so they sat unnamed. The trigger floor now names them at their
+        # first exchange; this sweep is what names the ones that were ALREADY sitting there,
+        # plus any conversation whose write path never reached a trigger at all. It produces
+        # nothing new, just the same title_refresh job on the same key.
+        from persona_api.schedules.leadership import SchedulerLeader
+        from persona_api.services.title_backfill import (
+            TITLE_BACKFILL_LOCK_KEY,
+            UntitledConversationBackfill,
+        )
+
+        return UntitledConversationBackfill(
+            dispatch_engine=dispatch_engine,
+            queue=JobQueue(dispatch_engine),
+            leader=SchedulerLeader(dispatch_engine, lock_key=TITLE_BACKFILL_LOCK_KEY),
+        )
+
     worker = build_worker(
         config,
         registry,
@@ -1695,6 +1715,7 @@ def start_in_process_worker(
         approval_sweep_builder=_approval_sweep_builder,
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,
+        title_backfill_builder=_title_backfill_builder,
     )
     handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()

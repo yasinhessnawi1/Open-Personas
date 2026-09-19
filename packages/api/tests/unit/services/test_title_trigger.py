@@ -30,19 +30,32 @@ class _RecordingQueue:
 # ----- the crossing function: exact set, no re-fire ---------------------------
 
 
-def test_threshold_set_is_the_r9_020_contract() -> None:
-    assert TITLE_REFRESH_THRESHOLDS == (4, 10, 24, 50, 100)
+def test_threshold_set_starts_at_the_first_completed_exchange() -> None:
+    # Issue #8: 2 is the channel-independent floor. Every channel that persists a
+    # completed turn crosses it, so no conversation has to reach four messages
+    # before it has a name.
+    assert TITLE_REFRESH_THRESHOLDS == (2, 4, 10, 24, 50, 100)
 
 
-def test_chat_turns_fire_exactly_the_threshold_set() -> None:
-    # A pure chat conversation grows 0→2→4→…; walking every turn must fire each
+def test_turns_fire_exactly_the_threshold_set() -> None:
+    # A conversation grows 0→2→4→…; walking every turn must fire each
     # threshold exactly once, in order, and nothing in between.
     fired: list[int] = []
     for prior in range(0, 120, 2):
         crossed = crossed_title_threshold(previous_count=prior, new_count=prior + 2)
         if crossed is not None:
             fired.append(crossed)
-    assert fired == [4, 10, 24, 50, 100]
+    assert fired == [2, 4, 10, 24, 50, 100]
+
+
+def test_the_first_completed_turn_fires_on_every_channel() -> None:
+    # The one crossing a connector-born or call-born conversation is guaranteed to
+    # reach: its first completed exchange. Before issue #8 this returned None and
+    # those conversations stayed untitled until a fourth message that often never came.
+    assert crossed_title_threshold(previous_count=0, new_count=2) == 2
+    # An assistant-only opener (a proactive/originated first message) lands on 1 and
+    # the pair after it crosses 2 all the same, parity-robust as before.
+    assert crossed_title_threshold(previous_count=1, new_count=3) == 2
 
 
 def test_no_refire_between_thresholds() -> None:
@@ -62,8 +75,16 @@ def test_crossing_is_parity_robust() -> None:
 
 def test_landing_exactly_on_a_threshold_counts_and_never_refires() -> None:
     assert crossed_title_threshold(previous_count=2, new_count=4) == 4
+    assert crossed_title_threshold(previous_count=0, new_count=2) == 2
     # The NEXT growth step from exactly-4 must not re-fire 4 (half-open left edge).
     assert crossed_title_threshold(previous_count=4, new_count=5) is None
+
+
+def test_an_empty_conversation_never_fires() -> None:
+    # Nothing was written, so there is nothing to title, and the producer must not
+    # enqueue a job that the handler would only no-op on.
+    assert crossed_title_threshold(previous_count=0, new_count=0) is None
+    assert crossed_title_threshold(previous_count=0, new_count=1) is None
 
 
 def test_a_jump_over_several_thresholds_fires_the_highest() -> None:

@@ -9,8 +9,9 @@ SQL) is what executes it, on a scripted title generator (the plumbing, not the
 model — the synthesis-pipeline test discipline).
 
 Covered here:
-- turn 1 (2 messages) enqueues NOTHING; turn 2 (4 messages) enqueues exactly one
-  ``title_refresh`` keyed ``title:{conv}:4``; turn 3 does not re-fire;
+- turn 1 (2 messages) enqueues ``title:{conv}:2``, the issue-#8 floor, so a
+  conversation is named by its first completed exchange on any channel; turn 2
+  (4 messages) adds ``title:{conv}:4``; turn 3 does not re-fire;
 - the real worker runs the handler: the title is rewritten from the WHOLE
   transcript + ``sidebar.changed`` (reason=conversation.title_updated) is
   published; a re-enqueue of the same threshold is A0's dedup no-op and a
@@ -251,20 +252,24 @@ def test_real_turns_enqueue_title_refresh_exactly_at_the_threshold(
     conv_id = _new_conversation(c, uid, persona_id)
     su = make_rls_engine(os.environ["DATABASE_URL"])
     try:
-        # Turn 1 → 2 messages: below the first threshold — NO title_refresh job.
+        # Turn 1 → 2 messages: the first completed exchange crosses the floor
+        # (issue #8): the crossing every channel reaches, chat included.
         _turn(c, uid, conv_id, "let's plan a board game night")
-        assert _title_jobs(su, uid) == []
+        assert [k for k, _s in _title_jobs(su, uid)] == [f"title:{conv_id}:2"]
 
         # Turn 2 → 4 messages: crosses 4 — the REAL chat turn enqueued the job.
         _turn(c, uid, conv_id, "actually make it a weekly games evening with friends")
         jobs = _title_jobs(su, uid)
-        assert [k for k, _s in jobs] == [f"title:{conv_id}:4"], (
-            "the real completed turn at message-total 4 enqueues exactly one title_refresh"
+        assert [k for k, _s in jobs] == [f"title:{conv_id}:2", f"title:{conv_id}:4"], (
+            "the real completed turn at message-total 4 enqueues exactly one more title_refresh"
         )
 
-        # Turn 3 → 6 messages: between thresholds — no re-fire, still exactly one.
+        # Turn 3 → 6 messages: between thresholds, no re-fire, still exactly two.
         _turn(c, uid, conv_id, "and add snacks planning")
-        assert [k for k, _s in _title_jobs(su, uid)] == [f"title:{conv_id}:4"]
+        assert [k for k, _s in _title_jobs(su, uid)] == [
+            f"title:{conv_id}:2",
+            f"title:{conv_id}:4",
+        ]
     finally:
         su.dispose()
 
@@ -286,7 +291,10 @@ def test_worker_refreshes_the_title_and_publishes_and_is_idempotent(
     try:
         _turn(c, uid, conv_id, "let's plan a board game night")
         _turn(c, uid, conv_id, "make it weekly, with rotating hosts and snacks")
-        assert [k for k, _s in _title_jobs(su, uid)] == [f"title:{conv_id}:4"]
+        assert [k for k, _s in _title_jobs(su, uid)] == [
+            f"title:{conv_id}:2",
+            f"title:{conv_id}:4",
+        ]
         assert _conversation_title(su, conv_id) == "First message title"
 
         seen_excerpts: list[str] = []
@@ -299,22 +307,28 @@ def test_worker_refreshes_the_title_and_publishes_and_is_idempotent(
         _prune_other_jobs(su, uid)
         worker = _title_worker(su, c.app.state.rls_engine, _generator, channel)
 
+        # Both crossings are real jobs; run them both (the loop would).
+        assert asyncio.run(worker.run_once()) == 1
         assert asyncio.run(worker.run_once()) == 1
 
         # The refreshed title describes the WHOLE conversation now.
         assert _conversation_title(su, conv_id) == "Weekly board game night"
         # The handler read the real transcript (early AND late turns present).
-        assert len(seen_excerpts) == 1
-        assert "board game night" in seen_excerpts[0]
-        assert "rotating hosts" in seen_excerpts[0]
-        # The live ping went out (reason=conversation.title_updated, the owner's).
+        assert len(seen_excerpts) == 2
+        assert "board game night" in seen_excerpts[-1]
+        assert "rotating hosts" in seen_excerpts[-1]
+        # The live ping went out ONCE: the second crossing regenerated the same
+        # title, and a converged refresh writes nothing and pings nothing.
         assert len(channel.published) == 1
         owner, event = channel.published[0]
         assert owner == uid
         assert getattr(event, "type", None) == "sidebar.changed"
         assert getattr(event, "reason", None) == "conversation.title_updated"
-        # The job succeeded (never dead-lettered).
-        assert _title_jobs(su, uid) == [(f"title:{conv_id}:4", "succeeded")]
+        # Both jobs succeeded (never dead-lettered).
+        assert _title_jobs(su, uid) == [
+            (f"title:{conv_id}:2", "succeeded"),
+            (f"title:{conv_id}:4", "succeeded"),
+        ]
 
         # Idempotency 1 — the PRODUCER's re-enqueue of the same threshold is
         # A0's ON CONFLICT no-op (same key, no second row).
@@ -322,7 +336,7 @@ def test_worker_refreshes_the_title_and_publishes_and_is_idempotent(
             enqueue_title_refresh(JobQueue(su), owner_id=uid, conversation_id=conv_id, threshold=4)
             is None
         )
-        assert len(_title_jobs(su, uid)) == 1
+        assert len(_title_jobs(su, uid)) == 2
 
         # Idempotency 2 — a RE-DELIVERY (the synthesis-test pattern: same payload,
         # fresh key) converges: same title regenerated → no write, no second ping.
@@ -362,13 +376,17 @@ def test_bad_generation_keeps_the_existing_title(client: tuple[TestClient, str, 
         worker = _title_worker(su, c.app.state.rls_engine, _echo_generator, channel)
 
         assert asyncio.run(worker.run_once()) == 1
+        assert asyncio.run(worker.run_once()) == 1
 
         # KEEP-EXISTING (the R9-020 contract): never regressed to first-words,
         # never the echo — the good title is byte-untouched; no ping either.
         assert _conversation_title(su, conv_id) == "A good first title"
         assert channel.published == []
-        # And the job is a clean success (a keep is a no-op, not a failure/retry).
-        assert _title_jobs(su, uid) == [(f"title:{conv_id}:4", "succeeded")]
+        # And the jobs are a clean success (a keep is a no-op, not a failure/retry).
+        assert _title_jobs(su, uid) == [
+            (f"title:{conv_id}:2", "succeeded"),
+            (f"title:{conv_id}:4", "succeeded"),
+        ]
     finally:
         su.dispose()
 

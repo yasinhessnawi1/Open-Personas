@@ -342,6 +342,14 @@ class APIConfig(BaseSettings):
     revival_sweep_interval_seconds: float = Field(
         default=300.0, gt=0, validation_alias="PERSONA_REVIVAL_SWEEP_INTERVAL_SECONDS"
     )
+    # Issue #8: how often the worker looks for conversations that are still unnamed and
+    # have content to name, and enqueues the ordinary title_refresh job for them. New
+    # conversations are titled at their first completed exchange by the write-time trigger,
+    # so this only ever catches a backlog or a write path that never reached a trigger,
+    # and a drained backlog costs one indexed query per pass.
+    title_backfill_interval_seconds: float = Field(
+        default=900.0, gt=0, validation_alias="PERSONA_TITLE_BACKFILL_INTERVAL_SECONDS"
+    )
     # Spec N2 — the MCP catalog auto-sync (hosted in the worker loop, leader-gated;
     # N2-D-1/2/3). A daily-ish periodic task re-pulls Docker's catalog and reconciles
     # the writable mirror (PERSONA_MCP_MIRROR_PATH). ``enabled`` is the opt-out for

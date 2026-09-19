@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     # under TYPE_CHECKING only, so the A0 worker keeps ZERO runtime dependency on
     # A1 — a worker built without a tick behaves exactly as A0 shipped.
     from persona_api.schedules.tick import SchedulerTick
+    from persona_api.services.title_backfill import UntitledConversationBackfill
     from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
     from persona_api.tasks.revival_sweep import RevivalSweeper
 
@@ -132,6 +133,8 @@ class Worker:
         dead_leg_sweep_interval_seconds: float = 120.0,
         revival_sweep: RevivalSweeper | None = None,
         revival_sweep_interval_seconds: float = 300.0,
+        title_backfill: UntitledConversationBackfill | None = None,
+        title_backfill_interval_seconds: float = 900.0,
     ) -> None:
         self._dispatch_engine = dispatch_engine
         self._rls_engine = rls_engine
@@ -181,6 +184,11 @@ class Worker:
         self._revival_sweep = revival_sweep
         self._revival_sweep_interval = revival_sweep_interval_seconds
         self._dead_leg_sweep_interval = dead_leg_sweep_interval_seconds
+        # Issue #8: the untitled-conversation backfill. Additive; None on a worker without
+        # it. Leader-gated on its own advisory key inside run_once, and it only ever
+        # enqueues the same title_refresh job the write-time triggers enqueue.
+        self._title_backfill = title_backfill
+        self._title_backfill_interval = title_backfill_interval_seconds
         self._draining = asyncio.Event()
         self._in_flight: set[asyncio.Task[object]] = set()
         self._last_maintenance = 0.0
@@ -195,6 +203,7 @@ class Worker:
         self._last_approval_sweep: float | None = None
         self._last_dead_leg_sweep: float | None = None
         self._last_revival_sweep: float | None = None
+        self._last_title_backfill: float | None = None
         # R9-093 observability: wall-clock of the last completed loop iteration.
         # ``None`` until the loop first turns. A dead loop leaves this frozen,
         # which is what makes "the background half stopped" OBSERVABLE — the
@@ -289,6 +298,7 @@ class Worker:
             await self._maybe_run_approval_sweep()
             await self._maybe_run_dead_leg_sweep()
             await self._maybe_run_revival_sweep()
+            await self._maybe_run_title_backfill()
             free = self._concurrency - len(self._in_flight)
             # Claim ONE at a time (not a batch of ``free``): the fairness count is
             # evaluated against committed state, so a batch would let all its
@@ -556,6 +566,30 @@ class Worker:
             _log.exception("revival sweep failed", worker_id=self._worker_id)
         self._last_revival_sweep = time.monotonic()
 
+    async def _maybe_run_title_backfill(self) -> None:
+        """Run the untitled-conversation backfill if wired + its cadence has elapsed (issue #8).
+
+        A no-op when unwired (None). Leader-gated inside ``run_once`` on its OWN advisory key,
+        so every worker may call it safely. It finds conversations that are still unnamed and
+        have content to name, and enqueues the SAME durable ``title_refresh`` job a completed
+        turn would have: the backlog that predates the trigger's floor, plus any conversation
+        whose write path never reached a trigger (a call whose teardown died with the process).
+        The scan is blocking SQL, so it runs off the loop's thread; a failure is logged, never
+        crashing the loop.
+        """
+        if self._title_backfill is None:
+            return
+        if (
+            self._last_title_backfill is not None
+            and time.monotonic() - self._last_title_backfill < self._title_backfill_interval
+        ):
+            return
+        try:
+            await asyncio.to_thread(self._title_backfill.run_once)
+        except Exception:  # noqa: BLE001, a sweep failure must not crash the worker loop
+            _log.exception("title backfill failed", worker_id=self._worker_id)
+        self._last_title_backfill = time.monotonic()
+
     async def _maybe_run_skill_catalog_sync(self) -> None:
         """Run the S2 skill-catalog auto-sync if wired + its (daily-ish) cadence has elapsed.
 
@@ -658,6 +692,7 @@ def build_worker(
     approval_sweep_builder: Callable[[Engine, Engine], ApprovalSweepRunner | None] | None = None,
     dead_leg_sweep_builder: Callable[[Engine, Engine], DeadLegSweeper | None] | None = None,
     revival_sweep_builder: Callable[[Engine, Engine], RevivalSweeper | None] | None = None,
+    title_backfill_builder: Callable[[Engine], UntitledConversationBackfill | None] | None = None,
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -742,6 +777,11 @@ def build_worker(
         if revival_sweep_builder is not None
         else None
     )
+    # Issue #8: the untitled-conversation backfill. Cross-tenant scan + enqueue, so the
+    # dispatch engine alone. None when unwired → the loop is unchanged.
+    title_backfill = (
+        title_backfill_builder(dispatch_engine) if title_backfill_builder is not None else None
+    )
     return Worker(
         dispatch_engine=dispatch_engine,
         rls_engine=rls_engine,
@@ -760,6 +800,8 @@ def build_worker(
         dead_leg_sweep_interval_seconds=config.dead_leg_sweep_interval_seconds,
         revival_sweep=revival_sweep,
         revival_sweep_interval_seconds=config.revival_sweep_interval_seconds,
+        title_backfill=title_backfill,
+        title_backfill_interval_seconds=config.title_backfill_interval_seconds,
         concurrency=config.worker_concurrency,
         poll_interval_seconds=config.worker_poll_interval_seconds,
         poll_jitter_seconds=config.worker_poll_jitter_seconds,
