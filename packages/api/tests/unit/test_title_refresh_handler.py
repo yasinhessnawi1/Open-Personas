@@ -10,21 +10,27 @@ excerpt window (first 4 + last 12, per-message truncation) and registration.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from loguru import logger
+from persona.backends.types import ChatResponse, TokenUsage
 from persona.jobs import JobRegistry
+from persona_api.background import worker_root
 from persona_api.jobs.handlers.title_refresh import (
     TITLE_REFRESH_JOB_TYPE,
     TitleRefreshData,
     TitleRefreshHandler,
     TitleRefreshJobPayload,
+    build_title_refresh_generator,
     register_title_refresh_handler,
     transcript_excerpt,
 )
+from persona_api.services.llm_usage_collector import UsageCollectingBackend
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -255,3 +261,128 @@ def test_registration_declares_type_payload_and_key() -> None:
     assert spec.payload_model is TitleRefreshJobPayload
     payload = TitleRefreshJobPayload(conversation_id="c", threshold=10)
     assert spec.idempotency_key(payload) == "title:c:10"
+
+
+# --- the title model call is owner-billed like every other background LLM (M3 T5) --------
+
+
+class _BillingBackend:
+    """A backend whose usage the collector can see, like the metered background backends."""
+
+    provider_name = "openrouter"
+    model_name = "m"
+    supports_native_tools = False
+    supports_vision = False
+
+    async def chat(self, messages: object, **_kw: object) -> ChatResponse:  # noqa: ARG002
+        return ChatResponse(
+            content="A Fine Title",
+            usage=TokenUsage(
+                prompt_tokens=400, completion_tokens=12, total_tokens=412, cost_usd=0.004
+            ),
+            model="m",
+            provider="openrouter",
+            latency_ms=1.0,
+        )
+
+
+class _RecordingPolicy:
+    def __init__(self) -> None:
+        self.charges: list[dict[str, Any]] = []
+
+    def capture_up_to_idempotent(self, **kw: Any) -> tuple[int, int]:  # noqa: ANN401
+        self.charges.append(kw)
+        return int(kw["amount"]), 100
+
+
+def _billing_handler(policy: _RecordingPolicy | None) -> TitleRefreshHandler:
+    """The handler as the worker root builds it, over a usage-collecting backend."""
+    backend = UsageCollectingBackend(_BillingBackend())  # type: ignore[arg-type]
+    return TitleRefreshHandler(
+        generator=build_title_refresh_generator(backend),  # type: ignore[arg-type]
+        repository=_Repo(_data()),
+        credits_policy=policy,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+    )
+
+
+def test_a_refreshed_title_bills_its_model_call_to_the_owner() -> None:
+    """Title refresh runs a real model call on every conversation that earns one and was
+    billed to nobody: it never reached ``bill_background_llm``, and its backend was built
+    with ``metered=False`` so the call recorded no usage to bill from either."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+
+    assert len(policy.charges) == 1, "the title model call was not billed"
+    charge = policy.charges[0]
+    assert charge["cost_cents"] == pytest.approx(0.4)  # 0.004 USD actual
+    assert charge["cost_basis"] == "actual_openrouter"
+    assert charge["reason"].startswith("title_refresh:")
+
+
+def test_the_title_charge_is_keyed_so_a_retry_cannot_double_charge() -> None:
+    """The job's own idempotency key: a re-delivered refresh re-runs the model and must
+    hit the ON CONFLICT gate rather than charge twice."""
+    policy = _RecordingPolicy()
+
+    _run(_billing_handler(policy))
+    _run(_billing_handler(policy))
+
+    keys = {c["billing_key"] for c in policy.charges}
+    assert len(keys) == 1, f"a retry would charge under a different key: {keys}"
+
+
+def test_an_unmetered_install_still_refreshes_the_title() -> None:
+    """No credits policy composed (community / self-host): the refresh must be untouched.
+
+    ``bill_background_llm`` no-ops on a ``None`` policy, so the only thing to prove here is
+    that adding the billing block did not change the job's actual deliverable.
+    """
+    repo = _Repo(_data())
+    handler = TitleRefreshHandler(
+        generator=build_title_refresh_generator(
+            UsageCollectingBackend(_BillingBackend())  # type: ignore[arg-type]
+        ),
+        repository=repo,
+        credits_policy=None,
+    )
+
+    _run(handler)
+
+    assert repo.writes == [("conv_1", "A Fine Title")]
+
+
+def test_the_worker_root_meters_the_title_backend_and_passes_a_credits_policy() -> None:
+    """The composition half, which no behavioural test can see.
+
+    Two things had to both be true for this surface to bill, and neither was: the handler
+    has to be given a credits policy, AND its backend has to be metered so there is any
+    usage to bill from. A test over the handler alone passes with the root still composing
+    an unmetered backend, which is how the surface looked wired while charging nobody.
+    """
+    root = Path(worker_root.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(root)
+
+    metered: list[bool] = []
+    policies: list[bool] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        kwargs = {kw.arg for kw in node.keywords}
+        if node.func.id == "plan_scoped_background_backend":
+            for kw in node.keywords:
+                if kw.arg == "tier" and "title" in ast.dump(kw.value):
+                    metered.append(
+                        any(
+                            k.arg == "metered"
+                            and isinstance(k.value, ast.Constant)
+                            and k.value.value is True
+                            for k in node.keywords
+                        )
+                    )
+        if node.func.id == "register_title_refresh_handler":
+            policies.append("credits_policy" in kwargs)
+
+    assert metered == [True], "the title backend is not metered; its usage cannot be billed"
+    assert policies == [True], "the title handler is registered without a credits policy"

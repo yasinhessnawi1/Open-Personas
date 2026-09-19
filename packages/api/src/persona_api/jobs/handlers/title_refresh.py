@@ -46,14 +46,18 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 
 from persona_api.db.models import conversations, messages
+from persona_api.services.background_billing import bill_background_llm
+from persona_api.services.llm_usage_collector import collect_llm_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from persona.backends import ChatBackend
     from persona.jobs import JobContext, JobRegistry
-    from sqlalchemy import Connection
+    from persona_runtime.cost import CostSource
+    from sqlalchemy import Connection, Engine
 
+    from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs.queue import JobQueue, JobRecord
     from persona_api.realtime.channel import UserEventChannel
 
@@ -193,10 +197,23 @@ class TitleRefreshHandler:
         generator: Callable[[str], Awaitable[str]],
         repository: TitleRepository,
         event_channel: UserEventChannel | None = None,
+        credits_policy: CreditsPolicy | None = None,
+        rls_engine: Engine | None = None,
+        cost_source: CostSource | None = None,
+        floor: int = 1,
     ) -> None:
         self._generate = generator
         self._repo = repository
         self._event_channel = event_channel
+        #: Spec M3 (T5): a title refresh is a real model call the owner benefits from with
+        #: nobody in the loop, which is exactly the background-LLM shape. It was billed to
+        #: nobody: it never reached ``bill_background_llm``, and its backend was composed
+        #: with ``metered=False``, so the call recorded no usage to bill from either.
+        #: ``None`` (an unmetered install) leaves the refresh byte-identical to before.
+        self._credits_policy = credits_policy
+        self._rls_engine = rls_engine
+        self._cost_source = cost_source
+        self._floor = floor
 
     async def handle(self, payload: TitleRefreshJobPayload, context: JobContext) -> None:
         # R9-020 keep-existing contract: import the STRICT sanitizer half — a
@@ -210,7 +227,26 @@ class TitleRefreshHandler:
 
         # The model call runs OUTSIDE any DB transaction (never hold a conn
         # across an LLM await); the write below re-checks existence.
-        raw = await self._generate(transcript_excerpt(data.transcript))
+        with collect_llm_usage() as usage:
+            raw = await self._generate(transcript_excerpt(data.transcript))
+        # Bill before the sanitize/keep-existing branch below: the model call HAPPENED and
+        # cost real money whether or not its output was usable, and a rejected generation is
+        # exactly when we would otherwise silently absorb the cost.
+        totals = usage.totals()
+        bill_background_llm(
+            credits_policy=self._credits_policy,
+            rls_engine=self._rls_engine,
+            owner_id=context.owner_id,
+            provider=totals.provider,
+            model=totals.model,
+            prompt_tokens=totals.prompt_tokens,
+            completion_tokens=totals.completion_tokens,
+            cost_usd=totals.cost_usd,
+            surface="title_refresh",
+            billing_key=title_refresh_idempotency_key(payload),
+            cost_source=self._cost_source,
+            floor=self._floor,
+        )
         candidate = sanitize_title_candidate(raw)
         if candidate is None:
             _logger.warning(
@@ -258,6 +294,10 @@ def register_title_refresh_handler(
     generator: Callable[[str], Awaitable[str]],
     repository: TitleRepository | None = None,
     event_channel: UserEventChannel | None = None,
+    credits_policy: CreditsPolicy | None = None,
+    rls_engine: Engine | None = None,
+    cost_source: CostSource | None = None,
+    floor: int = 1,
 ) -> None:
     """Register the title-refresh tenant (R9-020; the episodic-registration shape)."""
     registry.register(
@@ -268,6 +308,10 @@ def register_title_refresh_handler(
                 generator=generator,
                 repository=repository if repository is not None else PgTitleRepository(),
                 event_channel=event_channel,
+                credits_policy=credits_policy,
+                rls_engine=rls_engine,
+                cost_source=cost_source,
+                floor=floor,
             ),
             idempotency_key=title_refresh_idempotency_key,
             retry=RetryPolicy(max_attempts=2),

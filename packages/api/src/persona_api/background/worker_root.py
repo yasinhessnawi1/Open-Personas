@@ -325,12 +325,20 @@ def build_worker_registry(
         rls_engine=rls_engine,
         paid_tier_registry=tier_registry,
         free_tier_registry=free_tier_registry,
-        metered=False,
+        # Spec M3 (T5): metered so the refresh's model call records its usage. It was
+        # ``False``, which is half of why this surface was billed to nobody: even had the
+        # handler asked to bill, there was no usage to bill from.
+        metered=True,
     )
     register_title_refresh_handler(
         registry,
         generator=build_title_refresh_generator(title_backend),
         event_channel=event_channel,
+        # Spec M3 (T5): owner-billed title model call, idempotent + fail-soft.
+        credits_policy=build_credits_policy(config),
+        rls_engine=rls_engine,
+        cost_source=(runtime_factory.metadata_resolver if runtime_factory is not None else None),
+        floor=config.agentic_credit_floor,
     )
 
     # Turn-into-file (R9-025b): message action -> LLM extraction (mid tier by
