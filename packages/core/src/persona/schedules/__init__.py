@@ -12,6 +12,7 @@ See ``docs/specs/phase3/spec_A1/`` for the spec, decisions, and research.
 
 from __future__ import annotations
 
+from persona.schedules.disclosure import ScheduleDisclosureLedger, ScheduleDisclosures
 from persona.schedules.keys import (
     FIRE_PAYLOAD_FIRE_TIME_KEY,
     FIRE_PAYLOAD_SCHEDULE_ID_KEY,
@@ -47,6 +48,7 @@ from persona.schedules.vocabulary import (
     render_recurrence_terms,
     rule_to_pattern,
 )
+from persona.schedules.whenphrase import SUPPORTED_WHEN_FORMS, resolve_when_phrase
 
 __all__ = [
     "FIRE_PAYLOAD_FIRE_TIME_KEY",
@@ -61,7 +63,10 @@ __all__ = [
     "RescheduleProposal",
     "RescheduleProposalStatus",
     "Schedule",
+    "SUPPORTED_WHEN_FORMS",
     "ScheduleAgenda",
+    "ScheduleDisclosureLedger",
+    "ScheduleDisclosures",
     "ScheduleReader",
     "ScheduleScope",
     "ScheduledOccurrence",
@@ -76,5 +81,6 @@ __all__ = [
     "render_human_terms",
     "render_recurrence_terms",
     "resolve_proposal",
+    "resolve_when_phrase",
     "rule_to_pattern",
 ]

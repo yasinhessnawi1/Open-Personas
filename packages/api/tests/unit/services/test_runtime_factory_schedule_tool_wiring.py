@@ -84,9 +84,10 @@ async def test_schedule_introspect_adds_exactly_one_registered_tool() -> None:
     assert _TOOL in registered
     # The pre-R9-075 composition on this path: 11 build_default_toolbox built-ins +
     # ``task_introspect`` = 12 registered. ``schedule_introspect`` makes 13, and Spec W1's
-    # ``task_pickup`` 14. (Production adds record_user_fact + the runtime-wired tools whose
-    # backends are absent here.)
-    assert len(registered) == 14, sorted(registered)
+    # ``task_pickup`` 14. Issue 13's write half (``schedule_book_once`` plus
+    # ``schedule_remove``) makes 16. (Production adds record_user_fact + the runtime-wired
+    # tools whose backends are absent here.)
+    assert len(registered) == 16, sorted(registered)
 
 
 @pytest.mark.asyncio
@@ -140,3 +141,70 @@ async def test_the_persona_can_actually_reach_its_own_work(tool_name: str) -> No
     assert tool_name not in persona.tools  # no persona's YAML names it (it is not a capability)
     assert toolbox.is_allowed(tool_name), f"{tool_name} is registered but gated out"
     assert tool_name in toolbox.names()  # and it is actually advertised to the model
+
+
+# ------------------------------------------------------------------------------------------
+# Issue 13: the WRITE half of the same window has to reach the model too.
+# ------------------------------------------------------------------------------------------
+
+_WRITE_TOOLS = ["schedule_book_once", "schedule_remove"]
+
+
+@pytest.mark.parametrize("tool_name", _WRITE_TOOLS)
+@pytest.mark.asyncio
+async def test_the_persona_can_actually_write_to_the_calendar(tool_name: str) -> None:
+    """The defect in issue 13 was the persona having no write door at all.
+
+    A tool composed but gated out would reproduce it exactly: the persona would go on saying
+    its scheduling access is read-only, which is why this asserts advertisement through the
+    real composition rather than membership of the auto-allow set.
+    """
+    persona = _make_persona(tools=["file_read", "code_execution", "web_search"])
+    toolbox = await _make_factory()._build_toolbox(persona, scanned_skills=[])  # type: ignore[attr-defined]
+
+    assert tool_name not in persona.tools  # no persona's YAML names it
+    assert toolbox.is_allowed(tool_name), f"{tool_name} is registered but gated out"
+    assert tool_name in toolbox.names()
+
+
+@pytest.mark.asyncio
+async def test_the_read_and_write_tools_arrive_together() -> None:
+    """A persona with default permissions gets the whole window: look, book, remove."""
+    toolbox = await _make_factory()._build_toolbox(  # type: ignore[attr-defined]
+        _make_persona(tools=["file_read"]), scanned_skills=[]
+    )
+    names = toolbox.names()
+
+    assert {_TOOL, *_WRITE_TOOLS} <= set(names)
+
+
+@pytest.mark.asyncio
+async def test_off_request_booking_fails_closed() -> None:
+    """No RLS owner bound ⇒ no booking port ⇒ nothing is written anywhere."""
+    toolbox = await _make_factory()._build_toolbox(  # type: ignore[attr-defined]
+        _make_persona(tools=["file_read"]), scanned_skills=[]
+    )
+    result = await toolbox.dispatch(
+        ToolCall(
+            name="schedule_book_once",
+            args={"goal": "Redraw the Gantt chart", "when": "in one hour"},
+            call_id="call_book_1",
+        )
+    )
+
+    assert result.is_error is True
+    assert "calendar access" in result.content
+
+
+@pytest.mark.asyncio
+async def test_off_request_removal_fails_closed() -> None:
+    """No RLS owner bound ⇒ no removal port and no disclosure record ⇒ nothing is deleted."""
+    toolbox = await _make_factory()._build_toolbox(  # type: ignore[attr-defined]
+        _make_persona(tools=["file_read"]), scanned_skills=[]
+    )
+    result = await toolbox.dispatch(
+        ToolCall(name="schedule_remove", args={"schedule_id": "sch_1"}, call_id="call_rm_1")
+    )
+
+    assert result.is_error is True
+    assert "calendar access" in result.content

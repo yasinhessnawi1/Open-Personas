@@ -292,3 +292,95 @@ async def test_data_payload_carries_the_full_agenda() -> None:
     assert result.data["window_from"].startswith("2026-08-03")
     assert len(result.data["occurrences"]) == 1
     assert result.data["occurrences"][0]["schedule_id"] == "s1"
+
+
+# ------------------------------------------------------------------------------------------
+# The disclosure record (issue 13): what this read shows the user, the delete door may act on.
+# ------------------------------------------------------------------------------------------
+
+
+class _RecordingDisclosures:
+    """Stands in for the caller's half of the disclosure ledger."""
+
+    def __init__(self) -> None:
+        self.recorded: set[str] = set()
+
+    def record(self, schedule_ids: object) -> None:
+        self.recorded.update(schedule_ids)  # type: ignore[arg-type]
+
+    def was_shown(self, schedule_id: str) -> bool:
+        return schedule_id in self.recorded
+
+
+@pytest.mark.asyncio
+async def test_every_listed_schedule_is_recorded_as_shown() -> None:
+    """Reading the calendar is what licenses a removal, so the read records the ids.
+
+    Without this, ``schedule_remove`` refuses every id forever and the write door is dead on
+    arrival: the user is told to look at their calendar, they do, and it still says no.
+    """
+    reader = _FakeReader(
+        occurrences=[
+            _occurrence("sch_hn", fire_at=_NOW + timedelta(hours=1)),
+            _occurrence("sch_standup", fire_at=_NOW + timedelta(hours=3)),
+        ]
+    )
+    disclosures = _RecordingDisclosures()
+    tool = make_schedule_introspection_tool(
+        reader_provider=lambda: reader,
+        persona_id="astrid",
+        clock=lambda: _NOW,
+        disclosure_provider=lambda: disclosures,
+    )
+
+    await tool.execute(scope="all", days_ahead=7)
+
+    assert disclosures.recorded == {"sch_hn", "sch_standup"}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_calendar_discloses_nothing() -> None:
+    """Nothing was shown, so nothing becomes actionable: no blanket licence."""
+    disclosures = _RecordingDisclosures()
+    tool = make_schedule_introspection_tool(
+        reader_provider=lambda: _FakeReader(occurrences=[]),
+        persona_id="astrid",
+        clock=lambda: _NOW,
+        disclosure_provider=lambda: disclosures,
+    )
+
+    await tool.execute(scope="mine", days_ahead=7)
+
+    assert disclosures.recorded == set()
+
+
+@pytest.mark.asyncio
+async def test_the_read_still_answers_when_there_is_no_disclosure_record() -> None:
+    """Fail-soft: the answer the user asked for never depends on the delete gate's bookkeeping."""
+    reader = _FakeReader(occurrences=[_occurrence("sch_hn", fire_at=_NOW + timedelta(hours=1))])
+    tool = make_schedule_introspection_tool(
+        reader_provider=lambda: reader,
+        persona_id="astrid",
+        clock=lambda: _NOW,
+        disclosure_provider=lambda: None,
+    )
+
+    result = await tool.execute(scope="mine", days_ahead=7)
+
+    assert result.is_error is False
+    assert "sch_hn" in result.content
+
+
+def test_the_tool_no_longer_tells_the_persona_its_access_is_read_only() -> None:
+    """Issue 13's copy half: the description must not leave a persona believing it cannot write.
+
+    The persona in the report said "my scheduling access is currently read-only" and it was
+    telling the truth at the time. The write tools exist now, and the guidance the model reads
+    has to name them, or it will keep saying the old thing.
+    """
+    tool = make_schedule_introspection_tool(reader_provider=lambda: None)
+    description = tool.description
+
+    assert "read-only" not in description.replace("not read-only", "")
+    assert "schedule_book_once" in description
+    assert "schedule_remove" in description

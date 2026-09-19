@@ -23,6 +23,10 @@ from persona.tools.builtin.json_query import make_json_query_tool
 from persona.tools.builtin.mcp_search import make_mcp_search_tool
 from persona.tools.builtin.regex_match import make_regex_match_tool
 from persona.tools.builtin.schedule_introspection import SCHEDULE_INTROSPECT_TOOL_NAME
+from persona.tools.builtin.schedule_write import (
+    SCHEDULE_BOOK_ONCE_TOOL_NAME,
+    SCHEDULE_REMOVE_TOOL_NAME,
+)
 from persona.tools.builtin.task_introspection import TASK_INTROSPECT_TOOL_NAME
 from persona.tools.builtin.task_pickup import TASK_PICKUP_TOOL_NAME
 from persona.tools.builtin.text_diff import make_text_diff_tool
@@ -64,6 +68,14 @@ _logger = get_logger("tools.factory")
 #: * ``schedule_introspect`` — the read-only calendar window (R9-075). A persona could
 #:   create schedules but had no way to read them back, so "what's on my calendar?" was
 #:   answered from imagination.
+#: * ``schedule_book_once`` / ``schedule_remove``: the WRITE half of that same window. With
+#:   only the read tool, a persona asked to book a run an hour from now had to say its
+#:   scheduling access was read-only, and an entry the user asked it to delete was still
+#:   sitting there the next time they looked (issue 13). Presence is the authorization for
+#:   the same reason it is for ``task_pickup``: neither is a capability a persona opts into.
+#:   Both act on the CALLER's own calendar through the same services the Schedule page uses,
+#:   both resolve the owner per dispatch so an off-request call fails closed, and the removal
+#:   will not touch an id no calendar read ever put in front of the user.
 #: * ``task_introspect`` — the read-only window onto its own standing work (A4-D-5). It was
 #:   composed as an extra tool and never auto-allowed, so it hit exactly the filter this set
 #:   exists to prevent: registered, counted, and then dropped for every persona with a
@@ -88,6 +100,8 @@ SELF_KNOWLEDGE_TOOLS: frozenset[str] = frozenset(
     {
         "use_skill",
         SCHEDULE_INTROSPECT_TOOL_NAME,
+        SCHEDULE_BOOK_ONCE_TOOL_NAME,
+        SCHEDULE_REMOVE_TOOL_NAME,
         TASK_INTROSPECT_TOOL_NAME,
         TASK_PICKUP_TOOL_NAME,
         "record_user_fact",

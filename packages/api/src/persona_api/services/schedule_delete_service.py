@@ -58,6 +58,7 @@ def delete_schedule_with_intent(
     owner_id: str,
     schedule_id: str,
     event_channel: UserEventChannel | None = None,
+    requested_by: str = "user_via_ui",
     now: datetime | None = None,
 ) -> ScheduleDeleteOutcome:
     """Delete a schedule, record the tombstone, and pause an orphaned linked task.
@@ -65,6 +66,12 @@ def delete_schedule_with_intent(
     Raises :class:`~persona.errors.ScheduleNotFoundError` (unchanged — 404 upstream)
     if the schedule is absent; ``ScheduleStore.delete``'s RLS scoping/audit shape is
     untouched.
+
+    ``requested_by`` names the door the delete came through and rides the tombstone's
+    ``reason``, so the durable record of "the user deleted this" also says how they said
+    it. The calendar's delete button is ``user_via_ui`` (the default, unchanged);
+    ``user_via_chat`` is the persona's ``schedule_remove`` tool acting on an entry the user
+    asked it to take off, after a calendar read showed them that entry.
 
     Order — each step past the delete is best-effort (the user's requested delete
     always completes even if the ancillary honesty work below it degrades):
@@ -94,11 +101,12 @@ def delete_schedule_with_intent(
     subject = extract_subject(schedule.payload_template)
     title_key = normalize_title(subject) if subject is not None else None
     reason: dict[str, str] = {
+        "requested_by": requested_by,
         "cadence": render_human_terms(
             recurrence=schedule.recurrence,
             one_time_at=schedule.one_time_at,
             timezone=schedule.timezone,
-        )
+        ),
     }
     if subject is not None:
         reason["subject"] = subject

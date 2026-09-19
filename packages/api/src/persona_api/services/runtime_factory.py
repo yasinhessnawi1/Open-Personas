@@ -26,10 +26,11 @@ from persona.backends.metadata import (
 from persona.backends.openrouter_catalog import OpenRouterCatalogClient, catalog_ttl_from_env
 from persona.backends.openrouter_passthrough import build_openrouter_passthrough
 from persona.config import PersonaCoreConfig
-from persona.errors import PersonaNotFoundError
+from persona.errors import PersonaNotFoundError, ScheduleNotFoundError
 from persona.history import ConversationHistoryManager
 from persona.imagegen import make_generate_image_tool
 from persona.logging import get_logger
+from persona.schedules.disclosure import ScheduleDisclosureLedger
 from persona.schema.persona import Persona
 from persona.skills import (
     BUILTIN_ROOT,
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from persona.imagegen import ImageBackend
     from persona.sandbox.result import SandboxFile
     from persona.schedules import QuietHours
+    from persona.schedules.disclosure import ScheduleDisclosures
     from persona.schedules.reader import ScheduleReader
     from persona.schema.chunks import PersonaChunk
     from persona.schema.skills import SkillSpec
@@ -97,6 +99,7 @@ if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
     from persona.stores.protocol import MemoryStore
     from persona.tasks.reader import TaskStateReader
+    from persona.tools.builtin.schedule_write import ScheduleBookingPort, ScheduleRemovalPort
     from persona.tools.builtin.task_pickup import TaskPickupPort
     from persona.tools.mcp.catalog import MCPCatalog, MCPServerCatalogEntry
     from persona.tools.mcp.client import MCPClient
@@ -270,6 +273,14 @@ class RuntimeFactory:
         self._mcp_runtime = mcp_runtime
         # MCP clients accumulated across requests, closed on shutdown.
         self._mcp_clients: list[MCPClient] = []
+        # Issue 13: what this process has actually shown each user about their calendar.
+        # ``schedule_introspect`` records every entry it lists; ``schedule_remove`` will not
+        # delete an id that never came out of such a read, so a model cannot turn an id it
+        # invented into a deletion. Held here (one per process, injected into both tools)
+        # rather than reached for globally. It is in memory: a restart, or a turn served by
+        # another process, costs the user one more calendar read before the delete lands,
+        # which is the safe direction to fail in.
+        self._schedule_disclosures = ScheduleDisclosureLedger()
         # Spec 27 (D-27-3) — app-scoped lazy supervisor for built-in MCP servers.
         # Construction spawns NOTHING; a server boots on first resolution of an
         # ``mcp:<server>:`` tool in ``_build_toolbox`` and is reaped at shutdown.
@@ -1040,6 +1051,33 @@ class RuntimeFactory:
             make_schedule_introspection_tool(
                 reader_provider=self._build_schedule_reader_provider(),
                 persona_id=persona.persona_id,
+                disclosure_provider=self._build_schedule_disclosure_provider(),
+            )
+        )
+        # Issue 13: the WRITE half of that window. Reading the calendar was all a persona
+        # could do, so "book the redraw an hour from now" got the honest, useless answer
+        # ("my scheduling access is read-only") and the routine the user asked it to drop
+        # was still there next time they looked. Both tools go through the SAME services
+        # the Schedule page uses (``create_user_schedule`` for the New routine dialog's
+        # Once cadence, ``delete_schedule_with_intent`` for its delete), so there is no
+        # second scheduling path: same guards, same audit, same tombstone. Owner per
+        # dispatch from the RLS contextvar (fail-closed off-request); auto-allowed in
+        # ``build_default_toolbox`` (``SELF_KNOWLEDGE_TOOLS``) like the read half.
+        from persona.tools.builtin.schedule_write import (
+            make_schedule_book_once_tool,
+            make_schedule_remove_tool,
+        )
+
+        extra.append(
+            make_schedule_book_once_tool(
+                port_provider=self._build_schedule_booking_provider(persona.persona_id),
+                persona_id=persona.persona_id,
+            )
+        )
+        extra.append(
+            make_schedule_remove_tool(
+                port_provider=self._build_schedule_removal_provider(),
+                disclosure_provider=self._build_schedule_disclosure_provider(),
             )
         )
         # Spec 27 (D-27-3) — lazily spawn the built-in MCP servers THIS persona
@@ -1743,6 +1781,154 @@ class RuntimeFactory:
             if not owner:
                 return None
             return APIScheduleReader(engine, config, owner)
+
+        return _provider
+
+    def _build_schedule_disclosure_provider(self) -> Callable[[], ScheduleDisclosures | None]:
+        """The caller's half of the calendar disclosure ledger (issue 13).
+
+        ``schedule_introspect`` writes into it (every entry it lists has now been shown) and
+        ``schedule_remove`` reads it (an id nobody was shown is never deleted). Bound to the
+        caller at DISPATCH from the RLS contextvar, so one user's calendar reading can never
+        license a delete in another user's turn; off-request it resolves to ``None``, which
+        the remove tool treats as "not shown" and therefore asks rather than acts.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+
+        ledger = self._schedule_disclosures
+
+        def _provider() -> ScheduleDisclosures | None:
+            owner = current_user_id.get()
+            return ledger.bind(owner) if owner else None
+
+        return _provider
+
+    def _build_schedule_booking_provider(
+        self, persona_id: str | None
+    ) -> Callable[[], ScheduleBookingPort | None]:
+        """The owner-scoped, persona-bound one-off booking port (issue 13).
+
+        Writes through ``create_user_schedule``, the SAME function ``POST /v1/me/schedule``
+        calls when the New routine dialog books a "Once" cadence, so the persona's booking
+        gets the dialog's guards for free: the never-fires fail-fast, the owned-executor
+        check, subject normalisation, the compensating delete when the backing task cannot
+        be created, and the idempotent converge on a repeated key. The only difference is the
+        audit actor (``user_via_chat``, A8's existing vocabulary for "the user said so in
+        conversation") and the intent (``task``: the user is handing over work to do at that
+        time, not asking to be reminded that it exists).
+
+        The captured zone is the caller's own resolved timezone, the same one A8 gives the
+        calendar and the origination judge, so a booking made in chat and one made in the
+        dialog are anchored identically.
+        """
+        from datetime import UTC, datetime
+
+        from persona.tools.builtin.schedule_write import BookedSchedule, ScheduleBookingPort
+
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.schedules.store import ScheduleStore
+        from persona_api.services import schedule_create_service
+        from persona_api.tasks.store import TaskStore
+
+        engine = self._engine
+        timezone_provider = self._build_user_timezone_provider()
+
+        class _Port(ScheduleBookingPort):
+            def timezone(self) -> str:
+                return timezone_provider()
+
+            def book_once(
+                self, *, subject: str, fire_at: datetime, idempotency_key: str
+            ) -> BookedSchedule:
+                owner = current_user_id.get()
+                if not owner:
+                    raise PersonaNotFoundError(
+                        "no calendar context", context={"persona_id": persona_id or ""}
+                    )
+                zone = timezone_provider()
+                result = schedule_create_service.create_user_schedule(
+                    engine,
+                    ScheduleStore(engine),
+                    TaskStore(engine),
+                    owner_id=owner,
+                    pattern=None,
+                    one_time_at=fire_at,
+                    timezone=zone,
+                    persona_id=persona_id or "",
+                    subject=subject,
+                    idempotency_key=idempotency_key,
+                    now=datetime.now(UTC),
+                    intent="task",
+                    actor="user_via_chat",
+                )
+                return BookedSchedule(
+                    schedule_id=result.schedule_id,
+                    task_id=result.task_id,
+                    created=result.created,
+                    subject=subject,
+                    fire_at=result.next_fire or fire_at,
+                    timezone=result.timezone,
+                    human_terms=result.human_terms,
+                    quiet_hours_offer=result.quiet_hours_offer,
+                )
+
+        def _provider() -> ScheduleBookingPort | None:
+            return _Port() if current_user_id.get() and persona_id else None
+
+        return _provider
+
+    def _build_schedule_removal_provider(self) -> Callable[[], ScheduleRemovalPort | None]:
+        """The owner-scoped removal port (issue 13).
+
+        Deletes through ``delete_schedule_with_intent``, the SAME function the calendar's
+        delete affordance calls, so the persona's removal writes the R9-037 tombstone every
+        origination seam consults (nothing silently re-creates what the user dropped) and
+        pauses an orphaned backing task exactly as the UI delete does. The entry is read
+        first so the confirmation can name what went, rather than reciting an id; an entry
+        outside the caller's reach reads as absent, here and in the tool.
+        """
+        from persona.schedules import render_human_terms
+        from persona.tools.builtin.schedule_write import RemovedSchedule, ScheduleRemovalPort
+
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.schedules.store import ScheduleStore
+        from persona_api.schedules.tombstones import ScheduleTombstoneStore, extract_subject
+        from persona_api.services import schedule_delete_service
+        from persona_api.tasks.store import TaskStore
+
+        engine = self._engine
+
+        class _Port(ScheduleRemovalPort):
+            def remove(self, schedule_id: str) -> RemovedSchedule:
+                owner = current_user_id.get()
+                if not owner:
+                    raise ScheduleNotFoundError(
+                        "no calendar context", context={"schedule_id": schedule_id}
+                    )
+                store = ScheduleStore(engine)
+                schedule = store.get(owner, schedule_id)  # raises for another tenant's
+                outcome = schedule_delete_service.delete_schedule_with_intent(
+                    schedule_store=store,
+                    task_store=TaskStore(engine),
+                    tombstones=ScheduleTombstoneStore(engine),
+                    rls_engine=engine,
+                    owner_id=owner,
+                    schedule_id=schedule_id,
+                    requested_by="user_via_chat",
+                )
+                return RemovedSchedule(
+                    schedule_id=outcome.schedule_id,
+                    subject=extract_subject(schedule.payload_template),
+                    human_terms=render_human_terms(
+                        recurrence=schedule.recurrence,
+                        one_time_at=schedule.one_time_at,
+                        timezone=schedule.timezone,
+                    ),
+                    paused_task_id=outcome.paused_task_id,
+                )
+
+        def _provider() -> ScheduleRemovalPort | None:
+            return _Port() if current_user_id.get() else None
 
         return _provider
 

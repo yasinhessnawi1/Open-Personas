@@ -48,6 +48,7 @@ __all__ = [
     "ScheduleNeverFiresError",
     "ScheduleNotFoundError",
     "ScheduleStateError",
+    "ScheduleTimePhraseError",
     "SchemaVersionMismatchError",
     "SkillArgumentValidationError",
     "SkillCompositionDepthError",
@@ -589,6 +590,19 @@ class InvalidScheduleScopeError(PersonaError):
     whole calendar" when it in fact looked at one persona's slice. ``context``
     carries the rejected ``scope`` and the ``supported`` vocabulary so the tool
     can hand the model a corrective message.
+    """
+
+
+class ScheduleTimePhraseError(PersonaError):
+    """Raised when a spoken one-off time cannot be read as an instant.
+
+    The persona write door (``schedule_book_once``) takes the time in the words the
+    user used. :func:`persona.schedules.whenphrase.resolve_when_phrase` resolves the
+    supported forms and raises this for everything else, including a time that has
+    already passed or one further out than the calendar horizon. Deliberately not
+    approximated: booking a commitment at a time nobody meant is worse than asking
+    for the date again. ``context`` carries the rejected ``phrase`` and the
+    ``supported`` vocabulary, so the tool can offer it back in its decline.
     """
 
 

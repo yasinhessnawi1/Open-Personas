@@ -115,6 +115,7 @@ def create_user_schedule(
     now: datetime,
     notify_on_fire: bool = True,
     intent: Literal["reminder", "task"] = "reminder",
+    actor: Literal["user_via_ui", "user_via_chat"] = "user_via_ui",
 ) -> ScheduleCreateResult:
     """Create the backing task + schedule for a user-initiated reminder (A10-D-1/2/6).
 
@@ -130,6 +131,14 @@ def create_user_schedule(
     ``intent`` (R11-B2): ``"reminder"`` composes the remind-and-update contract (the A10
     shape); ``"task"`` makes the subject the goal VERBATIM — the Activity dialog's
     "Schedule for later" hands off real work, not a nudge about it. Same door either way.
+
+    ``actor`` names the door this create came through, in A8's existing reschedule
+    vocabulary, and rides the ``schedule.create`` audit row. The calendar dialog is
+    ``user_via_ui`` (the default, unchanged); ``user_via_chat`` is the persona's
+    ``schedule_book_once`` tool booking what the user asked for in conversation. The
+    ``originator`` stays ``user`` in both cases, because in both cases the user asked: a
+    persona cannot reach this function on its own initiative, only inside a turn the user
+    drove, and the audit should not suggest otherwise.
     """
     cleaned_subject = normalize_subject(subject)
     if not cleaned_subject:
@@ -176,7 +185,7 @@ def create_user_schedule(
         store,
         schedule,
         now=now,
-        extra={"actor": "user_via_ui", "originator": "user", "subject": cleaned_subject},
+        extra={"actor": actor, "originator": "user", "subject": cleaned_subject},
     )
     task = build_backing_task(
         task_id=task_id,

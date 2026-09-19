@@ -1,10 +1,18 @@
 """The ``schedule_introspect`` tool — the persona's window onto the calendar (R9-075).
 
-A model-callable, **read-only** tool that answers "what's on my calendar this week?", "am I
-about to double-book you?", and "when does that run again?" from computed schedule occurrences
-and nothing else. It is the read half the platform was missing: a persona could create a
+A model-callable tool that answers "what's on my calendar this week?", "am I about to
+double-book you?", and "when does that run again?" from computed schedule occurrences and
+nothing else. It is the read half the platform was missing: a persona could create a
 schedule (A1/A10) and the web calendar could render one (A8), but the toolbox had no way to
 *look* at either — so the persona guessed, or said it couldn't know.
+
+This tool itself only reads, but reading is no longer all the persona can do: the write door
+is :mod:`persona.tools.builtin.schedule_write` (``schedule_book_once`` to put a one-off on
+the calendar, ``schedule_remove`` to take an entry off it). That matters here because a
+persona that believes its access is read-only says so, and until the write tools shipped it
+was saying it truthfully. It must not keep saying it now. The ids this tool reports are also
+what licenses a removal: every schedule it lists is recorded as SHOWN to the user, and
+``schedule_remove`` refuses an id that no calendar read ever put in front of them.
 
 Two scopes, both the owner asked for, and the difference is explicit in the call AND in the
 answer:
@@ -20,8 +28,10 @@ slice as if it were the whole calendar. When the reader reports ``truncated`` th
 Owner scoping + RLS live in the injected reader (resolved at dispatch via ``reader_provider``);
 no reader (no request owner) fails closed. The tool is built once per conversation and stays
 correctly scoped because the owner is resolved per call, not per build (the ``task_introspect`` /
-``record_user_fact`` precedent). CQS: every path here reads — this tool cannot create, edit,
-pause, or cancel anything.
+``record_user_fact`` precedent). CQS: this tool answers a question about the calendar and
+changes nothing on it: it cannot create, edit, pause, or cancel. The disclosure it records is
+not calendar state; it is the note that the user has now seen these entries, which is what the
+delete gate reads.
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ from persona.tools.protocol import tool
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from persona.schedules.disclosure import ScheduleDisclosures
     from persona.schedules.reader import ScheduleAgenda, ScheduledOccurrence, ScheduleReader
     from persona.tools.protocol import AsyncTool
 
@@ -54,7 +65,9 @@ _GUIDANCE = (
     "personas — use 'all' whenever the question is about their day, their week, or a clash. "
     "days_ahead sets how far forward to look. Report ONLY what this tool returns: if it says "
     "nothing is scheduled, say nothing is scheduled; if it says the list was capped, say there "
-    "may be more. Never invent an entry, a time, or a cadence."
+    "may be more. Never invent an entry, a time, or a cadence. Your calendar access is not "
+    "read-only: use `schedule_book_once` to put a one-off run on the calendar, and "
+    "`schedule_remove` with a schedule id from THIS tool's answer to take an entry off it."
 )
 
 #: The furthest ahead a single call may look. Matches the server-side occurrences horizon,
@@ -72,6 +85,7 @@ def make_schedule_introspection_tool(
     reader_provider: Callable[[], ScheduleReader | None],
     persona_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
+    disclosure_provider: Callable[[], ScheduleDisclosures | None] | None = None,
 ) -> AsyncTool:
     """Build the ``schedule_introspect`` tool bound to an owner-scoped reader provider.
 
@@ -85,6 +99,10 @@ def make_schedule_introspection_tool(
             widening to the whole calendar.
         clock: Returns "now" (tz-aware UTC) — the window anchor. Defaults to the system UTC
             clock; injectable so the window is deterministic under test.
+        disclosure_provider: Resolves the caller's disclosure record at DISPATCH time, so
+            every schedule this read shows the user becomes an id ``schedule_remove`` will
+            act on. ``None`` (the CLI / test path) ⇒ nothing is recorded, which only ever
+            makes a later removal ask first.
 
     Returns:
         The registered :class:`~persona.tools.protocol.AsyncTool`.
@@ -119,6 +137,7 @@ def make_schedule_introspection_tool(
             end=end,
             persona_id=persona_id if parsed is ScheduleScope.MINE else None,
         )
+        _record_disclosure(disclosure_provider, agenda)
         return ToolResult(
             tool_name=SCHEDULE_INTROSPECT_TOOL_NAME,
             content=_render_agenda(agenda, scope=parsed, days_ahead=days_ahead),
@@ -127,6 +146,24 @@ def make_schedule_introspection_tool(
         )
 
     return schedule_introspect
+
+
+def _record_disclosure(
+    disclosure_provider: Callable[[], ScheduleDisclosures | None] | None,
+    agenda: ScheduleAgenda,
+) -> None:
+    """Note every listed schedule as shown to this user: the delete gate's only input.
+
+    Fail-soft on purpose: the read the user asked for is the point of the call, and a
+    disclosure that does not land costs them one extra confirmation later, never a wrong
+    answer and never a wrong delete.
+    """
+    if disclosure_provider is None:
+        return
+    disclosures = disclosure_provider()
+    if disclosures is None:
+        return
+    disclosures.record({occurrence.schedule_id for occurrence in agenda.occurrences})
 
 
 def _error(message: str) -> ToolResult:
