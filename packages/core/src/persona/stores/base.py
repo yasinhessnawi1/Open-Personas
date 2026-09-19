@@ -36,6 +36,13 @@ if TYPE_CHECKING:
 __all__ = ["TypedStore"]
 
 
+#: How many extra candidates a versioned query asks the backend for, so superseded versions
+#: inside the window cannot cost the caller results. Three is the convention the episodic
+#: store already used for its retention rerank; the bound stays small because the filtered
+#: answer is truncated back to ``top_k`` immediately.
+_SUPERSEDED_OVERFETCH = 3
+
+
 class TypedStore:
     """Shared implementation for the four typed stores.
 
@@ -181,6 +188,21 @@ class TypedStore:
 
         supersedes: PersonaChunk | None = None
         if next_version > 1:
+            # An update must never reuse a physical id already in this chain. Every backend
+            # writes ON CONFLICT (id) DO UPDATE, so a reused id does not append a version, it
+            # OVERWRITES the one it claims to supersede: the store was left holding a single
+            # row carrying ``version=2``, and ``history()`` then raised BrokenVersionChainError
+            # on the chain it was asked to read. Minting here, rather than trusting the caller,
+            # makes append-only a property of the STORE instead of a rule every writer has to
+            # remember. Callers that already mint distinct ids (``persona.autonomy`` puts the
+            # version in its own id) are untouched: the id changes only when it would collide.
+            chain_ids = {
+                c.id
+                for c in existing
+                if (c.provenance.logical_id if c.provenance is not None else c.id) == logical_id
+            }
+            if prepared.id in chain_ids:
+                prepared = prepared.model_copy(update={"id": f"{logical_id}::v{next_version:04d}"})
             head = current_version(existing, logical_id)
             if head is not None:
                 supersedes = link_supersedes(head, prepared.id)
@@ -195,15 +217,27 @@ class TypedStore:
         top_k: int,
         **filters: Any,  # noqa: ANN401 — backend-specific
     ) -> list[PersonaChunk]:
+        # Ask for more than the caller wants, because a superseded version sitting in the
+        # window used to cost a result outright: the filter below ran on the ANSWER, so a
+        # logical chain edited more times than ``top_k`` could fill the whole window with its
+        # own dead versions and return nothing current. That is silent memory loss, and it grew
+        # with use (``persona.autonomy`` appends a versioned chain into self_facts, so its dead
+        # versions accumulate for every persona that learns).
+        #
+        # The Postgres backend excludes them in SQL, so this over-read costs it nothing. The
+        # over-fetch is what keeps the guarantee true for a backend that does not push down.
+        fetch_k = top_k * _SUPERSEDED_OVERFETCH if self.SUPPORTS_VERSIONING else top_k
         results = self._backend.query(
             persona_id=persona_id,
             store_kind=self.STORE_KIND,
             text=query,
-            top_k=top_k,
+            top_k=fetch_k,
             where=filters or None,
         )
-        # Filter out superseded versions (queries return the current view).
-        return [c for c in results if c.provenance is None or c.provenance.superseded_by is None]
+        # Filter out superseded versions (queries return the current view), THEN honour the
+        # caller's bound, so top_k counts what it promises: current chunks.
+        current = [c for c in results if c.provenance is None or c.provenance.superseded_by is None]
+        return current[:top_k]
 
     def get_all(
         self,

@@ -359,6 +359,11 @@ class PostgresBackend:
             .where(
                 _memory_chunks.c.persona_id == persona_id,
                 _memory_chunks.c.kind == store_kind,
+                # A similarity query is the CURRENT view: a superseded version must never
+                # occupy a slot in it. Filtering here rather than after the limit is what
+                # makes ``top_k`` mean top_k current chunks (the store re-checks, but a
+                # post-filter alone silently shrank every result set that met an edited fact).
+                _memory_chunks.c.superseded_by.is_(None),
             )
             .order_by(distance)
             .limit(top_k)

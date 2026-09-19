@@ -32,6 +32,16 @@ pytestmark = pytest.mark.integration
 UTC_NOW = datetime(2026, 5, 28, 12, 0, 0, tzinfo=UTC)
 
 
+def _versioned_chunk(text: str, *, chunk_id: str, logical_id: str | None = None) -> PersonaChunk:
+    """A write; ``logical_id`` set means this is an update to that chain."""
+    provenance = None
+    if logical_id is not None:
+        provenance = ChunkProvenance(
+            source=WriteSource.USER, logical_id=logical_id, version=1, written_at=UTC_NOW
+        )
+    return PersonaChunk(id=chunk_id, text=text, created_at=UTC_NOW, provenance=provenance)
+
+
 @pytest.fixture
 def backend(pg_engine: Engine, embedder: HashEmbedder384) -> PostgresBackend:
     # memory_chunks.persona_id FK-references personas(id); seed the owner + a
@@ -191,3 +201,56 @@ def test_episodic_decay_ranks_recent_above_stale(
     results = store.query("p1", "mould complaint about the landlord", top_k=1)
     assert len(results) == 1
     assert results[0].id == "p1::episodic::recent"
+
+
+# --- the current view really is current, on the production transport ---------------------
+
+
+def test_a_similarity_query_never_returns_a_superseded_version(
+    backend: PostgresBackend,
+) -> None:
+    """The pushdown, asserted at the BACKEND so it cannot be satisfied by the store's filter.
+
+    ``TypedStore.query`` filters superseded rows and over-fetches to survive them, but on the
+    production transport the exclusion belongs in SQL: a post-filter alone let dead versions
+    occupy slots in the window, so a much-edited fact could crowd out everything else or
+    vanish entirely. Deleting the ``superseded_by IS NULL`` clause must turn this red.
+    """
+    store = SelfFactsStore(backend=backend, audit_logger=MemoryAuditLogger())
+    first = "p1::self_facts::0000"
+    store.write("p1", [_versioned_chunk("I drink tea", chunk_id=first)], source=WriteSource.USER)
+    for n in range(2, 7):
+        store.write(
+            "p1",
+            [_versioned_chunk(f"I drink tea variant {n}", chunk_id=first, logical_id=first)],
+            source=WriteSource.USER,
+            reason="edit",
+        )
+
+    rows = backend.query(persona_id="p1", store_kind="self_facts", text="what do I drink", top_k=10)
+
+    assert rows, "the backend returned nothing at all"
+    superseded = [
+        r.id for r in rows if r.provenance is not None and r.provenance.superseded_by is not None
+    ]
+    assert superseded == [], f"the backend handed back dead versions: {superseded}"
+
+
+def test_an_edited_fact_survives_a_narrow_window(backend: PostgresBackend) -> None:
+    """Six versions, a window of three: the current one still comes back."""
+    store = SelfFactsStore(backend=backend, audit_logger=MemoryAuditLogger())
+    first = "p1::self_facts::0000"
+    store.write("p1", [_versioned_chunk("I drink tea", chunk_id=first)], source=WriteSource.USER)
+    for n in range(2, 7):
+        store.write(
+            "p1",
+            [_versioned_chunk(f"I drink coffee take {n}", chunk_id=first, logical_id=first)],
+            source=WriteSource.USER,
+            reason="edit",
+        )
+
+    got = store.query("p1", "what do I drink", top_k=3)
+
+    assert [c.text for c in got] == ["I drink coffee take 6"]
+    chain = store.history("p1", first)
+    assert [c.provenance.version for c in chain if c.provenance] == [1, 2, 3, 4, 5, 6]
