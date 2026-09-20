@@ -64,7 +64,6 @@ def test_the_read_aloud_and_dictation_routes_read_the_url_the_same_way() -> None
     from types import SimpleNamespace
 
     from fastapi import Request
-
     from persona_api.routes.voice import _voice_service_base  # noqa: PLC2701
 
     def _request(config: object) -> Request:
