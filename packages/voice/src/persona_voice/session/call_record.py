@@ -36,10 +36,16 @@ if TYPE_CHECKING:
 
 __all__ = ["CallRecorder", "EndReason"]
 
-#: v1 writes 'disconnect' (clean room end) or 'error' (crash). 'user_hangup' /
-#: 'switched' are reserved for a later web-side refinement (the server only sees
-#: a room disconnect today). The DB CHECK accepts all four.
-EndReason = Literal["user_hangup", "switched", "error", "disconnect"]
+#: Why a call ended. Every value here has a real producer in
+#: :class:`~persona_voice.agent.runner.AgentSession` except ``switched``, which
+#: stays reserved for a web-side persona switch that does not exist yet:
+#: ``user_hangup`` (the remote participant left, seen on the room event),
+#: ``exhausted`` (the credit cutoff ended the call), ``shutdown`` (the worker was
+#: drained or redeployed, so the session task was cancelled), ``error`` (a crash)
+#: and ``disconnect`` (the room ended with no departure seen, the honest
+#: fallback). R9-203: before this, every call that did not crash was stored as a
+#: clean ``disconnect``. The DB CHECK accepts all six.
+EndReason = Literal["user_hangup", "switched", "exhausted", "shutdown", "error", "disconnect"]
 
 _LOG = get_logger("voice.call_record")
 
@@ -106,21 +112,36 @@ class CallRecorder:
                 err=repr(exc)[:300],
             )
 
-    def close(self, *, end_reason: EndReason, ended_at: datetime | None = None) -> int | None:
+    def close(
+        self,
+        *,
+        end_reason: EndReason,
+        ended_at: datetime | None = None,
+        conversation_ended_at: datetime | None = None,
+    ) -> int | None:
         """Finalize the call-record with end time, duration, and reason.
 
         Best-effort; MUST NOT raise (runs in the session teardown's suppressed
-        path). ``duration_s`` is STORED (V9-D-5) — computed here from
-        ``started_at`` (the :meth:`open` value, or read-back if open was missed).
-        A no-op-safe UPDATE: if the row was never inserted (open failed), the
-        UPDATE simply matches nothing.
+        path). A no-op-safe UPDATE: if the row was never inserted (open failed),
+        the UPDATE simply matches nothing.
 
-        Returns the computed ``duration_s`` (whole seconds, or ``None`` when the
+        Two different instants, named here so nobody has to guess later (R9-202).
+        ``ended_at`` is when this session was torn down, which can be hours after
+        anyone was on the call. ``conversation_ended_at`` is when the
+        conversation itself ended, from
+        :class:`~persona_voice.session.call_window.CallBillingWindow`. The STORED
+        ``duration_s`` (V9-D-5) measures the CONVERSATION, because that is what a
+        call's length means to the person who made it and to billing; the room's
+        full lifetime stays recoverable from ``ended_at - started_at`` on the
+        same row. With no conversation end available, duration falls back to wall
+        clock, as it always did.
+
+        Returns the stored ``duration_s`` (whole seconds, or ``None`` when the
         start is unknown) so teardown can bill the LiveKit infra tick (Spec M3,
-        T6b-1) without re-reading the row — the persistence itself stays best-effort.
+        T6b-1) without re-reading the row; the persistence itself stays best-effort.
         """
         ended = ended_at or self._clock()
-        duration_s = self._duration_s(ended)
+        duration_s = self._duration_s(conversation_ended_at or ended)
         try:
             with self._engine.begin() as conn:
                 conn.execute(

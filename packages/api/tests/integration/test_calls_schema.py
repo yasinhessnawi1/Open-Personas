@@ -6,7 +6,8 @@ Runs against a real Postgres built by ``alembic upgrade head`` (so migration
 1. **Table + valid insert** — a call-record inserts cleanly with its FK parents
    (user → persona → conversation), ``ended_at``/``duration_s``/``end_reason``
    nullable while live.
-2. **end_reason CHECK** — rejects an out-of-vocabulary reason.
+2. **end_reason CHECK** — accepts every reason the voice runner writes
+   (widened by migration 056 for R9-203) and rejects an out-of-vocabulary one.
 3. **ON DELETE CASCADE** — deleting the conversation removes its call-records
    (v1 retention falls out of the FK, V9-D-5).
 4. **RLS tenant isolation** (adversarial, the standing gate) — seed two tenants
@@ -103,6 +104,31 @@ def test_call_record_inserts_live_then_finalizes(migrated_engine: Engine) -> Non
         ).one()
     assert final.duration_s == 125
     assert final.end_reason == "disconnect"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["user_hangup", "switched", "exhausted", "shutdown", "error", "disconnect"],
+)
+def test_end_reason_check_accepts_every_reason_the_runner_writes(
+    migrated_engine: Engine, reason: str
+) -> None:
+    """R9-203 widened the vocabulary (migration 056), so the CHECK has to accept
+    the three reasons the voice runner gained a producer for. A call ended by the
+    credit cutoff or by a redeploy is no longer stored as a clean disconnect."""
+    _seed_conversation(migrated_engine, user_id="user_a", persona_id="p_a", conv_id="c_a")
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO calls (call_id, conversation_id, persona_id, owner_id, started_at, "
+                "end_reason) VALUES (:cid,'c_a','p_a','user_a', now(), :reason)"
+            ),
+            {"cid": f"call_{reason}", "reason": reason},
+        )
+        stored = conn.execute(
+            text("SELECT end_reason FROM calls WHERE call_id = :cid"), {"cid": f"call_{reason}"}
+        ).scalar_one()
+    assert stored == reason
 
 
 def test_end_reason_check_rejects_unknown(migrated_engine: Engine) -> None:

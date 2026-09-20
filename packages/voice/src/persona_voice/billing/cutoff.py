@@ -54,6 +54,11 @@ class VoiceExhaustionCutoff:
             hears why; a slow/blocked notice never delays the cutoff past the grace.
         on_fallback: Called if ``delete_room`` fails — the agent-leave path
             (typically ``ended.set``), so teardown still runs and the agent leaves.
+        on_triggered: Called once, first, when the cutoff fires, so the call's
+            durable record can say the call ended because the credit ran out
+            (R9-203). Without it the resulting room disconnect is
+            indistinguishable from a hangup in the record, which is how every
+            cut-off call was stored as a clean ``disconnect``.
         grace_s: Upper bound (seconds) on the notice before the room is deleted.
     """
 
@@ -63,11 +68,13 @@ class VoiceExhaustionCutoff:
         delete_room: Callable[[], Awaitable[None]],
         speak_notice: Callable[[], Awaitable[None]] | None = None,
         on_fallback: Callable[[], None] | None = None,
+        on_triggered: Callable[[], None] | None = None,
         grace_s: float = _DEFAULT_GRACE_S,
     ) -> None:
         self._delete_room = delete_room
         self._speak_notice = speak_notice
         self._on_fallback = on_fallback
+        self._on_triggered = on_triggered
         self._grace_s = grace_s
         self._fired = False
 
@@ -81,6 +88,11 @@ class VoiceExhaustionCutoff:
             return
         self._fired = True
         _LOG.info("voice credit exhausted; ending the call")
+        # R9-203: stamp the reason before anything that can fail, so the record
+        # is honest even if the notice or the room deletion goes wrong.
+        if self._on_triggered is not None:
+            with contextlib.suppress(Exception):
+                self._on_triggered()
         # One brief grounded notice, bounded so the end never hangs on the audio.
         if self._speak_notice is not None:
             with contextlib.suppress(Exception):  # incl. TimeoutError (an Exception)

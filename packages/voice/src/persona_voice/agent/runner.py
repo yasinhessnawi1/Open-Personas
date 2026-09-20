@@ -85,6 +85,7 @@ from persona_voice.model.origination_gate import (
 )
 from persona_voice.model.transcript import VoiceTranscriptWriter
 from persona_voice.session.call_record import CallRecorder, EndReason
+from persona_voice.session.call_window import CallBillingWindow
 from persona_voice.session.delegation_dispatch import DelegationDispatcher
 from persona_voice.session.delegation_handback import DelegationHandbackPoller
 from persona_voice.session.lifecycle_audit import SessionLifecycleAuditor
@@ -402,6 +403,7 @@ class AgentSession:
         delegation_dispatcher: DelegationDispatcher | None = None,
         on_call_complete: Callable[[], None] | None = None,
         turn_billing_meter: VoiceTurnBillingMeter | None = None,
+        billing_window: CallBillingWindow | None = None,
     ) -> None:
         self._voice_room = voice_room
         self._loop = loop
@@ -428,8 +430,16 @@ class AgentSession:
         # live engine to finalize the record at teardown. Owned + disposed here.
         self._call_recorder = call_recorder
         self._call_record_engine = call_record_engine
-        # Set to 'error' if run() exits via a real exception (crash); a clean
-        # disconnect / cancellation stays 'disconnect' (V9-D-5).
+        # R9-202: the billable window. It learns when the conversation actually
+        # ended (the caller leaving the room, or the last committed turn) and
+        # caps the billable seconds, so a session that lingers past the call
+        # cannot bill the gap. ``None`` means unmetered wiring (a test, or a
+        # session built without billing), and teardown then behaves as before.
+        self._billing_window = billing_window
+        # Why this call ended (V9-D-5). The default is the honest fallback: the
+        # room ended and we never saw the caller leave. Every other value is set
+        # by the exit path that knows better, through ``mark_end_reason``
+        # (R9-203, which found every non-crashing call stored as 'disconnect').
         self._end_reason: EndReason = "disconnect"
         # Held so the off-loop warm-up isn't garbage-collected mid-flight; the
         # turn-0 path gates on it (D-32-X-warmup-gates-turn0, wired in A3).
@@ -445,9 +455,27 @@ class AgentSession:
         # infra (per-min) once at end, off-loop + best-effort. ``None`` ⇒ unmetered.
         self._turn_billing_meter = turn_billing_meter
 
+    def mark_end_reason(self, reason: EndReason) -> None:
+        """Record WHY this call is ending, if nothing better is known yet.
+
+        First cause wins: the earliest exit path to speak keeps the record. The
+        default ``disconnect`` never wins over a real cause, and a later path
+        (teardown noticing the caller had left, say) cannot overwrite the reason
+        the credit cutoff or a crash already gave.
+        """
+        if self._end_reason == "disconnect":
+            self._end_reason = reason
+
     async def run(self) -> None:
         """Join the Room, run the loop until disconnect, then tear down."""
         try:
+            # R9-202: hear the caller leave. Registered BEFORE connect, because
+            # LiveKit can deliver participant events during the handshake and a
+            # departure missed here is a gap billed at the per minute rate.
+            if self._billing_window is not None:
+                self._voice_room.set_participant_left_handler(
+                    self._billing_window.note_participant_left
+                )
             # Prewarm the Silero ONNX session before the first frame
             # (D-V2-X-silero pillar #3 — never first-frame).
             await self._stt_seam.load()
@@ -467,10 +495,17 @@ class AgentSession:
                 session_id=self._session.session.session_id,
             )
             await self._ended.wait()
+        except asyncio.CancelledError:
+            # R9-203: the worker was drained or redeployed, so the launcher
+            # cancelled this session's task. That is not a hangup and not a
+            # crash, and it is exactly the shape that produced the production
+            # rows ending at one identical second. Re-raised unchanged.
+            self.mark_end_reason("shutdown")
+            raise
         except Exception:
             # A real crash (not a clean disconnect / CancelledError, which is a
             # BaseException and passes through) → record end_reason='error'.
-            self._end_reason = "error"
+            self.mark_end_reason("error")
             raise
         finally:
             await self._teardown()
@@ -524,16 +559,38 @@ class AgentSession:
         # end_reason), then dispose its DEDICATED engine. Runs AFTER session.end()
         # safely — the recorder's engine is separate, so the session-engine
         # disposal above never strands this write. close() is itself best-effort.
+        # R9-203: if no exit path claimed a reason and the caller was seen to
+        # leave, this was a hangup, not the bare fallback.
+        if self._billing_window is not None and self._billing_window.saw_participant_leave:
+            self.mark_end_reason("user_hangup")
+        conversation_ended_at = (
+            self._billing_window.conversation_ended_at()
+            if self._billing_window is not None
+            else None
+        )
         call_duration_s: int | None = None
         if self._call_recorder is not None:
-            call_duration_s = self._call_recorder.close(end_reason=self._end_reason)
+            call_duration_s = self._call_recorder.close(
+                end_reason=self._end_reason,
+                conversation_ended_at=conversation_ended_at,
+            )
         # Spec M3 (T6b-1): bill the call's LiveKit infra (per-min) ONCE at end, off
         # the loop + best-effort + idempotent (keyed per call, so a re-run of
         # teardown is a clean no-op). Runs after the record is finalized so the
         # duration is known; a billing hiccup never strands engine disposal below.
+        #
+        # R9-202: what is billed is the CONVERSATION, under a per call ceiling,
+        # never the session object's lifetime. ``call_duration_s`` already ends
+        # at the conversation's end (the recorder was handed it above); the
+        # window then bounds it and says so in the log if the bound binds.
         if self._turn_billing_meter is not None and call_duration_s is not None:
+            billable_s = (
+                self._billing_window.billable_seconds(call_duration_s)
+                if self._billing_window is not None
+                else call_duration_s
+            )
             with contextlib.suppress(Exception):
-                await self._turn_billing_meter.bill_call_infra(call_duration_s)
+                await self._turn_billing_meter.bill_call_infra(billable_s)
         if self._call_record_engine is not None:
             with contextlib.suppress(Exception):
                 self._call_record_engine.dispose()
@@ -916,10 +973,25 @@ async def build_agent_session(
         finally:
             engine.dispose()
 
+    # R9-202: the call-record id, minted here rather than at the recorder below
+    # because the billable window is named by it in the ceiling log, and the
+    # window has to exist before the meter that feeds it.
+    call_record_id = f"call_{uuid.uuid4().hex}"
+    # R9-202: the billable window. Fed by the room (the caller leaving) and by
+    # the meter (each committed turn), read at teardown. Before it, a session
+    # that outlived its conversation billed every second of the gap at the per
+    # minute LiveKit rate, which is how an eleven hour empty room cost a real
+    # user $13.34.
+    billing_window = CallBillingWindow(
+        call_id=call_record_id,
+        max_billable_s=config.max_billable_call_minutes * 60,
+    )
+
     turn_billing_meter = VoiceTurnBillingMeter(
         # R7: the per-UTC-day cap, which voice did not carry. An unset ``daily_cap`` is
         # silently uncapped, so the omission looked exactly like working code.
         ledger=CoreCreditsLedger(daily_cap=config.effective_daily_cap),
+        on_turn_committed=billing_window.note_turn_committed,
         billing_config=BillingConfig(),
         engine_factory=lambda: make_session_rls_engine(config.database_url, user_id=user_id),
         enqueue_topup=_enqueue_topup if config.is_cloud else None,
@@ -1144,12 +1216,23 @@ async def build_agent_session(
     # visibility for a self-hoster, and rewriting the ledger path would change
     # M3 billing behaviour well beyond this fix. Enforcement is the harm; the
     # bookkeeping is not.
+    #
+    # R9-203: the cutoff stamps the end reason through the session holder below,
+    # so a call the house ended for want of credit is stored as 'exhausted'
+    # rather than as the hangup it physically resembles.
+    agent_session_holder: list[AgentSession] = []
+
+    def _note_exhausted() -> None:
+        if agent_session_holder:
+            agent_session_holder[0].mark_end_reason("exhausted")
+
     if config.is_cloud:
         turn_billing_meter.set_on_exhausted(
             VoiceExhaustionCutoff(
                 delete_room=_delete_room_on_exhaustion,
                 speak_notice=_speak_exhaustion_notice,
                 on_fallback=ended.set,
+                on_triggered=_note_exhausted,
             ).trigger
         )
 
@@ -1162,7 +1245,7 @@ async def build_agent_session(
     call_record_engine = make_session_rls_engine(config.database_url, user_id=user_id)
     call_recorder = CallRecorder(
         engine=call_record_engine,
-        call_id=f"call_{uuid.uuid4().hex}",
+        call_id=call_record_id,
         conversation_id=conversation_id,
         persona_id=persona_id,
         owner_id=user_id,
@@ -1206,7 +1289,7 @@ async def build_agent_session(
             eng.dispose()
 
     # mcp_clients accumulated by build_default_toolbox are closed at teardown.
-    return AgentSession(
+    agent_session = AgentSession(
         voice_room=voice_room,
         loop=loop,
         stt_seam=stt_seam,
@@ -1225,7 +1308,10 @@ async def build_agent_session(
         delegation_dispatcher=delegation_dispatcher,
         on_call_complete=_on_call_complete,
         turn_billing_meter=turn_billing_meter,
+        billing_window=billing_window,
     )
+    agent_session_holder.append(agent_session)
+    return agent_session
 
 
 async def run_agent_session(

@@ -1616,14 +1616,22 @@ calls = Table(
     Column("ended_at", DateTime(timezone=True)),
     # STORED, not derived (V9-D-5): a live/crashed call stays queryable and the
     # Calls list avoids a per-row ``ended_at - started_at`` compute. Set at close.
+    # It measures the CONVERSATION, not the session object's lifetime (R9-202):
+    # a room can outlive the call by hours, and ``ended_at - started_at`` is where
+    # that lifetime stays readable.
     Column("duration_s", Integer),
-    # NULL while live; set at close. v1 writes 'disconnect' (clean room end) or
-    # 'error' (crash); 'user_hangup'/'switched' are reserved for a later web-side
-    # refinement (the server only sees a room disconnect today).
+    # NULL while live; set at close. Every value has a real producer in the voice
+    # runner except 'switched', which stays reserved for a web-side persona switch
+    # that does not exist yet: 'user_hangup' (the caller left the room),
+    # 'exhausted' (the credit cutoff ended the call), 'shutdown' (the worker was
+    # drained or redeployed), 'error' (a crash) and 'disconnect' (the room ended
+    # with no departure seen). R9-203 added the middle three, after every call
+    # that did not crash had been stored as a clean 'disconnect'.
     Column("end_reason", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
-        "end_reason IS NULL OR end_reason IN ('user_hangup', 'switched', 'error', 'disconnect')",
+        "end_reason IS NULL OR end_reason IN "
+        "('user_hangup', 'switched', 'exhausted', 'shutdown', 'error', 'disconnect')",
         name="calls_end_reason_check",
     ),
     Index("idx_calls_owner", "owner_id"),

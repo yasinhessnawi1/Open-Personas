@@ -54,6 +54,18 @@ class VoiceConfig(BaseSettings):
     # transport every turn, and nothing but the wallet itself bounded a day of them.
     credits_max_per_day: int = Field(default=10_000, ge=0, validation_alias="CREDITS_MAX_PER_DAY")
 
+    # --- R9-202 per-call billable ceiling ---
+    # The most minutes ONE call can ever be billed for, whatever the clock says.
+    # The primary fix bills the conversation rather than the session object's
+    # lifetime; this is the belt to that brace, and it is what makes the next
+    # lifecycle bug cost cents instead of a wallet. It bounds the CHARGE only:
+    # the call itself is never cut short by it, and the record still stores the
+    # measured duration. A call that hits it is logged by call id.
+    #
+    # Two hours by default: longer than any real call we have seen, short enough
+    # that a stuck session costs a couple of dollars. ``0`` disables the ceiling.
+    max_billable_call_minutes: int = Field(default=120, ge=0)
+
     @property
     def is_cloud(self) -> bool:
         """Whether this process runs the commercial cloud edition."""

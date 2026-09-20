@@ -80,6 +80,7 @@ def _meter(
     streamed_seconds: list[float] | None = None,
     engines: list[_FakeEngine] | None = None,
     on_exhausted: object | None = None,
+    on_turn_committed: object | None = None,
 ) -> VoiceTurnBillingMeter:
     seconds_box = streamed_seconds if streamed_seconds is not None else [0.0]
     engines_out = engines if engines is not None else []
@@ -102,6 +103,7 @@ def _meter(
         streamed_seconds_reader=lambda: seconds_box[0],
         floor=1,
         on_exhausted=on_exhausted,  # type: ignore[arg-type]
+        on_turn_committed=on_turn_committed,  # type: ignore[arg-type]
     )
 
 
@@ -216,6 +218,35 @@ class TestBillTurn:
         meter = _meter(ledger, streamed_seconds=[0.0])  # no STT, no TTS, no LLM
         asyncio.run(meter.bill_turn(1))
         assert ledger.calls == []
+
+    def test_every_committed_turn_beats_the_billable_window(self) -> None:
+        """R9-202: a committed turn is the fallback proof that the conversation
+        was still alive, so it must reach the window even on a turn that prices
+        at nothing. A free turn is still someone talking."""
+        beats: list[int] = []
+        ledger = _RecordingLedger()
+        meter = _meter(
+            ledger,
+            streamed_seconds=[0.0],  # a turn with no metered cost at all
+            on_turn_committed=lambda: beats.append(1),
+        )
+        asyncio.run(meter.bill_turn(1))
+        asyncio.run(meter.bill_turn(2))
+        assert beats == [1, 1]
+        assert ledger.calls == []  # and nothing was charged for them
+
+    def test_the_window_beat_survives_a_failing_deduct(self) -> None:
+        """The beat is recorded before pricing, so a ledger failure cannot make a
+        live call look like it stopped talking (and so bill for the gap)."""
+        beats: list[int] = []
+        meter = _meter(
+            _RaisingLedger(),
+            streamed_seconds=[60.0],
+            on_turn_committed=lambda: beats.append(1),
+        )
+        meter.note_tts_chars(1000)
+        asyncio.run(meter.bill_turn(1))  # fail-soft
+        assert beats == [1]
 
     def test_turn_without_llm_round_does_not_price_empty_attribution(
         self, monkeypatch: pytest.MonkeyPatch

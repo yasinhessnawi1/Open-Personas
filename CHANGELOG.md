@@ -11,6 +11,20 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Fixed
+- **A voice call is charged for the conversation, not for how long the room
+  stayed open.** Billing measured from the start of the call to the moment the
+  server tore the session down, which can be hours or days after the last word
+  was spoken: a room that lingers, a worker draining, a redeploy. One eleven hour
+  empty room cost a real person $13.34, and the longest record on file is a call
+  billed as sixteen days. The bill now ends when the caller leaves the room, or,
+  if that is never seen, at the last thing either of you said. A second limit
+  caps what any single call can cost however the clock behaves, and the call
+  record keeps the room's real lifetime so nothing is lost.
+- **A call says how it ended.** Every call that did not crash was filed as a
+  clean hangup, including the ones a redeploy killed and the ones that stopped
+  because the credits ran out. Each of those now says so.
+
 ## [1.2.0] - 2026-09-20
 
 ### Personas that act, a product that says what it is doing, and honest billing (2026-09-14 to 2026-09-20)

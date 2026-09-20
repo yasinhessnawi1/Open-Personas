@@ -61,9 +61,34 @@ def test_construction_registers_inbound_and_disconnect_handlers() -> None:
     _vr = VoiceRoom(room)
     assert "track_subscribed" in room.handlers
     assert "disconnected" in room.handlers
+    # R9-202: the caller leaving is its own event, and the bill depends on it.
+    assert "participant_disconnected" in room.handlers
     # Exactly one handler per event — we register inline at __init__.
     assert len(room.handlers["track_subscribed"]) == 1
     assert len(room.handlers["disconnected"]) == 1
+    assert len(room.handlers["participant_disconnected"]) == 1
+
+
+def test_participant_left_handler_is_called_on_the_room_event() -> None:
+    """R9-202: a remote participant leaving reaches the registered consumer.
+
+    The billable window hangs off this event, so the charge for every call
+    depends on the substrate event reaching the handler.
+    """
+    room = _FakeRoom()
+    vr = VoiceRoom(room)
+    departures: list[str] = []
+    vr.set_participant_left_handler(lambda: departures.append("left"))
+
+    room.fire("participant_disconnected", object())
+
+    assert departures == ["left"]
+
+
+def test_participant_left_event_without_a_handler_is_a_noop() -> None:
+    room = _FakeRoom()
+    VoiceRoom(room)
+    room.fire("participant_disconnected", object())  # must not raise
 
 
 def test_fake_room_satisfies_room_substrate_protocol() -> None:

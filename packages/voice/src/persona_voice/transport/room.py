@@ -130,6 +130,7 @@ class VoiceRoom:
         self._outbound_audio_track_name = outbound_audio_track_name
         self._inbound_handler: Callable[[InboundAudioFrame], Awaitable[None]] | None = None
         self._disconnect_handler: Callable[[], Awaitable[None]] | None = None
+        self._participant_left_handler: Callable[[], None] | None = None
         self._outbound_source: rtc.AudioSource | None = None
         self._outbound_track: rtc.LocalAudioTrack | None = None
         self._drain_tasks: list[asyncio.Task[None]] = []
@@ -137,6 +138,7 @@ class VoiceRoom:
         # construction so any inbound activity during connect surfaces cleanly.
         self._room.on("track_subscribed", self._handle_track_subscribed)
         self._room.on("disconnected", self._handle_disconnected)
+        self._room.on("participant_disconnected", self._handle_participant_disconnected)
 
     # ----- lifecycle ---------------------------------------------------
 
@@ -230,6 +232,27 @@ class VoiceRoom:
         ``rls_engine.begin()`` rollback).
         """
         self._disconnect_handler = handler
+
+    def set_participant_left_handler(self, handler: Callable[[], None]) -> None:
+        """Register the consumer notified when a remote participant leaves the Room.
+
+        The agent's only remote peer on a call is the caller, so this event is
+        the moment the human hung up. R9-202 bills the conversation rather than
+        the session object's lifetime, and this is the signal that says when the
+        conversation ended; the durable call-record also reads it to record an
+        honest ``user_hangup`` rather than a bare ``disconnect``.
+
+        The handler is SYNCHRONOUS on purpose: it only stamps a timestamp, and
+        the LiveKit event dispatcher is synchronous, so nothing is scheduled and
+        nothing can be lost to a cancelled task at teardown.
+        """
+        self._participant_left_handler = handler
+
+    def _handle_participant_disconnected(self, *_args: object) -> None:
+        """LiveKit ``participant_disconnected`` callback, forwarded to the consumer."""
+        if self._participant_left_handler is None:
+            return
+        self._participant_left_handler()
 
     def _handle_disconnected(self, *_args: object) -> None:
         """LiveKit ``disconnected`` callback — schedule the consumer to run.

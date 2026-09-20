@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from persona.calls import calls as _calls
 from persona_voice.agent.launcher import InProcessAgentLauncher
 from persona_voice.agent.runner import AgentSession
+from persona_voice.billing import VoiceExhaustionCutoff
+from persona_voice.session.call_record import CallRecorder
+from persona_voice.session.call_window import CallBillingWindow
+from sqlalchemy import Engine, create_engine, select
 
 pytestmark = [pytest.mark.asyncio]
 
@@ -236,7 +242,13 @@ class _SpyCallRecorder:
     def open(self, started_at: object = None) -> None:  # noqa: ARG002 — mirror CallRecorder
         self._calls.append("recorder_open")
 
-    def close(self, *, end_reason: str, ended_at: object = None) -> None:  # noqa: ARG002 — mirror
+    def close(
+        self,
+        *,
+        end_reason: str,
+        ended_at: object = None,  # noqa: ARG002 — mirrors CallRecorder.close
+        conversation_ended_at: object = None,  # noqa: ARG002 — mirrors CallRecorder.close
+    ) -> None:
         self.end_reason = end_reason
         self._calls.append("recorder_close")
 
@@ -307,7 +319,13 @@ class _SpyRecorderWithDuration:
     def open(self, started_at: object = None) -> None:  # noqa: ARG002 — mirror CallRecorder
         self._calls.append("recorder_open")
 
-    def close(self, *, end_reason: str, ended_at: object = None) -> int:  # noqa: ARG002 — mirror
+    def close(
+        self,
+        *,
+        end_reason: str,  # noqa: ARG002 — mirrors CallRecorder.close
+        ended_at: object = None,  # noqa: ARG002 — mirrors CallRecorder.close
+        conversation_ended_at: object = None,  # noqa: ARG002 — mirrors CallRecorder.close
+    ) -> int:
         self._calls.append("recorder_close")
         return self._duration_s
 
@@ -578,3 +596,283 @@ async def test_warm_starts_the_crisis_encoder_warmup_off_loop() -> None:
     assert launcher._crisis_warmup is not None  # noqa: SLF001 — boot started the off-loop warm
     await launcher._crisis_warmup  # noqa: SLF001 — let the background warm complete
     assert stub.warmed == 1  # the real boot path invoked warmup()
+
+
+# ---------- R9-202: the bill follows the conversation, not the session -------
+
+
+class _ParticipantAwareRoom(_FakeRoom):
+    """A room double that can deliver a ``participant_disconnected`` event.
+
+    The runner registers its handler through the SAME setter the real
+    :class:`~persona_voice.transport.room.VoiceRoom` exposes, so firing it here
+    drives the production path rather than reaching past it.
+    """
+
+    def __init__(self, calls: list[str]) -> None:
+        super().__init__(calls)
+        self.participant_left_handler: Any = None
+
+    def set_participant_left_handler(self, handler: Any) -> None:  # noqa: ANN401 — a callback
+        self.participant_left_handler = handler
+
+
+class _WindTheClock:
+    """A hand-wound UTC clock shared by the record and the billable window."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now = self.now + timedelta(seconds=seconds)
+
+
+def _sqlite_calls_engine() -> Engine:
+    """An in-memory engine carrying core's ``calls`` view (the real record SQL)."""
+    engine = create_engine("sqlite://")
+    _calls.metadata.create_all(engine)
+    return engine
+
+
+def _billed_session(
+    calls: list[str],
+    *,
+    clock: _WindTheClock,
+    engine: Engine,
+    max_billable_s: int,
+) -> tuple[AgentSession, asyncio.Event, _ParticipantAwareRoom, _SpyBillingMeter]:
+    """An AgentSession with the REAL recorder + REAL billable window and a spy meter."""
+    ended = asyncio.Event()
+    room = _ParticipantAwareRoom(calls)
+    recorder = CallRecorder(
+        engine=engine,
+        call_id="call_1a5",
+        conversation_id="c1",
+        persona_id="p1",
+        owner_id="u1",
+        clock=clock,
+    )
+
+    meter = _SpyBillingMeter(calls)
+    agent = AgentSession(
+        voice_room=room,  # type: ignore[arg-type]
+        loop=_FakeLoop(calls),  # type: ignore[arg-type]
+        stt_seam=_FakeSttSeam(calls),  # type: ignore[arg-type]
+        tts_seam=_FakeTtsSeam(calls),
+        session=_FakeSessionMachine(calls),  # type: ignore[arg-type]
+        mcp_clients=[],
+        livekit_url="ws://localhost:7880",
+        agent_token="tok",
+        ended=ended,
+        call_recorder=recorder,
+        call_record_engine=_SpyEngine(calls),  # type: ignore[arg-type]
+        turn_billing_meter=meter,  # type: ignore[arg-type]
+        billing_window=CallBillingWindow(
+            call_id="call_1a5", max_billable_s=max_billable_s, clock=clock
+        ),
+    )
+    return agent, ended, room, meter
+
+
+async def test_teardown_long_after_the_caller_left_bills_the_conversation() -> None:
+    """R9-202, the central one. A session torn down eleven hours after the caller
+    hung up must charge for the two minutes they were actually on the call.
+
+    Production billed the whole gap: ``call_1a5`` ran 40,008 seconds of wall clock
+    and took 1334 credits ($13.34) off a real person for minutes of conversation.
+    Nothing here forces the end state: the room delivers a real
+    ``participant_disconnected``, the clock then moves, and the ordinary teardown
+    chain does the rest.
+    """
+    calls: list[str] = []
+    clock = _WindTheClock(datetime(2026, 9, 2, 12, 42, 0, tzinfo=UTC))
+    engine = _sqlite_calls_engine()
+    agent, ended, room, meter = _billed_session(
+        calls, clock=clock, engine=engine, max_billable_s=7200
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "start_pipeline" in calls:
+            break
+
+    # Two minutes of conversation, then the caller leaves the room.
+    clock.advance(120)
+    room.participant_left_handler()
+    # The room lingers: a worker drain closes the session eleven hours later.
+    clock.advance(40_008 - 120)
+    ended.set()
+    await task
+
+    # Billed: the conversation. NOT the 40,008 second gap.
+    assert meter.infra_billed == [120]
+    with engine.begin() as conn:
+        row = conn.execute(select(_calls)).one()
+    # Stored duration is the conversation too, and the room's real lifetime stays
+    # readable as ended_at - started_at.
+    assert row.duration_s == 120
+    assert row.end_reason == "user_hangup"
+    wall_clock_s = (row.ended_at - row.started_at).total_seconds()
+    assert wall_clock_s == 40_008
+
+
+async def test_a_conversation_past_the_ceiling_is_billed_at_the_ceiling() -> None:
+    """The belt to the brace: whatever the measured conversation says, one call
+    cannot bill past the configured per-call ceiling, and the record keeps the
+    measured number."""
+    calls: list[str] = []
+    clock = _WindTheClock(datetime(2026, 9, 2, 12, 42, 0, tzinfo=UTC))
+    engine = _sqlite_calls_engine()
+    agent, ended, room, meter = _billed_session(
+        calls, clock=clock, engine=engine, max_billable_s=600
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "start_pipeline" in calls:
+            break
+
+    clock.advance(9_000)
+    room.participant_left_handler()
+    ended.set()
+    await task
+
+    assert meter.infra_billed == [600]
+    with engine.begin() as conn:
+        row = conn.execute(select(_calls)).one()
+    assert row.duration_s == 9_000  # the record stays honest about what was measured
+
+
+async def test_with_no_departure_the_last_committed_turn_ends_the_bill() -> None:
+    """The worker-killed shape: no room event ever arrives, so the last committed
+    turn is what the charge is measured to."""
+    calls: list[str] = []
+    clock = _WindTheClock(datetime(2026, 9, 2, 12, 42, 0, tzinfo=UTC))
+    engine = _sqlite_calls_engine()
+    agent, ended, _room, meter = _billed_session(
+        calls, clock=clock, engine=engine, max_billable_s=7200
+    )
+    window = agent._billing_window  # noqa: SLF001 — the meter feeds this in production
+    assert window is not None
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "start_pipeline" in calls:
+            break
+
+    clock.advance(200)
+    window.note_turn_committed()  # what VoiceTurnBillingMeter.bill_turn fires
+    clock.advance(5_000)
+    ended.set()
+    await task
+
+    assert meter.infra_billed == [200]
+    with engine.begin() as conn:
+        row = conn.execute(select(_calls)).one()
+    assert row.end_reason == "disconnect"  # nobody was seen to leave
+
+
+async def test_an_unmeasurable_call_still_falls_back_to_wall_clock() -> None:
+    """No departure and no turn: there is nothing better than wall clock, and the
+    ceiling is what keeps that from costing a wallet."""
+    calls: list[str] = []
+    clock = _WindTheClock(datetime(2026, 9, 2, 12, 42, 0, tzinfo=UTC))
+    engine = _sqlite_calls_engine()
+    agent, ended, _room, meter = _billed_session(
+        calls, clock=clock, engine=engine, max_billable_s=7200
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "start_pipeline" in calls:
+            break
+    clock.advance(40_008)
+    ended.set()
+    await task
+
+    assert meter.infra_billed == [7200]
+
+
+# ---------- R9-203: the record says WHY the call ended -----------------------
+
+
+async def test_a_drained_worker_records_shutdown() -> None:
+    """A redeploy cancels the session task. That is neither a hangup nor a crash,
+    and it is the shape that produced the production rows ending at one identical
+    second."""
+    calls: list[str] = []
+    ended = asyncio.Event()
+    recorder = _SpyCallRecorder(calls)
+    agent = AgentSession(
+        voice_room=_FakeRoom(calls),  # type: ignore[arg-type]
+        loop=_FakeLoop(calls),  # type: ignore[arg-type]
+        stt_seam=_FakeSttSeam(calls),  # type: ignore[arg-type]
+        tts_seam=_FakeTtsSeam(calls),
+        session=_FakeSessionMachine(calls),  # type: ignore[arg-type]
+        mcp_clients=[],
+        livekit_url="ws://localhost:7880",
+        agent_token="tok",
+        ended=ended,
+        call_recorder=recorder,  # type: ignore[arg-type]
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "recorder_open" in calls:
+            break
+    task.cancel()  # exactly what InProcessAgentLauncher.aclose() does on drain
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert recorder.end_reason == "shutdown"
+
+
+async def test_the_credit_cutoff_records_exhausted() -> None:
+    """The cutoff deletes the room, so the resulting disconnect is physically a
+    hangup. The record must still say the house ended the call."""
+    calls: list[str] = []
+    ended = asyncio.Event()
+    recorder = _SpyCallRecorder(calls)
+    room = _ParticipantAwareRoom(calls)
+    agent = AgentSession(
+        voice_room=room,  # type: ignore[arg-type]
+        loop=_FakeLoop(calls),  # type: ignore[arg-type]
+        stt_seam=_FakeSttSeam(calls),  # type: ignore[arg-type]
+        tts_seam=_FakeTtsSeam(calls),
+        session=_FakeSessionMachine(calls),  # type: ignore[arg-type]
+        mcp_clients=[],
+        livekit_url="ws://localhost:7880",
+        agent_token="tok",
+        ended=ended,
+        call_recorder=recorder,  # type: ignore[arg-type]
+        billing_window=CallBillingWindow(call_id="call_x", max_billable_s=7200),
+    )
+
+    task = asyncio.create_task(agent.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "recorder_open" in calls:
+            break
+    # The cutoff fires, then deletes the room; both parties drop.
+    await VoiceExhaustionCutoff(
+        delete_room=_noop_delete,
+        on_triggered=lambda: agent.mark_end_reason("exhausted"),
+    ).trigger()
+    room.participant_left_handler()
+    ended.set()
+    await task
+
+    # The caller did leave, but the credit cutoff is the real cause and it spoke first.
+    assert recorder.end_reason == "exhausted"
+
+
+async def _noop_delete() -> None:
+    """A delete_room double for the cutoff."""

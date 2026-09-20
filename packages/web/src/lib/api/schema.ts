@@ -3193,9 +3193,17 @@ export interface components {
      *             R9-028 voice session-end leg) has run at least once.
      *         started_at: When the call went active (UTC-aware); list order is by this
      *             field descending.
-     *         ended_at: When the call ended; ``None`` while live / on a crash.
-     *         duration_s: Stored whole-second duration; ``None`` until the call ends.
-     *         end_reason: Why the call ended; ``None`` while live.
+     *         ended_at: When the session was torn down; ``None`` while live / on a
+     *             crash. This can be later than the conversation's own end when a room
+     *             lingers or a worker drains, so it is NOT the call's length.
+     *         duration_s: Stored whole-second duration of the CONVERSATION (R9-202),
+     *             measured to the caller leaving the room or, failing that, the last
+     *             committed turn. ``None`` until the call ends. The room's full
+     *             lifetime stays available as ``ended_at - started_at``.
+     *         end_reason: Why the call ended; ``None`` while live. ``user_hangup`` the
+     *             caller left, ``exhausted`` the credit cutoff ended it, ``shutdown``
+     *             the worker was drained or redeployed, ``error`` it crashed,
+     *             ``disconnect`` the room ended with no departure seen.
      */
     CallSummary: {
       /** Call Id */
@@ -3219,7 +3227,9 @@ export interface components {
       /** Duration S */
       duration_s?: number | null;
       /** End Reason */
-      end_reason?: ("user_hangup" | "switched" | "error" | "disconnect") | null;
+      end_reason?:
+        | ("user_hangup" | "switched" | "exhausted" | "shutdown" | "error" | "disconnect")
+        | null;
     };
     /**
      * ChannelContext

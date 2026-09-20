@@ -28,6 +28,28 @@ class TestVoiceExhaustionCutoff:
         asyncio.run(cutoff.trigger())
         assert order == ["notice", "delete"]  # the caller hears WHY before the room dies
 
+    def test_trigger_stamps_the_end_reason_before_anything_can_fail(self) -> None:
+        """R9-203: the cutoff deletes the room, so the resulting disconnect looks
+        exactly like a hangup. The reason callback is what keeps the record
+        honest, and it runs before the notice and before delete_room so a failure
+        in either cannot lose it."""
+        order: list[str] = []
+
+        async def _notice() -> None:
+            order.append("notice")
+
+        async def _delete() -> None:
+            order.append("delete")
+            raise RuntimeError("livekit unreachable")
+
+        cutoff = VoiceExhaustionCutoff(
+            delete_room=_delete,
+            speak_notice=_notice,
+            on_triggered=lambda: order.append("reason"),
+        )
+        asyncio.run(cutoff.trigger())
+        assert order == ["reason", "notice", "delete"]
+
     def test_fire_once_second_trigger_is_a_noop(self) -> None:
         deletes: list[int] = []
 

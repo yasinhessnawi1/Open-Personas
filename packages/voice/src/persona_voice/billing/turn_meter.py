@@ -168,6 +168,7 @@ class VoiceTurnBillingMeter:
         floor: int = 1,
         on_exhausted: Callable[[], Awaitable[None]] | None = None,
         enqueue_topup: Callable[[int, int, int], None] | None = None,
+        on_turn_committed: Callable[[], None] | None = None,
     ) -> None:
         self._billing = MeteredBilling(ledger=ledger, config=billing_config)
         self._billing_config = billing_config
@@ -194,6 +195,12 @@ class VoiceTurnBillingMeter:
         # exists) rather than conditionally inert (a branch evaluated every turn).
         # Signature: ``(old_balance, new_balance, turn_seq) -> None``.
         self._enqueue_topup = enqueue_topup
+        # R9-202: the "the conversation is still alive" beat. A committed turn is
+        # the only proof of a live call that survives a worker being killed before
+        # any room event can arrive, so the billable window reads it as the
+        # fallback end of conversation. Fired on EVERY committed turn, including
+        # one that prices at zero: a free turn is still someone talking.
+        self._on_turn_committed = on_turn_committed
 
     def set_on_exhausted(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Late-bind the exhaustion cutoff (Spec M3, T6b-2).
@@ -266,6 +273,8 @@ class VoiceTurnBillingMeter:
         nothing; otherwise the ``provider_meter`` deduct captures what's affordable.
         """
         try:
+            if self._on_turn_committed is not None:
+                self._on_turn_committed()
             usage = self._accumulator.take_turn()
             provider_cents = self._price_turn(usage)
             if provider_cents <= 0.0:
@@ -378,6 +387,11 @@ class VoiceTurnBillingMeter:
 
         MUST NOT raise (runs in the teardown suppress). Keyed once per call so a
         re-run of teardown is a clean no-op.
+
+        ``duration_s`` is the BILLABLE duration, which teardown takes from
+        :class:`~persona_voice.session.call_window.CallBillingWindow`: the
+        conversation's own length, under the per call ceiling. It is not the
+        session object's lifetime, and passing that here is the R9-202 defect.
         """
         try:
             minutes = max(0, duration_s) / _SECONDS_PER_MINUTE
