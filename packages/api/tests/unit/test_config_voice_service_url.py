@@ -50,3 +50,31 @@ def test_the_service_reads_the_url_through_the_effective_accessor() -> None:
     # Duck-typed configs (the existing test fixtures) keep working through the fallback.
     assert _voice_service_url(SimpleNamespace(voice_service_url="http://x")) == "http://x"
     assert _voice_service_url(None) == ""
+
+
+def test_the_read_aloud_and_dictation_routes_read_the_url_the_same_way() -> None:
+    """The sibling of the test above, for the half that was left behind (R9-212).
+
+    ``13e85f5f`` routed the three assignment paths through the accessor and left
+    ``routes/voice.py`` reading the bare attribute, so a community install got auto
+    picked voices that worked while read aloud and dictation answered 503 before
+    touching the database. One accessor, every caller, or the default is dead in the
+    places a person actually presses.
+    """
+    from types import SimpleNamespace
+
+    from fastapi import Request
+
+    from persona_api.routes.voice import _voice_service_base  # noqa: PLC2701
+
+    def _request(config: object) -> Request:
+        scope = {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(config=config))}
+        return Request(scope)  # type: ignore[arg-type]
+
+    assert _voice_service_base(_request(APIConfig(edition=Edition.community))) == (
+        "http://localhost:8001"
+    )
+    # Duck-typed configs (the existing route fixtures) keep working through the fallback.
+    assert (
+        _voice_service_base(_request(SimpleNamespace(voice_service_url="http://x/"))) == "http://x"
+    )

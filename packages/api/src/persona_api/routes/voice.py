@@ -105,12 +105,23 @@ class STTProxyResponse(BaseModel):
 
 
 def _voice_service_base(request: Request) -> str:
-    """The configured persona-voice base URL, or raise the fail-soft 503.
+    """The persona-voice base URL these routes should call, or raise the fail-soft 503.
 
-    Checked FIRST (before any DB hop) in both routes below — the cheapest
-    possible gate, mirroring ``routes/connectors.py``'s ``initiate_link``.
+    Checked FIRST (before any DB hop) in both routes below, the cheapest possible
+    gate, mirroring ``routes/connectors.py``'s ``initiate_link``.
+
+    Reads ``effective_voice_service_url`` rather than the raw setting, so the
+    community default (R9-035) reaches read aloud and dictation too. It did not:
+    ``13e85f5f`` routed the three assignment paths through the effective URL and
+    left this one on the bare attribute, so a community install ended up with
+    auto picked voices that worked and a read aloud button that answered 503
+    before it touched anything. Falls back to the attribute because this reads a
+    duck typed config: tests hand it a ``SimpleNamespace``.
     """
-    base = str(getattr(request.app.state.config, "voice_service_url", "") or "").rstrip("/")
+    config = request.app.state.config
+    effective = getattr(config, "effective_voice_service_url", None)
+    raw = effective() if callable(effective) else getattr(config, "voice_service_url", "")
+    base = str(raw or "").rstrip("/")
     if not base:
         raise VoiceServiceUnavailableError(
             "the voice service is not configured", context={"reason": "not_configured"}
