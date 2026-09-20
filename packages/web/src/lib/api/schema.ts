@@ -1445,7 +1445,10 @@ export interface paths {
      *
      *     The response always carries ``X-Content-Type-Options: nosniff``. Office
      *     documents (docx / pptx / xlsx) additionally come back as an attachment: no
-     *     browser renders them inline, so a download is the only honest offer.
+     *     browser renders them inline, so a download is the only honest offer. A
+     *     content-addressed ref also carries a year-long ``immutable`` Cache-Control
+     *     (see :func:`is_content_addressed_ref`), so the browser stops re-downloading
+     *     persona avatars on every navigation.
      */
     get: operations["get_upload_v1_personas__persona_id__uploads__ref__get"];
     put?: never;
@@ -4899,6 +4902,7 @@ export interface components {
       avatar_ai_generated?: boolean | null;
       /** Avatar Status */
       avatar_status?: ("pending" | "failed") | null;
+      presentation?: components["schemas"]["PersonaPresentation"] | null;
       capabilities?: components["schemas"]["PersonaCapabilities"] | null;
       /** Consent To Auto Dispatch */
       consent_to_auto_dispatch?: boolean | null;
@@ -4964,6 +4968,68 @@ export interface components {
       conversation_id?: string | null;
     };
     /**
+     * PersonaPresentation
+     * @description How this persona shows up, written down once instead of guessed twice (R9-155).
+     *
+     *     A persona used to have its look and its voice decided independently, by two
+     *     subsystems reading two different inputs, so the portrait could contradict
+     *     the voice and both could contradict the background paragraph the user just
+     *     read. Personas that are not people fared worst: a human portrait for a ship's
+     *     computer is not a safe default, it is simply wrong. This is the single
+     *     authored answer both of them read.
+     *
+     *     **Authored, not inferred.** The value is written at authoring time alongside
+     *     the rest of the persona, where a person can see it and correct it. Nothing
+     *     downstream derives presentation from a ``name``, ever: that was the
+     *     stereotyping risk D-29-1 named, and it still holds. What D-29-1 got wrong
+     *     was the remedy. Leaving the image prompt demographic-silent did not avoid a
+     *     demographic choice, it handed the choice to the image model's priors, where
+     *     nobody could see it and nothing could correct it.
+     *
+     *     Be honest about what this does and does not buy: the authoring model reads a
+     *     description that contains a name, so a name can still colour the value it
+     *     writes. The gain is that the judgement happens ONCE, in the open, in a field
+     *     that can be edited, rather than twice, invisibly, in two model's priors that
+     *     cannot see each other.
+     *
+     *     Attributes:
+     *         form: Whether this persona is a person or not. ``"synthetic"`` covers
+     *             ships' computers, robots, disembodied assistants and anything else
+     *             a portrait of a human face would misrepresent. A synthetic persona
+     *             is never given a generated portrait at all; it is drawn as its own
+     *             generated mark instead.
+     *         presents: The persona's gender presentation, and the only field the
+     *             voice picker reads. ``"unspecified"`` is a real answer and the right
+     *             one whenever the persona's own text does not say: the picker then
+     *             chooses on character alone, exactly as it did before this field
+     *             existed. The vocabulary deliberately matches the normalised voice
+     *             catalogue tags (``persona_voice.tts.types.VoiceGender``) so the
+     *             picker can filter candidates by set membership with no mapping layer
+     *             between the two.
+     *         appearance: Optional prose describing WHO is in the portrait, in the
+     *             persona's own terms, for a ``"human"`` form. Its sibling
+     *             ``PersonaIdentity.visual_style`` describes HOW the portrait is
+     *             rendered: subject versus medium, never both describing the subject.
+     *             Omit it and the crafted prompt stays exactly as silent on appearance
+     *             as it is today. Forbidden on a ``"synthetic"`` form, which has no
+     *             portrait for it to describe.
+     */
+    PersonaPresentation: {
+      /**
+       * Form
+       * @enum {string}
+       */
+      form: "human" | "synthetic";
+      /**
+       * Presents
+       * @default unspecified
+       * @enum {string}
+       */
+      presents: "feminine" | "masculine" | "neutral" | "unspecified";
+      /** Appearance */
+      appearance?: string | null;
+    };
+    /**
      * PersonaSpecialitySummary
      * @description A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
      *
@@ -5024,6 +5090,8 @@ export interface components {
        * Format: date-time
        */
       updated_at: string;
+      /** Form */
+      form?: ("human" | "synthetic") | null;
       /**
        * Language
        * @default en

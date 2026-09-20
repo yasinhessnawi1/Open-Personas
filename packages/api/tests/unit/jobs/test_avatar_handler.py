@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from persona.imagegen import ImageProviderError
 from persona.jobs import JobRegistry, JobState
+from persona_api.imagegen.service import ImagegenAvatarGenerator
 from persona_api.jobs import context as context_module
 from persona_api.jobs.executor import JobExecutor
 from persona_api.jobs.handlers import avatar as avatar_module
@@ -387,3 +388,127 @@ async def test_success_through_the_executor_persists_and_reads_as_settled(
 
 def test_no_job_reads_as_no_status() -> None:
     assert avatar_status_from_job(None) is None
+
+
+# ---------------------------------------------------------------------------
+# R9-155: a job for a persona that is not a person declines, and is NOT retried.
+# ---------------------------------------------------------------------------
+
+_SYNTHETIC_YAML = (
+    "schema_version: '1.0'\n"
+    "identity:\n"
+    "  name: TARS\n"
+    "  role: mission support unit\n"
+    "  background: Blunt, funny, extremely capable.\n"
+    "  presentation:\n"
+    "    form: synthetic\n"
+    "    presents: masculine\n"
+)
+
+
+class _ForbiddenImageBackend:
+    """An image backend that fails the test if anything asks it to draw."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def provider_name(self) -> str:
+        return "forbidden"
+
+    @property
+    def model_name(self) -> str:
+        return "forbidden-1"
+
+    async def generate(self, prompt: str, *, options: Any = None) -> Any:
+        self.calls += 1
+        msg = f"the image backend was asked to draw a synthetic persona: {prompt!r}"
+        raise AssertionError(msg)
+
+    async def edit(self, *_a: Any, **_k: Any) -> Any:
+        raise NotImplementedError
+
+
+def _make_synthetic(engine: Engine) -> None:
+    """Flip the persona to synthetic, as an owner edit after the job was enqueued."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE personas SET yaml = :y WHERE id = :id"),
+            {"y": _SYNTHETIC_YAML, "id": _PERSONA},
+        )
+
+
+def _real_generator(backend: _ForbiddenImageBackend) -> ImagegenAvatarGenerator:
+    """The REAL generator the worker root composes, over a backend that must not be called."""
+    return ImagegenAvatarGenerator(backend=backend, file_storage=object())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sqlite_owner_scope")
+async def test_a_synthetic_persona_declines_and_the_job_is_not_retried(engine: Engine) -> None:
+    """The regression this task could introduce: an avatar job that never settles.
+
+    A persona edited to synthetic AFTER its create job was enqueued is the one
+    case the route gates cannot catch. The generator must decline, not raise: a
+    raise on attempt 1 re-queues (see the provider-failure test above), and a
+    persona that will never have a portrait would then burn every attempt and
+    dead-letter a job that was correct the first time. R9-013 is the retry loop
+    this project has already shipped once.
+    """
+    _make_synthetic(engine)
+    backend = _ForbiddenImageBackend()
+    queue = _LifecycleQueue(_record(attempt=1))
+
+    outcome = await _executor(queue, _real_generator(backend), engine).execute(queue.record)
+
+    # Settled on the first delivery, not re-queued for another go.
+    assert outcome is JobState.SUCCEEDED
+    assert queue.record.state is JobState.SUCCEEDED
+    assert queue.record.last_error is None
+    # Nothing was drawn, nothing was charged, nothing was stored.
+    assert backend.calls == 0
+    assert _avatar_row(engine) == (None, None)
+    # And the web is told to stop waiting rather than to keep polling.
+    assert avatar_status_from_job(queue.record) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sqlite_owner_scope")
+async def test_a_synthetic_persona_declines_on_its_last_attempt_too(engine: Engine) -> None:
+    """Same verdict at the retry budget's edge: succeeded, never dead-lettered.
+
+    The attempt-3 twin of the test above. If the decline ever became a raise,
+    this is the delivery that would leave the persona reading "failed" in the
+    UI forever, for a portrait it was never supposed to have.
+    """
+    _make_synthetic(engine)
+    backend = _ForbiddenImageBackend()
+    queue = _LifecycleQueue(_record(attempt=3))
+
+    outcome = await _executor(queue, _real_generator(backend), engine).execute(queue.record)
+
+    assert outcome is JobState.SUCCEEDED
+    assert backend.calls == 0
+    assert avatar_status_from_job(queue.record) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sqlite_owner_scope")
+async def test_a_regeneration_of_a_synthetic_persona_declines_the_same_way(
+    engine: Engine,
+) -> None:
+    """A regen job carries its own key and replaces unconditionally: it must decline too."""
+    _set_avatar(engine, "uploads/old.png", "generated")
+    _make_synthetic(engine)
+    backend = _ForbiddenImageBackend()
+    record = _record(attempt=1).model_copy(
+        update={"payload": {"persona_id": _PERSONA, "regenerate": True, "request_id": "abc123"}}
+    )
+    queue = _LifecycleQueue(record)
+
+    outcome = await _executor(queue, _real_generator(backend), engine).execute(queue.record)
+
+    assert outcome is JobState.SUCCEEDED
+    assert backend.calls == 0
+    # The existing avatar is left alone rather than wiped by a failed redraw.
+    assert _avatar_row(engine) == ("uploads/old.png", "generated")

@@ -15,6 +15,7 @@ from persona.schema.persona import Persona
 from persona_api.services.authoring_prompt import AUTHORING_PROMPT_VERSION
 from persona_api.services.authoring_service import (
     AuthoringSampling,
+    _validate_yaml,  # noqa: PLC2701 — the retry loop's own gate, tested directly
     generate_authoring_draft,
     refine_authoring_draft,
 )
@@ -203,3 +204,61 @@ def test_authoring_sampling_is_frozen_and_strict() -> None:
         s.temperature = 0.1  # type: ignore[misc]
     with pytest.raises(Exception):  # noqa: B017,PT011 — extra="forbid"
         AuthoringSampling(bogus=1)  # type: ignore[call-arg]
+
+
+# ----- R9-155: presentation through the real validate/retry loop -------------
+
+
+_NO_PRESENTATION_YAML = GOOD_YAML
+_BAD_PRESENTATION_YAML = """\
+schema_version: "1.0"
+identity:
+  name: Lex
+  role: Legal information assistant
+  background: A general legal-information assistant for everyday questions.
+  presentation:
+    form: robot
+    presents: female
+  constraints:
+    - Do not fabricate information; say when you don't know."""
+
+
+def test_a_model_that_omits_presentation_still_produces_a_valid_persona() -> None:
+    """Silence is honest. It must not be rescued with a default.
+
+    A model that says nothing about presentation yields `None`, which means
+    "not stated" and gives this persona exactly the avatar and voice behaviour
+    it would have had before the field existed. Defaulting to `human` here
+    would be the system guessing, which is the bug, not the fix.
+    """
+    assert _validate_yaml(_NO_PRESENTATION_YAML) == []
+    raw = yaml.safe_load(_NO_PRESENTATION_YAML)
+    raw["persona_id"] = raw["owner_id"] = "draft"
+    assert Persona.model_validate(raw).identity.presentation is None
+
+
+def test_an_invalid_presentation_is_fed_back_to_the_model_by_name() -> None:
+    """The repair retry turns a bad value into a self-correction, for free.
+
+    The errors this returns are exactly what `_retry_feedback` puts in front of
+    the model, so they have to name the offending path rather than just saying
+    the document is invalid.
+    """
+    errors = _validate_yaml(_BAD_PRESENTATION_YAML)
+    assert errors
+    assert any("presentation.form" in e for e in errors)
+    assert any("presentation.presents" in e for e in errors)
+
+
+def test_appearance_on_a_synthetic_persona_is_reported_actionably() -> None:
+    """The one cross-field rule, and the message a model has to act on."""
+    yaml_text = _NO_PRESENTATION_YAML.replace(
+        "  constraints:",
+        "  presentation:\n"
+        "    form: synthetic\n"
+        '    appearance: "a tall man in his forties"\n'
+        "  constraints:",
+    )
+    errors = _validate_yaml(yaml_text)
+    assert errors
+    assert any("form: human" in e for e in errors)

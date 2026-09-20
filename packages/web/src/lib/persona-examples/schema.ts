@@ -95,6 +95,35 @@ export interface WorldviewSeed {
 }
 
 /**
+ * How a starter shows up: the authored answer its portrait and its voice both
+ * read, instead of each guessing separately (R9-155).
+ *
+ * Mirrors `PersonaPresentation` in
+ * `packages/core/src/persona/schema/persona.py`. Two rules govern what goes in
+ * here, and both exist because seventy odd judgement calls is a lot of chances
+ * to invent a stereotype:
+ *
+ * 1. `presents` is set ONLY where the starter's own background already says
+ *    it, by the pronoun that text uses for the persona. Where the text keeps
+ *    the persona ungendered, the honest answer is `unspecified`, and the voice
+ *    picker then chooses on character alone exactly as it does today.
+ * 2. No `appearance` prose for any starter. Nothing in this roster describes
+ *    what a persona looks like, so nothing here should invent it.
+ */
+export interface PersonaPresentationSeed {
+  /**
+   * `synthetic` for a persona a human portrait would misrepresent: the three
+   * cinema-AI flagships, the roommate its own text calls virtual, and the
+   * journaling guide its own text calls "it". They are drawn as their own
+   * generated mark instead. Everyone else is `human`, which is exactly the
+   * behaviour every starter had before this field existed.
+   */
+  form: "human" | "synthetic";
+  /** The persona's gender presentation, or `unspecified` when its text does not say. */
+  presents: "feminine" | "masculine" | "neutral" | "unspecified";
+}
+
+/**
  * A complete, valid v1.0 persona document, the editable draft a starter
  * populates. Mirrors `packages/core/src/persona/schema/persona.py`; serialised
  * to YAML (via `docToYaml`) and posted straight to `POST /v1/personas`.
@@ -109,6 +138,8 @@ export interface PersonaStructure {
     language_default: string;
     /** Hard constraints; index 0 is always the verbatim safety constraint. */
     constraints: string[];
+    /** Authored, never guessed: see {@link PersonaPresentationSeed}. */
+    presentation: PersonaPresentationSeed;
   };
   self_facts: SelfFactSeed[];
   worldview: WorldviewSeed[];
@@ -184,12 +215,18 @@ const ROUTING_ON = { intelligent: { enabled: true } } as const;
  * Build a starter `structure`, pinning `schema_version` and prepending the
  * verbatim safety constraint so it is always the first constraint (the dataset
  * mirror of the create-boundary guard; a test asserts it on every starter).
+ *
+ * `presentation` is REQUIRED rather than defaulted on purpose: a new starter
+ * cannot be added without someone deciding whether it is a person, which is a
+ * compile-time version of the guarantee the dataset test checks at runtime. A
+ * default would silently make the next JARVIS a human face again.
  */
 export function structure(s: {
   name: string;
   role: string;
   background: string;
   language_default?: string;
+  presentation: PersonaPresentationSeed;
   constraints: string[];
   self_facts: SelfFactSeed[];
   worldview: WorldviewSeed[];
@@ -204,6 +241,7 @@ export function structure(s: {
       background: s.background,
       language_default: s.language_default ?? "en",
       constraints: [SAFETY_CONSTRAINT, ...s.constraints],
+      presentation: s.presentation,
     },
     self_facts: s.self_facts,
     worldview: s.worldview,

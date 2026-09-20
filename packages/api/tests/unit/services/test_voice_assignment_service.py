@@ -944,3 +944,167 @@ class TestReconcileStopsOnAnAuthRefusal:
 
         assert len(calls) > 1, "a transient failure must not abandon the whole sweep"
         assert counts["scanned"] == 3
+
+
+# ----- R9-155: the persona says, the picker reads ---------------------------
+
+
+def _declared(presents: str, *, form: str = "human") -> Persona:
+    """A persona that has declared its presentation."""
+    return Persona(
+        persona_id="persona_x",
+        owner_id="owner_x",
+        identity=PersonaIdentity(
+            name="Ally",
+            role="warm companion",
+            background="A warm, supportive friend.",
+            presentation={"form": form, "presents": presents},  # type: ignore[arg-type]
+        ),
+    )
+
+
+def _prompt_of(backend: _FakeBackend) -> str:
+    return "\n".join(m.content for m in (backend.seen or []) if isinstance(m.content, str))
+
+
+class TestDeclaredPresentationNarrowsTheCatalogue:
+    def test_a_wrong_gender_voice_is_unreachable_not_merely_unlikely(self) -> None:
+        """The whole point of filtering instead of prompting harder.
+
+        The model is told, in as many words, to use the feminine voice. It comes
+        back masculine anyway, because the feminine voice was never in the list
+        the reply is resolved against. A better instruction could always be
+        ignored; a candidate set cannot be.
+        """
+        backend = _FakeBackend("VOICE: v_fem")
+        options = [_option("v_fem", "feminine"), _option("v_masc", "masculine")]
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("masculine"), backend=backend, options=options)
+        )
+        assert choice == "v_masc"
+
+    def test_the_model_never_sees_a_voice_of_the_wrong_gender(self) -> None:
+        backend = _FakeBackend("VOICE: v_fem")
+        options = [
+            _option("v_fem", "feminine", name="Clara"),
+            _option("v_masc", "masculine", name="Sam"),
+        ]
+        asyncio.run(
+            vas.choose_voice(persona=_declared("feminine"), backend=backend, options=options)
+        )
+        prompt = _prompt_of(backend)
+        assert "Clara" in prompt
+        assert "Sam" not in prompt
+
+    def test_the_model_is_not_asked_to_decide_the_persona_gender(self) -> None:
+        """That question is answered. Inviting a model opinion can only disagree."""
+        backend = _FakeBackend("VOICE: v_masc")
+        asyncio.run(
+            vas.choose_voice(
+                persona=_declared("masculine"),
+                backend=backend,
+                options=[_option("v_masc", "masculine")],
+            )
+        )
+        prompt = _prompt_of(backend)
+        assert "FIRST decide" not in prompt
+        assert "do NOT reason about" in prompt
+
+    def test_an_unusable_reply_still_yields_a_correctly_gendered_voice(self) -> None:
+        """Every candidate is right by construction, so "none" would be a worse answer."""
+        backend = _FakeBackend("I cannot decide")
+        options = [_option("v_fem", "feminine"), _option("v_masc1", "masculine")]
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("masculine"), backend=backend, options=options)
+        )
+        assert choice == "v_masc1"
+
+    def test_neutral_admits_unspecified_voices_too(self) -> None:
+        backend = _FakeBackend("VOICE: v_unspec")
+        options = [
+            _option("v_fem", "feminine"),
+            _option("v_unspec", "unspecified"),
+            _option("v_neutral", "neutral"),
+        ]
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("neutral"), backend=backend, options=options)
+        )
+        assert choice == "v_unspec"
+        prompt = _prompt_of(backend)
+        assert "v_fem" not in prompt
+
+    def test_narrowing_happens_before_the_catalogue_is_truncated(self) -> None:
+        """Otherwise provider ordering decides how many candidates survive.
+
+        A long catalogue whose matching voices all sit past the truncation point
+        would reach the model as a handful, or as none at all, for no reason
+        other than the order the provider happened to return.
+        """
+        options = [_option(f"v_fem{i}", "feminine") for i in range(vas._MAX_CATALOGUE + 10)]
+        options.append(_option("v_masc_last", "masculine"))
+        backend = _FakeBackend("VOICE: v_masc_last")
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("masculine"), backend=backend, options=options)
+        )
+        assert choice == "v_masc_last"
+
+    def test_a_synthetic_persona_is_still_given_a_voice(self) -> None:
+        """No face, but it still speaks: form and presents are independent axes."""
+        backend = _FakeBackend("VOICE: v_masc")
+        options = [_option("v_fem", "feminine"), _option("v_masc", "masculine")]
+        choice = asyncio.run(
+            vas.choose_voice(
+                persona=_declared("masculine", form="synthetic"),
+                backend=backend,
+                options=options,
+            )
+        )
+        assert choice == "v_masc"
+
+
+class TestDeclaredPresentationFallsSoft:
+    def test_a_catalogue_with_no_matching_voice_falls_back_to_all_of_it(
+        self, loguru_capture: list[str]
+    ) -> None:
+        """A voiceless persona is a worse failure than an imperfectly matched voice.
+
+        A provider that tags nothing, or tags everything `unspecified`, must not
+        silence every masculine persona on the deployment.
+        """
+        backend = _FakeBackend("VOICE: v1")
+        options = [_option("v1", "unspecified"), _option("v2", "unspecified")]
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("masculine"), backend=backend, options=options)
+        )
+        assert choice == "v1"
+        assert any("no masculine voice" in line for line in loguru_capture)
+
+    def test_an_empty_catalogue_is_still_no_voice(self) -> None:
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("masculine"), backend=_FakeBackend("v1"), options=[])
+        )
+        assert choice is None
+
+
+class TestUndeclaredPresentationIsUnchanged:
+    def test_a_persona_without_presentation_takes_the_original_path(self) -> None:
+        """The additivity guarantee, in the voice half of the system."""
+        backend = _FakeBackend("GENDER: feminine\nVOICE: v_masc")
+        options = [_option("v_masc", "masculine"), _option("v_fem", "feminine")]
+        choice = asyncio.run(vas.choose_voice(persona=_persona(), backend=backend, options=options))
+        # The snap correction still runs: the model said feminine, so a feminine
+        # voice wins even though it picked a masculine one.
+        assert choice == "v_fem"
+        prompt = _prompt_of(backend)
+        assert "FIRST decide" in prompt
+        # And the model still sees the whole catalogue, unnarrowed.
+        assert "v_masc" in prompt
+
+    def test_an_explicit_unspecified_is_the_same_as_saying_nothing(self) -> None:
+        backend = _FakeBackend("GENDER: feminine\nVOICE: v_masc")
+        options = [_option("v_masc", "masculine"), _option("v_fem", "feminine")]
+        choice = asyncio.run(
+            vas.choose_voice(persona=_declared("unspecified"), backend=backend, options=options)
+        )
+        assert choice == "v_fem"
+        assert "FIRST decide" in _prompt_of(backend)

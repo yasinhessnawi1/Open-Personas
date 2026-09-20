@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 from persona.audit import AuditLogger, JSONLAuditLogger
@@ -653,6 +653,7 @@ def summary_of(row: dict[str, object], *, conversation_count: int = 0) -> Person
     """
     name, role = "", ""
     language = "en"
+    form: Literal["human", "synthetic"] | None = None
     tools_count = skills_count = constraints_count = 0
     try:
         parsed = yaml.safe_load(str(row["yaml"]))
@@ -662,6 +663,7 @@ def summary_of(row: dict[str, object], *, conversation_count: int = 0) -> Person
             name = str(identity.get("name", ""))
             role = str(identity.get("role", ""))
             language = _language_of(identity.get("language_default"))
+            form = _form_of(identity.get("presentation"))
             constraints_count = _len_of(identity.get("constraints"))
             tools_count = _len_of(parsed.get("tools"))
             skills_count = _len_of(parsed.get("skills"))
@@ -680,7 +682,27 @@ def summary_of(row: dict[str, object], *, conversation_count: int = 0) -> Person
         skills_count=skills_count,
         constraints_count=constraints_count,
         conversation_count=conversation_count,
+        form=form,
     )
+
+
+def _form_of(value: object) -> Literal["human", "synthetic"] | None:
+    """``identity.presentation.form`` from a raw YAML mapping, or ``None`` (R9-155).
+
+    ``None`` means the persona did not say, which is what every persona
+    authored before the field existed says, and the list view renders that
+    exactly as it renders a persona today. Anything unrecognised is also
+    ``None``: a list card is not the place to fail on a malformed document.
+    """
+    if not isinstance(value, dict):
+        return None
+    form = value.get("form")
+    normalised = form.strip().lower() if isinstance(form, str) else ""
+    if normalised == "human":
+        return "human"
+    if normalised == "synthetic":
+        return "synthetic"
+    return None
 
 
 def _len_of(value: object) -> int:

@@ -12,6 +12,7 @@ from datetime import datetime  # noqa: TC003 — Pydantic needs it at runtime
 from typing import Literal
 
 from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
+from persona.schema.persona import PersonaPresentation  # noqa: TC001 — runtime Pydantic field type
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
@@ -94,6 +95,11 @@ class PersonaSummary(_Output):
     avatar_url: str | None = None
     created_at: datetime
     updated_at: datetime
+    # R9-155: whether this persona is drawn as a portrait or as its own mark.
+    # The list view cannot parse the YAML (it does not carry one), so the one
+    # bit it needs to render the right thing travels as a field. ``None`` is
+    # "the persona did not say", which renders exactly as it does today.
+    form: Literal["human", "synthetic"] | None = None
     # Spec 35 — capability/identity glance for the library card (all free):
     language: str = "en"
     # "Apps & tools": the persona's tool allow-list length, which already folds
@@ -195,6 +201,10 @@ class PersonaDetail(_Output):
     # failure is visible on a reopened page, not only to whoever was watching.
     # Additive; ``None`` for legacy rows, user-supplied avatars and unit fixtures.
     avatar_status: Literal["pending", "failed"] | None = None
+    # R9-155: the persona's authored presentation, parsed from the stored YAML
+    # so the editor does not have to parse it again to show or change it.
+    # ``None`` for every persona authored before the field existed.
+    presentation: PersonaPresentation | None = None
     capabilities: PersonaCapabilities | None = None
     # Spec 21 T09 (D-21-7): tri-state auto-dispatch consent surfaced to the
     # settings UI. None = never asked / revoked-to-ask, True = granted,

@@ -11,6 +11,27 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Fixed
+- **A persona's face and voice now match what its description actually says.**
+  They used to be decided separately, by two different parts of the system, and
+  neither of them read the persona's own description closely enough to agree
+  with it or with each other. So you could write a persona as a man and meet a
+  woman's portrait, or hear a voice that matched neither. Now a persona says who
+  it is once, when it is created, and the portrait and the voice are both drawn
+  from that. You can see what it says and change it, and if you change it, both
+  follow.
+- **Personas that are not people are no longer drawn as people.** A ship's
+  computer, a robot, an assistant with no body: these were being handed a
+  photograph of a human face, which is not a neutral default, it is just wrong.
+  They are now marked as what they are and are never given a portrait. Two of
+  the three personas on the featured shelf were affected. They keep their
+  voices; only the face was ever the problem.
+- **A persona whose description does not mention any of this is untouched.**
+  Every persona you have already made looks and sounds exactly as it did. There
+  is nothing to migrate and nothing to redo, and the system does not guess on
+  your behalf: if a persona never said, it still does not say, and nothing
+  changes for it.
+
 ## [1.2.1] - 2026-09-20
 
 ### Fixed

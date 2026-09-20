@@ -25,10 +25,19 @@ from persona.backends import (
 )
 from persona.backends.errors import ProviderError
 from persona.billing import BillingConfig, credits_charged
-from persona.imagegen import ContentRejectedError, ImageGenError, craft_avatar_prompt
+from persona.errors import PersonaError
+from persona.imagegen import (
+    ContentRejectedError,
+    ImageGenError,
+    SyntheticPersonaHasNoPortraitError,
+    craft_avatar_prompt,
+    wants_generated_portrait,
+)
 from persona.logging import get_logger
+from persona.schema.persona import PersonaPresentation
 from persona.tools.audit import JSONLToolAuditLogger, ToolAuditEvent
 from persona_runtime.routing import tier_for
+from pydantic import ValidationError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.config import Edition
@@ -168,6 +177,52 @@ def _tools_from_yaml(yaml_str: str) -> list[str]:
     return [str(t) for t in tools] if isinstance(tools, list) else []
 
 
+def _wants_portrait(yaml_str: str, *, persona_id: str, owner_id: str) -> bool:
+    """Does this persona get a drawn portrait at all? (R9-155)
+
+    The route-side reader for the two gates that hold a YAML string rather than
+    a loaded persona (create, regenerate). It loads through the SAME loader and
+    asks the SAME predicate the generator's backstop uses, deliberately: a
+    lightweight second parse here, reading ``form`` out of the raw mapping,
+    would be a second implementation of the rule, which is the defect R9-155 is
+    about, one layer down.
+
+    Degrades to ``True`` on a YAML that will not load, which is exactly what
+    every persona did before this field existed. An unloadable persona has
+    bigger problems than its avatar, and the generator declines anyway if it
+    turns out to be synthetic.
+    """
+    try:
+        persona = persona_service.load_persona_from_yaml(
+            yaml_str, persona_id=persona_id, owner_id=owner_id
+        )
+    except (PersonaError, ValidationError):
+        return True
+    return wants_generated_portrait(persona.identity)
+
+
+def _presentation_from_yaml(yaml_str: str) -> PersonaPresentation | None:
+    """The persona's authored presentation, for the detail surface (R9-155).
+
+    Read through the real model so the API cannot report a shape the schema
+    would reject, and ``None`` on anything that will not parse: a persona
+    detail must still render for a document that is having a bad day, and the
+    editor shows the raw YAML alongside this anyway.
+    """
+    import yaml
+
+    try:
+        identity = yaml.safe_load(yaml_str).get("identity")
+    except (AttributeError, yaml.YAMLError):
+        return None
+    if not isinstance(identity, dict) or not isinstance(identity.get("presentation"), dict):
+        return None
+    try:
+        return PersonaPresentation.model_validate(identity["presentation"])
+    except ValidationError:
+        return None
+
+
 def _persona_detail(
     row: dict[str, object],
     *,
@@ -194,6 +249,7 @@ def _persona_detail(
         avatar_source=avatar_src,
         avatar_ai_generated=avatar_ai_generated,
         avatar_status=avatar_status,
+        presentation=_presentation_from_yaml(yaml_str),
         capabilities=_capabilities_from_registry(tier_registry),
         consent_to_auto_dispatch=bool(consent) if consent is not None else None,
         consent_updated_at=row.get("consent_updated_at"),  # type: ignore[arg-type]
@@ -223,6 +279,11 @@ def _emit_avatar_build_audit(
     defensive catch-all. The generation-specific outcomes (hard-line / provider
     rejection / provider error) are audited inside ``generate_avatar`` itself.
     Tagged zero-cost system event (D-29-2), JSONL, no migration.
+
+    ``reason="synthetic_persona"`` (R9-155) is recorded as an error on purpose
+    even though declining is the right outcome for that persona: the callers
+    gate before they get here, so reaching this line means a gate was missed,
+    and an operator counting errors should see that.
     """
     metadata: dict[str, str] = {
         "outcome": "error",
@@ -284,7 +345,14 @@ async def _maybe_generate_avatar(
     persona = persona_service.load_persona_from_yaml(
         yaml_str, persona_id=persona_id, owner_id=owner_id
     )
-    prompt = craft_avatar_prompt(persona.identity)
+    try:
+        prompt = craft_avatar_prompt(persona.identity)
+    except SyntheticPersonaHasNoPortraitError:
+        # R9-155 backstop. The callers gate on _wants_portrait, so reaching
+        # here means a gate was missed: decline and leave a countable audit
+        # trail rather than drawing this persona a face it should not have.
+        _emit_avatar_build_audit(audit, persona_id, reason="synthetic_persona")
+        return
     timeout_s = getattr(state, "avatar_gen_timeout_s", _DEFAULT_AVATAR_GEN_TIMEOUT_S)
 
     try:
@@ -490,14 +558,22 @@ async def create_persona(
     # tells the web whether anything is on its way. Both paths stay fail-soft.
     state = request.app.state
     job_queue = getattr(state, "job_queue", None)
-    queue_avatar = body.avatar_url is None and _avatar_queue_available(request)
+    # R9-155: a synthetic persona is drawn as its own mark, so nothing draws a
+    # portrait for it down EITHER door, and nothing tells the web to wait for
+    # one. ONE predicate feeds all three decisions below: three independently
+    # derived answers is how the avatar and the voice came to disagree in the
+    # first place.
+    wants_portrait = body.avatar_url is None and _wants_portrait(
+        body.yaml, persona_id=persona_id, owner_id=user.id
+    )
+    queue_avatar = wants_portrait and _avatar_queue_available(request)
     background_tasks.add_task(
         _enrich_persona_after_create,
         request,
         owner_id=user.id,
         persona_id=persona_id,
         yaml_str=body.yaml,
-        generate_avatar=body.avatar_url is None and not queue_avatar,
+        generate_avatar=wants_portrait and not queue_avatar,
     )
     if queue_avatar and job_queue is not None:
         enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
@@ -506,7 +582,7 @@ async def create_persona(
     # hook with an image backend to call. Without either, saying pending would
     # keep the web polling for an avatar that can never arrive.
     avatar_pending = queue_avatar or (
-        body.avatar_url is None and getattr(state, "image_backend", None) is not None
+        wants_portrait and getattr(state, "image_backend", None) is not None
     )
     return _persona_detail(
         row,
@@ -1148,6 +1224,16 @@ async def regenerate_avatar(
         rls_engine=request.app.state.rls_engine, persona_id=persona_id
     )
     yaml_str = str(row["yaml"])
+    # R9-155: this persona is drawn as its own mark, so there is no portrait to
+    # regenerate. Say so (422) rather than accepting the request and quietly
+    # doing nothing: the owner pressed a button, and a 202 they can poll
+    # forever is the silent failure, not the polite answer.
+    if not _wants_portrait(yaml_str, persona_id=persona_id, owner_id=user.id):
+        raise SyntheticPersonaHasNoPortraitError(
+            "This persona is drawn as its own mark, not a portrait. "
+            "Change its presentation to a person if you want a drawn avatar.",
+            context={"persona_id": persona_id},
+        )
     # A regeneration is its own generation: a per-request token keys both the
     # durable job (never deduped against the create job, which the create key
     # would have done) and the owner charge (a new portrait costs real money).

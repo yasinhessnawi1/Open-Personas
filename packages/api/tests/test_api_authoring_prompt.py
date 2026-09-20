@@ -29,11 +29,11 @@ def test_prompt_version_is_set() -> None:
     assert AUTHORING_PROMPT_VERSION
 
 
-def test_prompt_version_is_v4() -> None:
-    # Bumped v3 -> v4 on merge-back: the combined prompt now carries BOTH the
-    # sharpened NAMING instruction (drafter creativity) and the spoken-language
-    # inference + fallback reminder (authoring-prompt language work).
-    assert AUTHORING_PROMPT_VERSION == "v4"
+def test_prompt_version_is_v5() -> None:
+    # Bumped v4 -> v5 for R9-155: the prompt now asks the author to decide the
+    # persona's presentation, and both few-shots carry it (Sage synthetic,
+    # Astrid human). A bump means the paid corpus eval should be re-measured.
+    assert AUTHORING_PROMPT_VERSION == "v5"
 
 
 def test_naming_instruction_forbids_few_shot_and_placeholder_names() -> None:
@@ -119,6 +119,57 @@ def test_few_shot_simple_example_validates_as_v1() -> None:
     # the cross-model levers the prompt teaches: a safety constraint + epistemic diversity
     assert any("fabricate" in c.lower() for c in p.identity.constraints)
     assert any(w.epistemic != "fact" for w in p.worldview)
+
+
+def test_the_two_few_shots_show_one_form_each(  # R9-155
+) -> None:
+    """The decisive compliance lever, per this module's own note about few-shots.
+
+    Prose says a persona may be synthetic; an example SHOWS it. With both
+    examples human, a floor model would learn that `form: human` is what this
+    field is for and quietly never emit the other branch, which is exactly the
+    failure R9-155 is about. Sage is the synthetic one ("It favours simple
+    techniques" is how its own background already reads) and Astrid the human
+    one, so both branches are demonstrated at zero extra prompt length.
+    """
+    sage = _validate(EXAMPLE_SIMPLE_YAML).identity.presentation
+    astrid = _validate(EXAMPLE_COMPLEX_YAML).identity.presentation
+    assert sage is not None
+    assert astrid is not None
+    assert sage.form == "synthetic"
+    assert astrid.form == "human"
+    # And one of each kind of `presents`: a declared gender, and the honest
+    # refusal to declare one.
+    assert sage.presents == "unspecified"
+    assert astrid.presents == "feminine"
+    # Neither invents an appearance; nothing in either description says what
+    # the persona looks like.
+    assert sage.appearance is None
+    assert astrid.appearance is None
+
+
+def test_the_prompt_tells_the_author_not_to_read_presentation_off_the_name() -> None:
+    """D-29-1's surviving rule, carried into the one place that still infers.
+
+    Both halves are asserted separately, not as an `or` over two phrasings: the
+    rule is stated once for `form` and once for `presents` because they are two
+    different inferences, and an `or` would go on passing after either one was
+    deleted.
+    """
+    system = build_authoring_prompt("a cooking assistant", _TOOLS, _SKILLS)[0].content
+    assert "presentation" in system
+    # `presents` must not be read off the invented name.
+    assert "infer it from the name you just invented" in system
+    # Neither must `form`.
+    assert "never from its name" in system
+
+
+def test_the_schema_block_and_the_examples_agree_about_presentation() -> None:
+    """A field the schema permits but no example shows is a field models omit."""
+    system = build_authoring_prompt("a cooking assistant", _TOOLS, _SKILLS)[0].content
+    assert "form: <human | synthetic>" in system
+    assert "form: synthetic" in system  # via the Sage example
+    assert "form: human" in system  # via the Astrid example
 
 
 def test_few_shot_complex_example_validates_as_v1() -> None:

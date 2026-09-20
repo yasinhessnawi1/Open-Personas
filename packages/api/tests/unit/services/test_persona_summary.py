@@ -67,3 +67,48 @@ def test_survives_malformed_yaml() -> None:
     assert s.tools_count == 0
     assert s.constraints_count == 0
     assert s.conversation_count == 0
+
+
+# ----- R9-155: the one bit the list view cannot parse for itself ------------
+
+
+def test_form_is_surfaced_for_a_synthetic_persona() -> None:
+    """The library card has no YAML to read, so the bit it needs travels as a field."""
+    yaml_str = """
+identity:
+  name: JARVIS
+  role: Personal chief of staff
+  presentation:
+    form: synthetic
+    presents: masculine
+"""
+    assert summary_of(_row(yaml_str)).form == "synthetic"
+
+
+def test_form_is_surfaced_for_a_human_persona() -> None:
+    yaml_str = """
+identity:
+  name: Astrid
+  role: Tenancy law assistant
+  presentation:
+    form: human
+    presents: feminine
+"""
+    assert summary_of(_row(yaml_str)).form == "human"
+
+
+def test_a_persona_that_never_declared_reports_no_form() -> None:
+    """Not a default of human: the card renders it exactly as it does today."""
+    yaml_str = """
+identity:
+  name: Astrid
+  role: Tenancy law assistant
+"""
+    assert summary_of(_row(yaml_str)).form is None
+
+
+def test_a_malformed_presentation_does_not_break_the_card() -> None:
+    """A list row is not the place to fail on a document having a bad day."""
+    for broken in ("presentation: []", "presentation:\n    form: robot", "presentation: null"):
+        yaml_str = f"identity:\n  name: A\n  role: B\n  {broken}\n"
+        assert summary_of(_row(yaml_str)).form is None

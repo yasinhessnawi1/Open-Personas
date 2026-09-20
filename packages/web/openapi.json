@@ -2463,7 +2463,7 @@
       "get": {
         "tags": ["uploads"],
         "summary": "Get Upload",
-        "description": "Read an uploaded or generated file by its workspace-relative ref.\n\nServes every artifact the workspace holds, whatever produced it: uploads,\ngenerated images, charts, the Spec 28 rich-output set, and the office\ndocuments Spec 24 generates (R9-149).\n\nCross-tenant access returns 404 by design (existence-disclosure-safe).\nPath-traversal attempts (``..``) reject as 404 via the sandbox resolver.\n\nThe response always carries ``X-Content-Type-Options: nosniff``. Office\ndocuments (docx / pptx / xlsx) additionally come back as an attachment: no\nbrowser renders them inline, so a download is the only honest offer.",
+        "description": "Read an uploaded or generated file by its workspace-relative ref.\n\nServes every artifact the workspace holds, whatever produced it: uploads,\ngenerated images, charts, the Spec 28 rich-output set, and the office\ndocuments Spec 24 generates (R9-149).\n\nCross-tenant access returns 404 by design (existence-disclosure-safe).\nPath-traversal attempts (``..``) reject as 404 via the sandbox resolver.\n\nThe response always carries ``X-Content-Type-Options: nosniff``. Office\ndocuments (docx / pptx / xlsx) additionally come back as an attachment: no\nbrowser renders them inline, so a download is the only honest offer. A\ncontent-addressed ref also carries a year-long ``immutable`` Cache-Control\n(see :func:`is_content_addressed_ref`), so the browser stops re-downloading\npersona avatars on every navigation.",
         "operationId": "get_upload_v1_personas__persona_id__uploads__ref__get",
         "parameters": [
           {
@@ -8257,6 +8257,16 @@
             ],
             "title": "Avatar Status"
           },
+          "presentation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PersonaPresentation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "capabilities": {
             "anyOf": [
               {
@@ -8394,6 +8404,38 @@
         "title": "PersonaMemoryItem",
         "description": "One graph memory attributed to a persona (the page's memories modal)."
       },
+      "PersonaPresentation": {
+        "properties": {
+          "form": {
+            "type": "string",
+            "enum": ["human", "synthetic"],
+            "title": "Form"
+          },
+          "presents": {
+            "type": "string",
+            "enum": ["feminine", "masculine", "neutral", "unspecified"],
+            "title": "Presents",
+            "default": "unspecified"
+          },
+          "appearance": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appearance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["form"],
+        "title": "PersonaPresentation",
+        "description": "How this persona shows up, written down once instead of guessed twice (R9-155).\n\nA persona used to have its look and its voice decided independently, by two\nsubsystems reading two different inputs, so the portrait could contradict\nthe voice and both could contradict the background paragraph the user just\nread. Personas that are not people fared worst: a human portrait for a ship's\ncomputer is not a safe default, it is simply wrong. This is the single\nauthored answer both of them read.\n\n**Authored, not inferred.** The value is written at authoring time alongside\nthe rest of the persona, where a person can see it and correct it. Nothing\ndownstream derives presentation from a ``name``, ever: that was the\nstereotyping risk D-29-1 named, and it still holds. What D-29-1 got wrong\nwas the remedy. Leaving the image prompt demographic-silent did not avoid a\ndemographic choice, it handed the choice to the image model's priors, where\nnobody could see it and nothing could correct it.\n\nBe honest about what this does and does not buy: the authoring model reads a\ndescription that contains a name, so a name can still colour the value it\nwrites. The gain is that the judgement happens ONCE, in the open, in a field\nthat can be edited, rather than twice, invisibly, in two model's priors that\ncannot see each other.\n\nAttributes:\n    form: Whether this persona is a person or not. ``\"synthetic\"`` covers\n        ships' computers, robots, disembodied assistants and anything else\n        a portrait of a human face would misrepresent. A synthetic persona\n        is never given a generated portrait at all; it is drawn as its own\n        generated mark instead.\n    presents: The persona's gender presentation, and the only field the\n        voice picker reads. ``\"unspecified\"`` is a real answer and the right\n        one whenever the persona's own text does not say: the picker then\n        chooses on character alone, exactly as it did before this field\n        existed. The vocabulary deliberately matches the normalised voice\n        catalogue tags (``persona_voice.tts.types.VoiceGender``) so the\n        picker can filter candidates by set membership with no mapping layer\n        between the two.\n    appearance: Optional prose describing WHO is in the portrait, in the\n        persona's own terms, for a ``\"human\"`` form. Its sibling\n        ``PersonaIdentity.visual_style`` describes HOW the portrait is\n        rendered: subject versus medium, never both describing the subject.\n        Omit it and the crafted prompt stays exactly as silent on appearance\n        as it is today. Forbidden on a ``\"synthetic\"`` form, which has no\n        portrait for it to describe."
+      },
       "PersonaSpecialitySummary": {
         "properties": {
           "name": {
@@ -8518,6 +8560,18 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["human", "synthetic"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Form"
           },
           "language": {
             "type": "string",

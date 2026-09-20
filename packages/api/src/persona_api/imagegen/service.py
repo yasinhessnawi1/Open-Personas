@@ -72,6 +72,7 @@ from persona.imagegen import (
     GenerationResult,
     ImageGenError,
     ImageGenOptions,
+    SyntheticPersonaHasNoPortraitError,
     craft_avatar_prompt,
     hash_prompt_for_audit,
     is_hard_line_violation,
@@ -781,6 +782,10 @@ class ImagegenAvatarGenerator:
     - **content rejection** (hard-line backstop or provider moderation) →
       ``None`` — a deterministic decline, NOT a failure: the persona simply
       keeps no avatar (the handler's documented no-op outcome); nothing is billed;
+    - **synthetic persona** (R9-155: it is drawn as its own mark, not a face) →
+      ``None``, the same deterministic decline. The routes do not enqueue for
+      one at all; this covers the job that was already in flight when the
+      persona was edited, and it must never take the retry arm below;
     - **provider error / timeout** → raise — the A0 retry policy retries the
       transient class with backoff, then dead-letters honestly (the durable
       queue's improvement over the inline hook's single fail-soft shot);
@@ -824,7 +829,16 @@ class ImagegenAvatarGenerator:
         persona = persona_service.load_persona_from_yaml(
             yaml_str, persona_id=persona_id, owner_id=owner_id
         )
-        prompt = craft_avatar_prompt(persona.identity)
+        try:
+            prompt = craft_avatar_prompt(persona.identity)
+        except SyntheticPersonaHasNoPortraitError:
+            # This persona is drawn as its own mark (R9-155). A decline, not a
+            # failure: returning None settles the job SUCCEEDED, where raising
+            # would burn all three attempts and dead-letter a job that was
+            # right the first time. Reachable when a persona was edited to
+            # synthetic after its job was already enqueued.
+            _LOG.info("avatar declined: persona is synthetic", persona_id=persona_id)
+            return None
         try:
             result = await asyncio.wait_for(
                 generate_avatar(

@@ -165,6 +165,15 @@ def _audit_outcomes(tmp_path: Path) -> list[str]:
     return [json.loads(line)["metadata"]["outcome"] for line in path.read_text().splitlines()]
 
 
+def _audit_reasons(tmp_path: Path) -> list[str]:
+    path = tmp_path / "audit" / f"{_PERSONA}.tools.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)["metadata"].get("reason", "") for line in path.read_text().splitlines()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Happy path — avatar_url points at the served uploads route path.
 # ---------------------------------------------------------------------------
@@ -229,3 +238,50 @@ def test_hook_unexpected_exception_never_escapes(
     _run(_request(tmp_path, backend=_CrashingBackend()))  # must not raise
     assert captured_set == []
     assert _audit_outcomes(tmp_path) == ["error"]
+
+
+# ---------------------------------------------------------------------------
+# R9-155: the backstop. A missed gate declines; it does not draw a face.
+# ---------------------------------------------------------------------------
+
+_SYNTHETIC_YAML = """\
+schema_version: "1.0"
+identity:
+  name: JARVIS
+  role: personal chief of staff
+  background: |
+    Composed, precise, one dry aside per occasion.
+  presentation:
+    form: synthetic
+    presents: masculine
+"""
+
+
+class _ForbiddenBackend(_HappyBackend):
+    """Fails the test if the hook gets as far as asking for pixels."""
+
+    async def generate(
+        self, prompt: str, *, options: ImageGenOptions | None = None
+    ) -> GenerationResult:
+        msg = f"the image backend was asked to draw a synthetic persona: {prompt!r}"
+        raise AssertionError(msg)
+
+
+def test_hook_declines_a_synthetic_persona_without_calling_the_backend(
+    tmp_path: Path, captured_set: list[dict[str, str]]
+) -> None:
+    """Reached only when a route gate was missed, which is exactly why it exists."""
+    asyncio.run(
+        personas_routes._maybe_generate_avatar(
+            _request(tmp_path, backend=_ForbiddenBackend()),  # type: ignore[arg-type]
+            owner_id=_OWNER,
+            persona_id=_PERSONA,
+            yaml_str=_SYNTHETIC_YAML,
+        )
+    )
+
+    assert captured_set == []
+    # Audited as an error on purpose: the decline is right for this persona,
+    # but arriving here at all means a gate upstream did not hold.
+    assert _audit_outcomes(tmp_path) == ["error"]
+    assert _audit_reasons(tmp_path) == ["synthetic_persona"]

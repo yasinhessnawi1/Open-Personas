@@ -100,31 +100,113 @@ class _VoiceOption:
 #: leave the choice to character fit.
 _GENDERED = frozenset({"feminine", "masculine"})
 
+#: Which catalogue genders are admissible for a DECLARED presentation (R9-155).
+#: A declared ``feminine`` or ``masculine`` admits only that gender. ``neutral``
+#: also admits ``unspecified``, because most provider catalogues tag very few
+#: voices neutral and a strict filter would leave nothing to choose from.
+#: ``unspecified`` is absent on purpose: it means the persona did not say, so
+#: nothing is narrowed and the pre-R9-155 path runs unchanged.
+_ADMISSIBLE_VOICE_GENDERS: dict[str, frozenset[str]] = {
+    "feminine": frozenset({"feminine"}),
+    "masculine": frozenset({"masculine"}),
+    "neutral": frozenset({"neutral", "unspecified"}),
+}
 
-def _pick_messages(persona: Persona, options: list[_VoiceOption]) -> list[ConversationMessage]:
+
+def _declared_presents(persona: Persona) -> str:
+    """The persona's AUTHORED gender presentation, or ``""`` when it did not say.
+
+    ``""`` covers three cases that are all the same case: no ``presentation``
+    at all (every persona authored before R9-155), an explicit
+    ``"unspecified"``, and any value this picker has no filter for. All three
+    take the original path, where the model infers and the snap correction
+    repairs it.
+    """
+    presentation = persona.identity.presentation
+    if presentation is None:
+        return ""
+    return presentation.presents if presentation.presents in _ADMISSIBLE_VOICE_GENDERS else ""
+
+
+def _narrow_to_declared(options: list[_VoiceOption], declared: str) -> list[_VoiceOption]:
+    """Cut the catalogue down to the voices a declared presentation admits.
+
+    This is the whole point of R9-155 on the voice side. The old design asked
+    the model to guess the persona's gender and then repaired a bad pick
+    afterwards, which is a guess plus a correction on top of a guess. Removing
+    the wrong voices BEFORE the model sees them makes the wrong answer
+    unreachable rather than unlikely: :func:`_extract_choice` only resolves ids
+    that are in the list it is given, so a model that ignores every instruction
+    still cannot name a voice of the wrong gender.
+
+    Returns the full list unchanged when nothing is declared, and also when the
+    filter would empty it. A catalogue that tags every voice ``unspecified``
+    must not produce a silent persona: an imperfectly matched voice is a far
+    smaller failure than no voice at all, which is the failure this service
+    already fail-softs around everywhere else.
+    """
+    if not declared:
+        return options
+    admissible = _ADMISSIBLE_VOICE_GENDERS[declared]
+    narrowed = [o for o in options if o.gender in admissible]
+    if not narrowed:
+        _LOG.warning(
+            "voice catalogue has no {declared} voice; picking from the full catalogue "
+            "rather than leaving the persona unvoiced",
+            declared=declared,
+        )
+        return options
+    return narrowed
+
+
+def _pick_messages(
+    persona: Persona, options: list[_VoiceOption], *, declared: str = ""
+) -> list[ConversationMessage]:
     """Build the voice-pick prompt: persona identity + the compact catalogue.
 
-    Asks the model to FIRST commit to the persona's gender presentation, then
-    pick a voice — both are returned so the caller can hard-enforce the gender
-    match (the model occasionally picks a good-character voice of the wrong
-    gender; the catalogue's per-voice ``gender`` lets us correct that).
+    Two shapes, because there are two genuinely different jobs here.
+
+    When the persona DECLARES its presentation (R9-155), the candidate list has
+    already been narrowed to voices of that gender, so the model is asked for
+    one thing only: character fit. It is not invited to form an opinion about
+    the persona's gender, because that question is already answered and a model
+    opinion could only disagree with the author.
+
+    When nothing is declared, this is the original prompt verbatim: the model
+    commits to a gender first and returns it alongside the pick, so the caller
+    can hard-enforce the match afterwards. That path is unchanged for every
+    persona authored before the field existed.
     """
     catalogue = "\n".join(
         f"- {o.voice_id} | {o.gender} | {o.name}: {o.description}".rstrip(": ") for o in options
     )
-    system = (
-        "You assign a text-to-speech voice to an AI persona. You are given the "
-        "persona's identity and a catalogue of voices, each line as "
-        "'voice_id | gender | name: description'. FIRST decide the persona's most "
-        "likely gender presentation, THEN choose the voice whose gender MATCHES "
-        "that and whose character best fits. When a voice's description notes an "
-        "accent or dialect (e.g. 'egyptian accent') that suits the persona's "
-        "language or region, PREFER it — a dialect-appropriate voice sounds more "
-        "natural (Spec V14 D-V14-4). Reply with EXACTLY two lines and nothing "
-        "else:\n"
-        "GENDER: <one of: feminine | masculine | neutral | unknown>\n"
-        "VOICE: <the chosen voice_id, exactly as written>"
+    dialect = (
+        "When a voice's description notes an accent or dialect (e.g. 'egyptian "
+        "accent') that suits the persona's language or region, PREFER it — a "
+        "dialect-appropriate voice sounds more natural (Spec V14 D-V14-4). "
     )
+    if declared:
+        system = (
+            "You assign a text-to-speech voice to an AI persona. You are given the "
+            "persona's identity and a catalogue of voices, each line as "
+            "'voice_id | gender | name: description'. Every voice listed already "
+            "matches this persona's declared presentation, so do NOT reason about "
+            "the persona's gender: choose purely on which voice's CHARACTER best "
+            "fits the persona. " + dialect + "Reply with EXACTLY one line and "
+            "nothing else:\n"
+            "VOICE: <the chosen voice_id, exactly as written>"
+        )
+    else:
+        system = (
+            "You assign a text-to-speech voice to an AI persona. You are given the "
+            "persona's identity and a catalogue of voices, each line as "
+            "'voice_id | gender | name: description'. FIRST decide the persona's most "
+            "likely gender presentation, THEN choose the voice whose gender MATCHES "
+            "that and whose character best fits. " + dialect + "Reply with EXACTLY "
+            "two lines and nothing else:\n"
+            "GENDER: <one of: feminine | masculine | neutral | unknown>\n"
+            "VOICE: <the chosen voice_id, exactly as written>"
+        )
     user = (
         f"Persona name: {persona.identity.name}\n"
         f"Role: {persona.identity.role}\n"
@@ -187,21 +269,41 @@ async def choose_voice(
     Pure of I/O beyond the model call — the orchestration seam the unit tests
     drive with a fake backend. Returns the chosen ``voice_id`` (guaranteed to be
     one of ``options``) or ``None`` when nothing usable came back.
+
+    When the persona declares its presentation (R9-155) the catalogue is
+    narrowed BEFORE the model sees it, and the wrong-gender voice stops being a
+    thing the model can return at all. When it does not, the original
+    infer-then-correct path runs unchanged.
     """
-    catalogue = options[:_MAX_CATALOGUE]
+    declared = _declared_presents(persona)
+    # Narrow first, truncate second: truncating a 200-voice catalogue to 60 and
+    # then filtering can leave a handful of candidates (or none) purely because
+    # of provider ordering.
+    catalogue = _narrow_to_declared(options, declared)[:_MAX_CATALOGUE]
     if not catalogue:
         return None
     response = await backend.chat(
-        _pick_messages(persona, catalogue), temperature=0.0, max_tokens=_PICK_MAX_TOKENS
+        _pick_messages(persona, catalogue, declared=declared),
+        temperature=0.0,
+        max_tokens=_PICK_MAX_TOKENS,
     )
     gender, voice_text = _parse_pick(response.content)
     # The voice id from the VOICE: line, else scanned from the whole reply.
     voice_id = _extract_choice(voice_text or response.content, [o.voice_id for o in catalogue])
 
-    # Hard-enforce the gender match: when the persona reads clearly feminine or
-    # masculine, the picked voice MUST share that gender. The model's per-voice
-    # gender is right far more often than its final pick, so if it chose a
-    # mismatched (or no) voice, snap to a voice of the inferred gender.
+    if declared:
+        # Every candidate already matches what the persona declared, so there is
+        # nothing to correct: any id that resolved is right by construction. A
+        # reply that named nothing usable falls back to the first candidate
+        # rather than to None, because "no voice at all" would be a worse
+        # outcome than "a correctly-gendered voice we did not choose carefully".
+        return voice_id or catalogue[0].voice_id
+
+    # Nothing declared: hard-enforce the model's OWN gender call. When the
+    # persona reads clearly feminine or masculine, the picked voice must share
+    # that gender. The model's per-voice gender is right far more often than its
+    # final pick, so if it chose a mismatched (or no) voice, snap to a voice of
+    # the inferred gender.
     if gender in _GENDERED:
         by_id = {o.voice_id: o for o in catalogue}
         chosen = by_id.get(voice_id) if voice_id is not None else None

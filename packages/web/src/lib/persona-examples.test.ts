@@ -8,6 +8,11 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  docToYaml,
+  type PersonaDoc,
+  writeIdentityField,
+} from "./persona-draft";
+import {
   ACCENT_OKLCH,
   type EpistemicStatus,
   PERSONA_EXAMPLE_CATEGORIES,
@@ -23,6 +28,13 @@ const EPISTEMIC: ReadonlySet<EpistemicStatus> = new Set([
   "belief",
   "hypothesis",
   "contested",
+]);
+const FORMS: ReadonlySet<string> = new Set(["human", "synthetic"]);
+const PRESENTS: ReadonlySet<string> = new Set([
+  "feminine",
+  "masculine",
+  "neutral",
+  "unspecified",
 ]);
 
 describe("persona-examples dataset", () => {
@@ -214,6 +226,104 @@ describe("prebuilt structured starters (direct-create roster)", () => {
       expect(s.identity.name, id).toBe(name);
       expect(s.identity.role, id).toBe(role);
     }
+  });
+
+  it("has every starter say whether it is a person (R9-155)", () => {
+    // The gates that read this shipped first; without the data they change
+    // nothing, and JARVIS keeps getting a human face. This is the half that
+    // actually fixes what was reported.
+    for (const { id, structure: s } of ALL_EXAMPLES) {
+      expect(FORMS.has(s.identity.presentation.form), id).toBe(true);
+      expect(PRESENTS.has(s.identity.presentation.presents), id).toBe(true);
+    }
+  });
+
+  it("marks the personas a human portrait would misrepresent as synthetic", () => {
+    // Named explicitly rather than counted: these are the ones the owner
+    // reported, and a future edit that quietly humanises them fails here.
+    const synthetic = ALL_EXAMPLES.filter(
+      (e) => e.structure.identity.presentation.form === "synthetic",
+    ).map((e) => e.id);
+    expect(synthetic).toContain("featured-jarvis");
+    expect(synthetic).toContain("featured-tars");
+    expect(synthetic).toContain("featured-samantha");
+    // Its own background calls it "a virtual roommate".
+    expect(synthetic).toContain("companions-tobias");
+    // Its own background refers to the persona as "it", not as he or she.
+    expect(synthetic).toContain("wellness-journaling");
+  });
+
+  it("has no synthetic starter beyond the five whose text says so", () => {
+    // The guard against the opposite failure. Over-applying `synthetic` would
+    // strip portraits from a roster of people, and "mostly human" is too loose
+    // a bound to catch it: an exact set fails on the FIRST stray in either
+    // direction. Adding a synthetic starter should mean editing this line,
+    // which is the review this decision deserves.
+    const synthetic = ALL_EXAMPLES.filter(
+      (e) => e.structure.identity.presentation.form === "synthetic",
+    ).map((e) => e.id);
+    expect([...synthetic].sort()).toEqual([
+      "companions-tobias",
+      "featured-jarvis",
+      "featured-samantha",
+      "featured-tars",
+      "wellness-journaling",
+    ]);
+  });
+
+  it("declares no appearance prose anywhere in the roster", () => {
+    // Nothing in this dataset describes what a persona looks like, so nothing
+    // here invents it. Appearance is the field most likely to become a
+    // stereotype generator, and the roster is the worst place to start.
+    for (const { id, structure: s } of ALL_EXAMPLES) {
+      const presentation = s.identity.presentation as unknown as Record<
+        string,
+        unknown
+      >;
+      expect(presentation.appearance, id).toBeUndefined();
+    }
+  });
+
+  it("only genders a starter its own background already genders", () => {
+    // The evidence is the pronoun the persona's OWN text uses for it. A
+    // starter written with "they" or "it" stays `unspecified`: the voice
+    // picker then chooses on character alone, exactly as it does today.
+    for (const { id, structure: s } of ALL_EXAMPLES) {
+      const { presents } = s.identity.presentation;
+      if (presents === "unspecified" || presents === "neutral") continue;
+      const prose = s.identity.background.toLowerCase();
+      const pronouns =
+        presents === "feminine"
+          ? [" she ", " her ", " hers "]
+          : [" he ", " him ", " his "];
+      expect(
+        pronouns.some((p) => prose.includes(p)),
+        `${id} is marked ${presents} but its background never says so`,
+      ).toBe(true);
+    }
+  });
+
+  it("carries presentation onto the wire, in the shape the server reads", () => {
+    // The producer/consumer seam. The server gate parses the POSTED YAML and
+    // reads identity.presentation.form; if the field were dropped in
+    // serialisation the roster would look correct and change nothing, which is
+    // the exact failure mode this dataset is here to prevent.
+    const jarvis = PERSONA_EXAMPLES_BY_ID["featured-jarvis"];
+    expect(jarvis).toBeDefined();
+    const emitted = docToYaml(jarvis?.structure as unknown as PersonaDoc);
+    expect(emitted).toContain("presentation:");
+    expect(emitted).toContain("form: synthetic");
+
+    // And it survives the edit path: a user who renames a starter before
+    // creating it must not silently lose the field on the way through.
+    const edited = writeIdentityField(
+      jarvis?.structure as unknown as PersonaDoc,
+      "name",
+      "Jeeves",
+    );
+    const editedYaml = docToYaml(edited);
+    expect(editedYaml).toContain("name: Jeeves");
+    expect(editedYaml).toContain("form: synthetic");
   });
 
   it("bakes NO premade voice or visual_style (generate-on-create governs)", () => {

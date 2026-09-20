@@ -4,7 +4,11 @@ Every error raised by a :class:`persona.imagegen.protocol.ImageBackend`
 implementation, by the categorical hard-line filter
 (:mod:`persona.imagegen.safety`), or by the ``generate_image`` tool factory
 is a subclass of :class:`ImageGenError`, which in turn is a subclass of
-:class:`persona.errors.PersonaError`. Provider-specific exceptions from
+:class:`persona.errors.PersonaError`. The one deliberate exception is
+:class:`SyntheticPersonaHasNoPortraitError`, which sits directly under
+:class:`~persona.errors.PersonaError` because nothing failed when it is
+raised: see its own docstring for why that matters to the retry policy.
+Provider-specific exceptions from
 third-party SDKs (``openai``, ``fal_client``, ``httpx``) are caught at the
 adapter boundary and re-raised through this hierarchy so callers depend on
 our types rather than on a transitive dependency.
@@ -23,6 +27,7 @@ __all__ = [
     "ImageGenError",
     "ImageGenUnavailableError",
     "ImageProviderError",
+    "SyntheticPersonaHasNoPortraitError",
 ]
 
 
@@ -96,4 +101,29 @@ class ContentRejectedError(ImageGenError):
     ``ToolResult(is_error=True, content="content_rejected_...")`` so
     the model handles the refusal gracefully; the route layer maps it
     to HTTP 422.
+    """
+
+
+class SyntheticPersonaHasNoPortraitError(PersonaError):
+    """Raised when something asks for the portrait of a persona that is not a person.
+
+    A persona whose ``identity.presentation.form`` is ``"synthetic"`` is drawn
+    as its own generated mark, never as a face (R9-155): for a ship's computer
+    or a robot a human portrait is not a safe default, it is simply wrong.
+
+    **Deliberately NOT an** :class:`ImageGenError`. Image generation did not
+    fail here; there was never anything to generate. Keeping it outside that
+    tree means no generic ``except ImageGenError`` can absorb it into a
+    "provider failure" it is not, and, crucially, that it can never ride the
+    retry arm: the durable avatar job retries the transient provider class, and
+    retrying a persona that will never have a portrait would burn every attempt
+    and then dead-letter a job that was correct the first time (R9-013 is the
+    retry loop this project has already shipped once).
+
+    **Every caller handles it by name**, treating it as a deterministic
+    decline: no portrait, no error surfaced to the owner, no retry. It is a
+    backstop, not a control-flow path. The callers that can reach it all ask
+    :func:`persona.imagegen.wants_generated_portrait` first, so in a correct
+    system this is never raised at all; it exists so that a gate someone
+    forgets to add declines instead of quietly drawing a human face.
     """

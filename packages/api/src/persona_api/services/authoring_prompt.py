@@ -33,7 +33,7 @@ __all__ = [
     "build_refinement_prompt",
 ]
 
-AUTHORING_PROMPT_VERSION = "v4"
+AUTHORING_PROMPT_VERSION = "v5"
 
 #: The canonical block separator the model is told to emit (T02 parses it
 #: leniently, with fallbacks).
@@ -51,6 +51,9 @@ identity:
     favours simple techniques, common ingredients, and clear step-by-step
     guidance, and adapts recipes to dietary needs and what is in the pantry.
   language_default: en
+  presentation:
+    form: synthetic
+    presents: unspecified
   constraints:
     - Do not fabricate information; say when you don't know.
     - Always flag common food allergens present in a recipe.
@@ -101,6 +104,9 @@ identity:
     procedures in plain language and points to the relevant statute, while
     making clear she is not a lawyer and cannot give binding legal advice.
   language_default: nb
+  presentation:
+    form: human
+    presents: feminine
   constraints:
     - Do not fabricate information; say when you don't know.
     - Do not give binding legal advice; recommend consulting a qualified lawyer.
@@ -163,6 +169,10 @@ identity:                      # REQUIRED
   background: |                          # non-empty, 2-4 sentences
     <who this persona is>
   language_default: <ISO 639-1 code>     # the persona's spoken language (see 7)
+  presentation:                          # REQUIRED; see PRESENTATION below
+    form: <human | synthetic>            # is this persona a person, or not?
+    presents: <feminine | masculine | neutral | unspecified>
+    appearance: <optional; OMIT unless the description describes their looks>
   constraints:                           # list of constraint sentences
     - <constraint>
 self_facts:                    # list
@@ -200,11 +210,32 @@ HARD BANS — never output any of these, in any case or spelling:
 Pick something OUTSIDE these lists that suits THIS persona specifically. Two
 different descriptions must not yield the same name.
 
+## PRESENTATION (the system draws the avatar and picks the voice from this)
+Every persona gets a `presentation`. It is the one place the persona says how it
+shows up, and both its portrait and its speaking voice are chosen from it, so a
+wrong value is the first thing a user notices.
+- `form`: `human` for a persona who is a person, `synthetic` for one who is not
+  (an AI, a ship's computer, a robot, a talking object, a disembodied helper).
+  A synthetic persona is drawn as an abstract mark and never as a face, so this
+  is the difference between a ship's computer with a tasteful emblem and a ship's
+  computer wearing somebody's face.
+- `presents`: the gender the persona presents as, which picks the voice. Use
+  `unspecified` whenever the description does not say. That is a real answer, not
+  a failure to answer: the system then chooses a voice on character alone. Do NOT
+  infer it from the name you just invented.
+- `appearance`: a short phrase describing who is in the portrait, ONLY when the
+  description actually says what the persona looks like. Omit it otherwise;
+  never invent a face. It is REJECTED when `form` is `synthetic`, because a
+  synthetic persona has no portrait for it to describe.
+
 ## Instructions
 1. Infer aggressively. Fill every field. Leave nothing empty unless the
    description gives zero signal.
 2. identity.name: follow NAMING above — a distinctive, fitting, non-banned name.
 3. identity.background: 2-4 sentences establishing who this persona is.
+3b. identity.presentation: follow PRESENTATION above. Decide `form` from what
+   the persona IS, never from its name. Leave `presents` as `unspecified` unless
+   the description gives you a reason.
 4. constraints: 3-5 constraints a RESPONSIBLE version of this persona follows.
    ALWAYS include, VERBATIM and IN ENGLISH, as the FIRST constraint — even when
    the persona speaks another language — this exact sentence:

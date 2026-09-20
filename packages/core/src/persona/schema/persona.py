@@ -12,7 +12,14 @@ from pathlib import Path  # noqa: TC003 — Pydantic needs runtime access
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from yaml import YAMLError
 
 from persona.errors import PersonaError, PersonaNotFoundError, SchemaVersionMismatchError
@@ -26,6 +33,7 @@ __all__ = [
     "ModelScoringWeights",
     "Persona",
     "PersonaIdentity",
+    "PersonaPresentation",
     "RoutingBudgetConfig",
     "RoutingConfig",
     "SelfFact",
@@ -75,6 +83,113 @@ class CatalogueVoice(BaseModel):
 VoiceSpec = CatalogueVoice
 
 
+#: Upper bound on ``PersonaPresentation.appearance``. It is a descriptor, not a
+#: second background: it flows verbatim into an image prompt (and through the
+#: Spec 15 hard-line filter on the way), so a bound in the field's real unit
+#: keeps a pasted paragraph from crowding out the role anchor.
+_APPEARANCE_MAX_LENGTH = 200
+
+
+class PersonaPresentation(BaseModel):
+    """How this persona shows up, written down once instead of guessed twice (R9-155).
+
+    A persona used to have its look and its voice decided independently, by two
+    subsystems reading two different inputs, so the portrait could contradict
+    the voice and both could contradict the background paragraph the user just
+    read. Personas that are not people fared worst: a human portrait for a ship's
+    computer is not a safe default, it is simply wrong. This is the single
+    authored answer both of them read.
+
+    **Authored, not inferred.** The value is written at authoring time alongside
+    the rest of the persona, where a person can see it and correct it. Nothing
+    downstream derives presentation from a ``name``, ever: that was the
+    stereotyping risk D-29-1 named, and it still holds. What D-29-1 got wrong
+    was the remedy. Leaving the image prompt demographic-silent did not avoid a
+    demographic choice, it handed the choice to the image model's priors, where
+    nobody could see it and nothing could correct it.
+
+    Be honest about what this does and does not buy: the authoring model reads a
+    description that contains a name, so a name can still colour the value it
+    writes. The gain is that the judgement happens ONCE, in the open, in a field
+    that can be edited, rather than twice, invisibly, in two model's priors that
+    cannot see each other.
+
+    Attributes:
+        form: Whether this persona is a person or not. ``"synthetic"`` covers
+            ships' computers, robots, disembodied assistants and anything else
+            a portrait of a human face would misrepresent. A synthetic persona
+            is never given a generated portrait at all; it is drawn as its own
+            generated mark instead.
+        presents: The persona's gender presentation, and the only field the
+            voice picker reads. ``"unspecified"`` is a real answer and the right
+            one whenever the persona's own text does not say: the picker then
+            chooses on character alone, exactly as it did before this field
+            existed. The vocabulary deliberately matches the normalised voice
+            catalogue tags (``persona_voice.tts.types.VoiceGender``) so the
+            picker can filter candidates by set membership with no mapping layer
+            between the two.
+        appearance: Optional prose describing WHO is in the portrait, in the
+            persona's own terms, for a ``"human"`` form. Its sibling
+            ``PersonaIdentity.visual_style`` describes HOW the portrait is
+            rendered: subject versus medium, never both describing the subject.
+            Omit it and the crafted prompt stays exactly as silent on appearance
+            as it is today. Forbidden on a ``"synthetic"`` form, which has no
+            portrait for it to describe.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    form: Literal["human", "synthetic"]
+    presents: Literal["feminine", "masculine", "neutral", "unspecified"] = "unspecified"
+    appearance: str | None = Field(default=None, max_length=_APPEARANCE_MAX_LENGTH)
+
+    @field_validator("form", "presents", mode="before")
+    @classmethod
+    def _normalise_enum(cls, value: object) -> object:
+        """Accept ``"Human"`` and ``" MASCULINE "`` as the values they plainly are.
+
+        Case and surrounding whitespace carry no meaning here, and the producer
+        is a language model: a hard failure on ``"Human"`` costs a repair round
+        trip to fix nothing. Anything that is not one of the declared values
+        still fails, so the closed set is unchanged.
+        """
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("appearance", mode="after")
+    @classmethod
+    def _appearance_is_not_blank(cls, value: str | None) -> str | None:
+        """Reject a blank ``appearance``; ``None`` is how you say nothing.
+
+        ``max_length`` alone admits ``"   "``, which would merge whitespace into
+        an image prompt and read as a declared appearance that declares nothing.
+        The same whitespace-only hole the avatar crafter's role fallback exists
+        to cover.
+        """
+        if value is not None and not value.strip():
+            msg = "appearance must not be blank; omit it instead"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _appearance_is_human_only(self) -> PersonaPresentation:
+        """Forbid ``appearance`` on a synthetic persona.
+
+        A synthetic persona is never given a generated portrait, so appearance
+        prose on one is data nothing can ever read. The message is written to be
+        actionable because the authoring repair retry feeds it back to the model
+        verbatim.
+        """
+        if self.form == "synthetic" and self.appearance is not None:
+            msg = (
+                "appearance describes who is in a portrait, and a synthetic persona "
+                "has no portrait: remove appearance, or set form: human"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class PersonaIdentity(BaseModel):
     """Who the persona is. Immutable at runtime; edit the YAML to change.
 
@@ -111,6 +226,15 @@ class PersonaIdentity(BaseModel):
             personas without it are byte-for-byte unaffected; ``None`` and
             ``{}`` are both "no memory yet". The runtime prompt builder does
             not read it.
+        presentation: Optional :class:`PersonaPresentation` (R9-155): the one
+            authored answer to "how does this persona show up", read by BOTH
+            the avatar prompt crafter and the voice picker so the two can no
+            longer contradict each other. Additive per D-01-12, and ``None``
+            is a third state meaning "not stated", NOT a default of human:
+            every persona authored before this field existed keeps exactly the
+            behaviour it has today, because a default here would be the very
+            guess this field exists to remove. The runtime prompt builder does
+            not read it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -123,6 +247,7 @@ class PersonaIdentity(BaseModel):
     visual_style: str | None = None
     voice: VoiceSpec | None = None
     voice_by_provider: dict[str, str] | None = None
+    presentation: PersonaPresentation | None = None
 
     @field_validator("voice", mode="before")
     @classmethod

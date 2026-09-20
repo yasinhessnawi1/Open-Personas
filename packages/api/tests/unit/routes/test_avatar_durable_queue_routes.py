@@ -23,9 +23,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI
+from persona.imagegen import SyntheticPersonaHasNoPortraitError
 from persona.jobs import JobState
 from persona_api.config import Edition
+from persona_api.errors import register_exception_handlers
 from persona_api.jobs.handlers.avatar import AVATAR_JOB_TYPE
 from persona_api.jobs.queue import JobRecord
 from persona_api.routes import personas as personas_routes
@@ -140,12 +142,12 @@ def _request(
 
 
 def _create(
-    request: SimpleNamespace, *, avatar_url: str | None = None
+    request: SimpleNamespace, *, avatar_url: str | None = None, yaml_str: str = _YAML
 ) -> tuple[Any, BackgroundTasks]:
     background = BackgroundTasks()
     detail = asyncio.run(
         personas_routes.create_persona(
-            SimpleNamespace(yaml=_YAML, avatar_url=avatar_url),  # type: ignore[arg-type]
+            SimpleNamespace(yaml=yaml_str, avatar_url=avatar_url),  # type: ignore[arg-type]
             request,  # type: ignore[arg-type]
             background,
             SimpleNamespace(id=_OWNER, email=None),  # type: ignore[arg-type]
@@ -338,3 +340,177 @@ def test_get_does_not_read_the_queue_when_no_worker_consumes(
     queue = _FakeQueue(latest=_job(JobState.DEAD))
     detail = _get(_request(job_queue=queue, in_process_worker=None), monkeypatch)
     assert detail.avatar_status is None
+
+
+# ---------------------------------------------------------------------------
+# R9-155: a persona that is not a person is never sent down either door.
+# ---------------------------------------------------------------------------
+
+_SYNTHETIC_YAML = (
+    "schema_version: '1.0'\n"
+    "identity:\n"
+    "  name: JARVIS\n"
+    "  role: personal chief of staff\n"
+    "  background: Composed, precise, one dry aside per occasion.\n"
+    "  presentation:\n"
+    "    form: synthetic\n"
+    "    presents: masculine\n"
+)
+
+
+def _synthetic_row() -> dict[str, Any]:
+    return {**_row(), "yaml": _SYNTHETIC_YAML}
+
+
+def test_a_synthetic_persona_is_never_queued_for_a_portrait(
+    recorded_calls: list[str],
+) -> None:
+    """A worker is right there and willing; it is still not asked to draw a face."""
+    queue = _FakeQueue()
+    detail, background = _create(
+        _request(job_queue=queue, in_process_worker=_worker(AVATAR_JOB_TYPE)),
+        yaml_str=_SYNTHETIC_YAML,
+    )
+
+    assert queue.enqueued == []
+    # And the response must not tell the web to wait for a portrait that is
+    # never coming: a "pending" here is a spinner that spins forever.
+    assert detail.avatar_status is None
+    asyncio.run(background())
+    assert recorded_calls == ["voice"]
+
+
+def test_a_synthetic_persona_does_not_take_the_inline_path_either(
+    recorded_calls: list[str],
+) -> None:
+    """The other door. Both gates read the one predicate, so neither can drift."""
+    queue = _FakeQueue()
+    detail, background = _create(
+        _request(job_queue=queue, in_process_worker=None), yaml_str=_SYNTHETIC_YAML
+    )
+
+    assert queue.enqueued == []
+    assert detail.avatar_status is None
+    asyncio.run(background())
+    assert recorded_calls == ["voice"]
+
+
+def test_a_synthetic_persona_still_gets_a_voice(recorded_calls: list[str]) -> None:
+    """Form and voice are independent: a ship's computer speaks, it just has no face."""
+    _, background = _create(
+        _request(job_queue=_FakeQueue(), in_process_worker=_worker(AVATAR_JOB_TYPE)),
+        yaml_str=_SYNTHETIC_YAML,
+    )
+    asyncio.run(background())
+    assert "voice" in recorded_calls
+
+
+def test_a_human_persona_is_unaffected(recorded_calls: list[str]) -> None:
+    """The gate reads `synthetic`, not "has a presentation": humans still get drawn."""
+    human_yaml = _SYNTHETIC_YAML.replace("form: synthetic", "form: human")
+    queue = _FakeQueue()
+    detail, background = _create(
+        _request(job_queue=queue, in_process_worker=_worker(AVATAR_JOB_TYPE)),
+        yaml_str=human_yaml,
+    )
+
+    assert [j["type"] for j in queue.enqueued] == [AVATAR_JOB_TYPE]
+    assert detail.avatar_status == "pending"
+    asyncio.run(background())
+    assert recorded_calls == ["voice"]
+
+
+def test_regenerating_a_synthetic_persona_is_refused_not_silently_dropped(
+    monkeypatch: pytest.MonkeyPatch, recorded_calls: list[str]
+) -> None:
+    """The owner pressed a button. A 202 they can poll forever is the silent failure."""
+    monkeypatch.setattr(
+        personas_routes.persona_service, "get_persona", lambda **_: _synthetic_row()
+    )
+    queue = _FakeQueue()
+    background = BackgroundTasks()
+
+    with pytest.raises(SyntheticPersonaHasNoPortraitError):
+        asyncio.run(
+            personas_routes.regenerate_avatar(
+                _PERSONA,
+                _request(job_queue=queue, in_process_worker=_worker(AVATAR_JOB_TYPE)),  # type: ignore[arg-type]
+                background,
+                SimpleNamespace(id=_OWNER, email=None),  # type: ignore[arg-type]
+            )
+        )
+
+    assert queue.enqueued == []
+    asyncio.run(background())
+    assert recorded_calls == []
+
+
+def test_the_refusal_is_a_422_the_web_can_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wired to a handler, so the owner gets an honest reason and not a 500."""
+    app = FastAPI()
+    register_exception_handlers(app)
+    handler = app.exception_handlers[SyntheticPersonaHasNoPortraitError]
+    response = asyncio.run(
+        handler(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SyntheticPersonaHasNoPortraitError("drawn as its own mark", context={"p": "1"}),
+        )
+    )
+    assert response.status_code == 422
+    assert b"no_portrait_for_synthetic_persona" in response.body
+
+
+@pytest.mark.parametrize(
+    "unloadable",
+    [
+        "identity: [this is not a mapping]",
+        "schema_version: '1.0'\nidentity:\n  name: Astrid\n  presentation:\n    form: robot\n",
+        ": : not yaml at all",
+        "",
+    ],
+)
+def test_a_persona_that_will_not_load_is_treated_as_wanting_a_portrait(
+    unloadable: str,
+) -> None:
+    """Degrade to what every persona did before the field existed, never to "no avatar".
+
+    The gate reads the persona through the real loader, and a YAML that will not
+    load has bigger problems than its avatar. Failing closed here would quietly
+    strip avatars from personas whose only sin is being unreadable by this one
+    helper.
+    """
+    assert personas_routes._wants_portrait(unloadable, persona_id=_PERSONA, owner_id=_OWNER) is True
+
+
+def test_the_detail_surfaces_the_authored_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-155/T6: the editor reads a typed value, not a second YAML parse."""
+    monkeypatch.setattr(
+        personas_routes.persona_service, "get_persona", lambda **_: _synthetic_row()
+    )
+    detail = _get(_request(job_queue=_FakeQueue(latest=None), in_process_worker=None), monkeypatch)
+    assert detail.presentation is not None
+    assert detail.presentation.form == "synthetic"
+    assert detail.presentation.presents == "masculine"
+
+
+def test_the_detail_reports_no_presentation_for_a_persona_that_never_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail = _get(_request(job_queue=_FakeQueue(latest=None), in_process_worker=None), monkeypatch)
+    assert detail.presentation is None
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["  presentation: []\n", "  presentation:\n    form: robot\n", "  presentation: 3\n"],
+)
+def test_a_malformed_presentation_does_not_break_the_detail(
+    monkeypatch: pytest.MonkeyPatch, broken: str
+) -> None:
+    """The detail must still render; the editor shows the raw YAML beside it anyway."""
+    row = {**_row(), "yaml": f"schema_version: '1.0'\nidentity:\n  name: A\n  role: B\n{broken}"}
+    monkeypatch.setattr(personas_routes.persona_service, "get_persona", lambda **_: row)
+    detail = _get(_request(job_queue=_FakeQueue(latest=None), in_process_worker=None), monkeypatch)
+    assert detail.presentation is None

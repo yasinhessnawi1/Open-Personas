@@ -27,7 +27,7 @@ from persona.errors import (
     SchemaVersionMismatchError,
     ToolNotAllowedError,
 )
-from persona.imagegen.errors import ImageGenUnavailableError
+from persona.imagegen.errors import ImageGenUnavailableError, SyntheticPersonaHasNoPortraitError
 from persona.logging import get_logger
 from persona.sandbox.errors import (
     SandboxQuotaExceededError,
@@ -815,6 +815,25 @@ def register_exception_handlers(app: FastAPI) -> None:
                 exc.context,
             ),
             headers={"Retry-After": "30"},
+        )
+
+    @app.exception_handler(SyntheticPersonaHasNoPortraitError)
+    async def _no_portrait_422(_: Request, exc: SyntheticPersonaHasNoPortraitError) -> JSONResponse:
+        """Someone asked for the portrait of a persona that is not a person (R9-155).
+
+        A persona authored ``presentation.form: synthetic`` is drawn as its own
+        generated mark, so there is no portrait to draw or redraw. Answered
+        honestly rather than accepted and dropped: the create path never asks
+        (it gates before enqueuing), so this is the owner pressing "regenerate"
+        on a persona whose button should not have been offered.
+        """
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_body(
+                "no_portrait_for_synthetic_persona",
+                exc.message or "this persona is drawn as its own mark, not a portrait",
+                exc.context,
+            ),
         )
 
     @app.exception_handler(ModelBackendUnavailableError)
