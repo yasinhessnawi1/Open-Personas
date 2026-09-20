@@ -62,6 +62,19 @@ Per-spec entries are added by the close-out phase of each spec.
   because the credits ran out. Each of those now says so.
 
 ### Added
+- **Deleting a memory reaches everywhere it was used, and the raw memories are
+  yours to browse.** This shipped in July and was never written up here, which is
+  our omission, not a small one: it is the feature that decides whether "delete"
+  means anything. Before it, removing a fact from the memory page removed it from
+  the concept graph only. The persona's episodic memory, which is what actually
+  feeds recall, kept it, had no page of its own and no way to delete anything at
+  all, so a fact you deleted came back in the next conversation. That is where it
+  was found, with a persona still recalling a dog whose owner had deleted it
+  minutes earlier. Now a delete starts from the raw memory and follows it through
+  every layer that was built on top, including the summaries; the memory page
+  lists your episodic memories so you can read and remove them individually; and
+  deleting a conversation takes the memories formed in it with it, leaving other
+  conversations alone.
 - **A way to use the memory store without waiting for a model to load.** The first
   memory you write loads the embedding model, which on a cold cache is a few
   hundred megabytes and roughly a hundred seconds, paid inside that write. If you
