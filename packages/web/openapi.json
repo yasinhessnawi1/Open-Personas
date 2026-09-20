@@ -5752,7 +5752,14 @@
             "anyOf": [
               {
                 "type": "string",
-                "enum": ["user_hangup", "switched", "exhausted", "shutdown", "error", "disconnect"]
+                "enum": [
+                  "user_hangup",
+                  "switched",
+                  "exhausted",
+                  "shutdown",
+                  "error",
+                  "disconnect"
+                ]
               },
               {
                 "type": "null"

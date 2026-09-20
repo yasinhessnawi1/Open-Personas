@@ -3228,7 +3228,14 @@ export interface components {
       duration_s?: number | null;
       /** End Reason */
       end_reason?:
-        | ("user_hangup" | "switched" | "exhausted" | "shutdown" | "error" | "disconnect")
+        | (
+            | "user_hangup"
+            | "switched"
+            | "exhausted"
+            | "shutdown"
+            | "error"
+            | "disconnect"
+          )
         | null;
     };
     /**
