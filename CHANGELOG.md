@@ -11,6 +11,260 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-20
+
+### Personas that act, a product that says what it is doing, and honest billing (2026-09-14 to 2026-09-20)
+
+> Sixty three changes landed in the week after the work access release and none of
+> them was written up here. Four stories run through them. Personas learned to act
+> on your calendar and to read the files you hand them. The product started showing
+> you things it had been doing silently. Several surfaces got faster or quieter.
+> And a set of paid work that had been running on our money started charging
+> properly, which is the part that will show on your next bill, so it is spelled
+> out in full below.
+
+#### Added
+- **A persona can put things on your calendar and take them off.** "Book the Gantt
+  redraw an hour from now" and "remove the daily brief" used to get honest, useless
+  answers, because the persona could only read the calendar. It now books a one off
+  at a time you say in your own words, resolved against your own timezone, and
+  removes a routine it has actually shown you, through the same doors the Schedule
+  page uses. Recurring routines are still yours to set in the dialog.
+- **A file you hand over with a task reaches the persona that runs it.** The task
+  and New routine dialogs take attachments and dictation, the same way the chat
+  composer does, and the files ride along with the task: the first attempt and the
+  fortieth occurrence of a routine open the same documents, and the task page lists
+  them.
+- **A persona remembers the tasks it ran.** Starting, getting somewhere, finishing
+  and failing are written into the persona's own memory in its own words, so months
+  later "did you ever look into X" has an answer without anyone digging up a task
+  record.
+- **A task says what it produced, what stopped it, and what is done.** Files a task
+  makes are carried forward and listed in the finished report, a task that is stuck
+  says in one sentence what has to change outside it before anything more can
+  happen, and the criteria it agreed to actually move as the work meets them.
+- **A task agrees its terms out loud before it starts.** The done when list, a
+  deadline and a cap on how many working sessions it may take are authored at hand
+  over and read back to you before you agree, and honoured afterwards. A session
+  that has nothing to do until Thursday now says so and sleeps, instead of spending
+  a turn discovering it again.
+- **A persona that speaks first shows up as it happens.** Personas have been able
+  to start a conversation on their own for a while, but the message only appeared
+  the next time you opened the conversation. It now arrives live, wears a "Started
+  this" badge, and the run record says the persona opened the conversation and
+  links to it.
+- **A persona's portrait is generated in the background, and says where it got
+  to.** Generation ran inside the web request, so a restart halfway through lost it
+  with nothing to show for it. Portraits, and regenerated portraits, now go through
+  the durable queue, and the persona page says honestly whether one is still
+  pending or has failed.
+- **A run says which memory it drew on.** Watching a run, and reopening it later,
+  both show which of the persona's typed memories were consulted, in the same
+  colours the chat uses.
+- **A watched run says which tier it is running on**, from the first step rather
+  than only once it has finished.
+- **A run that fails says where it failed.** An unrecoverable failure used to
+  disappear with no record of the step it died on. A failed run now ends with a
+  named error step and a sentence written for a reader.
+- **Approvals you have already handled stay visible.** A "Recently handled" section
+  keeps decided approvals instead of losing them on reload, and an action you
+  edited before approving is recorded as your version rather than the persona's. An
+  edit small enough not to need a second look no longer asks you to confirm
+  something that has already gone out.
+- **A call leaves a record.** Being created, connecting and ending, and each turn's
+  timings, are written durably to wherever the audit trail is configured to live,
+  instead of to a temporary folder the machine swept away.
+- **The service says what is switched on, once, at boot.** One line names every
+  feature switch and its state, so anyone running an install can tell what it
+  actually has on without reading code and listing secrets. Settings print as on,
+  off or unset, and nothing that looks like a key, a price or a margin prints at
+  all.
+- **An operator can bound a task's working session from the environment**: how many
+  steps, how long, how much it may spend and how much of its notes it may keep.
+  Four documented settings that nothing read now work, as do the sandbox time
+  limits and the switch that turns off loading a local env file.
+
+#### Changed
+- **Several things that were free now cost credits, because they should have been
+  charged all along.** Each of these makes a real model call or uses real sandbox
+  time and used to charge nobody: naming a conversation, the extractor that pulls
+  facts out of one, turning something into a file and the sandbox render that
+  produces it, and sandbox work done inside a task's working session. None of them
+  is expensive. All of them were free by mistake, and they are named here so
+  nothing on your next bill is a surprise.
+- **An image is billed what it actually cost.** Every image backend but one
+  reported no price, so a four cent image was charged the one credit floor, on
+  ordinary image generation and on persona portraits alike. Three of the four now
+  bill their vendor's published price, read off the vendor's own pricing page. The
+  fourth publishes no per image price at all, so it still bills the floor and says
+  so by name rather than quietly looking cheap.
+- **A voice call stops at your daily spend cap.** Voice was the one surface running
+  without the daily cap the rest of the product enforces. It now shares the same
+  cap, and a call that reaches it ends the way an empty wallet ends it, rather than
+  carrying on unbilled.
+- **A subscription that is being paid for entitles you, and one that is not does
+  not.** Two reads of the same subscription disagreed: a past due subscriber kept
+  every paid model, and that same person was refused the free monthly allowance
+  they had just fallen back to. There is one rule now, and it holds in chat and on
+  calls alike. On this release a past due subscriber drops to the free models and
+  starts receiving the free monthly allowance.
+- **An automatic top up is a proper taxed invoice.** The same credit pack bought
+  through the checkout collected tax and bought through an automatic top up did
+  not. Both do now, on the pack's own price, and a refused top up can no longer
+  mark your subscription past due.
+- **Outbound text messages can now be billed, and are not yet.** A sent message
+  never reached a price and, separately, never asked the carrier to report its
+  delivery, so nothing could have been charged even in principle. Both are fixed.
+  Nobody is charged until an operator sets the rate, because a per message rate
+  depends on the account and the destination and we will not guess it.
+- **Money is stated in dollars, with the currency attached to the number.** The
+  task surface had been printing US dollars under a kroner label, so someone asking
+  for a hundred kroner cap was granted a hundred dollars: ten times what they
+  meant, in the direction that costs them. Every amount now carries its own symbol,
+  in the browser, in what a persona says back to you and in what it reads aloud.
+  "Legg til 50kr" is still understood, and still confirmed back to you in dollars.
+- **A task nobody configured is capped at ten dollars, not a thousand.** When the
+  ledger moved from counting tokens to counting money the default cap kept its
+  number and quietly became a thousand dollars. Ten dollars is roughly a hundred
+  and fifty working sessions on this product.
+- **A persona's portrait loads once, then it is just there.** The roster, the
+  sidebar, the chat header, every persona turn in a conversation and the voice orb
+  each downloaded the same picture again on every mount, showing the initials first
+  every time. One shared cache now paints it on the first frame, and the browser
+  keeps it across reloads.
+- **A conversation with history opens on its last message.** It used to open above
+  the newest turn and then grow out from under you as avatars and images loaded. It
+  now opens at the bottom before anything paints, stays anchored while late content
+  arrives, and never moves you once you have scrolled up to read.
+- **A long skill is summarised once instead of cut on every turn.** The built in
+  web research skill had been losing a third of itself on every use, and the part
+  it lost was its whole rubric for judging sources; an imported skill on a real
+  machine measured nine times the budget. Long skills are now summarised once and
+  served from a cache, so no turn waits for it and no two turns get a different
+  version of the same skill.
+- **A persona reading back your calendar says "every hour" and lists a routine
+  once.** One agenda ran past fifty thousand characters for four routines, reciting
+  the cadence on every single firing, and then sat in the conversation and was
+  resent on every turn after it, which is a good part of why replies had got slow.
+  It is now one line per commitment, with the next time it fires and how many times
+  it will fire in the window.
+- **The promise that one account cannot see another's data is checked against the
+  real database.** The check enforcing it read a list of eleven table names frozen
+  years of tables ago and could not fail on a new table with no policy. It now asks
+  the schema which tables hold someone's data and requires a policy on every one of
+  them, with the two deliberate exceptions written down where the check can read
+  them and say why.
+
+#### Fixed
+- **A persona with an external tool connected could not take a turn at all.** Tool
+  names containing colons are rejected outright by most model providers, and one of
+  them anywhere in the toolbox failed the whole request, so every turn came back as
+  a generic apology. Nothing the persona could have said would have worked. Names
+  are now translated once, where tools are looked up, which covers every provider
+  and every surface at the same time.
+- **A tool call written out as text is now either performed or removed.** Some
+  models emit their tool calls as text rather than as a call. The markup reached the
+  screen and the stored conversation, and the thing it described never happened,
+  which is why some tool cards never appeared. A written out call for a real tool is
+  now performed like any other, anything else is cut with a warning, and old
+  conversations are cleaned up as they are read.
+- **A busy model steps aside instead of ending your turn.** One provider reports
+  being overloaded in a way that carries no status code, and the router treated
+  that as fatal, so a turn failed with "Sorry, something went wrong on my end"
+  while a healthy alternative sat untried behind it. A busy model is now retried
+  once and then passed over.
+- **A shortened tool result says it was shortened.** A persona that fetched a long
+  page read the first four thousand characters and reasoned from them as though
+  they were the whole article. The model is now told when a result was cut, and the
+  indicator for it appears while you watch and when you come back.
+- **A reopened run shows the image it made, not a paragraph about it.** Generated
+  charts, images, documents and files rendered as cards while you watched and
+  turned back into text when you opened the run later. Both views are now built
+  from the same record.
+- **A reopened run says what its guards did.** The two guards that stop a long run
+  repeating a call and trim its oldest tool output only ever announced themselves
+  to somebody watching. Nobody watches a background task, so the common case was
+  the broken one and a working guard read as a missing feature. What they skipped
+  and what they saved now survives on the record.
+- **Conversations from Telegram, Slack, email and calls now get names, and the ones
+  already sitting untitled are named too.** Only the web chat ever asked for a
+  title, and the trigger needed four messages, which a one exchange conversation
+  never reaches. It now takes one completed exchange, on every channel, and a
+  background sweep works through the conversations that never got one.
+- **Your calendar lists the routines you asked for.** Every persona's own daily
+  wake up was showing as an "every day at 07:00" card you never created. The
+  persona still has it; you no longer have to look at it. The New routine example
+  now reads like a routine somebody would actually want.
+- **Reschedule opens on the schedule you are rescheduling.** The picker always
+  opened on "Every day, 09:00" whatever the schedule was, so nudging the time on an
+  hourly routine silently turned it into a daily one. It now opens on the real
+  cadence, and where a cadence is too unusual for the picker to show it says so and
+  offers to replace it, rather than letting you apply a guess.
+- **A task paused for money asks for it in money you can read.** The one message a
+  person sees at a spend cap said "spent 84000 of 100000 micros" and suggested an
+  amount five times larger than the server would accept, so following the
+  instruction got you refused.
+- **A redeploy no longer throws away a running task's work.** A task working in the
+  background was killed mid sentence by a deploy. It now stops at its next clean
+  boundary with its notes saved, and says that a redeploy is what stopped it.
+- **An edited memory cannot go missing.** Updating a stored fact overwrote the
+  version it was meant to replace, which broke the history and left nothing to roll
+  back to, and a well updated fact could drop out of recall entirely because old
+  versions were counted before they were filtered out. Both are fixed, in the
+  hosted database as well as in memory.
+- **A persona can save something you told it.** The tool for writing a fact to its
+  own memory was composed into every turn and filtered out again before any model
+  saw it, so a persona asked to remember something could not.
+- **You are not asked twice about an approval you already answered.** A redelivered
+  job could ask "may I do X?" about something already decided, which reads as the
+  persona having ignored your answer.
+- **A typo in a persona's tool list is reported.** A persona configured to use
+  "web_serch" was told nothing at all, and simply could not do the thing its author
+  believed it could.
+- **Documents a persona generates can be downloaded.** Word, PowerPoint and Excel
+  files were listed and then served a 404. All three download now, under the name
+  the persona chose, including names not written in the Latin alphabet.
+- **Signing in says what went wrong.** A wrong password, an account that signs in
+  with Google, an email with no account, and a password found in a public breach
+  all said "something went wrong". Each says what happened now, and the breach case
+  no longer borrows the lockout wording, which told people to wait for something
+  that was never going to lift.
+- **A duplicated Telegram connection is reported in words somebody can act on.**
+  Three processes polling one bot token evict each other continuously, which showed
+  up as a bot that answered, apologised, answered again and repeated itself for
+  about forty hours. A sustained conflict now says what is wrong and what to do
+  about it, while a brief one during a deploy stays quiet.
+- **Free accounts keep their free router, and the free daily allowance is
+  counted.** Free mode was dropping the one model that is free by name rather than
+  by suffix, which happened to be the last fallback in both free chains.
+  Separately, the shared daily free request limit was never measured at all. It is
+  counted now, with warnings as it fills.
+- **A proposal a persona has delivered can be answered.** On a self hosted install
+  every live proposal failed a timestamp comparison, so confirming or declining one
+  found nothing pending. Notices held back for a quieter moment were never released
+  either, because nothing ever released them.
+- **A persona backs off when you ignore it, not only when you say no.** Restraint
+  was learning from a typed refusal and nothing else, so a persona kept proposing
+  things to everyone who quietly did not answer, and to anyone who told it to stop
+  in words. Silence and a stop now weigh the same as a no.
+- **Upgrading a self hosted install no longer dies at boot.** The community
+  database created new tables and silently skipped existing ones, so a release that
+  added a column left the app failing on a missing column with nothing to act on.
+  It had happened three times. Missing columns are added on start now, and anything
+  that cannot be added safely is refused by name, with what to do about it.
+- **A self hosted cloud build signs in against its own instance.** The build fell
+  back to this project's production sign in hostname when the setting was absent,
+  so somebody else's deployment proxied every sign in request to ours. It now reads
+  the host out of the key you configured, or installs no proxy at all and warns.
+- **The spend cap on a task's working session can actually stop it.** The cap was
+  enforced correctly by code nothing could reach: both places that built the bound
+  left it empty, and the one thing that evaluated it passed a hardcoded zero. A
+  session is now bound by what its task has left to spend, measured in money rather
+  than in tokens, and sandbox and external tool spend count towards it alongside
+  model calls.
+- **The tier badge is right from the first token**, instead of appearing only once
+  the turn has finished.
+
 ### Release-note backfill (drafted 2026-09-14)
 
 > Six capabilities shipped between 2026-07-01 and 2026-07-05 and were never written up here,
