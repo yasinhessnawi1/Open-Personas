@@ -1,6 +1,6 @@
 [project]
 name = "persona-voice"
-version = "1.2.0"
+version = "1.2.1"
 description = "Real-time voice service for persona-core — WebRTC transport via LiveKit OSS Server."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,14 +44,14 @@ dependencies = [
     # surface (D-V1-X-jwt-verifier-extraction lands at T03 inside persona-core).
     # Lower-bounded for the same reason persona-runtime bounds it (published wheels
     # build with `uv build --no-sources`, so an unbounded sibling can resolve stale).
-    "persona-core[postgres]>=1.2.0,<2",
+    "persona-core[postgres]>=1.2.1,<2",
     # Spec V5 (D-V5-6): the integration thread composes persona-runtime's
     # PromptBuilder / Router / TierRegistry / FirstTokenLatencyTracker into the
     # voice turn so the voice persona is conditioned EXACTLY as the text persona
     # (no persona-bypass). The one structural dep edge V1 deliberately omitted —
     # the layering stays acyclic (voice → runtime → core); persona-runtime never
     # imports persona-voice. Internal workspace package, no new external dep.
-    "persona-runtime>=1.2.0,<2",
+    "persona-runtime>=1.2.1,<2",
     # LiveKit OSS substrate per D-V1-1 (branch (A) lock 2026-06-07). The PyPI
     # name is `livekit` (NOT `livekit-rtc` — decisions.md / tasks.md used the
     # historical alias). v1.1.10 is the Python Room / Participant / Track SDK;

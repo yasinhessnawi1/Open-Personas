@@ -11,6 +11,8 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-20
+
 ### Fixed
 - **A memory survives the server being killed in the middle of saving it.**
   Recording a new version of a memory took two writes, and a process that died

@@ -1,6 +1,6 @@
 [project]
 name = "persona-connectors"
-version = "1.2.0"
+version = "1.2.1"
 description = "Connector framework for persona-core — makes a persona reachable on messaging platforms (the trunk all per-platform adapters plug into)."
 readme = "README.md"
 requires-python = ">=3.11"
