@@ -12,12 +12,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from persona.approvals import ActionProposal
 from persona.errors import ScheduleNotFoundError, TaskNotFoundError
 from persona.tasks import Contract, Task
-from persona_api.approvals.failure import account_for_origination_failure
+from persona.tools import ActionCategory
+from persona_api.approvals.failure import (
+    FailureAccount,
+    account_for_cancel_failure,
+    account_for_origination_failure,
+)
 from persona_api.services.origination_adapters import (
     ScheduleCreatorAdapter,
     TaskCreatorAdapter,
+    render_approval_message,
     render_failure_account,
 )
 from sqlalchemy.exc import IntegrityError
@@ -131,3 +138,105 @@ def test_render_handles_the_builder_fallback_cause(cause: str) -> None:
     # The builder substitutes a fallback for an empty cause; render must still be non-empty.
     account = account_for_origination_failure("task-1", cause=cause)
     assert render_failure_account(account).strip()
+
+
+def _proposal() -> ActionProposal:
+    return ActionProposal(
+        proposal_id="p1",
+        owner_id="user_a",
+        task_id="t1",
+        persona_id="persona_a",
+        categories=frozenset({ActionCategory.COMMUNICATE_AS_USER}),
+        tool_name="send_email",
+        arguments={"to": "bob@example.com"},
+        description="send the appeal email to bob@example.com",
+        created_at=datetime(2026, 9, 21, 12, 0, tzinfo=UTC),
+    )
+
+
+# ---------------------------------------------------------------------------
+# R9-120: this is product copy now. A persona can say it unprompted in a chat app.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "account",
+    [
+        account_for_origination_failure("task-1", cause="the schedule store was unreachable"),
+        account_for_origination_failure("task-1", cause=""),
+        account_for_cancel_failure("task-1", cause="the leg was already running"),
+    ],
+)
+def test_a_failure_account_reads_as_sentences(account: FailureAccount) -> None:
+    """The cause begins a sentence, so it has to look like one.
+
+    The old template ran the cause on after a full stop exactly as stored, which produced
+    "I couldn't set up the task you just confirmed. the task couldn't be created just now."
+    That is a visible defect anywhere and it is the persona's own voice in someone's chat
+    app, so it is worth a test rather than a careful author.
+    """
+    text = render_failure_account(account)
+
+    sentences = [part.strip() for part in text.split(". ") if part.strip()]
+    assert sentences, "the render produced nothing"
+    for sentence in sentences:
+        assert sentence[0].isupper() or sentence[0].isdigit(), (
+            f"a sentence starts lower-case in: {text!r}"
+        )
+    assert ";" not in text, "the options are read aloud by a person, not parsed from a list"
+
+
+def test_every_approval_line_says_how_to_answer_it() -> None:
+    """A question a person cannot tell how to answer is not a question, it is a status line.
+
+    In the web app the buttons said how to reply. In a chat app the words have to. This
+    also pins that ``expired`` offers a way forward: it used to report the closed door and
+    stop, which is the dead end the failure-account rule already forbids everywhere else.
+    """
+    proposal = _proposal()
+    for kind in ("ask", "reconfirm", "clarify", "remind", "expired"):
+        line = render_approval_message(kind, proposal)
+        assert proposal.description.lower()[:20] in line.lower(), (
+            f"{kind} does not say what the persona actually wants to do"
+        )
+        assert "yes" in line.lower() or "ask me again" in line.lower(), (
+            f"{kind} gives the person no way to answer or move on: {line!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_no_delivery_text_claims_the_person_will_see_it() -> None:
+    """Saved is a claim about our records. Seen is a claim about someone's attention.
+
+    Since R9-120 the web home is also the fallback for a connector that did not take, so
+    "present on next open" quietly assumed a reader who returns to a conversation a chat
+    app user has no reason to open. Asserted on the OUTCOME the operator reads rather than
+    on the source, so a comment mentioning the old phrasing cannot green or red it.
+    """
+    from persona.schema.origination import OriginatedMessage, PersonaIdentityTag
+    from persona_api.services.web_deliverer import WebAppDeliverer
+
+    class _NoSessions:
+        def lookup(self, message: OriginatedMessage) -> None:  # noqa: ARG002 - Protocol shape
+            return None
+
+    deliverer = WebAppDeliverer(
+        rls_engine=object(),  # type: ignore[arg-type] - the injected sink ignores it
+        sessions=_NoSessions(),
+        record=lambda **_kwargs: None,
+    )
+    result = await deliverer.deliver(
+        OriginatedMessage(
+            persona=PersonaIdentityTag(persona_id="p1", display_name="Ada"),
+            owner_user_id="user_a",
+            content="I have something for you.",
+            conversation_id="conv_1",
+            created_at=datetime(2026, 9, 21, 12, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.detail is not None
+    assert "not yet seen" in result.detail
+    assert "present on next open" not in result.detail, (
+        "the delivery text promises the person will see it somewhere they may never look"
+    )

@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     from persona_api.realtime.channel import UserEventChannel
     from persona_api.sandbox.pool import SandboxPool
     from persona_api.schedules.tick import SchedulerTick
+    from persona_api.services.origination_delivery import ChannelDeliverers
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.title_backfill import UntitledConversationBackfill
     from persona_api.services.web_deliverer import LiveSessionRegistry
@@ -191,6 +192,7 @@ def build_worker_registry(
     memory_backend: Backend | None = None,
     edition: object | None = None,
     live_sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
     event_channel: UserEventChannel | None = None,
     drain: LegDrainSignal | None = None,
     image_backend: ImageBackend | None = None,
@@ -492,6 +494,7 @@ def build_worker_registry(
             config=config,
             audit_logger=build_audit_logger(config, rls_engine),
             live_sessions=live_sessions,
+            channels=channels,
             event_channel=event_channel,
             on_leg_settled=on_leg_settled,
             runnable_guard=kill_switch,
@@ -601,6 +604,7 @@ def build_worker_registry(
                 audit_root=Path(config.audit_root),
                 audit_logger=build_audit_logger(config, rls_engine),
                 sessions=live_sessions,
+                channels=channels,
             )
 
             def tag_resolver(persona_id: str) -> object:
@@ -870,6 +874,7 @@ def _register_task_leg_tenant(
     config: APIConfig,
     audit_logger: AuditLogger | None = None,
     live_sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
     event_channel: UserEventChannel | None = None,
     on_leg_settled: Callable[[LegOutcome, ResumeTrigger, datetime], Awaitable[None]] | None = None,
     runnable_guard: RunnableGuard | None = None,
@@ -934,6 +939,7 @@ def _register_task_leg_tenant(
         audit_root=audit_root,
         audit_logger=audit_logger,
         live_sessions=live_sessions,
+        channels=channels,
     )
     budget_gate, leg_budget_micros = _build_budget_gate(
         rls_engine=rls_engine,
@@ -943,6 +949,7 @@ def _register_task_leg_tenant(
         audit_root=audit_root,
         audit_logger=audit_logger,
         live_sessions=live_sessions,
+        channels=channels,
         emit_task_updated=_emit_task_updated,
     )
     on_approval_parked = _build_approval_announce_hook(
@@ -951,6 +958,7 @@ def _register_task_leg_tenant(
         edition=edition,
         audit_root=audit_root,
         audit_logger=audit_logger,
+        channels=channels,
     )
     on_task_stuck = _build_task_stuck_hook(
         rls_engine=rls_engine,
@@ -960,6 +968,7 @@ def _register_task_leg_tenant(
         audit_root=audit_root,
         audit_logger=audit_logger,
         live_sessions=live_sessions,
+        channels=channels,
     )
     register_task_leg_handler(
         registry,
@@ -1042,6 +1051,7 @@ def _build_budget_gate(
     audit_root: Path,
     audit_logger: AuditLogger | None,
     live_sessions: LiveSessionRegistry | None,
+    channels: ChannelDeliverers | None,
     emit_task_updated: Callable[[str, str, str], None],
 ) -> tuple[Callable[[str, Task, datetime], Awaitable[bool]], Callable[[str, Task], int]]:
     """The A3 leg-boundary budget gate (T10) — enforce the per-task cap + voice the extend ask.
@@ -1080,6 +1090,7 @@ def _build_budget_gate(
             audit_root=audit_root,
             audit_logger=audit_logger,
             sessions=live_sessions,
+            channels=channels,
         )
         if memory_backend is not None and edition is not None
         else None
@@ -1122,6 +1133,7 @@ def _build_approval_announce_hook(
     edition: object | None,
     audit_root: Path,
     audit_logger: AuditLogger | None,
+    channels: ChannelDeliverers | None,
 ) -> Callable[[str, str], Awaitable[None]] | None:
     """The A3 notify-on-park hook — proactively voice a freshly-parked approval's "may I do X?".
 
@@ -1148,6 +1160,7 @@ def _build_approval_announce_hook(
         ),
         edition=edition,  # type: ignore[arg-type]  # Edition; typed object (import cycle)
         tasks=TaskStore(rls_engine),
+        channels=channels,
     )
     approvals = ApprovalStore(rls_engine)
 
@@ -1175,6 +1188,7 @@ def _build_task_stuck_hook(
     audit_root: Path,
     audit_logger: AuditLogger | None,
     live_sessions: LiveSessionRegistry | None,
+    channels: ChannelDeliverers | None,
 ) -> Callable[[str, StuckReport], Awaitable[None]] | None:
     """The R9-005 honesty voice — a task parked on an over-budget checkpoint says so (C0).
 
@@ -1201,6 +1215,7 @@ def _build_task_stuck_hook(
         audit_root=audit_root,
         audit_logger=audit_logger,
         sessions=live_sessions,
+        channels=channels,
     )
 
     async def _voice(owner_id: str, report: StuckReport) -> None:
@@ -1262,6 +1277,7 @@ def _build_milestone_hook(
     audit_root: Path,
     audit_logger: AuditLogger | None = None,
     live_sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
 ) -> Callable[[LegOutcome, datetime], Awaitable[None]] | None:
     """Build the digest-on-milestone closure, or ``None`` when the digest can't be delivered.
 
@@ -1291,6 +1307,7 @@ def _build_milestone_hook(
         audit_root=audit_root,
         audit_logger=audit_logger,
         sessions=live_sessions,
+        channels=channels,
     )
     # A3-D-4 / A6-D-10: the per-persona/day chatter cap batches over-cap PROGRESS updates to the
     # DeferredDigestStore (the morning review) instead of dropping them — the digest's "deferred
@@ -1475,6 +1492,7 @@ def start_in_process_worker(
     runtime_factory: RuntimeFactory | None = None,
     memory_backend: Backend | None = None,
     live_sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
     event_channel: UserEventChannel | None = None,
     image_backend: ImageBackend | None = None,
     file_storage: FileStorage | None = None,
@@ -1527,6 +1545,7 @@ def start_in_process_worker(
         memory_backend=memory_backend,
         edition=config.edition,
         live_sessions=live_sessions,
+        channels=channels,
         event_channel=event_channel,
         drain=leg_drain,
         # R9-013: the avatar tenant's substrate — shared with the create route's

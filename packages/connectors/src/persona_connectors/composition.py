@@ -10,10 +10,15 @@ import-decoupled, so a future extract-to-core is a dependency swap, not a reshap
 (the reversibility guarantee).
 
 T1 wires the **shared foundations** every later task needs: the edition switch,
-the RLS engine, and the owner-scope (D-C1-X-rls-spine). The delivery-router
-(C0 ``DeliveryRouter`` reuse, T10) and the conversation-loop builder (api's
-``RuntimeFactory``, T9) plug in here in their tasks — their seams are marked
-below.
+the RLS engine, and the owner-scope (D-C1-X-rls-spine); the conversation-loop
+builder (api's ``RuntimeFactory``, T9) plugs in here too.
+
+Delivery routing is NOT built here any more (R9-120). This module once had a
+``build_delivery_router`` whose single caller threw the return value away, so the
+connectors were registered nowhere reachable and a persona could answer on
+Telegram but never speak first there. The router now has one construction site,
+``persona_api.services.origination_delivery.build_origination_router``, and the
+service entry binds this process's deliverers into the registry that site reads.
 """
 
 from __future__ import annotations
@@ -35,7 +40,6 @@ from persona_api.services.background_billing import bill_background_provider
 from persona_api.services.chat_service import start_chat_turn
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
-from persona_api.services.delivery_router import DeliveryRouter
 from sqlalchemy import text as _sql
 
 from persona_connectors.errors import ConnectorError, TurnFailedError
@@ -46,13 +50,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from persona.backends import StreamChunk
-    from persona.delivery import MessageDeliverer
     from persona_api.background.chat_turn_worker import ChatTurnHandle
     from persona_api.billing import StripeGateway
     from persona_api.config import APIConfig
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.initiative.verb_service import InitiativeVerbService
     from persona_api.jobs.queue import JobQueue
+    from persona_api.services.origination_service import OriginationService
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.task_reschedule_service import TaskRescheduleService
     from persona_api.services.task_steering_service import TaskSteeringService
@@ -63,7 +67,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ConnectorComposition",
-    "build_delivery_router",
     "build_persona_name_lister",
     "build_reply_runner",
     "build_sms_cost_biller",
@@ -411,6 +414,7 @@ def build_reply_runner(
     credits_policy: CreditsPolicy,
     gateway: StripeGateway | None,
     job_queue: JobQueue | None,
+    origination_service: OriginationService | None = None,
     task_steering_service: TaskSteeringService | None = None,
     task_reschedule_service: TaskRescheduleService | None = None,
     initiative_verb_service: InitiativeVerbService | None = None,
@@ -457,15 +461,28 @@ def build_reply_runner(
     and the user still read "Done, I've set that up". Steering, reschedule and
     initiative are now injected by the service entry and this path applies them.
 
-    ``origination_service`` remains unwired, and that is the honest boundary rather
-    than an oversight. Its failure notifier narrates "I could not create that after
-    all" through the C0 delivery seam to an open web tab, and a connector process has
-    neither the A11 live-session registry nor (at this point in its startup) its own
-    delivery router — so a failed origination would be persisted and never seen. That
-    needs a decision about where a connector-raised failure account is delivered, not
-    a wiring change. Steering is wired WITHOUT its optional notifier for the same
-    reason: pause, resume and cancel all take effect, and only the narration of a
-    cancel that failed to take is unavailable (it still logs).
+    R9-081 / R9-120 — origination, and why it is wired now. This was ``None`` on
+    purpose: the failure notifier narrates "I could not create that after all" through
+    the C0 delivery seam, and a connector process had no way to deliver it. Under the
+    owner ruling of 2026-09-21 the connector delivers its own, so the account goes back
+    to the chat where the promise was made, through the SAME seam the api's
+    originations enter (``origination_delivery.build_origination_router``) holding this
+    process's bound channels. The service entry composes it through the shared
+    ``compose_task_origination_services`` the api lifespan calls, so the two roots
+    cannot compose a different contract flow from each other.
+
+    The A11 live-session registry stays absent here, and that is not a degradation. It
+    is consulted only by the WEB deliverer, to push onto an open tab, over a
+    ``UserEventChannel`` that is an in-process bus (A11-D-1) no browser subscribes to
+    in this process; a registry here would report open sessions that do not exist. The
+    channel this process actually targets needs none, because a Telegram send IS the
+    push. Under ``PERSONA_API_EMBED_CONNECTORS`` both halves share one process and the
+    api's real registry serves both.
+
+    Steering now comes from that same shared composition, which removes an asymmetry
+    rather than hiding one: it was built here without its notifier precisely because
+    this process had none, and it therefore also missed the W1 (R9-146) fix that routes
+    pause / resume / cancel through ``TaskControlMutator`` instead of the bare store.
 
     ``request.persona_id`` is not passed down: ``start_chat_turn`` derives the persona
     from the conversation ROW, and the connector's conversation store creates one
@@ -491,6 +508,9 @@ def build_reply_runner(
             is not active.
         job_queue: The durable queue for the turn-boundary synthesis enqueue;
             ``None`` makes it a no-op.
+        origination_service: Worker side of the A4 contract create. ``None`` keeps the
+            pre-R9-081 behaviour, in which a persona said "Done, I've set that up" on a
+            connector and nothing was created.
         task_steering_service: Worker side of the A4 steering verbs (pause / resume /
             cancel). ``None`` keeps the pre-R9-081 drop-on-the-floor behaviour.
         task_reschedule_service: Worker side of the A8 reschedule verb.
@@ -507,9 +527,7 @@ def build_reply_runner(
         credits_policy=credits_policy,
         gateway=gateway,
         job_queue=job_queue,
-        # R9-081: see the note above. Origination alone stays None, pending the
-        # decision about where a connector-raised failure account is delivered.
-        origination_service=None,
+        origination_service=origination_service,
         task_steering_service=task_steering_service,
         task_reschedule_service=task_reschedule_service,
         initiative_verb_service=initiative_verb_service,
@@ -533,27 +551,3 @@ def build_reply_runner(
             return await _collect_reply(handle)
 
     return run_turn
-
-
-def build_delivery_router(
-    *, deliverers: Mapping[str, MessageDeliverer], rls_engine: Engine, home_channel: str
-) -> DeliveryRouter:
-    """Register the configured connectors as C0's ``MessageDeliverer``s (criterion 8).
-
-    The connector service routes every originated message to the deliverer for its
-    channel (each ``deliver`` resolves the chat via the GAP-A ``resolve_channel`` and
-    sends). ``home_channel`` is the always-available default target for this process; a
-    ``pending`` outcome (no resolvable channel) is the deliverer's, never a silent drop.
-    Generalised from C2's single-Telegram form to register Telegram / Discord / Slack
-    side by side (C3 multi-connector service wiring).
-
-    Args:
-        deliverers: ``platform`` → its ``MessageDeliverer`` (the connector). At least one.
-        rls_engine: The RLS-scoped engine the router's owner-scoped writes run on.
-        home_channel: The default target channel (a key present in ``deliverers``).
-    """
-    return DeliveryRouter(
-        deliverers=dict(deliverers),
-        rls_engine=rls_engine,
-        home_channel=home_channel,
-    )

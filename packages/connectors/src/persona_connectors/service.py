@@ -58,11 +58,14 @@ from persona_api.services.model_tiers import (
     build_free_tier_registry,
     resolve_openrouter_subscription_mode,
 )
+from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_api.services.runtime_factory import RuntimeFactory
-from persona_api.services.task_steering_service import TaskSteeringService
+from persona_api.services.task_origination_composition import (
+    TaskOriginationServices,
+    compose_task_origination_services,
+)
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
 from persona_api.services.verb_service_composition import build_conversational_verb_services
-from persona_api.tasks.store import TaskStore
 from persona_runtime.tier import tier_registry_from_env
 from websockets.asyncio.client import connect as ws_connect
 
@@ -80,7 +83,6 @@ from persona_connectors._twilio.client import TwilioClient
 from persona_connectors._twilio.status import map_delivery, parse_status_callback
 from persona_connectors.composition import (
     ConnectorComposition,
-    build_delivery_router,
     build_email_recipient_resolver,
     build_persona_name_lister,
     build_reply_runner,
@@ -981,12 +983,17 @@ class ConnectorsBundle:
             platform is configured.
         idle_sweep: A zero-argument factory for the lazy-expiry backstop, or ``None`` when
             no platform is configured.
+        channels: The origination delivery registry, ALREADY BOUND to :attr:`deliverers`
+            (R9-120). Carried on the bundle so a host can see what its personas can
+            speak on, and so an embedded host can pass its own registry in and get the
+            same object back rather than discovering a second one exists.
     """
 
     deliverers: Mapping[str, MessageDeliverer]
     runners: Mapping[str, Callable[[], Coroutine[object, object, None]]]
     http_app: FastAPI | None
     idle_sweep: Callable[[], Coroutine[object, object, None]] | None
+    channels: ChannelDeliverers
 
 
 async def build_connectors(
@@ -1000,6 +1007,8 @@ async def build_connectors(
     job_queue: JobQueue,
     stripe_gateway: StripeGateway | None,
     http: httpx.AsyncClient,
+    channels: ChannelDeliverers | None = None,
+    task_origination_services: TaskOriginationServices | None = None,
 ) -> ConnectorsBundle:
     """Compose every configured connector against ALREADY-BUILT collaborators.
 
@@ -1025,10 +1034,20 @@ async def build_connectors(
         stripe_gateway: The edition's Stripe gateway, or ``None`` outside cloud.
         http: The shared HTTP client. **The CALLER owns it and must close it**; nothing in
             this module closes a client it did not create.
+        channels: The process's origination delivery registry, for a host that already
+            has one (the embedded api, so that one process holds ONE registry). ``None``
+            makes one here. Either way this function BINDS it before returning, so no
+            caller can be handed an unbound registry.
+        task_origination_services: The host's already-composed A4 pair, for a host that
+            has one. The embedded api does, and passing it is what keeps ONE
+            ``OriginationService`` in that process: two would mean two services deciding
+            where a persona speaks, which is what the 2026-09-21 ruling's condition
+            rules out. ``None`` composes them here (the standalone service).
 
     Returns:
         The :class:`ConnectorsBundle`. Its ``deliverers`` is empty when no platform is
-        configured; deciding what that means is the host's, not this function's.
+        configured; deciding what that means is the host's, not this function's. Its
+        ``channels`` is always bound.
     """
     composition = ConnectorComposition(connector_config)
     config = connector_config
@@ -1038,11 +1057,33 @@ async def build_connectors(
     # the SAME builder app.py uses, so the two roots cannot drift apart the way the billing
     # set once did (R9-074 / R9-079).
     _verb_services = build_conversational_verb_services(rls_engine=rls_engine, config=api_config)
-    # Steering is built here rather than in the shared builder because the api gives it
-    # a failure notifier and this composition has none: pause / resume / cancel all take
-    # effect, and only the narration of a cancel that did NOT take is unavailable (it
-    # still logs). That is a real difference, so it is stated rather than hidden.
-    task_steering_service = TaskSteeringService(tasks=TaskStore(rls_engine))
+    # R9-081 / R9-120: origination and steering now come from the SAME builder app.py
+    # calls, because the reason they could not has gone. Steering was built here, bare,
+    # because the api had a failure notifier to give it and this process did not; this
+    # process can deliver its own now, so the shared composition applies, and with it
+    # the W1 (R9-146) routing of pause / resume / cancel through TaskControlMutator that
+    # the local construction never had.
+    #
+    # ``channels`` is bound further down, once the platforms are set up. That is a cycle
+    # rather than a bad order (the deliverers need ``run_turn``, which needs the chat
+    # turn registry, which needs this service), so the notifier reads the registry when
+    # it delivers rather than when it is built. See the binding site below for what
+    # stands between an unbound registry and production.
+    channels = channels if channels is not None else ChannelDeliverers()
+    _a4_services = task_origination_services or compose_task_origination_services(
+        rls_engine=rls_engine,
+        memory_backend=runtime_factory.memory_backend,
+        edition=api_config.edition,
+        audit_root=Path(api_config.audit_root),
+        # No A11 registry on purpose: it is consulted only by the WEB deliverer over an
+        # in-process bus (A11-D-1) that no browser tab subscribes to in this process, so
+        # one here would report open sessions that do not exist. The channel this
+        # process targets needs none: a Telegram send IS the push. An EMBEDDED host does
+        # have a real registry and passes its own services in above, so that process
+        # keeps A11 exactly as it always had it.
+        live_sessions=None,
+        channels=channels,
+    )
     run_turn = build_reply_runner(
         runtime_factory=runtime_factory,
         rls_engine=rls_engine,
@@ -1051,7 +1092,8 @@ async def build_connectors(
         credits_policy=credits_policy,
         gateway=stripe_gateway,
         job_queue=job_queue,
-        task_steering_service=task_steering_service,
+        origination_service=_a4_services.origination,
+        task_steering_service=_a4_services.steering,
         task_reschedule_service=_verb_services.reschedule,
         initiative_verb_service=_verb_services.initiative,
     )
@@ -1211,16 +1253,35 @@ async def build_connectors(
             for app in http_apps.values():
                 http_app.router.routes.extend(app.router.routes)
 
+    # R9-120, THE binding site. Every configured connector becomes a channel the one
+    # origination seam can route to (criterion 6 / 8). This used to build a
+    # ``DeliveryRouter`` and discard it, which meant the deliverers below were
+    # registered nowhere reachable: a persona could answer on Telegram and never speak
+    # first there.
+    #
+    # Bound UNCONDITIONALLY, before the single return, including when no platform is
+    # configured. An empty bind is a stated outcome; an UNBOUND registry is a defect,
+    # and the two must never look alike (``ChannelDeliverers.bound`` is what tells them
+    # apart). Nothing removed here: the old call passed ``home_channel=next(iter(...))``,
+    # so its fail-fast guard could only ever assert that the first key was a key.
+    #
+    # The operator switch lands HERE, at the one place channels become reachable, rather
+    # than at each notifier: off, a persona still receives and answers on every configured
+    # platform and only its originated messages fall back to the web app. Binding nothing
+    # is how "off" is expressed, so the off state travels the same code path as a deploy
+    # with no connector configured, instead of a second branch that has to agree with it.
+    origination_on = api_config.connector_origination_enabled
+    channels.bind(deliverers if origination_on else {})
+    if not origination_on and deliverers:
+        _log.info(
+            "connector origination is OFF by operator switch "
+            "(PERSONA_API_CONNECTOR_ORIGINATION_ENABLED=false); personas still reply on "
+            "{platforms} and will start conversations in the web app only",
+            platforms=", ".join(sorted(deliverers)),
+        )
+
     idle_sweep: Callable[[], Coroutine[object, object, None]] | None = None
     if deliverers:
-        # Register every configured connector as a C0 MessageDeliverer (criterion 6 / 8).
-        # The return value is deliberately unused, exactly as before this extraction: the
-        # construction is a fail-fast guard that ``home_channel`` has a deliverer. That the
-        # router goes nowhere is a REAL gap, tracked as R9-120 and decided alongside
-        # R9-081; wiring it here would be a different spec's change.
-        build_delivery_router(
-            deliverers=deliverers, rls_engine=rls_engine, home_channel=next(iter(deliverers))
-        )
         idle_after = timedelta(minutes=config.idle_timeout_minutes)
         # Native-boundary platforms (email, where the thread IS the conversation) opt out of
         # the idle sweep (Spec C5, D-C5-2): composition supplies the set from the registered
@@ -1232,7 +1293,11 @@ async def build_connectors(
         )
 
     return ConnectorsBundle(
-        deliverers=deliverers, runners=runners, http_app=http_app, idle_sweep=idle_sweep
+        deliverers=deliverers,
+        runners=runners,
+        http_app=http_app,
+        idle_sweep=idle_sweep,
+        channels=channels,
     )
 
 

@@ -14,7 +14,8 @@ import pytest
 from persona_api.config import Edition
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services.delivery_router import DeliveryRouter
-from persona_connectors.composition import ConnectorComposition, build_delivery_router
+from persona_api.services.origination_delivery import ChannelDeliverers, build_origination_router
+from persona_connectors.composition import ConnectorComposition
 from persona_connectors.config import ConnectorConfig
 from persona_connectors.errors import ConnectorError
 from sqlalchemy.engine import Engine
@@ -83,19 +84,30 @@ class _FakeDeliverer:
         return None
 
 
-def test_build_delivery_router_registers_multiple_connectors() -> None:
-    """C3 multi-connector wiring: Telegram + Discord + Slack deliverers registered side by side."""
+def test_multiple_connectors_are_reachable_side_by_side() -> None:
+    """C3 multi-connector wiring, now read through the seam that actually routes.
+
+    This used to build ``composition.build_delivery_router`` and assert the result was a
+    router. It was true and it was worthless: the service entry discarded that router, so
+    the deliverers were reachable in this test and nowhere else (R9-120). The property C3
+    cares about is unchanged, so it is asserted where it now lives, against the registry
+    the one origination router reads.
+    """
     engine = ConnectorComposition(
         ConnectorConfig(edition="cloud", database_url=_CLOUD_URL)
     ).make_engine()
-    deliverers = {
-        "telegram": _FakeDeliverer(),
-        "discord": _FakeDeliverer(),
-        "slack": _FakeDeliverer(),
-    }
-    router = build_delivery_router(
-        deliverers=deliverers,  # type: ignore[arg-type]
-        rls_engine=engine,
-        home_channel="slack",
+    channels = ChannelDeliverers()
+    channels.bind(
+        {
+            "telegram": _FakeDeliverer(),  # type: ignore[dict-item]
+            "discord": _FakeDeliverer(),  # type: ignore[dict-item]
+            "slack": _FakeDeliverer(),  # type: ignore[dict-item]
+        }
     )
+
+    router = build_origination_router(rls_engine=engine, channels=channels)
+
     assert isinstance(router, DeliveryRouter)
+    # The web home rides alongside, so a conversation that is not on any connector still
+    # has a target and the router's no-silent-drop guard holds.
+    assert sorted(router._deliverers) == ["discord", "slack", "telegram", "web"]  # noqa: SLF001

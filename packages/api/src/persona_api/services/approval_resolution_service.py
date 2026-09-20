@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
     from persona_api.approvals.resolver import ResolutionOutcome
     from persona_api.config import Edition
+    from persona_api.services.origination_delivery import ChannelDeliverers
     from persona_api.services.runtime_factory import RuntimeFactory
 
 __all__ = ["ApprovalResolutionService"]
@@ -61,6 +62,7 @@ class ApprovalResolutionService:
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
         checkpoint_token_budget: int = DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+        channels: ChannelDeliverers | None = None,
     ) -> None:
         self._engine = engine
         self._factory = factory
@@ -69,6 +71,9 @@ class ApprovalResolutionService:
         # checkpoint here, so this path enforces the same operator-configured core budget the
         # worker does. Left at the core default it behaves exactly as it always has.
         self._checkpoint_token_budget = checkpoint_token_budget
+        # R9-081: the approval ask goes back to the conversation that raised it, which
+        # can be a connector chat. Same registry as every other originated message.
+        self._channels = channels
         # The C0 episodic recorder for the notifier — the same construction as
         # OriginatorFailureNotifier (backend-selected audit when supplied; JSONL fallback).
         self._episodic = EpisodicStore(
@@ -106,6 +111,7 @@ class ApprovalResolutionService:
                 episodic=self._episodic,
                 edition=self._edition,
                 tasks=tasks,
+                channels=self._channels,
             ),
         )
 

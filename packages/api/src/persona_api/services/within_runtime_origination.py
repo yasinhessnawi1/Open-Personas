@@ -30,9 +30,8 @@ from persona_runtime.agentic.events import RunEvent
 from sqlalchemy import select
 
 from persona_api.db.models import personas as personas_t
-from persona_api.services.delivery_router import DeliveryRouter
 from persona_api.services.origination import OriginationRecorder
-from persona_api.services.web_deliverer import WebAppDeliverer
+from persona_api.services.origination_delivery import build_origination_router
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -160,9 +159,13 @@ class WithinRuntimeOriginator:
         tag = self._persona_tag(run.persona_id)
         if tag is None:
             return None
-        sessions = RunStreamRegistry(handle)
-        web = WebAppDeliverer(rls_engine=self._engine, sessions=sessions)
-        router = DeliveryRouter(deliverers={"web": web}, rls_engine=self._engine)
+        # The run's own open stream is the live target, so the registry is run-bound; the
+        # router itself comes from the one origination construction site (R9-120), not from
+        # a second hand-built ``{"web": web}`` here. No connector channels are passed: a run
+        # concludes into the stream the user is already watching.
+        router = build_origination_router(
+            rls_engine=self._engine, sessions=RunStreamRegistry(handle)
+        )
         recorder = _ReceiptRecorder(
             OriginationRecorder(
                 rls_engine=self._engine, episodic_store=self._episodic, edition=self._edition

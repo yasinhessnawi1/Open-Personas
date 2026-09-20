@@ -156,6 +156,13 @@ def _build_connector_runner(config: APIConfig, engine: Engine) -> None:
     R9-081: the verb services are built here the same way the service entry builds
     them. If this drifted from ``_amain`` the wiring assertions below would pass
     while production stayed unwired, which is the exact failure they exist to catch.
+
+    This helper deliberately does NOT compose the A4 origination services, because a
+    hand-copied mirror is the wrong place to assert that production wires something
+    (R9-121: a helper named "as production does" is the tell that it does not). That
+    assertion lives in ``test_connector_origination_wiring.py``, which drives the real
+    ``build_connectors``. Read the absence here as "not this test's subject", never as
+    "production does not pass one".
     """
     verb_services = build_conversational_verb_services(rls_engine=engine, config=config)
     build_reply_runner(
@@ -262,23 +269,6 @@ def test_the_connector_wires_the_verbs_it_can_actually_apply(
     call = recorder.calls[0]
     assert call["task_steering_service"] is not None, "pause / resume / cancel go nowhere"
     assert call["task_reschedule_service"] is not None, "a confirmed reschedule goes nowhere"
-
-
-def test_the_connector_leaves_origination_unwired_deliberately(
-    tmp_path: Path, recorder: _RegistryRecorder
-) -> None:
-    """Origination alone stays a STATED gap, and the reason is specific to it.
-
-    Its failure notifier narrates "I could not create that after all" through the C0
-    delivery seam to an open web tab, which a connector process does not have, so a
-    failed origination would be persisted and never seen. That needs a decision about
-    where a connector-raised failure account is delivered, not a wiring change. This
-    pins the boundary so closing it has to be deliberate.
-    """
-    config = _config(tmp_path)
-    _build_connector_runner(config, _connector_engine(tmp_path))
-
-    assert recorder.calls[0]["origination_service"] is None
 
 
 # ---------------------------------------------------------------------------

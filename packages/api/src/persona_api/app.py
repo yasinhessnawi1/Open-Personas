@@ -114,6 +114,7 @@ from persona_api.services.model_tiers import (
     build_free_tier_registry,
     resolve_openrouter_subscription_mode,
 )
+from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
 from persona_api.services.verb_service_composition import build_conversational_verb_services
@@ -446,22 +447,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # steers (cancel-failure surfaces an un-suppressible account). Gated on a real engine +
     # memory backend (the C0 originator needs both); ``None`` in unit/community-keyless paths →
     # the loop's A4 gates run but the worker no-ops, exactly the pre-activation posture.
+    #
+    # R9-081 / R9-120: the channels a persona can SPEAK FIRST on. One registry per
+    # process, created here because everything that originates has to read the same one,
+    # and bound further down once the boot knows whether this process hosts connectors.
+    # It is late-bound rather than ordered: the connector composition needs the chat turn
+    # registry, which needs the origination service, whose notifier needs the channels.
+    # ``ensure_bound`` below closes that on the one path every boot takes.
+    channel_deliverers = ChannelDeliverers()
+    app.state.channel_deliverers = channel_deliverers
     origination_service = None
     task_steering_service = None
+    a4_services = None
     if rls_engine is not None and memory_backend is not None:
         from persona_api.services.task_origination_composition import (
             compose_task_origination_services,
         )
 
-        _a4_services = compose_task_origination_services(
+        a4_services = compose_task_origination_services(
             rls_engine=rls_engine,
             memory_backend=memory_backend,
             edition=config.edition,
             audit_root=app.state.audit_root,
             live_sessions=live_sessions,
+            channels=channel_deliverers,
         )
-        origination_service = _a4_services.origination
-        task_steering_service = _a4_services.steering
+        origination_service = a4_services.origination
+        task_steering_service = a4_services.steering
     # Spec A8 (T6) + Spec A5 (T10): the worker sides of the reschedule and initiative
     # verbs. R9-081: built through the SHARED builder the connector root also calls, so
     # the two processes cannot drift — the connector had these at ``None`` while its
@@ -774,6 +786,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     # writes its checkpoint, so it honours the same configured core budget
                     # the worker's leg path does. One knob, both writers.
                     checkpoint_token_budget=config.task_checkpoint_token_budget,
+                    # R9-081: an approval ask belongs in the conversation that raised it,
+                    # which may be a Telegram chat.
+                    channels=channel_deliverers,
                 )
 
                 def _build_approval_resolver(
@@ -860,6 +875,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # api/worker split swaps these for the cross-process transport behind the
                 # unchanged seams.
                 live_sessions=live_sessions,
+                # R9-081: a task digest, an approval ask and a dead-leg account all
+                # originate from this worker, so they route through the SAME registry the
+                # chat path does. Without it a persona would hand work over on Telegram
+                # and report on it only in a web conversation nobody opened.
+                channels=channel_deliverers,
                 event_channel=event_channel,
                 # R9-013: the avatar_generation tenant's substrate. Threading the
                 # app's composed image backend + file storage lets the worker
@@ -932,6 +952,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 credits_policy=app.state.credits_policy,
                 job_queue=app.state.job_queue,
                 stripe_gateway=app.state.stripe_gateway,
+                # R9-081 / R9-120: ONE registry and ONE origination service in this
+                # process. The connector composition binds its deliverers into the
+                # registry the api's own notifiers already hold, and reuses the api's A4
+                # services rather than building a second set, which is what the ruling's
+                # condition rules out. ``a4_services`` is None only on a keyless boot
+                # that has no origination at all; then the connectors compose their own.
+                channels=channel_deliverers,
+                task_origination_services=a4_services,
             )
         except Exception as exc:  # noqa: BLE001 — a connector fault must not down the api
             # D-I1-6, and the same posture as the keyless in-process-worker branch above: a
@@ -974,6 +1002,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             dispatch=_connector_dispatch_ok,
         )
     app.state.embedded_connectors = embedded_connectors
+    # R9-081 / R9-120, the ONE place this process declares what it can speak on. Every
+    # branch above reaches this line: connectors hosted (the composition already bound
+    # them), flag off, no platform configured, or a connector that failed to start. The
+    # last three bind nothing and SAY so, because "no channels" has to be a statement
+    # rather than a missing one.
+    channel_deliverers.ensure_bound()
+    _LOG.info(
+        "origination can reach: {channels}",
+        channels=", ".join(sorted(channel_deliverers.snapshot())) or "the web app only",
+    )
 
     # Spec M2 (D-M2-6 + the F5 closure): warm the OpenRouter catalog + the
     # metadata index OFF the event loop at boot, then keep them TTL-fresh.

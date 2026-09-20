@@ -13,9 +13,12 @@ one-pipe-many-deliverers seam is real before C1's connectors land. It honours th
   later task). It is **NOT a push broker**: it can only push onto a stream the
   client *already* holds open, never to an idle client.
 * **No open session:** the recorder (T4) has **already durably persisted** the
-  message into the conversation, so it is **present-on-next-open** → this returns
+  message into the conversation, so it is **saved and reachable** → this returns
   :data:`DeliveryOutcome.PENDING` (never ``FAILED`` — nothing is dropped, D-C0-4)
-  and records the outcome via the api audit log (D-C0-5).
+  and records the outcome via the api audit log (D-C0-5). "Saved and reachable" is
+  the whole claim: since R9-120 this deliverer is also the fallback for a connector
+  channel that did not take, and "present on next open" quietly assumed a reader who
+  comes back to the conversation, which a chat-app user has no reason to do.
 
 A general out-of-band push to a *not-currently-streaming* client is deliberately
 out of scope here — that needs durable push infrastructure and is connector (C1) /
@@ -109,7 +112,10 @@ class WebAppDeliverer:
         return self._record_outcome(
             message,
             DeliveryOutcome.PENDING,
-            detail="no open session; persisted, present on next open",
+            # Says what our RECORDS are, never what the person will do. The old text was
+            # "present on next open", which is true of a web conversation people return to
+            # and close to untrue once this is the fallback for a chat app nobody reopens.
+            detail="no open web session; saved to the conversation and not yet seen",
         )
 
     def _record_outcome(

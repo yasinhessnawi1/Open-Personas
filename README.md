@@ -87,7 +87,7 @@ A bundled toolbox (web search, sandboxed code execution, image generation, diagr
 
 ### 🔌 Reach them where you actually talk
 
-Connect the apps you already live in and message a persona by name. **Telegram, Discord, Slack, and email** connect today with a guided flow (deep link or a verification code). **Discord and Slack are next**: adapters built, OAuth mounting in progress, and the UI says "coming soon" because it's honest. Persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web.
+Connect the apps you already live in and message a persona by name. **Telegram, Discord, Slack, and email** connect today with a guided flow (deep link or a verification code). **Discord and Slack are next**: adapters built, OAuth mounting in progress, and the UI says "coming soon" because it's honest. Persona switching, `/new`, and conversation boundaries all work over a real chat app, with the same ownership isolation as the web. A persona can also **speak first** there: hand work over on Telegram and its progress, its questions, and its honest account when something fails come back to that chat rather than to a browser tab you had open once. It can only ever speak in a conversation you started with it, and one setting turns speaking first off without taking the channel down.
 
 ![Connectors: reach your personas anywhere](assets/readme/connectors.png)
 

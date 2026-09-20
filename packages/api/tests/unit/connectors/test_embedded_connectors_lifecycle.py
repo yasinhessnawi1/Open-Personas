@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from loguru import logger as _loguru_logger
 from persona_api.app import create_app
 from persona_api.config import APIConfig, Edition
+from persona_api.services.origination_delivery import ChannelDeliverers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -178,11 +179,15 @@ def _install_fake_bundle(
     async def _fake_build(**kwargs: Any) -> ConnectorsBundle:  # noqa: ANN401 — passthrough
         started.append("built")
         assert isinstance(kwargs["http"], httpx.AsyncClient)
+        deliverers = {name: object() for name in runners}
+        channels = ChannelDeliverers()
+        channels.bind(deliverers)  # type: ignore[arg-type]
         return ConnectorsBundle(
-            deliverers={name: object() for name in runners},  # type: ignore[misc]
+            deliverers=deliverers,  # type: ignore[arg-type]
             runners=runners,
             http_app=None,
             idle_sweep=None,
+            channels=channels,
         )
 
     # The host imports this name INSIDE the function, so it resolves from the source

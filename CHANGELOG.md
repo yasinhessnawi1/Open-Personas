@@ -11,7 +11,39 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Added
+- **Your personas can start a conversation on Telegram, Slack, Discord, WhatsApp,
+  SMS and email, not just answer one.** Until now a persona could reply anywhere
+  you wrote to it and could only ever speak first in the web app. So if you handed
+  work over on Telegram, you were told about it somewhere you were not looking.
+  Progress on a task, a question it needs answered before it can continue, and an
+  honest account when something did not work now arrive in the chat where you
+  asked for the work. A persona still cannot message you out of nowhere: it can
+  only speak in a conversation you started with it.
+- **A switch for that, separate from the connectors themselves.** If a persona
+  starts conversations more eagerly than you would like, set
+  `PERSONA_API_CONNECTOR_ORIGINATION_ENABLED=false` and it goes back to replying
+  only, with every channel still working exactly as before. Previously the only
+  way to stop it would have been to turn the whole connector off, replies
+  included.
+
 ### Fixed
+- **A task you set up over Telegram now actually gets set up.** Confirming a piece
+  of work in a chat app got you "Done, I've set that up" and created nothing. The
+  reply was written before the part that does the work, so nothing ever went red
+  and nothing ever appeared. Rescheduling and pausing had the same hole in a
+  narrower form.
+- **Pausing or cancelling a task from a chat app now takes properly.** Those words
+  went through an older path than the same words in the web app, which could leave
+  a paused task stalled instead of paused.
+- **A persona sounds like itself when it brings you bad news.** The message it
+  sends when something could not be done ran two sentences together mid-thought
+  and listed your options like a form. It reads like a person now, with the real
+  reason kept word for word and every option still offered.
+- **"Saved" no longer sounds like "seen".** When a message could not be delivered
+  right away we recorded that it was "present on next open", which made sense for
+  the web app and quietly did not for a chat app nobody reopens. The record now
+  says what is actually true: saved, and not yet seen.
 - **A persona's face and voice now match what its description actually says.**
   They used to be decided separately, by two different parts of the system, and
   neither of them read the persona's own description closely enough to agree

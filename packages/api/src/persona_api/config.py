@@ -424,6 +424,20 @@ class APIConfig(BaseSettings):
     embed_connectors: bool | None = Field(
         default=None, validation_alias="PERSONA_API_EMBED_CONNECTORS"
     )
+    # R9-081 / R9-120: may a persona SPEAK FIRST on a connector, or only reply there?
+    # ON by default, because the capability is the point and a flag that ships off is how
+    # sixteen capabilities once ran dark here. It exists because the only other off switch
+    # is far too coarse: turning ``embed_connectors`` off kills replies too, so an operator
+    # whose persona originates too eagerly on someone's Telegram would have to take a
+    # working feature down to stop a new one. Off, every connector still receives and
+    # answers messages exactly as before; originated messages (a task's progress, an
+    # approval ask, a failure account) route to the web app only, which is the behaviour
+    # that shipped before this flag existed. Blast radius is why it is here at all: an
+    # unwanted reply lands in our own UI, an unwanted origination lands on a stranger's
+    # phone.
+    connector_origination_enabled: bool = Field(
+        default=True, validation_alias="PERSONA_API_CONNECTOR_ORIGINATION_ENABLED"
+    )
     # The tier the synthesis extractor + entity judge run on (D-K2-3). The hard
     # pre-live gate #2 re-runs the extraction corpus eval on THIS tier (NOT the
     # frontier/sonnet tier). ``small`` by default (cheap reflection pass).

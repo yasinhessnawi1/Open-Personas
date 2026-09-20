@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_connectors import service
 from persona_connectors.config import ConnectorConfig
 
@@ -280,11 +281,14 @@ def test_a_deploy_signal_stops_the_service_without_a_traceback(
         raise KeyboardInterrupt  # what the deploy does to a live transport
 
     async def _fake_build(**_kwargs: object) -> ConnectorsBundle:
+        bound = ChannelDeliverers()
+        bound.bind({"telegram": object()})  # type: ignore[dict-item]
         return ConnectorsBundle(
             deliverers={"telegram": object()},  # type: ignore[dict-item]
             runners={"telegram": _runner},
             http_app=None,
             idle_sweep=None,
+            channels=bound,
         )
 
     monkeypatch.setattr(service, "build_connectors", _fake_build)

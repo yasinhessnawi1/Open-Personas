@@ -16,6 +16,15 @@ back those Protocols with the real owner-scoped stores and the real C0 delivery 
 
 ``render_failure_account`` is the shared account→text rendering (headline + honest cause + the
 concrete next options), reused by the cancel-failure path.
+
+R9-081 / R9-120: this module no longer decides WHICH channels exist. It used to build its own
+``DeliveryRouter`` over ``{"web": web}``, which is why a persona could answer on Telegram and
+never speak first there, and why two other modules built the same object with the same hardcoded
+set. The router now comes from the one construction site,
+:func:`~persona_api.services.origination_delivery.build_origination_router`, and the channels come
+from the :class:`~persona_api.services.origination_delivery.ChannelDeliverers` its composition root
+bound. What reaches a reader is therefore the same code on every surface holding a different set,
+which is the condition attached to the 2026-09-21 ruling.
 """
 
 from __future__ import annotations
@@ -35,17 +44,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.models import personas as personas_t
-from persona_api.services.delivery_router import DeliveryRouter
 from persona_api.services.origination import OriginationRecorder
-from persona_api.services.web_deliverer import WebAppDeliverer
+from persona_api.services.origination_delivery import build_origination_router
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from persona.approvals import ActionProposal
     from persona.schedules import Schedule
-    from persona.schema.origination import OriginatedMessage
     from persona.stores.backend import Backend
     from persona.tasks import Task
     from sqlalchemy import Engine
@@ -54,7 +61,8 @@ if TYPE_CHECKING:
     from persona_api.approvals.failure import FailureAccount
     from persona_api.config import Edition
     from persona_api.schedules.store import ScheduleStore
-    from persona_api.services.web_deliverer import LiveSessionRegistry, LiveSessionSink
+    from persona_api.services.origination_delivery import ChannelDeliverers
+    from persona_api.services.web_deliverer import LiveSessionRegistry
     from persona_api.tasks.store import TaskStore
 
 __all__ = [
@@ -82,27 +90,27 @@ async def _originate_on_conversation(
     content: str,
     conversation_id: str,
     now: datetime,
-    channel: str | None = None,
     sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
 ) -> None:
     """Originate one persona message on ``conversation_id`` via the real C0 composition.
 
     The shared plumbing behind the A4 failure account + digest update: an :class:`Originator`
-    over the RLS-scoped :class:`OriginationRecorder` (durable conversation + episodic write) and a
-    :class:`DeliveryRouter` (best-effort live delivery; ``channel`` feeds ``resolve_channel``,
-    falling back to the web home when that channel has no deliverer here).
+    over the RLS-scoped :class:`OriginationRecorder` (durable conversation + episodic write) and
+    the router from :func:`~persona_api.services.origination_delivery.build_origination_router`,
+    which picks the one channel the reader is actually on and records the routing decision.
 
     ``sessions`` is the live-session registry the ``WebAppDeliverer`` consults (Spec A11): with
     the real channel-backed registry an OPEN tab receives the message live (``message.delivered``);
-    ``None`` keeps the pre-A11 ``_NoLiveSessions`` behaviour (persist-only → present-on-next-open).
-    The recorder persists the message BEFORE ``deliver`` runs, so the live event is always emitted
-    AFTER the durable commit (the client's refetch finds the row — A11 post-commit rule).
+    ``None`` keeps the pre-A11 persist-only behaviour (saved, not pushed). The recorder
+    persists the message BEFORE ``deliver`` runs, so the live event is always emitted AFTER the
+    durable commit (the client's refetch finds the row, the A11 post-commit rule).
+
+    ``channels`` carries the connector channels the composition root bound. ``None`` is web only,
+    which is the pre-R9-120 behaviour and stays the behaviour of any root that binds nothing.
     """
-    web = WebAppDeliverer(rls_engine=engine, sessions=sessions or _NoLiveSessions())
-    router = DeliveryRouter(
-        deliverers={"web": web}, rls_engine=engine, resolve_channel=lambda _m: channel
-    )
     recorder = OriginationRecorder(rls_engine=engine, episodic_store=episodic, edition=edition)
+    router = build_origination_router(rls_engine=engine, sessions=sessions, channels=channels)
     originator = Originator(recorder=recorder, deliverer=router)
     await originator.originate(
         persona=persona,
@@ -195,22 +203,36 @@ class ScheduleCreatorAdapter:
             self._schedules.delete(owner_id, schedule_id)
 
 
-class _NoLiveSessions:
-    """A live-session registry with no open sessions — delivery is durable-persist only.
+def _as_sentence(text: str) -> str:
+    """Capitalise a fragment that is about to start a sentence, leaving the words alone."""
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    return stripped[0].upper() + stripped[1:]
 
-    Outside a run there is no open SSE stream bound to the conversation, so live delivery yields
-    ``pending`` (D-C0-4, not a drop) while the recorder's conversation write is the durable,
-    un-suppressible visibility the failure account relies on.
-    """
 
-    def lookup(self, message: OriginatedMessage) -> LiveSessionSink | None:  # noqa: ARG002
-        return None
+def _as_choice(options: Sequence[str]) -> str:
+    """Join the options the way a person would say them: "a", "a or b", "a, b, or c"."""
+    if len(options) == 1:
+        return options[0]
+    if len(options) == 2:  # noqa: PLR2004 - "a or b" is not a magic number, it is English
+        return f"{options[0]} or {options[1]}"
+    return f"{', '.join(options[:-1])}, or {options[-1]}"
 
 
 def render_failure_account(account: FailureAccount) -> str:
-    """Render a :class:`FailureAccount` as a persona-voiced line — cause + concrete options."""
-    options = "; ".join(account.options)
-    return f"{account.headline} {account.cause}. You can: {options}."
+    """Render a :class:`FailureAccount` as a persona-voiced line: cause, then a way out.
+
+    R9-120 made this product copy rather than status output. Since a persona can now
+    speak first on a connector, this is the text that arrives unprompted in someone's
+    chat app, sometimes as the first thing that persona has ever said on its own. It used
+    to read ``"<headline> <cause>. You can: a; b."``, which ran a lower-case fragment on
+    after a full stop and offered its options as a semicolon-separated list. The content
+    is unchanged and deliberately so: the real cause goes in verbatim (never a disguised
+    success) and every option survives (never a dead end).
+    """
+    cause = _as_sentence(account.cause)
+    return f"{account.headline} {cause}. You can {_as_choice(account.options)}."
 
 
 class OriginatorFailureNotifier:
@@ -231,10 +253,12 @@ class OriginatorFailureNotifier:
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
         sessions: LiveSessionRegistry | None = None,
+        channels: ChannelDeliverers | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
         self._sessions = sessions
+        self._channels = channels
         # R5-D-2: backend-selected audit when supplied (worker parity);
         # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
@@ -260,6 +284,7 @@ class OriginatorFailureNotifier:
             conversation_id=conversation_id,
             now=datetime.now(UTC),
             sessions=self._sessions,
+            channels=self._channels,
         )
 
 
@@ -268,15 +293,25 @@ def render_approval_message(kind: str, proposal: ActionProposal) -> str:
 
     ``kind`` ∈ {ask, reconfirm, clarify, remind, expired}. Honest + glanceable: it names what the
     persona wants to do (``proposal.description``, verbatim) — never a paraphrase of the action.
+
+    R9-120 made these product copy. A persona can now ask permission in someone's chat app,
+    unprompted, so each line has to carry three things on its own: what the persona wants,
+    how to answer it, and a way forward. Two changes earned their place. Every line now says
+    how to reply in words a person would actually type, because "Reply to approve, deny, or
+    tell me what to change" is interface language arriving in a conversation. And ``expired``
+    stopped being a dead end: it reported the closed door and offered nothing, which is the
+    one shape the failure-account rule already forbids everywhere else.
     """
     d = proposal.description
     desc = (d[0].lower() + d[1:]) if d else f"run {proposal.tool_name}"
     lines = {
-        "ask": f"I'd like to {desc}. Reply to approve, deny, or tell me what to change.",
-        "reconfirm": f"Updated. I'd now {desc}. Approve the change, or deny.",
-        "clarify": f"To be sure: should I go ahead and {desc}? Please reply yes or no.",
-        "remind": f"Still waiting on you: I'd like to {desc}.",
-        "expired": f"The request to {desc} expired, so I did not do it.",
+        "ask": f"I'd like to {desc}. Yes to go ahead, no to skip it, or tell me what to change.",
+        "reconfirm": f"I've updated it. I'd now {desc}. Yes to go ahead, or no to leave it.",
+        "clarify": f"Just to be sure: should I {desc}? Yes or no is enough.",
+        "remind": f"Still holding on this one: I'd like to {desc}. Yes or no whenever you can.",
+        "expired": (
+            f"The request to {desc} expired, so I didn't do it. Ask me again whenever you like."
+        ),
     }
     return lines.get(kind, lines["ask"])
 
@@ -300,11 +335,13 @@ class OriginatorApprovalNotifier:
         episodic: EpisodicStore,
         edition: Edition,
         tasks: TaskStore,
+        channels: ChannelDeliverers | None = None,
     ) -> None:
         self._engine = rls_engine
         self._episodic = episodic
         self._edition = edition
         self._tasks = tasks
+        self._channels = channels
 
     async def ask(self, proposal: ActionProposal) -> None:
         await self._post("ask", proposal)
@@ -339,6 +376,7 @@ class OriginatorApprovalNotifier:
             content=render_approval_message(kind, proposal),
             conversation_id=conversation_id or "",
             now=datetime.now(UTC),
+            channels=self._channels,
         )
 
 
@@ -346,9 +384,9 @@ class OriginatorUpdateSender:
     """Deliver an A4 digest update as an originated C0 message (the ``UpdateSender`` plug).
 
     The production plug for :class:`~persona_api.tasks.updates.TaskUpdatePublisher`: a task's
-    milestone progress reaches the user as a persona-voiced, name-tagged message on the contract's
-    preferred channel (``channel`` feeds the router; ``None`` → home), persisted to the task's
-    conversation. Granularity gating already happened in the publisher — this only delivers.
+    milestone progress reaches the user as a persona-voiced, name-tagged message on the channel
+    that task's conversation actually lives on, persisted to the task's conversation. Granularity
+    gating already happened in the publisher — this only delivers.
     """
 
     def __init__(
@@ -360,10 +398,12 @@ class OriginatorUpdateSender:
         audit_root: Path,
         audit_logger: AuditLogger | None = None,
         sessions: LiveSessionRegistry | None = None,
+        channels: ChannelDeliverers | None = None,
     ) -> None:
         self._engine = rls_engine
         self._edition = edition
         self._sessions = sessions
+        self._channels = channels
         # R5-D-2: backend-selected audit when supplied (worker parity);
         # audit_root stays the byte-unchanged JSONL fallback.
         self._episodic = EpisodicStore(
@@ -376,12 +416,20 @@ class OriginatorUpdateSender:
         persona: PersonaIdentityTag,
         owner_id: str,
         content: str,
-        channel: str | None,
+        # R9-120: the contract's STATED channel preference is not a routing key, and that is
+        # a decision rather than an oversight. Every connector's ``deliver`` resolves strictly
+        # by ``conversation_id``, so a preference naming a channel this conversation is not
+        # bound to would select a deliverer that can only answer ``pending`` -- it would turn
+        # a live web delivery into a silent durable write. It was already inert (with only
+        # ``web`` registered every other value fell back to home); this keeps it inert on
+        # purpose rather than by accident. A real cross-channel preference needs an
+        # owner-level channel lookup that does not exist yet.
+        channel: str | None,  # noqa: ARG002 - see above; kept for the UpdateSender Protocol
         conversation_id: str | None,
         priority: MessagePriority,  # noqa: ARG002 — gating happened upstream; kept for the Protocol
         now: datetime,
     ) -> None:
-        """Deliver the update on ``channel`` (or home), persisted to ``conversation_id``."""
+        """Deliver the update on the conversation's own channel, persisted to it."""
         await _originate_on_conversation(
             engine=self._engine,
             episodic=self._episodic,
@@ -391,6 +439,6 @@ class OriginatorUpdateSender:
             content=content,
             conversation_id=conversation_id or "",
             now=now,
-            channel=channel,
             sessions=self._sessions,
+            channels=self._channels,
         )

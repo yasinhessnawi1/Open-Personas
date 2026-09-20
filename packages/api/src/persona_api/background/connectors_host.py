@@ -54,7 +54,9 @@ if TYPE_CHECKING:
     from persona_api.config import APIConfig
     from persona_api.editions.credits_policy import CreditsPolicy
     from persona_api.jobs import JobQueue
+    from persona_api.services.origination_delivery import ChannelDeliverers
     from persona_api.services.runtime_factory import RuntimeFactory
+    from persona_api.services.task_origination_composition import TaskOriginationServices
 
 __all__ = [
     "EmbeddedConnectors",
@@ -165,6 +167,8 @@ async def start_embedded_connectors(
     credits_policy: CreditsPolicy,
     job_queue: JobQueue,
     stripe_gateway: StripeGateway | None,
+    channels: ChannelDeliverers,
+    task_origination_services: TaskOriginationServices | None,
 ) -> EmbeddedConnectors | None:
     """Compose + start the embedded connectors, or return ``None`` when there are none.
 
@@ -180,6 +184,17 @@ async def start_embedded_connectors(
             the same object a web turn does.
         job_queue: The api's durable enqueue surface.
         stripe_gateway: The api's Stripe gateway, or ``None`` outside cloud.
+        channels: The api's origination delivery registry. The connector composition
+            BINDS its deliverers into this one, so the api's own origination service
+            starts routing to Telegram / Slack / Discord / the phone channels the moment
+            they are hosted here. Required, not optional: a second registry in this
+            process would mean two answers to "where can this persona speak".
+        task_origination_services: The api's OWN A4 pair, handed down so the connector
+            composition reuses it instead of building a second ``OriginationService``.
+            One process, one service, which is what the 2026-09-21 ruling's condition
+            asks of a second delivery path. ``None`` only on a boot with no memory
+            backend, where the api composed no A4 services at all and the connectors
+            therefore compose their own rather than inheriting nothing.
 
     Returns:
         The started handle, or ``None`` when no connector platform is configured. ``None``
@@ -200,6 +215,8 @@ async def start_embedded_connectors(
             job_queue=job_queue,
             stripe_gateway=stripe_gateway,
             http=http,
+            channels=channels,
+            task_origination_services=task_origination_services,
         )
     except Exception:
         # Composition reaches the live platforms (Telegram getMe, Discord /users/@me,

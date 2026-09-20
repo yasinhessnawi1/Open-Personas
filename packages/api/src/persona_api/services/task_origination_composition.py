@@ -1,10 +1,10 @@
 """The worker-side composition of the A4 task-origination flow (Spec A4, composition-root wiring).
 
 The single construction site for the origination + steering services the chat-turn worker consumes,
-built from the real owner-scoped stores + the real C0 delivery composition. Both the API lifespan
-(``app.py``) and the live composition test call **this** function, so the test exercises the exact
-production wiring rather than a hand-assembled stand-in — the guard against false-greening the very
-inertness this wiring exists to kill.
+built from the real owner-scoped stores + the real C0 delivery composition. The API lifespan
+(``app.py``), the connector root (R9-081) and the live composition test all call **this** function,
+so the test exercises the exact production wiring rather than a hand-assembled stand-in, and the
+two process roots cannot compose a different contract flow from each other.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from persona_api.config import Edition
+    from persona_api.services.origination_delivery import ChannelDeliverers
     from persona_api.services.web_deliverer import LiveSessionRegistry
 
 __all__ = ["TaskOriginationServices", "compose_task_origination_services"]
@@ -54,6 +55,7 @@ def compose_task_origination_services(
     edition: Edition,
     audit_root: Path,
     live_sessions: LiveSessionRegistry | None = None,
+    channels: ChannelDeliverers | None = None,
 ) -> TaskOriginationServices:
     """Build the A4 worker-side services over the real stores + C0 composition (A4-D-X).
 
@@ -65,6 +67,12 @@ def compose_task_origination_services(
     ``live_sessions`` (Spec A11) is the channel-backed registry that lets an open tab receive an
     originated failure account live (``message.delivered``); ``None`` keeps the persist-only
     behaviour.
+
+    ``channels`` (R9-081 / R9-120) is the process's bound connector channels, so a contract
+    confirmed over Telegram gets its failure account back on Telegram rather than into a web
+    conversation nobody is looking at. ``None`` is web only, which is the behaviour of any root
+    that hosts no connector. A root that DOES pass one must bind it before the first origination;
+    see :class:`~persona_api.services.origination_delivery.ChannelDeliverers`.
     """
     tasks = TaskStore(rls_engine)
     notifier = OriginatorFailureNotifier(
@@ -73,6 +81,7 @@ def compose_task_origination_services(
         edition=edition,
         audit_root=audit_root,
         sessions=live_sessions,
+        channels=channels,
     )
     origination = OriginationService(
         tasks=TaskCreatorAdapter(tasks),

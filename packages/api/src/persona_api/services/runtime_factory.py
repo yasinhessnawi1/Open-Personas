@@ -485,6 +485,18 @@ class RuntimeFactory:
 
         return safe_retrieval
 
+    @property
+    def memory_backend(self) -> Backend:
+        """The edition's memory backend this factory uses, for a co-composed service.
+
+        R9-081: the connector root builds its A4 origination services through the same
+        shared builder the api lifespan calls, and that builder needs the episodic
+        backend. The backend is chosen once, here (Chroma on community, Postgres on
+        cloud), so the root asks the factory for it rather than choosing a second time.
+        Two edition switches for one decision is how composition roots drift apart.
+        """
+        return self._memory_backend_for()
+
     def _memory_backend_for(self) -> Backend:
         """The edition's memory backend (Postgres cloud / Chroma community) — shared builder."""
         return self._memory_backend or PostgresBackend(engine=self._engine, embedder=self._embedder)
