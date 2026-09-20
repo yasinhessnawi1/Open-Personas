@@ -11,6 +11,7 @@ import typer
 from persona.cli.audit_cmd import audit
 from persona.cli.chat_cmd import chat
 from persona.cli.init_cmd import init
+from persona.cli.repair_cmd import repair
 from persona.cli.run_cmd import run
 from persona.cli.validate_cmd import validate
 
@@ -27,6 +28,7 @@ app.command()(validate)
 app.command()(chat)
 app.command()(audit)
 app.command()(run)
+app.command()(repair)
 
 
 if __name__ == "__main__":

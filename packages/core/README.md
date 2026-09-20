@@ -11,9 +11,9 @@ depends on nothing else in the project.
 
 ## What it is
 
-![How memory works in the engine: four typed stores that are versioned and never overwritten, a shared graph made sense of off the reply path, ranked recall, and forget that reaches every layer.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/how-memory-works.png)
+![How memory works in the engine: four typed stores that are versioned and never overwritten, a shared graph made sense of off the reply path, ranked recall, and forget that reaches every layer and every version.](https://raw.githubusercontent.com/yasinhessnawi1/Open-Personas-ai/main/assets/readme/diagrams/how-memory-works.png)
 
-*Four typed stores, versioned and never overwritten; one graph per account; recall that brings back what the turn needs; forget that reaches every layer.*
+*Four typed stores, versioned and never overwritten; one graph per account; recall that brings back what the turn needs; forget that reaches every layer and every version.*
 
 A persona is a single typed YAML document: identity, constraints, self facts,
 worldview claims with epistemic tags, tools, skills, routing preferences.
@@ -181,6 +181,17 @@ turn logging), compose `persona-core` with
   write is tagged with its source (`system` / `user` / `persona_self`) under a per
   store update policy, with a SHA-256 `content_hash` and exactly one `AuditEvent`
   per mutation.
+- **What the store promises, and what it does not.** A versioned write is one write:
+  kill the process in the middle of it and you get the old version or the new one,
+  never a chain broken between them. That is measured against a real killed process on
+  both transports rather than inferred, on chromadb 1.5.9 and on Postgres in one
+  transaction, and it is a promise about a process dying, not about power loss or a
+  lost disk flush. A forget removes every version of what it is given, not just the
+  current one. A chain damaged by an older release is repaired by `persona repair`,
+  which moves version pointers only, so it never re-embeds and needs no model loaded.
+  One thing it does not promise yet: writes are not serialised across processes, so two
+  processes writing the same fact at the same instant can both win, and the repair is
+  what puts that right.
 - **Episodic memory is a multi resolution pyramid.** Raw chunks are kept forever
   (text plus embedding, because summaries never replace evidence), and a background
   engine builds gists above them with drill down pointers back to the untouched
@@ -192,6 +203,16 @@ turn logging), compose `persona-core` with
   Anthropic, OpenAI, DeepSeek, Groq, Together, NVIDIA, Cloudflare, and OpenRouter,
   plus a prompt shim fallback for local Ollama and HF. Embeddings via
   `bge-small-en-v1.5` (384 dim), recorded in the schema for re-index safety.
+- **What a write costs, and how to pay less.** The first write loads the embedding model,
+  which on a cold cache is around a hundred and forty packages and roughly a hundred seconds,
+  inside that write. If you only ever write memories and read them back by id, you can skip
+  it: `PERSONA_EMBEDDER=hash` (or injecting `HashEmbedder()` yourself) starts instantly and
+  writes real, stable, normalised vectors. The catch is worth saying twice, because nothing
+  will error when you hit it: **similarity search stops working.** `query` still returns
+  chunks, they are just arbitrary ones, and so is anything built on recall. Writing, reading
+  by id, `recent`, `history`, `rollback` and forget are all exact either way. The CLI prints
+  a notice whenever the hash embedder is in use, so nobody discovers this from bad recall
+  three weeks later.
 - **Tools.** Built ins include `web_search`, `web_fetch`, sandboxed `file_read` and
   `file_write` (the path resolver rejects `..`, absolute paths, symlink escape, NUL
   bytes, mixed separators), `calculator` (safe AST eval), `datetime`,

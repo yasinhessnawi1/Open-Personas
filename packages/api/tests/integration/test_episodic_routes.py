@@ -307,3 +307,98 @@ def test_cross_owner_get_and_delete_touch_nothing(app_client: TestClient) -> Non
     )
     assert len(still_there.json()["gists"]) == 1
     assert _raw_chunk_count(app_client) == len(member_ids)
+
+
+# --- deleting a chunk that has been edited (Spec K13, T1) ----------------------------------
+
+
+def _seed_edited_chunk(client: TestClient, *, old_text: str, new_text: str) -> tuple[str, str]:
+    """A raw episodic chunk that has been edited: version 1 superseded by version 2.
+
+    Written through the real ``EpisodicStore``, so the chain is built by the production write
+    path rather than hand assembled. Returns ``(logical_id, head_id)``.
+
+    **This shape does not occur in production today.** Every episodic writer mints a fresh
+    logical id, and a scan of production found zero multi version episodic chains out of 333
+    rows, so this is a guard against a future writer rather than a reproduction of a live
+    leak (D-K13-11, R9-192). It is worth guarding because the two things it proves, that the
+    route can find an edited chunk at all and that forgetting it forgets both versions, are
+    silent failures: one 404s a chunk that exists, the other leaves the words on disk.
+    """
+    from persona.stores.episodic import EpisodicStore
+
+    token = current_user_id.set(_OWNER)
+    try:
+        store = EpisodicStore(
+            backend=client.app.state.memory_backend, audit_logger=client.app.state.audit_logger
+        )
+        first = _chunk(minutes_ago=2, body=old_text)
+        store.write(_PERSONA, [first], source=WriteSource.USER)
+        # A fresh chunk rather than ``model_copy(update={"text": ...})``: model_copy does not
+        # re-run validation, so it keeps the hash of the OLD text and the row it writes can
+        # never be read back (the tamper check fires on read). The edit reuses the id, which
+        # is how a caller says "this is an update to that fact".
+        edited = PersonaChunk(
+            id=first.id,
+            text=new_text,
+            created_at=first.created_at,
+            provenance=first.provenance,
+        )
+        store.write(_PERSONA, [edited], source=WriteSource.USER)
+        heads = store.get_all(_PERSONA)
+    finally:
+        current_user_id.reset(token)
+    return first.id, heads[0].id
+
+
+def _episodic_texts(client: TestClient) -> list[str]:
+    """Every version's text, superseded ones included: where a leak would still be."""
+    token = current_user_id.set(_OWNER)
+    try:
+        rows = client.app.state.memory_backend.get_all(persona_id=_PERSONA, store_kind="episodic")
+    finally:
+        current_user_id.reset(token)
+    return [c.text for c in rows]
+
+
+def test_deleting_an_edited_chunk_is_not_a_404(app_client: TestClient) -> None:
+    """The existence check asked by LOGICAL id while the browser hands it a PHYSICAL one.
+
+    The two are the same string only while a chunk has never been edited, so the head of a
+    longer chain was reported as not found and the delete refused.
+    """
+    _, head_id = _seed_edited_chunk(
+        app_client, old_text="USER: my landlord is Bjorn", new_text="USER: never mind that"
+    )
+
+    resp = app_client.delete(
+        f"/v1/memory/episodic/{head_id}",
+        params={"persona_id": _PERSONA, "is_gist": "false"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 204, (
+        f"the route could not find a chunk that exists (got {resp.status_code})"
+    )
+
+
+def test_deleting_an_edited_chunk_forgets_the_version_it_replaced(
+    app_client: TestClient,
+) -> None:
+    """The privacy claim, on content: the earlier wording must not survive the delete."""
+    secret = "USER: my landlord is Bjorn Haugen"
+    _, head_id = _seed_edited_chunk(
+        app_client, old_text=secret, new_text="USER: forget what I said about my landlord"
+    )
+    assert any(secret in t for t in _episodic_texts(app_client)), "seeding did not take"
+
+    app_client.delete(
+        f"/v1/memory/episodic/{head_id}",
+        params={"persona_id": _PERSONA, "is_gist": "false"},
+        headers=_auth(),
+    )
+
+    assert not any(secret in t for t in _episodic_texts(app_client)), (
+        "the superseded version still holds the forgotten sentence"
+    )
+    assert _raw_chunk_count(app_client) == 0

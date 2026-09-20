@@ -72,6 +72,13 @@ class _FakeBackend:
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         self.calls.append("delete_persona")
 
+    def get_by_ids(self, *, persona_id: str, store_kind: str, ids: list[str]) -> list[PersonaChunk]:
+        self.calls.append("get_by_ids")
+        return []
+
+    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+        self.calls.append("relink")
+
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         self.calls.append("delete_documents")
 

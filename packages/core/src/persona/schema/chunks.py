@@ -22,7 +22,9 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
+    "BOOKKEEPING_METADATA_KEYS",
     "CHUNK_ID_INDEX_WIDTH",
+    "PAYLOAD_METADATA_KEYS",
     "ChunkProvenance",
     "PersonaChunk",
     "WriteSource",
@@ -33,6 +35,73 @@ __all__ = [
 # Persona-RAG convention (D-01-2): 4-digit zero-padded index per store.
 # Lexicographic sort matches insertion order up to 10,000 chunks per store.
 CHUNK_ID_INDEX_WIDTH: int = 4
+
+# --- what a chunk's metadata means (Spec K13, T4, D-K13-12) ------------------------------
+#
+# ``metadata`` is an untyped bag of strings, and two different things live in it. Most keys
+# DESCRIBE the text they sit beside: how important it is, how confident we are, which run
+# produced it. Some keys are how another part of the system FINDS or GATES that row, and
+# those are not part of the memory at all, they are bookkeeping about where it sits.
+#
+# The difference only becomes visible at a rollback. Rolling back copies an older version's
+# text forward as a new current version, and copying its bookkeeping forward with it takes a
+# stamp back in time: a conversation id that a delete keys on, pointing at a conversation
+# that may be gone; a session id that a cooldown gate reads, reviving a session that ended.
+#
+# The rule, so this is decidable by someone who was not here:
+#
+#   A key is BOOKKEEPING when another subsystem uses it as a key to FIND, DELETE or GATE the
+#   chunk. Everything else is payload and travels with the text it describes.
+#
+# Both sets are enforced, not just documented: ``test_metadata_register.py`` walks every
+# place in ``packages/*/src`` that puts a key into chunk metadata and fails on any key that
+# is in neither set. Adding a stamp site without classifying its key breaks the build, which
+# is the point (§6b: a rule in a doc names the code that enforces it).
+
+#: Keys another subsystem looks a chunk UP by. A rollback must not carry these.
+BOOKKEEPING_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        # The conversation-delete cascade matches episodic chunks on this
+        # (``chat_service.delete_conversation``), so it is how a row is FOUND.
+        "conversation_id",
+        # ``persona.autonomy`` gates the next autonomy change on the head's session
+        # (``_enforce_cooldown``), so it is how a write is GATED.
+        "session_id",
+    }
+)
+
+#: Keys that describe the text. A rollback carries these, because they belong to it.
+#:
+#: Read by the guard test rather than by runtime code, and that is its job: the strip in
+#: ``rollback`` only needs the bookkeeping set, but without this one there would be a gap for
+#: an unclassified key to sit in unnoticed, which is the whole failure this register exists
+#: to stop. It is a declaration, not a switch.
+PAYLOAD_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "autonomy_level",  # what the persona chose; the fact itself
+        "confidence",  # how sure the claim is (the self_facts write gate reads it)
+        "domain",  # which area a worldview claim is about
+        "epistemic",  # fact / belief / hypothesis / contested
+        "importance",  # episodic weight; the lifecycle pin threshold reads it
+        "kind",  # e.g. a compacted history summary
+        "milestone",  # which task milestone this note records
+        "modality",  # the memory arrived by voice rather than text
+        "originated",  # the assistant spoke first
+        "page",  # document chunks: where in the document
+        "run_id",  # which agentic run produced this text
+        "section",
+        "sheet",
+        "source",  # agentic_run / task_milestone, the classifier in stores/engine.py
+        "source_ids",  # the raw chunks a core-memory block was distilled from
+        "status",  # how that run ended
+        "steps",  # how many steps it took
+        "task",  # what the run was asked to do
+        "task_id",  # which task this milestone belongs to
+        "tool",  # which tool a consent grant covers
+        "tools_used",  # which tools the run called
+        "valid_time",  # when a worldview claim held
+    }
+)
 
 
 class WriteSource(StrEnum):

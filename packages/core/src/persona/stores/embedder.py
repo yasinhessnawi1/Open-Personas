@@ -31,17 +31,18 @@ makes ``_load`` a network dependency on huggingface.co. What the libs honor:
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 _log = get_logger("stores.embedder")
 
-__all__ = ["Embedder", "SentenceTransformerEmbedder"]
+__all__ = ["Embedder", "HashEmbedder", "SentenceTransformerEmbedder", "build_embedder"]
 
 
 @runtime_checkable
@@ -159,3 +160,107 @@ class SentenceTransformerEmbedder:
             convert_to_numpy=True,
         )
         return [list(map(float, row)) for row in vectors]
+
+
+#: The dimension the hosted schema and the shipped model both use (``bge-small-en-v1.5``).
+#: :class:`HashEmbedder` defaults to it so a chunk it embeds can be written to either
+#: transport; the Postgres column is ``vector(384)`` and refuses anything else.
+DEFAULT_EMBEDDING_DIM: int = 384
+
+
+class HashEmbedder:
+    """A deterministic embedder that costs nothing to start and cannot search (Spec K13, T6).
+
+    Writing one chunk through the real embedder loads torch, transformers and
+    sentence-transformers. On a cold cache that is about a hundred seconds, inside the first
+    write, and it is paid by anyone who only ever writes and reads memories back by id: the
+    CLI storing a conversation, a script importing a persona, a test fixture, an adopter
+    using the store as a keyed store. This is for them.
+
+    **What it costs, stated plainly, because it is easy to miss.** A hash of the text carries
+    no meaning, so the distance between two of these vectors is noise. Similarity search
+    stops working and NOTHING ERRORS while it does: ``query`` still returns chunks, they are
+    simply arbitrary ones, and the same goes for every recall path built on it. Writes,
+    ``get_all``, ``recent``, ``history``, drill down, rollback and forget are all exact and
+    all correct, because none of them consults a vector.
+
+    Never zero, never NaN, by construction rather than by repair. ``shake_256`` gives exactly
+    the bytes needed, each pair of bytes becomes one lane in ``[-1, 1]``, and the result is
+    L2 normalised: pgvector's cosine distance is undefined over a zero vector and Chroma's
+    index is no happier, so a "null" embedder that returned zeros would break both transports
+    rather than merely blinding them.
+    """
+
+    def __init__(self, *, dimension: int = DEFAULT_EMBEDDING_DIM) -> None:
+        if dimension <= 0:
+            msg = f"embedding dimension must be positive; got {dimension}"
+            raise ValueError(msg)
+        self.model_name = f"hash-{dimension}"
+        self._dimension = dimension
+
+    @property
+    def dimension(self) -> int:
+        """Vector length, fixed at construction."""
+        return self._dimension
+
+    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        return [self._one(text) for text in texts]
+
+    def _one(self, text: str) -> list[float]:
+        import hashlib
+
+        raw = hashlib.shake_256(text.encode("utf-8")).digest(self._dimension * 2)
+        lanes = [
+            ((raw[i * 2] << 8 | raw[i * 2 + 1]) / 65535.0) * 2.0 - 1.0
+            for i in range(self._dimension)
+        ]
+        norm = math.sqrt(sum(lane * lane for lane in lanes))
+        if norm == 0.0:  # pragma: no cover - needs every lane to land on exactly 0.5
+            # Astronomically unlikely rather than impossible, and a zero vector is the one
+            # output both transports cannot use, so it is refused rather than returned.
+            msg = f"hash embedding for {text!r} came out as the zero vector"
+            raise ValueError(msg)
+        return [lane / norm for lane in lanes]
+
+
+def build_embedder(
+    kind: str,
+    *,
+    model_name: str = "BAAI/bge-small-en-v1.5",
+    on_notice: Callable[[str], None] | None = None,
+) -> Embedder:
+    """Build the embedder named by ``PERSONA_EMBEDDER`` (Spec K13, D-K13-18).
+
+    ``hash`` turns similarity search off, and somebody who has done that by setting an
+    environment variable must hear it now rather than infer it from bad recall in three
+    weeks. The notice goes to the log at warning level and, when ``on_notice`` is given, to
+    the caller's own output too, which is how the CLI puts it in front of a person.
+
+    Args:
+        kind: ``sentence-transformers`` (the real one) or ``hash``.
+        model_name: The sentence-transformers model id; ignored by ``hash``.
+        on_notice: Called with the warning text when a non-searching embedder is selected.
+
+    Raises:
+        ValueError: The name is not one of the two.
+    """
+    if kind == "sentence-transformers":
+        return SentenceTransformerEmbedder(model_name=model_name)
+    if kind != "hash":
+        msg = f"unknown embedder {kind!r}; expected 'sentence-transformers' or 'hash'"
+        raise ValueError(msg)
+
+    notice = (
+        "PERSONA_EMBEDDER=hash: semantic search is OFF.\n"
+        "  Memories are still written, read, listed and deleted exactly as usual, and "
+        "nothing will error.\n"
+        "  But searching them returns arbitrary results, quietly, because a hash carries no "
+        "meaning.\n"
+        "  Unset PERSONA_EMBEDDER to get real search back."
+    )
+    _log.warning("PERSONA_EMBEDDER=hash selected: semantic search is disabled")
+    if on_notice is not None:
+        on_notice(notice)
+    return HashEmbedder()

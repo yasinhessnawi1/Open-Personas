@@ -12,6 +12,42 @@ Per-spec entries are added by the close-out phase of each spec.
 ## [Unreleased]
 
 ### Fixed
+- **A memory survives the server being killed in the middle of saving it.**
+  Recording a new version of a memory took two writes, and a process that died
+  between them (a deploy replacing a machine, most often) left the memory
+  invisible: the older version pointed forward at a newer one that was never
+  written, so nothing could read it and its history was broken for good. It is
+  one write now, so either the new version is there or the old one still is. We
+  checked the live database before changing anything and found no memory in this
+  state, so nothing of yours was affected; the hole was real and we had simply
+  not fallen into it yet.
+- **Forgetting a memory now removes every version of it.** A memory you have
+  edited is stored as a chain of versions, and deleting one removed only the
+  newest. The older versions stayed on disk with the original wording still in
+  them. Forget now takes the whole chain, and a summary built over an older
+  version goes with it. The claim that deleting a fact reached every layer of
+  memory was narrower than it sounded, and this is what makes it true. As far as
+  we can tell nothing was left behind on anyone's account, but that is because
+  nothing in the product edits those memories yet, not because the code was
+  doing the right thing.
+- **A memory whose history was already broken can be repaired.** `persona repair`
+  checks a persona's memory for version chains an interrupted save damaged, says
+  what it found in plain words, and mends them when you ask it to with `--apply`.
+  On a healthy store it says so in one line and changes nothing. It never guesses:
+  a chain it cannot explain is reported and left exactly as it is. If you run
+  Open Persona yourself, this is the one place damage could already exist where we
+  cannot look for you.
+- **A memory that pointed nowhere is readable again.** When an interrupted save
+  left a memory with no current version, every read skipped it while its contents
+  sat on disk. Reads now fall back to the newest version there is, so the memory
+  comes back without waiting for anyone to repair anything.
+- **Rolling a memory back no longer drags old bookkeeping with it.** Restoring an
+  earlier version of a memory copied its internal stamps forward too, including
+  the conversation it came from, which could point at a conversation you had since
+  deleted. The text comes back; the filing does not.
+- **Deleting an edited memory from the memory browser works.** The check for
+  whether the memory existed looked it up the wrong way, so a memory you had
+  edited reported as not found and refused to delete.
 - **A voice call is charged for the conversation, not for how long the room
   stayed open.** Billing measured from the start of the call to the moment the
   server tore the session down, which can be hours or days after the last word
@@ -24,6 +60,16 @@ Per-spec entries are added by the close-out phase of each spec.
 - **A call says how it ended.** Every call that did not crash was filed as a
   clean hangup, including the ones a redeploy killed and the ones that stopped
   because the credits ran out. Each of those now says so.
+
+### Added
+- **A way to use the memory store without waiting for a model to load.** The first
+  memory you write loads the embedding model, which on a cold cache is a few
+  hundred megabytes and roughly a hundred seconds, paid inside that write. If you
+  only ever write memories and read them back by id, set `PERSONA_EMBEDDER=hash`
+  and it starts instantly instead. The catch is worth stating twice, because
+  nothing will error when you hit it: searching your memories stops working, and
+  returns arbitrary results quietly. Writing, reading, listing, history, rollback
+  and forget stay exact. The command line says all of this the moment you use it.
 
 ## [1.2.0] - 2026-09-20
 

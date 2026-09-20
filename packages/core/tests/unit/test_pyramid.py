@@ -53,6 +53,11 @@ class _SpyBackend:
         self.touches.append(("get_all", store_kind))
         return list(self.rows.get((persona_id, store_kind), {}).values())
 
+    def get_by_ids(self, *, persona_id: str, store_kind: str, ids: list[str]) -> list[PersonaChunk]:
+        self.touches.append(("get_by_ids", store_kind))
+        bucket = self.rows.get((persona_id, store_kind), {})
+        return [bucket[i] for i in ids if i in bucket]
+
     def get_by_logical_ids(
         self, *, persona_id: str, store_kind: str, logical_ids: list[str]
     ) -> list[PersonaChunk]:
@@ -362,3 +367,122 @@ def test_store_resolve_display_with_no_demoted_hits_is_a_passthrough() -> None:
     out = store.resolve_display("p1", [raw])
     assert out == [raw]
     assert ("get_all", GIST_KIND) not in backend.touches  # no gist fetch needed
+
+
+# --- gists are never versioned, and the repair scanner relies on that (Spec K13, T1/T3) ----
+
+
+def test_no_gist_row_is_ever_versioned() -> None:
+    """The invariant `persona repair` skips the gist kind ON, asserted rather than assumed.
+
+    ``write_gist`` writes version 1 under a deterministic id and never supersedes anything,
+    so a gist cannot hold a broken version chain and the repair scanner has nothing to do
+    there. That is a property of today's writer, not a law, and a scanner with a silent blind
+    spot is exactly the shape that bites later: if something starts superseding gists,
+    ``persona repair`` would go on reporting every chain intact while missing a whole kind.
+    This is the test that goes red on the day that changes.
+    """
+    backend = _SpyBackend()
+    store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())
+    first, second = _raw(), _raw(minutes=1)
+    backend.write_raw("p1", first)
+    backend.write_raw("p1", second)
+
+    # Every way a gist gets written: a fresh one, the same membership again (regeneration,
+    # which is an idempotent upsert onto the same id), and a different membership.
+    store.pyramid.write_gist("p1", text="one", member_ids=[first.id], created_at=_NOW)
+    store.pyramid.write_gist("p1", text="one again", member_ids=[first.id], created_at=_NOW)
+    store.pyramid.write_gist("p1", text="both", member_ids=[first.id, second.id], created_at=_NOW)
+
+    gists = list(backend.rows.get(("p1", GIST_KIND), {}).values())
+    assert gists, "no gists were written; this guard would pass on an empty store"
+    for gist in gists:
+        assert gist.provenance is not None
+        assert gist.provenance.version == 1, (
+            f"gist {gist.id} is at version {gist.provenance.version}: gists are now versioned, "
+            "so `persona repair` must stop skipping the episodic_gist kind"
+        )
+        assert gist.provenance.superseded_by is None, (
+            f"gist {gist.id} has been superseded: gists now form chains, so they can break "
+            "like any other chain and the repair scanner no longer covers them"
+        )
+
+
+def test_the_repair_scanner_covers_every_kind_that_can_hold_a_chain() -> None:
+    """The other half of the same guard, from the scanner's side."""
+    from persona.cli.repair_cmd import _VERSIONED_KINDS
+
+    assert GIST_KIND not in _VERSIONED_KINDS, (
+        "the scanner claims to check gists but there is no versioned gist store to check"
+    )
+    assert "identity" not in _VERSIONED_KINDS, "identity is immutable at runtime"
+    assert set(_VERSIONED_KINDS) == {"self_facts", "worldview", "episodic", "core_memory"}
+
+
+def test_the_cascade_reaches_a_gist_built_over_a_superseded_version() -> None:
+    """Spec K13, T1: the cascade gets the EXPANDED id set, not the ids the caller named.
+
+    A gist's members are physical ids, so a gist built before an edit points at the version
+    that edit superseded. Cascading on the requested id alone would delete the gist covering
+    the version the user saw and leave the older gist, which still carries the forgotten text,
+    sitting on top of evidence that has just been deleted.
+    """
+    backend = _SpyBackend()
+    store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())
+
+    original = _raw("p1::episodic::0001")
+    backend.write_raw("p1", original)
+    old_gist = store.pyramid.write_gist(
+        "p1", text="a gist quoting the original", member_ids=[original.id], created_at=_NOW
+    )
+
+    # The fact is edited: version 2 lands under a new id in the same chain.
+    # A fresh chunk, not ``model_copy(update={"text": ...})``: model_copy skips validation and
+    # would keep the hash of the old text, writing a row that cannot be read back.
+    store.write(
+        "p1",
+        [
+            PersonaChunk(
+                id="p1::episodic::0001::v0002",
+                text="the edited version",
+                created_at=original.created_at,
+                provenance=original.provenance,
+            )
+        ],
+    )
+    head = store.get_all("p1")[0]
+    new_gist = store.pyramid.write_gist(
+        "p1", text="a gist quoting the edit", member_ids=[head.id], created_at=_NOW
+    )
+
+    store.remove_documents("p1", [head.id])
+
+    remaining = backend.rows.get(("p1", GIST_KIND), {})
+    assert new_gist.id not in remaining
+    assert old_gist.id not in remaining, (
+        "the gist built over the superseded version survived the forget, still holding the "
+        "text, with its evidence deleted underneath it"
+    )
+    assert backend.rows.get(("p1", "episodic"), {}) == {}
+
+
+def test_a_forget_does_not_take_an_unrelated_gist() -> None:
+    """The cascade widened to whole chains; it must not widen to the neighbours."""
+    backend = _SpyBackend()
+    store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())
+    doomed, kept = _raw(), _raw(minutes=1)
+    backend.write_raw("p1", doomed)
+    backend.write_raw("p1", kept)
+    doomed_gist = store.pyramid.write_gist(
+        "p1", text="about the doomed one", member_ids=[doomed.id], created_at=_NOW
+    )
+    kept_gist = store.pyramid.write_gist(
+        "p1", text="about the kept one", member_ids=[kept.id], created_at=_NOW
+    )
+
+    store.remove_documents("p1", [doomed.id])
+
+    remaining = backend.rows.get(("p1", GIST_KIND), {})
+    assert doomed_gist.id not in remaining
+    assert kept_gist.id in remaining
+    assert list(backend.rows.get(("p1", "episodic"), {})) == [kept.id]

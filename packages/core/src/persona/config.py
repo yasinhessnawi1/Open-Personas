@@ -82,6 +82,13 @@ class PersonaCoreConfig(BaseSettings):
     log_file: Path | None = None
     audit_path: Path | None = None
 
+    # Spec K13 T6 (D-K13-18). Which embedder the CLI builds for the local store.
+    # ``sentence-transformers`` is the real one and the default. ``hash`` is a deterministic
+    # stand-in that costs nothing to start and DISABLES similarity search; the CLI says so
+    # loudly whenever it is selected. Local and CLI only: the hosted API composes its own
+    # embedder and ignores this, because a hosted store must never silently stop searching.
+    embedder: Literal["sentence-transformers", "hash"] = "sentence-transformers"
+
     # Spec 03 — tools (T12).
     web_search_provider: Literal["brave", "tavily", "serpapi"] = "brave"
     web_search_api_key: SecretStr | None = None

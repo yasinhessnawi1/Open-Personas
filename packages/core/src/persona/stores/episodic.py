@@ -108,15 +108,23 @@ class EpisodicStore(TypedStore):
     # ----- delete (the K8-D-14 privacy cascade rides the sanctioned paths) ----
 
     def remove_documents(self, persona_id: str, doc_ids: list[str]) -> None:
-        """True-delete raw chunks, then cascade to every intersecting gist.
+        """True-delete raw chunks and every other version of them, then cascade to gists.
 
         The only sanctioned raw-delete path besides :meth:`delete` (privacy /
         correction). A derived gist must not outlive its evidence (K8-D-14);
         survivors regenerate from originals on the next engine pass.
+
+        The cascade is handed the EXPANDED id set, not the ids the caller asked for (Spec
+        K13, T1). A gist's members are physical ids, so a gist built before an edit points
+        at the superseded version: cascading on the requested ids alone would delete the
+        gist covering the version the user saw and leave the older gist, which still carries
+        the text, sitting on top of evidence that has just been deleted.
         """
-        super().remove_documents(persona_id, doc_ids)
-        if doc_ids:
-            self._pyramid.remove_gists_for_members(persona_id, doc_ids)
+        if not doc_ids:
+            return
+        doomed = self.chain_ids(persona_id, doc_ids)
+        super().remove_documents(persona_id, doomed)
+        self._pyramid.remove_gists_for_members(persona_id, doomed)
 
     def delete(self, persona_id: str) -> None:
         """Wipe the persona's episodic store AND its gist layer (K8-D-14)."""

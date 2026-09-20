@@ -167,6 +167,42 @@ class ChromaBackend:
             # Treat "collection didn't exist" as success; delete is idempotent.
             return
 
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+    ) -> None:
+        """Repair primitive (Spec K13, D-K13-6): rewrite ``prov_superseded_by``, nothing else.
+
+        Metadata-only, exactly like :meth:`reinforce`: reads the current metadata for the
+        listed ids and writes it back through ``collection.update`` with no documents and no
+        embeddings, so Chroma keeps the stored vector untouched and no embedder is needed.
+        Clearing a link needs care that is not obvious. ``collection.update`` MERGES the
+        metadata it is given, so leaving ``prov_superseded_by`` out of the dict does NOT
+        remove it: the old value survives and the repair silently does nothing while
+        reporting success. Passing the key explicitly as ``None`` is what deletes it, which
+        is the shape an unlinked chunk has on this transport (``_chunk_to_metadata`` omits
+        the key entirely, and the read side treats absent as "current"). Measured against
+        chromadb 1.5.9, not assumed. Unknown ids are skipped.
+        """
+        if not links:
+            return
+        collection = self._collection(persona_id, store_kind)
+        raw = collection.get(ids=list(links.keys()), include=["metadatas"])
+        got_ids = [str(i) for i in (raw.get("ids") or [])]
+        metas = raw.get("metadatas") or []
+        if not got_ids:
+            return
+        updated: list[dict[str, Any]] = []
+        for chunk_id, meta in zip(got_ids, metas, strict=False):
+            md = dict(meta or {})
+            # Explicit None deletes the key; omitting it would leave the old link in place.
+            md["prov_superseded_by"] = links[chunk_id]
+            updated.append(md)
+        collection.update(ids=got_ids, metadatas=updated)
+
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         if not ids:
             return
@@ -178,6 +214,20 @@ class ChromaBackend:
     def get_all(self, *, persona_id: str, store_kind: str) -> list[PersonaChunk]:
         collection = self._collection(persona_id, store_kind)
         raw = collection.get(include=["documents", "metadatas"])
+        return _materialise_get(raw)
+
+    def get_by_ids(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],
+    ) -> list[PersonaChunk]:
+        """Chunks by physical id (Spec K13, T1). Ids that are not there are simply absent."""
+        if not ids:
+            return []
+        collection = self._collection(persona_id, store_kind)
+        raw = collection.get(ids=list(ids), include=["documents", "metadatas"])
         return _materialise_get(raw)
 
     def get_by_logical_ids(

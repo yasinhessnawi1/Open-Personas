@@ -760,8 +760,12 @@ def episodic_delete(
             return False
         store.remove_documents(persona_id, list(gist.member_ids))
         return True
-    existing = memory_backend.get_by_logical_ids(
-        persona_id=persona_id, store_kind="episodic", logical_ids=[chunk_id]
+    # By PHYSICAL id, which is what the browser hands us (Spec K13, T1). This asked
+    # ``get_by_logical_ids`` with a physical id, which is the same string only while a
+    # chunk has never been updated: the head of a longer chain has a different id from its
+    # logical id, so the check found nothing and the route 404d a chunk that exists.
+    existing = memory_backend.get_by_ids(
+        persona_id=persona_id, store_kind="episodic", ids=[chunk_id]
     )
     if not existing:
         return False

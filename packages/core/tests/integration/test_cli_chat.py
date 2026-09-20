@@ -9,8 +9,10 @@ Spec 02 deleted the `EchoBackend` stub from src/; production code never
 ships a fake backend (D-02-12). Tests inject ``MockChatBackend`` from
 ``tests/_mock_backend.py`` by patching ``persona.cli.chat_cmd.load_backend``.
 
-To keep these fast we also stub ``SentenceTransformerEmbedder`` with the
-:class:`HashEmbedder` from ``tests._embedder``.
+To keep these fast the chat runs with ``PERSONA_EMBEDDER=hash``, which is the real
+selection path a person uses on a cold cache (Spec K13, T6) rather than a monkeypatch
+around the model. That covers the wiring end to end: if the knob ever stops being read,
+these tests either load the real model or lose the notice, and both are failures here.
 """
 
 from __future__ import annotations
@@ -21,21 +23,11 @@ import pytest
 from persona.cli.main import app
 from typer.testing import CliRunner
 
-from tests._embedder import HashEmbedder
 from tests._mock_backend import MockChatBackend
 
 pytestmark = pytest.mark.integration
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "personas" / "valid"
-
-
-@pytest.fixture(autouse=True)
-def stub_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace SentenceTransformerEmbedder with the HashEmbedder for chat tests."""
-    monkeypatch.setattr(
-        "persona.cli.chat_cmd.SentenceTransformerEmbedder",
-        lambda **_kwargs: HashEmbedder(),
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +52,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "PERSONA_API_KEY": "mock-key",
         "PERSONA_CHROMA_PATH": str(tmp_path / "chroma"),
         "PERSONA_AUDIT_PATH": str(tmp_path / "audit"),
+        # The real knob, not a stub of the symbol behind it (Spec K13, D-K13-18). These
+        # tests never wanted a real model; they wanted a cheap deterministic embedder, and
+        # there is one in the product now, chosen the way a person chooses it.
+        "PERSONA_EMBEDDER": "hash",
     }
 
 
@@ -75,6 +71,9 @@ def test_chat_replies_via_mock_backend(
     )
     assert result.exit_code == 0, result.stderr
     assert "I would say: hello there" in result.stdout
+    # The knob was read and the person was told. This is also what keeps the test honest:
+    # without it, a broken knob would quietly load the real model here instead of failing.
+    assert "semantic search is OFF" in result.stderr
 
 
 def test_episodic_memory_persists_across_sessions(
@@ -96,8 +95,11 @@ def test_episodic_memory_persists_across_sessions(
 
     # Read episodic store directly to verify both turns landed and survived.
     from persona.audit import MemoryAuditLogger
-    from persona.stores import ChromaBackend, EpisodicStore
+    from persona.stores import ChromaBackend, EpisodicStore, HashEmbedder
 
+    # The SAME embedder the chat wrote with, so the collection's vectors and this reader
+    # agree on their dimension. ``get_all`` does not embed, so the mismatch would not have
+    # failed here, but it would be waiting for the first person to add a query below.
     backend = ChromaBackend(persist_path=tmp_path / "chroma", embedder=HashEmbedder())
     store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())
     chunks = store.get_all("01_minimal", include_superseded=True)

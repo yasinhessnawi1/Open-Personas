@@ -226,6 +226,37 @@ class PostgresBackend:
             rows = conn.execute(stmt).all()
         return {int(band): int(n) for band, n in rows}
 
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+    ) -> None:
+        """Repair primitive (Spec K13, D-K13-6): rewrite ``superseded_by``, nothing else.
+
+        One ``UPDATE`` per distinct target inside ONE transaction, the ``set_bands`` shape.
+        The embedding, the text and the metadata are never touched, so no embedder is needed
+        and the stored vector cannot drift; ``content_hash`` excludes provenance, so chunk
+        identity is stable too. Unknown ids match zero rows, which is the intended no-op.
+        """
+        if not links:
+            return
+        by_target: dict[str | None, list[str]] = {}
+        for chunk_id, target in links.items():
+            by_target.setdefault(target, []).append(chunk_id)
+        with self._engine.begin() as conn:
+            for target, ids in by_target.items():
+                conn.execute(
+                    _memory_chunks.update()
+                    .where(
+                        _memory_chunks.c.persona_id == persona_id,
+                        _memory_chunks.c.kind == store_kind,
+                        _memory_chunks.c.id.in_(ids),
+                    )
+                    .values(superseded_by=target)
+                )
+
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         stmt = delete(_memory_chunks).where(
             _memory_chunks.c.persona_id == persona_id,
@@ -285,6 +316,25 @@ class PostgresBackend:
             _memory_chunks.c.persona_id == persona_id,
             _memory_chunks.c.kind == store_kind,
             _memory_chunks.c.logical_id.in_(logical_ids),
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_chunk(dict(r), distance=None) for r in rows]
+
+    def get_by_ids(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],
+    ) -> list[PersonaChunk]:
+        """Rows by primary key, scoped to the persona and kind (Spec K13, T1)."""
+        if not ids:
+            return []
+        stmt = select(_memory_chunks).where(
+            _memory_chunks.c.persona_id == persona_id,
+            _memory_chunks.c.kind == store_kind,
+            _memory_chunks.c.id.in_(ids),
         )
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).mappings().all()

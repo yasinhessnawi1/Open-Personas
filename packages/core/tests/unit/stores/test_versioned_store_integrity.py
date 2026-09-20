@@ -44,14 +44,39 @@ class _IdKeyedBackend:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], dict[str, PersonaChunk]] = {}
+        #: Every upsert call, in order, as the chunks it was handed (Spec K13, T2). The
+        #: durability fix is about HOW MANY calls a versioned write makes and what is in
+        #: them, so the fake records the calls rather than only their result.
+        self.upsert_batches: list[list[PersonaChunk]] = []
 
     def _bucket(self, persona_id: str, store_kind: str) -> dict[str, PersonaChunk]:
         return self.rows.setdefault((persona_id, store_kind), {})
 
     def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+        self.upsert_batches.append(list(chunks))
         bucket = self._bucket(persona_id, store_kind)
         for chunk in chunks:
             bucket[chunk.id] = chunk
+
+    def get_by_ids(self, *, persona_id: str, store_kind: str, ids: list[str]) -> list[PersonaChunk]:
+        bucket = self._bucket(persona_id, store_kind)
+        return [bucket[i] for i in ids if i in bucket]
+
+    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+        """Spec K13's repair primitive: move version pointers, touch nothing else.
+
+        Faithful to both transports in the way that matters here: it rewrites
+        ``superseded_by`` in place without re-reading text or re-embedding, so a test can
+        tell a repair apart from a write.
+        """
+        bucket = self._bucket(persona_id, store_kind)
+        for chunk_id, target in links.items():
+            chunk = bucket.get(chunk_id)
+            if chunk is None or chunk.provenance is None:
+                continue  # unknown ids are skipped, like the real transports
+            bucket[chunk_id] = chunk.model_copy(
+                update={"provenance": chunk.provenance.model_copy(update={"superseded_by": target})}
+            )
 
     def get_all(self, *, persona_id: str, store_kind: str) -> list[PersonaChunk]:
         return list(self._bucket(persona_id, store_kind).values())
@@ -87,9 +112,19 @@ class _IdKeyedBackend:
     def recent(self, *, persona_id: str, store_kind: str, limit: int) -> list[PersonaChunk]:
         return self.get_all(persona_id=persona_id, store_kind=store_kind)[:limit]
 
-    def delete(self, *, persona_id: str, store_kind: str | None = None) -> None: ...
+    def delete_persona(self, persona_id: str, store_kind: str) -> None:
+        self.rows.pop((persona_id, store_kind), None)
 
-    def remove_documents(self, *, persona_id: str, store_kind: str, doc_ids: list[str]) -> None: ...
+    def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
+        """The real transports' delete: by PHYSICAL id, and unknown ids are a no-op.
+
+        This fake used to carry a ``remove_documents(doc_ids=...)`` stub that did nothing and
+        matched no method on the ``Backend`` protocol, which was harmless only for as long as
+        nothing here deleted anything (Spec K13, T1 needed it).
+        """
+        bucket = self._bucket(persona_id, store_kind)
+        for chunk_id in ids:
+            bucket.pop(chunk_id, None)
 
 
 def _store(backend: _IdKeyedBackend) -> SelfFactsStore:
@@ -230,3 +265,121 @@ def test_a_chain_does_not_crowd_out_other_facts() -> None:
 
     texts = [c.text for c in store.query(_PERSONA, "anything", top_k=3)]
     assert "fact 1" in texts, f"ordinary facts were crowded out by dead versions; got={texts}"
+
+
+# --- defect 3: the versioned write is ONE call, and one batch never carries an id twice ----
+#
+# Spec K13, T2. Two separate defects in the same four lines, found by the K13 phase-1 read and
+# reproduced before either was fixed.
+#
+# **A versioned write was two unsynchronised upserts.** The supersede link went first, the new
+# head second, with nothing around them. A process that died between them left the link
+# pointing at a chunk that was never written: zero current heads, so an ordinary read could not
+# find the node, and a chain the validator refuses, so history() and rollback() raised on that
+# logical id forever. The crash itself is proven where it has to be, against the real
+# transports with a real SIGKILL (``tests/integration/test_stores_crash_durability.py`` and its
+# Postgres sibling in the api package). What is proven HERE is the shape that makes the crash
+# impossible: one call.
+#
+# **One batch could carry the same id twice, and the unlinked copy won (R9-206).** When a
+# single write() carries two updates to the same logical chain, the chunk that is version N+1
+# for the first update is the prior head of the second, so it appears unlinked in ``prepared``
+# and linked in ``supersede_updates``. Writing the links and then the heads overwrote the link
+# with the unlinked copy: two current heads and a chain that raises on read, with no crash
+# involved at all. The transports disagree about duplicates (Postgres silently keeps the last
+# row of an executemany, Chroma raises DuplicateIDError and refuses the whole call), so the
+# fix is to fold the duplicate away before either of them sees it, not to reorder the batch.
+
+
+def _edit_batch(store: SelfFactsStore, chunk_id: str, texts: list[str]) -> None:
+    """Several updates to ONE logical chain inside ONE write() call."""
+    store.write(
+        _PERSONA,
+        [_chunk(text, chunk_id=chunk_id, logical_id=chunk_id) for text in texts],
+        source=WriteSource.USER,
+        reason="two corrections at once",
+    )
+
+
+def test_a_versioned_update_is_one_backend_call() -> None:
+    """The kill window is closed by there being no instant between two writes to land on."""
+    backend = _IdKeyedBackend()
+    store = _store(backend)
+    first = make_chunk_id(_PERSONA, _KIND, 0)
+
+    store.write(_PERSONA, [_chunk("I like tea", chunk_id=first)], source=WriteSource.USER)
+    backend.upsert_batches.clear()
+    _edit(store, first, "I like coffee")
+
+    assert len(backend.upsert_batches) == 1, (
+        f"a versioned update made {len(backend.upsert_batches)} backend calls; a crash between "
+        "them leaves the prior head pointing at a chunk that does not exist"
+    )
+
+
+def test_the_supersede_link_is_written_before_the_new_head() -> None:
+    """Order inside the batch, kept for the partial unique index on heads (R9-205).
+
+    With the index in place a batch that wrote the new head before the old one lost its NULL
+    would trip it, one statement at a time. Nothing enforces that today, which is exactly why
+    it needs a test now rather than a surprise later.
+    """
+    backend = _IdKeyedBackend()
+    store = _store(backend)
+    first = make_chunk_id(_PERSONA, _KIND, 0)
+
+    store.write(_PERSONA, [_chunk("I like tea", chunk_id=first)], source=WriteSource.USER)
+    backend.upsert_batches.clear()
+    _edit(store, first, "I like coffee")
+
+    batch = backend.upsert_batches[0]
+    superseded = [i for i, c in enumerate(batch) if c.provenance and c.provenance.superseded_by]
+    heads = [i for i, c in enumerate(batch) if c.provenance and not c.provenance.superseded_by]
+    assert superseded, f"expected a supersede link in the batch, got {batch}"
+    assert heads, f"expected a new head in the batch, got {batch}"
+    assert max(superseded) < min(heads), (
+        "the new head is written before the link that supersedes its predecessor; "
+        "with R9-205's partial unique index in place that batch would be rejected"
+    )
+
+
+def test_two_updates_to_one_chain_in_one_batch_keep_the_chain_readable() -> None:
+    """R9-206: the naive merge left two heads and a chain that raises, with no crash."""
+    backend = _IdKeyedBackend()
+    store = _store(backend)
+    first = make_chunk_id(_PERSONA, _KIND, 0)
+
+    store.write(_PERSONA, [_chunk("v1", chunk_id=first)], source=WriteSource.USER)
+    _edit_batch(store, first, ["v2", "v3"])
+
+    rows = backend.get_all(persona_id=_PERSONA, store_kind=_KIND)
+    heads = [c for c in rows if c.provenance is None or c.provenance.superseded_by is None]
+    assert len(heads) == 1, (
+        f"expected one head after two updates in one batch, got {len(heads)}: "
+        f"{[(c.id, c.provenance.superseded_by if c.provenance else None) for c in rows]}"
+    )
+
+    chain = store.history(_PERSONA, first)
+    assert [c.provenance.version for c in chain if c.provenance] == [1, 2, 3]
+    assert [c.text for c in chain] == ["v1", "v2", "v3"]
+
+
+def test_the_transport_never_sees_the_same_id_twice_in_one_batch() -> None:
+    """Why the fix is a dedupe and not a reordering.
+
+    Chroma raises ``DuplicateIDError`` and refuses the whole call when one upsert carries an id
+    twice; Postgres accepts it and silently keeps whichever row came last. So a batch that is
+    merely ordered correctly is a write that works on one transport and throws on the other.
+    """
+    backend = _IdKeyedBackend()
+    store = _store(backend)
+    first = make_chunk_id(_PERSONA, _KIND, 0)
+
+    store.write(_PERSONA, [_chunk("v1", chunk_id=first)], source=WriteSource.USER)
+    _edit_batch(store, first, ["v2", "v3", "v4"])
+
+    for batch in backend.upsert_batches:
+        ids = [c.id for c in batch]
+        assert len(ids) == len(set(ids)), (
+            f"one upsert carried the same id twice: {ids}. Chroma refuses that call outright."
+        )

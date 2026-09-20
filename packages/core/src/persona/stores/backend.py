@@ -126,6 +126,25 @@ class Backend(Protocol):
         """
         ...
 
+    def get_by_ids(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        ids: list[str],
+    ) -> list[PersonaChunk]:
+        """The chunks with these PHYSICAL ids, in no guaranteed order (Spec K13, T1).
+
+        The counterpart to :meth:`get_by_logical_ids`, and the difference matters: a physical
+        id names one version, a logical id names a chain. They are the same string for a
+        chunk that has never been updated, which is why passing one where the other belongs
+        looks like it works right up until a chain has a second version.
+
+        Ids that are not there are simply absent from the result (never an error), so this
+        doubles as the honest existence check. Empty ``ids`` returns ``[]``.
+        """
+        ...
+
     def reinforce(
         self,
         *,
@@ -180,6 +199,28 @@ class Backend(Protocol):
 
         Storage-neutral name for the per-persona-per-kind wipe. Chroma drops a
         collection; Postgres deletes rows. The caller does not know or care.
+        """
+        ...
+
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+    ) -> None:
+        """Set ``superseded_by`` on the listed chunk ids and touch nothing else (Spec K13).
+
+        The repair primitive (D-K13-6). ``links`` maps a chunk id to the id of the version
+        that supersedes it, or ``None`` to make it the current version. Unknown ids are
+        silently skipped, empty ``links`` is a no-op, and the whole map is applied as one
+        operation per transport.
+
+        Lifecycle-only in the sense that matters here: text, metadata and the embedding are
+        never read and never written, so this needs no embedder and can never re-embed. That
+        is what lets ``persona repair`` run without loading a model. ``content_hash`` covers
+        text plus metadata and NOT provenance, so a relink also cannot change chunk identity
+        or trip the tamper check.
         """
         ...
 

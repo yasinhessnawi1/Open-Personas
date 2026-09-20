@@ -98,6 +98,12 @@ class AuditAction(StrEnum):
     SESSION_CREATED = "session_created"
     SESSION_ACTIVE = "session_active"
     SESSION_ENDED = "session_ended"
+    # Spec K13 (D-K13-16): a chain repair, run by an operator through ``persona repair``.
+    # Its own action rather than a write, because it changes no content: it puts a version
+    # pointer back where the version numbers say it belongs, and the ledger should not call
+    # that a write. The new value needs no migration -- ``store_audit_events.action`` is plain
+    # TEXT with no CHECK constraint, which is how the skill and voice actions above arrived.
+    REPAIR = "repair"
 
 
 class AuditEvent(BaseModel):

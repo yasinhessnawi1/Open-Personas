@@ -423,3 +423,168 @@ class TestDelete:
         store.remove_documents("p1", ["x"])
         actions = [e.action for e in audit.events]
         assert AuditAction.REMOVE_DOCUMENTS in actions
+
+
+class TestRelink:
+    """The K13 repair primitive against real Chroma, including the trap it hides.
+
+    ``collection.update`` MERGES the metadata it is handed: leaving a key out does NOT remove
+    it. So clearing ``prov_superseded_by`` by omitting it silently does nothing, and a repair
+    built that way reports success while the chain stays broken. The key has to be passed
+    explicitly as ``None``. Measured against chromadb 1.5.9; this test is what keeps the next
+    person from simplifying it back.
+    """
+
+    def test_relink_clears_a_pointer(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = SelfFactsStore(backend=backend, audit_logger=audit)
+        chunk = _chunk(chunk_id="p1::self_facts::0001", text="a fact worth keeping")
+        store.write("p1", [chunk], source=WriteSource.USER)
+
+        backend.relink(
+            persona_id="p1", store_kind="self_facts", links={chunk.id: "some-newer-version"}
+        )
+        linked = backend.get_all(persona_id="p1", store_kind="self_facts")[0]
+        assert linked.provenance is not None
+        assert linked.provenance.superseded_by == "some-newer-version"
+
+        backend.relink(persona_id="p1", store_kind="self_facts", links={chunk.id: None})
+        cleared = backend.get_all(persona_id="p1", store_kind="self_facts")[0]
+        assert cleared.provenance is not None
+        assert cleared.provenance.superseded_by is None, (
+            "the link survived being cleared: chroma merges metadata, so the key has to be "
+            "sent as None rather than left out"
+        )
+
+    def test_relink_leaves_the_rest_of_the_chunk_alone(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = SelfFactsStore(backend=backend, audit_logger=audit)
+        chunk = _chunk(
+            chunk_id="p1::self_facts::0002",
+            text="text that must not be re-embedded",
+            metadata={"confidence": "0.900"},
+        )
+        store.write("p1", [chunk], source=WriteSource.USER)
+        before = backend.get_all(persona_id="p1", store_kind="self_facts")[0]
+
+        backend.relink(persona_id="p1", store_kind="self_facts", links={chunk.id: "next"})
+        after = backend.get_all(persona_id="p1", store_kind="self_facts")[0]
+
+        assert after.text == before.text
+        assert after.metadata == before.metadata == {"confidence": "0.900"}
+        assert after.content_hash == before.content_hash
+        assert after.provenance is not None
+        assert before.provenance is not None
+        assert after.provenance.version == before.provenance.version
+        assert after.provenance.written_at == before.provenance.written_at
+
+    def test_relink_skips_ids_that_are_not_there(self, backend: ChromaBackend) -> None:
+        backend.relink(persona_id="p1", store_kind="self_facts", links={"never-existed": None})
+
+    def test_relink_with_nothing_to_do_is_a_no_op(self, backend: ChromaBackend) -> None:
+        backend.relink(persona_id="p1", store_kind="self_facts", links={})
+
+
+class TestForgetWholeChain:
+    """A forget reaches every version, proven against a real transport (Spec K13, T1).
+
+    The delete matches on the physical id and a search only ever returns current versions, so
+    forgetting what the user can see used to leave the superseded versions on disk with the
+    words still in them (R9-201). The assertions are about the TEXT, through the reads that
+    would find it, because a row count cannot tell the difference.
+    """
+
+    _SECRET = "my landlord is called Bjorn Haugen"
+
+    def _edited_chain(self, backend: ChromaBackend, audit: MemoryAuditLogger) -> SelfFactsStore:
+        store = SelfFactsStore(backend=backend, audit_logger=audit)
+        first = _chunk(chunk_id="p1::self_facts::0001", text=self._SECRET)
+        store.write("p1", [first], source=WriteSource.USER)
+        store.write(
+            "p1",
+            [
+                PersonaChunk(
+                    id=first.id,
+                    text="I would rather not say who my landlord is",
+                    created_at=first.created_at,
+                    provenance=first.provenance,
+                )
+            ],
+            source=WriteSource.USER,
+        )
+        return store
+
+    def test_the_forgotten_words_are_in_no_version_afterwards(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = self._edited_chain(backend, audit)
+        on_disk = backend.get_all(persona_id="p1", store_kind="self_facts")
+        assert any(self._SECRET in c.text for c in on_disk), "the setup did not take"
+
+        store.remove_documents("p1", [store.get_all("p1")[0].id])
+
+        after = backend.get_all(persona_id="p1", store_kind="self_facts")
+        assert not any(self._SECRET in c.text for c in after), (
+            f"the forgotten sentence survives in a superseded version: {[c.text for c in after]}"
+        )
+
+    def test_a_search_cannot_reach_the_forgotten_text(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        """The read a recall actually takes, on the real index.
+
+        A neighbour is left in the store on purpose: querying an EMPTY store returns nothing
+        whatever the code does, so the assertion would hold even if the delete had done the
+        wrong thing. With rows left and ``top_k`` above the row count, the search returns
+        everything there is, which makes "the secret is not among them" mean something.
+        """
+        store = self._edited_chain(backend, audit)
+        store.write(
+            "p1",
+            [_chunk(chunk_id="p1::self_facts::0009", text="something else entirely")],
+            source=WriteSource.USER,
+        )
+        recalled = store.query("p1", self._SECRET, top_k=10)
+        assert recalled, "nothing was recallable to begin with"
+
+        # The head of the edited chain, which is NOT the id the caller first wrote: the store
+        # mints ``{logical_id}::v0002`` so an update cannot overwrite the version it supersedes.
+        head = next(
+            c
+            for c in store.get_all("p1")
+            if c.provenance is not None and c.provenance.logical_id == "p1::self_facts::0001"
+        )
+        store.remove_documents("p1", [head.id])
+
+        after = store.query("p1", self._SECRET, top_k=10)
+        assert after, "the search came back empty, so it proves nothing about the text"
+        assert not any(self._SECRET in c.text for c in after)
+        assert not any(
+            self._SECRET in c.text
+            for c in backend.get_all(persona_id="p1", store_kind="self_facts")
+        )
+
+    def test_the_chain_leaves_nothing_dangling_behind_it(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = self._edited_chain(backend, audit)
+        store.remove_documents("p1", [store.get_all("p1")[0].id])
+
+        survivors = backend.get_all(persona_id="p1", store_kind="self_facts")
+        assert survivors == []
+        assert store.history("p1", "p1::self_facts::0001") == []
+
+    def test_an_unversioned_neighbour_is_untouched(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = self._edited_chain(backend, audit)
+        keeper = _chunk(chunk_id="p1::self_facts::0009", text="something else entirely")
+        store.write("p1", [keeper], source=WriteSource.USER)
+
+        store.remove_documents("p1", [store.get_all("p1")[0].id])
+
+        assert [c.id for c in backend.get_all(persona_id="p1", store_kind="self_facts")] == [
+            keeper.id
+        ]

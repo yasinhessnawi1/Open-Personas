@@ -86,6 +86,16 @@ class _InMemoryBackend:
         self.call_log.append(("delete_persona", persona_id, store_kind))
         self.store.pop((persona_id, store_kind), None)
 
+    def get_by_ids(self, *, persona_id: str, store_kind: str, ids: list[str]) -> list[PersonaChunk]:
+        wanted = set(ids)
+        return [
+            c for c in self.get_all(persona_id=persona_id, store_kind=store_kind) if c.id in wanted
+        ]
+
+    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+        """Spec K13's repair primitive. Documents are unversioned, so this is never used on
+        this store; the fake implements it because the ``Backend`` protocol now requires it."""
+
     def delete_documents(
         self,
         *,

@@ -5,7 +5,12 @@ from __future__ import annotations
 from persona.stores.backend import Backend
 from persona.stores.base import TypedStore
 from persona.stores.chroma import CHROMA_QUERY_BATCH_CAP, ChromaBackend
-from persona.stores.embedder import Embedder, SentenceTransformerEmbedder
+from persona.stores.embedder import (
+    Embedder,
+    HashEmbedder,
+    SentenceTransformerEmbedder,
+    build_embedder,
+)
 from persona.stores.episodic import EpisodicStore
 from persona.stores.errors import (
     AuditWriteError,
@@ -32,13 +37,14 @@ from persona.stores.versioning import (
 from persona.stores.worldview import WorldviewStore
 
 __all__ = [
-    "CHROMA_QUERY_BATCH_CAP",
     "AuditWriteError",
     "Backend",
     "BrokenVersionChainError",
+    "CHROMA_QUERY_BATCH_CAP",
     "ChromaBackend",
     "Embedder",
     "EpisodicStore",
+    "HashEmbedder",
     "IdentityStore",
     "MemoryStore",
     "PersonaSelfRequirement",
@@ -52,6 +58,7 @@ __all__ = [
     "StoreNotFoundError",
     "TypedStore",
     "WorldviewStore",
+    "build_embedder",
     "compute_next_version",
     "current_version",
     "link_supersedes",

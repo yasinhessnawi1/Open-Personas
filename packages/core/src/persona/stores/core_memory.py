@@ -55,8 +55,12 @@ class CoreMemoryStore(TypedStore):
         There is one logical chain per persona, so the current heads
         (``get_all`` returns ``superseded_by IS NULL`` rows) are at most one row.
         """
-        heads = self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND)
-        current = [c for c in heads if c.provenance is None or c.provenance.superseded_by is None]
+        # Through the store's own ``get_all`` rather than the transport's, so the K13 read
+        # tolerance applies here too (D-K13-8). This is the one kind that really carries
+        # version chains in production, and a chain broken by an interrupted refresh used to
+        # make the block vanish: no unsuperseded row, so ``current`` was empty and the persona
+        # silently lost its always-in-context memory until the next refresh.
+        current = self.get_all(persona_id)
         if not current:
             return None
         # Deterministic: newest version wins if a backend ever returns siblings.

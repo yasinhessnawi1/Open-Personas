@@ -18,14 +18,26 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pydantic import BaseModel, ConfigDict
+
 from persona.audit import AuditAction, AuditEvent
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.schema.chunks import (
+    BOOKKEEPING_METADATA_KEYS,
+    ChunkProvenance,
+    PersonaChunk,
+    WriteSource,
+)
 from persona.stores.policy import PolicyTable, evaluate_write_policy
 from persona.stores.versioning import (
+    ChainDefect,
+    ChainDiagnosis,
     compute_next_version,
     current_version,
+    current_view,
+    diagnose_chain,
     link_supersedes,
+    plan_relink,
     validate_chain,
 )
 
@@ -33,7 +45,7 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger, StoreKind
     from persona.stores.backend import Backend
 
-__all__ = ["TypedStore"]
+__all__ = ["StoreDiagnosis", "TypedStore"]
 
 
 #: How many extra candidates a versioned query asks the backend for, so superseded versions
@@ -41,6 +53,26 @@ __all__ = ["TypedStore"]
 #: store already used for its retention rerank; the bound stays small because the filtered
 #: answer is truncated back to ``top_k`` immediately.
 _SUPERSEDED_OVERFETCH = 3
+
+
+class StoreDiagnosis(BaseModel):
+    """What a scan of one store found (Spec K13, T3).
+
+    ``chains_checked`` is reported even when ``findings`` is empty, because the ordinary
+    answer is "nothing wrong" and a maintenance command that says nothing at all reads like
+    it did not run.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    store_kind: str
+    chains_checked: int
+    findings: tuple[ChainDiagnosis, ...] = ()
+
+    @property
+    def healthy(self) -> bool:
+        """True when nothing needs attention."""
+        return not self.findings
 
 
 class TypedStore:
@@ -130,18 +162,38 @@ class TypedStore:
             else:
                 prepared.append(chunk)
 
-        # Persist supersedes-link updates first so the prior head's metadata
-        # reflects the new chain before the new head lands.
-        if supersede_updates:
-            self._backend.upsert(
-                persona_id=persona_id,
-                store_kind=self.STORE_KIND,
-                chunks=supersede_updates,
-            )
+        # ONE upsert, deduplicated by id, supersede links before new heads
+        # (Spec K13, D-K13-1 and D-K13-2).
+        #
+        # This was two backend calls, the links and then the heads, with nothing around them.
+        # A process that died between them left the prior head pointing at a chunk that was
+        # never written: zero current heads, so an ordinary read could not find the node at
+        # all, and a dangling link, so history() and rollback() raised on that logical id from
+        # then on, permanently, with no repair anywhere in the package. Measured on the real
+        # transports with a real SIGKILL rather than a raised exception standing in for one:
+        # two calls tore 4 of 8 kills, one call tore 0 of 8 (chromadb 1.5.9). One call is one
+        # transaction on Postgres, and one all or nothing operation on Chroma.
+        #
+        # The dedupe is not tidiness, it is the other half of the fix. When one batch carries
+        # two updates to the SAME logical chain, the chunk that is version N+1 for the first
+        # update is the prior head of the second, so its id appears in BOTH lists: unlinked in
+        # ``prepared``, linked in ``supersede_updates``. The old order wrote the link and then
+        # overwrote it with the unlinked copy, leaving two heads and a chain that raised on
+        # read, with no crash involved (R9-206). Ordering alone cannot fix that either, because
+        # the transports disagree about duplicates: Postgres silently keeps the last row of an
+        # executemany, Chroma raises DuplicateIDError and refuses the whole call. So the
+        # duplicate never reaches a transport, and the LINKED copy is the one that survives.
+        #
+        # Links before heads is for a constraint that does not exist yet: the partial unique
+        # index on current heads (R9-205) is checked per statement, so a batch that wrote a new
+        # head before the old one lost its NULL would trip it. Ordering costs nothing today and
+        # keeps that index addable without reopening this method.
+        superseded_ids = {c.id for c in supersede_updates}
+        batch = [*supersede_updates, *(c for c in prepared if c.id not in superseded_ids)]
         self._backend.upsert(
             persona_id=persona_id,
             store_kind=self.STORE_KIND,
-            chunks=prepared,
+            chunks=batch,
         )
 
         self._emit_audit(
@@ -248,7 +300,12 @@ class TypedStore:
         all_chunks = self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND)
         if include_superseded:
             return all_chunks
-        return [c for c in all_chunks if c.provenance is None or c.provenance.superseded_by is None]
+        # ``current_view`` rather than a plain superseded filter (Spec K13, D-K13-8): a chain
+        # broken by an interrupted save has NO unsuperseded row, so a plain filter drops the
+        # node out of every read while its rows sit on disk. The fallback is deliberately
+        # narrow, only a chain with no current version at all, and it is a READ: it never
+        # writes the repair back. ``persona repair`` does that, on purpose and audited.
+        return current_view(all_chunks)
 
     def recent(self, persona_id: str, limit: int) -> list[PersonaChunk]:
         """Return up to ``limit`` most-recently-created current chunks, newest first.
@@ -276,17 +333,53 @@ class TypedStore:
                 logical_ids=[c.provenance.logical_id for c in existing if c.provenance is not None],
             )
 
+    def chain_ids(self, persona_id: str, doc_ids: list[str]) -> list[str]:
+        """Every version of every chain the given PHYSICAL ids belong to (Spec K13, T1).
+
+        A forget is asked for in physical ids, because that is what a search hands back, and
+        a search only ever returns current versions. Deleting exactly those ids removes the
+        version the user can see and leaves every superseded version of the same fact on
+        disk, still holding the text they asked to be rid of, with the older version now
+        pointing at a row that no longer exists (R9-201). So a delete resolves its ids to
+        their chains first.
+
+        Ids that belong to no chain (a legacy chunk written before provenance, or an id that
+        is simply not there) are returned unchanged, so a caller always deletes at least what
+        it asked for and never less. Idempotent: expanding an already expanded set adds
+        nothing. Read only.
+        """
+        if not doc_ids or not self.SUPPORTS_VERSIONING:
+            return list(doc_ids)
+        named = self._backend.get_by_ids(
+            persona_id=persona_id, store_kind=self.STORE_KIND, ids=list(doc_ids)
+        )
+        logical_ids = sorted({c.provenance.logical_id for c in named if c.provenance is not None})
+        siblings = (
+            self._backend.get_by_logical_ids(
+                persona_id=persona_id, store_kind=self.STORE_KIND, logical_ids=logical_ids
+            )
+            if logical_ids
+            else []
+        )
+        return sorted({*doc_ids, *(c.id for c in siblings)})
+
     def remove_documents(self, persona_id: str, doc_ids: list[str]) -> None:
+        """Delete the named chunks AND every other version of the same facts.
+
+        The audit event records the ids actually deleted rather than the ids asked for, so
+        the trail can be read afterwards as proof of what went.
+        """
         if not doc_ids:
             return
+        doomed = self.chain_ids(persona_id, doc_ids)
         self._backend.delete_documents(
-            persona_id=persona_id, store_kind=self.STORE_KIND, ids=doc_ids
+            persona_id=persona_id, store_kind=self.STORE_KIND, ids=doomed
         )
         self._emit_audit(
             persona_id=persona_id,
             action=AuditAction.REMOVE_DOCUMENTS,
             source=WriteSource.USER,
-            chunk_ids=list(doc_ids),
+            chunk_ids=doomed,
         )
 
     # ----- history / rollback ---------------------------------------------
@@ -299,9 +392,20 @@ class TypedStore:
             raise RuntimeWriteForbiddenError(
                 msg, context={"store": self.STORE_KIND, "persona_id": persona_id}
             )
+        # The indexed chain read, not a full store scan (Spec K13, D-K13-13). Behaviourally
+        # identical: this filters on provenance anyway, which is exactly the set
+        # ``get_by_logical_ids`` never returns, on both transports. Measured on 3,000 rows
+        # with real 384 dimension vectors: the ``get_all`` shape took 216 ms because
+        # ``SELECT *`` ships every embedding for ``_row_to_chunk`` to throw away, and one
+        # chain by logical id takes 1 ms. ``rollback`` calls this, and so do
+        # ``persona.autonomy`` and the tool-consent path on every write they make.
         chain = [
             c
-            for c in self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND)
+            for c in self._backend.get_by_logical_ids(
+                persona_id=persona_id,
+                store_kind=self.STORE_KIND,
+                logical_ids=[logical_id],
+            )
             if c.provenance is not None and c.provenance.logical_id == logical_id
         ]
         chain.sort(key=lambda c: c.provenance.version if c.provenance else 0)
@@ -367,10 +471,21 @@ class TypedStore:
             written_by=written_by,
             reason=reason or f"rollback to version {to_version}",
         )
+        # The target's text comes forward; its BOOKKEEPING does not (Spec K13, D-K13-12).
+        # Metadata holds two different things, and only one of them belongs to the text. A
+        # conversation id is how the conversation-delete cascade FINDS a chunk, and a session
+        # id is how the autonomy cooldown GATES the next write: carrying those forward stamps
+        # a new row with a conversation that may have been deleted and a session that ended,
+        # and both are then read as current by code that has no way to know they time
+        # travelled. Everything that describes the text itself rides along with it.
         new_head = PersonaChunk(
             id=new_id,
             text=target.text,
-            metadata=dict(target.metadata),
+            metadata={
+                key: value
+                for key, value in target.metadata.items()
+                if key not in BOOKKEEPING_METADATA_KEYS
+            },
             created_at=datetime.now(UTC),
             provenance=new_provenance,
         )
@@ -394,6 +509,73 @@ class TypedStore:
             logical_ids=[logical_id],
             metadata={"to_version": str(to_version)},
         )
+
+    # ----- diagnose / repair (Spec K13, T3) ---------------------------------
+
+    def _chains(self, persona_id: str) -> dict[str, list[PersonaChunk]]:
+        """Every logical chain this store holds for the persona, keyed by logical id."""
+        chains: dict[str, list[PersonaChunk]] = {}
+        for chunk in self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND):
+            if chunk.provenance is None:
+                continue  # unversioned rows belong to no chain
+            chains.setdefault(chunk.provenance.logical_id, []).append(chunk)
+        return chains
+
+    def diagnose(self, persona_id: str) -> StoreDiagnosis:
+        """Check every version chain in this store. Reads only; repairs nothing.
+
+        The expected answer is that nothing is wrong, so the result carries the number of
+        chains checked as well as the findings: a scan that found a healthy store should be
+        able to say so.
+        """
+        if not self.SUPPORTS_VERSIONING:
+            return StoreDiagnosis(store_kind=self.STORE_KIND, chains_checked=0)
+        chains = self._chains(persona_id)
+        findings = [
+            diagnosis
+            for diagnosis in (diagnose_chain(chain) for chain in chains.values())
+            if diagnosis.defect is not ChainDefect.NONE
+        ]
+        findings.sort(key=lambda d: d.logical_id)
+        return StoreDiagnosis(
+            store_kind=self.STORE_KIND,
+            chains_checked=len(chains),
+            findings=tuple(findings),
+        )
+
+    def repair(self, persona_id: str, *, written_by: str = "stores.repair") -> int:
+        """Put the repairable chains right, and return how many were repaired.
+
+        Only the chains :func:`persona.stores.versioning.diagnose_chain` calls repairable are
+        touched; the rest are left exactly as they are, because rebuilding links from the
+        version order is only honest while the version order is known to be the truth. The
+        write goes through the transport's ``relink``, which moves version pointers and
+        nothing else: no text, no metadata, no embedding, so no model is loaded and no vector
+        moves. One audit event per repaired chain.
+        """
+        if not self.SUPPORTS_VERSIONING:
+            return 0
+        repaired = 0
+        for logical_id, chain in self._chains(persona_id).items():
+            diagnosis = diagnose_chain(chain)
+            if diagnosis.defect is ChainDefect.NONE or not diagnosis.repairable:
+                continue
+            links = plan_relink(chain)
+            if not links:
+                continue
+            self._backend.relink(persona_id=persona_id, store_kind=self.STORE_KIND, links=links)
+            self._emit_audit(
+                persona_id=persona_id,
+                action=AuditAction.REPAIR,
+                source=WriteSource.USER,
+                written_by=written_by,
+                reason=f"repaired a {diagnosis.defect} version chain",
+                chunk_ids=sorted(links),
+                logical_ids=[logical_id],
+                metadata={"defect": str(diagnosis.defect)},
+            )
+            repaired += 1
+        return repaired
 
     # ----- audit helper ----------------------------------------------------
 

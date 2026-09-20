@@ -34,8 +34,8 @@ from persona.stores import (
     EpisodicStore,
     IdentityStore,
     SelfFactsStore,
-    SentenceTransformerEmbedder,
     WorldviewStore,
+    build_embedder,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +58,13 @@ def chat(
         typer.echo(f"backend error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
+    # PERSONA_EMBEDDER picks this (Spec K13, D-K13-18). The notice goes to stderr as well as
+    # the log, because the person who set that variable has silently turned off search and
+    # has to learn it here rather than from recall that quietly stopped making sense.
+    embedder = build_embedder(
+        config.embedder,
+        on_notice=lambda text: typer.echo(f"\n{text}\n", err=True),
+    )
     chroma = ChromaBackend(persist_path=config.chroma_path, embedder=embedder)
     audit_root = config.audit_path or (config.chroma_path / "audit")
     audit_logger = JSONLAuditLogger(audit_root)

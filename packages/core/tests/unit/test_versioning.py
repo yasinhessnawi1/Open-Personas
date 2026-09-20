@@ -132,11 +132,18 @@ class TestValidateChain:
             validate_chain(chain)
 
     def test_non_contiguous_versions_raises(self) -> None:
+        """Spec K13 changed the WORDS this raises, not the fact that it raises.
+
+        The message a data defect carries is now product copy for the person whose memory
+        stopped working, so a test that matched the old developer phrasing would pin prose
+        that is meant to be improved. These match the structured ``defect`` instead, which is
+        the part that is a contract (``ChainDefect``), and the copy stays free to change.
+        """
         chain = [
             _chunk(chunk_id="v1", logical_id="lid", version=1, superseded_by="v3"),
             _chunk(chunk_id="v3", logical_id="lid", version=3),
         ]
-        with pytest.raises(BrokenVersionChainError, match="contiguous"):
+        with pytest.raises(BrokenVersionChainError, match="defect=missing_version"):
             validate_chain(chain)
 
     def test_duplicate_versions_raises(self) -> None:
@@ -152,12 +159,12 @@ class TestValidateChain:
             _chunk(chunk_id="v1", logical_id="lid", version=1, superseded_by="not_v2"),
             _chunk(chunk_id="v2", logical_id="lid", version=2),
         ]
-        with pytest.raises(BrokenVersionChainError, match="supersedes pointer"):
+        with pytest.raises(BrokenVersionChainError, match="defect=dangling_link"):
             validate_chain(chain)
 
     def test_tail_with_supersedes_raises(self) -> None:
         chain = [_chunk(chunk_id="v1", logical_id="lid", version=1, superseded_by="ghost")]
-        with pytest.raises(BrokenVersionChainError, match="tail version"):
+        with pytest.raises(BrokenVersionChainError, match="defect=dangling_link"):
             validate_chain(chain)
 
 
