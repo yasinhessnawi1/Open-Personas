@@ -264,6 +264,11 @@ Per-spec entries are added by the close-out phase of each spec.
   model calls.
 - **The tier badge is right from the first token**, instead of appearing only once
   the turn has finished.
+- **Installing the runtime or the voice package brings a matching engine with it.**
+  Both declared the engine they are built on without saying which versions they
+  work with, so installing either one could pull an engine from a previous release
+  and fail somewhere strange. Each now asks for an engine from its own release or
+  newer, and under the next major version.
 
 ### Release-note backfill (drafted 2026-09-14)
 

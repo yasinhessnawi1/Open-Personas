@@ -38,7 +38,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "persona-core",
+    # Lower-bounded on the release that ships alongside it: the published wheels are
+    # built with `uv build --no-sources`, so this constraint is the ONLY thing stopping
+    # `pip install persona-runtime` from resolving an older persona-core it was never
+    # tested against. The workspace itself still resolves through tool.uv.sources.
+    "persona-core>=1.2.0,<2",
     # Direct dep for prompt-token estimation in prompt.py (D-05-8). Already
     # transitive via persona-core (D-01-11); declared directly per
     # ENGINEERING_STANDARDS.md §5 ("declare directs, audit transitives").
