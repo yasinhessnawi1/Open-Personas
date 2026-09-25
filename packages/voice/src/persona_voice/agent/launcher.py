@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from persona.logging import get_logger
 from persona_runtime.tier import free_tier_registry_from_env, tier_registry_from_env
 
+from persona_voice.agent.openrouter_mode import resolve_voice_openrouter_mode
 from persona_voice.agent.runner import run_agent_session
 
 if TYPE_CHECKING:
@@ -139,14 +140,7 @@ class InProcessAgentLauncher:
                 # SLOW on some machines (~27s on an M1) — :meth:`warm` pays it at
                 # server startup so no call's first turn ever blocks on it.
                 self._embedder = SentenceTransformerEmbedder(model_name=_BGE_MODEL, device="cpu")
-            if self._tier_registry is None:
-                self._tier_registry = tier_registry_from_env()
-            # Spec M4 (T5c): build the free-only registry ONCE in the cloud edition (mirrors
-            # persona_api app.py). Community (not cloud) → stays None → no gating. Fail-closed:
-            # unconfigured PERSONA_FREE_*_MODELS ⇒ an empty registry (a free caller's tier get
-            # raises → the call fails rather than reaching a paid model).
-            if self._config.is_cloud and self._free_tier_registry is None:
-                self._free_tier_registry = free_tier_registry_from_env()
+            await self._ensure_tier_registries()
             if self._crisis_encoder is None:
                 # R6 (T8): lazy — the model loads at :meth:`warm` (off-loop), never on a
                 # call's first turn. Built only when enabled; disabled ⇒ lexical-only (V11).
@@ -155,6 +149,29 @@ class InProcessAgentLauncher:
 
                 if SafetyInterceptSettings().encoder_enabled:
                     self._crisis_encoder = build_crisis_encoder()
+
+    async def _ensure_tier_registries(self) -> None:
+        """Build the paid and (cloud) free tier registries once, with the OpenRouter mode.
+
+        R9-224: both registries are built with the same subscription mode the api uses,
+        resolved once here off the event loop, so a chain the api filters to its
+        ``:free`` models is filtered the same way on a call.
+        """
+        # Spec M4 (T5c): build the free-only registry ONCE in the cloud edition (mirrors
+        # persona_api app.py). Community (not cloud) → stays None → no gating. Fail-closed:
+        # unconfigured PERSONA_FREE_*_MODELS ⇒ an empty registry (a free caller's tier get
+        # raises → the call fails rather than reaching a paid model).
+        needs_paid = self._tier_registry is None
+        needs_free = self._config.is_cloud and self._free_tier_registry is None
+        if not (needs_paid or needs_free):
+            return
+        mode = await resolve_voice_openrouter_mode()
+        if needs_paid:
+            self._tier_registry = tier_registry_from_env(openrouter_subscription_mode=mode)
+        if needs_free:
+            self._free_tier_registry = free_tier_registry_from_env(
+                openrouter_subscription_mode=mode
+            )
 
     async def warm(self) -> None:
         """Build + warm the shared singletons at SERVER STARTUP (BLOCKING).

@@ -58,11 +58,15 @@ class TestRuntimeImportable:
         # genuinely-runtime failure mode — a proactive-question answer that
         # matches neither an option nor free-form. Spec A4 (T2) adds
         # ``ScheduleParseError`` — an unrepresentable schedule phrase declined
-        # honestly rather than coerced (parse-honesty). All are exported.
+        # honestly rather than coerced (parse-honesty). R9-224 names
+        # ``InvalidSubscriptionModeError``, the invalid OpenRouter mode override that
+        # used to be a bare ValueError, so voice can catch exactly that and nothing
+        # wider (it is still a ValueError). All are exported.
         from persona_runtime import errors
 
         assert errors.__all__ == [
             "InvalidQuestionAnswerError",
+            "InvalidSubscriptionModeError",
             "ScheduleParseError",
             "TierNotConfiguredError",
         ]

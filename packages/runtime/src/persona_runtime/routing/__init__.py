@@ -36,6 +36,7 @@ from persona_runtime.routing.latency import FirstTokenLatencyTracker
 from persona_runtime.routing.layer1 import apply_constraint_filter
 from persona_runtime.routing.model_selection import (
     canonical_model_id,
+    first_token_sample_model,
     reorder_primary,
     resolve_served_model,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "UnifiedRouter",
     "apply_constraint_filter",
     "canonical_model_id",
+    "first_token_sample_model",
     "nvidia_metadata_for_model",
     "reorder_primary",
     "resolve_served_model",

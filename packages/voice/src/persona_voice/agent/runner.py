@@ -65,6 +65,7 @@ from persona_voice.agent.language import (
     resolve_call_languages,
     tts_is_utterance_level,
 )
+from persona_voice.agent.openrouter_mode import resolve_voice_openrouter_mode
 from persona_voice.agent.warmup import start_embedder_warmup
 from persona_voice.billing import VoiceExhaustionCutoff, VoiceTurnBillingMeter
 from persona_voice.billing.topup_enqueue import enqueue_auto_topup
@@ -649,7 +650,11 @@ async def build_agent_session(
         # enough for one recall per turn.
         embedder = SentenceTransformerEmbedder(model_name=_BGE_MODEL, device="cpu")
     if tier_registry is None:
-        tier_registry = tier_registry_from_env()
+        # R9-224: the same OpenRouter mode the api builds with, resolved off the loop.
+        # The launcher always injects its registry; only a direct caller reaches this.
+        tier_registry = tier_registry_from_env(
+            openrouter_subscription_mode=await resolve_voice_openrouter_mode()
+        )
 
     # Warm the shared embedder OFF the loop now (A1) so turn 0's first recall is
     # not blocked by the synchronous cold model load — the root fix for the

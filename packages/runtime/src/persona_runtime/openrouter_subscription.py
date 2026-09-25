@@ -50,17 +50,27 @@ from persona.backends.openrouter_catalog import (
 )
 from persona.logging import get_logger
 
+from persona_runtime.errors import InvalidSubscriptionModeError
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["SUBSCRIPTION_MODES", "SUBSCRIPTION_MODE_ENV", "resolve_openrouter_subscription"]
+    from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
+
+__all__ = [
+    "SUBSCRIPTION_MODES",
+    "SUBSCRIPTION_MODE_ENV",
+    "resolve_openrouter_subscription",
+    "resolve_openrouter_subscription_mode",
+]
 
 _LOG = get_logger("runtime.openrouter_subscription")
 
 _API_KEY_ENV = "PERSONA_OPENROUTER_API_KEY"
 _BASE_URL_ENV = "PERSONA_OPENROUTER_BASE_URL"
 #: The operator override for the subscription mode. Public since R9-213 part 2: the api and
-#: voice must be handed the same value, so the deploy and the boot line name it too.
+#: voice must be handed the same value, so the deploy and the boot line name it too, and
+#: voice's ERROR line names it without repeating the string or printing the value (R9-224).
 SUBSCRIPTION_MODE_ENV = "PERSONA_OPENROUTER_SUBSCRIPTION_MODE"
 
 #: The values the override accepts (after strip and lower-casing, as read below).
@@ -86,7 +96,8 @@ def resolve_openrouter_subscription(
        backward compat).
     2. ``PERSONA_OPENROUTER_SUBSCRIPTION_MODE`` set to ``free`` / ``paid``
        (case-insensitive, stripped) → a forced state, **no probe** (D-22-7).
-       Any other non-empty value → :class:`ValueError` (operator typo).
+       Any other non-empty value → :class:`InvalidSubscriptionModeError`
+       (a ``ValueError``; an operator typo).
     3. Otherwise probe ``GET /api/v1/key`` via the catalog client and map the
        result with :func:`subscription_state_from_key_info`.
 
@@ -111,8 +122,8 @@ def resolve_openrouter_subscription(
         configured.
 
     Raises:
-        ValueError: ``PERSONA_OPENROUTER_SUBSCRIPTION_MODE`` is set to a value
-            other than ``free`` / ``paid``.
+        InvalidSubscriptionModeError: ``PERSONA_OPENROUTER_SUBSCRIPTION_MODE`` is
+            set to a value other than ``free`` / ``paid`` (a ``ValueError``).
         AuthenticationError: the probe rejected the API key (HTTP 401,
             D-22-9 fail-loud).
     """
@@ -131,6 +142,56 @@ def resolve_openrouter_subscription(
     return _probe_subscription(api_key, checked_at=checked_at, client_factory=factory)
 
 
+def resolve_openrouter_subscription_mode() -> OpenRouterSubscriptionMode | None:
+    """Resolve the OpenRouter free/paid mode at startup (Spec 22 T13 + T15).
+
+    Probes ``GET /api/v1/key`` once (or honours the
+    ``PERSONA_OPENROUTER_SUBSCRIPTION_MODE`` override) so the resolved mode can
+    be threaded into both the chat :class:`~persona_runtime.tier.TierRegistry`
+    (D-22-2 free-mode filter) and the image-gen factory (D-22-20 drop). Returns
+    ``None`` when OpenRouter is not configured (no key): the zero-touch opt-in
+    path.
+
+    One definition for every process that builds tier registries: the api, the
+    connector service and voice (R9-224). It lived in the api until voice needed it,
+    and voice may not import the api, so voice had simply gone without.
+
+    Composition-root degradation: an
+    :class:`~persona.backends.errors.AuthenticationError` (the resolver's D-22-9
+    fail-loud signal for an invalid key) is logged at ERROR and swallowed here so
+    one optional provider's bad key does NOT block startup, consistent with the
+    graceful-absence pattern used for the image backend and the E2B-less sandbox
+    pool. The misconfigured OpenRouter entries then surface their 401 at call
+    time. A transient probe failure already degrades to free-mode inside the
+    resolver (D-22-3).
+
+    Returns:
+        The resolved mode, or ``None`` when OpenRouter is unconfigured / rejected.
+
+    Raises:
+        InvalidSubscriptionModeError: the override is set to something other than
+            ``free`` / ``paid``. Not swallowed here: each caller decides whether a
+            typo stops its boot.
+    """
+    try:
+        state = resolve_openrouter_subscription()
+    except AuthenticationError as exc:
+        _LOG.error(
+            "OpenRouter API key rejected at startup; OpenRouter free-mode "
+            "filtering disabled (reason={reason})",
+            reason=str(exc),
+        )
+        return None
+    if state is None:
+        return None
+    _LOG.info(
+        "OpenRouter subscription mode resolved mode={mode} probe_failed={probe_failed}",
+        mode=state.mode,
+        probe_failed=state.probe_failed,
+    )
+    return state.mode
+
+
 def _resolve_forced_mode(
     raw_mode: str | None, *, checked_at: datetime
 ) -> OpenRouterSubscriptionState | None:
@@ -145,7 +206,7 @@ def _resolve_forced_mode(
     if not mode:
         return None
     if mode not in SUBSCRIPTION_MODES:
-        raise ValueError(
+        raise InvalidSubscriptionModeError(
             f"{SUBSCRIPTION_MODE_ENV} must be 'free' or 'paid' (case-insensitive); got {raw_mode!r}"
         )
     _LOG.info(

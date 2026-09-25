@@ -20,9 +20,21 @@ from persona.errors import PersonaError
 
 __all__ = [
     "InvalidQuestionAnswerError",
+    "InvalidSubscriptionModeError",
     "ScheduleParseError",
     "TierNotConfiguredError",
 ]
+
+
+class InvalidSubscriptionModeError(PersonaError, ValueError):
+    """The OpenRouter subscription-mode override is neither ``free`` nor ``paid`` (D-22-7).
+
+    Also a :class:`ValueError`, which is what this raised before it had a name, so a
+    caller that treats the typo as a ValueError fails exactly as before: the api and the
+    connector service refuse to boot on it (R9-224). Its message quotes the offending
+    value, so a caller that must not print the value logs the setting's name and this
+    class name only, as voice does.
+    """
 
 
 class TierNotConfiguredError(PersonaError):

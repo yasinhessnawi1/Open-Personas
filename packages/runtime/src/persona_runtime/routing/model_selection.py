@@ -23,7 +23,12 @@ from persona.backends.multi_model import MultiModelChatBackend
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
 
-__all__ = ["canonical_model_id", "reorder_primary", "resolve_served_model"]
+__all__ = [
+    "canonical_model_id",
+    "first_token_sample_model",
+    "reorder_primary",
+    "resolve_served_model",
+]
 
 
 def canonical_model_id(provider: str, model: str) -> str:
@@ -70,6 +75,42 @@ def resolve_served_model(backend: ChatBackend) -> tuple[str, str]:
         winner = chain[len(attempts)]
         return winner.provider_name, winner.model_name
     return backend.provider_name, backend.model_name
+
+
+def first_token_sample_model(backend: ChatBackend) -> str | None:
+    """The model a first-token latency sample for this call belongs to, or ``None``.
+
+    Call it once the call has produced its first reply text, when a chain has
+    committed to the backend that is answering.
+
+    What it excludes (R9-226): a FALLBACK call, one where an earlier backend in the
+    chain failed and a later one answered. The time measured includes every earlier
+    backend's failure, and the chain records no per-attempt timing to take that out,
+    so such a call yields no sample at all. The failure is not recorded against the
+    backend that failed either: time to a 429 or a timeout is not first-token latency,
+    and would make a fast-failing model look like the fastest one to the router's
+    latency score.
+
+    What it does NOT exclude: a same-backend RETRY. The chain retries a transient
+    failure on the same backend (once, by default) and, when the retry succeeds,
+    leaves nothing in ``last_attempts``, so that sample is attributed to the right
+    model but includes the failed attempt and the retry wait. Registered alongside
+    R9-223, whose per-call served identity is where per-attempt timing belongs.
+
+    Also inherits the known gaps of :func:`resolve_served_model`: the shared ledger
+    (R9-223) and, on an image request, a non-vision primary the chain skipped without
+    recording it (R9-227).
+
+    Args:
+        backend: The backend the call went through; usually a tier's wrapper.
+
+    Returns:
+        The model name the latency tracker keys on, or ``None`` when an earlier
+        backend in the chain failed before the one that answered.
+    """
+    if getattr(backend, "last_attempts", None):
+        return None
+    return resolve_served_model(backend)[1]
 
 
 def reorder_primary(backend: ChatBackend, chosen_model_id: str) -> ChatBackend:

@@ -16,8 +16,8 @@ turn on:
 * **AC9** — capability inference: an ``openrouter`` backend reports
   tools/vision inferred from the underlying model (tier-3, no catalog).
 * **D-22-20** — free-mode drops ALL ``openrouter`` image entries.
-* **D-22-3 / D-22-9** — composition-root degradation: a probe
-  :class:`AuthenticationError` disables OpenRouter without blocking startup.
+* The composition-root mode resolution itself (D-22-3 / D-22-9) is unit tested
+  beside the resolver, in ``persona_runtime`` (R9-224).
 
 No network: backends construct their SDK clients without calling out, and the
 subscription probe is replaced by an in-memory fake. The live smoke matrix is
@@ -26,29 +26,15 @@ an ``external`` concern (operator-run, not CI).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
-from persona.backends.errors import AuthenticationError
 from persona.backends.multi_model import MultiModelChatBackend
-from persona.backends.openrouter_catalog import OpenRouterSubscriptionState
 from persona.imagegen import load_image_backend_from_env
 from persona.imagegen.multi_model_image import MultiModelImageBackend
 from persona_api.app import _compose_image_backend
-from persona_api.services.model_tiers import resolve_openrouter_subscription_mode
+from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 
 pytestmark = pytest.mark.integration
-
-
-def _paid_state() -> OpenRouterSubscriptionState:
-    return OpenRouterSubscriptionState(
-        mode="paid",
-        is_free_tier=False,
-        limit_remaining=None,
-        last_checked_at=datetime(2026, 6, 11, tzinfo=UTC),
-        probe_failed=False,
-    )
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,45 +45,6 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(f"PERSONA_{provider}_API_KEY", raising=False)
         monkeypatch.delenv(f"PERSONA_{provider}_BASE_URL", raising=False)
     monkeypatch.delenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", raising=False)
-
-
-# ---------------------------------------------------------------------------
-# Composition-root mode resolution (the shared persona_api.services.model_tiers helper)
-# ---------------------------------------------------------------------------
-
-
-class TestCompositionRootModeResolution:
-    def test_no_key_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _clear_env(monkeypatch)
-        # No PERSONA_OPENROUTER_API_KEY → resolver returns None → mode None.
-        assert resolve_openrouter_subscription_mode() is None
-
-    def test_env_override_paid_skips_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _clear_env(monkeypatch)
-        monkeypatch.setenv("PERSONA_OPENROUTER_API_KEY", "sk-or-v1-test")
-        monkeypatch.setenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", "paid")
-        # Real resolver path, but the env override means NO network probe.
-        assert resolve_openrouter_subscription_mode() == "paid"
-
-    def test_auth_error_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # D-22-9 fail-loud at the resolver becomes graceful-degrade at the
-        # composition root: ERROR-logged, swallowed, startup continues.
-        def _boom() -> OpenRouterSubscriptionState | None:
-            raise AuthenticationError(
-                "bad key", context={"provider": "openrouter", "status_code": "401"}
-            )
-
-        monkeypatch.setattr(
-            "persona_api.services.model_tiers.resolve_openrouter_subscription", _boom
-        )
-        assert resolve_openrouter_subscription_mode() is None
-
-    def test_probe_paid_threads_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "persona_api.services.model_tiers.resolve_openrouter_subscription",
-            lambda: _paid_state(),
-        )
-        assert resolve_openrouter_subscription_mode() == "paid"
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,9 @@ voice turn log share. Driven through a REAL :class:`MultiModelChatBackend` whose
 primary genuinely raises inside ``chat_stream``, so the wrapper's own classifier and
 attempt ledger do the work; nothing about the ledger is hand-forced except in the
 defensive exhaustion case, which the wrapper never reaches without raising.
+
+Also :func:`persona_runtime.routing.first_token_sample_model` (R9-226), its sibling:
+which model a first-token latency sample belongs to, and when there is none.
 """
 
 # Test doubles keep the loose signatures of the protocols they stand in for.
@@ -19,7 +22,7 @@ from _fakes import ScriptedBackend, ScriptedRound  # type: ignore[import-not-fou
 from persona.backends.errors import RateLimitError
 from persona.backends.multi_model import AttemptRecord, MultiModelChatBackend
 from persona.schema.conversation import ConversationMessage
-from persona_runtime.routing import resolve_served_model
+from persona_runtime.routing import first_token_sample_model, resolve_served_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -112,3 +115,42 @@ def test_a_ledger_as_long_as_the_chain_falls_back_to_the_wrappers_own_identity()
         ]
 
     assert resolve_served_model(_ExhaustedWrapper()) == ("nvidia", "nvidia/llama")  # type: ignore[arg-type]
+
+
+# ----- first_token_sample_model (R9-226) -------------------------------------
+
+
+def test_a_bare_backend_owns_its_first_token_sample() -> None:
+    backend = ScriptedBackend([], provider_name="nvidia", model_name="nvidia/llama")
+
+    assert first_token_sample_model(backend) == "nvidia/llama"
+
+
+@pytest.mark.asyncio
+async def test_a_chain_whose_primary_answered_first_time_samples_the_primary() -> None:
+    primary = ScriptedBackend(
+        [ScriptedRound(text="hello")], provider_name="nvidia", model_name="nvidia/llama"
+    )
+    fallback = ScriptedBackend([], provider_name="anthropic", model_name="claude-sonnet-4-6")
+    wrapper = MultiModelChatBackend([primary, fallback], max_retries_per_backend=0)
+
+    assert await _drain(wrapper) == "hello"
+
+    assert first_token_sample_model(wrapper) == "nvidia/llama"
+
+
+@pytest.mark.asyncio
+async def test_a_chain_a_fallback_answered_yields_no_sample_for_either_model() -> None:
+    # The time to the fallback's first token includes the primary's failure, and the
+    # chain keeps no per-attempt timing to take it out, so neither model gets a sample.
+    primary = _RateLimitedBackend(provider="nvidia", model="nvidia/llama")
+    fallback = ScriptedBackend(
+        [ScriptedRound(text="hello")], provider_name="anthropic", model_name="claude-sonnet-4-6"
+    )
+    wrapper = MultiModelChatBackend([primary, fallback], max_retries_per_backend=0)
+
+    assert await _drain(wrapper) == "hello"
+
+    assert primary.stream_calls == 1
+    assert resolve_served_model(wrapper) == ("anthropic", "claude-sonnet-4-6")
+    assert first_token_sample_model(wrapper) is None

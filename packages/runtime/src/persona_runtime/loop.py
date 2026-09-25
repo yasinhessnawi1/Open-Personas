@@ -92,6 +92,7 @@ from persona_runtime.routing import (
     RoutingDecision,
     canonical_model_id,
     classifiers,
+    first_token_sample_model,
     reorder_primary,
     resolve_served_model,
     tier_for,
@@ -2430,8 +2431,13 @@ class ConversationLoop:
         Spec 18 T06 (D-18-X-first-token-measurement-impl): when a
         :class:`FirstTokenLatencyTracker` is wired into the loop, the FIRST
         non-empty ``chunk.delta`` records ``(perf_counter() - t_start) * 1000``
-        as that backend's first-token latency. V5 reads the registry field;
-        :class:`UnifiedRouter` reads it for Layer 2 latency scoring.
+        as the first-token latency of the model that answered (R9-226,
+        :func:`first_token_sample_model`). A round a FALLBACK served records
+        nothing, since its time includes the failed backends. A same-backend RETRY
+        that succeeded is still recorded, including the failed attempt and the
+        retry wait, because the chain leaves no ledger entry for it (registered
+        alongside R9-223). V5 reads the registry field; :class:`UnifiedRouter`
+        reads it for Layer 2 latency scoring.
         """
         names: dict[str, str] = {}
         args_json: dict[str, str] = {}
@@ -2442,7 +2448,13 @@ class ConversationLoop:
             if chunk.delta:
                 if not first_token_recorded and self._latency_tracker is not None:
                     first_token_ms = (time.perf_counter() - t_start) * 1000.0
-                    self._latency_tracker.record(backend.model_name, first_token_ms)
+                    # A chain releases no chunk before it commits to a backend, so by
+                    # the first delta its ledger lists every backend that failed this
+                    # round. It does not list a same-backend retry, and it is shared
+                    # across conversations (R9-223).
+                    sample_model = first_token_sample_model(backend)
+                    if sample_model is not None:
+                        self._latency_tracker.record(sample_model, first_token_ms)
                     first_token_recorded = True
                 outcome.text += chunk.delta
                 yield chunk.delta

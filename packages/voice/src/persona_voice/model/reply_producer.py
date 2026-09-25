@@ -58,7 +58,11 @@ from persona_runtime.emotional import ConvertMode, FeelingTagConverter
 from persona_runtime.graph_voice import start_graph_retrieval, take_graph_if_ready
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.routing import RoutingContext, classifiers
-from persona_runtime.routing.model_selection import reorder_primary, resolve_served_model
+from persona_runtime.routing.model_selection import (
+    first_token_sample_model,
+    reorder_primary,
+    resolve_served_model,
+)
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 from persona_runtime.schedule_claim import (
     SCHEDULE_CLAIM_LEXICON_VERSION,
@@ -537,6 +541,22 @@ class VoiceModelReplyProducer:
         async for delta in self._stream(backend, followup, None, max_tokens, timing, [], []):
             yield delta
 
+    def _record_first_token(self, backend: ChatBackend, timing: _RoundTiming) -> None:
+        """Record this turn's first-token latency unless a fallback answered it (R9-226).
+
+        Called at the round's first text delta, when a chain has committed to the
+        backend that is speaking. A turn a fallback answered measured the failed models
+        too, so it records nothing (:func:`first_token_sample_model`). A same-backend
+        retry that succeeded is still recorded, failed attempt included (see there).
+        """
+        tracker = self._ctx.latency_tracker
+        if tracker is None:
+            return
+        elapsed_ms = (time.perf_counter() - timing.t_start) * 1000.0
+        sample_model = first_token_sample_model(backend)
+        if sample_model is not None:
+            tracker.record(sample_model, elapsed_ms)
+
     async def _stream(
         self,
         backend: ChatBackend,
@@ -581,10 +601,7 @@ class VoiceModelReplyProducer:
             if chunk.delta:
                 if not timing.notified:
                     timing.notified = True
-                    if self._ctx.latency_tracker is not None:
-                        self._ctx.latency_tracker.record(
-                            backend.model_name, (time.perf_counter() - timing.t_start) * 1000.0
-                        )
+                    self._record_first_token(backend, timing)
                 text_out.append(chunk.delta)
                 spoken = strip_converter.feed(chunk.delta)
                 if spoken:

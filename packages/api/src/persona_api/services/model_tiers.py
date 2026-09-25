@@ -1,4 +1,8 @@
-"""Shared model-tier composition: the OpenRouter mode probe + the free-plan registry.
+"""Shared model-tier composition: the free-plan registry and the per-owner plan gate.
+
+The OpenRouter mode probe that used to live here moved to
+:func:`persona_runtime.openrouter_subscription.resolve_openrouter_subscription_mode`
+(R9-224), because voice builds tier registries too and may not import this package.
 
 Promoted out of :mod:`persona_api.app` (R9-074). Model SELECTION — which tier
 registry a caller resolves, and whether the free-plan gate is armed at all — is a
@@ -33,12 +37,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.backends.errors import AuthenticationError, ProviderError
+from persona.backends.errors import ProviderError
 from persona.backends.errors import TierNotConfiguredError as BackendTierNotConfiguredError
 from persona.billing.plans import entitled_plan_code
 from persona.logging import get_logger
 from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
-from persona_runtime.openrouter_subscription import resolve_openrouter_subscription
 from persona_runtime.routing import tier_for
 from persona_runtime.tier import free_tier_registry_from_env
 
@@ -61,7 +64,6 @@ __all__ = [
     "PlanScopedChatBackend",
     "build_free_tier_registry",
     "plan_scoped_background_backend",
-    "resolve_openrouter_subscription_mode",
     "select_plan_tier_registry",
     "warn_if_cloud_free_registry_empty",
 ]
@@ -72,47 +74,6 @@ __all__ = [
 _UNRESOLVED = "unresolved"
 
 _LOG = get_logger("api.model_tiers")
-
-
-def resolve_openrouter_subscription_mode() -> OpenRouterSubscriptionMode | None:
-    """Resolve the OpenRouter free/paid mode at startup (Spec 22 T13 + T15).
-
-    Probes ``GET /api/v1/key`` once (or honours the
-    ``PERSONA_OPENROUTER_SUBSCRIPTION_MODE`` override) so the resolved mode can
-    be threaded into both the chat :class:`~persona_runtime.tier.TierRegistry`
-    (D-22-2 free-mode filter) and the image-gen factory (D-22-20 drop). Returns
-    ``None`` when OpenRouter is not configured (no key) — the zero-touch opt-in
-    path.
-
-    Composition-root degradation: an
-    :class:`~persona.backends.errors.AuthenticationError` (the resolver's D-22-9
-    fail-loud signal for an invalid key) is logged at ERROR and swallowed here so
-    one optional provider's bad key does NOT block startup — consistent with the
-    graceful-absence pattern used for the image backend and the E2B-less sandbox
-    pool. The misconfigured OpenRouter entries then surface their 401 at call
-    time. A transient probe failure already degrades to free-mode inside the
-    resolver (D-22-3).
-
-    Returns:
-        The resolved mode, or ``None`` when OpenRouter is unconfigured / rejected.
-    """
-    try:
-        state = resolve_openrouter_subscription()
-    except AuthenticationError as exc:
-        _LOG.error(
-            "OpenRouter API key rejected at startup; OpenRouter free-mode "
-            "filtering disabled (reason={reason})",
-            reason=str(exc),
-        )
-        return None
-    if state is None:
-        return None
-    _LOG.info(
-        "OpenRouter subscription mode resolved mode={mode} probe_failed={probe_failed}",
-        mode=state.mode,
-        probe_failed=state.probe_failed,
-    )
-    return state.mode
 
 
 def warn_if_cloud_free_registry_empty(
@@ -172,7 +133,8 @@ def build_free_tier_registry(
     Args:
         config: The resolved :class:`~persona_api.config.APIConfig` for this boot.
         openrouter_subscription_mode: The mode from
-            :func:`resolve_openrouter_subscription_mode`, threaded through the
+            :func:`persona_runtime.openrouter_subscription.resolve_openrouter_subscription_mode`,
+            threaded through the
             same ``:free``-suffix filter the paid builder uses.
 
     Returns:

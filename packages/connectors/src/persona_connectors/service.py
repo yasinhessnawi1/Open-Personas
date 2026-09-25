@@ -54,10 +54,7 @@ from persona_api.events import (
 )
 from persona_api.jobs import JobQueue
 from persona_api.services import persona_service
-from persona_api.services.model_tiers import (
-    build_free_tier_registry,
-    resolve_openrouter_subscription_mode,
-)
+from persona_api.services.model_tiers import build_free_tier_registry
 from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.task_origination_composition import (
@@ -66,6 +63,7 @@ from persona_api.services.task_origination_composition import (
 )
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
 from persona_api.services.verb_service_composition import build_conversational_verb_services
+from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 from websockets.asyncio.client import connect as ws_connect
 
@@ -151,9 +149,12 @@ def _build_runtime_factory(
     ``:free``-suffix filter never applied to the paid tiers; and ``free_tier_registry``
     was never passed at all, which ``RuntimeFactory._plan_tier_selection`` reads as
     *"plan gating is OFF"* — so every free-plan user was served the PAID tiers on
-    every connector. Both now come from the shared
-    :mod:`persona_api.services.model_tiers` helpers the api's own lifespan calls, so
-    the two composition roots cannot drift apart again. Community is unaffected:
+    every connector. Both now come from the helpers the api's own lifespan calls, so
+    the composition roots cannot drift apart again: the mode from
+    :func:`persona_runtime.openrouter_subscription.resolve_openrouter_subscription_mode`
+    (moved there by R9-224 so voice shares it too; an invalid override stops this
+    service at boot, as it stops the api), and the free registry from
+    :mod:`persona_api.services.model_tiers`. Community is unaffected:
     :func:`~persona_api.services.model_tiers.build_free_tier_registry` returns ``None``
     outside the cloud edition, which is the byte-identical ungated path.
 

@@ -411,12 +411,14 @@ class OpenRouterCatalogClient:
 
         401 maps to :class:`AuthenticationError` when ``auth_error_is_loud``
         (the key probe — D-22-9); otherwise non-2xx maps to ``error_cls``
-        with a structured ``reason``.
+        with a structured ``reason``. A 2xx whose body is not JSON (a base URL
+        missing ``/api/v1``, a proxy serving HTML) is a ``malformed_response``
+        like any other unusable body, so the key probe's D-22-3 fallback applies
+        to it instead of a raw decode error escaping into a process's boot.
         """
         try:
             response = self._client.get(path)
             response.raise_for_status()
-            payload = response.json()
         except httpx.TimeoutException as exc:
             raise error_cls(
                 f"openrouter /{path} timed out",
@@ -441,6 +443,13 @@ class OpenRouterCatalogClient:
             raise error_cls(
                 f"openrouter /{path} request failed",
                 context={"provider": "openrouter", "reason": "http_error"},
+            ) from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            raise error_cls(
+                f"openrouter /{path} returned a body that is not JSON",
+                context={"provider": "openrouter", "reason": "malformed_response"},
             ) from exc
         if not isinstance(payload, dict):
             raise error_cls(

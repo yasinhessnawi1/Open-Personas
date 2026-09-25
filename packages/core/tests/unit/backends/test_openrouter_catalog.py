@@ -198,6 +198,16 @@ class TestListModels:
             _client(handler).list_models()
         assert info.value.context["reason"] == "malformed_response"
 
+    def test_a_body_that_is_not_json_raises_malformed(self) -> None:
+        # A 200 serving HTML (a base URL missing /api/v1, a proxy page) is an unusable
+        # body like any other, never a raw decode error.
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html><body>Not the API</body></html>")
+
+        with pytest.raises(OpenRouterCatalogError) as info:
+            _client(handler).list_models()
+        assert info.value.context["reason"] == "malformed_response"
+
 
 # ---------------------------------------------------------------------------
 # T10 — get_key_info
@@ -252,6 +262,16 @@ class TestGetKeyInfo:
     def test_missing_data_object_raises_malformed(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"no_data": True})
+
+        with pytest.raises(OpenRouterBalanceProbeError) as info:
+            _client(handler).get_key_info()
+        assert info.value.context["reason"] == "malformed_response"
+
+    def test_a_body_that_is_not_json_raises_the_probe_error_not_a_decode_error(self) -> None:
+        # R9-224 review: the resolver maps THIS error to the D-22-3 free-mode fallback. A
+        # raw JSONDecodeError escaped every handler and stopped a process at boot.
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html><body>Not the API</body></html>")
 
         with pytest.raises(OpenRouterBalanceProbeError) as info:
             _client(handler).get_key_info()

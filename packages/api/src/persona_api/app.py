@@ -34,6 +34,7 @@ from persona.stores.document_store import DocumentStore
 from persona.stores.postgres import PostgresBackend
 from persona_runtime.chain_report import log_model_chains_at_boot
 from persona_runtime.errors import TierNotConfiguredError
+from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
@@ -111,10 +112,7 @@ from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.flag_report import log_effective_flags
 from persona_api.services.free_model_usage import FreeModelDailyCounter
-from persona_api.services.model_tiers import (
-    build_free_tier_registry,
-    resolve_openrouter_subscription_mode,
-)
+from persona_api.services.model_tiers import build_free_tier_registry
 from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
