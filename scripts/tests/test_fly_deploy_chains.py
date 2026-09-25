@@ -158,8 +158,24 @@ def test_its_copy_of_the_seven_names_is_the_runtimes(fly: ModuleType) -> None:
 
 
 def test_stage_hands_every_app_the_same_canonical_seven_on_stdin_and_prints_no_value(
-    fly: ModuleType, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    fly: ModuleType,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The environment is asserted where the script hands it over, at the subprocess
+    boundary, not as the stand-in reports it: the stand-in is a Python process, and under
+    a C or POSIX locale (the Linux CI runner) Python's own startup locale coercion (PEP 538)
+    adds ``LC_CTYPE=C.UTF-8`` to its environment. Real flyctl is a Go binary and adds
+    nothing. The real stand-in still runs, for the arguments, stdin and output streams."""
+    passed: list[dict[str, str]] = []
+    real_run = fly.subprocess.run
+
+    def _recording_run(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        passed.append(dict(kwargs["env"]))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(fly.subprocess, "run", _recording_run)
     stand_in = StandIn(tmp_path)
     code = fly.stage(_APPS, _env(), stand_in.argv)
     lines = _output(capfd)
@@ -174,9 +190,13 @@ def test_stage_hands_every_app_the_same_canonical_seven_on_stdin_and_prints_no_v
     assert [(c["args"], c["stdin"]) for c in calls] == [
         (["secrets", "import", "--stage", "-a", app], payload) for app in _APPS
     ]
+    assert len(passed) == len(_APPS)
+    for env in passed:
+        assert env["FLY_API_TOKEN"] == _TOKEN
+        assert set(env) - {"FLY_API_TOKEN"} <= set(fly._FLYCTL_ENV)
+        assert not set(UNIFIED_ENV_NAMES) & set(env)
     for call in calls:
         assert call["env"]["FLY_API_TOKEN"] == _TOKEN
-        assert set(call["env"]) - {"FLY_API_TOKEN"} <= set(fly._FLYCTL_ENV)
         assert not set(UNIFIED_ENV_NAMES) & set(call["env"])
     for secret in (*_VALID.values(), *_CANONICAL.values(), _TOKEN, _WARNING):
         assert secret.strip() not in "\n".join(lines)
