@@ -96,7 +96,7 @@ ONLY_STEP="${ONLY_STEP:-}"
 
 # Canonical step names, in run order. This is what --only accepts, and every
 # step's log file under .ci-local/<run>/ is named "<one of these>.log".
-CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared licence-claims money-units mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
+CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared model-chains licence-claims money-units mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
 
 is_valid_step() { # name
   local n
@@ -474,6 +474,13 @@ fi
 if want_step "flags-declared"; then
   run_step "flags-declared" "uv run python scripts/check_flags_declared.py" \
     uv run python scripts/check_flags_declared.py
+fi
+# R9-213: every PERSONA_*_MODELS setting the source names is one CHAIN_ENV_NAMES knows,
+# because each process reads its own copy of every model list and the deploy can only keep
+# them equal for settings that list carries.
+if want_step "model-chains"; then
+  run_step "model-chains" "uv run python scripts/check_model_chains.py" \
+    uv run python scripts/check_model_chains.py
 fi
 # No document may call the MIT engine "source available" / "noncommercial" / PolyForm.
 # Prose said so in ARCHITECTURE 9.5 and it was broken five times regardless.

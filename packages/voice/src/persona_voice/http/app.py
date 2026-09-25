@@ -72,6 +72,7 @@ from persona.credits import require_credits as _require_credits_core
 from persona.errors import AuthenticationError, CreditsExhaustedError
 from persona.language_capability import default_capability_registry
 from persona.logging import get_logger
+from persona_runtime.chain_report import log_model_chains_at_boot
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Engine, create_engine, event, text
 
@@ -616,6 +617,11 @@ def build_app(config: VoiceConfig) -> FastAPI:
         # then runs warm — instead of its first turn hanging on memory recall
         # (the V6 operator-pass finding). `on_event("startup")` did NOT fire
         # under the factory; the lifespan always does.
+        # R9-213: first, name the model chains this process was handed. Voice composes its
+        # own registry (D-V5-6) from its own copy of every list, and the api logs the same
+        # line, so a chain updated on one app only shows in two reads. Before the warm-up,
+        # so the line is there even when the warm-up is slow or fails.
+        log_model_chains_at_boot()
         if launcher is not None:
             await launcher.warm()
         # Warm the voice catalogue off the loop so the first GET /v1/voices (and

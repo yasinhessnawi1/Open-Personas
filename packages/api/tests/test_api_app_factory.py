@@ -87,6 +87,35 @@ def test_startup_logs_the_mcp_mechanisms_summary(
     assert "mirror.json" in line
 
 
+def test_startup_logs_the_model_chains_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R9-213: the real lifespan names the chains this process was handed, once, so the
+    api's line can be compared with voice's. Voice reads its own copy of every list."""
+    from persona_runtime.chain_report import chain_fingerprint
+    from persona_runtime.tier import CHAIN_ENV_NAMES
+
+    for name in CHAIN_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    # A FREE chain, because community builds no free registry: the line is under test,
+    # not the registry, and a paid chain would make this boot resolve provider keys.
+    monkeypatch.setenv("PERSONA_FREE_MID_MODELS", "openrouter/z-ai/glm-x,openrouter/anthropic/c-y")
+    monkeypatch.setenv("PERSONA_SMALL_MODELS", "")
+    messages: list[str] = []
+    sink_id = _loguru_logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+    try:
+        with TestClient(create_app(APIConfig(edition=Edition.community))):
+            pass  # the real _lifespan ran
+    finally:
+        _loguru_logger.remove(sink_id)
+    fingerprint = chain_fingerprint(("openrouter/z-ai/glm-x", "openrouter/anthropic/c-y"))
+    assert [m for m in messages if m.startswith("model chains at boot")] == [
+        "model chains at boot: 1 of 6 set | PERSONA_FRONTIER_MODELS=unset | "
+        "PERSONA_MID_MODELS=unset | PERSONA_SMALL_MODELS=empty | "
+        "PERSONA_FREE_FRONTIER_MODELS=unset | "
+        "PERSONA_FREE_MID_MODELS=[openrouter/z-ai/glm-x,openrouter/anthropic/c-y] "
+        f"fp={fingerprint} | PERSONA_FREE_SMALL_MODELS=unset"
+    ]
+
+
 def test_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("PERSONA_API_RATE_LIMIT_MESSAGES", "13")

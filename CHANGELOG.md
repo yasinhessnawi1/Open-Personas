@@ -26,6 +26,22 @@ Per-spec entries are added by the close-out phase of each spec.
   only, with every channel still working exactly as before. Previously the only
   way to stop it would have been to turn the whole connector off, replies
   included.
+- **`persona.logging.looks_like_secret()` is new public API in persona-core
+  (MIT).** It answers whether a string contains a recognisable credential, from
+  the same list `redact_secrets` masks with. Use it to decide not to print
+  something, never to decide that something is safe to store.
+
+### Security
+- **`persona.logging.redact_secrets` recognises more credential shapes.** On top
+  of Bearer tokens, `sk-` keys (OpenAI, OpenRouter, Anthropic), labelled values
+  such as `api_key=` and long opaque runs, it now masks Stripe secret and
+  restricted keys (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`) and webhook
+  secrets (`whsec_`), Groq keys (`gsk_`), NVIDIA keys (`nvapi-`), GitHub tokens
+  (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), AWS access key ids
+  (`AKIA`), Google API keys (`AIza`), Hugging Face tokens (`hf_`), Slack tokens
+  (`xox`), JSON Web Tokens, and PEM and PGP private key headers. A key that contains a
+  `.`, `+`, `/` or `=` is now masked whole instead of losing only its first part.
+  Public keys and certificates are left alone, since they are not secrets.
 
 ### Fixed
 - **A task you set up over Telegram now actually gets set up.** Confirming a piece

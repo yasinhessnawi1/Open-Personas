@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
 
 __all__ = [
+    "CHAIN_ENV_NAMES",
     "TierConfig",
     "TierMetadata",
     "TierRegistry",
@@ -89,6 +90,19 @@ _FREE_TIER_ENV_PREFIXES: dict[str, str] = {
     "mid": "PERSONA_FREE_MID_",
     "small": "PERSONA_FREE_SMALL_",
 }
+
+# The suffix that turns a tier prefix into its model-chain setting.
+_MODELS_SUFFIX = "MODELS"
+
+#: Every model-chain setting the two builders below read, paid tiers first (R9-213).
+#: Derived from the same prefix tables the builders iterate, so a tier added to either
+#: table is in this list by construction. It exists because each hosted process reads
+#: its OWN copy of every chain (voice composes its own registry, D-V5-6), and a list of
+#: "the chain settings" kept by hand anywhere else drifts from what the code reads.
+CHAIN_ENV_NAMES: tuple[str, ...] = tuple(
+    f"{prefix}{_MODELS_SUFFIX}"
+    for prefix in (*_TIER_ENV_PREFIXES.values(), *_FREE_TIER_ENV_PREFIXES.values())
+)
 
 
 class TierMetadata(BaseModel):
@@ -606,7 +620,7 @@ def free_tier_registry_from_env(
     env_snapshot: dict[str, str] = dict(os.environ)
     resolver = ProviderCredentialResolver(env=env_snapshot)
     for tier_name, prefix in _FREE_TIER_ENV_PREFIXES.items():
-        raw = env_snapshot.get(f"{prefix}MODELS", "").strip()
+        raw = env_snapshot.get(f"{prefix}{_MODELS_SUFFIX}", "").strip()
         if not raw:
             continue  # fail-closed: an unconfigured free tier is ABSENT (never a paid default)
         try:

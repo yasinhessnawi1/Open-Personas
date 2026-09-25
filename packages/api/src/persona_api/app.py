@@ -32,6 +32,7 @@ from persona.logging import get_logger
 from persona.stores.chroma import ChromaBackend
 from persona.stores.document_store import DocumentStore
 from persona.stores.postgres import PostgresBackend
+from persona_runtime.chain_report import log_model_chains_at_boot
 from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.tier import tier_registry_from_env
 
@@ -209,6 +210,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # did was built by hand from Fly secrets and code defaults, and local and production
     # had diverged silently for months. One greppable line, no secrets, every flag.
     log_effective_flags(config)
+    # R9-213: and which model chains this process was handed. Voice reads its own copy of
+    # every list (D-V5-6) and logs the same line, so a partial update shows in two reads.
+    log_model_chains_at_boot()
     # The embedder for persona memory population (D-08-8). Lazy: weights load on
     # first encode, not at startup. Shared (thread-safe read path). Built early so
     # the community Chroma memory backend can compose it.

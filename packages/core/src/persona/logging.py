@@ -26,7 +26,7 @@ from persona.config import PersonaCoreConfig
 if TYPE_CHECKING:
     from loguru import Logger, Record
 
-__all__ = ["get_logger", "redact_secrets", "reset_for_testing"]
+__all__ = ["get_logger", "looks_like_secret", "redact_secrets", "reset_for_testing"]
 
 # Marker substituted for anything that looks like a credential in a free-form
 # string headed for a log. Deliberately ASCII-plain so it round-trips through
@@ -44,20 +44,78 @@ _ERROR_MESSAGE_MAX_CHARS: Final[int] = 300
 # the long-opaque-run catch-all mops up bare keys/hashes/base64 the labelled
 # passes missed. Over-redaction here is acceptable — a masked hash still lets
 # the operator see the surrounding "invalid model id" / "quota exceeded" text.
-_SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+#
+# R9-213 split the list in two so the model-chain boot line can share it. The
+# RECOGNISABLE shapes below are credentials you can name on sight (a prefix or a
+# label); :func:`looks_like_secret` answers from them alone. The long-opaque-run
+# catch-all stays redaction-only: real model slugs such as
+# ``openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5`` are 40+ characters of
+# exactly that alphabet, so as a yes/no test it would call half the catalogue a key.
+#
+# The key/hash/base64 alphabet. Every prefixed shape continues in it after its prefix,
+# because keys carry ``.``, ``+``, ``/`` and ``=``: a pattern that stopped at the first
+# of them masked the head of a key and printed the rest (a ``rk_live_<21>.<24>`` key did).
+_KEY_CHARS: Final[str] = r"[A-Za-z0-9._~+/=-]"
+
+_RECOGNISABLE_SECRET_SHAPES: Final[tuple[re.Pattern[str], ...]] = (
     # ``Bearer <token>`` (case-insensitive), token = non-space run.
     re.compile(r"(?i)\bbearer\s+[^\s\"']+"),
-    # ``sk-…`` / ``sk-or-v1-…`` style keys (OpenAI-compat + OpenRouter).
-    re.compile(r"\bsk-[A-Za-z0-9._-]{6,}"),
-    # ``api_key=…`` / ``api-key: …`` / ``token=…`` / ``secret=…`` /
-    # ``password=…`` / ``authorization: …`` — label + delimiter + value.
+    # ``sk-...`` in any form: OpenAI (``sk-proj-``), OpenRouter (``sk-or-v1-``),
+    # Anthropic (``sk-ant-``) and every OpenAI-compatible provider.
+    re.compile(rf"\bsk-{_KEY_CHARS}{{6,}}"),
+    # Stripe secret / restricted keys and webhook secrets. Live and test only, so an
+    # identifier such as ``sk_learn_compat_module_enabled`` is not masked.
+    re.compile(rf"\b(?:sk|rk)_(?:live|test)_{_KEY_CHARS}{{8,}}"),
+    re.compile(rf"\bwhsec_{_KEY_CHARS}{{16,}}"),
+    # Groq and NVIDIA keys, both providers this stack calls.
+    re.compile(rf"\bgsk_{_KEY_CHARS}{{20,}}"),
+    re.compile(rf"\bnvapi-{_KEY_CHARS}{{20,}}"),
+    # GitHub: classic (ghp/gho/ghu/ghs/ghr) and fine-grained tokens.
+    re.compile(rf"\bgh[pousr]_{_KEY_CHARS}{{20,}}"),
+    re.compile(rf"\bgithub_pat_{_KEY_CHARS}{{20,}}"),
+    # AWS access key id, Google API key, Hugging Face token, Slack token.
+    re.compile(rf"\bAKIA[0-9A-Z]{{16}}{_KEY_CHARS}*"),
+    re.compile(rf"\bAIza{_KEY_CHARS}{{35,}}"),
+    re.compile(rf"\bhf_{_KEY_CHARS}{{30,}}"),
+    re.compile(rf"\bxox[a-z][.-]{_KEY_CHARS}{{8,}}"),
+    # A JSON Web Token: base64url header (always ``eyJ``), a dot, then payload and
+    # signature in the key alphabet.
+    re.compile(rf"\beyJ[A-Za-z0-9_-]{{10,}}\.{_KEY_CHARS}{{10,}}"),
+    # A PEM or PGP PRIVATE key header (the base64 body falls to the opaque-run
+    # catch-all). A public key or a certificate is not a secret and is left alone.
+    re.compile(
+        r"-----BEGIN (?:(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY"
+        r"|PGP PRIVATE KEY BLOCK)-----"
+    ),
+    # ``api_key=...`` / ``api-key: ...`` / ``token=...`` / ``secret=...`` /
+    # ``password=...`` / ``authorization: ...``: label + delimiter + value.
     re.compile(
         r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password|authorization)"
         r"\s*[=:]\s*[^\s\"',&]+"
     ),
-    # Bare long opaque runs (>=40 chars of key/hash/base64 alphabet).
-    re.compile(r"\b[A-Za-z0-9._~+/=-]{40,}\b"),
 )
+
+_SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    *_RECOGNISABLE_SECRET_SHAPES,
+    # Bare long opaque runs (>=40 chars of key/hash/base64 alphabet).
+    re.compile(rf"\b{_KEY_CHARS}{{40,}}\b"),
+)
+
+
+def looks_like_secret(text: str) -> bool:
+    """True when ``text`` contains a recognisable credential shape.
+
+    Uses the same list :func:`redact_secrets` masks with, minus the long-opaque-run
+    catch-all (see the note above the list). A heuristic that errs toward yes: use it
+    to decide NOT to print something, never to decide that something is safe to store.
+
+    Args:
+        text: Any string about to be shown or logged.
+
+    Returns:
+        Whether any recognisable credential shape occurs in ``text``.
+    """
+    return any(pattern.search(text) for pattern in _RECOGNISABLE_SECRET_SHAPES)
 
 
 def redact_secrets(text: str, *, max_chars: int = _ERROR_MESSAGE_MAX_CHARS) -> str:
