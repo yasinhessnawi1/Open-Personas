@@ -58,7 +58,7 @@ from persona_runtime.emotional import ConvertMode, FeelingTagConverter
 from persona_runtime.graph_voice import start_graph_retrieval, take_graph_if_ready
 from persona_runtime.graph_window import set_recent_window_from_messages
 from persona_runtime.routing import RoutingContext, classifiers
-from persona_runtime.routing.model_selection import reorder_primary
+from persona_runtime.routing.model_selection import reorder_primary, resolve_served_model
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 from persona_runtime.schedule_claim import (
     SCHEDULE_CLAIM_LEXICON_VERSION,
@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from persona.backends import ChatBackend
-    from persona.backends.types import ToolSpec
+    from persona.backends.types import StreamChunk, ToolSpec
 
     from persona_voice.billing import VoiceTurnBillingMeter
     from persona_voice.loop.streaming import Transcript
@@ -100,6 +100,16 @@ _DEFAULT_MAX_TOKENS = 4096
 #: small-tier model made a caller wait 14.7s for first audio on a cue-matching turn.
 #: Past this budget the ask is handled as ordinary conversation.
 GATE_BUDGET_S: float = 4.0
+
+
+def _is_reply_payload(chunk: StreamChunk) -> bool:
+    """Whether ``chunk`` carries part of an actual reply (R9-214).
+
+    The same rule the multi-model chain commits to a backend on (R9-033): a
+    non-whitespace text delta or a tool-call delta. Usage-only finals, reasoning and
+    whitespace are not a reply, so they never mark a model as having answered.
+    """
+    return bool(chunk.delta.strip()) or chunk.tool_call_delta is not None
 
 
 @dataclass
@@ -213,6 +223,22 @@ class VoiceModelReplyProducer:
         self._clock = clock or (lambda: datetime.now(UTC))
         # Rotates the preamble across turns so the filler is not robotic (D-V5-5).
         self._preamble_index = 0
+        # R9-214: the (provider, model) that answered the CURRENT turn, read by the
+        # streaming loop for its turn-ended line. Mutable by design: cleared when a turn
+        # starts and set when a model round commits, so ``None`` means no model spoke.
+        self._served_model: tuple[str, str] | None = None
+
+    def served_model(self) -> tuple[str, str] | None:
+        """Return the ``(provider, model)`` that answered the current turn, if any.
+
+        Satisfies the streaming loop's ``ServedModelReporter`` seam (R9-214). The pair
+        is resolved from the tier's fallback chain, so a turn a fallback answered names
+        the fallback, not the primary. ``None`` when no model round produced a reply
+        this turn: the safety bypass, an origination takeover, or a stall or failure
+        before the first reply chunk. On a tool turn it names the last round that spoke,
+        the same last-round attribution the text loop's TurnLog uses.
+        """
+        return self._served_model
 
     def set_turn_meter(self, meter: VoiceTurnBillingMeter) -> None:
         """Late-bind the per-turn billing meter (Spec M3, T6b-1).
@@ -226,6 +252,9 @@ class VoiceModelReplyProducer:
 
     async def __call__(self, final_transcript: Transcript) -> AsyncIterator[str]:
         """Return the token stream for one completed user turn (V4 awaits this)."""
+        # Cleared here, not in the generator body, which only runs once the stream is
+        # first pulled: a turn that stalls before that must not report the last turn's model.
+        self._served_model = None
         return self._generate(final_transcript)
 
     async def _generate(self, final_transcript: Transcript) -> AsyncIterator[str]:
@@ -538,9 +567,17 @@ class VoiceModelReplyProducer:
         # that does not touch the strip (the tag is still removed from the audio); the
         # criterion-3 floor is preserved by reuse of the exact converter.
         strip_converter = FeelingTagConverter(ConvertMode.STRIP, on_feeling=self._capture_stance())
+        served_noted = False
         async for chunk in backend.chat_stream(
             prompt, tools=tools, temperature=0.0, max_tokens=max_tokens
         ):
+            if not served_noted and _is_reply_payload(chunk):
+                # R9-214: the chain is committed to its winner by its first payload chunk, so
+                # the ledger read here names the backend that is actually speaking, including
+                # on a turn a barge-in later cuts short. The meter feed below is unchanged and
+                # still receives the wrapper's primary (R9-221).
+                served_noted = True
+                self._served_model = resolve_served_model(backend)
             if chunk.delta:
                 if not timing.notified:
                     timing.notified = True

@@ -34,7 +34,11 @@ from persona_runtime.routing.heuristic import HeuristicRouter
 from persona_runtime.routing.intelligent_router import IntelligentRouter, ModelSelection
 from persona_runtime.routing.latency import FirstTokenLatencyTracker
 from persona_runtime.routing.layer1 import apply_constraint_filter
-from persona_runtime.routing.model_selection import canonical_model_id, reorder_primary
+from persona_runtime.routing.model_selection import (
+    canonical_model_id,
+    reorder_primary,
+    resolve_served_model,
+)
 from persona_runtime.routing.nvidia_models import (
     NVIDIA_LAUNCH_MODEL_METADATA,
     nvidia_metadata_for_model,
@@ -75,6 +79,7 @@ __all__ = [
     "canonical_model_id",
     "nvidia_metadata_for_model",
     "reorder_primary",
+    "resolve_served_model",
     "surface_for_profile",
     "tier_for",
 ]

@@ -85,6 +85,13 @@ DEFAULT_TURN_FIRST_AUDIO_TIMEOUT_S: float = 20.0
 TURN_FAILED_SPOKEN_LINE: str = "Sorry, I lost that for a moment. Could you say it again?"
 #: Bound on speaking the line above; a TTS that is itself down must not re-hang the turn.
 _FALLBACK_SPEECH_TIMEOUT_S: float = 8.0
+#: R9-214: the turn-ended line's provider and model when the producer can report a
+#: served model and none answered this turn (a safety bypass, an origination takeover,
+#: a stall or failure before the first reply chunk).
+_NO_SERVED_MODEL: str = "<none>"
+#: R9-214: the same fields when the producer cannot report a served model at all (a bare
+#: callable, the V1 echo baseline), which is a different fact from "nothing answered".
+_UNATTRIBUTED_MODEL: str = "<unattributed>"
 
 
 async def _single_text(text: str) -> AsyncIterator[str]:
@@ -99,6 +106,7 @@ __all__ = [
     "PassThroughEchoMode",
     "ReplyHeardListener",
     "STTStream",
+    "ServedModelReporter",
     "StreamingLoop",
     "TTSStream",
     "Transcript",
@@ -208,6 +216,21 @@ class ModelReplyProducer(Protocol):
     """
 
     async def __call__(self, final_transcript: Transcript) -> AsyncIterator[str]: ...
+
+
+@runtime_checkable
+class ServedModelReporter(Protocol):
+    """Optional V5 seam: which model answered the current turn (R9-214).
+
+    A :class:`ModelReplyProducer` that also implements this lets the loop's
+    ``voice turn ended`` line name the ``(provider, model)`` that actually answered,
+    which on a multi-model chain can be a fallback rather than the primary. The loop
+    only reads it for that line. Implementations MUST NOT raise: it is read in the
+    invocation's ``finally``. The loop enforces that by catching a raise, logging a
+    warning and naming the turn ``<unattributed>``.
+    """
+
+    def served_model(self) -> tuple[str, str] | None: ...
 
 
 @runtime_checkable
@@ -657,13 +680,17 @@ class StreamingLoop:
                 # CancelledError skips every handler above: a continuation or barge-in
                 # cut the turn. Say so, or the log reads as a reply that never played.
                 outcome = "cancelled"
+            served_provider, served_model = self._served_model_for_log()
             _LOG.info(
                 "voice turn ended outcome={outcome} tokens={tokens} "
-                "first_audio_ms={first} total_ms={total:.0f}",
+                "first_audio_ms={first} total_ms={total:.0f} "
+                "provider={provider} model={model}",
                 outcome=outcome,
                 tokens=len(heard),
                 first=None if first_audio_ms is None else round(first_audio_ms),
                 total=(time.perf_counter() - started) * 1000.0,
+                provider=served_provider,
+                model=served_model,
             )
             await self._session.notify(SessionLifecycleEvent.AGENT_STOPPED_SPEAKING)
             # T07 barged-over memory honesty (D-V4-4): emit what was actually
@@ -694,6 +721,31 @@ class StreamingLoop:
                 tts_first_audio_at=tts_first_audio_at,
                 audio_first_play_at=audio_first_play_at,
             )
+
+    def _served_model_for_log(self) -> tuple[str, str]:
+        """The ``(provider, model)`` the turn-ended line names (R9-214).
+
+        The served pair when the producer reports one, ``<none>`` when it can report
+        but no model answered this turn, and ``<unattributed>`` when the producer does
+        not implement :class:`ServedModelReporter` at all, or its read raises.
+
+        Never raises: it runs in the invocation's ``finally``, ahead of the
+        stopped-speaking notify, the heard-reply listener and the latency row, and a
+        log field must not cost the turn any of those.
+        """
+        if not isinstance(self._model, ServedModelReporter):
+            return _UNATTRIBUTED_MODEL, _UNATTRIBUTED_MODEL
+        try:
+            served = self._model.served_model()
+        except Exception as exc:  # noqa: BLE001, the seam's MUST NOT raise, enforced here
+            _LOG.warning(
+                "voice turn served-model read failed (class={cls}); logging it unattributed",
+                cls=type(exc).__name__,
+            )
+            return _UNATTRIBUTED_MODEL, _UNATTRIBUTED_MODEL
+        if served is None:
+            return _NO_SERVED_MODEL, _NO_SERVED_MODEL
+        return served
 
     async def _write_voice_log(
         self,

@@ -7,10 +7,13 @@ one deduct per committed turn plus a LiveKit infra tick at call end:
                 + LLM(turn tokens, priced via the seam)          → basis provider_meter
     call end  = LiveKit infra/min (real call duration)            → basis infra_flat
 
-The **served** provider is whatever backend actually served (there is no runtime
-provider-outage failover today, so served ≡ configured); each quantity is priced
-at that provider's own registry rate through the pure ``persona.billing`` helpers
-(model-fallback attribution). The deduct rides
+STT and TTS are priced at the configured backend's own registry rate through the pure
+``persona.billing`` helpers; neither has a runtime failover, so the configured backend
+is the one that served. The LLM arm is NOT always the served model: the producer feeds
+this meter the tier backend's ``provider_name`` / ``model_name``, and on a multi-model
+chain those name the PRIMARY even when a fallback answered. Such a turn is billed as if
+the primary had answered it, including whether the OpenRouter actual-cost arm applies
+(R9-221; the turn log names the served model since R9-214). The deduct rides
 :meth:`~persona.billing.metered.MeteredBilling.charge` in ``capture`` mode with a
 per-turn idempotency ``billing_key`` (``voice:{call_id}:{turn_seq}``) so a
 re-fired tick never double-charges.

@@ -23,7 +23,7 @@ from persona.backends.multi_model import MultiModelChatBackend
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
 
-__all__ = ["canonical_model_id", "reorder_primary"]
+__all__ = ["canonical_model_id", "reorder_primary", "resolve_served_model"]
 
 
 def canonical_model_id(provider: str, model: str) -> str:
@@ -36,6 +36,40 @@ def canonical_model_id(provider: str, model: str) -> str:
     are keyed on.
     """
     return model if "/" in model else f"{provider}/{model}"
+
+
+def resolve_served_model(backend: ChatBackend) -> tuple[str, str]:
+    """Return the ``(provider, model)`` that actually served ``backend``'s latest call.
+
+    A :class:`MultiModelChatBackend` reports its PRIMARY through ``provider_name`` /
+    ``model_name`` by contract, even when a fallback answered. On a text-only request
+    every backend before the winner leaves one record in the wrapper's
+    ``last_attempts`` ledger, so the winner is ``backends[len(last_attempts)]``. This
+    is the one resolution the text loop's TurnLog attribution (Spec M2, D-M2-2) and the
+    voice turn log (R9-214) share.
+
+    Known gap, unchanged here: on an image-bearing request the wrapper walks only its
+    vision-capable backends (``_vision_aware_candidates``) and skips the others without
+    recording them, so the ledger length no longer indexes the full chain and the pair
+    returned can name the wrong backend whenever a non-vision backend precedes the
+    winner. This is registered in the R9 register.
+
+    A bare backend has no ledger and no chain, so its own identity is returned. So is
+    the wrapper's, defensively, when the ledger is as long as the chain (every backend
+    failed, which callers do not reach because the wrapper raised instead).
+
+    Args:
+        backend: The backend the call went through; usually a tier's wrapper.
+
+    Returns:
+        The served ``(provider, model)`` pair.
+    """
+    attempts = getattr(backend, "last_attempts", None) or []
+    chain = getattr(backend, "backends", None)
+    if chain is not None and 0 <= len(attempts) < len(chain):
+        winner = chain[len(attempts)]
+        return winner.provider_name, winner.model_name
+    return backend.provider_name, backend.model_name
 
 
 def reorder_primary(backend: ChatBackend, chosen_model_id: str) -> ChatBackend:

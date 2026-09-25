@@ -93,6 +93,7 @@ from persona_runtime.routing import (
     canonical_model_id,
     classifiers,
     reorder_primary,
+    resolve_served_model,
     tier_for,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
@@ -2812,34 +2813,19 @@ def _compute_fallback_fields(backend: ChatBackend) -> _FallbackFields:
     chain that ``TierRegistry`` short-circuits past the wrapper entirely
     (D-20-17 case (a)).
 
-    For :class:`MultiModelChatBackend` callers, the winner is the backend
-    at index ``len(last_attempts)`` in the ``backends`` list: every prior
-    backend fell through (one ``AttemptRecord`` each); the next one
-    served the turn. The wrapper's own ``provider_name`` / ``model_name``
-    properties report the PRIMARY backend's identity (not the active
-    one), so we must reach into ``backends[len(attempts)]`` to record the
-    *actually-used* model on the TurnLog.
-
-    The ``AllModelsFailedError`` exhaustion case never reaches this
-    function — the loop's caller catches the error before write-back —
-    but we defensively guard against an over-length attempt ledger by
-    falling back to the wrapper's reported identity.
+    For :class:`MultiModelChatBackend` callers, the served identity comes
+    from :func:`~persona_runtime.routing.resolve_served_model`, the one
+    resolution this loop shares with the voice turn log (R9-214): the
+    wrapper's own ``provider_name`` / ``model_name`` report the PRIMARY,
+    so the winner is read from ``backends[len(last_attempts)]``, and an
+    over-length ledger (the exhaustion case, which never reaches here)
+    falls back to the wrapper's reported identity.
     """
     attempts = getattr(backend, "last_attempts", None) or []
     fallback_reasons: list[str] = [a.last_error_class for a in attempts]
     fallback_providers: list[str] = [a.provider for a in attempts]
     count = len(fallback_reasons)
-    # Resolve the actually-used backend's identity when this is the
-    # multi-model wrapper. ``getattr(..., "backends", None)`` returns the
-    # ordered chain on the wrapper, ``None`` on bare backends.
-    wrapper_backends = getattr(backend, "backends", None)
-    if wrapper_backends is not None and 0 <= count < len(wrapper_backends):
-        winner = wrapper_backends[count]
-        chosen_model: str | None = winner.model_name
-        chosen_provider: str | None = winner.provider_name
-    else:
-        chosen_model = backend.model_name
-        chosen_provider = backend.provider_name
+    chosen_provider, chosen_model = resolve_served_model(backend)
     return _FallbackFields(
         tier_model_chosen=chosen_model,
         tier_provider_used=chosen_provider,
