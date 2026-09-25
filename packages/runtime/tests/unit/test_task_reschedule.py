@@ -155,6 +155,30 @@ def test_reecho_no_warn_when_quiet_hours_unset() -> None:
     assert "quiet hours" not in echo.echo_text  # off-until-set → no warn
 
 
+def test_reecho_names_the_next_run_day_without_a_leading_zero() -> None:
+    # R9-225: the day came from a glibc-only strftime flag, which raises on Windows. The exact
+    # phrase is pinned so a portable rewrite keeps the text: "Tue 7 Jul", never "Tue 07 Jul".
+    intent = RescheduleIntent(
+        task_id="task-brief", recurrence_rrule="FREQ=DAILY;BYHOUR=6;BYMINUTE=0"
+    )
+    echo = assemble_reschedule_echo(
+        intent, task_goal="morning brief", timezone="Europe/Oslo", quiet_hours=None, now=_NOW
+    )
+    assert "next run Tue 7 Jul." in echo.echo_text
+
+
+def test_reecho_names_the_next_run_day_in_the_users_timezone() -> None:
+    # 01:00 Tuesday in Oslo is 23:00 MONDAY in UTC, so this pins the conversion: a phrase
+    # formatted from the UTC instant would say "Mon 6 Jul".
+    intent = RescheduleIntent(
+        task_id="task-brief", recurrence_rrule="FREQ=DAILY;BYHOUR=1;BYMINUTE=0"
+    )
+    echo = assemble_reschedule_echo(
+        intent, task_goal="morning brief", timezone="Europe/Oslo", quiet_hours=None, now=_NOW
+    )
+    assert "next run Tue 7 Jul." in echo.echo_text
+
+
 # --- T7 bar 4: the persona-proposed copy invites only the wired capability ------------------
 
 

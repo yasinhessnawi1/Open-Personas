@@ -84,9 +84,7 @@ def assemble_reschedule_echo(
         updated_at=now,
     )
     next_fire = next_fire_after(preview, after=now)
-    next_phrase = (
-        f"{next_fire.astimezone(ZoneInfo(timezone)):%a %-d %b}" if next_fire else "no upcoming run"
-    )
+    next_phrase = _day_phrase(next_fire, timezone) if next_fire else "no upcoming run"
     offer = _quiet_offer(next_fire, timezone, quiet_hours)
     echo = render_reschedule_echo(
         task_goal=task_goal,
@@ -96,6 +94,16 @@ def assemble_reschedule_echo(
         quiet_hours_offer=offer,
     )
     return RescheduleEcho(echo, _event(intent, timezone))
+
+
+def _day_phrase(when: datetime, timezone: str) -> str:
+    """``when`` as a short local day, e.g. "Tue 7 Jul".
+
+    The unpadded day comes from ``local.day``, not a strftime flag: the no-padding flag is a
+    glibc extension that raises ``ValueError`` on Windows (R9-225).
+    """
+    local = when.astimezone(ZoneInfo(timezone))
+    return f"{local:%a} {local.day} {local:%b}"
 
 
 def _quiet_offer(

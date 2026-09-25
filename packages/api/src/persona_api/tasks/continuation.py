@@ -407,11 +407,12 @@ class TaskContinuation:
         a task that got moving again stops being described as stuck without anyone
         remembering to erase anything.
 
-        Used by the APPROVAL gate only, and see :meth:`react_to_dead_leg` for why the stuck
-        park does not call it: advancing the head there breaks the revival sweep's
-        correlation between a task and the job that died on it. The gate is safe because no
-        dead job exists at that head (the gated leg's job succeeded), and moving the head is
-        what the approval resolver's own resolution checkpoint already does one step later.
+        Used by two parks, the APPROVAL gate and :meth:`park_at_bound`; see
+        :meth:`react_to_dead_leg` for why the stuck park does not call it: advancing the head
+        there breaks the revival sweep's correlation between a task and the job that died on
+        it. Both callers are safe because no dead job exists at that head (the job doing the
+        park succeeds). For the gate, moving the head is also what the approval resolver's
+        own resolution checkpoint already does one step later.
 
         Best-effort. A task that parked is parked; failing the park because a context write
         failed would trade the durable state change for an explanatory line.
