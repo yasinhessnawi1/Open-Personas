@@ -20,7 +20,11 @@ fingerprint (an unsalted 32-bit hash of a pasted password is a guessing oracle),
   broken, and counts in "N of 6 set"; only its display is held back.
 * ``malformed``: it does not parse as a model list, so no builder serves it as written.
 
-Nothing else from the environment is read.
+After the chains the line names the OpenRouter subscription mode (R9-213 part 2), which the
+api and voice must also agree on: ``free`` or ``paid`` the way the runtime reads it
+(stripped, any case), ``unset`` or ``empty``, or ``invalid`` with its content kept off the
+line. :data:`UNIFIED_ENV_NAMES` is those seven settings, the set the deploy hands every
+hosted process from one source. Nothing else from the environment is read.
 
 The residual, stated plainly (owner ruling, R9-213 option a: print slug-shaped names rather
 than only catalogue ids). A bare, unprefixed secret typed directly after a valid
@@ -50,12 +54,14 @@ from persona.backends.credentials import parse_models_list
 from persona.backends.errors import LocalProviderInModelsListError, MalformedTierModelsError
 from persona.logging import get_logger, looks_like_secret
 
+from persona_runtime.openrouter_subscription import SUBSCRIPTION_MODE_ENV, SUBSCRIPTION_MODES
 from persona_runtime.tier import CHAIN_ENV_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
 __all__ = [
+    "UNIFIED_ENV_NAMES",
     "ChainReport",
     "chain_fingerprint",
     "format_model_chains",
@@ -64,6 +70,11 @@ __all__ = [
 ]
 
 _log = get_logger("runtime.chains")
+
+#: The seven settings every hosted process must be handed identically: the six model chains
+#: and the OpenRouter subscription mode. Defined here, once; the deploy's validator and the
+#: model chain gate read it, so the deploy cannot carry a different set from the code.
+UNIFIED_ENV_NAMES: tuple[str, ...] = (*CHAIN_ENV_NAMES, SUBSCRIPTION_MODE_ENV)
 
 #: Hex characters of the sha256 kept as the fingerprint: short enough to compare by eye
 #: across two log lines, long enough that two different chains colliding is not a concern.
@@ -168,23 +179,38 @@ def format_model_chains(reports: Iterable[ChainReport]) -> str:
     return " | ".join(_segment(report) for report in reports)
 
 
+def _mode_state(raw: str | None) -> str:
+    """The subscription mode as the runtime would read it, or a named state; never the raw."""
+    if raw is None:
+        return "unset"
+    if not raw.strip():
+        return "empty"
+    mode = raw.strip().lower()
+    return mode if mode in SUBSCRIPTION_MODES else "invalid"
+
+
 def log_model_chains_at_boot(env: Mapping[str, str] | None = None) -> None:
-    """One INFO line at boot: how many chains are set (withheld ones included), then each.
+    """One INFO line at boot: how many chains are set (withheld ones included), each chain,
+    then the subscription mode.
 
     One line, so the api's and voice's can be compared as two units. Read it with
     ``grep "model chains at boot"``. Never raises: a report that fails logs one WARNING
     naming the exception type only (its message could carry the value) and returns.
     """
     try:
-        reports = model_chains(env)
+        snapshot = dict(os.environ if env is None else env)
+        reports = model_chains(snapshot)
         chains = format_model_chains(reports)
+        mode = _mode_state(snapshot.get(SUBSCRIPTION_MODE_ENV))
     except Exception as exc:  # noqa: BLE001 - a boot report must never stop a boot
         _log.warning("model chains at boot: report unavailable ({error})", error=type(exc).__name__)
         return
     configured = sum(1 for report in reports if report.state in _CONFIGURED)
     _log.info(
-        "model chains at boot: {configured} of {total} set | {chains}",
+        "model chains at boot: {configured} of {total} set | {chains} | {mode_name}={mode}",
         configured=configured,
         total=len(reports),
         chains=chains,
+        mode_name=SUBSCRIPTION_MODE_ENV,
+        mode=mode,
     )

@@ -17,8 +17,13 @@ name: Deploy
 # Do not re-run a Deploy run created before this fix: a re-run uses that run's
 # original copy of this file, with the old gate.
 #
-# Third-party actions are pinned to a full commit SHA, not a branch, and every
+# Every action is pinned to a full commit SHA, not a branch or a tag, and every
 # checkout drops its token after checking out (persist-credentials: false).
+# setup-flyctl downloads the flyctl release WITHOUT verifying a checksum; what
+# stands in for that is that both the action (commit) and flyctl (version) are
+# pinned. A job that holds a secret may carry only the keys and the exact steps
+# scripts/check_deploy_wiring.py allows: no container, services, env,
+# permissions, outputs or strategy, and runs-on is ubuntu-latest.
 #
 # Vercel handles persona-web deploys via its
 # own GitHub integration; open-persona-db (self-hosted Postgres) is deployed once
@@ -33,13 +38,50 @@ name: Deploy
 #        flyctl tokens create deploy -x 2160h
 #      (no `-a` flag → scoped to the org, usable for every app in it). 2160h =
 #      90-day expiry. Copy the full `FlyV1 …` value it prints.
-#   2. GitHub → repo Settings → Secrets and variables → Actions →
-#      "New repository secret" named FLY_API_TOKEN, paste the `FlyV1 …` value.
-#      (If FLY_API_TOKEN already exists app-scoped to open-persona-api, use
-#      "Update" to overwrite it with the org-scoped token from step 1 —
-#      otherwise the voice deploy authenticates as nobody and fails.)
-#   3. (Optional) Add `workflow_dispatch` runs to manually re-deploy from the
-#      Actions tab without pushing a commit.
+#   2. The token is an ENVIRONMENT secret of `production` (step 4), never a
+#      repository secret: a repository secret is readable by a run from any branch.
+#   3. (Optional) Re-deploy by hand from the Actions tab without pushing a commit.
+#      From `main` only: every job's `if` refuses another ref, and the Environment's
+#      branch rule (step 4a) refuses it the secrets even with an edited workflow.
+#   4. The settings the api and voice share (R9-213). Do these in order.
+#      a. The `Production` Environment already exists (since 2026-05-30, with no
+#         rules and no secrets); GitHub matches `environment: production` to it
+#         regardless of case. Settings > Environments > Production > Deployment
+#         branches and tags: choose "Selected branches and tags", add `main`, and
+#         confirm `main` is the ONLY rule listed.
+#      b. Add eight ENVIRONMENT secrets there. FLY_API_TOKEN: a fresh token from
+#         step 1 (`flyctl tokens create deploy -x 2160h`), never stored at
+#         repository level. And the seven settings, named like the runtime ones:
+#           PERSONA_FRONTIER_MODELS, PERSONA_MID_MODELS, PERSONA_SMALL_MODELS,
+#           PERSONA_FREE_FRONTIER_MODELS, PERSONA_FREE_MID_MODELS,
+#           PERSONA_FREE_SMALL_MODELS, PERSONA_OPENROUTER_SUBSCRIPTION_MODE.
+#         Chains are comma-separated provider/model entries (no quotes, spaces or
+#         newlines); the mode is exactly `free` or `paid`.
+#      c. Merge and push this workflow. Until then, main's jobs declare no
+#         environment and cannot read Environment secrets, so merging it is what
+#         restores deploys on the new token.
+#      d. After the first green Deploy run: delete the repository-level
+#         FLY_API_TOKEN (Settings > Secrets and variables > Actions, Repository
+#         secrets), confirm it is gone, and revoke the token that was stored there
+#         (`flyctl tokens list`, then `flyctl tokens revoke <id>`).
+#      How it runs: validate-model-chains checks all seven before anything is
+#      written, in a job that never holds the Fly token; stage-model-chains, a
+#      separate job with nothing in it but checkout, flyctl and a
+#      standard-library script, then stages them on BOTH apps.
+#      verify-model-chains then fails the run unless both apps hold the same seven
+#      values, Deployed; it runs even when one deploy failed, so a split still
+#      reports itself. To change a setting: update the secret, then run this
+#      workflow. Never `flyctl secrets set` these seven by hand: the next deploy
+#      puts the shared value back.
+#      A partial stage: if staging succeeds on the api and then fails on voice, the
+#      job fails and nothing deploys, but the api keeps the new values STAGED. They
+#      go live on the api's next deploy, a hand-run `flyctl deploy` included, so do
+#      not deploy the api by hand until a Deploy run has passed again; the next run
+#      stages both apps again and converges them.
+#
+# The whole workflow is one concurrency group: a second run waits for the first to
+# finish rather than racing it, and nothing in progress is cancelled. Jobs carry no
+# groups of their own.
 
 on:
   workflow_run:
@@ -53,7 +95,109 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
+  validate-model-chains:
+    # R9-213: the six model chains and the OpenRouter subscription mode, from the
+    # production Environment's secrets (setup step 4), checked before anything is
+    # written. This job imports the runtime and its third-party dependencies, and
+    # `uv sync` builds the workspace packages with a build backend uv.lock does not
+    # pin, so it never holds the Fly token: on a runner the job, not the step, is
+    # the boundary. A missing or bad value fails it, nothing is staged or deployed,
+    # and each app keeps what it has.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout the commit CI verified
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # astral-sh/setup-uv tag v10.2.0, commit of 2026-09-21.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          # uv itself, pinned: the latest release on 2026-09-25. No cache: this job
+          # holds production secrets and restores nothing it did not build itself.
+          version: "0.12.19"
+          enable-cache: false
+
+      # Only what the validator imports: persona-runtime and its persona-core
+      # dependency, at the versions uv.lock pins. uv.lock does not pin the build
+      # backend that builds the workspace packages themselves.
+      - run: uv sync --frozen --no-dev --package persona-runtime
+
+      # The values reach this step only as step env, never as secrets expressions
+      # inside a run block, and nothing here traces commands.
+      - name: Validate the seven settings (no Fly token, writes nothing)
+        env:
+          PERSONA_FRONTIER_MODELS: ${{ secrets.PERSONA_FRONTIER_MODELS }}
+          PERSONA_MID_MODELS: ${{ secrets.PERSONA_MID_MODELS }}
+          PERSONA_SMALL_MODELS: ${{ secrets.PERSONA_SMALL_MODELS }}
+          PERSONA_FREE_FRONTIER_MODELS: ${{ secrets.PERSONA_FREE_FRONTIER_MODELS }}
+          PERSONA_FREE_MID_MODELS: ${{ secrets.PERSONA_FREE_MID_MODELS }}
+          PERSONA_FREE_SMALL_MODELS: ${{ secrets.PERSONA_FREE_SMALL_MODELS }}
+          PERSONA_OPENROUTER_SUBSCRIPTION_MODE: ${{ secrets.PERSONA_OPENROUTER_SUBSCRIPTION_MODE }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/validate_deploy_chains.py
+
+  stage-model-chains:
+    # R9-213: stage the seven validated settings on BOTH apps before either
+    # deploys. This job holds the Fly token, so it runs nothing but checkout, the
+    # pinned flyctl setup and a standard-library-only script under `python3 -I`,
+    # which gives the token to flyctl's own process and the values to flyctl on
+    # stdin. No uv, no pip, no Python setup: scripts/check_deploy_wiring.py holds
+    # the exact list of steps allowed here.
+    needs: validate-model-chains
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout the commit CI verified
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # superfly/flyctl-actions tag 1.6 (= v1 and master), commit of 2026-04-08.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          # flyctl itself, pinned too: the latest release on 2026-09-25 (published
+          # 2026-09-24). Bump it deliberately; `latest` would download whatever
+          # release exists on the day of the deploy.
+          version: 0.4.108
+
+      - name: Stage the seven settings on api and voice
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PERSONA_FRONTIER_MODELS: ${{ secrets.PERSONA_FRONTIER_MODELS }}
+          PERSONA_MID_MODELS: ${{ secrets.PERSONA_MID_MODELS }}
+          PERSONA_SMALL_MODELS: ${{ secrets.PERSONA_SMALL_MODELS }}
+          PERSONA_FREE_FRONTIER_MODELS: ${{ secrets.PERSONA_FREE_FRONTIER_MODELS }}
+          PERSONA_FREE_MID_MODELS: ${{ secrets.PERSONA_FREE_MID_MODELS }}
+          PERSONA_FREE_SMALL_MODELS: ${{ secrets.PERSONA_FREE_SMALL_MODELS }}
+          PERSONA_OPENROUTER_SUBSCRIPTION_MODE: ${{ secrets.PERSONA_OPENROUTER_SUBSCRIPTION_MODE }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/fly_deploy_chains.py stage open-persona-api open-persona-voice
+
   deploy-api:
     # Only for a green CI run on a push to main in this repository, or a manual
     # run from main (github.event.workflow_run is null then). See the header.
@@ -63,14 +207,14 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    # R9-213: never deploy without the shared settings staged on both apps.
+    needs: stage-model-chains
     runs-on: ubuntu-latest
-    concurrency:
-      # Serialise deploys: a slow build can't be overtaken by a faster newer one.
-      group: deploy-api
-      cancel-in-progress: false
+    environment: production
     steps:
       - name: Checkout the commit CI verified
-        uses: actions/checkout@v4
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # When triggered by workflow_run, default checkout would be the
           # default branch tip; pin to the exact SHA that just passed CI so a
@@ -136,15 +280,14 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    # R9-213: never deploy without the shared settings staged on both apps.
+    needs: stage-model-chains
     runs-on: ubuntu-latest
-    concurrency:
-      # Separate group from deploy-api: voice and api serialise INDEPENDENTLY,
-      # so a slow voice cold start never blocks an api deploy and vice versa.
-      group: deploy-voice
-      cancel-in-progress: false
+    environment: production
     steps:
       - name: Checkout the commit CI verified
-        uses: actions/checkout@v4
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # Pin to the exact SHA that just passed CI (same reasoning as the api
           # job) so a deploy can never race ahead of its checks.
@@ -199,6 +342,46 @@ jobs:
         run: |
           flyctl status --app open-persona-voice
 
+  verify-model-chains:
+    # R9-213: after both app deploys, the seven shared settings must be on both
+    # apps, Deployed, with the same value. It runs even when one deploy failed
+    # (`!cancelled()`), provided the stage succeeded, so a split still reports
+    # itself. It prints match, differs, missing or not deployed per setting and
+    # app, never a digest: this repository's Actions log is public.
+    needs: [stage-model-chains, deploy-api, deploy-voice]
+    if: >-
+      (!cancelled() && needs.stage-model-chains.result == 'success' &&
+       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (!cancelled() && needs.stage-model-chains.result == 'success' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout the commit CI verified
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # superfly/flyctl-actions tag 1.6 (= v1 and master), commit of 2026-04-08.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          # flyctl itself, pinned too: the latest release on 2026-09-25 (published
+          # 2026-09-24). Bump it deliberately; `latest` would download whatever
+          # release exists on the day of the deploy.
+          version: 0.4.108
+
+      - name: The seven settings match and are deployed on api and voice
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/fly_deploy_chains.py verify open-persona-api open-persona-voice
+
 
   # deploy-connectors was removed on 2026-09-09. Since the connectors fold, the six
   # chat transports run INSIDE the api process (PERSONA_API_EMBED_CONNECTORS on
@@ -220,14 +403,11 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    concurrency:
-      # Independent group: the SFU redeploys without blocking/being blocked by api
-      # or voice.
-      group: deploy-livekit
-      cancel-in-progress: false
+    environment: production
     steps:
       - name: Checkout the commit CI verified
-        uses: actions/checkout@v4
+        # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false

@@ -35,6 +35,11 @@ jobs:
       # deploy can only keep them equal for settings that list carries; a chain read by
       # the code and missing from it would ship set by nothing.
       - run: uv run python scripts/check_model_chains.py
+      # The Deploy workflow hands the api and voice the same seven settings from the
+      # production Environment, and no secret reaches anything but its allowed site
+      # (R9-213 part 2). Every secrets reference must sit where it is allowed; the
+      # gate proves itself on a sample workflow on every run.
+      - run: uv run python scripts/check_deploy_wiring.py
       # No document may call the MIT engine "source available", "noncommercial" or
       # PolyForm. That rule was written in prose inside ARCHITECTURE section 9.5 and
       # then broken five times anyway, the worst in PUBLISH_CHECKLIST.md, which is

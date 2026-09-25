@@ -104,21 +104,68 @@ def test_the_workflow_has_deploy_jobs_to_check() -> None:
     assert {"deploy-api", "deploy-voice", "deploy-livekit"} <= set(_jobs())
 
 
-@pytest.mark.parametrize("job", sorted(_jobs()))
-def test_every_job_runs_only_for_a_push_to_main_here_or_a_manual_run_from_main(job: str) -> None:
-    condition = _jobs()[job].get("if")
-    assert isinstance(condition, str), f"{job} has no gate at all"
+#: Conditions ONE job may carry on BOTH paths on top of the canonical ones. Only the job that
+#: must report a split deploy (the api deployed, voice failed) runs after a failed
+#: dependency, and it still requires the stage to have succeeded plus every canonical
+#: condition. Any other job carrying these fails.
+_EXTRA_ON_EVERY_PATH: dict[str, frozenset[str]] = {
+    "verify-model-chains": frozenset(
+        {"!cancelled()", "needs.stage-model-chains.result == 'success'"}
+    ),
+}
+
+
+def gate_problems(job: str, condition: object) -> list[str]:
+    """Every way ``job``'s ``if`` departs from the two allowed paths; empty when it is right.
+
+    Shared with ``scripts/check_deploy_wiring.py``, so the gate has one definition.
+    """
+    if not isinstance(condition, str):
+        return [f"{job} has no gate at all"]
     found = paths(condition)
     # Every split condition must be a single comparison. An ``||`` inside a path's own
     # parentheses would otherwise glue into one "condition" and reopen a second way in:
     # ``(A && B && C && D && true || A && C)`` is the pre-fix gate wearing all four checks.
     glued = sorted(c for path in found for c in path if "||" in c or "&&" in c)
-    assert glued == [], f"{job}: conditions that hide another operator: {glued}"
-    assert len(found) == 2, f"{job}: expected exactly two paths, got {found}"
+    if glued:
+        return [f"{job}: conditions that hide another operator: {glued}"]
+    extra = _EXTRA_ON_EVERY_PATH.get(job, frozenset())
+    if not all(path >= extra for path in found):
+        return [f"{job}: every path must also require {sorted(extra)}"]
+    found = [path - extra for path in found]
+    if len(found) != 2:
+        return [f"{job}: expected exactly two paths, got {len(found)}"]
     manual = [p for p in found if "github.event_name == 'workflow_dispatch'" in p]
     automatic = [p for p in found if p not in manual]
-    assert manual == [_MANUAL_RUN_FROM_MAIN], f"{job}: manual path is {manual}"
-    assert automatic == [_CI_PUSH_TO_MAIN_HERE], f"{job}: CI path is {automatic}"
+    problems: list[str] = []
+    if manual != [_MANUAL_RUN_FROM_MAIN]:
+        problems.append(f"{job}: manual path is {[sorted(p) for p in manual]}")
+    if automatic != [_CI_PUSH_TO_MAIN_HERE]:
+        problems.append(f"{job}: CI path is {[sorted(p) for p in automatic]}")
+    return problems
+
+
+@pytest.mark.parametrize("job", sorted(_jobs()))
+def test_every_job_runs_only_for_a_push_to_main_here_or_a_manual_run_from_main(job: str) -> None:
+    assert gate_problems(job, _jobs()[job].get("if")) == []
+
+
+def test_only_the_verify_job_may_run_after_a_failed_dependency() -> None:
+    """The one allowance is scoped: the same condition on a deploy job is refused."""
+    assert set(_EXTRA_ON_EVERY_PATH) == {"verify-model-chains"}
+    extra = _EXTRA_ON_EVERY_PATH["verify-model-chains"]
+    after_failure = (
+        "(!cancelled() && needs.stage-model-chains.result == 'success' && "
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || "
+        "(!cancelled() && needs.stage-model-chains.result == 'success' && "
+        + " && ".join(sorted(_CI_PUSH_TO_MAIN_HERE))
+        + ")"
+    )
+    assert gate_problems("verify-model-chains", after_failure) == []
+    assert gate_problems("deploy-api", after_failure) == [
+        f"deploy-api: manual path is {[sorted(_MANUAL_RUN_FROM_MAIN | extra)]}",
+        f"deploy-api: CI path is {[sorted(_CI_PUSH_TO_MAIN_HERE | extra)]}",
+    ]
 
 
 def test_the_workflow_token_can_only_read() -> None:
@@ -131,16 +178,13 @@ def _steps() -> list[dict[str, Any]]:
     return steps
 
 
-def test_every_action_is_pinned_to_a_commit_or_is_checkout_v4() -> None:
-    """A moving ref such as ``@master`` runs whatever that branch holds on the day of the
-    deploy, with the production secrets in the job. Pin to a full commit SHA."""
+def test_every_action_is_pinned_to_a_full_commit_sha() -> None:
+    """A moving ref such as ``@master`` or a tag such as ``@v4`` runs whatever it points at
+    on the day of the deploy, with the production secrets in the job. Every action,
+    ``actions/checkout`` included, is pinned to a full 40-hex commit SHA."""
     uses = [str(step["uses"]) for step in _steps() if "uses" in step]
     assert uses, "the workflow uses no actions; the check would pass on nothing"
-    unpinned = [
-        ref
-        for ref in uses
-        if ref != "actions/checkout@v4" and re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", ref) is None
-    ]
+    unpinned = [ref for ref in uses if re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", ref) is None]
     assert unpinned == []
 
 

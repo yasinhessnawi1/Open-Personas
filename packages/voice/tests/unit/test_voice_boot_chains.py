@@ -21,6 +21,7 @@ from pydantic import SecretStr
 def test_the_voice_lifespan_logs_the_model_chains_once(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in CHAIN_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", "paid")
     monkeypatch.setenv("PERSONA_MID_MODELS", "openrouter/z-ai/glm-x,openrouter/anthropic/c-y")
     monkeypatch.setenv("PERSONA_FREE_FRONTIER_MODELS", "  ")
     # The catalogue pre-warm is fail-soft and unrelated; keep it off the network.
@@ -45,5 +46,5 @@ def test_the_voice_lifespan_logs_the_model_chains_once(monkeypatch: pytest.Monke
         "PERSONA_MID_MODELS=[openrouter/z-ai/glm-x,openrouter/anthropic/c-y] "
         f"fp={fingerprint} | PERSONA_SMALL_MODELS=unset | "
         "PERSONA_FREE_FRONTIER_MODELS=empty | PERSONA_FREE_MID_MODELS=unset | "
-        "PERSONA_FREE_SMALL_MODELS=unset"
+        "PERSONA_FREE_SMALL_MODELS=unset | PERSONA_OPENROUTER_SUBSCRIPTION_MODE=paid"
     ]

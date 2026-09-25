@@ -95,6 +95,7 @@ def test_startup_logs_the_model_chains_once(monkeypatch: pytest.MonkeyPatch) -> 
 
     for name in CHAIN_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("PERSONA_OPENROUTER_SUBSCRIPTION_MODE", raising=False)
     # A FREE chain, because community builds no free registry: the line is under test,
     # not the registry, and a paid chain would make this boot resolve provider keys.
     monkeypatch.setenv("PERSONA_FREE_MID_MODELS", "openrouter/z-ai/glm-x,openrouter/anthropic/c-y")
@@ -112,7 +113,8 @@ def test_startup_logs_the_model_chains_once(monkeypatch: pytest.MonkeyPatch) -> 
         "PERSONA_MID_MODELS=unset | PERSONA_SMALL_MODELS=empty | "
         "PERSONA_FREE_FRONTIER_MODELS=unset | "
         "PERSONA_FREE_MID_MODELS=[openrouter/z-ai/glm-x,openrouter/anthropic/c-y] "
-        f"fp={fingerprint} | PERSONA_FREE_SMALL_MODELS=unset"
+        f"fp={fingerprint} | PERSONA_FREE_SMALL_MODELS=unset | "
+        "PERSONA_OPENROUTER_SUBSCRIPTION_MODE=unset"
     ]
 
 

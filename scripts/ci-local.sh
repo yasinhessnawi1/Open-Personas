@@ -96,7 +96,7 @@ ONLY_STEP="${ONLY_STEP:-}"
 
 # Canonical step names, in run order. This is what --only accepts, and every
 # step's log file under .ci-local/<run>/ is named "<one of these>.log".
-CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared model-chains licence-claims money-units mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
+CI_LOCAL_STEP_NAMES="uv-sync ruff-check ruff-format lint-imports flags-declared model-chains deploy-wiring licence-claims money-units mypy-strict mypy-api pytest-collect pytest-unit pytest-integration web-install web-typecheck web-lint web-no-literals web-build web-test"
 
 is_valid_step() { # name
   local n
@@ -481,6 +481,12 @@ fi
 if want_step "model-chains"; then
   run_step "model-chains" "uv run python scripts/check_model_chains.py" \
     uv run python scripts/check_model_chains.py
+fi
+# R9-213 part 2: the Deploy workflow hands both apps the shared settings, and every
+# secrets reference sits at an allowed site.
+if want_step "deploy-wiring"; then
+  run_step "deploy-wiring" "uv run python scripts/check_deploy_wiring.py" \
+    uv run python scripts/check_deploy_wiring.py
 fi
 # No document may call the MIT engine "source available" / "noncommercial" / PolyForm.
 # Prose said so in ARCHITECTURE 9.5 and it was broken five times regardless.

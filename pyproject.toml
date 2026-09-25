@@ -304,7 +304,9 @@ ignore_missing_imports = true
 # already in the workspace via deepgram/livekit.
 
 [tool.pytest.ini_options]
-testpaths = ["packages/core/tests", "packages/runtime/tests", "packages/api/tests", "packages/voice/tests", "packages/connectors/tests"]
+# scripts/tests: the deploy validator and the model chain gate (R9-213) ship as scripts, and
+# their tests run in CI like any other; a script whose tests only run by hand is unguarded.
+testpaths = ["packages/core/tests", "packages/runtime/tests", "packages/api/tests", "packages/voice/tests", "packages/connectors/tests", "scripts/tests"]
 markers = [
     "integration: marks tests that require external services (Docker, real DB)",
     "external: marks tests that call real external APIs (Anthropic, OpenAI)",

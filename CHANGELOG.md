@@ -30,6 +30,36 @@ Per-spec entries are added by the close-out phase of each spec.
   (MIT).** It answers whether a string contains a recognisable credential, from
   the same list `redact_secrets` masks with. Use it to decide not to print
   something, never to decide that something is safe to store.
+- **The api and voice now say which model chains they were given, at startup.**
+  Each logs one line, `model chains at boot`, naming the six model chains with
+  their models and a short fingerprint, then the OpenRouter subscription mode.
+  Two apps holding the same lists show the same fingerprints, so a chain that
+  changed on one app only is visible in two log reads instead of by comparing
+  secret digests by hand. A value that is not plainly a list of model names is
+  never printed: the line says `withheld` or `malformed` instead.
+
+### Changed
+- **The model chains and the OpenRouter subscription mode now come from one place
+  and reach the api and voice together.** Each app used to keep its own copy, so
+  updating one moved chat and left calls on the old models with nothing saying
+  so. They now live in seven secrets of a `production` GitHub Environment, named
+  like the settings themselves (the six `PERSONA_*_MODELS` chains and
+  `PERSONA_OPENROUTER_SUBSCRIPTION_MODE`). Every deploy checks all seven before
+  touching either app, puts them on both, and afterwards fails loudly unless both
+  apps hold the same values, even when one of the two deploys failed. To change a
+  chain, update its secret and run the Deploy workflow; a value set on one Fly
+  app by hand is put back by the next deploy. A missing or broken secret stops
+  the deploy before anything changes. The check never prints a value or a
+  digest. The values are checked in a job that never holds the Fly token, and the
+  token is only held by jobs whose every step is fixed: checkout, the pinned
+  flyctl setup, and flyctl or a small standard-library script, never anything that
+  installs or loads third-party Python code.
+- **Production secrets and deploys are limited to `main`.** The Fly token and
+  the seven settings move to the `production` Environment, whose branch rule
+  admits only `main`, so a workflow run from any other branch cannot read them,
+  even with an edited copy of the workflow. The workflow also refuses a manual
+  run from another branch. Runs of the whole Deploy workflow now queue one
+  behind another instead of overlapping.
 
 ### Security
 - **`persona.logging.redact_secrets` recognises more credential shapes.** On top

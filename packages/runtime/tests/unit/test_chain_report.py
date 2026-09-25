@@ -27,6 +27,7 @@ import pytest
 from loguru import logger as _loguru_logger
 from persona_runtime import chain_report
 from persona_runtime.chain_report import (
+    UNIFIED_ENV_NAMES,
     chain_fingerprint,
     format_model_chains,
     log_model_chains_at_boot,
@@ -45,6 +46,7 @@ _SIX = (
     "PERSONA_FREE_MID_MODELS",
     "PERSONA_FREE_SMALL_MODELS",
 )
+_MODE = "PERSONA_OPENROUTER_SUBSCRIPTION_MODE"
 
 _FAKE_OPENROUTER_KEY = "sk-" + "or-v1-" + "0a1b2c3d" * 8
 _FAKE_OPENAI_KEY = "sk-" + "proj-" + "Zz9Yy8Xx" * 6
@@ -55,10 +57,14 @@ def _fp(canonical: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
-def _line(configured: int, **segments: str) -> str:
-    """The whole expected boot line: every setting ``unset`` unless given."""
-    parts = " | ".join(f"{name}={segments.get(name, 'unset')}" for name in _SIX)
-    return f"model chains at boot: {configured} of 6 set | {parts}"
+def _chains(**segments: str) -> str:
+    """The six chain segments: every chain ``unset`` unless given."""
+    return " | ".join(f"{name}={segments.get(name, 'unset')}" for name in _SIX)
+
+
+def _line(configured: int, mode: str = "unset", **segments: str) -> str:
+    """The whole expected boot line: the six chains, then the subscription mode."""
+    return f"model chains at boot: {configured} of 6 set | {_chains(**segments)} | {_MODE}={mode}"
 
 
 @pytest.fixture
@@ -89,7 +95,11 @@ def test_every_chain_setting_is_reported_in_order_even_when_nothing_is_set() -> 
 
 def test_unset_and_empty_are_named_explicitly_and_differently() -> None:
     line = format_model_chains(model_chains(env={"PERSONA_MID_MODELS": "   "}))
-    assert line == _line(0, PERSONA_MID_MODELS="empty").split(" set | ", 1)[1]
+    assert line == _chains(PERSONA_MID_MODELS="empty")
+
+
+def test_the_seven_settings_deployed_together_are_the_six_chains_and_the_mode() -> None:
+    assert (*_SIX, _MODE) == UNIFIED_ENV_NAMES
 
 
 def test_a_set_chain_reports_its_parsed_models_in_chain_order_with_its_fingerprint() -> None:
@@ -109,6 +119,7 @@ def test_it_is_one_info_line_read_from_the_process_environment(
     monkeypatch.setenv("PERSONA_OPENROUTER_API_KEY", _FAKE_OPENROUTER_KEY)
     monkeypatch.setenv("PERSONA_FRONTIER_MODELS", "openrouter/anthropic/claude-x")
     monkeypatch.setenv("PERSONA_FREE_SMALL_MODELS", "")
+    monkeypatch.setenv(_MODE, "paid")
 
     log_model_chains_at_boot()
 
@@ -117,6 +128,7 @@ def test_it_is_one_info_line_read_from_the_process_environment(
             "INFO",
             _line(
                 1,
+                mode="paid",
                 PERSONA_FRONTIER_MODELS=(
                     f"[openrouter/anthropic/claude-x] fp={_fp('openrouter/anthropic/claude-x')}"
                 ),
@@ -280,6 +292,30 @@ def test_the_documented_residual_a_short_bare_secret_after_a_provider_still_prin
     value = "openrouter/hunter2-summer24"
     log_model_chains_at_boot(env={"PERSONA_MID_MODELS": value})
     assert boot_log == [("INFO", _line(1, PERSONA_MID_MODELS=f"[{value}] fp={_fp(value)}"))]
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        pytest.param(None, "unset", id="unset"),
+        pytest.param("", "empty", id="empty"),
+        pytest.param("   ", "empty", id="blank"),
+        pytest.param("free", "free", id="free"),
+        pytest.param("paid", "paid", id="paid"),
+        pytest.param(" Paid ", "paid", id="accepted-the-way-the-runtime-accepts-it"),
+        pytest.param("sometimes", "invalid", id="another-word"),
+        pytest.param(_FAKE_OPENROUTER_KEY, "invalid", id="a-key-pasted-into-the-mode"),
+    ],
+)
+def test_the_subscription_mode_follows_the_chains_as_free_paid_or_a_named_state(
+    raw: str | None, shown: str, boot_log: list[tuple[str, str]]
+) -> None:
+    """R9-213 part 2: the api and voice must agree on the mode as well as the chains, so the
+    line names it. It is reported the way the runtime reads it (stripped, any case), and
+    anything the runtime would reject reads ``invalid`` with its content kept off the line."""
+    env = {} if raw is None else {_MODE: raw}
+    log_model_chains_at_boot(env=env)
+    assert boot_log == [("INFO", _line(0, mode=shown))]
 
 
 def test_a_report_that_fails_logs_one_warning_and_never_raises(

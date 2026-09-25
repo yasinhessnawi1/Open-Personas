@@ -53,15 +53,18 @@ from persona.logging import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["resolve_openrouter_subscription"]
+__all__ = ["SUBSCRIPTION_MODES", "SUBSCRIPTION_MODE_ENV", "resolve_openrouter_subscription"]
 
 _LOG = get_logger("runtime.openrouter_subscription")
 
 _API_KEY_ENV = "PERSONA_OPENROUTER_API_KEY"
 _BASE_URL_ENV = "PERSONA_OPENROUTER_BASE_URL"
-_MODE_ENV = "PERSONA_OPENROUTER_SUBSCRIPTION_MODE"
+#: The operator override for the subscription mode. Public since R9-213 part 2: the api and
+#: voice must be handed the same value, so the deploy and the boot line name it too.
+SUBSCRIPTION_MODE_ENV = "PERSONA_OPENROUTER_SUBSCRIPTION_MODE"
 
-_FORCED_MODES = frozenset({"free", "paid"})
+#: The values the override accepts (after strip and lower-casing, as read below).
+SUBSCRIPTION_MODES: frozenset[str] = frozenset({"free", "paid"})
 
 
 def resolve_openrouter_subscription(
@@ -120,7 +123,7 @@ def resolve_openrouter_subscription(
     if not api_key:
         return None
 
-    forced = _resolve_forced_mode(snapshot.get(_MODE_ENV), checked_at=checked_at)
+    forced = _resolve_forced_mode(snapshot.get(SUBSCRIPTION_MODE_ENV), checked_at=checked_at)
     if forced is not None:
         return forced
 
@@ -141,16 +144,16 @@ def _resolve_forced_mode(
     mode = raw_mode.strip().lower()
     if not mode:
         return None
-    if mode not in _FORCED_MODES:
+    if mode not in SUBSCRIPTION_MODES:
         raise ValueError(
-            f"{_MODE_ENV} must be 'free' or 'paid' (case-insensitive); got {raw_mode!r}"
+            f"{SUBSCRIPTION_MODE_ENV} must be 'free' or 'paid' (case-insensitive); got {raw_mode!r}"
         )
     _LOG.info(
         "openrouter subscription mode forced via env; skipping probe mode={mode}",
         mode=mode,
     )
     return OpenRouterSubscriptionState(
-        mode=mode,  # type: ignore[arg-type]  # narrowed to the Literal by _FORCED_MODES
+        mode=mode,  # type: ignore[arg-type]  # narrowed to the Literal by SUBSCRIPTION_MODES
         is_free_tier=mode == "free",
         limit_remaining=None,
         last_checked_at=checked_at,
