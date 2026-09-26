@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 
-from persona.errors import SandboxViolationError
+from persona.errors import SandboxViolationError, WorkspaceLinkRefusedError
 from persona.logging import get_logger
 from persona.schema.tools import ToolResult
 from persona.tools._sandbox import (
@@ -84,9 +84,10 @@ def make_file_read_tool(*, sandbox_root: SandboxRootProvider) -> AsyncTool:
         # O_NOFOLLOW closes the TOCTOU window between resolver's symlink check
         # and this open() — a swap of the final path component to a symlink
         # between the two operations is rejected (security review T09). Via the
-        # shared sandbox opener (R2-D-4).
+        # shared sandbox opener (R2-D-4). On Windows the opener refuses a link in
+        # ANY component below ``root`` (Spec WIN, T1), so the root is passed.
         try:
-            fd = open_nofollow(resolved, os.O_RDONLY)
+            fd = open_nofollow(resolved, os.O_RDONLY, root=root)
         except FileNotFoundError:
             return ToolResult(
                 tool_name="file_read",
@@ -97,6 +98,15 @@ def make_file_read_tool(*, sandbox_root: SandboxRootProvider) -> AsyncTool:
             return ToolResult(
                 tool_name="file_read",
                 content=f"IsADirectoryError: {path} is a directory, not a file",
+                is_error=True,
+            )
+        except WorkspaceLinkRefusedError as e:
+            # Windows: a link or shortcut in the path, or a hard-linked file (Spec WIN,
+            # T1). Its message is human and carries no host path; the context (which
+            # does) stays out of the model's view.
+            return ToolResult(
+                tool_name="file_read",
+                content=f"WorkspaceLinkRefusedError: {e.message}",
                 is_error=True,
             )
         except PermissionError as e:

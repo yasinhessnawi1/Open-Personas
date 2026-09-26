@@ -22,11 +22,12 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from persona.errors import SandboxViolationError
+from persona.errors import SandboxViolationError, WorkspaceLinkRefusedError
 from persona.logging import get_logger
 from persona.schema.tools import PersistedArtifact, ToolResult
 from persona.tools._sandbox import (
     SandboxRootProvider,
+    make_dirs_nofollow,
     open_nofollow,
     resolve_request_sandbox_root,
     resolve_sandbox_path,
@@ -106,8 +107,18 @@ def make_file_write_tool(
 
         # Create parent directories inside the sandbox (still within root after
         # resolver verified). mkdir is idempotent; we do not error on existing dirs.
+        # On Windows each folder is created with every link below ``root`` refused
+        # (Spec WIN, T1); on POSIX this is the same ``mkdir(parents=True)`` as before.
         try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
+            make_dirs_nofollow(resolved.parent, root=root)
+        except WorkspaceLinkRefusedError as e:
+            # Windows: a link or shortcut in the path, or a hard-linked file (Spec WIN,
+            # T1). Its message is human and carries no host path.
+            return ToolResult(
+                tool_name="file_write",
+                content=f"WorkspaceLinkRefusedError: {e.message}",
+                is_error=True,
+            )
         except OSError as e:
             return ToolResult(
                 tool_name="file_write",
@@ -141,6 +152,15 @@ def make_file_write_tool(
                 resolved,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
                 0o600,
+                root=root,
+            )
+        except WorkspaceLinkRefusedError as e:
+            # Windows: a link or shortcut in the path, or a hard-linked file (Spec WIN,
+            # T1). Its message is human and carries no host path.
+            return ToolResult(
+                tool_name="file_write",
+                content=f"WorkspaceLinkRefusedError: {e.message}",
+                is_error=True,
             )
         except PermissionError as e:
             return ToolResult(

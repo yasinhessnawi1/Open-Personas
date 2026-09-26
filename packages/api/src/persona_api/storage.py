@@ -36,7 +36,10 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
 from persona.tools._sandbox import (
+    delete_regular_file_nofollow,
     is_regular_file_nofollow,
+    iter_regular_files_nofollow,
+    make_dirs_nofollow,
     open_nofollow,
     read_nofollow_bytes,
     resolve_sandbox_path,
@@ -134,47 +137,40 @@ class LocalFileStorage:
     def put(self, key: str, data: bytes, *, content_type: str | None = None) -> str:
         _ = content_type  # POSIX FS carries type via the extension; unused here.
         resolved = self._resolve(key)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        write_nofollow_bytes(resolved, data)
+        make_dirs_nofollow(resolved.parent, root=self._root)
+        write_nofollow_bytes(resolved, data, root=self._root)
         return key
 
     def get(self, key: str) -> bytes:
-        return read_nofollow_bytes(self._resolve(key))
+        return read_nofollow_bytes(self._resolve(key), root=self._root)
 
     def open_stream(self, key: str) -> Iterator[bytes]:
-        return _iter_file_nofollow(self._resolve(key))
+        return _iter_file_nofollow(self._resolve(key), self._root)
 
     def exists(self, key: str) -> bool:
-        return is_regular_file_nofollow(self._resolve(key))
+        return is_regular_file_nofollow(self._resolve(key), root=self._root)
 
     def delete(self, key: str) -> bool:
-        resolved = self._resolve(key)
-        if not is_regular_file_nofollow(resolved):
-            return False
-        resolved.unlink()
-        return True
+        return delete_regular_file_nofollow(self._resolve(key), root=self._root)
 
     def list(self, prefix: str) -> Iterator[StorageObject]:
         # Behavior-identical to the pre-R5 artifact walk: ``rglob('*')`` +
         # ``is_file()`` (the endpoint's exact check), yielding store-relative,
         # forward-slashed keys. A missing prefix dir yields nothing.
+        # On Windows the walk never enters or reports a link (Spec WIN, T1).
         base = self._resolve(prefix)
-        if not base.is_dir():
-            return
         stem = prefix.rstrip("/")
-        for path in base.rglob("*"):
-            if not path.is_file():
-                continue
+        for path, size in iter_regular_files_nofollow(base):
             # Key = ``{prefix}/{path-relative-to-base}`` — computed against ``base``
             # (the resolved prefix dir) so the store-root symlink canonicalisation
             # (/tmp → /private/tmp) never breaks ``relative_to``.
             key = f"{stem}/{path.relative_to(base).as_posix()}"
-            yield StorageObject(key=key, size=path.stat().st_size)
+            yield StorageObject(key=key, size=size)
 
 
-def _iter_file_nofollow(path: Path) -> Iterator[bytes]:
+def _iter_file_nofollow(path: Path, root: Path) -> Iterator[bytes]:
     """Stream a file's bytes in chunks via the O_NOFOLLOW opener (serve path)."""
-    fd = open_nofollow(path, os.O_RDONLY)
+    fd = open_nofollow(path, os.O_RDONLY, root=root)
     try:
         while True:
             chunk = os.read(fd, _STREAM_CHUNK)

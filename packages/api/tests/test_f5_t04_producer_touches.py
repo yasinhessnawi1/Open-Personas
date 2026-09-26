@@ -66,7 +66,7 @@ def test_image_upload_writes_f5_sidecar_with_correct_metadata(
     sidecar = bytes_path.parent / f"{bytes_path.name}{SIDECAR_SUFFIX}"
     assert sidecar.is_file()
 
-    meta = read_artifact_sidecar(bytes_path)
+    meta = read_artifact_sidecar(bytes_path, root=workspace_root)
     assert meta is not None
     assert meta.source == "upload"
     assert meta.type == "image"
@@ -88,7 +88,7 @@ def test_image_upload_sidecar_handles_none_conversation_id_and_filename(
         declared_media_type="image/png",
     )
     bytes_path = workspace_root / "u1" / "astrid" / ref.workspace_path
-    meta = read_artifact_sidecar(bytes_path)
+    meta = read_artifact_sidecar(bytes_path, root=workspace_root)
     assert meta is not None
     assert meta.conversation_id is None
     assert meta.original_name is None
@@ -167,6 +167,6 @@ def test_image_upload_sidecar_idempotent_on_re_upload(
     assert ref1.workspace_path == ref2.workspace_path
 
     bytes_path = workspace_root / "u1" / "astrid" / ref2.workspace_path
-    meta = read_artifact_sidecar(bytes_path)
+    meta = read_artifact_sidecar(bytes_path, root=workspace_root)
     assert meta is not None
     assert meta.original_name == "second.png"  # last-writer-wins

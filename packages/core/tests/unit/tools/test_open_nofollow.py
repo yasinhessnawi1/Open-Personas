@@ -15,6 +15,7 @@ follow the swapped symlink and read/clobber an out-of-sandbox target; the
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,9 +30,17 @@ from persona.tools._sandbox import (
 def test_reads_a_regular_file(tmp_path: Path) -> None:
     target = tmp_path / "ok.txt"
     target.write_bytes(b"hello")
-    assert read_nofollow_bytes(target) == b"hello"
+    assert read_nofollow_bytes(target, root=tmp_path) == b"hello"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows reports only a read-only bit in st_mode, so 0o600 cannot be read back; "
+        "the owner-only property is proven on Windows by test_winopen.py::"
+        "test_a_created_file_is_readable_only_by_its_user_and_the_system"
+    ),
+)
 def test_writes_a_regular_file(tmp_path: Path) -> None:
     target = tmp_path / "out.bin"
     write_nofollow_bytes(target, b"data")
@@ -56,7 +65,7 @@ def test_read_rejects_a_symlink_swapped_in_after_resolve(tmp_path: Path) -> None
     assert Path(victim).read_bytes() == b"TOP SECRET - outside the sandbox"
     # … but the O_NOFOLLOW opener refuses (ELOOP on the trailing symlink).
     with pytest.raises(OSError):  # noqa: PT011 — ELOOP is an OSError subclass family
-        read_nofollow_bytes(victim)
+        read_nofollow_bytes(victim, root=sandbox)
 
 
 def test_write_rejects_a_symlink_swapped_in_after_resolve(tmp_path: Path) -> None:
@@ -70,7 +79,7 @@ def test_write_rejects_a_symlink_swapped_in_after_resolve(tmp_path: Path) -> Non
     victim.symlink_to(outside)
 
     with pytest.raises(OSError):  # noqa: PT011
-        write_nofollow_bytes(victim, b"CLOBBERED")
+        write_nofollow_bytes(victim, b"CLOBBERED", root=sandbox)
     # The out-of-sandbox target is untouched.
     assert outside.read_bytes() == b"original"
 
@@ -78,7 +87,7 @@ def test_write_rejects_a_symlink_swapped_in_after_resolve(tmp_path: Path) -> Non
 def test_open_nofollow_returns_an_fd_for_a_regular_file(tmp_path: Path) -> None:
     target = tmp_path / "fd.txt"
     target.write_bytes(b"x")
-    fd = open_nofollow(target, os.O_RDONLY)
+    fd = open_nofollow(target, os.O_RDONLY, root=tmp_path)
     try:
         assert os.read(fd, 1) == b"x"
     finally:
@@ -88,7 +97,7 @@ def test_open_nofollow_returns_an_fd_for_a_regular_file(tmp_path: Path) -> None:
 def test_is_regular_file_nofollow_true_for_a_regular_file(tmp_path: Path) -> None:
     target = tmp_path / "real.txt"
     target.write_bytes(b"x")
-    assert is_regular_file_nofollow(target) is True
+    assert is_regular_file_nofollow(target, root=tmp_path) is True
 
 
 def test_is_regular_file_nofollow_false_for_a_symlink_to_a_regular_file(tmp_path: Path) -> None:
@@ -99,12 +108,12 @@ def test_is_regular_file_nofollow_false_for_a_symlink_to_a_regular_file(tmp_path
     link = tmp_path / "link.txt"
     link.symlink_to(outside)
     assert link.is_file() is True  # the stdlib check FOLLOWS the symlink …
-    assert is_regular_file_nofollow(link) is False  # … the no-follow check does not.
+    assert is_regular_file_nofollow(link, root=tmp_path) is False  # … the no-follow check does not.
 
 
 def test_is_regular_file_nofollow_false_for_missing_path(tmp_path: Path) -> None:
-    assert is_regular_file_nofollow(tmp_path / "nope.txt") is False
+    assert is_regular_file_nofollow(tmp_path / "nope.txt", root=tmp_path) is False
 
 
 def test_is_regular_file_nofollow_false_for_a_directory(tmp_path: Path) -> None:
-    assert is_regular_file_nofollow(tmp_path) is False
+    assert is_regular_file_nofollow(tmp_path, root=tmp_path.parent) is False

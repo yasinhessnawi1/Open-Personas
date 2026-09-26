@@ -32,6 +32,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from persona.tools._sandbox import (
+    delete_regular_file_nofollow,
+    is_regular_file_nofollow,
+    read_nofollow_bytes,
+    write_nofollow_bytes,
+)
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 __all__ = [
@@ -106,7 +112,9 @@ def sidecar_path_for(bytes_path: Path) -> Path:
     return bytes_path.with_name(bytes_path.name + SIDECAR_SUFFIX)
 
 
-def write_artifact_sidecar(bytes_path: Path, meta: WorkspaceArtifactMetadata) -> None:
+def write_artifact_sidecar(
+    bytes_path: Path, meta: WorkspaceArtifactMetadata, *, root: Path
+) -> None:
     """Write a sidecar JSON next to ``bytes_path``.
 
     Idempotent overwrite: re-uploading or re-generating the same path writes
@@ -119,10 +127,12 @@ def write_artifact_sidecar(bytes_path: Path, meta: WorkspaceArtifactMetadata) ->
     """
     sidecar = sidecar_path_for(bytes_path)
     payload = meta.model_dump_json()
-    sidecar.write_text(payload, encoding="utf-8")
+    # Spec WIN T1.5/T1.6: never through a link planted at the sidecar's name, and always
+    # under the workspace root (required: no weaker fallback for a forgotten argument).
+    write_nofollow_bytes(sidecar, payload.encode("utf-8"), root=root)
 
 
-def read_artifact_sidecar(bytes_path: Path) -> WorkspaceArtifactMetadata | None:
+def read_artifact_sidecar(bytes_path: Path, *, root: Path) -> WorkspaceArtifactMetadata | None:
     """Read a sidecar for ``bytes_path``; return ``None`` if missing.
 
     Returns ``None`` for missing sidecars (artifact predates sidecar
@@ -131,13 +141,13 @@ def read_artifact_sidecar(bytes_path: Path) -> WorkspaceArtifactMetadata | None:
     rather than silently dropping malformed metadata.
     """
     sidecar = sidecar_path_for(bytes_path)
-    if not sidecar.is_file():
+    if not is_regular_file_nofollow(sidecar, root=root):
         return None
-    raw = sidecar.read_text(encoding="utf-8")
-    return WorkspaceArtifactMetadata.model_validate_json(raw)
+    raw = read_nofollow_bytes(sidecar, root=root)
+    return WorkspaceArtifactMetadata.model_validate_json(raw.decode("utf-8"))
 
 
-def delete_artifact_sidecar(bytes_path: Path) -> bool:
+def delete_artifact_sidecar(bytes_path: Path, *, root: Path) -> bool:
     """Delete the sidecar for ``bytes_path``; return True if it existed.
 
     Used by the F5 artifact-delete endpoint (T15) — the atomicity invariant
@@ -149,10 +159,7 @@ def delete_artifact_sidecar(bytes_path: Path) -> bool:
     ``WorkspaceConsistencyError(context={"phase": "delete_sidecar"})``.
     """
     sidecar = sidecar_path_for(bytes_path)
-    if not sidecar.is_file():
-        return False
-    sidecar.unlink()
-    return True
+    return delete_regular_file_nofollow(sidecar, root=root)
 
 
 def utcnow() -> datetime:

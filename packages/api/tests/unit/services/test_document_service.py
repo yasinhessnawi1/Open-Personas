@@ -187,7 +187,7 @@ class TestUploadSmallDoc:
             filename="memo.txt",
             document_store=document_store,
         )
-        meta = read_artifact_sidecar(sandbox_root / ref.workspace_path)
+        meta = read_artifact_sidecar(sandbox_root / ref.workspace_path, root=sandbox_root)
         assert meta is not None
         assert meta.source == "upload"
         assert meta.conversation_id == "conv1"

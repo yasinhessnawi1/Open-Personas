@@ -350,7 +350,12 @@ class OllamaBackend:
                     text_parts.append(block.text)
                 elif isinstance(block, ImageContent):
                     assert self._workspace_root is not None  # narrowed above
-                    image_bytes = (self._workspace_root / block.workspace_path).read_bytes()
+                    # R9-251 / Spec WIN T1.5: resolved and read without following a link.
+                    from persona.tools._sandbox import read_file_under_root  # noqa: PLC0415
+
+                    image_bytes = read_file_under_root(
+                        block.workspace_path, root=self._workspace_root
+                    )
                     images_b64.append(base64.standard_b64encode(image_bytes).decode("ascii"))
             out: dict[str, Any] = {
                 "role": msg.role,

@@ -101,8 +101,12 @@ class _FakeCodeSandbox:
     async def aclose(self) -> None:
         pass
 
-    async def copy_produced_file_to(self, session_id: str, ref: str, target_path: Path) -> None:
-        self.copy_calls.append({"session_id": session_id, "ref": ref, "target_path": target_path})
+    async def copy_produced_file_to(
+        self, session_id: str, ref: str, target_path: Path, *, root: Path | None = None
+    ) -> None:
+        self.copy_calls.append(
+            {"session_id": session_id, "ref": ref, "target_path": target_path, "root": root}
+        )
         if self._raise_on_copy is not None:
             raise self._raise_on_copy
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,7 +175,7 @@ async def test_success_persists_bytes_writes_both_sidecars(tmp_path: Path) -> No
 
     # F5 .f5.json — UNCHANGED contract, new location; the shape the chat Files
     # viewer (GET /v1/personas/{id}/artifacts, useConversationArtifacts) reads.
-    meta = read_artifact_sidecar(target)
+    meta = read_artifact_sidecar(target, root=tmp_path)
     assert meta is not None
     assert meta.source == "generated"
     assert meta.type == "doc"
@@ -224,7 +228,7 @@ async def test_producing_spec_and_sidecar_type_per_format(
         / "documents"
         / persisted_name
     )
-    meta = read_artifact_sidecar(target)
+    meta = read_artifact_sidecar(target, root=tmp_path)
     assert meta is not None
     assert meta.producing_spec == expected_producing_spec
     assert meta.type == expected_type

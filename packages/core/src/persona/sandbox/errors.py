@@ -26,6 +26,7 @@ from persona.errors import PersonaError
 __all__ = [
     "CodeSandboxError",
     "ExecutionTimeoutError",
+    "ProducedFileRefusedError",
     "ProducedFileSizeError",
     "ResourceLimitError",
     "SandboxError",
@@ -121,6 +122,19 @@ class ProducedFileSizeError(SandboxError):
     - ``size_bytes`` — actual file size.
     - ``cap_bytes`` — the configured cap (default 100 MB).
     - ``session_id`` — sandbox session.
+    """
+
+
+class ProducedFileRefusedError(SandboxError):
+    """A produced file's name or destination is not allowed in the workspace (Spec WIN, T1.5).
+
+    Raised by a ``produced_file_persister`` when the file's workspace destination is
+    refused: the name breaks a path rule (on Windows a reserved device name or a
+    trailing dot, for example) or a link sits in the way. The ``code_execution`` tool
+    catches it PER FILE: that file is skipped and the model is told why, in a human
+    sentence, while every other produced file is still saved. It never ends the turn.
+
+    Conventional ``context`` keys: ``ref`` (the produced file) and ``reason``.
     """
 
 

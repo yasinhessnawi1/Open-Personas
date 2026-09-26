@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -430,10 +431,15 @@ class TestToolAuditLoggerProtocols:
 
 class TestOSCapabilities:
     def test_o_nofollow_available(self) -> None:
-        # Sanity: O_NOFOLLOW must be available for the security guarantee to hold.
-        # Linux + macOS both provide it; Windows does not (the file tools then
-        # rely on resolver-only protection, which is still strong).
-        assert hasattr(os, "O_NOFOLLOW")
+        # Sanity: a no-follow opener must exist for the security guarantee to hold.
+        # Linux and macOS provide O_NOFOLLOW. Windows has none, so its opener is the
+        # Windows-only persona.tools._winopen (Spec WIN, T1), which must import there.
+        if sys.platform == "win32":
+            from persona.tools import _winopen
+
+            assert callable(_winopen.open_fd)
+        else:
+            assert hasattr(os, "O_NOFOLLOW")
 
 
 # Section: concurrent audit log writes

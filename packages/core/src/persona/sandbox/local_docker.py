@@ -112,9 +112,12 @@ from persona.sandbox.result import (
     ExecutionOutcome,
     ExecutionResult,
     NetworkPolicy,
+    RefusedFile,
     ResourceLimits,
     SandboxFile,
     guess_media_type,
+    produced_file_path_violation,
+    refused_file,
 )
 
 __all__ = ["LocalDockerSandbox"]
@@ -462,16 +465,20 @@ class LocalDockerSandbox:
         session_id: str,
         ref: str,
         target_path: Path,
+        *,
+        root: Path,
     ) -> None:
         """Copy a produced file from the session's host_out to a target path.
 
-        D-12-X-read-produced-file local impl: ``shutil.copyfile`` from
-        ``<host_out>/<ref>`` to ``target_path``. Direct disk-to-disk via
-        the OS — zero memory pressure regardless of file size, up to the
-        :data:`PRODUCED_FILE_CAP_BYTES` cap.
+        D-12-X-read-produced-file local impl: reads ``<host_out>/<ref>`` under the
+        :data:`PRODUCED_FILE_CAP_BYTES` cap, then writes it under ``root`` through
+        the no-follow helpers (Spec WIN, T1.5), so a link at the destination is
+        refused rather than followed out of the workspace.
         """
-        source = self._resolve_produced_source(session_id, ref)
-        await asyncio.to_thread(self._copy_produced_sync, source, target_path, session_id, ref)
+        host_out = self._resolve_produced_source(session_id, ref)
+        await asyncio.to_thread(
+            self._copy_produced_sync, host_out, target_path, session_id, ref, root
+        )
 
     async def read_produced_file_bytes(
         self,
@@ -483,11 +490,11 @@ class LocalDockerSandbox:
         D-12-X-read-produced-file local impl: a guarded
         ``source.read_bytes()`` after the size cap is checked.
         """
-        source = self._resolve_produced_source(session_id, ref)
-        return await asyncio.to_thread(self._read_produced_sync, source, session_id, ref)
+        host_out = self._resolve_produced_source(session_id, ref)
+        return await asyncio.to_thread(self._read_produced_sync, host_out, session_id, ref)
 
     def _resolve_produced_source(self, session_id: str, ref: str) -> Path:
-        """Resolve the host path of a produced file in the session's out-mount.
+        """The session's host ``out`` folder, where the produced file ``ref`` lives.
 
         Raises :class:`CodeSandboxError` if the session has no recorded
         workspace (was never created / already reaped).
@@ -499,66 +506,32 @@ class LocalDockerSandbox:
                 context={"reason": "no_session", "session_id": session_id, "ref": ref},
             )
         _host_in, host_out = self._session_workspaces[session_id]
-        return host_out / ref
+        return host_out
 
     @staticmethod
-    def _copy_produced_sync(source: Path, target_path: Path, session_id: str, ref: str) -> None:
-        """Sync copy with size-cap + missing-file guards. Called via ``to_thread``."""
-        from persona.sandbox.errors import ProducedFileSizeError  # noqa: PLC0415
-        from persona.sandbox.protocol import PRODUCED_FILE_CAP_BYTES  # noqa: PLC0415
+    def _copy_produced_sync(
+        host_out: Path, target_path: Path, session_id: str, ref: str, root: Path
+    ) -> None:
+        """Read ``ref`` from ``host_out`` without following a link, write it under ``root``."""
+        from persona.tools._sandbox import write_file_under_root  # noqa: PLC0415
 
-        if not source.is_file():
-            msg = f"produced file {ref!r} not found in session {session_id!r}"
-            raise CodeSandboxError(
-                msg,
-                context={"reason": "produced_file_missing", "session_id": session_id, "ref": ref},
-            )
-        size_bytes = source.stat().st_size
-        if size_bytes > PRODUCED_FILE_CAP_BYTES:
-            msg = (
-                f"produced file {ref!r} is {size_bytes} bytes, "
-                f"exceeds {PRODUCED_FILE_CAP_BYTES}-byte cap"
-            )
-            raise ProducedFileSizeError(
-                msg,
-                context={
-                    "ref": ref,
-                    "size_bytes": str(size_bytes),
-                    "cap_bytes": str(PRODUCED_FILE_CAP_BYTES),
-                    "session_id": session_id,
-                },
-            )
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target_path)
+        data = LocalDockerSandbox._read_produced_sync(host_out, session_id, ref)
+        write_file_under_root(target_path, data, root=root)
 
     @staticmethod
-    def _read_produced_sync(source: Path, session_id: str, ref: str) -> bytes:
-        """Sync read with size-cap + missing-file guards. Called via ``to_thread``."""
-        from persona.sandbox.errors import ProducedFileSizeError  # noqa: PLC0415
+    def _read_produced_sync(host_out: Path, session_id: str, ref: str) -> bytes:
+        """Read ``ref`` from ``host_out`` under the size cap, never through a link.
+
+        Spec WIN T1.6 (X-1): the container controls ``host_out``; a link anywhere in
+        ``ref`` (or a file with a second name) is refused with
+        :class:`ProducedFileRefusedError`, which the tool reports for this one file.
+        """
+        from persona.sandbox._produced_io import read_produced_file  # noqa: PLC0415
         from persona.sandbox.protocol import PRODUCED_FILE_CAP_BYTES  # noqa: PLC0415
 
-        if not source.is_file():
-            msg = f"produced file {ref!r} not found in session {session_id!r}"
-            raise CodeSandboxError(
-                msg,
-                context={"reason": "produced_file_missing", "session_id": session_id, "ref": ref},
-            )
-        size_bytes = source.stat().st_size
-        if size_bytes > PRODUCED_FILE_CAP_BYTES:
-            msg = (
-                f"produced file {ref!r} is {size_bytes} bytes, "
-                f"exceeds {PRODUCED_FILE_CAP_BYTES}-byte cap"
-            )
-            raise ProducedFileSizeError(
-                msg,
-                context={
-                    "ref": ref,
-                    "size_bytes": str(size_bytes),
-                    "cap_bytes": str(PRODUCED_FILE_CAP_BYTES),
-                    "session_id": session_id,
-                },
-            )
-        return source.read_bytes()
+        return read_produced_file(
+            host_out, ref, session_id=session_id, cap_bytes=PRODUCED_FILE_CAP_BYTES
+        )
 
     # -- Sync internals (called via asyncio.to_thread) ---------------------
 
@@ -845,7 +818,7 @@ class LocalDockerSandbox:
         duration_ms = (time.perf_counter() - started) * 1000.0
         stdout, stdout_truncated = self._capture_stdout(container, limits)
         stderr, stderr_truncated = self._capture_stderr(container, limits)
-        produced, files_truncated = self._discover_produced_files(host_out, limits)
+        produced, files_truncated, refused = self._discover_produced_files(host_out, limits)
 
         if oom_killed:
             outcome = "oom"
@@ -870,6 +843,7 @@ class LocalDockerSandbox:
             # but encodes "any captured output was truncated".
             truncated_stdout=stdout_truncated or stderr_truncated,
             truncated_files=files_truncated,
+            refused_files=refused,
         )
 
     @classmethod
@@ -935,31 +909,36 @@ class LocalDockerSandbox:
     @staticmethod
     def _discover_produced_files(
         host_out: Path, limits: ResourceLimits
-    ) -> tuple[tuple[SandboxFile, ...], bool]:
+    ) -> tuple[tuple[SandboxFile, ...], bool, tuple[RefusedFile, ...]]:
         """Snapshot-then-diff (D-12-10) — list files produced under the
         rw mount, applying the per-file size cap and the total-count cap.
 
-        Returns ``(files, was_truncated)``. ``was_truncated=True`` if
+        Returns ``(files, was_truncated, refused)``. ``was_truncated=True`` if
         EITHER cap fired (count > ``max_produced_files`` OR any single
-        file > ``max_produced_file_mb``)."""
-        if not host_out.exists():
-            return (), False
+        file > ``max_produced_file_mb``). ``refused`` holds files whose path is
+        not safe to bring into the workspace (Spec WIN, T1.5)."""
+        from persona.sandbox._produced_io import list_produced_files  # noqa: PLC0415
+
         per_file_cap_bytes = limits.max_produced_file_mb * 1024 * 1024
         produced: list[SandboxFile] = []
+        refused: list[RefusedFile] = []
         truncated = False
-        for path in sorted(host_out.rglob("*")):
-            if not path.is_file():
+        # Spec WIN T1.6 (X-1): the container controls this folder, links included, so
+        # the walk never follows or reports a link (a symlink to a host secret would
+        # otherwise be listed, then copied into the workspace).
+        for rel, size in list_produced_files(host_out):
+            violation = produced_file_path_violation(rel)
+            if violation is not None:
+                refused.append(refused_file(rel, violation))
                 continue
             if len(produced) >= limits.max_produced_files:
                 truncated = True
                 break
-            size = path.stat().st_size
             if size > per_file_cap_bytes:
                 # Surface the file's existence (the model wrote it) but
                 # mark the run as truncated so the model knows.
                 truncated = True
                 continue
-            rel = path.relative_to(host_out).as_posix()
             produced.append(
                 SandboxFile(
                     path=rel,
@@ -971,7 +950,7 @@ class LocalDockerSandbox:
                     media_type=guess_media_type(rel),
                 )
             )
-        return tuple(produced), truncated
+        return tuple(produced), truncated, tuple(refused)
 
     @staticmethod
     def _best_effort_remove(container: Container | None) -> None:
@@ -1096,7 +1075,7 @@ class LocalDockerSandbox:
         stdout, stdout_truncated = self._truncate_bytes(raw_stdout, limits.max_stdout_bytes)
         stderr, stderr_truncated = self._truncate_bytes(raw_stderr, limits.max_stdout_bytes)
         stderr = self._sanitise_stderr(stderr)
-        produced, files_truncated = self._discover_produced_files(host_out, limits)
+        produced, files_truncated, refused = self._discover_produced_files(host_out, limits)
 
         if exit_status == 0:
             outcome: str = "ok"
@@ -1114,6 +1093,7 @@ class LocalDockerSandbox:
             duration_ms=duration_ms,
             truncated_stdout=stdout_truncated or stderr_truncated,
             truncated_files=files_truncated,
+            refused_files=refused,
         )
 
     @staticmethod

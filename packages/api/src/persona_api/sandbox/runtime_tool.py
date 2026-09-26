@@ -28,13 +28,21 @@ still sees the successful execution).
 from __future__ import annotations
 
 import asyncio
+import errno
 from pathlib import Path  # noqa: TC003 — runtime use in workspace path resolution
 from typing import TYPE_CHECKING
 
+from persona.errors import SandboxViolationError
 from persona.logging import get_logger
+from persona.sandbox.errors import ProducedFileRefusedError
 from persona.sandbox.result import SandboxFile
 from persona.sandbox.tool import make_code_execution_tool
 from persona.tasks import SpendKind, report_leg_spend
+from persona.tools._sandbox import (
+    iter_regular_files_nofollow,
+    read_nofollow_bytes,
+    resolve_sandbox_path,
+)
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.sandbox.context import get_sandbox_request_context
@@ -228,15 +236,14 @@ def make_pool_code_execution_tool(
         persona_workspace = _resolve_persona_workspace()
         if persona_workspace is None:
             return files
+        # Spec WIN T1.5: these bytes are sent INTO the sandbox, so a link planted in
+        # intermediate/ must never be followed to an outside file. The listing skips
+        # links (Windows) and every read refuses one.
         intermediate_dir = persona_workspace / "intermediate"
-        if not intermediate_dir.is_dir():
-            return files
-        for path in sorted(intermediate_dir.rglob("*")):
-            if not path.is_file():
-                continue
+        for path, _size in sorted(iter_regular_files_nofollow(intermediate_dir)):
             rel = path.relative_to(persona_workspace).as_posix()
             try:
-                content = path.read_bytes()
+                content = read_nofollow_bytes(path, root=persona_workspace)
             except OSError as exc:
                 _logger.warning(
                     "intermediate file read failed; skipping",
@@ -322,10 +329,38 @@ def make_pool_code_execution_tool(
         if persona_workspace is None:
             return None
         if ref.startswith("charts/") or ref.startswith("intermediate/"):
-            target = persona_workspace / ref
+            relative = ref
         else:
-            target = persona_workspace / "uploads" / ref
-        await pool.sandbox.copy_produced_file_to(session_id, ref, target)
+            relative = f"uploads/{ref}"
+        # Spec WIN T1.5: the name comes from code the model wrote, so the destination
+        # is resolved like any other workspace path (no escape, no Windows path
+        # shapes) and written through the no-follow helpers under the workspace
+        # root (no link followed). A refusal skips THIS file with a human reason.
+        try:
+            target = resolve_sandbox_path(persona_workspace, relative)
+        except SandboxViolationError as exc:
+            raise ProducedFileRefusedError(
+                "produced file refused",
+                context={
+                    "ref": ref,
+                    "reason": "its name is not allowed as a workspace path "
+                    f"({exc.context.get('reason', 'invalid')})",
+                },
+            ) from exc
+        try:
+            await pool.sandbox.copy_produced_file_to(
+                session_id, ref, target, root=persona_workspace
+            )
+        except OSError as exc:
+            if exc.errno != errno.ELOOP:
+                raise
+            raise ProducedFileRefusedError(
+                "produced file refused",
+                context={
+                    "ref": ref,
+                    "reason": "a link or shortcut sits where it would be saved",
+                },
+            ) from exc
 
         # F5 T06 — D-F5-X-artifact-metadata-convention: write a sidecar so
         # the F5 artifact-list endpoint can filter/sort produced files.
@@ -357,7 +392,8 @@ def make_pool_code_execution_tool(
             ctx = get_sandbox_request_context()
             write_artifact_sidecar(
                 target,
-                WorkspaceArtifactMetadata(
+                root=persona_workspace,
+                meta=WorkspaceArtifactMetadata(
                     source="generated",
                     type=artifact_type,  # type: ignore[arg-type]
                     producing_spec=producing_spec,  # type: ignore[arg-type]
@@ -374,7 +410,7 @@ def make_pool_code_execution_tool(
 
         # Spec 28 — surface the persisted file as a ToolResult.artifact. The ref
         # is workspace-relative (the GET /uploads/{ref:path} route serves it).
-        return target.relative_to(persona_workspace).as_posix()
+        return target.relative_to(persona_workspace.resolve()).as_posix()
 
     return make_code_execution_tool(
         pool.sandbox,

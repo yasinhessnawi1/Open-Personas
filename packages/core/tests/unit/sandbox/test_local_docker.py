@@ -804,7 +804,7 @@ class TestProducedFileCaps:
         (out / "a.csv").write_bytes(b"x,y\n1,2\n")
         (out / "b.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
 
-        produced, truncated = sandbox._discover_produced_files(out, ResourceLimits())
+        produced, truncated, _refused = sandbox._discover_produced_files(out, ResourceLimits())
 
         assert truncated is False
         assert len(produced) == 2
@@ -822,7 +822,7 @@ class TestProducedFileCaps:
         for i in range(30):
             (out / f"f{i:02d}.txt").write_bytes(b"x")
 
-        produced, truncated = LocalDockerSandbox._discover_produced_files(
+        produced, truncated, _refused = LocalDockerSandbox._discover_produced_files(
             out, ResourceLimits(max_produced_files=5)
         )
 
@@ -839,7 +839,7 @@ class TestProducedFileCaps:
         # 2 MiB file; cap is 1 MiB.
         (out / "huge.bin").write_bytes(b"\x00" * (2 * 1024 * 1024))
 
-        produced, truncated = LocalDockerSandbox._discover_produced_files(
+        produced, truncated, _refused = LocalDockerSandbox._discover_produced_files(
             out, ResourceLimits(max_produced_file_mb=1)
         )
 
@@ -851,7 +851,9 @@ class TestProducedFileCaps:
     def test_empty_workspace_no_files_no_truncation(self, tmp_path: Path) -> None:
         out = tmp_path / "out"
         out.mkdir()
-        produced, truncated = LocalDockerSandbox._discover_produced_files(out, ResourceLimits())
+        produced, truncated, _refused = LocalDockerSandbox._discover_produced_files(
+            out, ResourceLimits()
+        )
         assert produced == ()
         assert truncated is False
 

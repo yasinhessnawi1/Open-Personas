@@ -51,10 +51,14 @@ from persona.sandbox.result import (
     ExecutionOutcome,
     ExecutionResult,
     NetworkPolicy,
+    RefusedFile,
     ResourceLimits,
     SandboxFile,
     guess_media_type,
+    produced_file_path_violation,
+    refused_file,
 )
+from persona.tools._sandbox import write_file_under_root
 
 from persona_api.sandbox.config import SandboxWallClockConfig
 
@@ -398,15 +402,19 @@ class HostedSandbox:
         session_id: str,
         ref: str,
         target_path: Path,
+        *,
+        root: Path,
     ) -> None:
         """Copy a produced file from the E2B sandbox to a host target path.
 
-        D-12-X-read-produced-file hosted impl: ``sandbox.files.read`` then
-        ``target_path.write_bytes`` — memory == file size (the E2B SDK
-        doesn't stream), bounded by :data:`PRODUCED_FILE_CAP_BYTES`.
+        D-12-X-read-produced-file hosted impl: ``sandbox.files.read`` then a write
+        under ``root`` through the no-follow helpers (Spec WIN, T1.5): memory ==
+        file size (the E2B SDK doesn't stream), bounded by
+        :data:`PRODUCED_FILE_CAP_BYTES`. ``target_path`` must already be resolved
+        under ``root``; a link at the destination is refused, never followed.
         """
         data = await self.read_produced_file_bytes(session_id, ref)
-        await asyncio.to_thread(self._write_bytes, target_path, data)
+        await asyncio.to_thread(write_file_under_root, target_path, data, root=root)
 
     async def read_produced_file_bytes(
         self,
@@ -480,12 +488,6 @@ class HostedSandbox:
             # E2B's typed overloads return str by default; format="bytes" must yield bytes.
             return bytes(result)
         return result
-
-    @staticmethod
-    def _write_bytes(target_path: Path, data: bytes) -> None:
-        """Sync write with parent-dir mkdir. Called via to_thread."""
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(data)
 
     # -- Sync internals (called via asyncio.to_thread) ---------------------
 
@@ -703,7 +705,7 @@ class HostedSandbox:
         # erroring still surfaces it (mirrors the produced_file_persister which
         # fires regardless of outcome). Best-effort: a listing failure logs and
         # yields no produced files rather than masking the run's real result.
-        produced, files_truncated = self._discover_produced_files(sandbox, limits)
+        produced, files_truncated, refused = self._discover_produced_files(sandbox, limits)
 
         return ExecutionResult(
             stdout=stdout,
@@ -713,12 +715,13 @@ class HostedSandbox:
             produced_files=produced,
             duration_ms=duration_ms,
             truncated_files=files_truncated,
+            refused_files=refused,
         )
 
     @classmethod
     def _discover_produced_files(
         cls, sandbox: E2BSandbox, limits: ResourceLimits
-    ) -> tuple[tuple[SandboxFile, ...], bool]:
+    ) -> tuple[tuple[SandboxFile, ...], bool, tuple[RefusedFile, ...]]:
         """List + read files produced under ``/workspace/out`` on the E2B sandbox.
 
         Hosted analogue of :meth:`LocalDockerSandbox._discover_produced_files`.
@@ -738,9 +741,13 @@ class HostedSandbox:
         stops enumeration. ``media_type`` is inferred from the extension so a
         produced PNG surfaces as ``image/png`` and renders inline.
 
-        Returns ``(files, was_truncated)``; ``was_truncated`` is ``True`` when
-        either cap fired. A missing out-dir or any SDK listing error yields
-        ``((), False)`` — discovery never converts a successful run into a
+        Returns ``(files, was_truncated, refused)``; ``was_truncated`` is ``True``
+        when either cap fired. ``refused`` holds files whose relative path is not
+        safe to bring into the workspace (Spec WIN, T1.5): code in the sandbox can
+        create any Linux name, and a backslash, a colon, a leading ``/`` or a
+        ``..`` becomes a separator, a drive, an alternate data stream or an escape
+        once joined onto a host path. A missing out-dir or any SDK listing error
+        yields ``((), False, ())``; discovery never converts a successful run into a
         failure.
         """
         try:
@@ -751,11 +758,12 @@ class HostedSandbox:
                 "produced-file listing failed (no out-dir / SDK error)",
                 exc_type=type(exc).__name__,
             )
-            return (), False
+            return (), False, ()
 
         per_file_cap_bytes = limits.max_produced_file_mb * 1024 * 1024
         prefix = f"{_HOSTED_WORKSPACE_OUT}/"
         produced: list[SandboxFile] = []
+        refused: list[RefusedFile] = []
         truncated = False
         # Sort by absolute path for a deterministic, sortable order (parity with
         # the local path's ``sorted(host_out.rglob("*"))``).
@@ -766,6 +774,10 @@ class HostedSandbox:
             if not abs_path.startswith(prefix):
                 # Defensive: the SDK should only return entries under the listed
                 # dir, but never surface a path outside the documented out-dir.
+                continue
+            violation = produced_file_path_violation(abs_path[len(prefix) :])
+            if violation is not None:
+                refused.append(refused_file(abs_path[len(prefix) :], violation))
                 continue
             if len(produced) >= limits.max_produced_files:
                 truncated = True
@@ -784,7 +796,7 @@ class HostedSandbox:
                     media_type=guess_media_type(rel),
                 )
             )
-        return tuple(produced), truncated
+        return tuple(produced), truncated, tuple(refused)
 
     @staticmethod
     def _entry_is_file(entry: E2BEntryInfo) -> bool:

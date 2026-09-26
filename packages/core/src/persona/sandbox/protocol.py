@@ -222,6 +222,8 @@ class CodeSandbox(Protocol):
         session_id: str,
         ref: str,
         target_path: Path,
+        *,
+        root: Path,
     ) -> None:
         """Copy a produced file from the sandbox session to a host path
         (D-12-X-read-produced-file).
@@ -235,12 +237,16 @@ class CodeSandbox(Protocol):
 
         Two-tier production-shaped contract:
 
-        - **Local impl** uses ``shutil.copyfile(source, target_path)``
-          — direct disk-to-disk via the OS, zero memory pressure regardless
-          of file size. The source lives at
+        - **Local impl** reads the source under the cap from
           ``<sandbox_workspace_root>/session-<safe_id>/out/<ref>``.
-        - **Hosted impl** (E2B) reads ``await sandbox.files.read(...)``
-          then writes the bytes — memory == file size (SDK doesn't stream).
+        - **Hosted impl** (E2B) reads ``await sandbox.files.read(...)``.
+
+        Both then write through the workspace's no-follow helpers under ``root``
+        (Spec WIN, T1.5): parent folders with ``make_dirs_nofollow`` and the bytes
+        with ``write_nofollow_bytes``, so a link in the destination is refused (on
+        Windows any link below ``root``) instead of being followed out of the
+        workspace. ``target_path`` must be the result of ``resolve_sandbox_path``
+        under ``root``; a destination outside ``root`` is refused.
 
         **Runtime always uses this** for persistence;
         :meth:`read_produced_file_bytes` is for audit/debug small-file cases.
@@ -256,8 +262,9 @@ class CodeSandbox(Protocol):
                 tenant-isolated keying from kickoff trip-up #6).
             ref: Workspace-relative path returned in
                 ``ExecutionResult.produced_files[i].path``.
-            target_path: Host filesystem destination. Caller ensures the
-                parent directory exists.
+            target_path: Host destination, already resolved under ``root``
+                with ``resolve_sandbox_path``. Missing parent folders are created.
+            root: The workspace root ``target_path`` was resolved under.
 
         Raises:
             persona.sandbox.errors.ProducedFileSizeError: ``ref`` exceeds
@@ -266,6 +273,9 @@ class CodeSandbox(Protocol):
                 failure (file missing from sandbox; substrate I/O error).
             persona.sandbox.errors.SandboxUnavailableError: Backend
                 substrate unreachable.
+            OSError: the destination is refused (a link; on Windows
+                :class:`~persona.errors.WorkspaceLinkRefusedError`).
+            ValueError: ``target_path`` is not inside ``root``.
         """
         ...
 

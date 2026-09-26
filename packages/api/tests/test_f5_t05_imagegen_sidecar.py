@@ -83,7 +83,7 @@ def test_imagegen_persist_writes_f5_sidecar(tmp_path: Path, png_bytes: bytes) ->
     sidecar = bytes_path.parent / f"{bytes_path.name}{SIDECAR_SUFFIX}"
     assert sidecar.is_file()
 
-    meta = read_artifact_sidecar(bytes_path)
+    meta = read_artifact_sidecar(bytes_path, root=tmp_path)
     assert meta is not None
     assert meta.source == "generated"
     assert meta.type == "image"
@@ -103,7 +103,7 @@ def test_imagegen_persist_with_conversation_id(tmp_path: Path, png_bytes: bytes)
     )
 
     bytes_path = tmp_path / "u1" / "astrid" / relative
-    meta = read_artifact_sidecar(bytes_path)
+    meta = read_artifact_sidecar(bytes_path, root=tmp_path)
     assert meta is not None
     assert meta.conversation_id == "conv-42"
 

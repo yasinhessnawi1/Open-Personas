@@ -1144,7 +1144,11 @@ def _resolve_image_bytes(block: ImageContent, workspace_root: Path | None) -> by
     if block.inline_bytes is not None:
         return block.inline_bytes
     assert workspace_root is not None  # narrowed by the caller's guard
-    return (workspace_root / block.workspace_path).read_bytes()
+    # R9-251 / Spec WIN T1.5: the stored path is resolved and read without following a
+    # link, so a link planted in the workspace can never send an outside file to a model.
+    from persona.tools._sandbox import read_file_under_root  # noqa: PLC0415
+
+    return read_file_under_root(block.workspace_path, root=workspace_root)
 
 
 def _message_to_anthropic(

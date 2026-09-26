@@ -31,10 +31,13 @@ __all__ = [
     "DEFAULT_MEDIA_TYPE",
     "ExecutionOutcome",
     "ExecutionResult",
+    "RefusedFile",
     "NetworkPolicy",
     "ResourceLimits",
     "SandboxFile",
     "guess_media_type",
+    "produced_file_path_violation",
+    "refused_file",
 ]
 
 #: Fallback media type for files whose extension does not map to a known type.
@@ -163,6 +166,63 @@ class SandboxFile(BaseModel):
     media_type: str = "application/octet-stream"
 
 
+class RefusedFile(BaseModel):
+    """A produced file the workspace refused to take, and the human reason (Spec WIN, T1.5).
+
+    Attributes:
+        path: A display-safe preview of the file's name (control characters removed,
+            truncated); never used as a path.
+        reason: A short human explanation, shown to the model so it can rename.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    reason: str
+
+
+#: The longest name preview a :class:`RefusedFile` carries.
+_REFUSED_PREVIEW_CHARS = 120
+
+
+def refused_file(path: str, reason: str) -> RefusedFile:
+    """Build a :class:`RefusedFile` whose ``path`` is safe to show (no control characters)."""
+    shown = "".join(c for c in path if ord(c) >= 32 and ord(c) != 127)
+    if len(shown) > _REFUSED_PREVIEW_CHARS:
+        shown = shown[:_REFUSED_PREVIEW_CHARS] + "..."
+    return RefusedFile(path=shown, reason=reason)
+
+
+def produced_file_path_violation(path: str) -> str | None:
+    """Why a produced file's relative path must be refused, on every platform, or ``None``.
+
+    Code in the sandbox can create any name its Linux filesystem allows, and those
+    names are later joined onto a host folder. A backslash or a colon is an ordinary
+    character on Linux but a separator, a drive (``C:``) or an alternate data stream
+    (``name:stream``) on Windows; ``..`` and a leading ``/`` climb or jump out of the
+    destination. Such a file is refused at discovery, before any host path is built.
+
+    Args:
+        path: The produced file's path relative to the sandbox output folder.
+
+    Returns:
+        A short human reason, or ``None`` when the path is acceptable.
+    """
+    if not path:
+        return "the name is empty"
+    if any(ord(c) < 32 or ord(c) == 127 for c in path):
+        return "the name contains control characters"
+    if "\\" in path:
+        return "the name contains a backslash"
+    if ":" in path:
+        return "the name contains a colon"
+    if path.startswith("/"):
+        return "the path is absolute"
+    if ".." in path.split("/"):
+        return "the path climbs out of its folder with '..'"
+    return None
+
+
 class ExecutionResult(BaseModel):
     """The result of one :meth:`CodeSandbox.execute` call.
 
@@ -186,6 +246,9 @@ class ExecutionResult(BaseModel):
             and was truncated with an explicit marker.
         truncated_files: ``True`` when produced files exceeded the count or
             size caps in ``ResourceLimits``.
+        refused_files: Produced files the backend refused at discovery because
+            their path is not safe to bring into the workspace (see
+            :func:`produced_file_path_violation`); the tool tells the model why.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -198,3 +261,4 @@ class ExecutionResult(BaseModel):
     duration_ms: float = Field(default=0.0, ge=0.0)
     truncated_stdout: bool = False
     truncated_files: bool = False
+    refused_files: tuple[RefusedFile, ...] = Field(default_factory=tuple)

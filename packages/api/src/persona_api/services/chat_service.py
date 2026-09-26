@@ -1410,6 +1410,7 @@ def _stage_documents_for_file_read(
     # sandbox resolver (mirrors the lazy-import discipline elsewhere here).
     from persona.errors import SandboxViolationError  # noqa: PLC0415
     from persona.tools._sandbox import (  # noqa: PLC0415
+        make_dirs_nofollow,
         resolve_sandbox_path,
         write_nofollow_bytes,
     )
@@ -1430,11 +1431,11 @@ def _stage_documents_for_file_read(
             )
             continue
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            make_dirs_nofollow(target.parent, root=file_read_root)
             # R2 F-03: write via the O_NOFOLLOW opener so a symlink swapped into the
             # final component cannot redirect the mirror write outside the sandbox
             # (a swapped link raises OSError → skip, like any other write failure).
-            write_nofollow_bytes(target, sf.content_bytes)
+            write_nofollow_bytes(target, sf.content_bytes, root=file_read_root)
         except OSError as exc:
             _log.warning(
                 "could not mirror document into the file_read root; skipping",

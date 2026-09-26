@@ -293,6 +293,7 @@ class TestSurface08ArtifactView:
                     created_at=datetime.now(UTC),
                     original_name=None,
                 ),
+                root=tmp_path,
             )
 
             resp = c.get(f"/v1/personas/{pid}/artifacts", headers=_auth(uid))

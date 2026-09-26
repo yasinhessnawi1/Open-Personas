@@ -16,6 +16,8 @@ rationale and ``docs/specs/spec_01/spec_01_core.md`` §11.7.
 
 from __future__ import annotations
 
+import errno
+
 __all__ = [
     "AuditWriteError",
     "AuthenticationError",
@@ -65,6 +67,7 @@ __all__ = [
     "UnknownDocumentTemplateError",
     "UnknownJobTypeError",
     "VettedSourceAuthenticityError",
+    "WorkspaceLinkRefusedError",
 ]
 
 
@@ -257,6 +260,35 @@ class FileExtractionError(PersonaError):
 
 class SandboxViolationError(PersonaError):
     """Raised when a file operation attempts to escape its sandbox directory."""
+
+
+class WorkspaceLinkRefusedError(PersonaError, OSError):
+    """Raised when a workspace file operation meets a link it will not follow (Spec WIN, T1).
+
+    The Windows no-follow opener refuses a symbolic link, a junction or any other
+    reparse point below the workspace root, and a file with more than one name (a
+    hard link). It is an :class:`OSError` with ``errno == errno.ELOOP`` so every
+    caller that already maps the POSIX ``O_NOFOLLOW`` refusal (an ``OSError``
+    carrying ``ELOOP``) handles it unchanged, and a :class:`PersonaError` so it
+    carries structured ``context`` and a human message. POSIX never raises it: the
+    POSIX opener is byte-identical and still raises the kernel's own ``OSError``.
+
+    Args:
+        message: Human-readable explanation, safe to show to a user or a model.
+        context: Structured context (``reason`` and a control-stripped path preview).
+        filename: The path that was refused, as ``OSError.filename``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        context: dict[str, str] | None = None,
+        filename: str | None = None,
+    ) -> None:
+        OSError.__init__(self, errno.ELOOP, message, filename)
+        self.message = message
+        self.context = dict(context) if context else {}
 
 
 class MCPConnectionError(PersonaError):

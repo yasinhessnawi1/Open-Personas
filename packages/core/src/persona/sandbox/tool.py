@@ -46,12 +46,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from persona.sandbox.errors import SandboxError
+from persona.sandbox.errors import ProducedFileRefusedError, SandboxError
 from persona.sandbox.result import (
     ExecutionResult,
     NetworkPolicy,
+    RefusedFile,
     ResourceLimits,
     SandboxFile,
+    refused_file,
 )
 from persona.schema.tools import PersistedArtifact, ToolResult
 from persona.tools.audit import ToolAuditEvent
@@ -209,6 +211,7 @@ def make_code_execution_tool(
         # surfaced to the model so it regenerates them rather than assuming the
         # write succeeded.
         empty_files: list[str] = []
+        refused_files: list[RefusedFile] = []
         try:
             if pre_execute_hook is not None:
                 await pre_execute_hook()
@@ -276,7 +279,16 @@ def make_code_execution_tool(
                         )
                         empty_files.append(sf.path)
                         continue
-                    workspace_ref = await produced_file_persister(session_id, sf.path)
+                    try:
+                        workspace_ref = await produced_file_persister(session_id, sf.path)
+                    except ProducedFileRefusedError as refusal:
+                        # Spec WIN T1.5: one refused file (a name the workspace does
+                        # not allow, or a link in the way) is skipped and explained;
+                        # every other produced file is still saved.
+                        refused_files.append(
+                            refused_file(sf.path, refusal.context.get("reason", str(refusal)))
+                        )
+                        continue
                     # Spec 28 — surface the persisted file as an artifact so the
                     # chat UI renders a file card. None ⇒ persisted but not
                     # surfaced (e.g. CLI / no workspace). The file-copy callback
@@ -363,6 +375,15 @@ def make_code_execution_tool(
                 f"discarded: {names}. The write did not succeed — regenerate the "
                 f"file and verify it is non-empty before finishing."
             )
+        all_refused = (*result.refused_files, *refused_files)
+        if all_refused:
+            listed = "; ".join(f"{r.path} ({r.reason})" for r in all_refused)
+            formatted = (
+                f"{formatted}\n\n"
+                f"ERROR: these produced files were not saved, because their names or "
+                f"locations are not allowed in the workspace: {listed}. Save files "
+                f"under plain relative names such as 'report.pdf' or 'charts/plot.png'."
+            )
         _emit_audit_for_result(
             audit_logger=audit_logger,
             persona_id=persona_id,
@@ -391,7 +412,7 @@ def make_code_execution_tool(
             # loops also feed is_error back without crashing the stream). An
             # empty produced file is also a recoverable failure even when the
             # code exited 0 — the deliverable wasn't actually written.
-            is_error=result.outcome != "ok" or bool(empty_files),
+            is_error=result.outcome != "ok" or bool(empty_files) or bool(all_refused),
             data={
                 "outcome": result.outcome,
                 "exit_status": result.exit_status,

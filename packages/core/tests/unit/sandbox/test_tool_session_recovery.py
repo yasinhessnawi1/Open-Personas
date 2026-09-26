@@ -106,6 +106,8 @@ class SequencingSandbox:
         session_id: str,  # noqa: ARG002 — Protocol contract
         ref: str,  # noqa: ARG002 — Protocol contract
         target_path: Path,  # noqa: ARG002 — Protocol contract
+        *,
+        root: Path | None = None,  # noqa: ARG002 - Protocol contract
     ) -> None:  # pragma: no cover
         return None
 

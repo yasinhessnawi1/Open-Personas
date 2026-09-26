@@ -69,6 +69,7 @@ class _FakeSandbox:
         self.aclose_calls: int = 0
         # D-12-X-read-produced-file Protocol contract additions:
         self.copy_calls: list[tuple[str, str, Path]] = []
+        self.copy_roots: list[Path | None] = []
         self.read_calls: list[tuple[str, str]] = []
 
     async def execute(
@@ -111,8 +112,11 @@ class _FakeSandbox:
     async def aclose(self) -> None:
         self.aclose_calls += 1
 
-    async def copy_produced_file_to(self, session_id: str, ref: str, target_path: Path) -> None:
+    async def copy_produced_file_to(
+        self, session_id: str, ref: str, target_path: Path, *, root: Path | None = None
+    ) -> None:
         self.copy_calls.append((session_id, ref, target_path))
+        self.copy_roots.append(root)
         if self.copy_raises is not None:
             raise self.copy_raises
 
@@ -603,7 +607,7 @@ class TestWorkspaceRootPersisterWiring:
             reset_sandbox_request_context(token)
         assert not result.is_error
         target = workspace_root / "alice" / "persona-A" / "uploads" / "marketing_strategy.pdf"
-        meta = read_artifact_sidecar(target)
+        meta = read_artifact_sidecar(target, root=tmp_path)
         assert meta is not None
         assert meta.source == "generated"
         assert meta.conversation_id == "conv-42"

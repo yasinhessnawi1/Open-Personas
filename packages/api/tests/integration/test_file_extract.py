@@ -166,7 +166,16 @@ class _FakeCodeSandbox:
     async def aclose(self) -> None:
         return
 
-    async def copy_produced_file_to(self, session_id: str, ref: str, target_path: Path) -> None:  # noqa: ARG002
+    async def copy_produced_file_to(
+        self,
+        session_id: str,  # noqa: ARG002
+        ref: str,  # noqa: ARG002
+        target_path: Path,
+        *,
+        root: Path | None = None,
+    ) -> None:
+        assert root is not None, "production passes the workspace root"
+        assert target_path.is_relative_to(root.resolve())
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"%PDF-fake")
 
@@ -428,7 +437,7 @@ def test_worker_produces_the_artifact_lists_it_and_publishes(
             / persisted_name
         )
         assert target.read_bytes() == b"%PDF-fake"
-        meta = read_artifact_sidecar(target)
+        meta = read_artifact_sidecar(target, root=workspace_root)
         assert meta is not None
         assert meta.source == "generated"
         assert meta.type == "doc"

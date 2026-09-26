@@ -67,6 +67,14 @@ class TestHappyPaths:
         result = resolve_sandbox_path(tmp_path, "norsk-tekst-æøå.txt")
         assert result.is_relative_to(tmp_path.resolve())
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Spec WIN ruling 3: on Windows every link below the root is refused, even one "
+            "that stays inside; proven by test_sandbox_windows_resolver.py::"
+            "test_a_junction_out_is_an_escape_and_a_junction_in_is_refused_as_a_link"
+        ),
+    )
     def test_symlink_inside_sandbox_allowed(self, tmp_path: Path) -> None:
         # A symlink whose target is also inside the sandbox is fine.
         target = tmp_path / "target.txt"
@@ -209,6 +217,14 @@ class TestSymlinkEscape:
         with pytest.raises(SandboxViolationError):
             resolve_sandbox_path(sandbox, "etcpasswd")
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Spec WIN ruling 3: on Windows every link below the root is refused, even one "
+            "that stays inside; proven by test_sandbox_windows_resolver.py::"
+            "test_a_junction_out_is_an_escape_and_a_junction_in_is_refused_as_a_link"
+        ),
+    )
     def test_symlink_chain_inside_allowed(self, tmp_path: Path) -> None:
         # link -> intermediate -> target (all inside sandbox) is fine.
         target = tmp_path / "target.txt"

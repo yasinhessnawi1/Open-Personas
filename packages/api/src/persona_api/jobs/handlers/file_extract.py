@@ -104,6 +104,7 @@ from persona.logging import get_logger
 from persona.sandbox.errors import SandboxError
 from persona.sandbox.result import NetworkPolicy, ResourceLimits
 from persona.skills import count_tokens
+from persona.tools._sandbox import resolve_sandbox_path, write_file_under_root
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -766,20 +767,17 @@ class SandboxFileRenderer:
                     },
                 )
 
-            documents_dir = (
-                self._workspace_root
-                / owner_id
-                / persona_id
-                / "conversations"
-                / conversation_id
-                / DOCUMENT_DIR_NAME
+            # Spec WIN T1.5: the destination is resolved like any workspace path and
+            # written through the no-follow helpers under the workspace root.
+            target = resolve_sandbox_path(
+                self._workspace_root,
+                f"{owner_id}/{persona_id}/conversations/{conversation_id}"
+                f"/{DOCUMENT_DIR_NAME}/{persisted_name}",
             )
-            target = documents_dir / persisted_name
-            target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 assert handle is not None  # noqa: S101 — set by the acquire() above, never reset
                 await self._pool.sandbox.copy_produced_file_to(
-                    handle.session_id, produced.path, target
+                    handle.session_id, produced.path, target, root=self._workspace_root
                 )
             except SandboxError as exc:
                 raise FileExtractionError(
@@ -814,8 +812,10 @@ class SandboxFileRenderer:
                 token_count=count_tokens(content.body_markdown),
                 size_bytes=produced.size_bytes,
             )
-            target.with_name(target.name + SPEC_14_SIDECAR_SUFFIX).write_text(
-                doc.model_dump_json(), encoding="utf-8"
+            write_file_under_root(
+                target.with_name(target.name + SPEC_14_SIDECAR_SUFFIX),
+                doc.model_dump_json().encode("utf-8"),
+                root=self._workspace_root,
             )
 
             # The F5 `.f5.json` sidecar — UNCHANGED contract, new location; this is
@@ -825,7 +825,8 @@ class SandboxFileRenderer:
             # slug, so the panel shows "Board Game Night Plan.pdf", not the ref.
             write_artifact_sidecar(
                 target,
-                WorkspaceArtifactMetadata(
+                root=self._workspace_root,
+                meta=WorkspaceArtifactMetadata(
                     source="generated",
                     type=_SIDECAR_TYPE_BY_FORMAT[format],  # type: ignore[arg-type]
                     producing_spec=_PRODUCING_SPEC_BY_FORMAT[format],  # type: ignore[arg-type]

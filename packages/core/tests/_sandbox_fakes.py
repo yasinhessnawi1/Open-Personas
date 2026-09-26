@@ -109,6 +109,8 @@ class FakeSandbox:
         session_id: str,  # noqa: ARG002 — Protocol contract; fake doesn't use it
         ref: str,  # noqa: ARG002 — Protocol contract; fake doesn't use it
         target_path: Path,  # noqa: ARG002 — Protocol contract; fake doesn't use it
+        *,
+        root: Path | None = None,  # noqa: ARG002 - Protocol contract; fake doesn't use it
     ) -> None:
         """D-12-X-read-produced-file Protocol contract. Fake records the call
         in :attr:`copy_calls`; tests can populate :attr:`produced_bytes` to

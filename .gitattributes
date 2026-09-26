@@ -1,0 +1,17 @@
+# Line endings (Spec WIN). Text files are stored with LF and checked out with LF on every
+# platform, so a Windows checkout sees the same bytes as Linux and macOS. The index held
+# no CRLF file when this was added, so nothing was renormalised.
+* text=auto eol=lf
+
+# Binary files are never converted. Some PDFs are pure ASCII, which git would otherwise
+# treat as text and rewrite on a Windows checkout, breaking their byte offsets.
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.raw binary

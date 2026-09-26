@@ -121,7 +121,7 @@ def test_lists_files_with_metadata_when_sidecars_present(
     client: TestClient, persona_root: Path
 ) -> None:
     image = _seed(persona_root, "uploads/abc.png", b"PNGDATA")
-    write_artifact_sidecar(image, _make_meta(original_name="photo.png"))
+    write_artifact_sidecar(image, _make_meta(original_name="photo.png"), root=persona_root)
 
     resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
     assert resp.status_code == 200
@@ -137,7 +137,7 @@ def test_lists_files_with_metadata_when_sidecars_present(
 
 def test_skips_sidecar_files_themselves(client: TestClient, persona_root: Path) -> None:
     image = _seed(persona_root, "uploads/abc.png")
-    write_artifact_sidecar(image, _make_meta())
+    write_artifact_sidecar(image, _make_meta(), root=persona_root)
 
     resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
     body = resp.json()
@@ -203,6 +203,7 @@ def populated(persona_root: Path) -> None:
             original_name="cat.png",
             created_at=datetime(2026, 6, 1, tzinfo=UTC),
         ),
+        root=persona_root,
     )
     doc_upload = _seed(persona_root, "uploads/report.pdf")
     write_artifact_sidecar(
@@ -215,6 +216,7 @@ def populated(persona_root: Path) -> None:
             original_name="report.pdf",
             created_at=datetime(2026, 6, 2, tzinfo=UTC),
         ),
+        root=persona_root,
     )
     chart_gen = _seed(persona_root, "charts/q3.png")
     write_artifact_sidecar(
@@ -227,6 +229,7 @@ def populated(persona_root: Path) -> None:
             original_name=None,
             created_at=datetime(2026, 6, 3, tzinfo=UTC),
         ),
+        root=persona_root,
     )
     img_gen = _seed(persona_root, "uploads/generated_image.png")
     write_artifact_sidecar(
@@ -239,6 +242,7 @@ def populated(persona_root: Path) -> None:
             original_name=None,
             created_at=datetime(2026, 6, 4, tzinfo=UTC),
         ),
+        root=persona_root,
     )
     _seed(persona_root, "uploads/legacy.png")  # no sidecar
 
@@ -366,6 +370,7 @@ def test_pagination_window(client: TestClient, persona_root: Path) -> None:
             _make_meta(
                 created_at=datetime(2026, 6, i + 1, tzinfo=UTC),
             ),
+            root=persona_root,
         )
     resp = client.get("/v1/personas/astrid/artifacts?limit=3&offset=4", headers=_auth())
     body = resp.json()
@@ -408,11 +413,17 @@ def test_negative_offset_is_422(client: TestClient) -> None:
 
 def test_sorted_by_created_at_descending(client: TestClient, persona_root: Path) -> None:
     oldest = _seed(persona_root, "uploads/old.png")
-    write_artifact_sidecar(oldest, _make_meta(created_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    write_artifact_sidecar(
+        oldest, _make_meta(created_at=datetime(2026, 1, 1, tzinfo=UTC)), root=persona_root
+    )
     newest = _seed(persona_root, "uploads/new.png")
-    write_artifact_sidecar(newest, _make_meta(created_at=datetime(2026, 12, 31, tzinfo=UTC)))
+    write_artifact_sidecar(
+        newest, _make_meta(created_at=datetime(2026, 12, 31, tzinfo=UTC)), root=persona_root
+    )
     middle = _seed(persona_root, "uploads/mid.png")
-    write_artifact_sidecar(middle, _make_meta(created_at=datetime(2026, 6, 1, tzinfo=UTC)))
+    write_artifact_sidecar(
+        middle, _make_meta(created_at=datetime(2026, 6, 1, tzinfo=UTC)), root=persona_root
+    )
 
     resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
     refs = [item["ref"] for item in resp.json()["items"]]
@@ -437,7 +448,7 @@ def test_unauthenticated_returns_401(client: TestClient) -> None:
 
 def test_delete_artifact_removes_bytes_and_sidecar(client: TestClient, persona_root: Path) -> None:
     bytes_path = _seed(persona_root, "uploads/abc.png")
-    write_artifact_sidecar(bytes_path, _make_meta())
+    write_artifact_sidecar(bytes_path, _make_meta(), root=persona_root)
 
     resp = client.delete("/v1/personas/astrid/artifacts/uploads/abc.png", headers=_auth())
     assert resp.status_code == 204
@@ -465,6 +476,7 @@ def test_walks_nested_subdirectories(client: TestClient, persona_root: Path) -> 
     write_artifact_sidecar(
         chart,
         _make_meta(source="generated", type_="chart", producing_spec="17"),
+        root=persona_root,
     )
     _seed(persona_root, "intermediate/data.parquet")
     # No sidecar for intermediate (per D-F4-X-bare-ref-resolution policy).
