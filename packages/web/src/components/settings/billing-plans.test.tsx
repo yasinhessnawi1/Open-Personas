@@ -68,11 +68,11 @@ function ok(data: unknown) {
   return { response: new Response(null, { status: 200 }), data };
 }
 
-function setup(planCode = "free") {
+function setup(planCode = "free", catalog: typeof CATALOG = CATALOG) {
   apiGet.mockImplementation((path: string) =>
     Promise.resolve(
       path === "/v1/billing/config"
-        ? ok(CATALOG)
+        ? ok(catalog)
         : ok({
             total_balance: 500,
             allowance_balance: 500,
@@ -87,6 +87,24 @@ function renderPlans() {
     <NextIntlClientProvider locale="en" messages={messages}>
       <BillingPlans />
     </NextIntlClientProvider>,
+  );
+}
+
+/** Each plan row's terms line, keyed by plan code. */
+function planTermsText(): Record<string, string> {
+  return Object.fromEntries(
+    Array.from(document.querySelectorAll('[data-slot="plan-row"]')).map(
+      (row) => [
+        row.getAttribute("data-plan") ?? "",
+        row.querySelector('[data-slot="plan-terms"]')?.textContent ?? "",
+      ],
+    ),
+  );
+}
+
+function packLabels(): string[] {
+  return Array.from(document.querySelectorAll('[data-slot="pack-cta"]')).map(
+    (el) => el.textContent ?? "",
   );
 }
 
@@ -116,14 +134,100 @@ describe("billing plans", () => {
     );
   });
 
-  it("renders prices from the catalog rather than hardcoding them", async () => {
+  it("says what each plan gives in dollars, with the extra over its price", async () => {
+    // R9-177 B6 (owner ruling 2026-09-26): one unit, and the extra is computed from the
+    // catalog. Exact strings, because a value claim must be exactly right.
     setup();
     renderPlans();
-    // $15 and $50 are the catalog's numbers, formatted. If the component hardcoded
-    // economics this would still pass, so the load-bearing companion is the backend
-    // projection test — this only guards the formatting path.
-    await waitFor(() => expect(screen.getByText(/\$15 a month/)).toBeTruthy());
-    expect(screen.getByText(/\$50 a month/)).toBeTruthy();
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="plan-terms"]').length).toBe(
+        3,
+      ),
+    );
+    expect(planTermsText()).toEqual({
+      free: "$3 to spend every month, on us.",
+      plus: "$20 to spend every month for $15. That's $5 extra.",
+      pro: "$60 to spend every month for $50. That's $10 extra.",
+    });
+  });
+
+  it("drops the extra claim when a plan gives no more than it costs", async () => {
+    setup("free", {
+      ...CATALOG,
+      plans: [
+        {
+          ...CATALOG.plans[1],
+          monthly_price_credits: 1550,
+          included_allowance_credits: 1550,
+        },
+      ],
+    });
+    renderPlans();
+    await waitFor(() =>
+      expect(planTermsText().plus).toBe(
+        "$15.50 to spend every month for $15.50.",
+      ),
+    );
+  });
+
+  it("labels each pack with the one amount it adds", async () => {
+    setup();
+    renderPlans();
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="pack-cta"]').length).toBe(
+        2,
+      ),
+    );
+    expect(packLabels()).toEqual(["Add $5", "Add $10"]);
+  });
+
+  it("shows both figures for a pack that grants a different amount", async () => {
+    setup("free", {
+      ...CATALOG,
+      packs: [
+        {
+          code: "10",
+          price_credits: 1000,
+          granted_credits: 1250,
+          expiry_months: 12,
+        },
+      ],
+    });
+    renderPlans();
+    await waitFor(() =>
+      expect(packLabels()).toEqual(["$10 for $12.50 to spend"]),
+    );
+  });
+
+  it.each(["free", "plus"])(
+    "states that the monthly amount does not carry over (on %s)",
+    async (planCode) => {
+      // Owner ruling 2026-09-26: one note for every plan, Free included, which has no
+      // renewal date to name. The months come from the catalog.
+      setup(planCode);
+      renderPlans();
+      await waitFor(() =>
+        expect(
+          document.querySelector('[data-slot="plan-renewal-note"]')
+            ?.textContent,
+        ).toBe(
+          "Your monthly amount refreshes each month. What you don't use doesn't carry over; pack credit lasts 12 months.",
+        ),
+      );
+    },
+  );
+
+  it("still states the monthly terms when the catalog has no packs", async () => {
+    // The note used to vanish with the packs; the plans' own terms do not depend on them.
+    setup("free", { ...CATALOG, packs: [] });
+    renderPlans();
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-slot="plan-renewal-note"]')?.textContent,
+      ).toBe(
+        "Your monthly amount refreshes each month. What you don't use doesn't carry over.",
+      ),
+    );
   });
 
   it("gives Free no purchase button", async () => {
@@ -229,7 +333,9 @@ describe("billing plans", () => {
         document.querySelector('[data-slot="pack-expiry-note"]'),
       ).not.toBeNull(),
     );
-    expect(screen.getByText(/12 months/)).toBeTruthy();
+    expect(
+      document.querySelector('[data-slot="pack-expiry-note"]')?.textContent,
+    ).toMatch(/12 months/);
   });
 
   it("surfaces an honest error when checkout cannot open", async () => {

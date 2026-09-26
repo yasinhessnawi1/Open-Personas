@@ -129,3 +129,23 @@ def test_payg_checkout_collects_the_address_stripe_tax_needs() -> None:
     assert params["automatic_tax"] == {"enabled": True}
     assert params["billing_address_collection"] == "required"
     assert params["customer_update"] == {"address": "auto", "name": "auto"}
+
+
+def test_payg_checkout_turns_adaptive_pricing_off() -> None:
+    """A pack is always paid in USD: the webhook grants only a USD payment, so a buyer
+    shown a localized price in NOK or EUR would pay and be refused. Adaptive Pricing can
+    be on in the dashboard, so the session opts out explicitly."""
+    gateway = _gateway_with_mock_client()
+    gateway._client.checkout.sessions.create.return_value = MagicMock(url="u")  # noqa: SLF001
+
+    gateway.create_payg_checkout(
+        customer_id="cus_1",
+        price_id="price_pack",
+        user_id="u1",
+        credit_amount=1000,
+        success_url="s_url",
+        cancel_url="c_url",
+    )
+
+    params = gateway._client.checkout.sessions.create.call_args.kwargs["params"]  # noqa: SLF001
+    assert params["adaptive_pricing"] == {"enabled": False}

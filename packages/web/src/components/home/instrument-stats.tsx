@@ -1,13 +1,15 @@
 import { getFormatter, getTranslations } from "next-intl/server";
+import { usdFromCredits } from "@/lib/money";
 
 /**
  * Dashboard instrument stats (Spec 35 D-35-1) — the `.v-stat` tile row.
  *
  * Wired to REAL data only (the spec forbids faking; the mockup's literal
  * "1,204 / 6 / 2" were hardcoded):
- *   - Credits: the caller's balance (`/v1/me/credits`). Cloud shows the number;
- *     community is unmetered → the balance is a sentinel, so it degrades to
- *     "Unlimited". A failed/absent fetch hides the tile rather than guessing.
+ *   - Balance: the caller's balance (`/v1/me/credits`), in dollars through
+ *     `usdFromCredits` (R9-177 B6, owner ruling 2026-09-26). Community is
+ *     unmetered → the balance is a sentinel, so it degrades to "Unlimited". A
+ *     failed/absent fetch hides the tile rather than guessing.
  *   - Active personas: the already-fetched personas list length (free).
  *   - Conversations: the already-fetched conversation count (free). This stands
  *     in for the mockup's "runs in progress" — there is no list-runs endpoint to
@@ -34,14 +36,14 @@ export async function InstrumentStats({
     edition === "community"
       ? t("creditsUnlimited")
       : credits !== null
-        ? format.number(credits)
+        ? usdFromCredits(credits)
         : null;
 
   return (
     <div className="v-grid v-grid--3">
       {creditsValue !== null ? (
         <div className="v-card v-stat">
-          <div className="v-stat__label">{t("credits")}</div>
+          <div className="v-stat__label">{t("balance")}</div>
           <div className="v-stat__value">{creditsValue}</div>
         </div>
       ) : null}

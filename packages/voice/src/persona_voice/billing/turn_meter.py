@@ -9,11 +9,17 @@ one deduct per committed turn plus a LiveKit infra tick at call end:
 
 STT and TTS are priced at the configured backend's own registry rate through the pure
 ``persona.billing`` helpers; neither has a runtime failover, so the configured backend
-is the one that served. The LLM arm is NOT always the served model: the producer feeds
-this meter the tier backend's ``provider_name`` / ``model_name``, and on a multi-model
-chain those name the PRIMARY even when a fallback answered. Such a turn is billed as if
-the primary had answered it, including whether the OpenRouter actual-cost arm applies
-(R9-221; the turn log names the served model since R9-214). The deduct rides
+is the one that served. The LLM arm is priced at the model that SERVED each round: the
+producer feeds this meter the pair ``persona_runtime.routing.resolve_served_model``
+reads from the tier's fallback chain, the resolution the text loop prices from (Spec
+M2, D-M2-2) and the pair the ``voice turn ended`` line names (R9-214). So a turn a
+fallback answered is billed at the fallback, and the OpenRouter actual-cost arm applies
+exactly when the fallback was an OpenRouter route (R9-221). Each round of a tool turn is
+priced on its own, at the model that served it, and the rounds are summed; one round's
+OpenRouter actual is used for that round even when another round has none. (The text
+TurnLog still prices a whole turn at its last round's model; voice no longer does.) The
+pair is read from a ledger on a tier wrapper that concurrent calls
+share, so a concurrent call can still misattribute a turn (R9-223). The deduct rides
 :meth:`~persona.billing.metered.MeteredBilling.charge` in ``capture`` mode with a
 per-turn idempotency ``billing_key`` (``voice:{call_id}:{turn_seq}``) so a
 re-fired tick never double-charges.
@@ -47,7 +53,7 @@ from persona.billing import (
 )
 from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import CENTS_ROUND_DECIMALS, compute_turn_cost
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -56,7 +62,7 @@ if TYPE_CHECKING:
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
 
-__all__ = ["TurnUsage", "VoiceTurnAccumulator", "VoiceTurnBillingMeter"]
+__all__ = ["LlmRound", "TurnUsage", "VoiceTurnAccumulator", "VoiceTurnBillingMeter"]
 
 _LOG = get_logger("voice.billing")
 
@@ -64,16 +70,28 @@ _SECONDS_PER_MINUTE = 60.0
 
 
 @dataclass(frozen=True)
+class LlmRound:
+    """One model round's usage and the (provider, model) that served that round."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None
+    provider: str
+    model: str
+
+
+@dataclass(frozen=True)
 class TurnUsage:
-    """One turn's summed metered quantities (the snapshot the meter prices)."""
+    """One turn's metered quantities (the snapshot the meter prices).
+
+    The model arm is kept per round, never summed into one pair, because the rounds of
+    one turn can be served by different models (a tool round by the primary, the
+    follow-up by a fallback) and each is priced at its own model.
+    """
 
     stt_streamed_seconds: float
     tts_chars: int
-    llm_prompt_tokens: int
-    llm_completion_tokens: int
-    llm_cost_usd: float | None
-    llm_provider: str
-    llm_model: str
+    llm_rounds: tuple[LlmRound, ...]
 
 
 class VoiceTurnAccumulator:
@@ -81,21 +99,16 @@ class VoiceTurnAccumulator:
 
     STT is read as a **delta**: the seam adapter's ``streamed_seconds`` is a
     session-cumulative counter (V8 rebase), so each turn bills the audio streamed
-    *since the previous turn*. TTS chars + LLM usage are summed across the turn's
-    rounds (a tool round + re-prompt is one turn, two model calls). ``cost_usd`` is
-    the summed OpenRouter actual **iff every round reported one**, else ``None``
-    (then the turn prices from tokens) — mirrors the T5 usage-collector discipline.
+    *since the previous turn*. TTS chars are summed across the turn; each model round
+    (a tool round + re-prompt is one turn, two model calls) is kept as its own
+    :class:`LlmRound`, with its own served model and its own OpenRouter actual if any.
     """
 
     def __init__(self, *, streamed_seconds_reader: Callable[[], float]) -> None:
         self._read_streamed_seconds = streamed_seconds_reader
         self._last_streamed = 0.0
         self._tts_chars = 0
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._costs: list[float | None] = []
-        self._provider = ""
-        self._model = ""
+        self._rounds: list[LlmRound] = []
 
     def note_tts_chars(self, count: int) -> None:
         """Add characters sent to the TTS backend for synthesis this turn."""
@@ -110,38 +123,29 @@ class VoiceTurnAccumulator:
         provider: str,
         model: str,
     ) -> None:
-        """Add one model round's token usage (summed across the turn's rounds)."""
-        self._prompt_tokens += max(0, prompt_tokens)
-        self._completion_tokens += max(0, completion_tokens)
-        self._costs.append(cost_usd)
-        self._provider = provider  # representative served model (last round)
-        self._model = model
+        """Record one model round's usage under the model that served that round."""
+        self._rounds.append(
+            LlmRound(
+                prompt_tokens=max(0, prompt_tokens),
+                completion_tokens=max(0, completion_tokens),
+                cost_usd=cost_usd,
+                provider=provider,
+                model=model,
+            )
+        )
 
     def take_turn(self) -> TurnUsage:
         """Snapshot this turn's totals (STT as a since-last delta) and reset for the next."""
         now = max(0.0, self._read_streamed_seconds())
         stt_delta = max(0.0, now - self._last_streamed)
         self._last_streamed = now
-        cost_usd = (
-            sum(c for c in self._costs if c is not None)
-            if self._costs and all(c is not None for c in self._costs)
-            else None
-        )
         usage = TurnUsage(
             stt_streamed_seconds=stt_delta,
             tts_chars=self._tts_chars,
-            llm_prompt_tokens=self._prompt_tokens,
-            llm_completion_tokens=self._completion_tokens,
-            llm_cost_usd=cost_usd,
-            llm_provider=self._provider,
-            llm_model=self._model,
+            llm_rounds=tuple(self._rounds),
         )
         self._tts_chars = 0
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._costs = []
-        self._provider = ""
-        self._model = ""
+        self._rounds = []
         return usage
 
 
@@ -247,24 +251,34 @@ class VoiceTurnBillingMeter:
         tts_cents, _ = voice_tts_cents(
             self._tts_provider, chars=usage.tts_chars, model=self._tts_model
         )
-        # Finding 3: price the LLM arm ONLY when a real model round was recorded
-        # this turn. A turn with no LLM round (e.g. a TTS-only greeting, or an
-        # STT/TTS-only turn) leaves the accumulator's provider/model empty;
-        # calling ``compute_turn_cost(provider="", model="")`` logs a spurious
-        # ``no pricing metadata; turn recorded unpriced provider= model=`` warning
-        # (and returns 0.0 anyway). Guarding on the served model keeps the empty
-        # attribution out of the priced-turn path entirely.
-        llm_cents = 0.0
-        if usage.llm_model:
-            llm_cents, _ = compute_turn_cost(
-                provider=usage.llm_provider,
-                model=usage.llm_model,
-                prompt_tokens=usage.llm_prompt_tokens,
-                completion_tokens=usage.llm_completion_tokens,
-                actual_cost_usd=usage.llm_cost_usd,
+        # Rounded once, to the micro-cents every arm is already priced in: a float sum of
+        # rounds such as 0.1 + 2.7 + 0.2 lands on 3.0000000000000004, and the charge ceils
+        # the printed value, so an unrounded total costs an extra credit.
+        total = stt_cents + tts_cents + self._price_llm_rounds(usage.llm_rounds)
+        return round(total, CENTS_ROUND_DECIMALS)
+
+    def _price_llm_rounds(self, rounds: tuple[LlmRound, ...]) -> float:
+        """Each round at the model that served it, summed (review test gap on R9-221).
+
+        A turn with no model round (a TTS-only greeting, an STT/TTS-only turn) prices at
+        zero without calling the cost function, and so does a round with no served model
+        (Finding 3: ``compute_turn_cost(provider="", model="")`` would log a spurious
+        ``no pricing metadata`` warning and return 0.0 anyway).
+        """
+        cents = 0.0
+        for llm_round in rounds:
+            if not llm_round.model:
+                continue
+            round_cents, _ = compute_turn_cost(
+                provider=llm_round.provider,
+                model=llm_round.model,
+                prompt_tokens=llm_round.prompt_tokens,
+                completion_tokens=llm_round.completion_tokens,
+                actual_cost_usd=llm_round.cost_usd,
                 source=self._cost_source,
             )
-        return stt_cents + tts_cents + llm_cents
+            cents += round_cents
+        return cents
 
     # ----- deducts (off the audio loop, fail-soft) ---------------------------
 

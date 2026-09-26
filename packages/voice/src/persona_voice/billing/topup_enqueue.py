@@ -113,7 +113,10 @@ def enqueue_auto_topup(
             },
         ).first()
     job_id = row[0] if row is not None else None
-    _logger.info(
+    # DEBUG, not INFO (R9-215): this runs once per charged turn on every cloud call and
+    # nearly every job is a no-op at the api, which applies the threshold (D-M5-16). The
+    # line an operator needs is the api's INFO line for a charge it actually made.
+    _logger.debug(
         "voice auto-top-up trigger enqueued (call={call} turn={turn} job={job})",
         call=call_id,
         turn=turn_seq,

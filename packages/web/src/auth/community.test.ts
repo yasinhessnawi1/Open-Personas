@@ -25,6 +25,11 @@ describe("community @/auth", () => {
     await expect(getToken()).resolves.toBeNull();
   });
 
+  it("server EDITION names the community edition", async () => {
+    const { EDITION } = await import("./server.community");
+    expect(EDITION).toBe("community");
+  });
+
   it("server currentUser() returns the local owner profile shape settings reads", async () => {
     const { currentUser } = await import("./server.community");
     const user = await currentUser();

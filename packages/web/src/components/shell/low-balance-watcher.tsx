@@ -26,6 +26,7 @@ import { useEffect, useRef } from "react";
 import { useAuth } from "@/auth";
 import { useNotify } from "@/components/providers/notification-provider";
 import { createApiClient, unwrap } from "@/lib/api/client";
+import { usdFromCredits } from "@/lib/money";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 /** Guard key: once set, we don't re-check or re-nag for the rest of the session. */
@@ -83,7 +84,9 @@ export function LowBalanceWatcher() {
             level: "warning",
             persist: true,
             title: tRef.current("lowBalance.title"),
-            body: tRef.current("lowBalance.body", { count: credits.balance }),
+            body: tRef.current("lowBalance.body", {
+              amount: usdFromCredits(credits.balance),
+            }),
             href: BILLING_HREF,
           });
         }

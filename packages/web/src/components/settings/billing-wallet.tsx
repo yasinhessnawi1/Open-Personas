@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api/client";
 import type { components } from "@/lib/api/schema";
 import { useApi } from "@/lib/api/use-api";
+import { usdFromCredits } from "@/lib/money";
 
 type Wallet = components["schemas"]["WalletResponse"];
 
@@ -135,12 +136,12 @@ export function BillingWallet({
         {t("balanceLabel")}
       </h2>
       <p className="type-display mt-2" data-slot="billing-wallet-balance">
-        {wallet.total_balance}
+        {usdFromCredits(wallet.total_balance)}
       </p>
       <p className="type-caption mt-1 text-muted-foreground">
         {t("balanceHint", {
-          allowance: wallet.allowance_balance,
-          payg: wallet.total_balance - wallet.allowance_balance,
+          allowance: usdFromCredits(wallet.allowance_balance),
+          payg: usdFromCredits(wallet.total_balance - wallet.allowance_balance),
         })}
       </p>
 

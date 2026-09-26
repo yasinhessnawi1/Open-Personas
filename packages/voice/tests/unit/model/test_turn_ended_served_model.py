@@ -6,8 +6,8 @@ genuinely raises inside ``chat_stream``, so the chain's own classifier and ledge
 decide who served. The assertion is on the log line itself, the thing an operator
 reads, and the served pair is compared with equality.
 
-Also pinned here: the billing meter is still fed the chain's primary (R9-221), and
-the producer's reply rule matches the chain's commit rule (R9-033).
+Also pinned here: the billing meter is fed the same served pair the line names, round by
+round (R9-221), and the producer's reply rule matches the chain's commit rule (R9-033).
 """
 
 # Test doubles keep the loose signatures of the protocols they stand in for.
@@ -516,13 +516,20 @@ class _MeterFeed:
         self.llm.append((provider, model))
 
 
-async def test_the_meter_is_still_fed_the_primary_while_the_log_names_the_fallback(
-    ended: _EndedLines,
+@pytest.mark.parametrize(
+    ("primary_behaviour", "fallback_calls", "served"),
+    [
+        pytest.param(_RATE_LIMIT, 1, ("anthropic", "fallback-model"), id="fallback_turn"),
+        pytest.param(_SPEAK, 0, ("nvidia", "primary-model"), id="primary_turn"),
+    ],
+)
+async def test_the_meter_is_fed_the_model_that_served_the_turn(
+    ended: _EndedLines, primary_behaviour: str, fallback_calls: int, served: tuple[str, str]
 ) -> None:
-    # R9-221, pinned on purpose. R9-214 left billing unchanged, so on a turn a fallback
-    # answered the meter still receives the chain's PRIMARY. Moving billing to the
-    # served pair is the owner's call under R9-221, and that change must edit this test.
-    primary = _Backend("nvidia", "primary-model", [_RATE_LIMIT])
+    # R9-221, owner ruling 2026-09-26: a voice turn a fallback answered is billed at the
+    # SERVED model, the M2 rule (D-M2-2) text already bills by. Until that ruling this
+    # test pinned the primary on purpose; the meter and the turn-ended line now agree.
+    primary = _Backend("nvidia", "primary-model", [primary_behaviour])
     fallback = _Backend("anthropic", "fallback-model", [_SPEAK])
     chain = MultiModelChatBackend(
         [primary, fallback], tier_name="frontier", max_retries_per_backend=0
@@ -533,7 +540,30 @@ async def test_the_meter_is_still_fed_the_primary_while_the_log_names_the_fallba
 
     await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
 
-    assert meter.llm == [("nvidia", "primary-model")]
+    assert (primary.stream_calls, fallback.stream_calls) == (1, fallback_calls)
+    assert meter.llm == [served]
+    assert _ended(ended) == ("completed", *served)
+
+
+async def test_each_round_of_a_tool_turn_is_fed_to_the_meter_as_the_model_that_served_it(
+    ended: _EndedLines,
+) -> None:
+    # The primary serves the tool-call round; the follow-up's primary attempt is rate
+    # limited and the fallback speaks. Each round's usage reaches the meter under the
+    # model that produced it, so the pair is resolved per round, never once per turn.
+    primary = _Backend("nvidia", "primary-model", ["web_search", _RATE_LIMIT])
+    fallback = _Backend("anthropic", "fallback-model", [_SPEAK])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain, toolbox=Toolbox([_web_search], allow_list=None))  # type: ignore[list-item]
+    meter = _MeterFeed()
+    producer.set_turn_meter(meter)  # type: ignore[arg-type]
+
+    await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
+
+    assert (primary.stream_calls, fallback.stream_calls) == (2, 1)
+    assert meter.llm == [("nvidia", "primary-model"), ("anthropic", "fallback-model")]
     assert _ended(ended) == ("completed", "anthropic", "fallback-model")
 
 

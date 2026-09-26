@@ -76,6 +76,9 @@ def _payg_event(event_id: str, pi_id: str, credit_amount: int) -> bytes:
                     "id": pi_id,
                     "object": "payment_intent",
                     "customer": _CUSTOMER,
+                    # A paid pack: the grant checks the amount received (review follow-up).
+                    "currency": "usd",
+                    "amount_received": credit_amount,
                     "metadata": {"payg_credits": str(credit_amount)},
                 }
             },

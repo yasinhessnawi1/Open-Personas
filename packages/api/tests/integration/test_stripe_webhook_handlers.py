@@ -379,7 +379,15 @@ def _payment_intent(
     metadata: dict[str, str] = {"user_id": meta_user}
     if payg_credits is not None:
         metadata["payg_credits"] = payg_credits
-    return {"id": pi_id, "object": "payment_intent", "customer": customer, "metadata": metadata}
+    return {
+        "id": pi_id,
+        "object": "payment_intent",
+        "customer": customer,
+        # A paid pack: the grant checks the amount received (review follow-up).
+        "currency": "usd",
+        "amount_received": int(payg_credits) if payg_credits else 0,
+        "metadata": metadata,
+    }
 
 
 def _payg(engine: Engine, uid: str) -> tuple[int, int]:

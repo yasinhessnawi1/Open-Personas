@@ -64,8 +64,28 @@ describe("billing wallet", () => {
       expect(
         document.querySelector('[data-slot="billing-wallet-balance"]')
           ?.textContent,
-      ).toBe("500"),
+      ).toBe("$5"),
     );
+  });
+
+  it("splits the balance in dollars between the monthly amount and packs", async () => {
+    // R9-177 B6: the plans speak dollars, so the balance beside them does too.
+    walletGet.mockResolvedValue(
+      wallet({ total_balance: 2350, allowance_balance: 1850 }),
+    );
+    renderWallet();
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-slot="billing-wallet-balance"]')
+          ?.textContent,
+      ).toBe("$23.50"),
+    );
+    expect(
+      screen.getByText(
+        "$18.50 from your monthly amount, $5 from credit packs.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(messages.billing.balanceLabel)).toBeTruthy();
   });
 
   it("reads low_balance from the API rather than recomputing it", async () => {
@@ -126,7 +146,7 @@ describe("billing wallet", () => {
     expect(
       document.querySelector('[data-slot="billing-wallet-balance"]')
         ?.textContent,
-    ).toBe("500");
+    ).toBe("$5");
   });
 
   it("clears the pending state when the balance actually moves", async () => {
@@ -141,7 +161,7 @@ describe("billing wallet", () => {
       expect(
         document.querySelector('[data-slot="billing-wallet-balance"]')
           ?.textContent,
-      ).toBe("1500"),
+      ).toBe("$15"),
     );
     await waitFor(() =>
       expect(

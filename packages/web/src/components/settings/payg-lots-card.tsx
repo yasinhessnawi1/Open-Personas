@@ -3,6 +3,7 @@
 import { useFormatter, useTranslations } from "next-intl";
 import { Card } from "@/components/ui/card";
 import type { components } from "@/lib/api/schema";
+import { usdFromCredits } from "@/lib/money";
 
 type Wallet = components["schemas"]["WalletResponse"];
 type PaygLot = components["schemas"]["PaygLotOut"];
@@ -72,8 +73,8 @@ export function PaygLotsCard({ lots, now = Date.now() }: PaygLotsCardProps) {
               <div>
                 <p className="type-body font-medium">
                   {t("lotRemaining", {
-                    remaining: lot.credits_remaining,
-                    total: lot.credits_total,
+                    remaining: usdFromCredits(lot.credits_remaining),
+                    total: usdFromCredits(lot.credits_total),
                   })}
                 </p>
                 <p className="type-caption text-muted-foreground">

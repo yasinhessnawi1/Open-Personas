@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api/client";
 import type { components } from "@/lib/api/schema";
 import { useApi } from "@/lib/api/use-api";
-import { dollarsFromCredits } from "@/lib/money";
+import { packTerms, planTerms } from "./billing-terms";
 
 type BillingConfig = components["schemas"]["BillingConfigResponse"];
 
@@ -130,6 +130,7 @@ export function BillingPlans() {
         <div className="mt-4 flex flex-col gap-3">
           {config.plans.map((plan) => {
             const current = plan.code === planCode;
+            const terms = planTerms(plan);
             return (
               <div
                 key={plan.code}
@@ -143,11 +144,11 @@ export function BillingPlans() {
                     {t("planName", { plan: plan.code })}
                     {current ? ` ${t("currentPlanTag")}` : ""}
                   </p>
-                  <p className="type-caption text-muted-foreground">
-                    {t("planTerms", {
-                      price: dollarsFromCredits(plan.monthly_price_credits),
-                      credits: plan.included_allowance_credits,
-                    })}
+                  <p
+                    className="type-caption text-muted-foreground"
+                    data-slot="plan-terms"
+                  >
+                    {t(terms.key, terms.values)}
                   </p>
                 </div>
                 {/* Free is a tier, not a purchase: the backend 400s it, so it never
@@ -168,6 +169,17 @@ export function BillingPlans() {
             );
           })}
         </div>
+        {/* The plans' own terms, stated at purchase the way the pack expiry is (D-M5-13):
+            a monthly amount reads as if it accrues unless this says it does not. Always
+            shown; the pack clause only when the catalog has packs to state it about. */}
+        <p
+          className="type-caption mt-3 text-muted-foreground"
+          data-slot="plan-renewal-note"
+        >
+          {packExpiry > 0
+            ? t("planRenewalNote", { months: packExpiry })
+            : t("planRenewalNoteNoPacks")}
+        </p>
 
         {planCode !== "free" ? (
           <Button
@@ -190,23 +202,23 @@ export function BillingPlans() {
           {t("packsHint")}
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
-          {config.packs.map((pack) => (
-            <Button
-              key={pack.code}
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() => buyPack(pack.code)}
-              data-slot="pack-cta"
-              data-pack={pack.code}
-            >
-              {busy?.kind === "pack" && busy.code === pack.code
-                ? t("opening")
-                : t("packLabel", {
-                    price: dollarsFromCredits(pack.price_credits),
-                    credits: pack.granted_credits,
-                  })}
-            </Button>
-          ))}
+          {config.packs.map((pack) => {
+            const terms = packTerms(pack);
+            return (
+              <Button
+                key={pack.code}
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => buyPack(pack.code)}
+                data-slot="pack-cta"
+                data-pack={pack.code}
+              >
+                {busy?.kind === "pack" && busy.code === pack.code
+                  ? t("opening")
+                  : t(terms.key, terms.values)}
+              </Button>
+            );
+          })}
         </div>
         {/* D-M5-13: the expiry term is stated AT PURCHASE, not discovered afterwards. */}
         {packExpiry > 0 ? (

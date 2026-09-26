@@ -7,7 +7,15 @@
  */
 import "server-only";
 
-import type { CurrentUser, ServerAuth, ServerTokenResult } from "./types";
+import type {
+  CurrentUser,
+  Edition,
+  ServerAuth,
+  ServerTokenResult,
+} from "./types";
+
+/** This build is the community edition: unmetered, so no balance is ever money. */
+export const EDITION: Edition = "community";
 
 const LOCAL_OWNER_ID = "local-owner";
 const LOCAL_OWNER_EMAIL = "local@localhost";

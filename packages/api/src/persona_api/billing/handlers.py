@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from persona.billing import get_plan
+from persona.billing import PAYG_PACKS, PaygPack, get_plan
 from persona.logging import get_logger
 
 from persona_api.billing.gateway import AUTO_TOPUP_SOURCE
@@ -208,6 +208,67 @@ def _stamped_payg_credits(container: Any) -> int | None:  # noqa: ANN401
     return amount if amount > 0 else None
 
 
+#: The only currency this system bills in (the currency audit of 2026-09-14).
+_BILLING_CURRENCY = "usd"
+
+
+def _paid_for_its_pack(invoice: Any, *, credit_amount: int) -> bool:  # noqa: ANN401
+    """Whether a top-up invoice was settled for the pack its stamp grants (review M3).
+
+    The stamp says what to grant; only the invoice says it was bought. A draft that lost
+    its line in a cleanup can be replayed within the hour, finalize at $0 and be marked
+    paid by Stripe with the stamp intact, so a stamp alone must never grant. Three
+    conditions, all from the invoice:
+
+    - it is in USD, the only currency the credit arithmetic is valid for;
+    - ``subtotal`` equals the pack's price: the pack's line is on it, once. ``subtotal``
+      is before exclusive tax and invoice-level discounts, so this holds with tax either
+      way and under a coupon we deliberately put on a customer. It alone defeats the
+      lineless $0 replay, whose subtotal is 0;
+    - it is fully settled: status ``paid`` and ``amount_remaining == 0``. NOT
+      ``amount_paid`` against the price: Stripe applies a customer credit balance before
+      charging the card, and ``amount_paid`` excludes that balance, so a $10 top-up paid
+      $4 from the balance has ``amount_paid`` 600. Comparing it with the price took the
+      balance and granted nothing (review HIGH).
+    """
+    pack = _pack_granting(credit_amount)
+    if pack is None or not _billed_in_usd(invoice):
+        return False
+    subtotal = _field(invoice, "subtotal")
+    amount_remaining = _field(invoice, "amount_remaining")
+    if not isinstance(subtotal, int) or not isinstance(amount_remaining, int):
+        return False
+    settled = str(_field(invoice, "status") or "") == "paid" and amount_remaining == 0
+    return subtotal == pack.price_credits and settled
+
+
+def _received_for_its_pack(pi: Any, *, credit_amount: int) -> bool:  # noqa: ANN401
+    """Whether a Checkout pack's PaymentIntent received the pack its stamp grants.
+
+    The same rule as :func:`_paid_for_its_pack`, from what a PaymentIntent carries: USD,
+    and ``amount_received`` at least the pack's price. A PaymentIntent has no pre-tax
+    subtotal; it carries the Checkout session's TOTAL, which with Stripe Tax on is the
+    price plus any exclusive tax (or the price, tax included). Checkout offers no
+    promotion codes, so nothing can legitimately bring a pack's total below its price,
+    and requiring equality would refuse every taxed pack the customer paid for.
+    """
+    pack = _pack_granting(credit_amount)
+    if pack is None or not _billed_in_usd(pi):
+        return False
+    amount_received = _field(pi, "amount_received")
+    return isinstance(amount_received, int) and amount_received >= pack.price_credits
+
+
+def _pack_granting(credit_amount: int) -> PaygPack | None:
+    """The catalog pack that grants ``credit_amount`` credits, if one does."""
+    return next((p for p in PAYG_PACKS if p.granted_credits == credit_amount), None)
+
+
+def _billed_in_usd(container: Any) -> bool:  # noqa: ANN401
+    """Whether the Stripe object is in USD, the only currency the credit arithmetic fits."""
+    return str(_field(container, "currency") or "").lower() == _BILLING_CURRENCY
+
+
 def _is_auto_topup(container: Any) -> bool:  # noqa: ANN401
     """Whether the object carries the ``source=auto_topup`` stamp the gateway sets.
 
@@ -263,12 +324,19 @@ def _grant_topup_invoice(context: WebhookContext, invoice: Any, *, invoice_id: s
 
     The same ledger seam the Checkout pack path uses (``grant_payg_lot_idempotent``), so
     a pack bought either way lands as the same kind of lot with the same expiry; only the
-    ``reason`` says which door it came through.
+    ``reason`` says which door it came through. The stamp says how much to grant, and the
+    invoice's own amounts must show that pack was paid for (:func:`_paid_for_its_pack`).
     """
     credit_amount = _stamped_payg_credits(invoice)
     if credit_amount is None:
         _log.warning(
             "stripe webhook: auto top-up invoice without usable payg_credits, no-op",
+            invoice_id=invoice_id,
+        )
+        return
+    if not _paid_for_its_pack(invoice, credit_amount=credit_amount):
+        _log.warning(
+            "stripe webhook: auto top-up invoice was not paid for its pack, no grant",
             invoice_id=invoice_id,
         )
         return
@@ -309,7 +377,9 @@ def handle_payment_intent_succeeded(event: stripe.Event, context: WebhookContext
     ``payment_intent.metadata.payg_credits`` (stamped at checkout), NOT the charged amount
     (which includes tax). The lot is idempotent on the payment_intent id — a re-delivery
     grants ONE lot. Only fires for our PAYG intents (those carrying ``payg_credits``); a
-    subscription invoice's own PI has no such metadata → no-op.
+    subscription invoice's own PI has no such metadata → no-op. The stamp says how much to
+    grant, and the PaymentIntent's own amounts must show the pack was paid for
+    (:func:`_received_for_its_pack`); a stamp alone never grants.
 
     The auto top-up invoice's PI carries the same stamp (for the tripwire) plus
     ``source=auto_topup``; that lot is ``invoice.paid``'s to grant, keyed on the invoice
@@ -322,6 +392,12 @@ def handle_payment_intent_succeeded(event: stripe.Event, context: WebhookContext
     credit_amount = _stamped_payg_credits(pi)
     if credit_amount is None:
         return  # not a PAYG pack purchase we stamped → no-op
+    if not _received_for_its_pack(pi, credit_amount=credit_amount):
+        _log.warning(
+            "stripe webhook: pack payment was not paid for its pack, no grant",
+            payment_intent_id=pi_id,
+        )
+        return
 
     def _write(user_id: str) -> None:
         context.credits_policy.grant_payg_lot_idempotent(

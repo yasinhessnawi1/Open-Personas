@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api/client";
 import { useApi } from "@/lib/api/use-api";
-import { dollarsFromCredits } from "@/lib/money";
+import { usdFromCredits } from "@/lib/money";
 
 /**
  * Spec M5 (T4a) — the auto-top-up toggle (B1).
@@ -100,8 +100,8 @@ export function AutoTopupCard({
           </h2>
           <p className="type-body mt-2 max-w-prose text-muted-foreground">
             {t("autoTopupExplain", {
-              threshold: dollarsFromCredits(thresholdCredits),
-              amount: dollarsFromCredits(amountCredits),
+              threshold: usdFromCredits(thresholdCredits),
+              amount: usdFromCredits(amountCredits),
             })}
           </p>
         </div>

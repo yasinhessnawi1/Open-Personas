@@ -11,6 +11,13 @@
  */
 import type { ComponentType, ReactNode } from "react";
 
+/**
+ * Which edition this build is. Each `@/auth/server` variant exports it as a constant,
+ * so it is exactly the edition the build selected, with no runtime environment read
+ * that could differ from the build's.
+ */
+export type Edition = "cloud" | "community";
+
 /** Mint a bearer token for the API (Clerk JWT-template token in cloud; null in community). */
 export type GetToken = (options?: {
   template?: string;

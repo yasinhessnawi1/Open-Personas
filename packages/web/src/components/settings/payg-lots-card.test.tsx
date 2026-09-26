@@ -49,9 +49,9 @@ describe("payg lots", () => {
   });
 
   it("shows what remains and what the pack started as", () => {
-    // Partial spend has to be visible: "200 left" alone hides that it was a $5 pack.
+    // Partial spend has to be visible: "$2 left" alone hides that it was a $5 pack.
     renderLots([lot(300, 200, 500)]);
-    expect(screen.getByText(/200 of 500 credits left/)).toBeTruthy();
+    expect(screen.getByText("$2 of $5 left")).toBeTruthy();
   });
 
   it("shows a real expiry date, not just a countdown", () => {
@@ -66,9 +66,9 @@ describe("payg lots", () => {
     const unsorted = [lot(300, 100), lot(10, 200), lot(150, 300)];
     renderLots(unsorted);
     const remainings = lotEls().map(
-      (el) => el.querySelector("p")?.textContent?.match(/^(\d+)/)?.[1],
+      (el) => el.querySelector("p")?.textContent?.match(/^(\$\d+)/)?.[1],
     );
-    expect(remainings).toEqual(["100", "200", "300"]);
+    expect(remainings).toEqual(["$1", "$2", "$3"]);
   });
 
   it("warns on a lot that is about to lapse", () => {

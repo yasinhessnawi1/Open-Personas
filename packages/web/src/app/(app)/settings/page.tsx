@@ -1,7 +1,7 @@
 import { Package } from "lucide-react";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
-import { currentUser } from "@/auth/server";
+import { currentUser, EDITION } from "@/auth/server";
 import { PageBody, PageHeader, Stack } from "@/components/layout";
 import { ErrorState } from "@/components/patterns/error-state";
 import { LowBalanceWarningCard } from "@/components/settings/low-balance-warning-card";
@@ -10,6 +10,7 @@ import { UsageBreakdown } from "@/components/settings/usage-breakdown";
 import { Card } from "@/components/ui/card";
 import { unwrap } from "@/lib/api";
 import { serverApi } from "@/lib/api/server";
+import { usdFromCredits } from "@/lib/money";
 import {
   aggregateBySurface,
   type LedgerEntry,
@@ -26,6 +27,12 @@ import {
  *   - `credits.balance` (D-11-12 zero-guard surfaces via the `exhausted`
  *     branch below);
  *   - `<PreferencesCard>` consumer of `useTheme` + `useBoolSetting` + `LOCALE_COOKIE`.
+ *
+ * R9-177 B6, additive only. The balance reads in dollars on a metered install. The
+ * community edition is unmetered and reports a sentinel balance, so it reads "Unlimited"
+ * and carries no spending hint. Metered is decided by the EDITION the build selected
+ * (`@/auth/server`), not by whether Stripe billing is configured: a cloud install with
+ * billing off still meters, and its balance is still money.
  *
  * Spec M5 (T6) — ADDITIVE ONLY. Both credit warnings on this page used to state
  * the problem and stop (§1c.2, §1c.3): a user was told they were running out, or
@@ -68,6 +75,8 @@ export default async function SettingsPage() {
       .then(unwrap)
       .catch(() => [] as LedgerEntry[]),
   ]);
+  // Community is unmetered and reports a sentinel balance: never show it as money.
+  const metered = EDITION !== "community";
 
   const email = user?.primaryEmailAddress?.emailAddress ?? "";
   const name =
@@ -133,7 +142,7 @@ export default async function SettingsPage() {
                 href="#credits"
                 className="type-ui block border-l-2 border-transparent px-3 py-1 hover:border-primary hover:text-foreground"
               >
-                {t("credits")}
+                {t("balance")}
               </a>
             </li>
             <li>
@@ -229,17 +238,24 @@ export default async function SettingsPage() {
               data-slot="settings-credits"
             >
               <h2 className="type-caption font-mono text-muted-foreground uppercase">
-                {t("credits")}
+                {t("balance")}
               </h2>
               <p
                 className="type-display tabular-nums"
                 data-slot="settings-credits-balance"
               >
-                {format.number(credits.balance)}
+                {metered
+                  ? usdFromCredits(credits.balance)
+                  : t("balanceUnlimited")}
               </p>
-              <p className="type-caption text-muted-foreground">
-                {t("creditsHint")}
-              </p>
+              {metered ? (
+                <p
+                  className="type-caption text-muted-foreground"
+                  data-slot="settings-credits-hint"
+                >
+                  {t("creditsHint")}
+                </p>
+              ) : null}
             </Card>
           )}
 

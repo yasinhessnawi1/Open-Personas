@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # Spec M3 (D-M3-12): ``CostBasis`` now lives in ``persona.billing.basis`` (core)
 # so the billing seam has one authoritative home for the vocabulary; re-exported
 # here so ``from persona_runtime.cost import CostBasis`` importers are unchanged.
-__all__ = ["CostBasis", "CostSource", "compute_turn_cost"]
+__all__ = ["CENTS_ROUND_DECIMALS", "CostBasis", "CostSource", "compute_turn_cost"]
 
 _logger = get_logger("runtime.cost")
 
@@ -48,7 +48,7 @@ _logger = get_logger("runtime.cost")
 #: review finding I1 extends the SAME treatment to the estimate arm's summed
 #: cents (static/catalog table lookups also pick up float noise, and the
 #: worker's printed-value ceil turns that noise into a real overcharge).
-_ACTUAL_ROUND_DECIMALS: Final[int] = 6
+CENTS_ROUND_DECIMALS: Final[int] = 6
 
 
 @runtime_checkable
@@ -151,7 +151,7 @@ def compute_turn_cost(
     # "what we actually paid" and minted as ``actual_openrouter`` — it falls
     # through to the honest resolver-chain estimate below instead.
     if provider == "openrouter" and actual_cost_usd is not None and actual_cost_usd >= 0.0:
-        return round(actual_cost_usd * 100.0, _ACTUAL_ROUND_DECIMALS), "actual_openrouter"
+        return round(actual_cost_usd * 100.0, CENTS_ROUND_DECIMALS), "actual_openrouter"
     chain = source if source is not None else _default_source()
     hit = chain.resolve_with_source(_canonical_model_id(provider, model), allow_fetch=False)
     if hit is None:
@@ -166,7 +166,7 @@ def compute_turn_cost(
         return 0.0, "unpriced"
     metadata, link = hit
     # I1 (spec M2 review): round the estimate sum the SAME way the actual arm
-    # already rounds (``_ACTUAL_ROUND_DECIMALS``). Raw float arithmetic on an
+    # already rounds (``CENTS_ROUND_DECIMALS``). Raw float arithmetic on an
     # exact-integer-cent estimate can land a 1e-15 noise bit above the true
     # value (e.g. 9.0 -> 9.000000000000002); the worker's printed-value ceil
     # (``Decimal(str(cost))``) then rounds that noise UP to an extra whole
@@ -175,6 +175,6 @@ def compute_turn_cost(
     cents = round(
         (prompt_tokens / 1000.0) * metadata.cost_input_per_1k_tokens
         + (completion_tokens / 1000.0) * metadata.cost_output_per_1k_tokens,
-        _ACTUAL_ROUND_DECIMALS,
+        CENTS_ROUND_DECIMALS,
     )
     return cents, "estimate_static" if link == "static" else "estimate_catalog"

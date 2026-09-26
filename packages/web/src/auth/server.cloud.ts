@@ -9,9 +9,12 @@ import "server-only";
 
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { auth as clerkAuth } from "@clerk/nextjs/server";
-import type { ServerTokenResult } from "./types";
+import type { Edition, ServerTokenResult } from "./types";
 
 export { auth, currentUser } from "@clerk/nextjs/server";
+
+/** This build is the cloud edition: metered, so the balance is money. */
+export const EDITION: Edition = "cloud";
 
 /**
  * Clerk API error codes that mean the session this request's cookie references

@@ -37,6 +37,13 @@ function clerkApiError(status: number, code: string) {
   });
 }
 
+describe("server EDITION (cloud)", () => {
+  it("names the cloud edition", async () => {
+    const { EDITION } = await import("./server.cloud");
+    expect(EDITION).toBe("cloud");
+  });
+});
+
 describe("serverAuthToken (cloud) — BUG 1 logout-race resilience", () => {
   beforeEach(() => {
     auth.mockReset();

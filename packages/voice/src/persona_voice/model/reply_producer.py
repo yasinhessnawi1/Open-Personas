@@ -587,17 +587,20 @@ class VoiceModelReplyProducer:
         # that does not touch the strip (the tag is still removed from the audio); the
         # criterion-3 floor is preserved by reuse of the exact converter.
         strip_converter = FeelingTagConverter(ConvertMode.STRIP, on_feeling=self._capture_stance())
-        served_noted = False
+        # This round's served (provider, model). Billing reads this local, never
+        # ``self._served_model``: that field belongs to the turn log and the next turn's
+        # ``__call__`` resets it, so the charge depends only on this round's own read.
+        served: tuple[str, str] | None = None
         async for chunk in backend.chat_stream(
             prompt, tools=tools, temperature=0.0, max_tokens=max_tokens
         ):
-            if not served_noted and _is_reply_payload(chunk):
+            if served is None and _is_reply_payload(chunk):
                 # R9-214: the chain is committed to its winner by its first payload chunk, so
                 # the ledger read here names the backend that is actually speaking, including
-                # on a turn a barge-in later cuts short. The meter feed below is unchanged and
-                # still receives the wrapper's primary (R9-221).
-                served_noted = True
-                self._served_model = resolve_served_model(backend)
+                # on a turn a barge-in later cuts short. R9-221: the meter below is fed this
+                # same pair, so a turn a fallback answered is billed at the fallback (D-M2-2).
+                served = resolve_served_model(backend)
+                self._served_model = served
             if chunk.delta:
                 if not timing.notified:
                     timing.notified = True
@@ -612,14 +615,20 @@ class VoiceModelReplyProducer:
                     yield spoken
             # Spec M3 (T6b-1): the final chunk carries usage (StreamChunk.usage);
             # capture this round's real token usage for the served LLM's meter,
-            # summed across the turn's rounds (a tool round + re-prompt).
+            # one entry per round (a tool round + re-prompt), each priced on its own.
             if chunk.usage is not None and self._turn_meter is not None:
+                # A chain yields nothing until it has committed to a backend, but on commit
+                # it releases the payload-less chunks it held back (usage included) BEFORE
+                # the committing chunk, so ``served`` can still be unset here. The chain's
+                # ledger is already final by then, so resolving now names the same backend.
+                # A bare backend, which has no ledger, resolves to its own identity.
+                provider, model = served if served is not None else resolve_served_model(backend)
                 self._turn_meter.note_llm_usage(
                     prompt_tokens=chunk.usage.prompt_tokens,
                     completion_tokens=chunk.usage.completion_tokens,
                     cost_usd=chunk.usage.cost_usd,
-                    provider=backend.provider_name,
-                    model=backend.model_name,
+                    provider=provider,
+                    model=model,
                 )
             tcd = chunk.tool_call_delta
             if tcd is not None:

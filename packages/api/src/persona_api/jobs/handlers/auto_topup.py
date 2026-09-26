@@ -32,7 +32,7 @@ from persona.jobs import (
 )
 from persona.logging import get_logger
 
-from persona_api.billing.autotopup import maybe_auto_topup
+from persona_api.billing.autotopup import AutoTopupOutcome, maybe_auto_topup
 
 if TYPE_CHECKING:
     from persona.jobs import JobContext, JobRegistry
@@ -43,6 +43,19 @@ if TYPE_CHECKING:
 __all__ = ["AutoTopupHandler", "register_auto_topup_handler"]
 
 _log = get_logger("api.jobs.auto_topup")
+
+#: Outcomes whose evaluated line is DEBUG (R9-215, owner ruling 2026-09-26). Voice enqueues
+#: one job per charged turn (D-M5-16), so ``not_crossed`` would otherwise print a line per
+#: turn, and ``charged`` already has its one INFO line ("auto-top-up invoiced") in
+#: ``maybe_auto_topup``. Every other outcome explains a top-up that did not happen, so INFO.
+_DEBUG_OUTCOMES: frozenset[AutoTopupOutcome] = frozenset(
+    {AutoTopupOutcome.NOT_CROSSED, AutoTopupOutcome.CHARGED}
+)
+
+
+def _level_for(outcome: AutoTopupOutcome) -> str:
+    """The log level for the handler's evaluated line for ``outcome``."""
+    return "DEBUG" if outcome in _DEBUG_OUTCOMES else "INFO"
 
 
 class AutoTopupHandler:
@@ -68,7 +81,8 @@ class AutoTopupHandler:
             old_balance=payload.old_balance,
             new_balance=payload.new_balance,
         )
-        _log.info(
+        _log.log(
+            _level_for(outcome),
             "auto-top-up trigger from {source} evaluated: {outcome} (call={call} turn={turn})",
             source=payload.source,
             outcome=str(outcome),

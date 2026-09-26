@@ -23,7 +23,13 @@ import SettingsPage from "./page";
 
 const apiGet = vi.fn();
 
+// The edition the build selected. Switched per test; cloud unless a test says otherwise.
+const build = vi.hoisted(() => ({ edition: "cloud" as "cloud" | "community" }));
+
 vi.mock("@/auth/server", () => ({
+  get EDITION() {
+    return build.edition;
+  },
   currentUser: () =>
     Promise.resolve({
       firstName: "Ada",
@@ -57,11 +63,24 @@ vi.mock("@/components/settings/preferences-card", () => ({
   PreferencesCard: () => null,
 }));
 
-/** Drives the page's real reads with a given balance. */
-function serveBalance(balance: number, lowBalance: boolean) {
+/**
+ * Drives the page's real reads with a given balance. Billing is on (cloud) by default;
+ * "404" answers the config read as community does, "disabled" as a metered install
+ * with billing switched off does.
+ */
+function serveBalance(
+  balance: number,
+  lowBalance: boolean,
+  billing: "on" | "404" | "disabled" = "on",
+) {
   apiGet.mockImplementation((path: string) => {
     if (path === "/v1/me/credits") {
       return Promise.resolve({ data: { balance, low_balance: lowBalance } });
+    }
+    if (path === "/v1/billing/config") {
+      return billing === "404"
+        ? Promise.reject(new Error("404"))
+        : Promise.resolve({ data: { enabled: billing === "on" } });
     }
     if (path === "/v1/me/usage") return Promise.resolve({ data: [] });
     return Promise.resolve({ data: [] });
@@ -81,6 +100,57 @@ function billingLinks(): string[] {
 }
 
 describe("settings page credit warnings", () => {
+  it("shows the balance in dollars under a Balance heading", async () => {
+    // R9-177 B6 (owner ruling 2026-09-26): every wallet balance speaks dollars.
+    serveBalance(123_450, false);
+    await renderPage();
+    const card = document.querySelector('[data-slot="settings-credits"]');
+    expect(card?.querySelector("h2")?.textContent).toBe("Balance");
+    expect(
+      document.querySelector('[data-slot="settings-credits-balance"]')
+        ?.textContent,
+    ).toBe("$1,234.50");
+  });
+
+  it.each(["disabled", "404"] as const)(
+    "still shows dollars on a metered install whatever the billing config says (%s)",
+    async (billing) => {
+      // Review MEDIUM-1: a cloud install with Stripe billing off, or a config read that
+      // fails (a 500, a 401 race), still meters. Its balance is money, not "Unlimited".
+      serveBalance(2350, false, billing);
+      await renderPage();
+      expect(
+        document.querySelector('[data-slot="settings-credits-balance"]')
+          ?.textContent,
+      ).toBe("$23.50");
+      expect(
+        document.querySelector('[data-slot="settings-credits-hint"]')
+          ?.textContent,
+      ).toBe("Your balance is spent per turn, by model tier.");
+    },
+  );
+
+  it("shows Unlimited, never a dollar figure or a spending hint, on community", async () => {
+    // Community is unmetered and reports a sentinel balance of a billion credits. As
+    // money that read "$10,000,000"; it is not money, so it must not look like it.
+    build.edition = "community";
+    try {
+      serveBalance(1_000_000_000, false, "404");
+      await renderPage();
+      const card = document.querySelector('[data-slot="settings-credits"]');
+      expect(
+        card?.querySelector('[data-slot="settings-credits-balance"]')
+          ?.textContent,
+      ).toBe("Unlimited");
+      expect(card?.textContent).not.toMatch(/\$/);
+      expect(
+        card?.querySelector('[data-slot="settings-credits-hint"]'),
+      ).toBeNull();
+    } finally {
+      build.edition = "cloud";
+    }
+  });
+
   it("gives the low-balance warning a way to act on it", async () => {
     serveBalance(500, true);
     await renderPage();

@@ -45,14 +45,36 @@ export function microsFromDollars(input: string | number): number {
 }
 
 /**
- * credits → `"15"` / `"15.50"`, WITHOUT the `$`.
- *
- * The sign is separate here because the billing strings carry it in the copy
- * (`"${price} a month"`). This was two byte-identical copies in `billing-plans.tsx` and
- * `auto-topup-card.tsx` until 2026-09-15; two copies of a money conversion drift.
+ * The locale wallet figures are formatted in. The app's catalogue is English and USD is
+ * its only currency, so this is fixed until currency exchange is done properly (phase 4).
  */
-export function dollarsFromCredits(credits: number): string {
-  return (credits / CREDITS_PER_DOLLAR).toFixed(
-    credits % CREDITS_PER_DOLLAR === 0 ? 0 : 2,
-  );
+const MONEY_LOCALE = "en-US";
+
+/** Built once each: an `Intl.NumberFormat` is immutable, and constructing one is not free. */
+const WHOLE_DOLLARS = new Intl.NumberFormat(MONEY_LOCALE, {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+const DOLLARS_AND_CENTS = new Intl.NumberFormat(MONEY_LOCALE, {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/**
+ * credits → `"$15"` / `"$15.50"` / `"$0"` / `"$1,234.50"`, unit attached. The one
+ * formatter every wallet figure in the app goes through.
+ *
+ * Whole dollars print without cents, anything else with two decimals, thousands grouped.
+ * Every money string takes the formatted value and carries no `$` of its own (R9-177
+ * B6): until 2026-09-26 the copy wrote the sign beside a bare number
+ * (`"${price} a month"`), which is the same drift R9-172 was, one layer up.
+ */
+export function usdFromCredits(credits: number): string {
+  const formatter =
+    credits % CREDITS_PER_DOLLAR === 0 ? WHOLE_DOLLARS : DOLLARS_AND_CENTS;
+  return formatter.format(credits / CREDITS_PER_DOLLAR);
 }

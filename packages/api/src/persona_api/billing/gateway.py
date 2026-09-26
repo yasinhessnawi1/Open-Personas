@@ -43,6 +43,13 @@ _REQUIRES_ACTION_CODES = frozenset(
 )
 
 
+def _is_resource_missing(exc: Exception) -> bool:
+    """Whether Stripe answered that the object no longer exists (an already cleaned draft)."""
+    return getattr(exc, "code", None) == "resource_missing" or (
+        getattr(exc, "http_status", None) == 404
+    )
+
+
 class AutoTopupPriceNotConfiguredError(PersonaError):
     """No Stripe Price is configured for the pack the auto top-up bills.
 
@@ -242,6 +249,11 @@ class StripeGateway:
                 # without both, every first purchase failed with a 502.
                 "billing_address_collection": "required",
                 "customer_update": {"address": "auto", "name": "auto"},
+                # A pack is always paid in USD: the webhook grants only a USD payment
+                # (credits are US cents), so a buyer shown a localized NOK or EUR price
+                # would pay and be refused. Adaptive Pricing can be switched on in the
+                # dashboard, so this session opts out explicitly.
+                "adaptive_pricing": {"enabled": False},
                 "metadata": meta,
                 "payment_intent_data": {
                     "setup_future_usage": "off_session",  # save the card (Pro auto-top-up T7b)
@@ -299,7 +311,8 @@ class StripeGateway:
         :class:`OffSessionAuthenticationRequiredError` (``code == "authentication_required"``,
         the contract the caller already keys on) and any other refusal
         :class:`OffSessionChargeFailedError`; in both cases the invoice is voided so no
-        open obligation lingers behind the on-session prompt.
+        open obligation lingers behind the on-session prompt. If ``finalize_invoice`` itself
+        fails, the draft is deleted (its line first) and the finalize error is re-raised.
 
         Raises:
             AutoTopupPriceNotConfiguredError: no pack Price configured; nothing was sent.
@@ -333,7 +346,7 @@ class StripeGateway:
             },
             options={"idempotency_key": f"{idempotency_key}:invoice"},
         )
-        self._client.invoice_items.create(
+        item = self._client.invoice_items.create(
             params={
                 "customer": customer_id,
                 "invoice": invoice.id,
@@ -343,11 +356,19 @@ class StripeGateway:
             },
             options={"idempotency_key": f"{idempotency_key}:item"},
         )
-        finalized = self._client.invoices.finalize_invoice(
-            invoice.id,
-            params={"auto_advance": False},
-            options={"idempotency_key": f"{idempotency_key}:finalize"},
-        )
+        try:
+            finalized = self._client.invoices.finalize_invoice(
+                invoice.id,
+                params={"auto_advance": False},
+                options={"idempotency_key": f"{idempotency_key}:finalize"},
+            )
+        except Exception:
+            # R9-177 B9 edge (owner ruling 2026-09-26): a draft left behind by a failed
+            # finalize (Stripe Tax cannot place the customer, say) would pile up in the
+            # dashboard, one per crossing. Clean it up, then re-raise: the caller must
+            # still see why the top-up failed.
+            self._discard_draft_best_effort(invoice.id, item_id=item.id)
+            raise
         self._stamp_invoice_payment_intent(finalized, meta=meta, idempotency_key=idempotency_key)
 
         try:
@@ -400,6 +421,84 @@ class StripeGateway:
                 invoice_id=invoice.id,
                 payment_intent_id=pi_id,
             )
+
+    def _discard_draft_best_effort(self, invoice_id: str, *, item_id: str) -> None:
+        """Remove the pack's line, then delete the draft a failed finalize left behind.
+
+        Only ever called when finalize raised, so the invoice is a draft. Stripe refuses
+        to delete anything that is not a one-off draft, so a finalize that did complete
+        behind a lost response cannot be deleted here either: the line removal fails
+        first and the invoice is left alone.
+
+        The line goes first because the invoice is deleted only once its line is gone. A
+        line left behind by a deleted draft could become a pending item, and a later
+        invoice for this customer that includes pending items would bill it. A draft that
+        keeps its line is harmless, so when the line cannot be removed the draft stays.
+
+        An hour-keyed replay can find the line, or the whole draft, already gone: the
+        replayed create calls return the saved ids of what an earlier cleanup deleted.
+        Stripe answers ``resource_missing`` for those, which means already cleaned, not kept.
+
+        Best-effort: every failure here is logged and swallowed, so the caller always
+        receives the finalize error. Logs name the invoice id only.
+        """
+        if not self._remove_draft_line(invoice_id, item_id=item_id):
+            return
+        try:
+            self._client.invoices.delete(invoice_id)
+        except Exception as exc:  # noqa: BLE001 (cleanup must never replace the finalize error)
+            if _is_resource_missing(exc):
+                _log.info(
+                    "auto top-up draft invoice already cleaned up after a failed finalize",
+                    invoice_id=invoice_id,
+                )
+                return
+            self._unstamp_surviving_draft(invoice_id, delete_error=exc)
+            return
+        _log.info(
+            "auto top-up draft invoice deleted after a failed finalize", invoice_id=invoice_id
+        )
+
+    def _remove_draft_line(self, invoice_id: str, *, item_id: str) -> bool:
+        """Remove the pack's line from the draft; ``True`` when it is gone, now or before."""
+        try:
+            self._client.invoice_items.delete(item_id)
+        except Exception as exc:  # noqa: BLE001 (cleanup must never replace the finalize error)
+            if _is_resource_missing(exc):
+                return True  # an earlier cleanup removed it; this is a replay
+            _log.warning(
+                "auto top-up draft invoice kept after a failed finalize: its line could not be "
+                "removed",
+                invoice_id=invoice_id,
+                error=type(exc).__name__,
+            )
+            return False
+        return True
+
+    def _unstamp_surviving_draft(self, invoice_id: str, *, delete_error: Exception) -> None:
+        """Clear the credit stamp on a lineless draft that could not be deleted (review M3).
+
+        The draft keeps ``metadata.payg_credits``, and a same-hour replay can finalize it at
+        $0, which Stripe marks paid. Clearing the stamp means it can never grant, whatever
+        happens to it later; ``source`` stays so the webhooks still route it as a top-up.
+        The webhook's own amount check is the second, independent guard.
+        """
+        try:
+            self._client.invoices.update(invoice_id, params={"metadata": {"payg_credits": ""}})
+        except Exception as exc:  # noqa: BLE001 (cleanup must never replace the finalize error)
+            _log.warning(
+                "auto top-up draft invoice could not be deleted after a failed finalize, and "
+                "its credit stamp could not be cleared",
+                invoice_id=invoice_id,
+                error=type(exc).__name__,
+            )
+            return
+        _log.warning(
+            "auto top-up draft invoice could not be deleted after a failed finalize; its "
+            "credit stamp was cleared so it can never grant",
+            invoice_id=invoice_id,
+            error=type(delete_error).__name__,
+        )
 
     def _void_best_effort(self, invoice_id: str, *, idempotency_key: str) -> None:
         """Void a finalized invoice whose off-session payment was refused.

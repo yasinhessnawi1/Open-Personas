@@ -12,6 +12,9 @@ documented route. These tests pin the wire shape with a fake ``StripeClient`` (n
   root, so Stripe replays the same invoice and never charges twice;
 - ``user_id`` / ``payg_credits`` / ``source`` ride the invoice AND its PaymentIntent;
 - a card needing 3DS maps to the existing on-session fallback (``REQUIRES_ACTION``);
+- a finalize failure (Stripe Tax cannot place the customer, say) removes the pack's line and
+  deletes the draft, so no orphan drafts pile up, and the caller still sees the original
+  error; a finalized invoice is voided on a refused payment and never deleted;
 - ``invoice.paid`` grants the top-up lot exactly once, keyed on the invoice id, while a
   subscription invoice is untouched by the new branch and the invoice's own
   ``payment_intent.succeeded`` never double-grants.
@@ -20,11 +23,12 @@ documented route. These tests pin the wire shape with a fake ``StripeClient`` (n
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 import stripe
+from loguru import logger as _loguru_logger
 from persona.billing import get_payg_pack
 from persona_api.billing import StripeGateway, WebhookContext, handlers
 from persona_api.billing import autotopup as autotopup_module
@@ -41,6 +45,9 @@ from persona_api.billing.gateway import (
 )
 from persona_api.config import APIConfig, Edition
 from persona_api.editions.factory import build_stripe_gateway
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _PRICE = "price_pack_10_test"
 _KEY = "autotopup:u1:2026-07-24-15"
@@ -67,10 +74,20 @@ class _FakeInvoice:
 class _FakeStripe:
     """Records every call and replays a create by its idempotency key, as Stripe does."""
 
-    def __init__(self, *, pay_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        pay_error: Exception | None = None,
+        finalize_error: Exception | None = None,
+        delete_error: Exception | None = None,
+        item_delete_error: Exception | None = None,
+    ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._by_key: dict[str, Any] = {}
         self._pay_error = pay_error
+        self._finalize_error = finalize_error
+        self._delete_error = delete_error
+        self._item_delete_error = item_delete_error
         self._invoice_seq = 0
 
         self.invoices = MagicMock()
@@ -78,8 +95,10 @@ class _FakeStripe:
         self.invoices.finalize_invoice.side_effect = self._finalize
         self.invoices.pay.side_effect = self._pay
         self.invoices.void_invoice.side_effect = self._void
+        self.invoices.delete.side_effect = self._delete
         self.invoice_items = MagicMock()
         self.invoice_items.create.side_effect = self._item_create
+        self.invoice_items.delete.side_effect = self._item_delete
         self.payment_intents = MagicMock()
         self.payment_intents.update.side_effect = self._pi_update
         self.payment_intents.create.side_effect = AssertionError("no bare PaymentIntent")
@@ -104,7 +123,21 @@ class _FakeStripe:
 
     def _finalize(self, invoice_id: str, **kwargs: Any) -> _FakeInvoice:  # noqa: ANN401
         self._record("invoices.finalize_invoice", invoice_id, **kwargs)
+        if self._finalize_error is not None:
+            raise self._finalize_error
         return _FakeInvoice(invoice_id, "open")
+
+    def _delete(self, invoice_id: str, **kwargs: Any) -> _FakeInvoice:  # noqa: ANN401
+        self._record("invoices.delete", invoice_id, **kwargs)
+        if self._delete_error is not None:
+            raise self._delete_error
+        return _FakeInvoice(invoice_id, "deleted")
+
+    def _item_delete(self, item_id: str, **kwargs: Any) -> MagicMock:  # noqa: ANN401
+        self._record("invoice_items.delete", item_id, **kwargs)
+        if self._item_delete_error is not None:
+            raise self._item_delete_error
+        return MagicMock()
 
     def _pi_update(self, pi_id: str, **kwargs: Any) -> MagicMock:  # noqa: ANN401
         self._record("payment_intents.update", pi_id, **kwargs)
@@ -297,6 +330,137 @@ def test_a_void_failure_never_hides_the_3ds_outcome() -> None:
         _topup(_gateway(fake))
 
 
+# --- a finalize failure deletes its draft (R9-177 B9 edge) -----------------------
+
+
+@pytest.fixture
+def gateway_records() -> Iterator[list[tuple[str, str, dict[str, Any]]]]:
+    """Every record the gateway logs at INFO or above, as ``(level, message, extra)``."""
+    captured: list[tuple[str, str, dict[str, Any]]] = []
+    sink_id = _loguru_logger.add(
+        lambda m: captured.append(
+            (m.record["level"].name, m.record["message"], dict(m.record["extra"]))
+        ),
+        level="INFO",
+        filter=lambda record: record["extra"].get("component") == "api.billing.gateway",
+    )
+    yield captured
+    _loguru_logger.remove(sink_id)
+
+
+def _tax_location_error() -> stripe.InvalidRequestError:
+    """What finalize raises when Stripe Tax cannot place the customer."""
+    return stripe.InvalidRequestError(
+        "The customer's location is not recognized.",
+        param=None,
+        code="customer_tax_location_invalid",
+    )
+
+
+def _no_other_ids(extra: dict[str, Any]) -> bool:
+    """A cleanup record names the invoice id and nothing else that identifies or prices."""
+    values = " ".join(str(v) for k, v in extra.items() if k != "invoice_id")
+    return not any(token in values for token in ("cus_", "ii_", "pi_", "u1", "1000", _PRICE))
+
+
+@pytest.mark.parametrize(
+    "finalize_error",
+    [
+        pytest.param(_tax_location_error(), id="stripe_tax_cannot_place_the_customer"),
+        pytest.param(stripe.APIConnectionError("blip"), id="connection_error"),
+    ],
+)
+def test_a_finalize_failure_deletes_the_draft_and_raises_the_original(
+    gateway_records: list[tuple[str, str, dict[str, Any]]], finalize_error: Exception
+) -> None:
+    fake = _FakeStripe(finalize_error=finalize_error)
+
+    with pytest.raises(type(finalize_error)) as excinfo:
+        _topup(_gateway(fake))
+
+    assert excinfo.value is finalize_error  # the caller still sees the real failure
+    # The line comes off first, then the one draft this call created is deleted. Nothing
+    # is paid, voided or stamped.
+    assert [c[0] for c in fake.calls] == [
+        "invoices.create",
+        "invoice_items.create",
+        "invoices.finalize_invoice",
+        "invoice_items.delete",
+        "invoices.delete",
+    ]
+    assert fake.named("invoice_items.delete")[0][1] == ("ii_1",)
+    ((_, delete_args, _),) = fake.named("invoices.delete")
+    assert delete_args == ("in_1",)
+    ((level, message, extra),) = gateway_records
+    assert level == "INFO"
+    assert "deleted" in message
+    assert extra["invoice_id"] == "in_1"
+    assert _no_other_ids(extra)
+
+
+def test_a_draft_delete_failure_never_hides_the_finalize_failure(
+    gateway_records: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    finalize_error = _tax_location_error()
+    fake = _FakeStripe(
+        finalize_error=finalize_error, delete_error=stripe.APIConnectionError("blip")
+    )
+
+    with pytest.raises(stripe.InvalidRequestError) as excinfo:
+        _topup(_gateway(fake))
+
+    assert excinfo.value is finalize_error
+    assert len(fake.named("invoices.delete")) == 1
+    ((level, message, extra),) = gateway_records
+    assert level == "WARNING"
+    assert "could not be deleted" in message
+    assert extra["invoice_id"] == "in_1"
+    assert _no_other_ids(extra)
+
+
+def test_a_line_that_cannot_be_removed_leaves_the_draft_in_place(
+    gateway_records: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    # Deleting the draft while its line is still attached could hand the pack's line back
+    # to the customer's pending items, where a later invoice would bill it. A draft that
+    # keeps its line is harmless, so the draft stays.
+    finalize_error = _tax_location_error()
+    fake = _FakeStripe(
+        finalize_error=finalize_error, item_delete_error=stripe.APIConnectionError("blip")
+    )
+
+    with pytest.raises(stripe.InvalidRequestError) as excinfo:
+        _topup(_gateway(fake))
+
+    assert excinfo.value is finalize_error
+    assert len(fake.named("invoice_items.delete")) == 1
+    assert fake.named("invoices.delete") == []
+    ((level, _message, extra),) = gateway_records
+    assert level == "WARNING"
+    assert extra["invoice_id"] == "in_1"
+    assert _no_other_ids(extra)
+
+
+def test_a_successful_topup_deletes_nothing() -> None:
+    fake = _FakeStripe()
+
+    assert _topup(_gateway(fake)) == ("in_1", "paid")
+
+    assert fake.named("invoices.delete") == []
+    assert fake.named("invoice_items.delete") == []
+
+
+def test_a_refused_payment_voids_the_finalized_invoice_and_never_deletes_it() -> None:
+    fake = _FakeStripe(pay_error=stripe.CardError("declined", "payment_method", "card_declined"))
+
+    with pytest.raises(OffSessionChargeFailedError):
+        _topup(_gateway(fake))
+
+    assert len(fake.named("invoices.void_invoice")) == 1
+    assert fake.named("invoices.delete") == []
+    assert fake.named("invoice_items.delete") == []
+
+
 def test_maybe_auto_topup_maps_3ds_to_requires_action(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real trigger chain: the gateway's domain exception reaches the caller's
     existing branch, so the user gets the on-session prompt, exactly as before."""
@@ -453,6 +617,12 @@ def _topup_invoice(*, invoice_id: str = "in_topup") -> dict[str, Any]:
         "id": invoice_id,
         "object": "invoice",
         "customer": "cus_1",
+        "currency": "usd",
+        # A paid $10 pack: the grant checks these before it trusts the stamp (review M3).
+        "status": "paid",
+        "subtotal": 1000,
+        "amount_paid": 1000,
+        "amount_remaining": 0,
         "metadata": dict(_META),
         "lines": {"data": [{"pricing": {"price": _PRICE}}]},
     }
@@ -572,6 +742,8 @@ def test_a_checkout_pack_payment_intent_still_grants() -> None:
         "id": "pi_pack_1",
         "object": "payment_intent",
         "customer": "cus_1",
+        "currency": "usd",
+        "amount_received": 500,  # a paid $5 pack: the grant checks it (review follow-up)
         "metadata": {"user_id": "u1", "payg_credits": "500"},
     }
 

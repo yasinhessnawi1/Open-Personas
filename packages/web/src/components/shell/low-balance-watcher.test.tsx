@@ -31,13 +31,11 @@ import {
   NotificationProvider,
   useNotify,
 } from "@/components/providers/notification-provider";
+import catalogue from "@/i18n/messages/en.json";
 import { LowBalanceWatcher } from "./low-balance-watcher";
 
-const messages = {
-  notifications: {
-    lowBalance: { title: "Low balance", body: "{count} credits left" },
-  },
-};
+// The real catalogue, so the rendered notification is the one users read.
+const messages = { notifications: catalogue.notifications };
 
 /** Surfaces the feed's first entry so tests can assert persist + href + level. */
 function Probe() {
@@ -49,6 +47,7 @@ function Probe() {
       data-count={entries.length}
       data-href={e?.href ?? ""}
       data-level={e?.level ?? ""}
+      data-body={e?.body ?? ""}
     />
   );
 }
@@ -95,6 +94,17 @@ describe("LowBalanceWatcher", () => {
     expect(toastFns.warning).toHaveBeenCalledTimes(1);
     // It read the REAL endpoint, not a static trigger.
     expect(getCredits).toHaveBeenCalledWith("/v1/me/credits");
+  });
+
+  it("says what is left in dollars", async () => {
+    // R9-177 B6 (owner ruling 2026-09-26): the balance speaks dollars everywhere.
+    getCredits.mockResolvedValue(creditsReply(450, true));
+    renderWatcher();
+    await waitFor(() =>
+      expect(screen.getByTestId("probe")).toHaveAttribute("data-count", "1"),
+    );
+    const probe = screen.getByTestId("probe");
+    expect(probe).toHaveAttribute("data-body", "$4.50 left");
   });
 
   it("does not notify when the balance is healthy", async () => {

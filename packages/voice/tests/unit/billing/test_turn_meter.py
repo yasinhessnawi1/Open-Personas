@@ -17,6 +17,7 @@ import pytest
 from persona.billing import BillingConfig
 from persona.errors import DailySpendCapExceededError
 from persona_voice.billing import VoiceTurnAccumulator, VoiceTurnBillingMeter
+from persona_voice.billing.turn_meter import LlmRound
 
 
 def _amount(kw: dict[str, object]) -> int:
@@ -125,28 +126,32 @@ class TestVoiceTurnAccumulator:
         box[0] = 75.0  # cumulative reader; the second turn bills only the new 45s
         assert acc.take_turn().stt_streamed_seconds == pytest.approx(45.0)
 
-    def test_llm_usage_sums_across_rounds(self) -> None:
+    def test_each_round_is_kept_with_its_own_served_model_and_cost(self) -> None:
+        # A tool round and its follow-up can be served by different models, so the
+        # rounds are never folded into one pair; each keeps its own actual too.
         acc = VoiceTurnAccumulator(streamed_seconds_reader=lambda: 0.0)
         acc.note_llm_usage(
             prompt_tokens=100, completion_tokens=50, cost_usd=0.01, provider="openrouter", model="m"
         )
         acc.note_llm_usage(
-            prompt_tokens=40, completion_tokens=20, cost_usd=0.02, provider="openrouter", model="m"
+            prompt_tokens=40, completion_tokens=20, cost_usd=None, provider="anthropic", model="f"
         )
-        usage = acc.take_turn()
-        assert usage.llm_prompt_tokens == 140
-        assert usage.llm_completion_tokens == 70
-        assert usage.llm_cost_usd == pytest.approx(0.03)  # summed, both rounds reported one
-
-    def test_cost_usd_is_none_when_any_round_lacks_it(self) -> None:
-        acc = VoiceTurnAccumulator(streamed_seconds_reader=lambda: 0.0)
-        acc.note_llm_usage(
-            prompt_tokens=100, completion_tokens=50, cost_usd=0.01, provider="openrouter", model="m"
+        assert acc.take_turn().llm_rounds == (
+            LlmRound(
+                prompt_tokens=100,
+                completion_tokens=50,
+                cost_usd=0.01,
+                provider="openrouter",
+                model="m",
+            ),
+            LlmRound(
+                prompt_tokens=40,
+                completion_tokens=20,
+                cost_usd=None,
+                provider="anthropic",
+                model="f",
+            ),
         )
-        acc.note_llm_usage(
-            prompt_tokens=40, completion_tokens=20, cost_usd=None, provider="openrouter", model="m"
-        )
-        assert acc.take_turn().llm_cost_usd is None
 
     def test_take_turn_resets_state(self) -> None:
         acc = VoiceTurnAccumulator(streamed_seconds_reader=lambda: 0.0)
@@ -157,8 +162,7 @@ class TestVoiceTurnAccumulator:
         acc.take_turn()
         second = acc.take_turn()
         assert second.tts_chars == 0
-        assert second.llm_prompt_tokens == 0
-        assert second.llm_cost_usd is None
+        assert second.llm_rounds == ()
 
 
 # ----- per-turn deduct ------------------------------------------------------
@@ -311,7 +315,8 @@ class TestBillTurn:
         box[0] = 20.0
         meter.note_tts_chars(0)
         asyncio.run(meter.bill_turn(2))  # only the new 10s
-        assert ledger.calls[-1]["cost_cents"] == pytest.approx(10.0 / 60.0 * 1.25)
+        # Recorded to micro-cents: the turn total is rounded once (per-round review LOW).
+        assert ledger.calls[-1]["cost_cents"] == round(10.0 / 60.0 * 1.25, 6)
 
 
 # ----- call-end LiveKit infra ------------------------------------------------
@@ -589,3 +594,26 @@ class TestDailyCap:
         """Fail-soft is preserved: the refusal must not escape into the turn recorder."""
         meter = _meter(_CapRefusingLedger(), streamed_seconds=[60.0])
         asyncio.run(meter.bill_turn(1))  # no on_exhausted wired: must not raise
+
+
+def test_rounds_that_sum_to_whole_cents_never_ceil_to_an_extra_credit() -> None:
+    # Review LOW on per-round pricing: summing rounds priced 0.1, 2.7 and 0.2 cents in
+    # float gives 3.0000000000000004, and the charge ceils the printed value, so the
+    # turn cost 4 credits for 3 cents of work. The turn total is rounded to micro-cents
+    # first, the same rounding each round already gets.
+    ledger = _RecordingLedger()
+    meter = _meter(ledger, streamed_seconds=[0.0])
+    for cost_usd in (0.001, 0.027, 0.002):  # OpenRouter actuals: 0.1, 2.7, 0.2 cents
+        meter.note_llm_usage(
+            prompt_tokens=10,
+            completion_tokens=10,
+            cost_usd=cost_usd,
+            provider="openrouter",
+            model="vendor/model",
+        )
+
+    asyncio.run(meter.bill_turn(1))
+
+    (charge,) = ledger.calls
+    assert charge["cost_cents"] == 3.0
+    assert charge["amount"] == 3
