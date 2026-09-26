@@ -104,6 +104,12 @@ export interface TaskRun {
   task: string;
   task_id: string | null;
   status: string;
+  /**
+   * R9-158: why the run was stopped early (`paused`, `cancelled`, `budget`, `wall_clock`,
+   * `steps`, `drain` or `approval`); null when it ended on its own or was recorded before
+   * the reason was.
+   */
+  stop_reason?: string | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -145,6 +151,12 @@ export interface TaskDetail {
   run_ids: string[];
   /** The task's runs, newest first (Spec W1, D-W1-3): the detail is their home. */
   runs: TaskRun[];
+  /**
+   * R9-158: a leg is queued, claimed or running. Between a Resume and the worker claiming
+   * the leg there is no run row yet; this is what lets the page say the next run is
+   * starting instead of showing the old stopped run as the latest word.
+   */
+  leg_queued?: boolean;
   created_at: string;
   updated_at: string;
 }

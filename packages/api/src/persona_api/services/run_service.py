@@ -54,6 +54,7 @@ _SUMMARY_COLS = (
     runs_t.c.task,
     runs_t.c.task_id,
     runs_t.c.status,
+    runs_t.c.stop_reason,
     runs_t.c.started_at,
     runs_t.c.finished_at,
 )
@@ -62,12 +63,14 @@ _SUMMARY_COLS = (
 def summarise_run(row: dict[str, object]) -> RunSummary:
     """The light :class:`RunSummary` projection of a runs row (shared by every run list)."""
     task_id = row.get("task_id")
+    stop_reason = row.get("stop_reason")
     return RunSummary(
         id=str(row["id"]),
         persona_id=str(row["persona_id"]),
         task=str(row["task"]),
         task_id=str(task_id) if task_id is not None else None,
         status=str(row["status"]),
+        stop_reason=str(stop_reason) if stop_reason is not None else None,
         started_at=row["started_at"],  # type: ignore[arg-type]
         finished_at=row.get("finished_at"),  # type: ignore[arg-type]
     )

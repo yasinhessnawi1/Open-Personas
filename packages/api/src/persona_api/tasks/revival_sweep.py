@@ -44,12 +44,13 @@ from persona.tasks import (
     WaitKind,
     classify_retryable,
 )
-from sqlalchemy import Select, exists, select
+from sqlalchemy import exists, select
 
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import jobs as jobs_t
 from persona_api.db.models import tasks as tasks_t
 from persona_api.tasks.handler import TASK_LEG_JOB_TYPE
+from persona_api.tasks.live_legs import live_task_leg_ids
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -84,9 +85,6 @@ STRANDED_GRACE = timedelta(minutes=10)
 #: own row at this head before acting, so a park is picked up at most once no matter how many
 #: ticks see it (D-W1-8).
 REVIVAL_AUDIT_ACTION = "task.revived"
-
-#: The states that mean a job is still going to run (or is running). Anything else is spent.
-_LIVE_JOB_STATES = ("queued", "claimed", "running")
 
 #: The one-line note the revival records, so the audit trail says who moved the task and why.
 _STRANDED_NOTE = "stranded: no live leg"
@@ -161,7 +159,7 @@ class RevivalSweeper:
                 tasks_t.c.state == TaskState.ACTIVE.value,
                 tasks_t.c.paused.is_(False),
                 tasks_t.c.updated_at < cutoff,
-                ~exists(self._live_job_for(tasks_t.c.id)),
+                ~exists(live_task_leg_ids(tasks_t.c.id)),
             )
             .order_by(tasks_t.c.updated_at)
             .limit(self._limit)
@@ -173,15 +171,6 @@ class RevivalSweeper:
             if self._revive(owner_id, task_id, now=now, note=_STRANDED_NOTE, trigger=None):
                 revived += 1
         return revived
-
-    @staticmethod
-    def _live_job_for(task_id_column: object) -> Select[tuple[int]]:
-        """A correlated EXISTS over this task's own leg jobs that are still going to run."""
-        return select(jobs_t.c.id).where(
-            jobs_t.c.type == TASK_LEG_JOB_TYPE,
-            jobs_t.c.payload["task_id"].as_string() == task_id_column,
-            jobs_t.c.state.in_(_LIVE_JOB_STATES),
-        )
 
     # --- a transient failure, offered and then taken up (D-W1-8) -----------------------------
 

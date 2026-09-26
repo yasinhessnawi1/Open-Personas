@@ -26,7 +26,12 @@ from persona.tools import ActionCategory
 from sqlalchemy import select
 
 from persona_api.approvals import KillSwitchStore
-from persona_api.approvals.budget import PLATFORM_DEFAULT_BUDGET_MICROS, BudgetEnforcer
+from persona_api.approvals.budget import (
+    PLATFORM_DEFAULT_BUDGET_MICROS,
+    BudgetEnforcer,
+    Extension,
+    ExtensionOutcome,
+)
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import audit_log as audit_log_t
@@ -57,6 +62,7 @@ from persona_api.services import (
     task_control_service,
 )
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.live_legs import has_starting_leg
 from persona_api.tasks.reader import APITaskStateReader
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from persona_api.textline import DETAIL_BUDGET, full_text, one_line
@@ -80,14 +86,15 @@ _CHECKPOINT_LIMIT = 10
 _MAX_EXTEND_MICROS = PLATFORM_DEFAULT_BUDGET_MICROS
 
 
-def _extension_ceiling_detail() -> str:
+def _extension_ceiling_detail(allowed_micros: int = _MAX_EXTEND_MICROS) -> str:
     """The 422 a user earns by asking for too much, in the currency they are charged in.
 
     R9-172 tail: this said "the maximum of 100000 micros", which is the ledger's own integer
     and means nothing to the person reading it. The web surfaces this detail on a failed
-    raise-the-cap, so it is user-visible text, not an operator log line.
+    raise-the-cap, so it is user-visible text, not an operator log line. R9-158: what one
+    request may add is the ceiling plus how far the task is already over its cap.
     """
-    return f"that is more than you can add at once, which is {format_micros(_MAX_EXTEND_MICROS)}"
+    return f"that is more than you can add at once, which is {format_micros(allowed_micros)}"
 
 
 _log = get_logger("api.routes.tasks")
@@ -333,6 +340,7 @@ async def get_task(
             run_service.summarise_run(r)
             for r in run_service.list_runs_for_task(rls_engine=engine, task_id=task_id)
         ],
+        leg_queued=has_starting_leg(engine, user.id, task_id, now=now),
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
@@ -541,9 +549,7 @@ async def extend_budget(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> BudgetExtendResult:
-    """Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap."""
-    if body.amount_micros > _MAX_EXTEND_MICROS:
-        raise HTTPException(status_code=422, detail=_extension_ceiling_detail())
+    """Raise the cap of a task at its cap (bounded, at-most-once). Reports the old → new cap."""
     engine = request.app.state.rls_engine
     store = TaskStore(engine)
     try:
@@ -552,17 +558,46 @@ async def extend_budget(
         raise HTTPException(status_code=404, detail="task not found") from exc
     budget = BudgetEnforcer(engine=engine, tasks=store, queue=JobQueue(engine))
     old_cap = budget.effective_cap(user.id, task)
-    # At-most-once (the cas_unpause gate): only a budget-paused task extends; a lost race no-ops.
-    applied = budget.extend(user.id, task_id, body.amount_micros, now=datetime.now(UTC))
+    # At-most-once per time the task reaches its cap (R9-158): the gate is the cap itself,
+    # under a row lock, so a duplicate finds the task already lifted off its cap and no-ops.
+    # The ceiling is decided with the cap, from the same locked read: a task over its cap by
+    # more than one request may add could otherwise never be lifted off it.
+    extension = budget.extend(
+        user.id,
+        task_id,
+        body.amount_micros,
+        now=datetime.now(UTC),
+        ceiling_micros=_MAX_EXTEND_MICROS,
+    )
+    if extension.outcome is ExtensionOutcome.OVER_CEILING:
+        allowed = extension.allowed_micros or _MAX_EXTEND_MICROS
+        raise HTTPException(status_code=422, detail=_extension_ceiling_detail(allowed))
     after = store.get(user.id, task_id)
     return BudgetExtendResult(
         task_id=task_id,
-        applied=applied,
+        applied=extension.outcome is ExtensionOutcome.APPLIED,
         old_cap_micros=old_cap,
         new_cap_micros=budget.effective_cap(user.id, after),
         state=budget.check(user.id, after).value,
-        note="" if applied else "This task isn't paused at its budget cap: nothing to extend.",
+        note=_extension_note(extension),
     )
+
+
+def _extension_note(extension: Extension) -> str:
+    """The sentence a user reads for an extension that did not apply (R9-158)."""
+    outcome = extension.outcome
+    if outcome is ExtensionOutcome.APPLIED:
+        return ""
+    if outcome is ExtensionOutcome.TOO_SMALL:
+        # The shortfall the decision itself read, never a second read, never negative.
+        return (
+            "That still leaves this task at its budget cap. "
+            f"Add more than {format_micros(max(0, extension.shortfall_micros))} so it can "
+            "carry on."
+        )
+    if outcome is ExtensionOutcome.FINISHED:
+        return "This task has already finished: nothing to extend."
+    return "This task isn't at its budget cap: nothing to extend."
 
 
 __all__ = ["router"]

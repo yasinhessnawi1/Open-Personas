@@ -6,7 +6,13 @@
  * - **Terminal projection (A6-D-4, condition 4)** — a stuck report renders as its own stuck
  *   projection (a failure never dresses as success).
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -242,5 +248,126 @@ describe("run history (Spec W1, D-W1-3)", () => {
         document.querySelector('[data-slot="run-history-empty"]'),
       ).not.toBeNull();
     });
+  });
+
+  // --- R9-158: Resume's first refresh, and the poll that follows a queued leg -----------
+
+  const stoppedByPause: TaskDetailData["runs"][number] = {
+    id: "run_1",
+    persona_id: "kai",
+    task: "Book the dentist",
+    task_id: "t1",
+    status: "cancelled",
+    stop_reason: "paused",
+    started_at: "2026-09-26T09:00:00Z",
+    finished_at: "2026-09-26T09:02:00Z",
+  };
+
+  it("shows the next run starting after Resume, never the stale paused pair", async () => {
+    client.getTask
+      .mockResolvedValueOnce(
+        detail({ status: "paused", paused: true, runs: [stoppedByPause] }),
+      )
+      .mockResolvedValue(
+        detail({
+          status: "progressing",
+          paused: false,
+          leg_queued: true,
+          runs: [stoppedByPause],
+        }),
+      );
+    client.resumeTask.mockResolvedValue({
+      task_id: "t1",
+      status: "progressing",
+      paused: false,
+      changed: true,
+      owner_autonomy_paused: false,
+      note: "",
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+
+    await screen.findByText(
+      "Starting. The next run appears here as soon as a worker picks it up.",
+    );
+    const slots = Array.from(
+      document.querySelectorAll('[data-slot="run-history"] > li'),
+    ).map((el) => el.getAttribute("data-slot"));
+    expect(slots).toEqual(["run-history-starting", "run-history-row"]);
+    expect(
+      document.querySelector('[data-slot="run-history-stop-reason"]')
+        ?.textContent,
+    ).toBe("Stopped: you paused this task");
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+  });
+
+  it.each([
+    [true, 2],
+    [false, 1],
+  ])(
+    "a queued leg (%s) keeps the page polling even while the task waits on the user",
+    async (legQueued, fetches) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        client.getTask.mockResolvedValue(
+          detail({ status: "waiting_on_user", leg_queued: legQueued }),
+        );
+        renderDetail();
+        await screen.findByText("Book the dentist");
+        await act(async () => {
+          vi.advanceTimersByTime(3000);
+        });
+        expect(client.getTask).toHaveBeenCalledTimes(fetches);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ["a finished task", { status: "completed" }],
+    ["a paused task", { status: "paused", paused: true }],
+  ])(
+    "%s shows no Starting row and does not poll, even if a leg is still listed",
+    async (_label, state) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        client.getTask.mockResolvedValue(
+          detail({ ...state, leg_queued: true, runs: [stoppedByPause] }),
+        );
+        renderDetail();
+        await screen.findByText("Book the dentist");
+        await act(async () => {
+          vi.advanceTimersByTime(9000);
+        });
+        expect(
+          document.querySelector('[data-slot="run-history-starting"]'),
+        ).toBeNull();
+        expect(client.getTask).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("a finished task stops polling even if a run row still says running", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      client.getTask.mockResolvedValue(
+        detail({
+          status: "completed",
+          runs: [{ ...stoppedByPause, status: "running", stop_reason: null }],
+        }),
+      );
+      renderDetail();
+      await screen.findByText("Book the dentist");
+      await act(async () => {
+        vi.advanceTimersByTime(9000);
+      });
+      expect(client.getTask).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

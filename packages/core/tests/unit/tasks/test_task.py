@@ -197,6 +197,43 @@ def test_cancel_while_paused_clears_overlay() -> None:
     assert cancelled.paused is False
 
 
+# R9-158: a pause holds work that is left. A task that ends has none, so every terminal
+# transition clears the hold, or a finished task goes on presenting as paused with Resume
+# and Cancel offered (the owner ruled a pause pressed while a leg finishes the work
+# completes the task, 2026-09-26).
+
+
+def test_completing_a_paused_task_ends_it_unpaused() -> None:
+    done = _task().start(now=_T0).pause(now=_T0).complete(now=_T1)
+    assert (done.state, done.paused, done.wait_kind, done.updated_at) == (
+        TaskState.COMPLETED,
+        False,
+        None,
+        _T1,
+    )
+
+
+def test_failing_a_paused_active_task_ends_it_unpaused() -> None:
+    failed = _task().start(now=_T0).pause(now=_T0).fail(now=_T1)
+    assert (failed.state, failed.paused, failed.wait_kind) == (TaskState.FAILED, False, None)
+
+
+def test_failing_a_paused_waiting_task_ends_it_unpaused() -> None:
+    waiting = _task().start(now=_T0).begin_wait(WaitKind.ON_USER, now=_T0).pause(now=_T0)
+    failed = waiting.fail(now=_T1)
+    assert (failed.state, failed.paused, failed.wait_kind) == (TaskState.FAILED, False, None)
+
+
+def test_an_unpaused_task_that_ends_stays_unpaused() -> None:
+    active = _task().start(now=_T0)
+    ended = (active.complete(now=_T1), active.fail(now=_T1), active.cancel(now=_T1))
+    assert [(t.state, t.paused) for t in ended] == [
+        (TaskState.COMPLETED, False),
+        (TaskState.FAILED, False),
+        (TaskState.CANCELLED, False),
+    ]
+
+
 # --- cost ledger accounting ---------------------------------------------------
 
 

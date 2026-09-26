@@ -35,6 +35,13 @@ const LIVE_RUN_POLL_MS = 3000;
 /** Task statuses under which a worker may open or advance a run at any moment. */
 const LIVE_TASK_STATUSES = new Set(["just_created", "progressing"]);
 
+/** R9-158: the next leg is starting, and the task is one a leg can start for. */
+function isStarting(detail: TaskDetailData): boolean {
+  return (
+    detail.leg_queued === true && !detail.paused && !TERMINAL.has(detail.status)
+  );
+}
+
 function statusVariant(
   status: string,
 ): "outline" | "secondary" | "destructive" {
@@ -89,11 +96,19 @@ export function TaskDetail({
   // Spec W1 (D-W1-3): while the task is being worked (a leg may open a run at any moment,
   // and a run may be live), refetch on a short poll so the run history appears and flips
   // without a reload; the durable row stays the truth (A6-R-4). Off once parked or done.
+  // R9-158: the next leg starting (right after Resume or Pick up) is being worked too,
+  // whatever the task's status says, so the poll runs until its run appears. Never for a
+  // finished or paused task: nothing will start there, and a stale row must not keep a
+  // finished task polling forever.
+  const legStarting =
+    detail !== null && detail !== "error" && isStarting(detail);
   const hasLiveRun =
     detail !== null &&
     detail !== "error" &&
     !detail.paused &&
+    !TERMINAL.has(detail.status) &&
     (LIVE_TASK_STATUSES.has(detail.status) ||
+      legStarting ||
       detail.runs.some((r) => r.status === "running"));
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -450,7 +465,7 @@ export function TaskDetail({
             <h2 className="type-caption font-mono text-muted-foreground uppercase">
               {t("runs")}
             </h2>
-            <RunHistory runs={detail.runs} />
+            <RunHistory runs={detail.runs} legQueued={legStarting} />
           </section>
         </CardContent>
       </Card>

@@ -19,7 +19,11 @@ from persona_api.approvals import (
     KillSwitchStore,
     parse_kill_switch,
 )
-from persona_api.approvals.budget import BudgetEnforcer
+from persona_api.approvals.budget import (
+    PLATFORM_DEFAULT_BUDGET_MICROS,
+    BudgetEnforcer,
+    ExtensionOutcome,
+)
 from persona_api.tasks.continuation import TaskContinuation
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
@@ -46,6 +50,9 @@ class _FakeQueue:
 
     def enqueue(self, **kwargs: object) -> None:
         self.enqueued.append(kwargs)
+
+    def count_spent_attempts(self, *, owner_id: str, idempotency_key: str) -> int:  # noqa: ARG002
+        return 0  # R9-158: the extension resumes through the continuation's seam
 
 
 def _seed(engine: Engine, user: str, persona: str) -> None:
@@ -74,6 +81,16 @@ def _active_task(tasks: TaskStore, *, owner: str, persona: str, task_id: str) ->
     return tasks.start(owner, task_id, now=_NOW)
 
 
+def _spend_to_the_default_cap(engine: Engine, owner: str, task_id: str) -> None:
+    """Put the task at its (default) cap: R9-158 extends only a task that is AT its cap."""
+    with engine.begin() as conn:
+        conn.execute(text("SELECT set_config('app.current_user_id', :o, true)"), {"o": owner})
+        conn.execute(
+            text("UPDATE tasks SET ledger_model_micros = :s WHERE id = :t"),
+            {"s": PLATFORM_DEFAULT_BUDGET_MICROS, "t": task_id},
+        )
+
+
 def _kill_switch(engine: Engine) -> KillSwitchStore:
     tasks = TaskStore(engine)
     continuation = TaskContinuation(
@@ -95,13 +112,14 @@ def test_clearing_budget_does_not_resume_a_suspended_persona(
     budget = BudgetEnforcer(engine=app_engine, tasks=tasks, queue=_FakeQueue())  # type: ignore[arg-type]
 
     # Two independent sources co-occur: budget pauses the task AND the persona is suspended.
+    _spend_to_the_default_cap(app_engine, "user_a", "t1")  # R9-158: extend needs the cap
     tasks.pause("user_a", "t1", now=_NOW)  # budget overlay
     ks.suspend_persona("user_a", "persona_a", now=_NOW)
     assert ks.is_runnable("user_a", tasks.get("user_a", "t1")) is False
 
     # A budget extension clears the budget overlay (cas_unpause) — but the persona is STILL
     # suspended, so the task must NOT become runnable. The invariant.
-    assert budget.extend("user_a", "t1", 500, now=_NOW) is True  # un-paused the budget overlay
+    assert budget.extend("user_a", "t1", 500, now=_NOW).outcome is ExtensionOutcome.APPLIED
     task = tasks.get("user_a", "t1")
     assert task.paused is False  # budget source cleared
     assert ks.is_runnable("user_a", task) is False  # persona-suspend still holds
@@ -137,7 +155,7 @@ def test_cancel_is_terminal_and_extension_cannot_revive(
     assert ks.is_runnable("user_a", cancelled) is False  # terminal → never runnable
     # A stale extension reply cannot bring it back to life (cas_unpause needs paused=true;
     # cancel cleared the overlay, and the task is terminal regardless).
-    assert budget.extend("user_a", "t1", 500, now=_NOW) is False
+    assert budget.extend("user_a", "t1", 500, now=_NOW).outcome is ExtensionOutcome.FINISHED
 
 
 # --- persona-suspend (resumable, RLS-scoped) --------------------------------

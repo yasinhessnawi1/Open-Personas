@@ -402,6 +402,16 @@
     "runsEmpty": "No runs yet. The first one starts as soon as a worker picks it up.",
     "runStarted": "Started {time}",
     "runLive": "Running now",
+    "runStarting": "Starting. The next run appears here as soon as a worker picks it up.",
+    "stopReason": {
+      "paused": "Stopped: you paused this task",
+      "cancelled": "Stopped: you cancelled this task",
+      "budget": "Stopped: budget reached",
+      "wall_clock": "Stopped: time limit reached",
+      "steps": "Stopped: step limit reached",
+      "drain": "Stopped for a restart",
+      "approval": "Stopped: it was waiting for your approval"
+    },
     "currentCadence": "Now: {terms}",
     "cadenceNotPickable": "This runs {terms}. That cadence can't be shown in this picker, so applying will replace it with what you set here.",
     "cadenceUnknown": "Couldn't load the current cadence, so applying will replace it with what you set here.",

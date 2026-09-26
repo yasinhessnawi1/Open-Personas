@@ -127,6 +127,12 @@ class LegOutcome:
             job, because the leg that gated wrote no checkpoint of its own. ``None`` on every
             ordinary outcome, and on a leg that merely ended on a question: a question is
             answered by the person reading it, not an obstacle in the world.
+        stop_reason: Why a CANCELLED run was stopped early, as the cancel token was tripped
+            with (R9-158): a box bound (``steps`` / ``wall_clock`` / ``budget``), the deploy
+            ``drain``, or a user control (``paused`` / ``cancelled``). ``None`` whenever the
+            run ended on its own, so the run record can say why it stopped instead of a bare
+            "cancelled". A plain string here: the vocabulary the record accepts belongs to
+            the api that writes it.
     """
 
     task: Task
@@ -138,6 +144,7 @@ class LegOutcome:
     resume_at: datetime | None = None
     proposal_id: str | None = None
     blocked_on: str | None = None
+    stop_reason: str | None = None
 
 
 class AgenticRunner(Protocol):
@@ -475,6 +482,7 @@ class LegExecutor:
             # instant (future, under the ceiling); this is where it becomes the directive
             # the continuation schedules on. A finished leg carries none by construction.
             resume_at=checkpoint.idle_until if disposition is LegDisposition.CONTINUE else None,
+            stop_reason=token.reason if run.status is RunStatus.CANCELLED else None,
         )
 
     @staticmethod

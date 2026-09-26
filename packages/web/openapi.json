@@ -9070,6 +9070,17 @@
             "type": "string",
             "title": "Status"
           },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
           "started_at": {
             "type": "string",
             "format": "date-time",
@@ -9800,6 +9811,11 @@
             },
             "type": "array",
             "title": "Runs"
+          },
+          "leg_queued": {
+            "type": "boolean",
+            "title": "Leg Queued",
+            "default": false
           },
           "created_at": {
             "type": "string",

@@ -5370,6 +5370,8 @@ export interface components {
       task_id?: string | null;
       /** Status */
       status: string;
+      /** Stop Reason */
+      stop_reason?: string | null;
       /**
        * Started At
        * Format: date-time
@@ -5711,6 +5713,11 @@ export interface components {
       run_ids: string[];
       /** Runs */
       runs: components["schemas"]["RunSummary"][];
+      /**
+       * Leg Queued
+       * @default false
+       */
+      leg_queued: boolean;
       /**
        * Created At
        * Format: date-time

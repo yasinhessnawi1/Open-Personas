@@ -60,6 +60,16 @@ def _seed(su: Engine) -> None:
         conn.execute(text("INSERT INTO personas (id, owner_id, yaml) VALUES ('kai','u','name: x')"))
 
 
+def _spend_to_the_default_cap(engine: Engine, owner: str, task_id: str) -> None:
+    """Put the task at its (default) cap: R9-158 extends only a task that is AT its cap."""
+    with engine.begin() as conn:
+        conn.execute(text("SELECT set_config('app.current_user_id', :o, true)"), {"o": owner})
+        conn.execute(
+            text("UPDATE tasks SET ledger_model_micros = :s WHERE id = :t"),
+            {"s": PLATFORM_DEFAULT_BUDGET_MICROS, "t": task_id},
+        )
+
+
 def _task(tasks: TaskStore, task_id: str, goal: str) -> None:
     tasks.create(
         Task(
@@ -231,7 +241,8 @@ async def test_budget_extend_is_bounded_and_at_most_once(
     _seed(migrated_engine)
     tasks = TaskStore(app_engine)
     _task(tasks, "t1", "renew the domain")
-    tasks.pause("u", "t1", now=_NOW)  # budget-paused (the extend precondition)
+    _spend_to_the_default_cap(app_engine, "u", "t1")  # R9-158: at the cap
+    tasks.pause("u", "t1", now=_NOW)  # budget-paused
     req = _request(app_engine)
 
     # bounded: an over-the-max increment is refused, not written.
@@ -249,7 +260,7 @@ async def test_budget_extend_is_bounded_and_at_most_once(
     )
     assert result.applied is True
     assert result.new_cap_micros == result.old_cap_micros + valid_increment
-    # the task un-paused (the extend armed it); a second extend now no-ops (at-most-once).
+    # the task un-paused and is off its cap; a second extend now no-ops (at-most-once).
     again = await extend_budget(
         "t1", BudgetExtendRequest(amount_micros=valid_increment), req, _USER
     )

@@ -22,6 +22,7 @@ outside any such scope MUST pass the owner explicitly.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from persona_runtime.agentic.run import RunStatus
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
 
 __all__ = [
+    "RunStopReason",
     "insert_run",
     "persist_error",
     "persist_final",
@@ -53,6 +55,24 @@ __all__ = [
     "persist_progress",
     "persist_terminal",
 ]
+
+
+class RunStopReason(StrEnum):
+    """Why a run was stopped before it ended on its own (R9-158); ``runs.stop_reason``.
+
+    The one vocabulary behind ``runs_stop_reason_check`` (a unit test holds the two
+    equal). A run that ends on its own records none. The box bounds and the drain carry
+    the same values as :class:`persona.tasks.LegBoxLimit`, because the executor hands over
+    the reason its cancel token was tripped with.
+    """
+
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    BUDGET = "budget"
+    WALL_CLOCK = "wall_clock"
+    STEPS = "steps"
+    DRAIN = "drain"
+    APPROVAL = "approval"
 
 
 @contextmanager
@@ -131,7 +151,14 @@ def persist_progress(
     _update(engine, run_id, owner_id, {"steps": event_log})
 
 
-def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None = None) -> None:
+def persist_final(
+    engine: Engine,
+    *,
+    run_id: str,
+    run: Run,
+    owner_id: str | None = None,
+    stop_reason: RunStopReason | None = None,
+) -> None:
     """Write the authoritative terminal record from a finished :class:`Run`.
 
     The run's own ``status`` is written verbatim: every :class:`RunStatus` value is a
@@ -146,8 +173,13 @@ def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None
     shown on the run page, and a capacity exhaustion stringifies to our provider names,
     model ids and routing strategy. The loop hands the failure over honestly and this
     picks the sentence a person sees, in both places the record states it.
+
+    ``stop_reason`` says why a CANCELLED run was stopped (R9-158). It is written only on a
+    cancelled run: any other status already says how the run ended, and a reason beside
+    it would contradict the row.
     """
     error, steps = _reader_safe_failure(engine, run, owner_id)
+    reason = stop_reason.value if stop_reason is not None else None
     _update(
         engine,
         run_id,
@@ -157,6 +189,7 @@ def persist_final(engine: Engine, *, run_id: str, run: Run, owner_id: str | None
             "steps": steps,
             "output": run.output,
             "error": error,
+            "stop_reason": reason if run.status is RunStatus.CANCELLED else None,
             "finished_at": run.finished_at,
         },
     )
@@ -237,18 +270,24 @@ def persist_terminal(
     error: str | None,
     finished_at: datetime,
     owner_id: str | None = None,
+    stop_reason: RunStopReason | None = None,
 ) -> None:
     """Terminate a run that produced no :class:`Run` object (an early stop).
 
     ``status`` MUST be one of the ``runs_status_check`` values; the steps already
     snapshotted by :func:`persist_progress` are left in place as the record of how far
-    the run got.
+    the run got. ``stop_reason`` says why it stopped (R9-158), e.g. the approval gate.
     """
     _update(
         engine,
         run_id,
         owner_id,
-        {"status": status, "error": error, "finished_at": finished_at},
+        {
+            "status": status,
+            "error": error,
+            "stop_reason": stop_reason.value if stop_reason is not None else None,
+            "finished_at": finished_at,
+        },
     )
 
 

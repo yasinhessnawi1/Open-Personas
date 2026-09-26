@@ -534,6 +534,10 @@ class RunSummary(_Output):
     #: The task this run executes (Spec W1, D-W1-1); ``None`` only for a legacy bare run.
     task_id: str | None = None
     status: str
+    #: Why the run was stopped early (R9-158): ``paused``, ``cancelled``, ``budget``,
+    #: ``wall_clock``, ``steps``, ``drain`` or ``approval``. ``None`` when it ended on its
+    #: own, and on runs recorded before the reason was.
+    stop_reason: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
 
@@ -1592,6 +1596,11 @@ class TaskDetailOut(_Output):
     #: The task's runs, newest first (Spec W1, D-W1-3): the task detail is the home of its
     #: run history, so a dispatched run stays reachable after navigating away.
     runs: list[RunSummary]
+    #: R9-158: whether this task's next leg is starting (claimed, or queued and due). Between
+    #: a Resume and the worker picking the leg up there is no new run row yet, so without this
+    #: the page showed the stale pair (a paused-looking task and its old cancelled run); with
+    #: it, the page shows the next run as starting and keeps polling until the run appears.
+    leg_queued: bool = False
     created_at: datetime
     updated_at: datetime
 

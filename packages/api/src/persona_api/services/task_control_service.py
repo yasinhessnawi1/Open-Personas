@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 from persona.tasks import Revived, TaskState, WaitKind
 
+from persona_api.approvals.budget import BudgetEnforcer, BudgetState
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules import ScheduleStore
@@ -109,6 +110,23 @@ PICKUP_REPLY = "Pick this up where you left off."
 #: The audit action every pickup writes, whichever door it came through (Spec W1, T9).
 PICKUP_AUDIT_ACTION = "task.pickup"
 
+#: What Resume answers on a task that has used its budget (R9-158; owner ruling 2026-09-26).
+#: Resuming it would run a leg boxed at zero remaining budget, which stops at once and pauses
+#: again at the cap. Extending is the way on, and it resumes the task by itself. "Raise cap" is
+#: the task page's label for Extend; the chat door reaches the same sentence.
+BUDGET_REACHED_RESUME_NOTE = (
+    "This task has used its budget, so resuming it would stop again at once. "
+    "Extend the budget with Raise cap on the task page and it carries on by itself."
+)
+
+#: The same refusal for a task waiting on the user (R9-158). Raising its cap does not queue
+#: a leg (one would run past what it is waiting on), so "carries on by itself" would be false:
+#: the user raises the cap, then answers it or picks it up.
+BUDGET_REACHED_WAITING_NOTE = (
+    "This task has used its budget. Extend the budget with Raise cap on the task page, "
+    "then answer it or pick it up and it carries on."
+)
+
 #: What a resumed leg is told (D-W1-38): a person lifted the pause, nothing failed, nothing
 #: was answered. The persona reads this, so it says the thing in the persona's terms.
 _RESUMED_REASON = "the user resumed it after a pause"
@@ -175,6 +193,11 @@ def resume_task(
     from persona.tasks import is_terminal
 
     store = TaskStore(engine)
+    # R9-158: checked first, so the pickup Resume becomes for a task waiting on the user is
+    # refused with the same sentence (pickup_task carries the same guard for its own door).
+    refused = _refused_at_the_cap(engine, owner_id, task)
+    if refused is not None:
+        return refused
     if not task.paused:
         # Spec W1 (T9): "start it again" means one thing to a user, and the seam should mean it
         # too. A task that is not paused but is parked ON THE USER is not resumed, it is picked
@@ -208,6 +231,27 @@ def resume_task(
     )
     _log.info("task resumed; next leg enqueued from the head", task_id=task.id)
     return ControlOutcome(task=unpaused, changed=True, note=note, owner_paused=owner_paused)
+
+
+def _refused_at_the_cap(engine: Engine, owner_id: str, task: Task) -> ControlOutcome | None:
+    """Refuse a control that would run a leg on a task that has used its budget (R9-158).
+
+    The leg would be boxed at zero remaining budget: it stops at once and pauses again at
+    the cap, recreating the stale "paused task, cancelled run" pair and spending to do it.
+    Read from the budget state (spent at or over the effective cap), not from which door
+    paused the task, so Resume and Pick up (the user's, and the persona's own tool) refuse
+    alike, with one sentence that points to Extend. ``None`` lets the control go on.
+    """
+    from persona.tasks import is_terminal
+
+    if is_terminal(task.state):
+        return None
+    budget = BudgetEnforcer(engine=engine, tasks=TaskStore(engine), queue=JobQueue(engine))
+    if budget.check(owner_id, task) is not BudgetState.REACHED:
+        return None
+    waiting_on_user = task.state is TaskState.WAITING and task.wait_kind is WaitKind.ON_USER
+    note = BUDGET_REACHED_WAITING_NOTE if waiting_on_user else BUDGET_REACHED_RESUME_NOTE
+    return ControlOutcome(task=task, changed=False, note=note)
 
 
 class TaskControlMutator:
@@ -280,6 +324,9 @@ def pickup_task(
 
     if is_terminal(task.state):
         return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+    refused = _refused_at_the_cap(engine, owner_id, task)
+    if refused is not None:
+        return refused
     if task.state is not TaskState.WAITING or task.wait_kind is not WaitKind.ON_USER:
         return ControlOutcome(task=task, changed=False, note="This task is already being worked.")
     held, why, owner_paused = _blocked(engine, owner_id, task)

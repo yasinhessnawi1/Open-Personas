@@ -30,12 +30,14 @@ established ``audit_service`` posture; the load-bearing atomicity is checkpoint 
 from __future__ import annotations
 
 import json
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import TaskNotFoundError
 from persona.logging import get_logger
 from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
+    TERMINAL_STATES,
     AcceptanceStatus,
     Task,
     enforce_checkpoint_budget,
@@ -45,6 +47,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.engine import rls_connection
+from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import task_checkpoints as checkpoints_t
 from persona_api.db.models import tasks as tasks_t
 from persona_api.services import audit_service
@@ -67,7 +70,7 @@ if TYPE_CHECKING:
         TaskCheckpoint,
         WaitKind,
     )
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 __all__ = ["CheckpointStore", "TaskStore"]
 
@@ -199,6 +202,37 @@ class TaskStore:
         if result.rowcount != 1:
             return False
         self._audit(owner_id, "task.unpause", self.get(owner_id, task_id))
+        return True
+
+    def cas_pause(self, conn: Connection, owner_id: str, task: Task, *, now: datetime) -> bool:
+        """Set the ``paused`` overlay iff clear and the task is live, on the caller's connection.
+
+        For a caller that already holds the task row's lock (the budget gate, R9-158), so the
+        pause and its ``task.pause`` audit row commit with the decision that led to them. On
+        SQLite a write from a second connection would wait on that same lock, so both are
+        written here, on ``conn``. Returns whether this call set the overlay.
+        """
+        result = conn.execute(
+            update(tasks_t)
+            .where(
+                tasks_t.c.id == task.id,
+                tasks_t.c.owner_id == owner_id,
+                tasks_t.c.paused.is_(False),
+                tasks_t.c.state.not_in([s.value for s in TERMINAL_STATES]),
+            )
+            .values(paused=True, updated_at=now)
+        )
+        if result.rowcount != 1:
+            return False
+        conn.execute(
+            insert(audit_log_t).values(
+                id=f"audit_{uuid.uuid4().hex}",
+                user_id=owner_id,
+                action="task.pause",
+                target=task.id,
+                metadata={"state": task.state.value, "persona_id": task.persona_id},
+            )
+        )
         return True
 
     def record_run(self, owner_id: str, task_id: str, run_id: str) -> None:

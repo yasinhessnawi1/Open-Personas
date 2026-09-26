@@ -16,10 +16,22 @@ import { cn } from "@/lib/utils";
  * viewer. The list is durable state (fetched, never inferred); the parent refetches on the
  * task.updated signal and, while a run is live, on a short poll, so a status flips without
  * a reload. No steps are loaded here; the viewer owns those.
+ *
+ * R9-158: a run stopped early says why (the user's pause or cancel, a limit, a restart, an
+ * approval), rather than a bare "cancelled"; and while a leg is queued but no run is live
+ * yet (the moment right after Resume), a "Starting" row leads the list, so the old stopped
+ * run is never presented as the latest word on a task that is already moving again.
  */
-export function RunHistory({ runs }: { runs: TaskRun[] }) {
+export function RunHistory({
+  runs,
+  legQueued = false,
+}: {
+  runs: TaskRun[];
+  legQueued?: boolean;
+}) {
   const t = useTranslations("taskDetail");
-  if (runs.length === 0) {
+  const starting = legQueued && !runs.some((run) => run.status === "running");
+  if (runs.length === 0 && !starting) {
     return (
       <p
         className="type-ui text-muted-foreground"
@@ -31,6 +43,16 @@ export function RunHistory({ runs }: { runs: TaskRun[] }) {
   }
   return (
     <ol className="flex flex-col gap-2" data-slot="run-history">
+      {starting ? (
+        <li
+          className="rounded-lg border border-dashed px-3 py-2"
+          data-slot="run-history-starting"
+        >
+          <output className="type-caption text-muted-foreground">
+            {t("runStarting")}
+          </output>
+        </li>
+      ) : null}
       {runs.map((run) => (
         <li
           key={run.id}
@@ -38,13 +60,23 @@ export function RunHistory({ runs }: { runs: TaskRun[] }) {
           data-slot="run-history-row"
           data-status={run.status}
         >
-          <div className="flex items-center gap-2">
-            <RunStatusBadge status={run.status as RunStatus} />
-            <span className="type-caption text-muted-foreground">
-              {run.status === "running"
-                ? t("runLive")
-                : t("runStarted", { time: formatStarted(run.started_at) })}
-            </span>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <RunStatusBadge status={run.status as RunStatus} />
+              <span className="type-caption text-muted-foreground">
+                {run.status === "running"
+                  ? t("runLive")
+                  : t("runStarted", { time: formatStarted(run.started_at) })}
+              </span>
+            </div>
+            {isStopReason(run.stop_reason) ? (
+              <span
+                className="type-caption text-muted-foreground"
+                data-slot="run-history-stop-reason"
+              >
+                {t(`stopReason.${run.stop_reason}`)}
+              </span>
+            ) : null}
           </div>
           <Link
             href={`/runs/${encodeURIComponent(run.id)}`}
@@ -60,6 +92,23 @@ export function RunHistory({ runs }: { runs: TaskRun[] }) {
       ))}
     </ol>
   );
+}
+
+/** The reasons the api records (``RunStopReason``); anything else shows no reason line. */
+const STOP_REASONS = [
+  "paused",
+  "cancelled",
+  "budget",
+  "wall_clock",
+  "steps",
+  "drain",
+  "approval",
+] as const;
+
+type StopReason = (typeof STOP_REASONS)[number];
+
+function isStopReason(value: string | null | undefined): value is StopReason {
+  return (STOP_REASONS as readonly string[]).includes(value ?? "");
 }
 
 /** A short, local time for the row; the viewer carries the precise timestamps. */

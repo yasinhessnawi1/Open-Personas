@@ -136,6 +136,17 @@ DEFAULT_RECENT_LEG_SUMMARIES = 3
 #: a long tail of old leg summaries pushes both away from the model's attention.
 MAX_RECENT_LEG_SUMMARIES = 5
 
+#: What a leg that ended under a pause still settles (R9-158). A pause holds work that is
+#: LEFT; it does not undo work that is done. COMPLETED is the work finishing (the owner ruled
+#: on 2026-09-26 that a pause pressed while a leg finishes the work completes the task), and
+#: WAITING_USER is the leg stopping on a question only the user can move, whose reply is
+#: refused while paused (D-W1-10). Every other outcome is held until Resume, which
+#: re-enqueues from the head (D-W1-30): CONTINUE's next leg and FAILED's retry would be jobs
+#: the claim consumes, and an approval park would strand the task, because an approval
+#: answered while paused enqueues a leg the claim consumes and Resume only clears a waiting
+#: task's overlay.
+_SETTLED_UNDER_A_PAUSE: Final = frozenset({LegDisposition.COMPLETED, LegDisposition.WAITING_USER})
+
 
 class TaskLegPayload(JobPayload):
     """Which leg to run: the task, the job-fixed predecessor anchor, and the trigger.
@@ -463,11 +474,23 @@ class _LegRunRecord:
             self._engine, run_id=self.run_id, event_log=event_log, owner_id=self._owner
         )
 
-    def finish(self, run: Run) -> None:
+    def finish(self, run: Run, *, stop_reason: run_record.RunStopReason | None = None) -> None:
         """Write the terminal record from the finished run (status/steps/output/error)."""
-        run_record.persist_final(self._engine, run_id=self.run_id, run=run, owner_id=self._owner)
+        run_record.persist_final(
+            self._engine,
+            run_id=self.run_id,
+            run=run,
+            owner_id=self._owner,
+            stop_reason=stop_reason,
+        )
 
-    def stop(self, *, reason: str, now: datetime) -> None:
+    def stop(
+        self,
+        *,
+        reason: str,
+        now: datetime,
+        stop_reason: run_record.RunStopReason | None = None,
+    ) -> None:
         """Terminate a run that never produced a :class:`Run` object.
 
         Only the A3 approval gate reaches here: ``GatedActionProposedError`` propagates
@@ -484,6 +507,7 @@ class _LegRunRecord:
             error=reason,
             finished_at=now,
             owner_id=self._owner,
+            stop_reason=stop_reason,
         )
 
     def fail(self, message: str) -> None:
@@ -524,8 +548,9 @@ class _ControlledRunner:
         self._tasks = tasks
         self._owner = owner_id
         self._task_id = task_id
-        #: True once a control (cancel / pause) tripped the leg; the handler then withholds
-        #: the continuation instead of enqueueing a leg the claim would only skip.
+        #: True once a control (cancel / pause) tripped the leg. Logged with the settle; the
+        #: hold itself is decided by the durable row (R9-158), since the pause may have been
+        #: lifted again before the leg ended.
         self.tripped = False
 
     async def run(
@@ -542,13 +567,21 @@ class _ControlledRunner:
                 current = self._tasks.get(self._owner, self._task_id)
                 if is_terminal(current.state) or current.paused:
                     self.tripped = True
+                    # R9-158: the reason rides the token into the run record, so the run
+                    # says the user paused or cancelled it rather than a bare "cancelled".
+                    reason = (
+                        run_record.RunStopReason.CANCELLED
+                        if is_terminal(current.state)
+                        else run_record.RunStopReason.PAUSED
+                    )
                     _log.info(
                         "leg stopped by a control at a step boundary",
                         task_id=self._task_id,
                         state=current.state.value,
                         paused=current.paused,
+                        reason=reason.value,
                     )
-                    cancel_token.cancel("control")
+                    cancel_token.cancel(reason.value)
 
         if on_step_usage is not None:
             return await self._inner.run(
@@ -958,7 +991,13 @@ class TaskLegHandler:
         # no run at all — settle the durable record either way, before anything downstream
         # (metering, billing, the continuation) can raise and strand it in ``running``.
         if record is not None:
-            self._settle_run_record(record, run=outcome.run, cause=_gate_reason(outcome), now=now)
+            self._settle_run_record(
+                record,
+                run=outcome.run,
+                cause=_gate_reason(outcome),
+                stop_reason=_run_stop_reason(outcome),
+                now=now,
+            )
         # A0 metering visibility (per-job spend → audit_log); the task ledger already accrued
         # via the CAS append. On a re-delivery the leg re-runs, so A0 records this execution's
         # spend (forensics) while the ledger no-ops — A0 meters executions, A2 accounts work.
@@ -1028,13 +1067,27 @@ class TaskLegHandler:
         # left to trip): the durable row is the user's decision either way, and driving the
         # state machine from it (cancelled → completed) would raise, A0 would re-run the leg
         # for nothing, and the job would dead-letter. Re-read, and settle without a transition.
+        #
+        # A PAUSE is different from a cancel (R9-158): it holds work that is left, so what the
+        # leg finished is settled and only what would come next is held, for as long as the
+        # task IS paused. The durable row decides, not whether the watcher tripped: a pause
+        # that tripped the leg and was lifted before it ended must let the leg continue. A
+        # Resume pressed while this leg's job was still live enqueued at the same head key and
+        # was absorbed by it (A0 dedups on the key), so if this leg held too, nothing would be
+        # left to run and the task would sit ACTIVE with no leg until the stranded sweep. A
+        # Resume pressed after the salvage append keyed the new head, which this leg's
+        # continuation then dedups onto: one live leg either way. Discarding a completed leg
+        # here is what left finished tasks paused with Resume offered.
         settled = self._tasks.get(owner, task.id)
-        if control.tripped or is_terminal(settled.state):
+        held = settled.paused and outcome.disposition not in _SETTLED_UNDER_A_PAUSE
+        if is_terminal(settled.state) or held:
             _log.info(
                 "leg ended under a control; no continuation",
                 task_id=task.id,
                 state=settled.state.value,
+                paused=settled.paused,
                 tripped=control.tripped,
+                disposition=outcome.disposition.value,
             )
             return
         # Disposition → state machine (continuation / completion / waiting); raises on FAILED
@@ -1216,13 +1269,19 @@ class TaskLegHandler:
         return record
 
     def _settle_run_record(
-        self, record: _LegRunRecord, *, run: Run | None, cause: str | None, now: datetime
+        self,
+        record: _LegRunRecord,
+        *,
+        run: Run | None,
+        cause: str | None,
+        now: datetime,
+        stop_reason: run_record.RunStopReason | None = None,
     ) -> None:
         """Write the leg run's terminal record — from the run, else from the stop cause."""
         if run is not None:
-            record.finish(run)
+            record.finish(run, stop_reason=stop_reason)
         elif cause is not None:
-            record.stop(reason=cause, now=now)
+            record.stop(reason=cause, now=now, stop_reason=stop_reason)
         else:  # pragma: no cover — a run-less leg always carries a cause
             record.fail("the leg ended without producing a run")
 
@@ -1309,6 +1368,25 @@ class TaskLegHandler:
                 await self._on_task_stuck(owner, report)
             except Exception as exc:  # noqa: BLE001 — the voice is additive; the park stands
                 _log.warning("stuck voicing failed task_id={tid}: {err}", tid=task.id, err=str(exc))
+
+
+def _run_stop_reason(outcome: LegOutcome) -> run_record.RunStopReason | None:
+    """Why the leg's run was stopped early, in the run record's vocabulary (R9-158).
+
+    The approval gate stops a run that never returned one; every other early stop is the
+    reason the leg's cancel token was tripped with (a box bound, the drain, or a control).
+    A reason outside the vocabulary is logged and recorded as none rather than failing the
+    settle: the record is the floor, and a CHECK violation would lose the whole row.
+    """
+    if outcome.disposition is LegDisposition.WAITING_APPROVAL:
+        return run_record.RunStopReason.APPROVAL
+    if outcome.stop_reason is None:
+        return None
+    try:
+        return run_record.RunStopReason(outcome.stop_reason)
+    except ValueError:
+        _log.warning("leg stopped for an unrecorded reason", reason=outcome.stop_reason)
+        return None
 
 
 def _gate_reason(outcome: LegOutcome) -> str | None:

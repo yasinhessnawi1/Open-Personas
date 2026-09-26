@@ -25,6 +25,7 @@ from persona_api.approvals import (
     BudgetState,
     parse_extension_micros,
 )
+from persona_api.approvals.budget import ExtensionOutcome
 from persona_api.tasks.store import TaskStore
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -51,6 +52,9 @@ class _FakeQueue:
 
     def enqueue(self, **kwargs: object) -> None:
         self.enqueued.append(kwargs)
+
+    def count_spent_attempts(self, *, owner_id: str, idempotency_key: str) -> int:  # noqa: ARG002
+        return 0  # R9-158: the extension resumes through the continuation's seam
 
 
 def _seed(engine: Engine, user: str, persona: str) -> None:
@@ -173,9 +177,9 @@ def test_extension_raises_cap_and_resumes(migrated_engine: Engine, app_engine: E
     )
     enforcer.enforce("user_a", task, now=_NOW)  # paused at cap
 
-    applied = enforcer.extend("user_a", "t1", 500, now=_NOW)
+    applied = enforcer.extend("user_a", "t1", 500, now=_NOW).outcome
 
-    assert applied is True
+    assert applied is ExtensionOutcome.APPLIED
     assert tasks.get("user_a", "t1").paused is False  # resumed
     assert len(queue.enqueued) == 1  # the next leg re-enqueued
     # The effective cap rose by the extension (1000 + 500).
@@ -200,11 +204,13 @@ def test_duplicated_extension_does_not_double_extend(
     )
     enforcer.enforce("user_a", task, now=_NOW)
 
-    first = enforcer.extend("user_a", "t1", 500, now=_NOW)
-    second = enforcer.extend("user_a", "t1", 500, now=_NOW)  # the duplicated reply
+    first = enforcer.extend("user_a", "t1", 500, now=_NOW).outcome
+    second = enforcer.extend("user_a", "t1", 500, now=_NOW).outcome  # the duplicated reply
 
-    assert first is True
-    assert second is False  # the un-pause CAS rejected the duplicate
+    assert first is ExtensionOutcome.APPLIED
+    # R9-158: the gate is the cap, under a row lock. The first extension lifted the task off
+    # its cap, so the duplicate finds it no longer at the cap.
+    assert second is ExtensionOutcome.NOT_AT_CAP
     # Exactly one extension applied — the cap rose by 500, not 1000.
     assert enforcer.effective_cap("user_a", tasks.get("user_a", "t1")) == 1500
     assert len(queue.enqueued) == 1  # one resume, not two

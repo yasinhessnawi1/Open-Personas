@@ -361,12 +361,23 @@ runs = Table(
     Column("steps", _json(), nullable=False, server_default=text("'[]'")),
     Column("output", Text),
     Column("error", Text),
+    # R9-158: why a run was stopped early (a box bound, the deploy drain, a user control,
+    # or the approval gate), so the run list can say why instead of a bare "cancelled".
+    # NULL on runs that ended on their own and on rows written before migration 057.
+    # The vocabulary is ``persona_api.services.run_record.RunStopReason``; a unit test
+    # holds the CHECK below equal to it.
+    Column("stop_reason", Text),
     Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("finished_at", DateTime(timezone=True)),
     CheckConstraint(
         "status IN ('running', 'awaiting_user', 'completed', 'cancelled', "
         "'max_steps_reached', 'error')",
         name="runs_status_check",
+    ),
+    CheckConstraint(
+        "stop_reason IS NULL OR stop_reason IN ('paused', 'cancelled', 'budget', "
+        "'wall_clock', 'steps', 'drain', 'approval')",
+        name="runs_stop_reason_check",
     ),
     # Composite FK: a run's persona must belong to the same owner (finding 1).
     ForeignKeyConstraint(
@@ -449,6 +460,18 @@ jobs = Table(
         "owner_id",
         postgresql_where=text("state IN ('claimed', 'running')"),
     ),
+    # R9-158: "does this task have a leg still to run?" The task detail reports it (a
+    # Resume shows "Starting" until the worker claims the leg) and the revival sweep's
+    # stranded check asks the same thing. Both filter a task's live legs by the task id in
+    # the payload; without this the route polled every few seconds would scan the owner's
+    # jobs row by row. Partial: only live task legs, so the index stays small. Migration 058.
+    # Postgres only: SQLite before 3.38 has no ``->>``, and a community database built by
+    # ``create_all`` on such a host would fail to boot for want of a speed-up it never needs.
+    Index(
+        "idx_jobs_live_task_leg",
+        text("(payload ->> 'task_id')"),
+        postgresql_where=text("type = 'task_leg' AND state IN ('queued', 'claimed', 'running')"),
+    ).ddl_if(dialect="postgresql"),
 )
 # D-A0-4 hygiene (HOT updates via fillfactor + aggressive per-table autovacuum)
 # is applied as storage reloptions in migration 011 — ``ALTER TABLE jobs SET

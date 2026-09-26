@@ -172,12 +172,20 @@ class Task(BaseModel):
         return self._transition(TaskState.ACTIVE, now=now)
 
     def complete(self, *, now: datetime) -> Task:
-        """``ACTIVE → COMPLETED`` — the task is done (a completion report follows)."""
-        return self._transition(TaskState.COMPLETED, now=now)
+        """``ACTIVE → COMPLETED``; clears the ``paused`` overlay.
+
+        The task is done (a completion report follows). A pause holds work that is left, and
+        a finished task has none, so the hold ends with it (R9-158): a pause pressed while
+        the last leg finished the work must not leave a done task offering Resume.
+        """
+        return self._transition(TaskState.COMPLETED, now=now, paused=False)
 
     def fail(self, *, now: datetime) -> Task:
-        """``ACTIVE | WAITING → FAILED`` — an unrecoverable terminal."""
-        return self._transition(TaskState.FAILED, now=now)
+        """``ACTIVE | WAITING → FAILED``, an unrecoverable terminal; clears the ``paused`` overlay.
+
+        Cleared for the reason :meth:`complete` clears it (R9-158): nothing is left to hold.
+        """
+        return self._transition(TaskState.FAILED, now=now, paused=False)
 
     def cancel(self, *, now: datetime) -> Task:
         """``→ CANCELLED`` from any non-terminal state; clears the ``paused`` overlay."""

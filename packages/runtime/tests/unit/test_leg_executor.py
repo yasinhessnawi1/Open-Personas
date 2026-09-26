@@ -812,3 +812,48 @@ async def test_a_leg_that_ends_on_its_own_names_no_limit() -> None:
         task=_task(), trigger=_TRIGGER, now=_NOW, external_cancel=CancelToken()
     )
     assert outcome.box_limit is None
+
+
+# --- why a stopped run stopped (R9-158) ---------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["paused", "cancelled", LegBoxLimit.DRAIN.value])
+async def test_a_leg_stopped_from_outside_carries_the_reason_it_was_stopped_with(
+    reason: str,
+) -> None:
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=10, status=RunStatus.COMPLETED, clock=clock, step_seconds=1.0)
+    stop = CancelToken()
+    stop.cancel(reason)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW, external_cancel=stop
+    )
+    assert (outcome.run.status, outcome.stop_reason) == (RunStatus.CANCELLED, reason)
+
+
+@pytest.mark.asyncio
+async def test_a_leg_the_box_stopped_carries_the_bound_it_hit() -> None:
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=10, status=RunStatus.COMPLETED, clock=clock, step_seconds=100.0)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(),
+        trigger=_TRIGGER,
+        box=LegBox(max_steps=10, wall_clock_seconds=180.0),
+        now=_NOW,
+    )
+    assert (outcome.run.status, outcome.stop_reason) == (
+        RunStatus.CANCELLED,
+        LegBoxLimit.WALL_CLOCK.value,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.COMPLETED, RunStatus.MAX_STEPS_REACHED])
+async def test_a_leg_that_ended_on_its_own_carries_no_stop_reason(status: RunStatus) -> None:
+    clock = _FakeClock()
+    runner = _FakeRunner(max_steps=2, status=status, clock=clock, step_seconds=1.0)
+    outcome = await _executor(runner, _RecordingSink(), clock).run_leg(
+        task=_task(), trigger=_TRIGGER, now=_NOW, external_cancel=CancelToken()
+    )
+    assert (outcome.run.status, outcome.stop_reason) == (status, None)

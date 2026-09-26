@@ -13,30 +13,41 @@ The state machine over ``task.ledger.total_micros`` vs the effective cap:
 - **reached** (≥100%) → the task is **paused** (A2 overlay — no new legs) + a ``budget.reached``
   account; nothing runs past the cap until the user extends.
 
-**The extension is at-most-once.** "add another $2" → a single ``budget.extended`` row that
-raises the cap + resumes the task. The CAS lives in :meth:`TaskStore.cas_unpause` (clear the
-overlay iff set): only the un-pause winner writes the extension, so a duplicated extension reply
-cannot double-extend.
+**The extension is at-most-once, per time the task reaches its cap** (R9-158). "add another $2"
+→ a single ``budget.extended`` row that raises the cap, then the task carries on. The gate is
+the cap itself, checked and written under a row lock on the task (:meth:`BudgetEnforcer.extend`):
+an extension is recorded only while the task is AT its cap, and one that would leave it still
+at its cap is refused with the shortfall, so every recorded extension lifts the task off its
+cap. A duplicated reply that waited on the lock then finds it no longer at the cap and no-ops.
+It no longer depends on ``paused``: a task can reach its cap while waiting on the user, and
+the old gate (the un-pause CAS) refused to extend it at all, a dead end the Resume refusal then
+pointed the user straight into.
 """
 
 from __future__ import annotations
 
 import re
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from persona.tasks import Revived, micros_from_dollars
-from sqlalchemy import text
+from persona.tasks import Revived, TaskState, is_terminal, micros_from_dollars
+from sqlalchemy import insert, select
 
+from persona_api.db.engine import rls_connection
+from persona_api.db.models import audit_log as audit_log_t
+from persona_api.db.models import tasks as tasks_t
 from persona_api.services import audit_service
-from persona_api.tasks.handler import enqueue_task_leg
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from datetime import datetime
 
     from persona.tasks import Task
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
     from persona_api.jobs.queue import JobQueue
     from persona_api.tasks.continuation import TaskStateSignal
@@ -46,6 +57,8 @@ __all__ = [
     "PLATFORM_DEFAULT_BUDGET_MICROS",
     "BudgetEnforcer",
     "BudgetState",
+    "Extension",
+    "ExtensionOutcome",
     "parse_extension_micros",
 ]
 
@@ -118,6 +131,32 @@ class BudgetState(StrEnum):
     REACHED = "reached"
 
 
+class ExtensionOutcome(StrEnum):
+    """What a budget extension did (R9-158)."""
+
+    #: Recorded: the cap rose, and the task carries on (see :meth:`BudgetEnforcer.extend`).
+    APPLIED = "applied"
+    #: The task is not at its cap (never was, or a duplicate found it already extended).
+    NOT_AT_CAP = "not_at_cap"
+    #: The amount would leave the task at its cap; nothing recorded. Add more than the gap.
+    TOO_SMALL = "too_small"
+    #: The task has ended; there is nothing for a higher cap to let carry on.
+    FINISHED = "finished"
+    #: More than one request may add: the per-request ceiling plus the shortfall.
+    OVER_CEILING = "over_ceiling"
+
+
+@dataclass(frozen=True)
+class Extension:
+    """The result of :meth:`BudgetEnforcer.extend`, from the one read that decided it."""
+
+    outcome: ExtensionOutcome
+    #: How far the task is over its cap (spent minus cap), never negative.
+    shortfall_micros: int = 0
+    #: The most this request could add (the ceiling plus the shortfall), when there is one.
+    allowed_micros: int | None = None
+
+
 #: What a budget-extended leg is told (Spec W1, D-W1-38 amended): the cap was raised, so the
 #: work it was cut off from may continue. Not a schedule firing.
 _EXTENDED_REASON = "the user extended its budget"
@@ -175,39 +214,139 @@ class BudgetEnforcer:
             self._audit(owner_id, _BUDGET_APPROACHING, task.id, self._usage_meta(owner_id, task))
         return False
 
-    def extend(self, owner_id: str, task_id: str, amount_micros: int, *, now: datetime) -> bool:
-        """Apply a one-reply extension: raise the cap + resume — **at most once per pause**.
+    def extend(
+        self,
+        owner_id: str,
+        task_id: str,
+        amount_micros: int,
+        *,
+        now: datetime,
+        ceiling_micros: int | None = None,
+    ) -> Extension:
+        """Raise the cap of a task that is at it, then let it carry on (R9-158).
 
-        The CAS in :meth:`TaskStore.cas_unpause` gates it: only the un-pause winner records the
-        ``budget.extended`` row and re-enqueues the next leg, so a duplicated extension reply is
-        a clean no-op (no double-extend). Returns whether the extension applied.
+        **The gate.** In one transaction holding the task row's lock (``FOR UPDATE``): the
+        task must be live and at its cap, and ``amount_micros`` must lift it off the cap;
+        only then is the ``budget.extended`` row written. Every recorded extension therefore
+        leaves the task below its cap, and a concurrent or duplicated extension, which waits
+        on the lock and re-reads the committed cap, finds it no longer at the cap and returns
+        :attr:`ExtensionOutcome.NOT_AT_CAP`. At most one extension per time the task reaches
+        its cap, whether or not it is paused. The lock is :meth:`_row_lock`: ``FOR UPDATE`` on
+        Postgres, and on SQLite (where ``FOR UPDATE`` is not rendered) ``BEGIN IMMEDIATE``,
+        which takes the database's write lock before the read, so a second extender waits for
+        the first to commit and then reads its extension.
+
+        **The ceiling.** ``ceiling_micros`` bounds what one request may add, plus the shortfall:
+        a task that ran past its cap by more than the ceiling could otherwise never be lifted
+        off it (:attr:`ExtensionOutcome.OVER_CEILING` beyond that).
+
+        **Carrying on**, after the commit (:meth:`_carry_on`): a paused ACTIVE or DEFINED task
+        is unpaused and its next leg queued, as before. A WAITING task only has a pause cleared
+        and nothing queued: it waits on a reply, a pickup or its own trigger, and a leg queued
+        now would run past the question it is waiting on. An unpaused task needs nothing.
         """
-        if not self._tasks.cas_unpause(owner_id, task_id, now=now):
-            _log.info("budget extend no-op (not budget-paused)", task_id=task_id)
-            return False
-        self._audit(owner_id, _BUDGET_EXTENDED, task_id, {"amount_micros": str(amount_micros)})
-        task = self._tasks.get(owner_id, task_id)
-        enqueue_task_leg(
-            self._queue,
-            owner_id=owner_id,
-            task_id=task_id,
-            predecessor_seq=task.head_checkpoint_seq,
+        with self._row_lock(owner_id, task_id) as conn:
+            if conn is None:
+                return Extension(ExtensionOutcome.NOT_AT_CAP)
+            task = self._tasks.get(owner_id, task_id)
+            if is_terminal(task.state):
+                return Extension(ExtensionOutcome.FINISHED)
+            cap = self.effective_cap(owner_id, task)
+            spent = task.ledger.total_micros
+            if spent < cap:
+                _log.info("budget extend no-op (not at the cap)", task_id=task_id)
+                return Extension(ExtensionOutcome.NOT_AT_CAP)
+            shortfall = spent - cap
+            if ceiling_micros is not None and amount_micros > ceiling_micros + shortfall:
+                return Extension(
+                    ExtensionOutcome.OVER_CEILING, shortfall, ceiling_micros + shortfall
+                )
+            if amount_micros <= shortfall:
+                return Extension(ExtensionOutcome.TOO_SMALL, shortfall)
+            conn.execute(
+                insert(audit_log_t).values(
+                    id=f"audit_{uuid.uuid4().hex}",
+                    user_id=owner_id,
+                    action=_BUDGET_EXTENDED,
+                    target=task_id,
+                    metadata={"amount_micros": str(amount_micros), "cap_micros": str(cap)},
+                )
+            )
+        self._carry_on(owner_id, task, now=now)
+        _log.info("budget extended", task_id=task_id, amount_micros=amount_micros)
+        return Extension(ExtensionOutcome.APPLIED, shortfall)
+
+    @contextmanager
+    def _row_lock(self, owner_id: str, task_id: str) -> Iterator[Connection | None]:
+        """A transaction holding the task row's lock, or ``None`` if the owner has no such task.
+
+        Every budget decision that writes (the extension, the pause at the cap) runs inside
+        it, so each reads what the other committed. Postgres: ``SELECT ... FOR UPDATE`` on the
+        row, the owner named explicitly as well as enforced by RLS. SQLite renders no
+        ``FOR UPDATE`` and its driver begins a transaction only at the first write, so the
+        read would be unlocked: ``BEGIN IMMEDIATE`` takes the write lock first. Writes other
+        than on the yielded connection must wait until the block ends (on SQLite they would
+        wait on this very lock).
+        """
+        with rls_connection(self._engine, owner_id) as conn:
+            if conn.dialect.name == "sqlite":
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            locked = conn.execute(
+                select(tasks_t.c.id)
+                .where(tasks_t.c.id == task_id, tasks_t.c.owner_id == owner_id)
+                .with_for_update()
+            ).first()
+            yield conn if locked is not None else None
+
+    def _carry_on(self, owner_id: str, task: Task, *, now: datetime) -> None:
+        """After a recorded extension: clear a pause, and queue a leg only where one is due."""
+        if not task.paused or not self._tasks.cas_unpause(owner_id, task.id, now=now):
+            return
+        if task.state is TaskState.WAITING:
+            return  # its reply, a pickup or its own trigger carries it on
+        if task.state is TaskState.DEFINED:
+            self._tasks.start(owner_id, task.id, now=now)
+        # Through the one resume seam (D-W1-30), not a bare enqueue: a paused task's leg may
+        # already have been claimed and consumed at the head (a schedule firing while it sat
+        # at the cap), and a bare enqueue at that key would be absorbed by the spent row,
+        # leaving the task unpaused with nothing to run (R9-158 re-review). The seam counts
+        # the spent attempts and suffixes the key (D-W1-29).
+        from persona_api.tasks.continuation import TaskContinuation
+
+        TaskContinuation(task_store=self._tasks, queue=self._queue).resume(
+            owner_id,
+            task.id,
             # Spec W1 (D-W1-38, amended): the leg is told the budget was raised, not that a
             # schedule fired. It matters: told a fire, a persona may read the wake as its
             # recurrence rather than as permission to carry on the work it was cut off from.
-            trigger=Revived(reason=_EXTENDED_REASON, revived_at=now),
-            scheduled_at=now,
+            Revived(reason=_EXTENDED_REASON, revived_at=now),
+            now=now,
         )
-        _log.info("budget extended + resumed", task_id=task_id, amount_micros=amount_micros)
-        return True
 
     # --- internals ----------------------------------------------------------
 
     def _pause_at_cap(self, owner_id: str, task: Task, *, now: datetime) -> bool:
-        if task.paused:
-            return True  # already paused (e.g. a re-checked leg) — still halt, no double-audit
-        self._tasks.pause(owner_id, task.id, now=now)
-        self._audit(owner_id, _BUDGET_REACHED, task.id, self._usage_meta(owner_id, task))
+        """Pause at the cap, deciding again under the row lock (R9-158 re-review).
+
+        ``task`` is the caller's snapshot, read before the lock. A concurrent extension may
+        have lifted the cap since; pausing on the stale read would leave the task paused
+        BELOW its cap, waiting for an extension that already happened. So the cap is re-read
+        under the same lock the extension takes, and a task no longer at its cap carries on.
+        """
+        with self._row_lock(owner_id, task.id) as conn:
+            if conn is None:
+                return True  # gone: nothing to continue
+            current = self._tasks.get(owner_id, task.id)
+            if is_terminal(current.state):
+                return True
+            if self.check(owner_id, current) is not BudgetState.REACHED:
+                _log.info("cap lifted before the pause; the leg carries on", task_id=task.id)
+                return False
+            if current.paused:
+                return True  # already paused (e.g. a re-checked leg): still halt, no re-audit
+            if not self._tasks.cas_pause(conn, owner_id, current, now=now):
+                return True
+        self._audit(owner_id, _BUDGET_REACHED, task.id, self._usage_meta(owner_id, current))
         _log.info("task paused at budget cap", task_id=task.id, spent=task.ledger.total_micros)
         if self._on_state_change is not None:  # A11 budget-paused ping (best-effort, post-write)
             try:
@@ -223,14 +362,19 @@ class BudgetEnforcer:
         }
 
     def _extensions_total(self, owner_id: str, task_id: str) -> int:
-        """SUM the granted ``budget.extended`` amounts for a task (owner-scoped, indexed)."""
+        """SUM the granted ``budget.extended`` amounts for a task (owner-scoped, indexed).
+
+        Read through the typed column rather than raw SQL: on the community (SQLite) engine a
+        raw ``SELECT metadata`` returns the JSON as text, and the ``.get`` below then raised on
+        every effective-cap read once a task had an extension (found in R9-158).
+        """
         with self._engine.connect() as conn:
             rows = conn.execute(
-                text(
-                    "SELECT metadata FROM audit_log "
-                    "WHERE target = :task AND action = :action AND user_id = :owner"
-                ),
-                {"task": task_id, "action": _BUDGET_EXTENDED, "owner": owner_id},
+                select(audit_log_t.c.metadata).where(
+                    audit_log_t.c.target == task_id,
+                    audit_log_t.c.action == _BUDGET_EXTENDED,
+                    audit_log_t.c.user_id == owner_id,
+                )
             ).all()
         total = 0
         for row in rows:

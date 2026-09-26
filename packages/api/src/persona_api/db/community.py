@@ -116,6 +116,12 @@ class _SqliteUTCDateTime(TypeDecorator[datetime]):
         return value
 
 
+#: Postgres-only indexes the community copy leaves out. ``Table.to_metadata`` does not carry
+#: an index's ``ddl_if``, so the canonical ``ddl_if(dialect="postgresql")`` alone would still
+#: build them on SQLite, where ``->>`` needs 3.38 or later (R9-158 review, MEDIUM-4).
+_POSTGRES_ONLY_INDEXES = frozenset({"idx_jobs_live_task_leg"})
+
+
 def build_community_metadata() -> MetaData:
     """The SQLite-viable community view of the schema (Spec 33, D-33-7).
 
@@ -128,6 +134,8 @@ def build_community_metadata() -> MetaData:
         if table.name in _CLOUD_ONLY_TABLES:
             continue
         copied = table.to_metadata(target)
+        for index in [ix for ix in copied.indexes if ix.name in _POSTGRES_ONLY_INDEXES]:
+            copied.indexes.discard(index)
         for column in copied.columns:
             server_default = column.server_default
             if isinstance(server_default, DefaultClause) and "gen_random_uuid" in str(

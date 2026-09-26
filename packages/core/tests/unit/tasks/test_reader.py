@@ -119,6 +119,40 @@ def test_paused_overlay_wins() -> None:
     assert view.status is IntrospectionStatus.PAUSED
 
 
+def test_paused_overlay_wins_over_every_waiting_kind() -> None:
+    statuses = [
+        project_task_state(
+            _task(state=TaskState.WAITING, wait_kind=kind, paused=True, head_seq=1), None
+        ).status
+        for kind in WaitKind
+    ]
+    assert statuses == [IntrospectionStatus.PAUSED] * len(WaitKind)
+
+
+def test_a_terminal_task_reads_terminal_even_if_its_row_still_says_paused() -> None:
+    # R9-158: rows written before terminal transitions cleared the pause still carry
+    # ``paused=true``. Ended is the truth about whether work is left, so the terminal
+    # status wins and the task page stops offering Resume on finished work.
+    statuses = [
+        project_task_state(_task(state=state, paused=True, head_seq=2), _checkpoint()).status
+        for state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED)
+    ]
+    assert statuses == [
+        IntrospectionStatus.COMPLETED,
+        IntrospectionStatus.FAILED,
+        IntrospectionStatus.CANCELLED,
+    ]
+
+
+def test_a_task_paused_and_then_completed_reads_completed() -> None:
+    task = _task(state=TaskState.ACTIVE, head_seq=1)
+    done = task.pause(now=_NOW).complete(now=_NOW)
+    assert (summarise_task(done).status, project_task_state(done, _checkpoint()).status) == (
+        IntrospectionStatus.COMPLETED,
+        IntrospectionStatus.COMPLETED,
+    )
+
+
 def test_spend_is_surfaced() -> None:
     view = project_task_state(_task(spent=15_000_000, head_seq=1), _checkpoint())
     assert view.spent_micros == 15_000_000

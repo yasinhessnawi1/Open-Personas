@@ -110,15 +110,21 @@ class TaskStateView(BaseModel):
 
 
 def _derive_status(task: Task, *, has_checkpoint: bool) -> IntrospectionStatus:
-    """Map a task's lifecycle (+ pause overlay + wait kind) onto the narratable status."""
-    if task.paused:
-        return IntrospectionStatus.PAUSED
+    """Map a task's lifecycle (+ pause overlay + wait kind) onto the narratable status.
+
+    Terminal states come first (R9-158). The lifecycle state is the one truth about whether
+    work is left, and a pause only holds work that is left, so a finished task reads as
+    finished even when its row still says ``paused`` (rows written before terminal
+    transitions cleared the overlay do).
+    """
     if task.state is TaskState.COMPLETED:
         return IntrospectionStatus.COMPLETED
     if task.state is TaskState.FAILED:
         return IntrospectionStatus.FAILED
     if task.state is TaskState.CANCELLED:
         return IntrospectionStatus.CANCELLED
+    if task.paused:
+        return IntrospectionStatus.PAUSED
     if task.state is TaskState.WAITING:
         if task.wait_kind is WaitKind.UNTIL_TIME:
             return IntrospectionStatus.SCHEDULED
