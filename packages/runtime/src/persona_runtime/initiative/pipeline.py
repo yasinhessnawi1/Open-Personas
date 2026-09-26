@@ -25,7 +25,10 @@ NO silent skips. The flush (ruling 4: flush-on-next-scan) re-validates every
 held notice BOTH ways a hold can rot (T3 ruling 3 + the T7 bar): the why-now
 time half (T2's pure predicate), the citations-still-resolve half (the T4
 check re-run), and a hold-age bound — a stale hold is EXPIRED with the
-``suppressed_stale`` disposition + audit row, never delivered.
+``suppressed_stale`` disposition + audit row, never delivered. Quiet hours bind
+the flush too (R9-237): a flush that lands inside the user's window delivers
+nothing and asks the injected :class:`DeferredFlushScheduler` for one flush at
+the window's end.
 
 Fail-soft is absolute: any stage error discards the candidate (audited) —
 silence is the safe state; the pipeline never raises into the scan job.
@@ -44,6 +47,8 @@ from persona.initiative.restraint import (
     cadence_exhausted,
     meets_acceptance_floor,
     meets_value_threshold,
+    quiet_edge_release_at,
+    quiet_hold_edge_minute,
     resolve_delivery,
     why_now_lapsed,
 )
@@ -59,6 +64,7 @@ if TYPE_CHECKING:
     from persona_runtime.initiative.grounding import GroundingChecker
 
 __all__ = [
+    "DeferredFlushScheduler",
     "HeldNotice",
     "InitiativePipeline",
     "NoticeClaim",
@@ -206,6 +212,28 @@ class DeliveryExecutor(Protocol):
         ...
 
 
+@runtime_checkable
+class DeferredFlushScheduler(Protocol):
+    """Arranges one later flush for an owner (R9-237; api: the A0 queue).
+
+    The daily scan fire is the flush's only other trigger, and it fires at the
+    scan hour, which a quiet window can cover every day. A flush inside the
+    window therefore hands the release to this seam instead of delivering.
+    """
+
+    def schedule_flush(self, owner_id: str, *, release_at: datetime) -> None:
+        """Run :meth:`InitiativePipeline.flush` for ``owner_id`` at ``release_at``.
+
+        Idempotent per owner per ``release_at``: every scan fire of the same
+        morning asks for the same instant, and the owner gets ONE flush.
+        """
+        ...
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 # --- the pipeline ---------------------------------------------------------------
 
 
@@ -225,8 +253,15 @@ class InitiativePipeline:
         dial_reader: Callable[[str, str], InitiativeDial],
         settings: InitiativeSettings,
         delivery: DeliveryExecutor | None = None,
+        deferred_flush: DeferredFlushScheduler | None = None,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
-        """Inject every seam (api wires the real stores at the worker root)."""
+        """Inject every seam (api wires the real stores at the worker root).
+
+        ``deferred_flush`` (R9-237) receives the release of a flush that fell
+        inside quiet hours; ``None`` leaves such a batch held for the next scan
+        fire (logged). ``clock`` is the pipeline's one source of "now".
+        """
         self._grounding = grounding
         self._wellbeing = wellbeing
         self._declines = declines
@@ -237,6 +272,8 @@ class InitiativePipeline:
         self._dial_reader = dial_reader
         self._settings = settings
         self._delivery = delivery
+        self._deferred_flush = deferred_flush
+        self._clock = clock
 
     # --- the CandidateSink surface (T6's seam, filled) ------------------------
 
@@ -250,7 +287,7 @@ class InitiativePipeline:
                 self._audit(candidate, "initiative.discard_error", "pipeline_error")
 
     async def _gate_one(self, candidate: InitiativeCandidate) -> None:
-        now = datetime.now(UTC)
+        now = self._clock()
         owner = candidate.owner_id
 
         # (1) grounding — T4's two mechanical layers. No grounding, no candidate.
@@ -364,13 +401,62 @@ class InitiativePipeline:
         re-run — citations that dissolved (K7 merged/superseded, a deleted
         conversation) or no longer entail EXPIRE the notice. Survivors deliver
         under the same cadence caps (counted at delivery).
+
+        Quiet hours first (R9-237): inside the user's window NOTHING is
+        delivered, expired or re-grounded; the whole batch waits for one flush
+        at the window's end (:meth:`_defer_past_quiet_hours`). That later flush
+        comes back through here and re-checks, so a window edited meanwhile
+        still holds.
+
+        Raising: the quiet-hours step never raises (a failed read or enqueue
+        holds the batch and logs), and one rotten notice never blocks the rest.
+        A failure of the held-notice read itself propagates; both callers (the
+        scan handler and the deferred-flush handler) are fail-soft around this.
         """
-        now = datetime.now(UTC)
-        for notice in self._ledger.held_for_owner(owner_id):
+        now = self._clock()
+        held = self._ledger.held_for_owner(owner_id)
+        if not held:
+            return
+        if self._defer_past_quiet_hours(owner_id, now=now):
+            return
+        for notice in held:
             try:
                 await self._flush_one(owner_id, notice, now=now)
             except Exception:  # noqa: BLE001 — one rotten hold never blocks the batch
                 _logger.warning("flush of one held notice failed; leaving it held")
+
+    def _defer_past_quiet_hours(self, owner_id: str, *, now: datetime) -> bool:
+        """True when the batch must not go out now (the release is then scheduled).
+
+        The same rule the interrupt path applies (:func:`quiet_hold_edge_minute`,
+        in the user's zone); the window's end minute becomes the absolute instant
+        the deferred flush runs at. Fails CLOSED: a user-context read that
+        fails holds the batch (the next scan fire retries), and a failed enqueue
+        holds it too; neither raises.
+        """
+        try:
+            context = self._users.user_context(owner_id)
+        except Exception:  # noqa: BLE001, unknown quiet hours must never mean "deliver"
+            _logger.opt(exception=True).warning(
+                "quiet-hours read failed for a flush; batch stays held"
+            )
+            return True
+        edge = quiet_hold_edge_minute(
+            now=now, timezone_name=context.timezone, quiet=context.quiet_hours
+        )
+        if edge is None:
+            return False
+        release_at = quiet_edge_release_at(now, context.timezone, edge)
+        if self._deferred_flush is None:
+            _logger.warning("flush inside quiet hours with no deferral seam; batch stays held")
+            return True
+        try:
+            self._deferred_flush.schedule_flush(owner_id, release_at=release_at)
+        except Exception:  # noqa: BLE001, a lost deferral holds the batch; it never delivers
+            _logger.opt(exception=True).warning(
+                "deferred flush enqueue failed; batch stays held until the next scan fire"
+            )
+        return True
 
     async def _flush_one(self, owner_id: str, notice: HeldNotice, now: datetime) -> None:
         candidate = notice.candidate

@@ -75,6 +75,11 @@ from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
 from persona_api.editions.factory import build_credits_policy, build_stripe_gateway
 from persona_api.errors import CommunityDbError
+from persona_api.initiative.deferred_flush import (
+    InitiativeDeferredFlushHandler,
+    QueueDeferredFlushScheduler,
+    register_initiative_deferred_flush_handler,
+)
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
 from persona_api.initiative.handler import (
     InitiativeScanHandler,
@@ -636,6 +641,9 @@ def build_worker_registry(
             dial_reader=_dial_reader,
             settings=initiative_settings,
             delivery=delivery_executor,
+            # R9-237: a flush inside the user's quiet hours releases at the window's
+            # end through the deferred-flush tenant registered just below.
+            deferred_flush=QueueDeferredFlushScheduler(JobQueue(rls_engine)),
         )
         register_initiative_scan_handler(
             registry,
@@ -649,6 +657,25 @@ def build_worker_registry(
                 held_batch=pipeline,
                 pause_check=kill_switch.is_owner_autonomy_paused,
                 # Spec M3 (T5b): owner-billed scan cost, idempotent + fail-soft.
+                credits_policy=build_credits_policy(config),
+                rls_engine=rls_engine,
+                cost_source=(
+                    runtime_factory.metadata_resolver if runtime_factory is not None else None
+                ),
+                floor=config.agentic_credit_floor,
+            ),
+        )
+        # R9-237: the quiet-hours deferred flush, the same pipeline's flush behind the
+        # scan fire's own gates (pause, then dial) and billed like it.
+        register_initiative_deferred_flush_handler(
+            registry,
+            handler=InitiativeDeferredFlushHandler(
+                held_batch=pipeline,
+                held_personas=lambda owner: {
+                    n.persona_id for n in initiative_ledger.held_for_owner(owner)
+                },
+                dial_reader=_dial_reader,
+                pause_check=kill_switch.is_owner_autonomy_paused,
                 credits_policy=build_credits_policy(config),
                 rls_engine=rls_engine,
                 cost_source=(

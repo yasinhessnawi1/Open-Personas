@@ -12,7 +12,10 @@ Four pure pieces the pipeline (T7) composes in the pinned order:
   Phase-3 polarity pin): an interrupt claim is honoured only for a hard
   deadline inside the horizon, and even then a fire inside the user's quiet
   window holds to the window edge — the user's boundary outranks the notice,
-  the possibly-missed deadline is the accepted, audited cost.
+  the possibly-missed deadline is the accepted, audited cost. The quiet test
+  itself is :func:`quiet_hold_edge_minute`, shared with the held-batch flush
+  (R9-237), and :func:`quiet_edge_release_at` turns its edge minute into the
+  instant the hold releases.
 - **staleness** — the why-now-lapsed half of held-candidate expiry (the
   second Phase-3 pin). The time half lives HERE (:func:`why_now_lapsed`); the
   citations-still-resolve half is T7's re-grounding at flush — the named
@@ -22,12 +25,13 @@ Quiet-hours and timezone semantics are A8's shared definitions ONLY
 (:mod:`persona.schedules.quiet_hours`, :mod:`persona.timezone`) — this module
 adds no window or zone semantics of its own; :func:`local_minute_of_day` is a
 plain ``zoneinfo`` wall-clock projection (DST handled by ``astimezone``), the
-conversion the quiet-hours module's contract asks its caller to perform.
+conversion the quiet-hours module's contract asks its caller to perform, and
+the local-to-UTC direction is A1's :func:`~persona.schedules.nextfire.localize_to_utc`.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -35,6 +39,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from persona.initiative.config import InitiativeSettings  # noqa: TC001 — runtime use
+from persona.schedules.nextfire import localize_to_utc
 
 if TYPE_CHECKING:
     from persona.schedules.quiet_hours import QuietHours
@@ -47,6 +52,8 @@ __all__ = [
     "local_minute_of_day",
     "meets_acceptance_floor",
     "meets_value_threshold",
+    "quiet_edge_release_at",
+    "quiet_hold_edge_minute",
     "resolve_delivery",
     "why_now_lapsed",
 ]
@@ -174,11 +181,67 @@ def resolve_delivery(
     horizon = timedelta(hours=settings.interrupt_horizon_hours)
     if deadline is None or deadline <= now or deadline - now > horizon:
         return DeliveryResolution(kind=DeliveryKind.BATCH)
-    if quiet is not None and quiet.contains(local_minute_of_day(now, timezone_name)):
-        return DeliveryResolution(
-            kind=DeliveryKind.HOLD_TO_QUIET_EDGE, hold_edge_minute=quiet.end_minute
-        )
+    edge = quiet_hold_edge_minute(now=now, timezone_name=timezone_name, quiet=quiet)
+    if edge is not None:
+        return DeliveryResolution(kind=DeliveryKind.HOLD_TO_QUIET_EDGE, hold_edge_minute=edge)
     return DeliveryResolution(kind=DeliveryKind.DELIVER_NOW)
+
+
+def quiet_hold_edge_minute(
+    *, now: datetime, timezone_name: str, quiet: QuietHours | None
+) -> int | None:
+    """The quiet-hours rule alone: the window's END minute inside it, ``None`` outside.
+
+    The ONE place quiet hours are applied to initiative. The interrupt path
+    (:func:`resolve_delivery`) and the held-batch flush both call it, so a
+    notice can never reach the user inside the window by one door while the
+    other door holds it (R9-237: the flush once had no check at all).
+
+    Args:
+        now: The current tz-aware instant.
+        timezone_name: The user's resolved IANA zone; ``now`` is projected onto
+            the user's local wall clock, never read as UTC.
+        quiet: The user's quiet window, or ``None`` when unset (off-until-set).
+
+    Returns:
+        The local minute-of-day the hold releases at (the value
+        :class:`DeliveryResolution` carries as ``hold_edge_minute``), or
+        ``None`` when ``now`` is outside the window or no window is set.
+    """
+    if quiet is not None and quiet.contains(local_minute_of_day(now, timezone_name)):
+        return quiet.end_minute
+    return None
+
+
+def quiet_edge_release_at(now: datetime, timezone_name: str, edge_minute: int) -> datetime:
+    """The first UTC instant after ``now`` at which the user's local clock reads ``edge_minute``.
+
+    Turns a ``hold_edge_minute`` (local minute-of-day) into the absolute instant
+    a hold releases. The next local occurrence is today's if it is still ahead,
+    otherwise tomorrow's; the DST gap handling is A1's
+    :func:`~persona.schedules.nextfire.localize_to_utc`, the same rule every
+    schedule fire uses (a window ending inside a spring-forward gap releases at
+    the jumped-to time).
+
+    The fall-back fold needs one step more than A1's rule: ``localize_to_utc``
+    picks the FIRST pass of a repeated hour, which is right for a schedule but
+    wrong for a flush already in the SECOND pass. So before rolling to tomorrow,
+    the same wall time's second pass (``fold=1``) is taken if it is still ahead.
+    Outside a fold, ``fold=1`` names the same instant, so this changes nothing.
+    """
+    zone = ZoneInfo(timezone_name)
+    utc_now = now.astimezone(UTC)
+    local_now = now.astimezone(zone).replace(tzinfo=None)
+    target = local_now.replace(
+        hour=edge_minute // 60, minute=edge_minute % 60, second=0, microsecond=0
+    )
+    release = localize_to_utc(target, zone)
+    if release > utc_now:
+        return release
+    second_pass = target.replace(tzinfo=zone, fold=1).astimezone(UTC)
+    if second_pass > utc_now:
+        return second_pass
+    return localize_to_utc(target + timedelta(days=1), zone)
 
 
 def why_now_lapsed(*, anchor_time: datetime | None, now: datetime) -> bool:

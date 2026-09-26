@@ -13,6 +13,8 @@ from persona.initiative.restraint import (
     local_minute_of_day,
     meets_acceptance_floor,
     meets_value_threshold,
+    quiet_edge_release_at,
+    quiet_hold_edge_minute,
     resolve_delivery,
     why_now_lapsed,
 )
@@ -142,6 +144,85 @@ class TestResolveDelivery:
             settings=_SETTINGS,
         )
         assert resolution.kind is DeliveryKind.DELIVER_NOW
+
+
+class TestQuietHoldForTheFlush:
+    """R9-237: the quiet rule the held-batch flush shares with the interrupt path."""
+
+    _MORNING_QUIET = QuietHours(start_minute=22 * 60, end_minute=8 * 60)
+
+    def test_scan_hour_inside_a_22_to_08_window_holds_to_its_end(self) -> None:
+        # 05:00 UTC = 07:00 Oslo (CEST), the default scan hour, inside 22:00 to 08:00.
+        edge = quiet_hold_edge_minute(
+            now=datetime(2026, 7, 4, 5, 0, tzinfo=UTC),
+            timezone_name=_OSLO,
+            quiet=self._MORNING_QUIET,
+        )
+        assert edge == 8 * 60
+
+    def test_no_window_delivers_now(self) -> None:
+        edge = quiet_hold_edge_minute(
+            now=datetime(2026, 7, 4, 5, 0, tzinfo=UTC), timezone_name=_OSLO, quiet=None
+        )
+        assert edge is None
+
+    def test_outside_the_window_delivers_now(self) -> None:
+        # 06:30 UTC = 08:30 Oslo, just past a 22:00 to 08:00 window.
+        edge = quiet_hold_edge_minute(
+            now=datetime(2026, 7, 4, 6, 30, tzinfo=UTC),
+            timezone_name=_OSLO,
+            quiet=self._MORNING_QUIET,
+        )
+        assert edge is None
+
+    def test_the_window_is_read_on_the_users_clock_not_utc(self) -> None:
+        # 11:00 UTC is outside 22:00 to 08:00 in UTC, but it is 07:00 in New York (EDT).
+        edge = quiet_hold_edge_minute(
+            now=datetime(2026, 7, 4, 11, 0, tzinfo=UTC),
+            timezone_name="America/New_York",
+            quiet=self._MORNING_QUIET,
+        )
+        assert edge == 8 * 60
+
+    def test_release_is_the_same_mornings_edge_after_midnight(self) -> None:
+        # 07:00 Oslo on 4 July releases at 08:00 Oslo on 4 July = 06:00 UTC.
+        release = quiet_edge_release_at(datetime(2026, 7, 4, 5, 0, tzinfo=UTC), _OSLO, 8 * 60)
+        assert release == datetime(2026, 7, 4, 6, 0, tzinfo=UTC)
+
+    def test_release_is_on_the_minute_whatever_the_seconds_of_now(self) -> None:
+        # Two scan fires a few seconds apart must ask for ONE instant (one deferred job).
+        now = datetime(2026, 7, 4, 5, 0, 3, 123456, tzinfo=UTC)
+        release = quiet_edge_release_at(now, _OSLO, 8 * 60)
+        assert release == datetime(2026, 7, 4, 6, 0, 0, tzinfo=UTC)
+
+    def test_release_is_the_next_mornings_edge_before_midnight(self) -> None:
+        # 23:30 Oslo on 4 July releases at 08:00 Oslo on 5 July = 06:00 UTC.
+        release = quiet_edge_release_at(_NOW, _OSLO, 8 * 60)
+        assert release == datetime(2026, 7, 5, 6, 0, tzinfo=UTC)
+
+    def test_release_crossing_the_utc_date_line_in_the_users_zone(self) -> None:
+        # 01:30 Tokyo on 27 Sep is 16:30 UTC on 26 Sep; 06:00 Tokyo is 21:00 UTC on 26 Sep.
+        release = quiet_edge_release_at(
+            datetime(2026, 9, 26, 16, 30, tzinfo=UTC), "Asia/Tokyo", 6 * 60
+        )
+        assert release == datetime(2026, 9, 26, 21, 0, tzinfo=UTC)
+
+    def test_an_edge_inside_the_spring_forward_gap_releases_at_the_jump(self) -> None:
+        # Oslo skips 02:00 to 03:00 on 29 Mar 2026; a 02:30 edge releases at 03:30 CEST.
+        release = quiet_edge_release_at(datetime(2026, 3, 28, 23, 30, tzinfo=UTC), _OSLO, 150)
+        assert release == datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
+
+    def test_an_edge_in_the_repeated_hour_is_taken_on_its_second_pass(self) -> None:
+        # Oslo repeats 02:00 to 03:00 on 25 Oct 2026. At 01:10 UTC (02:10 CET, the second
+        # pass) a 02:30 edge is still 20 minutes ahead: 02:30 CET = 01:30 UTC that morning,
+        # not tomorrow's (the first pass, 00:30 UTC, is already behind).
+        release = quiet_edge_release_at(datetime(2026, 10, 25, 1, 10, tzinfo=UTC), _OSLO, 150)
+        assert release == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+    def test_an_edge_in_the_repeated_hour_is_its_first_pass_when_that_is_ahead(self) -> None:
+        # At 00:10 UTC (02:10 CEST, the first pass) the first 02:30 (00:30 UTC) is next.
+        release = quiet_edge_release_at(datetime(2026, 10, 25, 0, 10, tzinfo=UTC), _OSLO, 150)
+        assert release == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
 
 
 class TestLocalMinuteOfDay:

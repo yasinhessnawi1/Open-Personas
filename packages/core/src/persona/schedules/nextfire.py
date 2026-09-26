@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from persona.schedules.models import RecurrenceRule, Schedule
 
-__all__ = ["next_fire_after", "occurrences_between"]
+__all__ = ["localize_to_utc", "next_fire_after", "occurrences_between"]
 
 # How far before ``after`` to seed the rrule scan (local). The localization step
 # shifts a fire's absolute instant by at most the DST gap (≤ ~2h); two days is a
@@ -61,7 +61,7 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _localize_to_utc(naive_local: datetime, zone: ZoneInfo) -> datetime:
+def localize_to_utc(naive_local: datetime, zone: ZoneInfo) -> datetime:
     """Localize a naive wall-clock occurrence to its absolute UTC instant.
 
     The DST-edge handling, in one place (D-A1-X-dst-edges-in-localize):
@@ -158,7 +158,7 @@ def occurrences_between(
     The read side of the SAME engine (Spec A8, A8-D-11): the calendar and A6-Review render
     from this, never a client-side recurrence reimplementation (criterion 5). It forward-steps
     the rrule ONCE from near ``start`` (not N calls to :func:`next_fire_after` from the anchor)
-    and localizes each occurrence through the identical :func:`_localize_to_utc` gap/fold + the
+    and localizes each occurrence through the identical :func:`localize_to_utc` gap/fold + the
     identical absolute-UTC COUNT/UNTIL bounding — so an instant listed here is byte-identical to
     the instant the tick will fire.
 
@@ -209,7 +209,7 @@ def _between_seeked(
     for scanned, occ in enumerate(pattern.xafter(seed_local, inc=True), start=1):
         if scanned > _MAX_SCAN:
             break  # defensive backstop (unreachable for well-formed rules)
-        fire = _localize_to_utc(occ, zone)
+        fire = localize_to_utc(occ, zone)
         if until is not None and fire > until:
             break  # past UNTIL — no further fire (occurrences ascend)
         if fire > end:
@@ -234,7 +234,7 @@ def _between_count_bounded(
     fires_seen = 0
     out: list[datetime] = []
     for occ in pattern:
-        fire = _localize_to_utc(occ, zone)
+        fire = localize_to_utc(occ, zone)
         if fire <= anchor_utc:
             continue  # at/before creation — not a fire, not counted
         fires_seen += 1
@@ -265,7 +265,7 @@ def _next_count_bounded(
     """
     fires_seen = 0
     for occ in pattern:
-        fire = _localize_to_utc(occ, zone)
+        fire = localize_to_utc(occ, zone)
         if fire <= anchor_utc:
             continue  # at/before creation — not a future fire, not counted
         fires_seen += 1
@@ -293,7 +293,7 @@ def _next_seeked(
     for scanned, occ in enumerate(pattern.xafter(seed_local, inc=True), start=1):
         if scanned > _MAX_SCAN:
             return None  # defensive backstop (unreachable for well-formed rules)
-        fire = _localize_to_utc(occ, zone)
+        fire = localize_to_utc(occ, zone)
         if until is not None and fire > until:
             return None  # past UNTIL — no further fire (occurrences ascend)
         if fire > after:

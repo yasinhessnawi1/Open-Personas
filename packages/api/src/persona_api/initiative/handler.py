@@ -113,7 +113,7 @@ class HeldBatchFlush(Protocol):
     """
 
     async def flush(self, owner_id: str) -> None:
-        """Release (or expire) the owner's held notices; never raises."""
+        """Release (or expire) the owner's held notices; may raise (callers are fail-soft)."""
         ...
 
 

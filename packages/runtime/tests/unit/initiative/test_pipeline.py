@@ -28,7 +28,7 @@ from persona.initiative import (
     Urgency,
 )
 from persona.initiative.restraint import CadenceCounts
-from persona.schedules.quiet_hours import QuietHours  # noqa: TC002 — runtime default arg
+from persona.schedules.quiet_hours import QuietHours
 from persona.tools.categories import ActionCategory
 from persona_runtime.initiative import InitiativePipeline
 from persona_runtime.initiative.grounding import GroundingRejection, GroundingVerdict
@@ -222,7 +222,11 @@ class _Harness:
         self.provenance = overrides.get("provenance") or _FakeProvenance(self.trace)
         self.auditor = _FakeAuditor()
         self.delivery = overrides.get("delivery")
+        self.deferred = overrides.get("deferred_flush")
         dial = overrides.get("dial", InitiativeDial.PROPOSE_ONLY)
+        extra: dict[str, Any] = {}
+        if "clock" in overrides:
+            extra["clock"] = overrides["clock"]
         self.pipeline = InitiativePipeline(
             grounding=self.grounding,
             wellbeing=self.wellbeing,
@@ -234,6 +238,8 @@ class _Harness:
             dial_reader=lambda _o, _p: dial,
             settings=overrides.get("settings", _SETTINGS),
             delivery=self.delivery,
+            deferred_flush=self.deferred,
+            **extra,
         )
 
     def audit_events(self) -> list[str]:
@@ -418,6 +424,175 @@ class TestFlush:
         await h.pipeline.flush("u1")
         assert h.ledger.expired == []
         assert h.ledger.delivered == []
+
+
+class _FakeDeferredFlush:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls: list[tuple[str, datetime]] = []  # (owner_id, release_at)
+        self._raises = raises
+
+    def schedule_flush(self, owner_id: str, *, release_at: datetime) -> None:
+        self.calls.append((owner_id, release_at))
+        if self._raises:
+            msg = "queue unavailable"
+            raise RuntimeError(msg)
+
+
+class _BrokenUsers:
+    def user_context(self, owner_id: str) -> _Context:
+        msg = "users table unavailable"
+        raise RuntimeError(msg)
+
+
+class _Clock:
+    """A settable "now" so one pipeline can live through the 07:00 and 08:00 flushes."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class TestFlushHonoursQuietHours:
+    """R9-237: a held notice is never delivered inside the user's quiet hours."""
+
+    # 2026-09-26 05:00 UTC = 07:00 in Oslo (CEST, UTC+2): the default scan hour.
+    _SCAN_FIRE = datetime(2026, 9, 26, 5, 0, tzinfo=UTC)
+    # 08:00 Oslo the same morning: the end of a 22:00 to 08:00 window.
+    _WINDOW_END = datetime(2026, 9, 26, 6, 0, tzinfo=UTC)
+    _NIGHT = QuietHours(start_minute=22 * 60, end_minute=8 * 60)
+
+    def _harness(
+        self,
+        clock: _Clock,
+        *,
+        timezone: str = "Europe/Oslo",
+        quiet: QuietHours | None = None,
+        held: list[_Held] | None = None,
+    ) -> tuple[_Harness, _FakeDelivery, _FakeDeferredFlush, _Context]:
+        delivery = _FakeDelivery()
+        deferred = _FakeDeferredFlush()
+        context = _Context(timezone=timezone, quiet=quiet)
+        h = _Harness(delivery=delivery, deferred_flush=deferred, clock=clock)
+        h.ledger = _FakeLedger(
+            h.trace,
+            held=held
+            if held is not None
+            else [_Held(_candidate(), created_at=clock.now - timedelta(days=1))],
+        )
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.users = _FakeUsers(h.trace, context)
+        h.pipeline._users = h.users  # noqa: SLF001
+        return h, delivery, deferred, context
+
+    @pytest.mark.asyncio
+    async def test_held_through_the_0700_flush_and_delivered_by_the_0800_one(self) -> None:
+        clock = _Clock(self._SCAN_FIRE)
+        h, delivery, deferred, _ = self._harness(clock, quiet=self._NIGHT)
+
+        await h.pipeline.flush("u1")
+        assert delivery.calls == []
+        assert h.ledger.delivered == []
+        assert h.ledger.expired == []
+        assert "grounding" not in h.trace.calls  # nothing spent inside the window
+        assert deferred.calls == [("u1", self._WINDOW_END)]
+
+        clock.now = deferred.calls[0][1]  # the deferred flush runs at its release instant
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+        assert h.ledger.delivered == [("n-held", "propose")]
+        assert deferred.calls == [("u1", self._WINDOW_END)]  # nothing deferred again
+
+    @pytest.mark.asyncio
+    async def test_no_quiet_hours_delivers_at_0700_as_before(self) -> None:
+        h, delivery, deferred, _ = self._harness(_Clock(self._SCAN_FIRE), quiet=None)
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+        assert h.ledger.delivered == [("n-held", "propose")]
+        assert deferred.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_window_crossing_midnight_is_read_in_the_users_own_zone(self) -> None:
+        # 16:30 UTC on 26 Sep is 01:30 on 27 Sep in Tokyo: inside 23:00 to 06:00 there,
+        # outside it on a UTC clock. The window ends at 06:00 Tokyo = 21:00 UTC on 26 Sep.
+        clock = _Clock(datetime(2026, 9, 26, 16, 30, tzinfo=UTC))
+        tokyo_night = QuietHours(start_minute=23 * 60, end_minute=6 * 60)
+        h, delivery, deferred, _ = self._harness(clock, timezone="Asia/Tokyo", quiet=tokyo_night)
+
+        await h.pipeline.flush("u1")
+        assert delivery.calls == []
+        assert deferred.calls == [("u1", datetime(2026, 9, 26, 21, 0, tzinfo=UTC))]
+
+        clock.now = deferred.calls[0][1]
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_two_held_notices_ask_for_one_deferred_flush(self) -> None:
+        clock = _Clock(self._SCAN_FIRE)
+        first = _Held(_candidate(), created_at=clock.now - timedelta(days=1))
+        second = _Held(_candidate(persona_id="p2"), created_at=clock.now - timedelta(days=2))
+        second.id = "n-held-2"
+        h, delivery, deferred, _ = self._harness(clock, quiet=self._NIGHT, held=[first, second])
+
+        await h.pipeline.flush("u1")
+        assert delivery.calls == []
+        assert deferred.calls == [("u1", self._WINDOW_END)]
+
+        clock.now = self._WINDOW_END
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose"), ("n-held-2", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_a_window_extended_meanwhile_still_holds_at_the_deferred_flush(self) -> None:
+        clock = _Clock(self._SCAN_FIRE)
+        h, delivery, deferred, context = self._harness(clock, quiet=self._NIGHT)
+        await h.pipeline.flush("u1")
+
+        context.quiet_hours = QuietHours(start_minute=22 * 60, end_minute=9 * 60)
+        clock.now = self._WINDOW_END
+        await h.pipeline.flush("u1")
+        assert delivery.calls == []
+        assert deferred.calls == [
+            ("u1", self._WINDOW_END),
+            ("u1", datetime(2026, 9, 26, 7, 0, tzinfo=UTC)),  # 09:00 Oslo
+        ]
+
+    @pytest.mark.asyncio
+    async def test_without_a_deferral_seam_the_batch_stays_held(self) -> None:
+        h, delivery, _, _ = self._harness(_Clock(self._SCAN_FIRE), quiet=self._NIGHT)
+        h.pipeline._deferred_flush = None  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert delivery.calls == []
+        assert h.ledger.expired == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_enqueue_holds_the_batch_and_does_not_raise(self) -> None:
+        h, delivery, _, _ = self._harness(_Clock(self._SCAN_FIRE), quiet=self._NIGHT)
+        failing = _FakeDeferredFlush(raises=True)
+        h.pipeline._deferred_flush = failing  # noqa: SLF001
+        await h.pipeline.flush("u1")  # returns normally
+        assert failing.calls == [("u1", self._WINDOW_END)]
+        assert delivery.calls == []
+        assert h.ledger.delivered == []
+        assert h.ledger.expired == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_quiet_hours_hold_the_batch_and_do_not_raise(self) -> None:
+        h, delivery, deferred, _ = self._harness(_Clock(self._SCAN_FIRE), quiet=None)
+        h.pipeline._users = _BrokenUsers()  # noqa: SLF001
+        await h.pipeline.flush("u1")  # fails closed: never "deliver" on an unknown window
+        assert delivery.calls == []
+        assert h.ledger.delivered == []
+        assert deferred.calls == []
+
+    @pytest.mark.asyncio
+    async def test_nothing_held_reads_no_quiet_hours_and_defers_nothing(self) -> None:
+        h, _, deferred, _ = self._harness(_Clock(self._SCAN_FIRE), quiet=self._NIGHT, held=[])
+        await h.pipeline.flush("u1")
+        assert deferred.calls == []
+        assert "user_context" not in h.trace.calls
 
 
 class TestFailSoft:

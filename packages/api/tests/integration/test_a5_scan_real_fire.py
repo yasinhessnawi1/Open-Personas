@@ -39,6 +39,7 @@ from persona.jobs import JobRegistry, JobState
 from persona.schema.chunks import WriteSource
 from persona_api.background.worker_root import build_worker_registry
 from persona_api.config import APIConfig
+from persona_api.initiative.deferred_flush import INITIATIVE_DEFERRED_FLUSH_JOB_TYPE
 from persona_api.initiative.handler import (
     INITIATIVE_SCAN_JOB_TYPE,
     InitiativeScanHandler,
@@ -327,10 +328,15 @@ def test_initiative_tenant_registered_only_when_enabled(
         )
 
     monkeypatch.delenv("PERSONA_INITIATIVE_ENABLED", raising=False)
-    assert INITIATIVE_SCAN_JOB_TYPE not in _registry().types()  # the default-OFF gate
+    off = _registry().types()
+    assert INITIATIVE_SCAN_JOB_TYPE not in off  # the default-OFF gate
+    assert INITIATIVE_DEFERRED_FLUSH_JOB_TYPE not in off
 
     monkeypatch.setenv("PERSONA_INITIATIVE_ENABLED", "true")
-    assert INITIATIVE_SCAN_JOB_TYPE in _registry().types()
+    on = _registry().types()
+    assert INITIATIVE_SCAN_JOB_TYPE in on
+    # R9-237: the quiet-hours deferred flush the pipeline enqueues has a tenant to run it.
+    assert INITIATIVE_DEFERRED_FLUSH_JOB_TYPE in on
 
 
 class _FakeTierRegistry:
