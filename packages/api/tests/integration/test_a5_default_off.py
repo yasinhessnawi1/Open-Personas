@@ -6,7 +6,8 @@ check (the detector detects — a proof that cannot fail is no proof, the
 detonate-the-scorer discipline):
 
 - the worker registry carries NO ``initiative_scan`` tenant (and the OFF
-  registry's type set is byte-identical to the ON set minus exactly that one);
+  registry's type set is byte-identical to the ON set minus exactly the two
+  initiative tenants: the scan and R9-237's quiet-hours deferred flush);
 - the worker's provisioner builder yields ``None`` (no sweep component);
 - the factory-built loop carries NO initiative gate (interpreter + pending
   provider both ``None`` — the chat turn is byte-unchanged);
@@ -26,6 +27,7 @@ from persona.backends.types import ChatResponse, TokenUsage
 from persona.initiative import InitiativeSettings
 from persona_api.background.worker_root import build_worker_registry
 from persona_api.config import APIConfig
+from persona_api.initiative.deferred_flush import INITIATIVE_DEFERRED_FLUSH_JOB_TYPE
 from persona_api.initiative.handler import INITIATIVE_SCAN_JOB_TYPE
 from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.services.runtime_factory import RuntimeFactory
@@ -127,7 +129,7 @@ def test_settings_gate_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
     assert InitiativeSettings().enabled is False
 
 
-def test_registry_is_the_pre_a5_set_when_off_and_gains_exactly_one_tenant_when_on(
+def test_registry_is_the_pre_a5_set_when_off_and_gains_exactly_the_two_initiative_tenants_when_on(
     app_engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("PERSONA_INITIATIVE_ENABLED", raising=False)
@@ -137,8 +139,9 @@ def test_registry_is_the_pre_a5_set_when_off_and_gains_exactly_one_tenant_when_o
     monkeypatch.setenv("PERSONA_INITIATIVE_ENABLED", "true")
     on_types = _registry_types(app_engine, tmp_path / "on")
     # The sensitivity half + the byte-identity half in one assertion: the ONLY
-    # difference the flag makes to the worker's tenant set is the scan tenant.
-    assert on_types - off_types == {INITIATIVE_SCAN_JOB_TYPE}
+    # difference the flag makes to the worker's tenant set is the scan tenant and
+    # the quiet-hours deferred flush it can enqueue (R9-237).
+    assert on_types - off_types == {INITIATIVE_SCAN_JOB_TYPE, INITIATIVE_DEFERRED_FLUSH_JOB_TYPE}
     assert off_types - on_types == set()
 
 
