@@ -2529,7 +2529,7 @@ export interface paths {
     put?: never;
     /**
      * Extend Budget
-     * @description Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap.
+     * @description Raise the cap of a task at its cap (bounded, at-most-once). Reports the old → new cap.
      */
     post: operations["extend_budget_v1_tasks__task_id__budget_extend_post"];
     delete?: never;
@@ -3631,6 +3631,29 @@ export interface components {
        * @default []
        */
       images: components["schemas"]["ImageContent"][];
+      /**
+       * Text Stored
+       * @default false
+       */
+      text_stored: boolean;
+      /**
+       * Text Partial
+       * @default false
+       */
+      text_partial: boolean;
+      /**
+       * Index State
+       * @enum {string}
+       */
+      index_state:
+        | "not_needed"
+        | "pending"
+        | "indexing"
+        | "ready"
+        | "partial"
+        | "failed";
+      /** Chunks Indexed */
+      chunks_indexed?: number | null;
     };
     /**
      * EditMessageRequest

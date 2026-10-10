@@ -107,6 +107,12 @@ def _record(row: RowMapping) -> JobRecord:
 # primitive) cannot span a job's out-of-transaction run — the durable count is the
 # correct duration-spanning mechanism here. This is an anti-starvation gate; a
 # brief over-cap under concurrent batch claims is acceptable (it never starves).
+#
+# Serial types (D-FV0-31): a job whose type is in ``:serial_types`` is skipped while
+# another job of its type is claimed or running, so at most one of that type is in
+# flight across every worker (the document index embeds one slice at a time). It reads
+# the same durable state, so the same brief overlap under simultaneous claims applies.
+# ``idx_jobs_inflight_by_type`` (migration 059) serves the check.
 _CLAIM_SQL = text(
     """
     WITH claimed AS (
@@ -118,6 +124,10 @@ _CLAIM_SQL = text(
                   AND u.state IN ('claimed', 'running')) < :max_per_user
           AND  (SELECT count(*) FROM jobs g
                 WHERE g.state IN ('claimed', 'running')) < :max_global
+          AND  NOT (j.type = ANY(CAST(:serial_types AS text[]))
+                    AND EXISTS (SELECT 1 FROM jobs s
+                                WHERE s.type = j.type
+                                  AND s.state IN ('claimed', 'running')))
         ORDER BY j.priority DESC, j.scheduled_at
         FOR UPDATE SKIP LOCKED
         LIMIT  :limit
@@ -236,6 +246,7 @@ class JobQueue:
         limit: int = 1,
         max_per_user: int = 0,
         max_global: int = 0,
+        serial_types: list[str] | None = None,
         now: datetime | None = None,
     ) -> list[JobRecord]:
         """Claim up to ``limit`` due jobs via SKIP LOCKED; commit; return them.
@@ -247,7 +258,8 @@ class JobQueue:
 
         Fairness (D-A0-6): ``max_per_user`` skips a candidate whose owner already
         has that many jobs in flight; ``max_global`` caps total in-flight. ``0``
-        means unlimited for either.
+        means unlimited for either. ``serial_types`` are the types of which at most one
+        may be in flight at a time.
         """
         now = _utcnow(now)
         lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -262,6 +274,7 @@ class JobQueue:
                         "lease_expires_at": lease_expires_at,
                         "max_per_user": max_per_user or _UNLIMITED,
                         "max_global": max_global or _UNLIMITED,
+                        "serial_types": list(serial_types or ()),
                     },
                 )
                 .mappings()
@@ -387,6 +400,32 @@ class JobQueue:
                 scheduled_at=scheduled_at,
                 lease_expires_at=None,
                 locked_by=None,
+            )
+        )
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).rowcount == 1
+
+    def defer(self, *, job_id: str, worker_id: str, reason: str, scheduled_at: datetime) -> bool:
+        """Return a running job to ``queued``, due at ``scheduled_at``, at the same attempt.
+
+        For a handler's :class:`~persona.errors.JobDeferredError`: the claim counted an
+        attempt, so the attempt goes back by one and the next claim counts the same one
+        again. Records the reason and releases the lease. Owner-checked.
+        """
+        stmt = (
+            update(jobs)
+            .where(
+                jobs.c.id == job_id,
+                jobs.c.locked_by == worker_id,
+                jobs.c.state == JobState.RUNNING.value,
+            )
+            .values(
+                state=JobState.QUEUED.value,
+                last_error=reason,
+                scheduled_at=scheduled_at,
+                lease_expires_at=None,
+                locked_by=None,
+                attempt=func.greatest(jobs.c.attempt - 1, 0),
             )
         )
         with self._engine.begin() as conn:

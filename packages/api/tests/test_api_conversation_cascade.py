@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import _document_upload
 import pytest
 from fastapi.testclient import TestClient
 from persona.stores.document_store import DocumentStore
@@ -165,7 +166,7 @@ class TestDocumentCascadeOnConversationDelete:
         document_store: DocumentStore,
     ) -> None:
         # Upload two documents to the conversation.
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -174,7 +175,7 @@ class TestDocumentCascadeOnConversationDelete:
             filename="memo.txt",
             document_store=document_store,
         )
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -195,10 +196,15 @@ class TestDocumentCascadeOnConversationDelete:
             == 2
         )
 
+        # D-FV0-31: each document's extracted text is stored beside it.
+        assert len(list(workspace_root.rglob("*.text.json"))) == 2
+
         # Delete the conversation.
         resp = client.delete("/v1/conversations/conv_u1", headers=_auth())
         assert resp.status_code == 204
 
+        # ... and goes with the conversation.
+        assert list(workspace_root.rglob("*.text.json")) == []
         # Workspace files for the conversation's documents are gone.
         remaining = document_service.list_for_conversation(
             file_storage=LocalFileStorage(workspace_root),
@@ -217,7 +223,7 @@ class TestDocumentCascadeOnConversationDelete:
     ) -> None:
         # Force large-doc path so chunks land in the store.
         monkeypatch.setenv("PERSONA_DOC_INJECT_THRESHOLD", "100")
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -243,7 +249,7 @@ class TestDocumentCascadeOnConversationDelete:
         # Upload to conv_u1 AND to a different conversation (conv_other —
         # workspace-scoped, not RLS-scoped here since fake delete only
         # accepts conv_u1).
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -252,7 +258,7 @@ class TestDocumentCascadeOnConversationDelete:
             filename="a.txt",
             document_store=document_store,
         )
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -296,7 +302,7 @@ class TestCriterion6HoldsAtCascadeBoundary:
         for _persona_id, store_kind in backend.store:
             seen_kinds_before.add(store_kind)
 
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id="u1",
             persona_id="astrid",
@@ -336,3 +342,51 @@ class TestCrossTenantStillReturns404:
     def test_cross_tenant_delete_404s(self, client: TestClient) -> None:
         resp = client.delete("/v1/conversations/conv_OTHER", headers=_auth())
         assert resp.status_code == 404
+
+
+class TestTheCascadeRunsWhileTheRowStillExists:
+    """Fourth security review finding 7: chunk RLS matches through the conversation row."""
+
+    def test_documents_and_chunks_go_before_the_row_and_the_backlog_is_dropped(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from persona_api.services import document_service  # noqa: PLC0415
+
+        order: list[str] = []
+        real_remove_all = document_service.remove_all_for_conversation
+
+        def _remove_all(**kwargs: Any) -> None:  # noqa: ANN401
+            order.append("documents")
+            real_remove_all(**kwargs)
+
+        def _delete_row(**_kw: Any) -> None:  # noqa: ANN401
+            order.append("row")
+
+        class _Scheduler:
+            async def forget_conversation(self, *, owner_id: str, conversation_id: str) -> None:
+                order.append(f"backlog:{owner_id}:{conversation_id}")
+
+        monkeypatch.setattr(document_service, "remove_all_for_conversation", _remove_all)
+        monkeypatch.setattr(chat_service, "delete_conversation", _delete_row)
+        client.app.state.document_index_scheduler = _Scheduler()  # type: ignore[attr-defined]
+        resp = client.delete("/v1/conversations/conv_u1", headers=_auth())
+        assert resp.status_code == 204
+        assert order == ["documents", "backlog:u1:conv_u1", "row"]
+
+    def test_a_backlog_that_cannot_be_dropped_does_not_stop_the_delete(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted: list[str] = []
+
+        class _Broken:
+            async def forget_conversation(self, **_: str) -> None:
+                raise RuntimeError("the database is down")
+
+        monkeypatch.setattr(
+            chat_service, "delete_conversation", lambda **kw: deleted.append(kw["conversation_id"])
+        )
+        client.app.state.document_index_scheduler = _Broken()  # type: ignore[attr-defined]
+        assert client.delete("/v1/conversations/conv_u1", headers=_auth()).status_code == 204
+        assert deleted == ["conv_u1"]

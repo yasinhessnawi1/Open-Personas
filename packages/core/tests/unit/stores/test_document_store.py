@@ -381,6 +381,44 @@ class TestDeleteDocument:
             store.delete_document("conv", "weird::name")
 
 
+class _PrefixBackend(_InMemoryBackend):
+    """A backend that deletes by id prefix, and fails if asked to read everything."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefixes: list[tuple[str, str, str]] = []
+        self.reading = True
+
+    def get_all(self, *, persona_id: str, store_kind: str) -> list[PersonaChunk]:
+        if not self.reading:
+            msg = "the delete read every chunk of the conversation"
+            raise AssertionError(msg)
+        return super().get_all(persona_id=persona_id, store_kind=store_kind)
+
+    def delete_by_id_prefix(self, *, persona_id: str, store_kind: str, prefix: str) -> None:
+        self.prefixes.append((persona_id, store_kind, prefix))
+        ids = [
+            c.id
+            for c in super().get_all(persona_id=persona_id, store_kind=store_kind)
+            if c.id.startswith(prefix)
+        ]
+        self.delete_documents(persona_id=persona_id, store_kind=store_kind, ids=ids)
+
+
+class TestDeleteDocumentByPrefix:
+    """Fourth security review finding 3: the delete never reads the conversation's chunks."""
+
+    def test_a_backend_that_deletes_by_prefix_is_asked_to_and_reads_nothing(self) -> None:
+        backend = _PrefixBackend()
+        store = DocumentStore(backend=backend)
+        store.write("conv", [_make_chunk("conv", "a.pdf", 0), _make_chunk("conv", "b.pdf", 0)])
+        backend.reading = False
+        store.delete_document("conv", "a.pdf")
+        assert backend.prefixes == [("conv", "document", "conv::document::a.pdf::")]
+        backend.reading = True
+        assert {c.doc_ref for c in store.get_all("conv")} == {"b.pdf"}
+
+
 class TestNoSourcePolicyAxis:
     """D-14-X-no-source-policy-on-documents — the upload IS the provenance."""
 

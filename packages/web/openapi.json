@@ -4741,7 +4741,7 @@
       "post": {
         "tags": ["tasks"],
         "summary": "Extend Budget",
-        "description": "Raise a budget-paused task's cap (bounded, at-most-once). Reports the old \u2192 new cap.",
+        "description": "Raise the cap of a task at its cap (bounded, at-most-once). Reports the old \u2192 new cap.",
         "operationId": "extend_budget_v1_tasks__task_id__budget_extend_post",
         "parameters": [
           {
@@ -6356,6 +6356,40 @@
             "type": "array",
             "title": "Images",
             "default": []
+          },
+          "text_stored": {
+            "type": "boolean",
+            "title": "Text Stored",
+            "default": false
+          },
+          "text_partial": {
+            "type": "boolean",
+            "title": "Text Partial",
+            "default": false
+          },
+          "index_state": {
+            "type": "string",
+            "enum": [
+              "not_needed",
+              "pending",
+              "indexing",
+              "ready",
+              "partial",
+              "failed"
+            ],
+            "title": "Index State"
+          },
+          "chunks_indexed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunks Indexed"
           }
         },
         "additionalProperties": false,
@@ -6367,7 +6401,8 @@
           "format",
           "workspace_path",
           "strategy",
-          "token_count"
+          "token_count",
+          "index_state"
         ],
         "title": "DocumentRef",
         "description": "Reference to an attached document \u2014 the API-boundary type.\n\nPersisted alongside the original file as a ``{doc_ref}.meta.json``\nsidecar in the workspace. Returned by :func:`upload`,\n:func:`list_for_conversation`, and (via JSON) the API GET endpoint\n(T18). Carries the metadata T14/T15/T16 need to render the prompt\nsections + the synopsis."

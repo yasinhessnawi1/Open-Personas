@@ -282,6 +282,22 @@ class PostgresBackend:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
+    def delete_by_id_prefix(self, *, persona_id: str, store_kind: str, prefix: str) -> None:
+        """Delete every chunk of ``(persona_id, store_kind)`` whose id starts with ``prefix``.
+
+        One statement: nothing is read back (a document's chunks are found by their id
+        prefix, ``{conversation}::document::{doc_ref}::``). ``LIKE`` wildcards in the prefix
+        are escaped, so a ``_`` or ``%`` in a document id matches only itself.
+        """
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = delete(_memory_chunks).where(
+            _memory_chunks.c.persona_id == persona_id,
+            _memory_chunks.c.kind == store_kind,
+            _memory_chunks.c.id.like(f"{escaped}%", escape="\\"),
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
     # -- read ---------------------------------------------------------------
 
     def get_all(

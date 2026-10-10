@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/auth";
+import { useMeEvent } from "@/components/providers/me-events-provider";
 import { ApiError, createApiClient, unwrap } from "@/lib/api/client";
 import type { DocumentRef } from "@/lib/upload";
 
@@ -76,6 +77,11 @@ export function useConversationDocuments(
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // D-FV0-31: the background document index publishes `sidebar.changed`
+  // (reason=document.indexed) when a document's index finishes, so a chip that
+  // read "Indexing…" updates without reopening the conversation.
+  useMeEvent("sidebar.changed", () => void refresh());
 
   const addOptimistic = useCallback((ref: DocumentRef) => {
     setDocuments((prev) =>

@@ -115,6 +115,11 @@ class JobTypeSpec(Generic[P]):
             avatar-create handler (a regen uses a distinct recipe).
         retry: The retry/backoff/dead-letter policy.
         lease: The lease/heartbeat class (defaults to MEDIUM).
+        serial: At most one job of this type runs at a time, across every worker: the
+            claim skips it while another of its type is claimed or running. For work
+            that must not run in parallel with itself (the document index's embedding,
+            D-FV0-31). A brief overlap is possible when two workers claim in the same
+            instant; the work must stay correct if it happens.
     """
 
     type: str
@@ -125,6 +130,7 @@ class JobTypeSpec(Generic[P]):
     idempotency_key: Callable[[P], str]
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     lease: LeasePolicy = MEDIUM_LEASE
+    serial: bool = False
 
 
 class JobRegistry:
@@ -167,6 +173,10 @@ class JobRegistry:
     def types(self) -> list[str]:
         """Sorted registered job-type names."""
         return sorted(self._specs)
+
+    def serial_types(self) -> list[str]:
+        """Sorted names of the types registered ``serial`` (one in flight at a time)."""
+        return sorted(name for name, spec in self._specs.items() if spec.serial)
 
     def idempotency_key_for(self, job_type: str, payload: JobPayload) -> str:
         """Build the idempotency key for ``payload`` via its registered recipe."""

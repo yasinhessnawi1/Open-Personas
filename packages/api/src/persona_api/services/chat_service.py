@@ -1326,7 +1326,7 @@ def _resolve_turn_documents(
             owner_id=owner_id,
             persona_id=persona_id,
             conversation_id=conversation_id,
-            doc_ref=ref.doc_ref,
+            ref=ref,
         )
         if file_bytes is None:
             _log.warning(

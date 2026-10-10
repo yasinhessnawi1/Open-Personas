@@ -26,6 +26,10 @@ function doc(overrides: Partial<DocumentRef> = {}): DocumentRef {
     sheet_names: null,
     size_bytes: 1000,
     images: [],
+    text_stored: false,
+    text_partial: false,
+    index_state: "not_needed" as const,
+    chunks_indexed: null,
     ...overrides,
   };
 }
@@ -72,5 +76,29 @@ describe("<ConversationDocumentList>", () => {
     expect(
       screen.getByLabelText(en.chat.composer.documents.panelTitle),
     ).toBeDefined();
+  });
+});
+
+describe("<ConversationDocumentList> index state (D-FV0-31)", () => {
+  it("hands each chip its document's index state", () => {
+    const { container } = render(
+      <NextIntlClientProvider locale="en" messages={en}>
+        <ConversationDocumentList
+          documents={[
+            doc({
+              doc_ref: "a",
+              index_state: "indexing",
+              strategy: "retrieval",
+            }),
+            doc({ doc_ref: "b" }),
+          ]}
+          onRemove={() => {}}
+        />
+      </NextIntlClientProvider>,
+    );
+    const chips = container.querySelectorAll('[data-slot="document-chip"]');
+    expect(chips[0].getAttribute("data-index-state")).toBe("indexing");
+    expect(chips[0].textContent).toContain("Indexing…");
+    expect(chips[1].textContent).not.toContain("Indexing…");
   });
 });

@@ -17,6 +17,7 @@ alongside the UI delete flow.
 
 from __future__ import annotations
 
+import posixpath
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -243,6 +244,26 @@ async def list_artifacts(
     )
 
 
+def is_document_workspace_ref(ref: str) -> bool:
+    """Whether ``ref`` points inside a conversation's attached-documents directory.
+
+    ``conversations/<id>/documents/...``, after normalising ``.`` and ``..`` segments
+    and doubled or backward slashes, so no spelling of the path slips past. The two
+    directory names are compared case-folded (third security review, finding 16): on a
+    case-insensitive filesystem, as community installs on macOS and Windows have,
+    ``Conversations/c/Documents`` opens the same directory. Case folding is broader
+    than any filesystem's case matching (``ſ`` folds to ``s``), so it refuses more,
+    never less.
+    """
+    normalised = posixpath.normpath("/" + ref.replace("\\", "/")).lstrip("/")
+    parts = normalised.split("/")
+    return (
+        len(parts) >= 3
+        and parts[0].casefold() == "conversations"
+        and parts[2].casefold() == "documents"
+    )
+
+
 @router.delete(
     "/{persona_id}/artifacts/{ref:path}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -263,6 +284,19 @@ async def delete_artifact(
     Cross-tenant persona ids return 404 via the pre-flight RLS check.
     """
     _ensure_persona_visible(request, persona_id)
+    if is_document_workspace_ref(ref):
+        # F3 (second review): an attached document is a set of objects (the original,
+        # its sidecars, its stored text, its page images) plus store chunks. Deleting
+        # one object here would leave the rest behind, so documents are deleted only
+        # through the document delete, which removes all of it.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "document_managed",
+                "detail": "attached documents are removed with the document delete",
+                "ref": ref[:120],
+            },
+        )
 
     file_storage: FileStorage = request.app.state.file_storage
     key = f"{user.id}/{persona_id}/{ref}"
@@ -313,4 +347,4 @@ async def delete_artifact(
     return
 
 
-__all__ = ["router"]
+__all__ = ["is_document_workspace_ref", "router"]

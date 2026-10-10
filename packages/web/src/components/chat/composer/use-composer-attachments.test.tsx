@@ -351,6 +351,44 @@ describe("useComposerAttachments", () => {
     expect(errorOpts?.id).toBe("toast-id-1");
   });
 
+  it("uploadDocumentFile shows the server's reason, never [object Object], for the real 503 body (D-FV0-09)", async () => {
+    // The exact body FastAPI sends for the upload route's HTTPException: the
+    // structured error sits one level down, under `detail`.
+    restore = installFakeXhr((xhr) => {
+      xhr.send = () => {
+        xhr.status = 503;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "missing_dependency",
+            detail: "pypdf is not installed",
+            context: {
+              format: "pdf",
+              install_hint: "pip install persona-core[documents]",
+            },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      };
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.uploadDocumentFile(file("r.pdf", "application/pdf"));
+    });
+
+    expect(onDocumentError).toHaveBeenCalledTimes(1);
+    expect(onDocumentError.mock.calls[0][0]).toBe(
+      "missing_dependency: pypdf is not installed",
+    );
+    expect(toastFns.error).toHaveBeenCalledTimes(1);
+    const [title] = toastFns.error.mock.calls[0] as [string, unknown];
+    expect(title).toBe("missing_dependency: pypdf is not installed");
+    expect(title).not.toContain("[object Object]");
+  });
+
   it("retryImage re-runs the upload with the original file", async () => {
     let attemptCount = 0;
     restore = installFakeXhr((xhr) => {

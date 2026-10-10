@@ -135,3 +135,50 @@ describe("<DocumentChip>", () => {
     expect(chip?.getAttribute("data-format")).toBe("pdf");
   });
 });
+
+describe("<DocumentChip> index state (D-FV0-31)", () => {
+  const cases = [
+    ["pending", false, "Indexing…"],
+    ["indexing", false, "Indexing…"],
+    ["partial", false, "Partly indexed"],
+    ["failed", false, "Couldn't index"],
+    ["not_needed", true, "Partly read"],
+    ["failed", true, "Couldn't index"],
+  ] as const;
+
+  for (const [indexState, textPartial, label] of cases) {
+    it(`shows "${label}" for ${indexState}${textPartial ? " and a cut text" : ""}`, () => {
+      const { container } = renderWithIntl(
+        <DocumentChip
+          docRef="r-9"
+          filename="report.pdf"
+          format="pdf"
+          sizeBytes={2048}
+          indexState={indexState}
+          textPartial={textPartial}
+        />,
+      );
+      const state = container.querySelectorAll('[data-slot="document-state"]');
+      expect(state).toHaveLength(1);
+      expect(state[0].textContent).toBe(` · ${label}`);
+    });
+  }
+
+  for (const indexState of ["ready", "not_needed"] as const) {
+    it(`shows no label for a ${indexState} document read whole`, () => {
+      const { container } = renderWithIntl(
+        <DocumentChip
+          docRef="r-10"
+          filename="memo.txt"
+          format="txt"
+          sizeBytes={2048}
+          indexState={indexState}
+          textPartial={false}
+        />,
+      );
+      expect(
+        container.querySelectorAll('[data-slot="document-state"]'),
+      ).toHaveLength(0);
+    });
+  }
+});

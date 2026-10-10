@@ -36,6 +36,16 @@ export interface DocumentChipProps {
   sizeBytes: number | null;
   /** F3 T18: scanned-PDF cue when set. Mirrors DocumentRef.strategy. */
   strategy?: "whole_inject" | "retrieval" | "vision_handoff";
+  /** D-FV0-31: the background index's state. Mirrors DocumentRef.index_state. */
+  indexState?:
+    | "not_needed"
+    | "pending"
+    | "indexing"
+    | "ready"
+    | "partial"
+    | "failed";
+  /** Only part of the text could be read. Mirrors DocumentRef.text_partial. */
+  textPartial?: boolean;
   /** Remove this document from the conversation. */
   onRemove?: (docRef: string) => void;
   className?: string;
@@ -51,6 +61,22 @@ const FORMAT_ICONS: Record<string, ReactNode> = {
   code: <FileCode className="size-4 shrink-0" aria-hidden />,
 };
 
+/**
+ * D-FV0-31: the one state label a chip shows, or null for a document that is whole and
+ * ready. The index state comes first; a cut text shows only when the index has nothing
+ * to say. The persona is told the same, in a sentence, on every turn.
+ */
+export function documentStateKey(
+  indexState: DocumentChipProps["indexState"],
+  textPartial: boolean | undefined,
+): "indexing" | "partial" | "failed" | "partlyRead" | null {
+  if (indexState === "pending" || indexState === "indexing") return "indexing";
+  if (indexState === "partial") return "partial";
+  if (indexState === "failed") return "failed";
+  if (textPartial) return "partlyRead";
+  return null;
+}
+
 function formatSize(bytes: number | null): string {
   if (bytes === null) return "";
   if (bytes < 1024) return `${bytes} B`;
@@ -64,6 +90,8 @@ export function DocumentChip({
   format,
   sizeBytes,
   strategy,
+  indexState,
+  textPartial,
   onRemove,
   className,
 }: DocumentChipProps) {
@@ -71,6 +99,7 @@ export function DocumentChip({
   const icon = FORMAT_ICONS[format] ?? FORMAT_ICONS.txt;
   const isScanned = strategy === "vision_handoff";
   const sizeLabel = formatSize(sizeBytes);
+  const stateKey = documentStateKey(indexState, textPartial);
 
   return (
     <Card
@@ -85,6 +114,7 @@ export function DocumentChip({
       data-slot="document-chip"
       data-format={format}
       data-strategy={strategy}
+      data-index-state={indexState}
     >
       <span className="text-muted-foreground">{icon}</span>
 
@@ -95,6 +125,11 @@ export function DocumentChip({
         <span className="type-caption text-muted-foreground">
           {format.toUpperCase()}
           {sizeLabel ? ` · ${sizeLabel}` : ""}
+          {stateKey ? (
+            <span data-slot="document-state">
+              {` · ${t(`documents.state.${stateKey}`)}`}
+            </span>
+          ) : null}
         </span>
       </div>
 

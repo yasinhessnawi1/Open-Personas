@@ -954,7 +954,13 @@
         "panelTitle": "Documents in this conversation",
         "panelEmpty": "No documents attached yet",
         "scannedCue": "Read as scanned pages",
-        "removeConfirmation": "Remove {filename}?"
+        "removeConfirmation": "Remove {filename}?",
+        "state": {
+          "indexing": "Indexing…",
+          "partial": "Partly indexed",
+          "failed": "Couldn't index",
+          "partlyRead": "Partly read"
+        }
       }
     },
     "output": {

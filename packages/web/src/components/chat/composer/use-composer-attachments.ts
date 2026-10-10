@@ -4,9 +4,14 @@ import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/auth";
 import { useNotify } from "@/components/providers/notification-provider";
-import { ApiError, type TokenGetter } from "@/lib/api/client";
+import type { TokenGetter } from "@/lib/api/client";
 import { notifyConversationFilesChanged } from "@/lib/hooks/use-conversation-artifacts";
-import { type DocumentRef, uploadDocument, uploadImage } from "@/lib/upload";
+import {
+  type DocumentRef,
+  describeUploadError,
+  uploadDocument,
+  uploadImage,
+} from "@/lib/upload";
 import type { ImageAttachment } from "./attach-state";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
@@ -133,12 +138,7 @@ export function useComposerAttachments(
         // ApiError carries the structured server detail; surface its
         // `context.reason` (Spec 13 returns oversize / magic_bytes_mismatch /
         // etc.) so F2's error voice maps it via the i18n table.
-        const detail =
-          e instanceof ApiError
-            ? `${e.code}${e.detail ? `: ${String(e.detail)}` : ""}`
-            : e instanceof Error
-              ? e.message
-              : String(e);
+        const detail = describeUploadError(e);
         patch(id, () => ({
           kind: "image",
           id,
@@ -207,12 +207,7 @@ export function useComposerAttachments(
         });
         onDocumentAttached(ref);
       } catch (e) {
-        const detail =
-          e instanceof ApiError
-            ? `${e.code}${e.detail ? `: ${String(e.detail)}` : ""}`
-            : e instanceof Error
-              ? e.message
-              : String(e);
+        const detail = describeUploadError(e);
         notify({ level: "error", title: detail, id: toastId });
         onDocumentError(detail);
       }

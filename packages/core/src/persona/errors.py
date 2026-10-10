@@ -546,6 +546,26 @@ class PermanentJobError(PersonaError):
     """
 
 
+class JobDeferredError(PersonaError):
+    """Raised by a job handler to put its job back, due later, without spending an attempt.
+
+    For a pause that is not the job's fault: the process cannot do the work for now (the
+    document indexer's threads are stuck, D-FV0-31). The executor returns the job to
+    ``queued``, due ``delay_seconds`` from now, with its attempt count unchanged, so a pause
+    never moves a job toward its dead letter. ``context`` carries the cause.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        delay_seconds: float,
+        context: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message, context=context)
+        self.delay_seconds = delay_seconds
+
+
 class InvalidRecurrenceRuleError(PersonaError):
     """Raised when an RFC-5545 recurrence rule is malformed or unsupported.
 

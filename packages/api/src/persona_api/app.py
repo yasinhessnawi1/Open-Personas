@@ -55,6 +55,8 @@ from persona_api.db.community_managed import (
     run_migrations,
 )
 from persona_api.db.engine import create_db_engine
+from persona_api.document_worker.admission import DocumentAdmission
+from persona_api.document_worker.pool import ProcessDocumentParser
 from persona_api.editions import (
     build_credits_policy,
     build_owner_resolver,
@@ -77,6 +79,7 @@ from persona_api.middleware.rate_limit import (
 )
 from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware, TelemetryBuffer
 from persona_api.middleware.rls_context import make_rls_engine
+from persona_api.process_hardening import make_process_non_dumpable
 from persona_api.realtime.channel import UserEventChannel
 from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
@@ -110,6 +113,7 @@ from persona_api.sandbox import (
 from persona_api.services import persona_service
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
+from persona_api.services.document_index import DocumentIndexer
 from persona_api.services.flag_report import log_effective_flags
 from persona_api.services.free_model_usage import FreeModelDailyCounter
 from persona_api.services.model_tiers import build_free_tier_registry
@@ -125,6 +129,10 @@ if TYPE_CHECKING:
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
     from persona.stores.backend import Backend
     from sqlalchemy import Engine
+
+    from persona_api.services.document_index import (
+        LocalDocumentIndexQueue as _LocalDocumentIndexQueue,
+    )
 
 __all__ = ["create_app"]
 
@@ -203,6 +211,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     client, D-05-4 / spec-06 handoff).
     """
     config: APIConfig = app.state.config
+    # F5 (second review): no process of this OS user, a compromised document parse
+    # worker included, may attach to the api or read its memory or environment.
+    make_process_non_dumpable()
     # R9-170 / sweep part2 N: say what is switched on, once, before anything else starts.
     # Until 2026-09-18 nothing in the process could answer "what is on"; the register that
     # did was built by hand from Fly secrets and code defaults, and local and production
@@ -896,6 +907,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # file_extract_queue_ready gate). workspace_root is always set.
                 sandbox_pool=sandbox_pool,
                 workspace_root=app.state.workspace_root,
+                # D-FV0-31: the background document index, on the app's one indexer
+                # thread; the parse port re-reads an older generated file's text.
+                document_indexer=app.state.document_indexer,
+                document_parser=app.state.document_parser,
             )
         except AuthenticationError:
             # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,
@@ -910,6 +925,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             in_process_worker = None
     app.state.in_process_worker = in_process_worker
+    # D-FV0-31: who indexes retrieval documents. The jobs system when this process's
+    # worker carries ``document_ingest`` (enqueue implies handler), else an in-process
+    # queue on the same indexer thread (a community boot without the worker). None when
+    # no document store exists at all: nothing could hold the chunks.
+    document_index_queue = _build_document_index_scheduler(app, in_process_worker)
 
     # Spec I1 (T2, D-I1-17): host the connector transports IN THIS PROCESS behind
     # PERSONA_API_EMBED_CONNECTORS (default OFF). The standalone connector service runs a
@@ -1145,6 +1165,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:
             await app.state.telemetry_buffer.aclose()
+        # D-FV0-31: stop the in-process index queue (its documents resume on the next turn
+        # that sees them), and the indexer thread after it.
+        if document_index_queue is not None:
+            await document_index_queue.aclose()
+        app.state.document_indexer.close()
+        # D-FV0-31: kill the document parse workers (none run until the first upload).
+        document_parser = getattr(app.state, "document_parser", None)
+        if isinstance(document_parser, ProcessDocumentParser):
+            await document_parser.aclose()
         if in_process_worker is not None:
             await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
         if embedded_connectors is not None:
@@ -1225,6 +1254,21 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # the lifespan hasn't run (tests hitting the app without TestClient's lifespan).
     # The lifespan re-affirms it from ``app.state.workspace_root`` (same value).
     app.state.file_storage = build_file_storage(config, Path(config.workspace_root))
+    # D-FV0-31: the one port every untrusted document parse goes through (upload and the
+    # whole-inject re-parse alike): a pool of limited, killable worker processes. Workers
+    # start on first use, so building the app starts no process.
+    # F2 (second review): per-owner admission (upload leases, the worker-time budget,
+    # the cooldown) is one injected service, shared by the pool and the upload route.
+    app.state.document_admission = DocumentAdmission()
+    app.state.document_parser = ProcessDocumentParser(admission=app.state.document_admission)
+    # D-FV0-31: the one thread every document-index slice runs on (niced, one core), and the
+    # scheduler the lifespan picks. Until the lifespan runs there is no scheduler, and an
+    # upload stays ``pending`` until a turn picks it up.
+    app.state.document_indexer = DocumentIndexer()
+    # Fourth review finding 5: the embedder's first encode happens on a normal-priority
+    # thread, so its helper threads are not created at the indexer's niceness.
+    app.state.document_indexer.warm_up_with(lambda: _warm_embedder(app))
+    app.state.document_index_scheduler = None
 
     # Spec R7 (R7-D-4/6): the per-user concurrency caps ride the same edition seam —
     # ``cloud`` enforces the configured caps, ``community`` no-ops (0 = unlimited; the
@@ -1270,6 +1314,70 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     _register_routers(app)
 
     return app
+
+
+def _warm_embedder(app: FastAPI) -> None:
+    """One encode with the app's embedder, if it has one (the indexer's warm-up)."""
+    embedder = getattr(app.state, "embedder", None)
+    if embedder is not None:
+        embedder.encode(["warm up"])
+
+
+def _build_document_index_scheduler(
+    app: FastAPI, in_process_worker: object | None
+) -> _LocalDocumentIndexQueue | None:
+    """Pick the document index's scheduler (D-FV0-31); return the local queue to close.
+
+    The jobs system when the in-process worker carries ``document_ingest``; else, when a
+    document store exists, an in-process queue on the same indexer thread, started here.
+    """
+    from persona.stores.document_store import DocumentStore  # noqa: PLC0415
+
+    from persona_api.services.document_index import (  # noqa: PLC0415
+        DOCUMENT_INDEX_JOB_TYPE,
+        DocumentIndexDeps,
+        InMemoryIndexQuota,
+        JobDocumentIndexScheduler,
+        install_statement_bound,
+    )
+    from persona_api.services.document_index import (  # noqa: PLC0415
+        LocalDocumentIndexQueue as _LocalQueue,
+    )
+
+    job_types: frozenset[str] = getattr(in_process_worker, "job_types", frozenset())
+    if DOCUMENT_INDEX_JOB_TYPE in job_types and app.state.job_queue is not None:
+        app.state.document_index_scheduler = JobDocumentIndexScheduler(
+            app.state.job_queue, app.state.file_storage
+        )
+        return None
+    memory_backend = getattr(app.state, "memory_backend", None)
+    if memory_backend is None:
+        app.state.document_index_scheduler = None
+        return None
+    from persona_api.services.notifications_service import (  # noqa: PLC0415
+        publish_sidebar_changed,
+    )
+
+    event_channel = getattr(app.state, "event_channel", None)
+    install_statement_bound(getattr(memory_backend, "_engine", None))
+
+    def _indexed(owner_id: str) -> None:
+        publish_sidebar_changed(event_channel, owner_id=owner_id, reason="document.indexed")
+
+    queue = _LocalQueue(
+        DocumentIndexDeps(
+            file_storage=app.state.file_storage,
+            document_store=lambda: DocumentStore(backend=memory_backend),
+            indexer=app.state.document_indexer,
+            quota=InMemoryIndexQuota(),
+            parser=app.state.document_parser,
+            on_finished=_indexed,
+        )
+    )
+    queue.start()
+    app.state.document_index_scheduler = queue
+    _LOG.info("document index runs from the in-process queue (no jobs worker carries it)")
+    return queue
 
 
 def _build_rate_limiter(config: APIConfig, rls_engine: Engine | None) -> RateLimiter:

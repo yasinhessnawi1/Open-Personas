@@ -430,6 +430,25 @@ def test_success_extracts_renders_meters_twice_and_publishes() -> None:
     assert getattr(event, "reason", None) == "conversation.file_extracted"
 
 
+def test_the_generated_file_is_scheduled_for_the_document_index() -> None:
+    """D-FV0-31 (coordinator's ruling): a generated file is indexed like an upload."""
+    scheduled: list[tuple[str, str, str, str]] = []
+    rendered = RenderedFile(
+        workspace_path="conversations/conv_1/documents/board-game-night-plan-1a2b3c4d.pdf",
+        media_type="application/pdf",
+        size_bytes=1234,
+        format="pdf",
+    )
+    handler = FileExtractHandler(
+        extractor=_ExtractorStub(_content(kind="prose")),
+        renderer=_RendererStub(rendered),
+        repository=_Repo(_data()),
+        schedule_index=lambda *args: scheduled.append(args),
+    )
+    _run(handler)
+    assert scheduled == [("u1", "persona_1", "conv_1", "board-game-night-plan-1a2b3c4d")]
+
+
 def test_tabular_content_with_auto_format_renders_xlsx() -> None:
     repo = _Repo(_data())
     extractor = _ExtractorStub(_content(kind="tabular"))

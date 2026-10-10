@@ -20,7 +20,9 @@ a future persona-leg handler drives), so both the direct-DB and collaborator
 paths are owner-bound by the same one act — belt and suspenders.
 
 Failure policy (T6): a :class:`~persona.errors.PermanentJobError` from the handler
-terminates the job as ``failed`` (non-retryable). Any other exception is transient
+terminates the job as ``failed`` (non-retryable). A
+:class:`~persona.errors.JobDeferredError` puts the job back, due later, without spending an
+attempt (D-FV0-31). Any other exception is transient
 — the job retries with capped-exponential backoff (jittered) until the type's
 ``max_attempts`` is reached, then dead-letters as ``dead`` with the recorded
 cause. A worker that *crashes* mid-job (no exception fires) is the lease-expiry
@@ -41,7 +43,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import PermanentJobError, UnknownJobTypeError
+from persona.errors import JobDeferredError, PermanentJobError, UnknownJobTypeError
 from persona.jobs import JobState
 from persona.logging import get_logger
 
@@ -158,6 +160,23 @@ class JobExecutor:
             # so the task is truly cancelled — never fall through to complete().
             _log.info("job cancelled mid-flight (drain)", job_id=record.id, type=record.type)
             raise
+        except JobDeferredError as exc:
+            # The handler cannot run for now, through no fault of the job: back to the
+            # queue, due later, at the same attempt (D-FV0-31, fifth review F1).
+            scheduled_at = datetime.now(UTC) + timedelta(seconds=max(exc.delay_seconds, 0.0))
+            self._queue.defer(
+                job_id=record.id,
+                worker_id=self._worker_id,
+                reason=str(exc),
+                scheduled_at=scheduled_at,
+            )
+            _log.warning(
+                "job deferred",
+                job_id=record.id,
+                type=record.type,
+                delay_seconds=round(exc.delay_seconds, 3),
+            )
+            return JobState.QUEUED
         except PermanentJobError as exc:
             # The handler declared this failure permanent (non-retryable) → terminal.
             self._queue.mark_failed(job_id=record.id, worker_id=self._worker_id, error=str(exc))

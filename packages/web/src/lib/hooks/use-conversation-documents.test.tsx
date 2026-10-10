@@ -2,8 +2,20 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useConversationDocuments } from "./use-conversation-documents";
 
+// A stable getToken, as Clerk's is: a new function each render would re-create
+// `refresh` and re-fetch on every render.
+const auth = vi.hoisted(() => ({
+  getToken: () => Promise.resolve("jwt-token"),
+}));
 vi.mock("@clerk/nextjs", () => ({
-  useAuth: () => ({ getToken: () => Promise.resolve("jwt-token") }),
+  useAuth: () => auth,
+}));
+
+const meHandlers = new Map<string, () => void>();
+vi.mock("@/components/providers/me-events-provider", () => ({
+  useMeEvent: (type: string, handler: () => void) => {
+    meHandlers.set(type, handler);
+  },
 }));
 
 const FAKE_DOC = {
@@ -18,6 +30,10 @@ const FAKE_DOC = {
   sheet_names: null,
   size_bytes: 20_000,
   images: [],
+  text_stored: false,
+  text_partial: false,
+  index_state: "not_needed" as const,
+  chunks_indexed: null,
 };
 
 const FAKE_DOC_2 = {
@@ -114,5 +130,20 @@ describe("useConversationDocuments", () => {
           ? arg.url
           : String(arg);
     expect(url).toContain("conv_2");
+  });
+
+  it("refreshes when the document index pings sidebar.changed (D-FV0-31)", async () => {
+    const { result } = renderHook(() => useConversationDocuments("conv_1"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const calls = (
+      globalThis.fetch as unknown as { mock: { calls: unknown[] } }
+    ).mock.calls.length;
+    act(() => meHandlers.get("sidebar.changed")?.());
+    await waitFor(() =>
+      expect(
+        (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock
+          .calls.length,
+      ).toBe(calls + 1),
+    );
   });
 });

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import _document_upload
 import pytest
 from fastapi.testclient import TestClient
 from persona.stores.document_store import DocumentStore
@@ -101,6 +102,13 @@ def client(
     app.state.sandbox_root = sandbox_root
     app.state.file_storage = LocalFileStorage(sandbox_root)  # R5-D-4: routes read this
     app.state.build_document_store = lambda: document_store
+    from persona_api.middleware.rate_limit import (  # noqa: PLC0415
+        InMemoryRateLimitStore,
+        RateLimiter,
+    )
+
+    # The listing is rate limited (fourth review finding 1); generous here.
+    app.state.rate_limiter = RateLimiter(InMemoryRateLimitStore(), default_limit=1000)
 
     # Mock chat_service.get_conversation to return a synthetic row for the
     # "u1's conv" only; raise ConversationNotFoundError otherwise (mimics
@@ -146,7 +154,7 @@ class TestListDocuments:
         sandbox_root: Path,
         document_store: DocumentStore,
     ) -> None:
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="astrid",
@@ -178,7 +186,7 @@ class TestDeleteDocument:
         sandbox_root: Path,
         document_store: DocumentStore,
     ) -> None:
-        ref = document_service.upload(
+        ref = _document_upload.upload(
             file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="astrid",
@@ -187,11 +195,14 @@ class TestDeleteDocument:
             filename="memo.txt",
             document_store=document_store,
         )
+        # D-FV0-31: the stored extracted text goes with its document.
+        assert len(list(sandbox_root.rglob(f"{ref.doc_ref}.txt.text.json"))) == 1
         resp = client.delete(
             f"/v1/conversations/conv_u1/documents/{ref.doc_ref}",
             headers=_auth(),
         )
         assert resp.status_code == 204
+        assert list(sandbox_root.rglob(f"{ref.doc_ref}.*")) == []
         # List confirms the document was removed.
         refs = document_service.list_for_conversation(
             file_storage=LocalFileStorage(sandbox_root),
@@ -235,7 +246,7 @@ class TestCrossTenantIsolation:
     ) -> None:
         # Upload a doc to conv_other (persona_id="other_persona"). conv_other
         # is unknown to the fake get_conversation → 404.
-        document_service.upload(
+        _document_upload.upload(
             file_storage=LocalFileStorage(sandbox_root),
             owner_id="u1",
             persona_id="other_persona",

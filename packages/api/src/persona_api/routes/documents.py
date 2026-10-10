@@ -26,8 +26,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request, status
+from persona.logging import get_logger
 
 from persona_api.auth import AuthenticatedUser, get_current_user
+from persona_api.middleware.rate_limit import rate_limit
 from persona_api.services import audit_service, chat_service, document_service
 
 if TYPE_CHECKING:
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
 
     from persona_api.services.document_service import DocumentRef
 
+
+_log = get_logger("api.documents.routes")
 
 router = APIRouter(prefix="/v1", tags=["documents"])
 
@@ -63,6 +67,9 @@ def _build_document_store(request: Request) -> DocumentStore:
 @router.get(
     "/conversations/{conversation_id}/documents",
     response_model=list[document_service.DocumentRef],
+    # Fourth review finding 1: a listing picks up waiting documents, so it is rate limited
+    # like every other endpoint (the pick-up is also throttled per conversation).
+    dependencies=[Depends(rate_limit("default"))],
 )
 async def list_documents(
     conversation_id: str,
@@ -78,12 +85,27 @@ async def list_documents(
         conversation_id=conversation_id,
     )
     persona_id = str(conv["persona_id"])
-    return document_service.list_for_conversation(
+    refs = document_service.list_for_conversation(
         file_storage=request.app.state.file_storage,
         owner_id=user.id,
         persona_id=persona_id,
         conversation_id=conversation_id,
     )
+    # D-FV0-31: opening a conversation lists its documents; a document whose background
+    # index never started (or, without the jobs system, was cut short by a restart) is
+    # picked up here as well as on the next turn.
+    scheduler = getattr(request.app.state, "document_index_scheduler", None)
+    if scheduler is not None:
+        try:
+            await scheduler.pick_up(
+                owner_id=user.id,
+                persona_id=persona_id,
+                conversation_id=conversation_id,
+                refs=refs,
+            )
+        except Exception:  # noqa: BLE001 - listing never fails over a pick-up
+            _log.warning("document index pick-up failed for {}", conversation_id)
+    return refs
 
 
 @router.delete(

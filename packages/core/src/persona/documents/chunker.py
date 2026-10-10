@@ -9,14 +9,24 @@ Strategy (D-14-4):
    per paragraph / heading-block / sheet / page so the chunker can keep
    semantically-coherent units together where they fit. Retrieved chunks
    then read as whole paragraphs or whole sheets, not as arbitrary slices.
-2. **Token-aware fallback.** When a single ``DocumentSection`` exceeds the
-   chunk-token cap, it is recursively split on paragraph (``\\n\\n``) →
-   line (``\\n``) → space → character until each split is under the cap.
-   This is the inline "Spec 01 fallback" path D-14-4 names — the four typed
-   stores' chunking (one chunk per YAML field, no splitting) is untouched.
-3. **Overlap.** Adjacent chunks within the same section carry ``overlap_tokens``
-   of text overlap so retrieval over a chunk boundary doesn't lose semantic
-   continuity. Default 64 tokens (R-14-3 + predecessor convention at
+2. **Token windows, cut at a separator.** When a single ``DocumentSection``
+   exceeds the chunk-token cap, it is cut into windows of at most
+   ``chunk_size_tokens`` tokens. Each window ends at the last paragraph break
+   (``\\n\\n``) in its final quarter, else the last line break, else the last
+   space, else exactly at the cap. Chunks therefore fill to between three
+   quarters of the cap and the cap. The recursive split this replaced counted
+   each part's tokens on its own and summed them, which overcounted and left
+   chunks at 224 to 331 tokens of 512 (third security review, finding 14).
+   The text is encoded in segments (:data:`persona.skills._tokens.SEGMENT_CHARS`),
+   never as one list for the whole section, and each character is encoded
+   about twice in all. This is the inline "Spec 01 fallback" path D-14-4
+   names; the four typed stores' chunking (one chunk per YAML field, no
+   splitting) is untouched.
+3. **Overlap.** Adjacent chunks within the same section share about
+   ``overlap_tokens`` tokens: the next window starts that many tokens before
+   the last one ended, moved forward to a word start when one is near, so
+   retrieval over a chunk boundary doesn't lose semantic continuity. Default
+   64 tokens (R-14-3 + predecessor convention at
    ``uia-rag-chatbot/src/uia_rag/chunking/splitter.py:27``).
 
 Defaults (D-14-4 + R-14-3):
@@ -28,7 +38,10 @@ Defaults (D-14-4 + R-14-3):
 
 Token counting goes through :func:`persona.skills.count_tokens` (the shared
 ``cl100k_base`` encoder, D-05-8). Estimate-for-budgeting; never conflated
-with provider ``usage`` for billing.
+with provider ``usage`` for billing. It is imported on first use, not at module
+import: the parsers import :class:`DocumentSection` from here, and the document
+parse worker (D-FV0-31) must start without ``persona.skills``, which loads the
+tokenizer and, through the package, the provider SDKs.
 
 This module deliberately does NOT modify
 :mod:`persona.schema.chunks` /  :mod:`persona.registry` / the four typed
@@ -41,19 +54,58 @@ the regression assertion in
 
 from __future__ import annotations
 
+import functools
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from persona.schema.documents import DocumentChunk, make_document_chunk_id
-from persona.skills import count_tokens
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+    from types import ModuleType
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE_TOKENS",
     "DEFAULT_OVERLAP_TOKENS",
+    "ChunkCursor",
     "DocumentSection",
     "chunk_document",
+    "iter_document_chunks",
 ]
+
+
+@functools.cache
+def _tokens() -> ModuleType:
+    """The shared ``cl100k_base`` token module, imported on first use."""
+    from persona.skills import _tokens as module  # noqa: PLC0415
+
+    return module
+
+
+def count_tokens(text: str) -> int:
+    """Count ``text`` with the shared encoder, importing it on first use."""
+    return int(_tokens().count_tokens(text))
+
+
+def count_tokens_capped(text: str, cap: int) -> int:
+    """The exact count when at most ``cap``, else a number above it, from about one segment."""
+    return int(_tokens().count_tokens_capped(text, cap))
+
+
+def _encode(text: str) -> list[int]:
+    """Encode one segment (bounded by the caller), special-token strings as plain text."""
+    tokens: list[int] = _tokens().encode(text)
+    return tokens
+
+
+def _token_starts(tokens: list[int]) -> list[int]:
+    """The character offset at which each token starts, in the text the tokens encode."""
+    _, starts = _tokens()._ENCODER.decode_with_offsets(tokens)  # noqa: SLF001
+    return list(starts)
+
 
 #: Default per-chunk token cap (R-14-3 + predecessor convention).
 DEFAULT_CHUNK_SIZE_TOKENS: int = 512
@@ -88,6 +140,20 @@ class DocumentSection(BaseModel):
     sheet: str | None = None
 
 
+@dataclass(frozen=True)
+class ChunkCursor:
+    """Where chunking resumes: a section, a character offset into it, and the next index.
+
+    ``offset`` counts characters of the section's stripped text. A cursor that
+    :func:`iter_document_chunks` yields, passed back as ``start``, continues exactly
+    where it stopped: the same chunks, with the same indexes, follow.
+    """
+
+    section: int = 0
+    offset: int = 0
+    index: int = 0
+
+
 def chunk_document(
     sections: list[DocumentSection],
     *,
@@ -97,6 +163,7 @@ def chunk_document(
     title: str,
     chunk_size_tokens: int = DEFAULT_CHUNK_SIZE_TOKENS,
     overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
+    max_chunks: int | None = None,
 ) -> list[DocumentChunk]:
     """Split sections into :class:`DocumentChunk` instances.
 
@@ -116,6 +183,8 @@ def chunk_document(
         chunk_size_tokens: Per-chunk token cap (default 512, R-14-3).
         overlap_tokens: Overlap between adjacent chunks within one section
             (default 64). Must be strictly less than ``chunk_size_tokens``.
+        max_chunks: Stop after this many chunks; the rest of the text is not
+            encoded at all. ``None`` for no limit.
 
     Returns:
         Ordered list of :class:`DocumentChunk` instances, indexed
@@ -126,6 +195,80 @@ def chunk_document(
             ``overlap_tokens`` is negative / not strictly less than
             ``chunk_size_tokens``.
     """
+    chunks: list[DocumentChunk] = []
+    if max_chunks is not None and max_chunks <= 0:
+        _validate(chunk_size_tokens, overlap_tokens)
+        return chunks
+    for chunk, _ in iter_document_chunks(
+        sections,
+        conversation_id=conversation_id,
+        doc_ref=doc_ref,
+        document_format=document_format,
+        title=title,
+        chunk_size_tokens=chunk_size_tokens,
+        overlap_tokens=overlap_tokens,
+    ):
+        chunks.append(chunk)
+        # A generator: once ``max_chunks`` is reached the rest is never encoded.
+        if max_chunks is not None and len(chunks) >= max_chunks:
+            break
+    return chunks
+
+
+def iter_document_chunks(
+    sections: Sequence[DocumentSection],
+    *,
+    conversation_id: str,
+    doc_ref: str,
+    document_format: str,
+    title: str,
+    start: ChunkCursor = ChunkCursor(),  # noqa: B008 - frozen, so one shared default is safe
+    chunk_size_tokens: int = DEFAULT_CHUNK_SIZE_TOKENS,
+    overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
+) -> Iterator[tuple[DocumentChunk, ChunkCursor]]:
+    """Yield each chunk with the cursor that resumes just after it.
+
+    The document index (D-FV0-31) embeds a document a slice at a time: it takes some
+    chunks, stores the last cursor, and later passes it back as ``start``. Nothing
+    before ``start`` is encoded again.
+
+    Raises:
+        ValueError: As :func:`chunk_document`.
+    """
+    _validate(chunk_size_tokens, overlap_tokens)
+    created_at = datetime.now(UTC)
+    index = start.index
+    for number in range(start.section, len(sections)):
+        section = sections[number]
+        cleaned = section.text.strip()
+        if not cleaned:
+            continue
+        offset = start.offset if number == start.section else 0
+        for piece, next_offset in _split_to_token_cap(
+            cleaned,
+            start=offset,
+            chunk_size_tokens=chunk_size_tokens,
+            overlap_tokens=overlap_tokens,
+        ):
+            chunk = DocumentChunk(
+                id=make_document_chunk_id(conversation_id, doc_ref, index),
+                text=piece,
+                doc_ref=doc_ref,
+                format=document_format,
+                title=title,
+                page=section.page,
+                section=section.section,
+                sheet=section.sheet,
+                created_at=created_at,
+            )
+            index += 1
+            if next_offset < len(cleaned):
+                yield chunk, ChunkCursor(number, next_offset, index)
+            else:
+                yield chunk, ChunkCursor(number + 1, 0, index)
+
+
+def _validate(chunk_size_tokens: int, overlap_tokens: int) -> None:
     if chunk_size_tokens <= 0:
         msg = f"chunk_size_tokens must be positive; got {chunk_size_tokens}"
         raise ValueError(msg)
@@ -139,193 +282,117 @@ def chunk_document(
         )
         raise ValueError(msg)
 
-    chunks: list[DocumentChunk] = []
-    created_at = datetime.now(UTC)
-    global_index = 0
 
-    for section in sections:
-        cleaned = section.text.strip()
-        if not cleaned:
-            continue
-        pieces = _split_to_token_cap(
-            cleaned,
-            chunk_size_tokens=chunk_size_tokens,
-            overlap_tokens=overlap_tokens,
-        )
-        for piece in pieces:
-            chunks.append(
-                DocumentChunk(
-                    id=make_document_chunk_id(conversation_id, doc_ref, global_index),
-                    text=piece,
-                    doc_ref=doc_ref,
-                    format=document_format,
-                    title=title,
-                    page=section.page,
-                    section=section.section,
-                    sheet=section.sheet,
-                    created_at=created_at,
-                )
-            )
-            global_index += 1
+#: The largest segment encoded at once while looking for a full window. A
+#: segment starts at :data:`persona.skills._tokens.SEGMENT_CHARS` and doubles
+#: while it holds no more than one window's tokens, which only long whitespace
+#: runs need (about 128 characters per token). tiktoken fails at about
+#: 1,000,000 characters of whitespace; this is a quarter of that.
+_MAX_SEGMENT_CHARS: int = 262_144
 
-    return chunks
+#: Separators a window may end at, best first.
+_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ")
 
 
 def _split_to_token_cap(
     text: str,
     *,
+    start: int = 0,
     chunk_size_tokens: int,
     overlap_tokens: int,
-) -> list[str]:
-    """Split ``text`` recursively on natural boundaries to fit under the cap.
+) -> Iterator[tuple[str, int]]:
+    """Yield ``text`` from ``start`` as chunks of at most ``chunk_size_tokens`` tokens.
 
-    Boundary order: paragraph (``\\n\\n``) → line (``\\n``) → space → char.
-    Adjacent splits within this function carry ``overlap_tokens`` of overlap.
+    Each chunk comes with the offset its successor starts at (``len(text)`` after the
+    last). Chunks are stripped and never empty. Text that fits is one chunk, found by a
+    count that stops past the cap. Longer text is cut into token windows (see the module
+    docstring), each ending at the best separator in its last quarter and each, counted
+    on its own, within the cap.
 
-    Pure function; no side effects.
+    Linear: the text is encoded segment by segment from the current window's start;
+    a segment is re-encoded only from the window that crosses its end.
     """
-    if count_tokens(text) <= chunk_size_tokens:
-        return [text]
+    if start == 0 and count_tokens_capped(text, chunk_size_tokens) <= chunk_size_tokens:
+        yield text, len(text)
+        return
+    cap = chunk_size_tokens
+    pos = start
+    while pos < len(text):
+        span = _tokens().SEGMENT_CHARS
+        while True:
+            end = _tokens().safe_cut(text, pos, pos + span)
+            tokens = _encode(text[pos:end])
+            if len(tokens) > cap or end == len(text) or span >= _MAX_SEGMENT_CHARS:
+                break
+            span *= 2
+        starts = [pos + offset for offset in _token_starts(tokens)]
+        starts.append(end)  # a sentinel: the end of the last token
+        count = len(tokens)
+        i = 0
+        while True:
+            if i + cap < count:
+                k = _window_end(text, starts, i, i + cap, cap)
+            elif end == len(text):
+                k = count  # the last window runs to the end of the text
+            elif i == 0:
+                # The longest segment still holds no more than one window.
+                yield from _non_empty(text[pos:end], end)
+                pos = end
+                break
+            else:
+                pos = starts[i]  # re-encode from this window's start
+                break
+            chunk = text[starts[i] : starts[k]]
+            while k > i + 1 and count_tokens(chunk.strip()) > cap:
+                # Counted on its own, a window can tokenise longer at its edges.
+                k -= 1
+                chunk = text[starts[i] : starts[k]]
+            if k == count:
+                yield from _non_empty(chunk, len(text))
+                return
+            following = _next_start(text, starts, i, k, overlap_tokens)
+            yield from _non_empty(chunk, starts[following])
+            i = following
 
-    # Recursive split: try the coarsest separator first.
-    for separator in ("\n\n", "\n", " "):
-        if separator in text:
-            parts = [p for p in text.split(separator) if p.strip()]
-            if len(parts) > 1:
-                return _pack_with_overlap(
-                    parts,
-                    separator=separator,
-                    chunk_size_tokens=chunk_size_tokens,
-                    overlap_tokens=overlap_tokens,
-                )
 
-    # No natural separator — fall back to character-level split with overlap.
-    return _split_chars_with_overlap(
-        text,
-        chunk_size_tokens=chunk_size_tokens,
-        overlap_tokens=overlap_tokens,
-    )
+def _non_empty(chunk: str, following: int) -> Iterator[tuple[str, int]]:
+    stripped = chunk.strip()
+    if stripped:
+        yield stripped, following
 
 
-def _pack_with_overlap(
-    parts: list[str],
-    *,
-    separator: str,
-    chunk_size_tokens: int,
-    overlap_tokens: int,
-) -> list[str]:
-    """Greedily pack parts into chunks under the cap, with token overlap.
+def _window_end(text: str, starts: list[int], i: int, j: int, cap: int) -> int:
+    """The token index to end the window ``[i, j)`` at: the best separator in its last quarter.
 
-    Each part is checked against the cap first; an over-cap part is
-    recursively split via :func:`_split_to_token_cap`, and its sub-pieces
-    are emitted directly (never re-packed with same-level neighbours —
-    they're already cap-sized).
+    A cut before token ``t`` is at a separator when the text just before
+    ``starts[t]`` ends with it, or the token itself starts with it. With no
+    separator in the last quarter, the window ends at ``j``.
     """
-    result: list[str] = []
-    current: list[str] = []
-    current_tokens = 0
-
-    def _flush() -> None:
-        nonlocal current, current_tokens
-        if current:
-            result.append(separator.join(current))
-            current = []
-            current_tokens = 0
-
-    for part in parts:
-        part_tokens = count_tokens(part)
-        if part_tokens > chunk_size_tokens:
-            # Over-cap part — recursively split and emit each sub-piece
-            # directly. Flush the in-progress chunk first so order is preserved.
-            _flush()
-            sub_pieces = _split_to_token_cap(
-                part,
-                chunk_size_tokens=chunk_size_tokens,
-                overlap_tokens=overlap_tokens,
+    floor = i + (cap * 3) // 4
+    for separator in _SEPARATORS:
+        for t in range(j, floor, -1):
+            at = starts[t]
+            before = at - len(separator)  # a negative start would count from the end
+            at_separator = text.startswith(separator, at) or (
+                before >= 0 and text.startswith(separator, before)
             )
-            for piece in sub_pieces:
-                result.append(piece)
-            continue
-
-        sep_tokens = count_tokens(separator) if current else 0
-        if current and current_tokens + sep_tokens + part_tokens > chunk_size_tokens:
-            packed = separator.join(current)
-            result.append(packed)
-            # Carry the overlap forward.
-            overlap_text = _trailing_overlap(packed, overlap_tokens=overlap_tokens)
-            current = [overlap_text] if overlap_text else []
-            current_tokens = count_tokens(overlap_text) if overlap_text else 0
-            sep_tokens = count_tokens(separator) if current else 0
-        current.append(part)
-        current_tokens += sep_tokens + part_tokens
-
-    _flush()
-    return result
+            if at_separator and at > starts[i]:
+                return t
+    return j
 
 
-def _split_chars_with_overlap(
-    text: str,
-    *,
-    chunk_size_tokens: int,
-    overlap_tokens: int,
-) -> list[str]:
-    """Character-level fallback split with overlap.
+def _next_start(text: str, starts: list[int], i: int, k: int, overlap_tokens: int) -> int:
+    """The next window's first token: ``overlap_tokens`` before ``k``, moved to a word start.
 
-    Uses binary search to find a character window whose token-count is at
-    most ``chunk_size_tokens``. Slow path — only reached when no natural
-    separator exists in the text.
+    Moves forward, by at most half the overlap, to the first token that starts a
+    word (it begins with a space or follows whitespace). Always after ``i`` in the
+    text, so every window makes progress.
     """
-    result: list[str] = []
-    cursor = 0
-    n = len(text)
-    while cursor < n:
-        window_end = _binary_find_char_end(text, cursor, chunk_size_tokens=chunk_size_tokens)
-        result.append(text[cursor:window_end])
-        if window_end >= n:
-            break
-        # Pull the cursor back by ``overlap_tokens`` worth of characters
-        # (approximate: char-token ratio is rough but acceptable here).
-        overlap_chars = _approx_chars_for_tokens(text[cursor:window_end], overlap_tokens)
-        cursor = max(cursor + 1, window_end - overlap_chars)
-    return result
-
-
-def _binary_find_char_end(text: str, start: int, *, chunk_size_tokens: int) -> int:
-    """Find largest ``end`` such that ``count_tokens(text[start:end])`` ≤ cap."""
-    n = len(text)
-    lo, hi = start + 1, n
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if count_tokens(text[start:mid]) <= chunk_size_tokens:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
-
-
-def _approx_chars_for_tokens(reference_text: str, overlap_tokens: int) -> int:
-    """Approximate the character count for ``overlap_tokens`` worth of text."""
-    if not reference_text or overlap_tokens <= 0:
-        return 0
-    ref_tokens = count_tokens(reference_text)
-    if ref_tokens == 0:
-        return 0
-    char_per_token = max(1, len(reference_text) // ref_tokens)
-    return char_per_token * overlap_tokens
-
-
-def _trailing_overlap(packed_text: str, *, overlap_tokens: int) -> str:
-    """Return the trailing ``overlap_tokens``-worth slice of ``packed_text``."""
-    if overlap_tokens <= 0:
-        return ""
-    if count_tokens(packed_text) <= overlap_tokens:
-        return packed_text
-    # Binary search for the cut-point.
-    lo, hi = 0, len(packed_text)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if count_tokens(packed_text[mid:]) <= overlap_tokens:
-            hi = mid
-        else:
-            lo = mid + 1
-    return packed_text[lo:]
+    first = max(k - overlap_tokens, i + 1)
+    for t in range(first, max(first, k - overlap_tokens // 2) + 1):
+        at = starts[t]
+        if at > starts[i] and (text.startswith(" ", at) or text[at - 1].isspace()):
+            return t
+    while first < k and starts[first] <= starts[i]:
+        first += 1
+    return first

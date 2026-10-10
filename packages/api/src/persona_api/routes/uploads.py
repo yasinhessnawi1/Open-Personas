@@ -31,13 +31,18 @@ of scope here.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import re
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
+from fastapi.routing import APIRoute
 from persona.documents.errors import (
     CorruptDocumentError,
     MissingDependencyError,
@@ -45,9 +50,23 @@ from persona.documents.errors import (
 )
 from persona.documents.parsers import SUPPORTED_EXTENSIONS
 from persona.errors import PersonaError, PersonaNotFoundError
+from persona.logging import get_logger
 
 from persona_api.auth import AuthenticatedUser, get_current_user
-from persona_api.middleware.rate_limit import rate_limit
+from persona_api.auth.deps import get_verify_token
+from persona_api.document_worker.admission import (
+    DocumentAdmission,
+    DocumentParseBudgetError,
+    DocumentParseCooldownError,
+    DocumentUploadInProgressError,
+    DocumentUploadsArrivingError,
+    UploadLease,
+)
+from persona_api.document_worker.pool import (
+    DocumentParserBusyError,
+    DocumentParserUnavailableError,
+)
+from persona_api.middleware.rate_limit import RateLimiter, rate_limit
 from persona_api.services import (
     audit_service,
     chat_service,
@@ -55,8 +74,223 @@ from persona_api.services import (
     image_service,
     task_attachment_service,
 )
+from persona_api.services.document_index import DocumentIndexBacklogFullError
+from persona_api.services.document_parsing import ParsedDocument
 
-router = APIRouter(prefix="/v1/personas", tags=["uploads"])
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+#: Room for the multipart framing around the file: boundaries, part headers and the
+#: two small form fields. Generous; a real request uses well under a kilobyte.
+_MULTIPART_OVERHEAD_BYTES: int = 64 * 1024
+
+#: The most bytes an upload request body may carry (D-FV0-08, review item 6).
+MAX_UPLOAD_BODY_BYTES: int = image_service.MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD_BYTES
+
+#: The longest an upload's body may take to arrive (second security review F7). A
+#: client trickling a byte at a time otherwise holds a connection and a request slot
+#: for as long as it likes. Sixty seconds carries the full 20 MiB at about 2.8 Mbit/s;
+#: a slower link can still send a smaller file.
+MAX_UPLOAD_BODY_SECONDS: float = 60.0
+
+#: The rate-limit bucket uploads count against, checked before the body is read.
+_UPLOAD_RATE_LIMIT_KEY = "default"
+
+
+def _too_slow() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_408_REQUEST_TIMEOUT,
+        detail={
+            "error": "upload_too_slow",
+            "detail": "the upload took too long to arrive",
+            "context": {"max_seconds": str(int(MAX_UPLOAD_BODY_SECONDS))},
+        },
+    )
+
+
+def _too_large(received: int | None) -> HTTPException:
+    context = {"max_bytes": str(MAX_UPLOAD_BODY_BYTES)}
+    if received is not None:
+        context["received_bytes"] = str(received)
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail={
+            "error": "upload_too_large",
+            "detail": "the upload is larger than the server accepts",
+            "context": context,
+        },
+    )
+
+
+class _BoundedUploadRequest(Request):
+    """A request whose multipart form allows one file and a few small fields.
+
+    Starlette's defaults spool up to 1,000 files and 1,000 fields per request to disk
+    before the handler runs. FastAPI calls ``form()`` with no arguments, so the bounds
+    are the defaults of this override.
+    """
+
+    def form(
+        self,
+        *,
+        max_files: int | float = 1,
+        max_fields: int | float = 8,
+        max_part_size: int = 64 * 1024,
+    ) -> Any:  # noqa: ANN401 (Starlette's awaitable-or-context-manager wrapper)
+        return super().form(max_files=max_files, max_fields=max_fields, max_part_size=max_part_size)
+
+
+def _counting_receive(
+    receive: Any,  # noqa: ANN401 (the ASGI receive callable)
+    on_body_done: Callable[[], None] | None = None,
+) -> Any:  # noqa: ANN401 (the ASGI receive callable)
+    """Wrap ``receive`` so the body stops being read past its byte and time limits.
+
+    :data:`MAX_UPLOAD_BODY_BYTES` bounds a chunked body, or one whose ``Content-Length``
+    lies: the count is of bytes actually received, whatever the headers said.
+    :data:`MAX_UPLOAD_BODY_SECONDS` bounds how long the whole body may take, from the
+    first read, however slowly it trickles; a read that would wait past it is cut off.
+    Once the body is complete, ``on_body_done`` runs, and later reads (a disconnect
+    check) pass straight through.
+    """
+    received = 0
+    deadline: float | None = None
+    body_done = False
+
+    async def counted() -> Any:  # noqa: ANN401 (an ASGI message)
+        nonlocal received, deadline, body_done
+        if body_done:
+            return await receive()
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + MAX_UPLOAD_BODY_SECONDS
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise _too_slow()
+        try:
+            message = await asyncio.wait_for(receive(), remaining)
+        except TimeoutError:
+            raise _too_slow() from None
+        if message.get("type") == "http.request":
+            received += len(message.get("body", b""))
+            if received > MAX_UPLOAD_BODY_BYTES:
+                raise _too_large(received)
+            if not message.get("more_body", False):
+                body_done = True
+                if on_body_done is not None:
+                    on_body_done()
+        return message
+
+    return counted
+
+
+async def _authenticate_before_body(request: Request) -> AuthenticatedUser:
+    """Resolve the caller the way :func:`get_current_user` does, before the body is read.
+
+    Raises the same authentication error the dependency would (401). The dependency
+    still runs for the handler and binds the RLS owner as before; this only moves the
+    refusal ahead of the body.
+    """
+    resolver = request.app.state.owner_resolver
+    user: AuthenticatedUser = await resolver.resolve(request, get_verify_token(request))
+    return user
+
+
+def _rate_limit_before_body(request: Request, user: AuthenticatedUser) -> None:
+    """Count the upload against the caller's rate limit before the body is read.
+
+    Third security review finding 5: the limit was a dependency, and FastAPI reads the
+    form before it solves dependencies, so a refused upload had already been received.
+    The decision is left on the request, and the route's own rate-limit dependency
+    uses it instead of counting the request a second time.
+    """
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is None:
+        return
+    decision = limiter.check(user.id, _UPLOAD_RATE_LIMIT_KEY)
+    request.state.rate_limit_decision = decision
+    request.state.rate_limit_counted = (user.id, _UPLOAD_RATE_LIMIT_KEY)
+
+
+def _too_many_bodies(exc: DocumentUploadsArrivingError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "error": "uploads_arriving",
+            "detail": exc.message or "other uploads of yours are still arriving",
+            "context": dict(exc.context),
+        },
+        headers={"Retry-After": exc.context.get("retry_after_seconds", "5")},
+    )
+
+
+class _BoundedUploadRoute(APIRoute):
+    """Bounds every upload request body before Starlette spools any of it.
+
+    Before the body is read: the caller is authenticated, counted against the rate
+    limit, and given one of their places for a body arriving (``MAX_BODIES_PER_OWNER``,
+    else 429), and a declared ``Content-Length`` over the limit is refused. The body
+    itself is counted as it arrives; the form allows one file.
+    """
+
+    def get_route_handler(self) -> Any:  # noqa: ANN401 (Starlette's handler type)
+        original = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            if request.method == "POST":
+                # F7 (second review): who is asking is settled before a byte of the body
+                # is read, so an unauthenticated client cannot make the api receive and
+                # spool a 20 MiB body only to be refused afterwards.
+                user = await _authenticate_before_body(request)
+                _rate_limit_before_body(request, user)
+                declared = request.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        declared_bytes = int(declared)
+                    except ValueError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={"error": "bad_content_length", "detail": "invalid length"},
+                        ) from exc
+                    if declared_bytes > MAX_UPLOAD_BODY_BYTES:
+                        raise _too_large(declared_bytes)
+                admission: DocumentAdmission | None = getattr(
+                    request.app.state, "document_admission", None
+                )
+                try:
+                    body = admission.begin_body(user.id) if admission is not None else None
+                except DocumentUploadsArrivingError as exc:
+                    raise _too_many_bodies(exc) from exc
+                try:
+                    receive = _counting_receive(
+                        request.receive, body.release if body is not None else None
+                    )
+                    return await original(_BoundedUploadRequest(request.scope, receive))
+                finally:
+                    if body is not None:
+                        body.release()
+            return await original(request)
+
+        return bounded
+
+
+_log = get_logger("api.uploads")
+
+router = APIRouter(prefix="/v1/personas", tags=["uploads"], route_class=_BoundedUploadRoute)
+
+#: The most bytes the upload route reads from the request body (D-FV0-08). One byte more
+#: than the largest per-branch cap, so every branch still sees an oversized file as
+#: oversized and refuses it, while a multi-gigabyte body is never pulled into memory
+#: whole. Every branch's cap is the same constant today; a test pins that, because a
+#: branch with a larger cap would be silently truncated by this read.
+_MAX_UPLOAD_READ_BYTES: int = (
+    max(
+        image_service.MAX_UPLOAD_BYTES,
+        document_service.MAX_DOCUMENT_BYTES,
+        task_attachment_service.MAX_ATTACHMENT_BYTES,
+    )
+    + 1
+)
 
 #: A content-addressed workspace file name: ``blake2b(bytes, digest_size=16)``
 #: rendered as 32 hex characters (services/image_service.py, imagegen/service.py,
@@ -176,7 +410,7 @@ def _is_document_filename(filename: str) -> bool:
 @router.post(
     "/{persona_id}/uploads",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(rate_limit("default"))],
+    dependencies=[Depends(rate_limit(_UPLOAD_RATE_LIMIT_KEY))],
 )
 async def create_upload(
     persona_id: str,
@@ -209,7 +443,7 @@ async def create_upload(
     """
     _ensure_persona_visible(request, persona_id)
 
-    file_bytes = await file.read()
+    file_bytes = await file.read(_MAX_UPLOAD_READ_BYTES)
     declared_media_type = file.content_type or ""
     filename = file.filename or ""
 
@@ -251,7 +485,7 @@ async def create_upload(
                     ),
                 },
             )
-        return _handle_document_upload(
+        return await _handle_document_upload(
             request=request,
             user=user,
             persona_id=persona_id,
@@ -381,7 +615,7 @@ def _handle_image_upload(
     }
 
 
-def _handle_document_upload(
+async def _handle_document_upload(
     *,
     request: Request,
     user: AuthenticatedUser,
@@ -409,24 +643,72 @@ def _handle_document_upload(
         conversation_id=conversation_id,
     )
 
-    builder = getattr(request.app.state, "build_document_store", None)
-    if builder is None:
+    if getattr(request.app.state, "build_document_store", None) is None:
         msg = (
             "DocumentStore builder not wired in app.state — composition root "
             "needs to set app.state.build_document_store"
         )
         raise RuntimeError(msg)
 
+    parser = request.app.state.document_parser
+    admission: DocumentAdmission = request.app.state.document_admission
+    lease: UploadLease | None = None
+    store_scheduled = False
     try:
-        ref = document_service.upload(
-            file_storage=request.app.state.file_storage,
-            owner_id=user.id,
-            persona_id=persona_id,
-            conversation_id=conversation_id,
-            file_bytes=file_bytes,
-            filename=filename,
-            document_store=builder(),
+        extension = document_service.validate_upload(file_bytes=file_bytes, filename=filename)
+        # F2: one upload per owner, held until the worker AND the store are done with it,
+        # within the owner's worker-time budget and not during a cooldown.
+        lease = admission.begin_upload(user.id)
+        # F7 (third review): the scratch directory outlives a cancelled request. It is
+        # removed when the lease is last released, that is once neither the worker
+        # (still rendering into it) nor the store (reading the page images) can use it.
+        scratch = tempfile.mkdtemp(prefix="persona-upload-")
+        lease.on_released(functools.partial(shutil.rmtree, scratch, ignore_errors=True))
+        # The parser port reads a path, never request state: the bytes go to a
+        # private scratch directory, and page images come back inside it.
+        source = Path(scratch) / f"upload{extension}"
+        render_dir = Path(scratch) / "pages"
+        render_dir.mkdir()
+        await asyncio.to_thread(source.write_bytes, file_bytes)
+        # D-FV0-31: the parse runs in a limited, killable worker process. One upload
+        # per user at a time; a busy pool queues briefly, then refuses.
+        parsed = await parser.parse(
+            source, render_dir=render_dir, owner_id=user.id, purpose="upload", lease=lease
         )
+        store_scheduled = True
+        # Persisting and auditing are synchronous; they run together in ONE thread
+        # call. ``asyncio.to_thread`` copies the context, so the RLS owner contextvar
+        # is bound inside it. Recording the audit in the same call means an upload
+        # whose client disconnects mid-store is still both stored and audited: the
+        # thread finishes what it started, and nothing is stored before the parse has
+        # returned. Nothing is embedded here (D-FV0-31): a retrieval document is
+        # stored ``pending`` and indexed in the background, scheduled below.
+        try:
+            ref = await asyncio.to_thread(
+                _store_and_audit,
+                request=request,
+                user=user,
+                persona_id=persona_id,
+                conversation_id=conversation_id,
+                file_bytes=file_bytes,
+                filename=filename,
+                parsed=parsed,
+                lease=lease,
+            )
+        except asyncio.CancelledError:
+            # Gone before the store thread started: it will not store, and the lease
+            # is released here. Once started, it stores, audits and releases itself.
+            lease.abandon_store()
+            raise
+    except document_service.DocumentTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={
+                "error": "document_too_large",
+                "detail": exc.message or "document exceeds the upload size limit",
+                "context": dict(exc.context),
+            },
+        ) from exc
     except UnsupportedFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -454,12 +736,153 @@ def _handle_document_upload(
                 "context": dict(exc.context),
             },
         ) from exc
-    # T21 — VisionHandoffRequiredError is GONE; scanned PDFs succeed via
-    # rasterisation + ImageContent (Spec 13 D-13-X-pdf-contract). The
-    # TODO(T21) catch-block + the interim exception class have been removed
-    # per the close-out discipline. The returned DocumentRef carries the
-    # rasterised page images for the runtime's vision-tier routing.
+    except DocumentIndexBacklogFullError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "index_backlog_full",
+                "detail": exc.message or "too many documents are waiting to be indexed",
+                "context": dict(exc.context),
+            },
+            headers={"Retry-After": exc.context.get("retry_after_seconds", "60")},
+        ) from exc
+    except DocumentUploadInProgressError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "upload_in_progress",
+                "detail": exc.message or "an upload of yours is still being read",
+                "context": dict(exc.context),
+            },
+        ) from exc
+    except (DocumentParseBudgetError, DocumentParseCooldownError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": exc.context.get("reason", "parse_budget_exhausted"),
+                "detail": exc.message or "try again later",
+                "context": dict(exc.context),
+            },
+            headers={"Retry-After": exc.context.get("retry_after_seconds", "60")},
+        ) from exc
+    except DocumentParserBusyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "parser_busy",
+                "detail": exc.message or "the document parser is busy; try again shortly",
+                "context": dict(exc.context),
+            },
+            headers={"Retry-After": exc.context.get("retry_after_seconds", "10")},
+        ) from exc
+    except DocumentParserUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "parser_unavailable",
+                "detail": exc.message or "the document parser is unavailable",
+                "context": dict(exc.context),
+            },
+        ) from exc
+    finally:
+        if lease is not None and not store_scheduled:
+            lease.release()
+    assert ref is not None  # noqa: S101 (only an abandoned store returns None)
+    if ref.index_state == "pending":
+        await _schedule_index(
+            request,
+            owner_id=user.id,
+            persona_id=persona_id,
+            conversation_id=conversation_id,
+            ref=ref,
+        )
+    return ref.model_dump(mode="json")
 
+
+async def _schedule_index(
+    request: Request,
+    *,
+    owner_id: str,
+    persona_id: str,
+    conversation_id: str,
+    ref: document_service.DocumentRef,
+) -> None:
+    """Start the background index of a retrieval document (D-FV0-31). Never fails the upload.
+
+    A failure here, or a request gone before it, leaves the document ``pending``; the
+    next turn or document listing that sees it schedules it again (``pick_up``).
+    """
+    scheduler = getattr(request.app.state, "document_index_scheduler", None)
+    if scheduler is None:
+        return
+    try:
+        await scheduler.schedule(
+            owner_id=owner_id,
+            persona_id=persona_id,
+            conversation_id=conversation_id,
+            doc_ref=ref.doc_ref,
+        )
+    except Exception:  # noqa: BLE001 - picked up again on the next turn
+        _log.warning("could not schedule the index of {}", ref.doc_ref)
+
+
+def _store_and_audit(
+    *,
+    request: Request,
+    user: AuthenticatedUser,
+    persona_id: str,
+    conversation_id: str,
+    file_bytes: bytes,
+    filename: str,
+    parsed: ParsedDocument,
+    lease: UploadLease,
+) -> document_service.DocumentRef | None:
+    """Persist a parsed upload, then record its audit row (runs in a thread).
+
+    Releases the upload lease when done, so the owner's upload slot is held through the
+    store. Returns ``None`` without storing when the request was abandoned before this
+    thread started. Nothing is embedded here, so there is no api time to charge: the
+    background index has its own per-owner quota (D-FV0-31).
+    """
+    if not lease.start_store():
+        return None
+    try:
+        return _store_and_audit_held(
+            request=request,
+            user=user,
+            persona_id=persona_id,
+            conversation_id=conversation_id,
+            file_bytes=file_bytes,
+            filename=filename,
+            parsed=parsed,
+        )
+    finally:
+        lease.release()
+
+
+def _store_and_audit_held(
+    *,
+    request: Request,
+    user: AuthenticatedUser,
+    persona_id: str,
+    conversation_id: str,
+    file_bytes: bytes,
+    filename: str,
+    parsed: ParsedDocument,
+) -> document_service.DocumentRef:
+    scheduler = getattr(request.app.state, "document_index_scheduler", None)
+    ref = document_service.upload(
+        file_storage=request.app.state.file_storage,
+        owner_id=user.id,
+        persona_id=persona_id,
+        conversation_id=conversation_id,
+        file_bytes=file_bytes,
+        filename=filename,
+        parsed=parsed,
+        # Fourth review finding 1: at most MAX_PENDING_DOCUMENTS_PER_OWNER documents wait
+        # for the index per owner; past it the upload is refused before anything is stored.
+        admit_retrieval=(lambda: scheduler.admit(user.id)) if scheduler is not None else None,
+    )
     audit_service.record(
         engine=request.app.state.rls_engine,
         user_id=user.id,
@@ -472,8 +895,7 @@ def _handle_document_upload(
             "token_count": str(ref.token_count),
         },
     )
-
-    return ref.model_dump(mode="json")
+    return ref
 
 
 @router.get(

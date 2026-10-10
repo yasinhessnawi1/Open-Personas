@@ -25,6 +25,8 @@ counts in :class:`persona_runtime.logging.TurnLog` come from the backend's
 
 from __future__ import annotations
 
+import json
+import unicodedata
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -366,6 +368,11 @@ class DocumentDescriptor(BaseModel):
     page_count: int | None = None
     sheet_names: tuple[str, ...] | None = None
     size_bytes: int | None = None
+    note: str | None = None
+    """What the model must know about how much of this document it can use: a plain
+    sentence or two from the api (D-FV0-31), such as a document still being indexed, one
+    only partly read, or a scanned one whose pages it cannot see. ``None`` for a document
+    that is whole and ready. Rendered on its own line after the synopsis."""
 
 
 class DocumentContext(BaseModel):
@@ -1053,7 +1060,7 @@ class PromptBuilder:
         """
         lines = ["Attached documents (full text):"]
         for doc in document_context.whole_inject_docs:
-            lines.append(f"\n--- {doc.title} ---\n{doc.full_text}")
+            lines.append(f"\n--- {_one_line(doc.title)} ---\n{doc.full_text}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1084,6 +1091,10 @@ class PromptBuilder:
             for doc in document_context.attached_documents
         ]
         synopsis = "Attached documents: " + "; ".join(descriptors)
+        # D-FV0-31: what the model cannot use of a document, said plainly, one line each.
+        notes = [doc.note for doc in document_context.attached_documents if doc.note]
+        if notes:
+            synopsis += "\n" + "\n".join(notes)
         return (
             synopsis
             + "\nThe original uploaded files are on disk at "
@@ -1104,6 +1115,7 @@ class PromptBuilder:
         - ``memo.txt (TXT, 2 KB)``
         """
         format_upper = doc.format.upper()
+        title = _quoted_title(doc.title)
         size_part = ""
         if doc.size_bytes is not None and doc.size_bytes > 0:
             size_kb = max(1, doc.size_bytes // 1024)
@@ -1112,11 +1124,11 @@ class PromptBuilder:
         if doc.format == "xlsx" and doc.sheet_names:
             n = len(doc.sheet_names)
             sheets_word = "sheet" if n == 1 else "sheets"
-            return f"{doc.title} ({format_upper}, {n} {sheets_word}{size_part})"
+            return f"{title} ({format_upper}, {n} {sheets_word}{size_part})"
         if doc.page_count is not None and doc.page_count > 0:
             pages_word = "page" if doc.page_count == 1 else "pages"
-            return f"{doc.title} ({format_upper}, {doc.page_count} {pages_word}{size_part})"
-        return f"{doc.title} ({format_upper}{size_part})"
+            return f"{title} ({format_upper}, {doc.page_count} {pages_word}{size_part})"
+        return f"{title} ({format_upper}{size_part})"
 
     @staticmethod
     def _render_retrieved_document_chunks(document_context: DocumentContext) -> str:
@@ -1129,7 +1141,7 @@ class PromptBuilder:
         """
         lines = ["Relevant excerpts from attached documents:"]
         for chunk in document_context.retrieved_chunks:
-            citation_parts: list[str] = [chunk.title]
+            citation_parts: list[str] = [_one_line(chunk.title)]
             if chunk.page is not None:
                 citation_parts.append(f"page {chunk.page}")
             if chunk.sheet is not None:
@@ -1218,3 +1230,23 @@ class PromptBuilder:
         path is gated separately by the vision dispatcher.
         """
         return sum(count_tokens(m.content) for m in messages if isinstance(m.content, str))
+
+
+#: Characters a document title never carries into the prompt (fourth security review
+#: finding 6): controls, format characters, line and paragraph separators, and (fifth
+#: review) lone surrogates, private-use and unassigned code points. The api cleans
+#: titles on store and on read; this is the same rule at the last step.
+_TITLE_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+_MAX_TITLE_CHARS = 120
+
+
+def _one_line(title: str) -> str:
+    kept = "".join(
+        " " if unicodedata.category(c) in _TITLE_DROPPED_CATEGORIES else c for c in title
+    )
+    return " ".join(kept.split())[:_MAX_TITLE_CHARS].rstrip() or "document"
+
+
+def _quoted_title(title: str) -> str:
+    """A document title as the synopsis shows it: one line, quoted, inner quotes escaped."""
+    return json.dumps(_one_line(title), ensure_ascii=False)

@@ -141,6 +141,37 @@ def test_is_any_sidecar_recognises_both_suffixes(tmp_path: Path) -> None:
     assert is_any_sidecar(bytes_path) is False
 
 
+_DOCS = Path("u1/astrid/conversations/conv_1/documents")
+
+
+def test_the_extracted_text_and_index_sidecars_are_sidecars_beside_documents() -> None:
+    """D-FV0-31: a document's stored text and index progress never show in the Files list."""
+    assert is_any_sidecar(_DOCS / "lease-1a2b3c4d.pdf.text.json") is True
+    assert is_any_sidecar(_DOCS / "lease-1a2b3c4d.pdf.index.json") is True
+    # An uploaded JSON document is a file, not a sidecar.
+    assert is_any_sidecar(_DOCS / "notes-1a2b3c4d.json") is False
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "u1/astrid/outputs/search.index.json",
+        "u1/astrid/outputs/report.text.json",
+        "u1/astrid/conversations/conv_1/outputs/search.index.json",
+        "u1/astrid/documents/search.index.json",
+        "search.index.json",
+    ],
+)
+def test_the_same_suffixes_elsewhere_are_files(key: str) -> None:
+    """Fourth security review finding 8: a user's own ``*.index.json`` is listed again."""
+    assert is_any_sidecar(Path(key)) is False
+
+
+def test_the_f5_and_meta_sidecars_are_sidecars_anywhere() -> None:
+    assert is_any_sidecar(Path("u1/astrid/outputs/chart.png.f5.json")) is True
+    assert is_any_sidecar(Path("u1/astrid/outputs/x.meta.json")) is True
+
+
 # -- write + read round-trip -------------------------------------------------
 
 

@@ -27,10 +27,12 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from persona.documents.archive_guard import check_ooxml_archive
+
 # Runtime ref required: Pydantic v2 introspects ``sections`` field at validation
 # time so DocumentSection must be importable at runtime, not just for typing.
 from persona.documents.chunker import DocumentSection  # noqa: TC001
-from persona.documents.errors import UnsupportedFormatError
+from persona.documents.errors import CorruptDocumentError, UnsupportedFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,8 +44,11 @@ __all__ = [
     "FLAG_NO_TEXT_LAYER",
     "FLAG_PARTIAL_EXTRACTION",
     "FLAG_ROW_CAP_TRUNCATED",
+    "MAX_DOCUMENT_SECTIONS",
+    "MAX_DOCUMENT_TEXT_CHARS",
     "ParseResult",
     "SUPPORTED_EXTENSIONS",
+    "cap_document_text",
     "parse_document",
 ]
 
@@ -70,6 +75,22 @@ FLAG_ROW_CAP_TRUNCATED: str = "row_cap_truncated"
 #: Flag set when extraction caught and recovered from corruption (e.g. a
 #: UTF-8 decode error replaced bytes; an xlsx with an unreadable sheet).
 FLAG_CORRUPT: str = "corrupt"
+
+
+#: The most text one document may yield, in characters of its full text (D-FV0-31,
+#: second security review F1). A 12 KB PDF whose pages share one 1 MB text stream yielded
+#: 60 million characters; every character crosses to the api, is tokenised, chunked and
+#: embedded there. Four million characters is about a thousand pages of dense prose. A
+#: document past it keeps its first four million characters and is flagged partial.
+MAX_DOCUMENT_TEXT_CHARS: int = 4_000_000
+
+#: The most sections one document may have (D-FV0-31, third security review finding 11).
+#: A plain-text file of one-word paragraphs within the text budget is over a million
+#: sections, and each one is an object in every process that reads the result. Past
+#: this, the remaining sections are joined into the last one: the full text is
+#: unchanged, only their page, sheet or heading labels are lost. The PDF parser stops
+#: at 2,000 text pages, so a PDF's pages are never joined.
+MAX_DOCUMENT_SECTIONS: int = 10_000
 
 
 class ParseResult(BaseModel):
@@ -166,6 +187,10 @@ _DISPATCH_TABLE: dict[str, tuple[str, str]] = {
 #: Public view of the supported extension set.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(_DISPATCH_TABLE.keys())
 
+#: The zip-based (Office Open XML) formats in the dispatch table. Each is checked by
+#: :func:`~persona.documents.archive_guard.check_ooxml_archive` before its parser runs.
+_OOXML_FORMAT_BY_EXTENSION: dict[str, str] = {".docx": "docx", ".xlsx": "xlsx"}
+
 
 def parse_document(path: Path) -> ParseResult:
     """Parse a document by file extension, dispatching to the per-format parser.
@@ -190,7 +215,8 @@ def parse_document(path: Path) -> ParseResult:
         MissingDependencyError: The format's parser library isn't installed
             (e.g. ``.pdf`` without ``[documents]``).
         CorruptDocumentError: The file can't be parsed (corrupt / empty /
-            encrypted), per criterion #8.
+            encrypted), per criterion #8, or a ``.docx`` / ``.xlsx`` archive is
+            refused by the archive guard before parsing (D-FV0-08).
     """
     extension = path.suffix.lower()
     if extension not in _DISPATCH_TABLE:
@@ -201,9 +227,73 @@ def parse_document(path: Path) -> ParseResult:
                 "filename": path.name,
             },
         )
+    office_format = _OOXML_FORMAT_BY_EXTENSION.get(extension)
+    if office_format is not None:
+        # D-FV0-08: refuse a hostile archive before any library decompresses it.
+        check_ooxml_archive(path, document_format=office_format)
     module_name, function_name = _DISPATCH_TABLE[extension]
     parser_fn = _load_parser(module_name, function_name)
-    return parser_fn(path)
+    try:
+        # Every format goes through the one text budget here, whatever its parser does.
+        return cap_document_text(parser_fn(path))
+    except RecursionError as exc:
+        # One adapter boundary for every format: a file nested deep enough to exhaust
+        # the stack inside a library is refused, never a server error. The parsers
+        # re-raise RecursionError (and MemoryError) instead of relabelling it; a
+        # MemoryError is not caught here either and reaches the caller as itself.
+        raise CorruptDocumentError(
+            "document is too complex to read safely",
+            context={
+                "format": extension.lstrip("."),
+                "reason": "too_complex",
+                "filename": path.name,
+            },
+        ) from exc
+
+
+def cap_document_text(result: ParseResult) -> ParseResult:
+    """Cut ``result`` to :data:`MAX_DOCUMENT_TEXT_CHARS` of full text, flagging it partial.
+
+    Sections are kept in order while they fit, counting the blank line
+    :attr:`ParseResult.full_text` puts between them; the section that crosses the budget
+    is cut to fit, and the rest are dropped. Then, past :data:`MAX_DOCUMENT_SECTIONS`,
+    the remaining sections are joined into one (the full text is unchanged). A result
+    within both bounds is returned unchanged.
+    """
+    return _cap_sections(_cap_text(result))
+
+
+def _cap_sections(result: ParseResult) -> ParseResult:
+    """Join the sections past :data:`MAX_DOCUMENT_SECTIONS` into the last one kept."""
+    if len(result.sections) <= MAX_DOCUMENT_SECTIONS:
+        return result
+    keep = MAX_DOCUMENT_SECTIONS - 1
+    rest = result.sections[keep:]
+    joined = "\n\n".join(section.text for section in rest if section.text.strip())
+    last = rest[0].model_copy(update={"text": joined})
+    return result.model_copy(update={"sections": (*result.sections[:keep], last)})
+
+
+def _cap_text(result: ParseResult) -> ParseResult:
+    used = 0
+    kept: list[DocumentSection] = []
+    for section in result.sections:
+        separator = 2 if kept else 0
+        cost = separator + len(section.text)
+        if used + cost <= MAX_DOCUMENT_TEXT_CHARS:
+            kept.append(section)
+            used += cost
+            continue
+        room = MAX_DOCUMENT_TEXT_CHARS - used - separator
+        if room > 0:
+            kept.append(section.model_copy(update={"text": section.text[:room]}))
+        break
+    else:
+        return result
+    flags = result.flags
+    if FLAG_PARTIAL_EXTRACTION not in flags:
+        flags = (*flags, FLAG_PARTIAL_EXTRACTION)
+    return result.model_copy(update={"sections": tuple(kept), "flags": flags})
 
 
 def _load_parser(module_name: str, function_name: str) -> Callable[[Path], ParseResult]:

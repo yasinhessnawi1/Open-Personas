@@ -167,6 +167,8 @@ if TYPE_CHECKING:
     from persona_api.realtime.channel import UserEventChannel
     from persona_api.sandbox.pool import SandboxPool
     from persona_api.schedules.tick import SchedulerTick
+    from persona_api.services.document_index import DocumentIndexer
+    from persona_api.services.document_parsing import DocumentParser
     from persona_api.services.origination_delivery import ChannelDeliverers
     from persona_api.services.runtime_factory import RuntimeFactory
     from persona_api.services.title_backfill import UntitledConversationBackfill
@@ -204,6 +206,8 @@ def build_worker_registry(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    document_indexer: DocumentIndexer | None = None,
+    document_parser: DocumentParser | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -253,6 +257,12 @@ def build_worker_registry(
         workspace_root: The app's workspace root (the ``file_extract``
             renderer's persist target — the SAME root the code_execution
             produced-file persister writes under).
+        document_indexer: The process's one document-index thread (D-FV0-31). With
+            ``memory_backend`` and ``file_storage`` it registers ``document_ingest``,
+            the background index of retrieval documents; ``None`` registers nothing,
+            and the app indexes from its in-process queue instead.
+        document_parser: The app's parse port, for indexing an older generated file
+            that was stored without its text.
     """
     # R9-096: plan-scoped, resolved per job inside the owner scope — never once here on
     # the paid registry. Metered (Spec M3, T5): the handler now has its owner-billing seam.
@@ -281,6 +291,62 @@ def build_worker_registry(
         graph_store=graph_store, registry=entity_registry, backend=backend
     )
     registry = JobRegistry()
+    schedule_index: Callable[[str, str, str, str], None] | None = None
+
+    # D-FV0-31: the document index. Registered before file_extract, whose generated files
+    # are indexed by it. The producer (the upload route, and the per-turn pick-up) uses the
+    # jobs system iff this process's worker carries the type (``job_types``), else the
+    # app's in-process queue: enqueue implies handler.
+    if document_indexer is not None and memory_backend is not None and file_storage is not None:
+        from persona.stores.document_store import DocumentStore  # noqa: PLC0415
+
+        from persona_api.services.document_index import (  # noqa: PLC0415
+            DocumentIndexDeps,
+            PostgresIndexBacklog,
+            PostgresIndexQuota,
+            install_statement_bound,
+            register_document_index_handler,
+        )
+        from persona_api.services.notifications_service import (  # noqa: PLC0415
+            publish_sidebar_changed,
+        )
+
+        index_backend = memory_backend
+        # The index's store calls get a statement_timeout (fourth review finding 2).
+        install_statement_bound(getattr(memory_backend, "_engine", None))
+
+        def _indexed(owner_id: str) -> None:
+            publish_sidebar_changed(event_channel, owner_id=owner_id, reason="document.indexed")
+
+        from persona_api.services.document_index import (  # noqa: PLC0415
+            enqueue_document_index,
+        )
+
+        def _schedule_index(
+            owner_id: str, persona_id: str, conversation_id: str, doc_ref: str
+        ) -> None:
+            enqueue_document_index(
+                JobQueue(rls_engine),
+                owner_id=owner_id,
+                persona_id=persona_id,
+                conversation_id=conversation_id,
+                doc_ref=doc_ref,
+            )
+
+        schedule_index = _schedule_index
+        register_document_index_handler(
+            registry,
+            deps=DocumentIndexDeps(
+                file_storage=file_storage,
+                document_store=lambda: DocumentStore(backend=index_backend),
+                indexer=document_indexer,
+                quota=PostgresIndexQuota(rls_engine),
+                parser=document_parser,
+                on_finished=_indexed,
+                backlog=PostgresIndexBacklog(rls_engine),
+            ),
+            rls_engine=rls_engine,
+        )
 
     # Graph consolidation (Spec K7, K7-D-5) — the durable background pass, enabled by
     # config (default ON in the worker). Wire it BEFORE synthesis so the synthesis-tail
@@ -405,6 +471,8 @@ def build_worker_registry(
                 runtime_factory.metadata_resolver if runtime_factory is not None else None
             ),
             floor=config.agentic_credit_floor,
+            # D-FV0-31: the generated file is a retrieval document; index it.
+            schedule_index=schedule_index,
         )
 
     # The K8 sleep-time engine (Spec K8, K8-D-8) — registered ONLY when enabled
@@ -1525,6 +1593,8 @@ def start_in_process_worker(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    document_indexer: DocumentIndexer | None = None,
+    document_parser: DocumentParser | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -1583,6 +1653,9 @@ def start_in_process_worker(
         # producer gate (file_extract_queue_ready), so enqueue implies handler.
         sandbox_pool=sandbox_pool,
         workspace_root=workspace_root,
+        # D-FV0-31: the document index, on the app's one indexer thread.
+        document_indexer=document_indexer,
+        document_parser=document_parser,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines

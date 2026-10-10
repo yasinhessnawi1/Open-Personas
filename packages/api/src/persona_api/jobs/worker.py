@@ -141,6 +141,8 @@ class Worker:
         self._rls_engine = rls_engine
         self._worker_id = worker_id or make_worker_id()
         self._queue = JobQueue(dispatch_engine)
+        # D-FV0-31: types of which at most one job may be in flight (the document index).
+        self._serial_types = registry.serial_types()
         self._executor = JobExecutor(
             queue=self._queue,
             registry=registry,
@@ -197,6 +199,9 @@ class Worker:
         self._title_backfill = title_backfill
         self._title_backfill_interval = title_backfill_interval_seconds
         self._draining = asyncio.Event()
+        # Set when a job of a serial type settles: its lane is free, so the loop claims
+        # again at once instead of after a poll interval (D-FV0-31, fourth review F1).
+        self._lane_free = asyncio.Event()
         self._in_flight: set[asyncio.Task[object]] = set()
         self._last_maintenance = 0.0
         self._last_scheduler_tick = 0.0
@@ -258,7 +263,10 @@ class Worker:
         to the type's lease) and bounded async concurrency land in T5.
         """
         records = self._queue.claim(
-            worker_id=self._worker_id, lease_seconds=lease_seconds, limit=batch
+            worker_id=self._worker_id,
+            lease_seconds=lease_seconds,
+            limit=batch,
+            serial_types=self._serial_types,
         )
         for record in records:
             await self._executor.execute(record)
@@ -324,6 +332,7 @@ class Worker:
                         limit=1,
                         max_per_user=self._max_jobs_per_user,
                         max_global=self._max_jobs_global,
+                        serial_types=self._serial_types,
                     )
                     if free > 0
                     else []
@@ -348,12 +357,33 @@ class Worker:
                 task: asyncio.Task[object] = asyncio.create_task(self._executor.execute(record))
                 self._in_flight.add(task)
                 task.add_done_callback(self._settle_job_task)
+                if record.type in self._serial_types:
+                    task.add_done_callback(self._free_lane)
             if not records:
                 # Nothing due (or no free slots) — wait a jittered interval, but
-                # wake immediately if a drain is requested mid-sleep.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._draining.wait(), timeout=self._next_poll_delay())
+                # wake immediately if a drain is requested mid-sleep, or a serial
+                # job's lane comes free.
+                await self._idle_wait()
         await self._drain()
+
+    def _free_lane(self, _task: asyncio.Task[object]) -> None:
+        """A serial job settled: wake the loop to claim the next one now."""
+        self._lane_free.set()
+
+    async def _idle_wait(self) -> None:
+        """Wait one jittered poll interval, a drain request, or a freed serial lane."""
+        draining = asyncio.ensure_future(self._draining.wait())
+        lane = asyncio.ensure_future(self._lane_free.wait())
+        try:
+            await asyncio.wait(
+                {draining, lane},
+                timeout=self._next_poll_delay(),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for waiter in (draining, lane):
+                waiter.cancel()
+            self._lane_free.clear()
 
     def _settle_job_task(self, task: asyncio.Task[object]) -> None:
         """Discard a settled job task, RETRIEVING any escaped exception (R9-013).
