@@ -173,9 +173,31 @@ _TEXT_SIDECAR_VERSION: int = 2
 #: so no doc ref followed by a dot is the start of another's name.
 _DOC_REF_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
-#: The shape of every doc ref ever made: a slug, ``-`` and eight hex digits. Uploads
-#: (:func:`_make_doc_ref`) and generated files (``file_extract``) both make them so.
-_DOC_REF_SHAPE = re.compile(r"[A-Za-z0-9._-]*-[0-9a-f]{8}")
+#: The longest doc ref :func:`is_doc_ref_shape` accepts. No stored document has a longer
+#: one: an object key is at most 1,024 bytes and a local file name at most 255, and a
+#: document's names are its ref plus an extension. Uploads make ``{slug}-{8 hex}`` from
+#: the file name's stem, generated files ``{slug of at most 60}-{8 hex}``.
+MAX_DOC_REF_CHARS: int = 1_024
+
+_DOC_REF_SLUG_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+_DOC_REF_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def is_doc_ref_shape(doc_ref: str) -> bool:
+    """Whether ``doc_ref`` has the shape of every doc ref ever made: a slug, ``-``, 8 hex.
+
+    The slug is any run of ASCII letters, digits, ``.``, ``_`` and ``-``. Exactly the
+    language of ``[A-Za-z0-9._-]*-[0-9a-f]{8}`` (fullmatch), up to
+    :data:`MAX_DOC_REF_CHARS`, but checked in one linear pass: that regular expression
+    backtracks polynomially on a run of dashes, because its starred class also holds the
+    ``-`` that follows it (CodeQL, polynomial regular expression on uncontrolled data).
+    """
+    if not 9 <= len(doc_ref) <= MAX_DOC_REF_CHARS or doc_ref[-9] != "-":
+        return False
+    return _DOC_REF_HEX_CHARS.issuperset(doc_ref[-8:]) and _DOC_REF_SLUG_CHARS.issuperset(
+        doc_ref[:-9]
+    )
+
 
 #: A document's original is ``{doc_ref}`` plus one extension of letters and digits.
 _EXTENSION_PATTERN = r"\.[A-Za-z0-9]+"
@@ -620,7 +642,7 @@ def find_document(
 
     ``None`` when there is none (deleted, never stored, or a ref of another shape).
     """
-    if not _DOC_REF_SHAPE.fullmatch(doc_ref):
+    if not is_doc_ref_shape(doc_ref):
         return None
     prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
     meta = re.compile(re.escape(doc_ref) + _EXTENSION_PATTERN + re.escape(SPEC_14_SIDECAR_SUFFIX))
@@ -977,7 +999,7 @@ def _document_file_names(doc_ref: str) -> re.Pattern[str]:
     ``.index.json`` sidecars, and its ``{doc_ref}.page-NNNN.png`` pages (finding 9: a name
     that merely contains ``.page-`` is not a page).
 
-    For a ``doc_ref`` of :data:`_DOC_REF_SHAPE`, no other document's name matches.
+    For a ``doc_ref`` of :func:`is_doc_ref_shape`, no other document's name matches.
     Another document's ref ``d`` also ends in ``-`` and eight hex digits. If ``d``
     is longer and starts with ``{doc_ref}.``, what follows that dot in its names holds
     the ``-`` of ``d``'s ending, which an extension, a sidecar suffix and
@@ -1099,7 +1121,7 @@ def remove_document(
             chunk-ID prefix-match (D-14-X-document-chunk-id).
     """
     prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
-    if not _DOC_REF_SHAPE.fullmatch(doc_ref):
+    if not is_doc_ref_shape(doc_ref):
         # No document has this ref; and a ref of another shape could name another
         # document's file (``x.txt.meta`` names ``x.txt.meta.json``).
         document_store.delete_document(conversation_id, doc_ref)

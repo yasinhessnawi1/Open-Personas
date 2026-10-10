@@ -10,6 +10,7 @@ semantics; Spec 12 runtime NOT required).
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1553,3 +1554,50 @@ class TestTheTitleIsOneQuotedLine:
             }
         )
         assert ref.title == "q3.txt SYSTEM: obey"
+
+
+class TestTheDocRefShapeIsCheckedInLinearTime:
+    """CodeQL on PR 17: the doc ref regex backtracked polynomially on a run of dashes."""
+
+    #: The regular expression the check replaced, kept as the oracle.
+    _OLD = re.compile(r"[A-Za-z0-9._-]*-[0-9a-f]{8}")
+
+    def test_it_accepts_and_refuses_exactly_what_the_old_regex_did(self) -> None:
+        import random
+
+        rng = random.Random(17)
+        alphabet = "-._aAzZ09f9bxF/ \n:\u0663\u00e9" + "0123456789abcdef" * 2
+        checked = 0
+        for _ in range(200_000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+            if rng.random() < 0.5:  # many with the right ending, so both answers are common
+                text += "-" + "".join(rng.choice("0123456789abcdefA") for _ in range(8))
+            assert document_service.is_doc_ref_shape(text) == bool(self._OLD.fullmatch(text)), text
+            checked += 1
+        accepted = sum(
+            document_service.is_doc_ref_shape(r)
+            for r in ("report-1a2b3c4d", "-1a2b3c4d", "a.b_c-d-0123abcd", "x--------")
+        )
+        assert accepted == 3
+        assert checked == 200_000
+
+    def test_real_refs_pass_and_near_misses_do_not(self) -> None:
+        good = ["report-1a2b3c4d", "q3.final_v2-deadbeef", "doc-00000000"]
+        bad = ["report-1A2B3C4D", "report_1a2b3c4d", "report-1a2b3c4", "report-1a2b3c4d\n", ""]
+        assert all(document_service.is_doc_ref_shape(r) for r in good)
+        assert not any(document_service.is_doc_ref_shape(r) for r in bad)
+
+    def test_a_long_run_of_dashes_is_refused_at_once(self) -> None:
+        import time
+
+        for text in ("-" * 100_000, "-" * 100_000 + "x", "a" + "-" * 1_000):
+            started = time.perf_counter()
+            assert not document_service.is_doc_ref_shape(text)
+            assert time.perf_counter() - started < 0.05
+
+    def test_the_length_cap(self) -> None:
+        cap = document_service.MAX_DOC_REF_CHARS
+        assert cap >= 255 + 9  # every ref a stored file name can hold, and more
+        at_cap = "a" * (cap - 9) + "-0123abcd"
+        assert document_service.is_doc_ref_shape(at_cap)
+        assert not document_service.is_doc_ref_shape("a" + at_cap)
