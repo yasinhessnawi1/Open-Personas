@@ -154,3 +154,31 @@ def test_a_document_indexer_with_a_stuck_thread_reports_its_count_and_stays_ok()
         response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["document_index"] == {"state": "ok", "abandoned_threads": 1}
+
+
+def test_the_healthy_body_with_the_apps_indexer_is_exact() -> None:
+    """The whole healthy body (what the observability integration test pins).
+
+    The deploy smoke test greps the raw body for ``"status":"ok"``, so that stays the
+    first key, compact; Fly's machine check is ``/livez`` and reads only the status code.
+    """
+    from persona_api.services.document_index import DocumentIndexer
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.rls_engine = _OkEngine()
+    app.state.in_process_worker = None
+    app.state.document_indexer = DocumentIndexer()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/healthz")
+    finally:
+        app.state.document_indexer.close()
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "db": "connected",
+        "worker": "absent",
+        "document_index": {"state": "ok", "abandoned_threads": 0},
+    }
+    assert response.text.startswith('{"status":"ok"')
