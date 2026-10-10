@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -458,7 +458,7 @@ class TestDocumentByteCap:
         )
         assert resp.status_code == 413
         detail = resp.json()["detail"]
-        assert detail["error"] == "document_too_large"
+        assert detail["error"] == "upload_too_large"
         assert detail["context"]["max_bytes"] == str(MAX_DOCUMENT_BYTES)
         assert detail["context"]["size_bytes"] == str(MAX_DOCUMENT_BYTES + 1)
         assert parse_calls == []
@@ -486,6 +486,48 @@ class TestDocumentByteCap:
         assert resp.status_code == 413
         assert resp.json()["detail"]["context"]["size_bytes"] == str(MAX_DOCUMENT_BYTES + 1)
         assert parse_calls == []
+
+
+class TestOneAnswerForTooLarge:
+    """PR 17: every upload branch answers a file too large with 413 ``upload_too_large``.
+
+    Whether the body bound found it (over 20 MiB + 64 KiB) or the branch's own cap did (a
+    file over 20 MiB inside the body bound): an image, a document and a task attachment.
+    """
+
+    _BRANCHES: ClassVar[dict[str, tuple[str, str, dict[str, str]]]] = {
+        "image": ("big.png", "image/png", {}),
+        "document": ("big.txt", "text/plain", {"conversation_id": "conv_u1"}),
+        "task attachment": ("big.txt", "text/plain", {"scope": "task"}),
+    }
+
+    @pytest.mark.parametrize("branch", ["image", "document", "task attachment"])
+    @pytest.mark.parametrize("over", ["the file cap", "the body bound"])
+    def test_it_is_413_upload_too_large(
+        self, client: TestClient, tmp_path: Path, branch: str, over: str
+    ) -> None:
+        from persona_api.routes import uploads  # noqa: PLC0415
+        from persona_api.services import image_service  # noqa: PLC0415
+
+        _isolated_storage(client, tmp_path / "store")
+        name, media_type, data = self._BRANCHES[branch]
+        size = (
+            image_service.MAX_UPLOAD_BYTES + 1
+            if over == "the file cap"
+            else uploads.MAX_UPLOAD_BODY_BYTES + 1
+        )
+        resp = client.post(
+            "/v1/personas/astrid/uploads",
+            headers=_auth(),
+            files={"file": (name, b"\x89PNG\r\n\x1a\n" + b"\x00" * (size - 8), media_type)},
+            data=data,
+        )
+        assert resp.status_code == 413, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "upload_too_large"
+        assert detail["detail"] == "The file is too large: the upload limit is 20 MB."
+        assert detail["context"]["reason"] == "oversize"
+        assert detail["context"]["max_bytes"] == str(image_service.MAX_UPLOAD_BYTES)
 
 
 class TestUploadRequestBodyLimit:
@@ -550,7 +592,7 @@ class TestUploadRequestBodyLimit:
         )
         # Over the 20 MiB document cap, so the service refuses it: but the ROUTE took it.
         assert resp.status_code == 413
-        assert resp.json()["detail"]["error"] == "document_too_large"
+        assert resp.json()["detail"]["error"] == "upload_too_large"
 
     def test_a_second_file_part_is_refused(self, client: TestClient) -> None:
         resp = client.post(

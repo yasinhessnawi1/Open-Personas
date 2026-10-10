@@ -108,6 +108,10 @@ Per-spec entries are added by the close-out phase of each spec.
   a file that hit a limit, that person waits a minute and then goes behind everyone
   else for ten minutes. Uploads past these limits, or past the request rate limit,
   are refused before the file is received.
+- **A file too large gets one clear answer.** An image, a document or a file attached to
+  a task that is over the 20 MB limit is refused with "The file is too large: the upload
+  limit is 20 MB." For API clients this is now always 413 `upload_too_large` (an image
+  or task attachment over the limit was 422, a document 413 `document_too_large`).
 - **Text that contains a model's special token markers, or a very long run of spaces,
   no longer fails the upload.**
 - **A document whose name contains a dot, or `.page-`, is no longer mixed up with

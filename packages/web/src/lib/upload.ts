@@ -200,16 +200,27 @@ export function uploadErrorBody(parsed: unknown): ApiErrorBody | undefined {
   return body;
 }
 
+/** The error code every upload branch answers a file too large with (413). */
+export const UPLOAD_TOO_LARGE = "upload_too_large";
+
 /**
  * One line describing a failed upload, for a toast or an attachment chip.
  *
- * `code: message` when the server said why. A `detail` that is not text (a
- * validation error list, an unexpected object) is rendered as JSON rather than as
- * `[object Object]`.
+ * `code: message` when the server said why; for a file too large, just the server's
+ * sentence (the image chip, the document toast and the task hand-off all show it). A
+ * `detail` that is not text (a validation error list, an unexpected object) is rendered
+ * as JSON rather than as `[object Object]`.
  */
 export function describeUploadError(error: unknown): string {
   if (error instanceof ApiError) {
     const detail = error.detail;
+    // One answer for "too large" on every upload branch (PR 17): 413
+    // `upload_too_large`, whose detail is already a sentence for a person.
+    if (error.code === UPLOAD_TOO_LARGE) {
+      return typeof detail === "string" && detail !== ""
+        ? detail
+        : "The file is too large to upload.";
+    }
     if (detail === undefined || detail === null || detail === "")
       return error.code;
     const text = typeof detail === "string" ? detail : JSON.stringify(detail);

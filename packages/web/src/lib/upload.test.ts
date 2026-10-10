@@ -330,6 +330,31 @@ describe("upload.ts: FastAPI error envelope (D-FV0-09)", () => {
     );
   });
 
+  it("shows the server's sentence for a file too large, whatever the branch (PR 17)", () => {
+    const wrapped = {
+      detail: {
+        error: "upload_too_large",
+        detail: "The file is too large: the upload limit is 20 MB.",
+        context: { reason: "oversize", max_bytes: "20971520" },
+      },
+    };
+    const error = new ApiError(413, uploadErrorBody(wrapped), {
+      limit: null,
+      remaining: null,
+      reset: null,
+      retryAfter: null,
+    });
+    expect(describeUploadError(error)).toBe(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+    const bare = new ApiError(
+      413,
+      { error: "upload_too_large" },
+      { limit: null, remaining: null, reset: null, retryAfter: null },
+    );
+    expect(describeUploadError(bare)).toBe("The file is too large to upload.");
+  });
+
   it("passes a flat body through unchanged", () => {
     const flat = { error: "corrupt_document", detail: "could not parse" };
     expect(uploadErrorBody(flat)).toEqual(flat);

@@ -179,6 +179,67 @@ describe("useComposerAttachments", () => {
     expect(att.detail).toContain("image_validation_error");
   });
 
+  it("an image too large shows the server's sentence on its chip (PR 17)", async () => {
+    restore = installFakeXhr((xhr) => {
+      xhr.send = vi.fn(() => {
+        xhr.status = 413;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "upload_too_large",
+            detail: "The file is too large: the upload limit is 20 MB.",
+            context: { reason: "oversize" },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      });
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    act(() => {
+      result.current.attachImage(file("big.png", "image/png"));
+    });
+    await waitFor(() =>
+      expect(result.current.attachedImages[0].state).toBe("error"),
+    );
+    const att = result.current.attachedImages[0];
+    if (att.state !== "error") throw new Error("expected error state");
+    expect(att.detail).toBe(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+  });
+
+  it("a document too large shows the server's sentence in its toast (PR 17)", async () => {
+    restore = installFakeXhr((xhr) => {
+      xhr.send = () => {
+        xhr.status = 413;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "upload_too_large",
+            detail: "The file is too large: the upload limit is 20 MB.",
+            context: { reason: "oversize" },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      };
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.uploadDocumentFile(
+        file("big.pdf", "application/pdf"),
+      );
+    });
+    expect(onDocumentError).toHaveBeenCalledWith(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+  });
+
   it("removeImage drops the attachment from state", async () => {
     restore = installFakeXhr((xhr) => {
       xhr.send = () => {

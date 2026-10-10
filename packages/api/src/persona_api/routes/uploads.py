@@ -78,7 +78,7 @@ from persona_api.services.document_index import DocumentIndexBacklogFullError
 from persona_api.services.document_parsing import ParsedDocument
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 #: Room for the multipart framing around the file: boundaries, part headers and the
 #: two small form fields. Generous; a real request uses well under a kilobyte.
@@ -108,18 +108,33 @@ def _too_slow() -> HTTPException:
     )
 
 
-def _too_large(received: int | None) -> HTTPException:
-    context = {"max_bytes": str(MAX_UPLOAD_BODY_BYTES)}
-    if received is not None:
-        context["received_bytes"] = str(received)
+#: The one error code for "too large" on every upload branch (PR 17): the body bound,
+#: an image, a task attachment and a document all answer 413 ``upload_too_large``.
+UPLOAD_TOO_LARGE_ERROR: str = "upload_too_large"
+
+
+def upload_too_large(context: Mapping[str, str]) -> HTTPException:
+    """413 ``upload_too_large``: one answer, whichever bound found the file too large.
+
+    ``context`` always has ``reason`` ``oversize`` and ``max_bytes``, the file cap; the
+    body bound adds ``max_body_bytes`` and ``received_bytes``, a branch ``size_bytes``.
+    """
+    limit = image_service.MAX_UPLOAD_BYTES
     return HTTPException(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
         detail={
-            "error": "upload_too_large",
-            "detail": "the upload is larger than the server accepts",
-            "context": context,
+            "error": UPLOAD_TOO_LARGE_ERROR,
+            "detail": f"The file is too large: the upload limit is {limit // (1024 * 1024)} MB.",
+            "context": {**dict(context), "reason": "oversize", "max_bytes": str(limit)},
         },
     )
+
+
+def _too_large(received: int | None) -> HTTPException:
+    context = {"max_body_bytes": str(MAX_UPLOAD_BODY_BYTES)}
+    if received is not None:
+        context["received_bytes"] = str(received)
+    return upload_too_large(context)
 
 
 class _BoundedUploadRequest(Request):
@@ -370,6 +385,8 @@ def _remap_image_error(exc: PersonaError) -> Exception:
 
     * ``not_found`` → :class:`PersonaNotFoundError` (→ 404 via the existing
       handler, existence-disclosure-safe; cross-tenant fetch lands here).
+    * ``oversize`` → 413 ``upload_too_large``, the one answer every upload branch gives
+      for a file too large (:func:`upload_too_large`).
     * Everything else → :class:`HTTPException` (422) with a structured
       body matching the rest of the API's validation-error shape. We don't
       add a new domain exception per the spec brief; ``HTTPException``
@@ -379,6 +396,8 @@ def _remap_image_error(exc: PersonaError) -> Exception:
     if reason in _NOT_FOUND_REASONS:
         not_found: Exception = PersonaNotFoundError(exc.message or "not found", context=exc.context)
         return not_found
+    if reason == "oversize":
+        return upload_too_large(exc.context)
     payload: dict[str, object] = {
         "error": "image_validation_error",
         "detail": exc.message or "image validation failed",
@@ -504,13 +523,15 @@ async def create_upload(
 
 
 def _remap_attachment_error(exc: PersonaError) -> Exception:
-    """Translate a task-attachment failure into a 422 that says what went wrong.
+    """Translate a task-attachment failure into the answer that says what went wrong.
 
     The attachment service raises ``unsupported_media_type`` (a format the document
-    parsers do not know) or ``oversize``. Same structured body shape as the rest of the
-    API, under its own error code so a client never has to read a document failure as an
-    image one.
+    parsers do not know; 422) or ``oversize`` (413 ``upload_too_large``, as every
+    branch). Same structured body shape as the rest of the API, under its own error code
+    so a client never has to read a document failure as an image one.
     """
+    if exc.context.get("reason") == "oversize":
+        return upload_too_large(exc.context)
     payload: dict[str, object] = {
         "error": "attachment_validation_error",
         "detail": exc.message or "that file could not be attached",
@@ -701,14 +722,7 @@ async def _handle_document_upload(
             lease.abandon_store()
             raise
     except document_service.DocumentTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail={
-                "error": "document_too_large",
-                "detail": exc.message or "document exceeds the upload size limit",
-                "context": dict(exc.context),
-            },
-        ) from exc
+        raise upload_too_large(exc.context) from exc
     except UnsupportedFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
