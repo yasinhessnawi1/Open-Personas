@@ -1768,20 +1768,32 @@ class TestTheIndexerThread:
         assert os.getpriority(os.PRIO_PROCESS, threading.get_native_id()) < inside
 
     def test_its_torch_runs_on_one_thread_and_no_other_threads_change(self) -> None:
+        import subprocess
+
         torch = pytest.importorskip("torch")
-        # torch's own default, as a thread that has set nothing reads it, before the indexer
-        # runs. It is not ``os.cpu_count()``: torch counts physical cores (2 on a 4-vCPU CI
-        # runner), and OMP_NUM_THREADS overrides it.
-        default: list[int] = []
-        first = threading.Thread(target=lambda: default.append(torch.get_num_threads()))
-        first.start()
-        first.join()
-        if default[0] == 1:
+        # torch's own default on this host, read by a fresh interpreter with the same
+        # environment, so nothing this process did (an earlier test's indexer included)
+        # can change it. It is not ``os.cpu_count()``: torch counts physical cores (2 on a
+        # 4-vCPU CI runner), and OMP_NUM_THREADS overrides it.
+        default = int(
+            subprocess.run(  # noqa: S603 - this interpreter, a fixed script
+                [sys.executable, "-c", "import torch; print(torch.get_num_threads())"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
+            ).stdout.strip()
+        )
+        if default == 1:
             pytest.skip("torch defaults to one thread here: a limit to one would not show")
         # an index that changed it for the whole process (even from its own thread, before
         # this thread first asked) would show here
+        first: list[int] = []
+        reader = threading.Thread(target=lambda: first.append(torch.get_num_threads()))
+        reader.start()
+        reader.join()
         before = torch.get_num_threads()
-        assert before == default[0]
+        assert (before, first) == (default, [default])
         indexer = DocumentIndexer()
         try:
             inside = asyncio.run(indexer.run(torch.get_num_threads))
