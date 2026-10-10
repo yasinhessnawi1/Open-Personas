@@ -91,12 +91,15 @@ conversation.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import re
 import uuid
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from persona.documents.chunker import DocumentSection
 from persona.documents.ingest import IngestStrategy
 from persona.errors import FileExtractionError
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
@@ -110,13 +113,18 @@ from sqlalchemy import select
 
 from persona_api.db.models import conversations, messages
 from persona_api.services.artifact_metadata import (
+    DOCUMENT_TEXT_SIDECAR_SUFFIX,
     SPEC_14_SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
     utcnow,
     write_artifact_sidecar,
 )
 from persona_api.services.background_billing import bill_background_infra, bill_background_llm
-from persona_api.services.document_service import DOCUMENT_DIR_NAME, DocumentRef
+from persona_api.services.document_service import (
+    DOCUMENT_DIR_NAME,
+    DocumentRef,
+    text_sidecar_bytes,
+)
 from persona_api.services.llm_usage_collector import collect_llm_usage
 
 if TYPE_CHECKING:
@@ -793,11 +801,11 @@ class SandboxFileRenderer:
             # The DocumentRef `.meta.json` sidecar — the exact shape
             # `document_service.list_for_conversation` (and therefore
             # `GET /v1/conversations/{id}/documents`) reads. `strategy=RETRIEVAL`
-            # with no chunks written: honest-inert (the SAME "not yet ingested for
-            # recall" shape a RETRIEVAL doc has before its first query) rather than
-            # WHOLE_INJECT, which would auto-inject this generated file's full text
-            # into every later turn's prompt — a real behavior change nobody asked
-            # for here; wiring real ingestion is a follow-up, not this fix.
+            # rather than WHOLE_INJECT, which would auto-inject this generated file's
+            # full text into every later turn's prompt. D-FV0-31: like an uploaded
+            # retrieval document, it is stored with its text and ``pending``, and the
+            # handler schedules the document index, which makes it searchable. (Until
+            # then it was a retrieval document nothing ever indexed.)
             workspace_path = (
                 f"{owner_id}/{persona_id}/conversations/{conversation_id}"
                 f"/{DOCUMENT_DIR_NAME}/{persisted_name}"
@@ -811,6 +819,17 @@ class SandboxFileRenderer:
                 strategy=IngestStrategy.RETRIEVAL,
                 token_count=count_tokens(content.body_markdown),
                 size_bytes=produced.size_bytes,
+                text_stored=True,
+                index_state="pending",
+                chunks_indexed=0,
+            )
+            # The text the index reads, written before the `.meta.json` that lists the
+            # document (the upload's order): the extracted body the file was rendered
+            # from, one section.
+            write_file_under_root(
+                target.with_name(target.name + DOCUMENT_TEXT_SIDECAR_SUFFIX),
+                text_sidecar_bytes((DocumentSection(text=content.body_markdown),)),
+                root=self._workspace_root,
             )
             write_file_under_root(
                 target.with_name(target.name + SPEC_14_SIDECAR_SUFFIX),
@@ -865,9 +884,14 @@ class FileExtractHandler:
         rls_engine: Engine | None = None,
         cost_source: CostSource | None = None,
         floor: int = 1,
+        schedule_index: Callable[[str, str, str, str], None] | None = None,
     ) -> None:
         self._extract = extractor
         self._renderer = renderer
+        #: D-FV0-31: schedules the document index for the file this job generates, called
+        #: as ``(owner_id, persona_id, conversation_id, doc_ref)``. ``None`` leaves the
+        #: file ``pending`` until a turn or a document listing picks it up.
+        self._schedule_index = schedule_index
         self._repo = repository
         self._episodic_query = episodic_query
         self._event_channel = event_channel
@@ -973,6 +997,16 @@ class FileExtractHandler:
             kind="sandbox",
             detail={"surface": "file_extract", "format": rendered.format},
         )
+        if self._schedule_index is not None:
+            # The generated file is a retrieval document: index it like an upload. Its
+            # stored name is ``{doc_ref}{ext}`` and a generated doc ref holds no dot.
+            await asyncio.to_thread(
+                self._schedule_index,
+                context.owner_id,
+                data.persona_id,
+                payload.conversation_id,
+                PurePosixPath(rendered.workspace_path).stem,
+            )
         # Spec M3 (T5): the render is a real sandbox execution and it was charged to
         # nobody. The tool's own per-execution deduct
         # (``runtime_tool._on_execute_success``) cannot reach it: the renderer drives
@@ -1025,6 +1059,7 @@ def register_file_extract_handler(
     rls_engine: Engine | None = None,
     cost_source: CostSource | None = None,
     floor: int = 1,
+    schedule_index: Callable[[str, str, str, str], None] | None = None,
 ) -> None:
     """Register the file-extract tenant (R9-025b; the title-refresh registration shape).
 
@@ -1048,6 +1083,7 @@ def register_file_extract_handler(
                 rls_engine=rls_engine,
                 cost_source=cost_source,
                 floor=floor,
+                schedule_index=schedule_index,
             ),
             idempotency_key=file_extract_idempotency_key,
             retry=RetryPolicy(),

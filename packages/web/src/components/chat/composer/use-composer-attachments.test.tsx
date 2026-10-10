@@ -179,6 +179,67 @@ describe("useComposerAttachments", () => {
     expect(att.detail).toContain("image_validation_error");
   });
 
+  it("an image too large shows the server's sentence on its chip (PR 17)", async () => {
+    restore = installFakeXhr((xhr) => {
+      xhr.send = vi.fn(() => {
+        xhr.status = 413;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "upload_too_large",
+            detail: "The file is too large: the upload limit is 20 MB.",
+            context: { reason: "oversize" },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      });
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    act(() => {
+      result.current.attachImage(file("big.png", "image/png"));
+    });
+    await waitFor(() =>
+      expect(result.current.attachedImages[0].state).toBe("error"),
+    );
+    const att = result.current.attachedImages[0];
+    if (att.state !== "error") throw new Error("expected error state");
+    expect(att.detail).toBe(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+  });
+
+  it("a document too large shows the server's sentence in its toast (PR 17)", async () => {
+    restore = installFakeXhr((xhr) => {
+      xhr.send = () => {
+        xhr.status = 413;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "upload_too_large",
+            detail: "The file is too large: the upload limit is 20 MB.",
+            context: { reason: "oversize" },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      };
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.uploadDocumentFile(
+        file("big.pdf", "application/pdf"),
+      );
+    });
+    expect(onDocumentError).toHaveBeenCalledWith(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+  });
+
   it("removeImage drops the attachment from state", async () => {
     restore = installFakeXhr((xhr) => {
       xhr.send = () => {
@@ -349,6 +410,44 @@ describe("useComposerAttachments", () => {
       { id?: string } | undefined,
     ];
     expect(errorOpts?.id).toBe("toast-id-1");
+  });
+
+  it("uploadDocumentFile shows the server's reason, never [object Object], for the real 503 body (D-FV0-09)", async () => {
+    // The exact body FastAPI sends for the upload route's HTTPException: the
+    // structured error sits one level down, under `detail`.
+    restore = installFakeXhr((xhr) => {
+      xhr.send = () => {
+        xhr.status = 503;
+        xhr.responseText = JSON.stringify({
+          detail: {
+            error: "missing_dependency",
+            detail: "pypdf is not installed",
+            context: {
+              format: "pdf",
+              install_hint: "pip install persona-core[documents]",
+            },
+          },
+        });
+        queueMicrotask(() => xhr.onload?.());
+      };
+    });
+
+    const { result } = renderHook(
+      () => useComposerAttachments(defaultOptions()),
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.uploadDocumentFile(file("r.pdf", "application/pdf"));
+    });
+
+    expect(onDocumentError).toHaveBeenCalledTimes(1);
+    expect(onDocumentError.mock.calls[0][0]).toBe(
+      "missing_dependency: pypdf is not installed",
+    );
+    expect(toastFns.error).toHaveBeenCalledTimes(1);
+    const [title] = toastFns.error.mock.calls[0] as [string, unknown];
+    expect(title).toBe("missing_dependency: pypdf is not installed");
+    expect(title).not.toContain("[object Object]");
   });
 
   it("retryImage re-runs the upload with the original file", async () => {

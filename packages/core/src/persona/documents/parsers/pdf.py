@@ -56,6 +56,7 @@ from persona.documents.errors import (
 from persona.documents.parsers import (
     FLAG_NO_TEXT_LAYER,
     FLAG_PARTIAL_EXTRACTION,
+    MAX_DOCUMENT_TEXT_CHARS,
     ParseResult,
 )
 
@@ -64,10 +65,22 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_NO_TEXT_LAYER_THRESHOLD",
+    "MAX_PDF_PAGES",
+    "MAX_PDF_TEXT_PAGES",
     "NO_TEXT_LAYER_THRESHOLD_ENV_VAR",
     "parse_pdf",
     "resolve_no_text_layer_threshold",
 ]
+
+#: The most pages a PDF may have at all; a larger one is refused before its pages are
+#: read. A thousand-page manual is ordinary; ten thousand pages is not a document a
+#: person attaches to a chat. Checked against the declared count first, then the real one.
+MAX_PDF_PAGES: int = 10_000
+
+#: The most pages text is extracted from. A PDF can point every page at one shared
+#: content stream, so pages cost work, not bytes; past this the rest is skipped and the
+#: result is flagged partial.
+MAX_PDF_TEXT_PAGES: int = 2_000
 
 #: Default no-text-layer detection threshold per D-14-2 (chars per page).
 DEFAULT_NO_TEXT_LAYER_THRESHOLD: int = 50
@@ -144,6 +157,8 @@ def parse_pdf(path: Path) -> ParseResult:
 
     try:
         reader = pypdf.PdfReader(str(path))
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:  # noqa: BLE001 — adapter-boundary catch
         reason = _classify_open_failure(exc)
         raise CorruptDocumentError(
@@ -168,17 +183,32 @@ def parse_pdf(path: Path) -> ParseResult:
                 },
             )
 
-    sections, total_chars, page_errors = _extract_pages(reader)
-    page_count = len(reader.pages)
+    declared = _declared_page_count(reader)
+    if declared is not None and declared > MAX_PDF_PAGES:
+        raise _too_many_pages(filename, declared)
+    try:
+        page_count = len(reader.pages)
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:  # noqa: BLE001 (adapter-boundary catch)
+        raise CorruptDocumentError(
+            "could not read the PDF page tree",
+            context={"format": "pdf", "reason": "unreadable_pages", "filename": filename},
+        ) from exc
+    if page_count > MAX_PDF_PAGES:
+        raise _too_many_pages(filename, page_count)
+
+    pages_to_read = min(page_count, MAX_PDF_TEXT_PAGES)
+    sections, total_chars, page_errors, pages_read = _extract_pages(reader, pages=pages_to_read)
 
     threshold = resolve_no_text_layer_threshold()
-    coverage = (total_chars / page_count) if page_count > 0 else 0.0
+    coverage = (total_chars / pages_read) if pages_read > 0 else 0.0
     no_text_layer = coverage < threshold
 
     flags: list[str] = []
     if no_text_layer:
         flags.append(FLAG_NO_TEXT_LAYER)
-    if page_errors > 0:
+    if page_errors > 0 or pages_read < page_count:
         flags.append(FLAG_PARTIAL_EXTRACTION)
 
     return ParseResult(
@@ -187,6 +217,35 @@ def parse_pdf(path: Path) -> ParseResult:
         page_count=page_count,
         size_bytes=size_bytes,
         needs_vision_handoff=no_text_layer,
+    )
+
+
+def _declared_page_count(reader: Any) -> int | None:  # noqa: ANN401
+    """The page count the PDF's page tree root claims, read without flattening the tree.
+
+    ``len(reader.pages)`` flattens every page object first; this reads one number, so
+    an absurd claim is refused before that work starts. ``None`` when it is missing or
+    not a number (the real count is then checked after flattening).
+    """
+    try:
+        value = reader.trailer["/Root"]["/Pages"]["/Count"]
+        return int(value)
+    except (MemoryError, RecursionError):
+        raise
+    except Exception:  # noqa: BLE001 (a malformed tree is checked by the real count)
+        return None
+
+
+def _too_many_pages(filename: str, count: int) -> CorruptDocumentError:
+    return CorruptDocumentError(
+        "PDF has too many pages",
+        context={
+            "format": "pdf",
+            "reason": "too_many_pages",
+            "filename": filename,
+            "page_count": str(count),
+            "limit": str(MAX_PDF_PAGES),
+        },
     )
 
 
@@ -200,28 +259,40 @@ def _classify_open_failure(exc: BaseException) -> str:
     return "unknown"
 
 
-def _extract_pages(reader: Any) -> tuple[list[DocumentSection], int, int]:  # noqa: ANN401
-    """Extract text from each page.
+def _extract_pages(
+    reader: Any,  # noqa: ANN401
+    *,
+    pages: int,
+) -> tuple[list[DocumentSection], int, int, int]:
+    """Extract text from each page, stopping once the document text budget is spent.
 
-    Returns ``(sections, total_chars, error_count)`` — ``sections`` is one
+    Returns ``(sections, total_chars, error_count, pages_read)``: ``sections`` is one
     :class:`DocumentSection` per non-empty page; ``total_chars`` is the
     summed char count across pages for the no-text-layer heuristic;
     ``error_count`` is the number of pages that raised during extraction
-    (each treated as zero text contribution; not a crash).
+    (each treated as zero text contribution; not a crash); ``pages_read`` is how many
+    pages were read before :data:`MAX_DOCUMENT_TEXT_CHARS` was reached (pages sharing
+    one huge text stream reach it in a few pages, F1).
     """
     sections: list[DocumentSection] = []
     total_chars = 0
     error_count = 0
+    pages_read = 0
 
-    for page_index, page in enumerate(reader.pages, start=1):
+    for page_index in range(1, pages + 1):
+        if total_chars >= MAX_DOCUMENT_TEXT_CHARS:
+            break
+        pages_read = page_index
         try:
-            page_text = page.extract_text() or ""
+            page_text = reader.pages[page_index - 1].extract_text() or ""
+        except (MemoryError, RecursionError):
+            raise
         except Exception:  # noqa: BLE001 — adapter-boundary catch
             page_text = ""
             error_count += 1
-        cleaned = page_text.strip()
+        cleaned = page_text.strip()[: MAX_DOCUMENT_TEXT_CHARS - total_chars]
         total_chars += len(cleaned)
         if cleaned:
             sections.append(DocumentSection(text=cleaned, page=page_index))
 
-    return sections, total_chars, error_count
+    return sections, total_chars, error_count, pages_read

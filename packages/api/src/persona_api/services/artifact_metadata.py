@@ -42,6 +42,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 __all__ = [
     "SIDECAR_SUFFIX",
+    "DOCUMENT_INDEX_SIDECAR_SUFFIX",
+    "DOCUMENT_TEXT_SIDECAR_SUFFIX",
     "SPEC_14_SIDECAR_SUFFIX",
     "WorkspaceArtifactMetadata",
     "delete_artifact_sidecar",
@@ -59,11 +61,32 @@ SIDECAR_SUFFIX = ".f5.json"
 #: sidecar files themselves never surface as artifacts.
 SPEC_14_SIDECAR_SUFFIX = ".meta.json"
 
+#: Suffix of a whole-inject document's extracted-text sidecar (D-FV0-31): the text the
+#: parse worker returned at upload, so a chat turn reads it instead of re-parsing.
+DOCUMENT_TEXT_SIDECAR_SUFFIX = ".text.json"
+
+#: Suffix of a retrieval document's index progress (D-FV0-31): its index state, how many
+#: chunks are stored and where the index job resumes. Written by the job, never by upload.
+DOCUMENT_INDEX_SIDECAR_SUFFIX = ".index.json"
+
 
 def is_any_sidecar(path: Path) -> bool:
-    """Whether ``path`` is a sidecar file (F5 or Spec 14) — skip during walks."""
+    """Whether ``path`` is a sidecar file (F5, Spec 14, extracted text or index progress).
+
+    The extracted-text and index-progress sidecars exist only beside a conversation's
+    documents (``.../conversations/<id>/documents/``), so only there do their suffixes mark
+    a sidecar: a user's own ``outputs/search.index.json`` is a file like any other
+    (fourth security review finding 8).
+    """
     name = path.name
-    return name.endswith(SIDECAR_SUFFIX) or name.endswith(SPEC_14_SIDECAR_SUFFIX)
+    if name.endswith((SIDECAR_SUFFIX, SPEC_14_SIDECAR_SUFFIX)):
+        return True
+    if not name.endswith((DOCUMENT_TEXT_SIDECAR_SUFFIX, DOCUMENT_INDEX_SIDECAR_SUFFIX)):
+        return False
+    parts = path.parts
+    # The documents directory's name (document_service.DOCUMENT_DIR_NAME, not imported
+    # here: that module imports this one).
+    return len(parts) >= 4 and parts[-2] == "documents" and parts[-4] == "conversations"
 
 
 class WorkspaceArtifactMetadata(BaseModel):

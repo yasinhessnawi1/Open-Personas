@@ -119,3 +119,66 @@ def test_db_failure_still_takes_precedence(worker: object) -> None:
         response = client.get("/healthz")
     assert response.status_code == 503
     assert response.json()["db"] == "not_configured"
+
+
+class _FakeIndexer:
+    def __init__(self, abandoned: int, exhausted: bool) -> None:
+        self.abandoned_threads = abandoned
+        self.exhausted = exhausted
+
+
+def test_an_exhausted_document_indexer_degrades_healthz() -> None:
+    """D-FV0-31, fifth review F1: indexing paused on stuck threads is visible, not silent."""
+    app = FastAPI()
+    app.include_router(router)
+    app.state.rls_engine = _OkEngine()
+    app.state.in_process_worker = _FakeWorker(datetime.now(UTC))
+    app.state.document_indexer = _FakeIndexer(3, exhausted=True)
+    with TestClient(app) as client:
+        response = client.get("/healthz")
+        livez = client.get("/livez")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["document_index"] == {"state": "exhausted", "abandoned_threads": 3}
+    assert livez.status_code == 200
+
+
+def test_a_document_indexer_with_a_stuck_thread_reports_its_count_and_stays_ok() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    app.state.rls_engine = _OkEngine()
+    app.state.in_process_worker = None
+    app.state.document_indexer = _FakeIndexer(1, exhausted=False)
+    with TestClient(app) as client:
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["document_index"] == {"state": "ok", "abandoned_threads": 1}
+
+
+def test_the_healthy_body_with_the_apps_indexer_is_exact() -> None:
+    """The whole healthy body (what the observability integration test pins).
+
+    The deploy smoke test greps the raw body for ``"status":"ok"``, so that stays the
+    first key, compact; Fly's machine check is ``/livez`` and reads only the status code.
+    """
+    from persona_api.services.document_index import DocumentIndexer
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.rls_engine = _OkEngine()
+    app.state.in_process_worker = None
+    app.state.document_indexer = DocumentIndexer()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/healthz")
+    finally:
+        app.state.document_indexer.close()
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "db": "connected",
+        "worker": "absent",
+        "document_index": {"state": "ok", "abandoned_threads": 0},
+    }
+    assert response.text.startswith('{"status":"ok"')

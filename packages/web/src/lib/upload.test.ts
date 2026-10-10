@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api/client";
-import { uploadDocument, uploadImage } from "./upload";
+import {
+  describeUploadError,
+  uploadDocument,
+  uploadErrorBody,
+  uploadImage,
+} from "./upload";
 
 /**
  * Vitest's jsdom environment provides a stub XMLHttpRequest with most of the
@@ -279,6 +284,101 @@ describe("upload.ts — uploadDocument (Spec 14 branch)", () => {
         getToken: async () => FAKE_TOKEN,
       }),
     ).rejects.toThrow(ApiError);
+  });
+});
+
+describe("upload.ts: FastAPI error envelope (D-FV0-09)", () => {
+  let restore: () => void;
+  afterEach(() => restore?.());
+
+  /** The exact body the upload route sends when a parser library is missing. */
+  const missingDependency = {
+    detail: {
+      error: "missing_dependency",
+      detail: "pypdf is not installed",
+      context: {
+        format: "pdf",
+        install_hint: "pip install persona-core[documents]",
+      },
+    },
+  };
+
+  it("unwraps the nested body so the code and message are the server's", async () => {
+    ({ restore } = installFakeXhr((xhr) => {
+      xhr.send = vi.fn(() => {
+        xhr.status = 503;
+        xhr.responseText = JSON.stringify(missingDependency);
+        queueMicrotask(() => xhr.onload?.());
+      });
+    }));
+
+    const failure = await uploadDocument(
+      FAKE_PERSONA,
+      FAKE_CONVERSATION,
+      makeFile("lease.pdf", "application/pdf"),
+      { getToken: async () => FAKE_TOKEN },
+    ).catch((e: unknown) => e);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    const error = failure as ApiError;
+    expect(error.status).toBe(503);
+    expect(error.code).toBe("missing_dependency");
+    expect(error.detail).toBe("pypdf is not installed");
+    expect(error.context?.format).toBe("pdf");
+    expect(describeUploadError(error)).toBe(
+      "missing_dependency: pypdf is not installed",
+    );
+  });
+
+  it("shows the server's sentence for a file too large, whatever the branch (PR 17)", () => {
+    const wrapped = {
+      detail: {
+        error: "upload_too_large",
+        detail: "The file is too large: the upload limit is 20 MB.",
+        context: { reason: "oversize", max_bytes: "20971520" },
+      },
+    };
+    const error = new ApiError(413, uploadErrorBody(wrapped), {
+      limit: null,
+      remaining: null,
+      reset: null,
+      retryAfter: null,
+    });
+    expect(describeUploadError(error)).toBe(
+      "The file is too large: the upload limit is 20 MB.",
+    );
+    const bare = new ApiError(
+      413,
+      { error: "upload_too_large" },
+      { limit: null, remaining: null, reset: null, retryAfter: null },
+    );
+    expect(describeUploadError(bare)).toBe("The file is too large to upload.");
+  });
+
+  it("passes a flat body through unchanged", () => {
+    const flat = { error: "corrupt_document", detail: "could not parse" };
+    expect(uploadErrorBody(flat)).toEqual(flat);
+  });
+
+  it("does not unwrap a detail that is not a structured body", () => {
+    expect(uploadErrorBody({ detail: "Not authenticated" })).toEqual({
+      detail: "Not authenticated",
+    });
+    const validation = { detail: [{ loc: ["body", "file"], msg: "required" }] };
+    expect(uploadErrorBody(validation)).toEqual(validation);
+    expect(uploadErrorBody("nope")).toBeUndefined();
+    expect(uploadErrorBody(null)).toBeUndefined();
+  });
+
+  it("never renders an object detail as [object Object]", () => {
+    const error = new ApiError(
+      422,
+      { detail: [{ loc: ["body", "file"], msg: "required" }] },
+      { limit: null, remaining: null, reset: null, retryAfter: null },
+    );
+    const text = describeUploadError(error);
+    expect(text).not.toContain("[object Object]");
+    expect(text).toContain("required");
   });
 });
 

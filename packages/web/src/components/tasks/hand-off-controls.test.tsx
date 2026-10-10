@@ -28,7 +28,10 @@ vi.mock("@/auth", () => ({
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push }) }));
 vi.mock("@/lib/api/schedule-client", () => ({ createSchedule, previewCreate }));
-vi.mock("@/lib/upload", () => ({ uploadTaskAttachment }));
+vi.mock("@/lib/upload", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/upload")>()),
+  uploadTaskAttachment,
+}));
 vi.mock("@/lib/voice/stt", () => ({
   transcribeAudio: (...args: unknown[]) => transcribeAudio(...args),
 }));
@@ -148,6 +151,29 @@ describe("the task hand-off dialog", () => {
     );
     await waitFor(() =>
       expect(JSON.parse(hidden?.value ?? "[]")).toEqual([REF]),
+    );
+  });
+
+  it("a file too large shows the server's sentence on its chip (PR 17)", async () => {
+    const { ApiError } = await import("@/lib/api/client");
+    uploadTaskAttachment.mockRejectedValue(
+      new ApiError(
+        413,
+        {
+          error: "upload_too_large",
+          detail: "The file is too large: the upload limit is 20 MB.",
+        },
+        { limit: null, remaining: null, reset: null, retryAfter: null },
+      ),
+    );
+    open();
+    await pickPersona();
+    fireEvent.change(attachButton(), { target: { files: [aFile("big.pdf")] } });
+
+    await waitFor(() =>
+      expect(
+        screen.getByTitle("The file is too large: the upload limit is 20 MB."),
+      ).toBeInTheDocument(),
     );
   });
 

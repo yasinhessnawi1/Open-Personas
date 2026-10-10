@@ -92,9 +92,10 @@ class TestLazyImportDiscipline:
         # is about the import GRAPH, not the test environment).
         # We test the static property: the parsers package's __init__ has
         # no top-level pypdf/openpyxl/docx import.
+        # No reload: this test reads the source text, and reloading the package left a
+        # second ParseResult class behind that later typed consumers rejected.
         import persona.documents.parsers  # noqa: PLC0415
 
-        importlib.reload(persona.documents.parsers)
         source = Path(persona.documents.parsers.__file__).read_text()
         # The __init__ never imports pypdf/openpyxl/docx/pypdfium2 at module
         # level — guards the import graph.
@@ -251,6 +252,9 @@ class TestDispatchToCorrectParser:
         assert result.page_count == 1
 
 
+_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "documents"
+
+
 class TestMissingDependencyDiscipline:
     """If a parser library is missing, the format-specific parser raises a
     ``MissingDependencyError`` with a clear install hint.
@@ -311,8 +315,10 @@ class TestMissingDependencyDiscipline:
             monkeypatch.delitem(sys.modules, "docx")
         monkeypatch.setattr(builtins, "__import__", _failing_import)
 
+        # A real docx: the archive guard (D-FV0-08) now refuses a bare zip magic before
+        # any parser runs, so only a well-formed file reaches the missing-library path.
         path = tmp_path / "x.docx"
-        path.write_bytes(b"PK\x03\x04")
+        path.write_bytes((_FIXTURE_DIR / "sample.docx").read_bytes())
         with pytest.raises(MissingDependencyError) as excinfo:
             parse_document(path)
         assert excinfo.value.context["format"] == "docx"
@@ -335,8 +341,10 @@ class TestMissingDependencyDiscipline:
             monkeypatch.delitem(sys.modules, "openpyxl")
         monkeypatch.setattr(builtins, "__import__", _failing_import)
 
+        # A real xlsx: the archive guard (D-FV0-08) now refuses a bare zip magic before
+        # any parser runs, so only a well-formed file reaches the missing-library path.
         path = tmp_path / "x.xlsx"
-        path.write_bytes(b"PK\x03\x04")
+        path.write_bytes((_FIXTURE_DIR / "sample.xlsx").read_bytes())
         with pytest.raises(MissingDependencyError) as excinfo:
             parse_document(path)
         assert excinfo.value.context["format"] == "xlsx"

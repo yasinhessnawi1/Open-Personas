@@ -70,6 +70,7 @@ __all__ = [
     "credit_transactions",
     "credits",
     "day_spend",
+    "document_index_backlog",
     "free_model_daily_usage",
     "graph_consolidation_markers",
     "graph_edges",
@@ -460,6 +461,13 @@ jobs = Table(
         "owner_id",
         postgresql_where=text("state IN ('claimed', 'running')"),
     ),
+    # D-FV0-31: the serial-type claim asks "is a job of this type in flight?" on every claim
+    # (one document-index slice at a time). Partial: only in-flight jobs. Migration 059.
+    Index(
+        "idx_jobs_inflight_by_type",
+        "type",
+        postgresql_where=text("state IN ('claimed', 'running')"),
+    ),
     # R9-158: "does this task have a leg still to run?" The task detail reports it (a
     # Resume shows "Starting" until the worker claims the leg) and the revival sweep's
     # stranded check asks the same thing. Both filter a task's live legs by the task id in
@@ -727,6 +735,21 @@ rate_limit_buckets = Table(
     Column("window_start", DateTime(timezone=True), nullable=False),
     Column("request_count", Integer, nullable=False, server_default=text("0")),
     PrimaryKeyConstraint("user_id", "endpoint", "window_start"),
+)
+
+# D-FV0-31 (fourth security review finding 1): each owner's retrieval documents waiting
+# for the background index. The index runs one ``document_ingest`` job per OWNER, which
+# walks this list; a document is a row here, never a job of its own, so one owner's many
+# documents cannot fill the serial index lane. RLS-scoped by ``owner_id`` (migration 060).
+document_index_backlog = Table(
+    "document_index_backlog",
+    metadata,
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, nullable=False),
+    Column("conversation_id", Text, nullable=False),
+    Column("doc_ref", Text, nullable=False),
+    Column("added_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    PrimaryKeyConstraint("owner_id", "conversation_id", "doc_ref"),
 )
 
 credits = Table(  # noqa: A001 — schema table name (spec §5), not the stdlib `credits`

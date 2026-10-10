@@ -355,3 +355,54 @@ class TestIngestResultShape:
         )
         with pytest.raises(ValidationError):
             result.strategy = IngestStrategy.RETRIEVAL  # type: ignore[misc]
+
+
+class TestTheUploadOnlyDecides:
+    """D-FV0-31: the upload decides the strategy; it never chunks, embeds or counts it all."""
+
+    def test_a_retrieval_document_is_decided_without_a_store(self) -> None:
+        from persona.documents.ingest import decide_strategy  # noqa: PLC0415
+        from persona.documents.parsers import ParseResult  # noqa: PLC0415
+
+        result = decide_strategy(
+            ParseResult(sections=(DocumentSection(text="word " * 5000),)),
+            doc_ref="d-1234abcd",
+            threshold_tokens=1000,
+        )
+        assert result.strategy == IngestStrategy.RETRIEVAL
+        assert result.chunk_count == 0
+        assert 1000 < result.token_count <= 1000 + 20_000  # a partial count past the threshold
+
+    def test_counting_stops_one_segment_past_the_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from persona.documents.ingest import decide_strategy  # noqa: PLC0415
+        from persona.documents.parsers import ParseResult  # noqa: PLC0415
+        from persona.skills import _tokens  # noqa: PLC0415
+
+        seen = [0]
+        real = _tokens.encode
+
+        def _spy(text: str) -> list[int]:
+            seen[0] += len(text)
+            return real(text)
+
+        monkeypatch.setattr(_tokens, "encode", _spy)
+        decide_strategy(
+            ParseResult(sections=(DocumentSection(text="word " * 800_000),)),
+            doc_ref="d-1234abcd",
+            threshold_tokens=3000,
+        )
+        assert seen[0] <= _tokens.SEGMENT_CHARS
+
+    def test_at_the_threshold_it_is_still_whole_inject(self) -> None:
+        from persona.documents.ingest import decide_strategy  # noqa: PLC0415
+        from persona.documents.parsers import ParseResult  # noqa: PLC0415
+        from persona.skills import count_tokens  # noqa: PLC0415
+
+        text = ("word " * 200).strip()
+        n = count_tokens(text)
+        result = decide_strategy(
+            ParseResult(sections=(DocumentSection(text=text),)), doc_ref="d", threshold_tokens=n
+        )
+        assert (result.strategy, result.token_count) == (IngestStrategy.WHOLE_INJECT, n)

@@ -235,4 +235,10 @@ def test_healthz_ok(ctx: tuple[TestClient, str, str, Engine]) -> None:
     assert r.status_code == 200
     # R9-093 put worker liveness on /healthz; this fixture starts no in-process
     # worker, so the honest value is "absent" (not "stale", which would be a 503).
-    assert r.json() == {"status": "ok", "db": "connected", "worker": "absent"}
+    # D-FV0-31 added the document indexer's state (degraded only while it is exhausted).
+    assert r.json() == {
+        "status": "ok",
+        "db": "connected",
+        "worker": "absent",
+        "document_index": {"state": "ok", "abandoned_threads": 0},
+    }

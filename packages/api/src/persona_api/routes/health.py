@@ -57,9 +57,25 @@ def _worker_health(request: Request) -> tuple[str, float | None]:
     return ("stale" if age > _WORKER_BEAT_STALE_AFTER_SECONDS else "ok"), age
 
 
+def _document_index_health(request: Request) -> dict[str, object] | None:
+    """The document indexer's state: ``ok``, or ``exhausted`` when its threads are stuck.
+
+    ``exhausted`` (D-FV0-31, fifth review F1): too many indexer threads are stuck in calls
+    that never returned, so indexing is paused. A background fault, like a stale worker:
+    it degrades ``/healthz`` and leaves ``/livez`` alone. ``None`` without an indexer.
+    """
+    indexer = getattr(request.app.state, "document_indexer", None)
+    if indexer is None:
+        return None
+    return {
+        "state": "exhausted" if indexer.exhausted else "ok",
+        "abandoned_threads": indexer.abandoned_threads,
+    }
+
+
 @router.get("/healthz")
 async def healthz(request: Request) -> JSONResponse:
-    """Readiness: DB connectivity + background-worker liveness."""
+    """Readiness: DB connectivity, background-worker liveness, the document indexer."""
     engine = getattr(request.app.state, "rls_engine", None)
     if engine is None:
         return JSONResponse(
@@ -78,7 +94,10 @@ async def healthz(request: Request) -> JSONResponse:
     body: dict[str, object] = {"status": "ok", "db": "connected", "worker": worker_state}
     if beat_age is not None:
         body["worker_beat_age_seconds"] = round(beat_age, 1)
-    if worker_state == "stale":
+    index = _document_index_health(request)
+    if index is not None:
+        body["document_index"] = index
+    if worker_state == "stale" or (index is not None and index["state"] == "exhausted"):
         body["status"] = "degraded"
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
     return JSONResponse(status_code=status.HTTP_200_OK, content=body)

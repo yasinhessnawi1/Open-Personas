@@ -30,7 +30,12 @@ from typing import TYPE_CHECKING
 
 from persona.documents.chunker import DocumentSection
 from persona.documents.errors import CorruptDocumentError
-from persona.documents.parsers import FLAG_CORRUPT, ParseResult
+from persona.documents.parsers import (
+    FLAG_CORRUPT,
+    FLAG_PARTIAL_EXTRACTION,
+    MAX_DOCUMENT_TEXT_CHARS,
+    ParseResult,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -133,6 +138,10 @@ def parse_text(path: Path) -> ParseResult:
     flags: list[str] = []
     if text_strict_failed:
         flags.append(FLAG_CORRUPT)
+    if len(text) > MAX_DOCUMENT_TEXT_CHARS:
+        # Cut before splitting, so a huge file is never split into sections whole.
+        text = text[:MAX_DOCUMENT_TEXT_CHARS]
+        flags.append(FLAG_PARTIAL_EXTRACTION)
 
     sections = _build_sections(text, extension=extension)
 

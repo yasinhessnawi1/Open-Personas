@@ -51,7 +51,7 @@ from persona.documents.chunker import (
     DEFAULT_OVERLAP_TOKENS,
     chunk_document,
 )
-from persona.skills import count_tokens
+from persona.skills._tokens import count_tokens_capped
 
 if TYPE_CHECKING:
     from persona.documents.parsers import ParseResult
@@ -62,8 +62,10 @@ __all__ = [
     "INJECT_THRESHOLD_ENV_VAR",
     "INJECT_THRESHOLD_MAX",
     "INJECT_THRESHOLD_MIN",
+    "MAX_DOCUMENT_CHUNKS",
     "IngestResult",
     "IngestStrategy",
+    "decide_strategy",
     "ingest_document",
     "resolve_inject_threshold",
 ]
@@ -133,6 +135,17 @@ class IngestResult(BaseModel):
     #: When ``strategy == RETRIEVAL``, the number of chunks written. ``0``
     #: otherwise.
     chunk_count: int = Field(default=0, ge=0)
+    #: ``True`` when the document had more text than :data:`MAX_DOCUMENT_CHUNKS`
+    #: chunks hold, so only the first chunks were written.
+    chunks_truncated: bool = False
+
+
+#: The most chunks one document writes to the store (D-FV0-31; third security review,
+#: approved 1,000). Every chunk is embedded, at about 0.3 s of CPU each on the
+#: production embedder: 1,000 chunks are about 448,000 tokens of text, roughly 600
+#: pages of prose and five minutes of background CPU. Past this many the rest of the
+#: document is not indexed, and the document says so (``partial``).
+MAX_DOCUMENT_CHUNKS: int = 1_000
 
 
 def resolve_inject_threshold() -> int:
@@ -200,8 +213,55 @@ def ingest_document(
             token_count=0,
         )
 
+    decided = decide_strategy(parse_result, doc_ref=doc_ref, threshold_tokens=threshold_tokens)
+    if decided.strategy != IngestStrategy.RETRIEVAL:
+        return decided
+
+    # Retrieval path: chunk + write to DocumentStore.
+    chunks = chunk_document(
+        sections=list(parse_result.sections),
+        conversation_id=conversation_id,
+        doc_ref=doc_ref,
+        document_format=document_format,
+        title=title,
+        chunk_size_tokens=chunk_size_tokens,
+        overlap_tokens=overlap_tokens,
+        max_chunks=MAX_DOCUMENT_CHUNKS + 1,
+    )
+    truncated = len(chunks) > MAX_DOCUMENT_CHUNKS
+    chunks = chunks[:MAX_DOCUMENT_CHUNKS]
+    document_store.write(conversation_id, chunks)
+
+    return decided.model_copy(update={"chunk_count": len(chunks), "chunks_truncated": truncated})
+
+
+def decide_strategy(
+    parse_result: ParseResult,
+    *,
+    doc_ref: str,
+    threshold_tokens: int | None = None,
+) -> IngestResult:
+    """Decide how a parsed document is used, without chunking or storing anything.
+
+    The upload path calls this (D-FV0-31, third security review): a retrieval
+    document is indexed later by the background job, never inside the request.
+    Tokens are counted only until the count passes the threshold, so a four-million
+    character document costs one segment of counting here, not a whole encode. For a
+    retrieval document ``token_count`` is therefore that partial count: more than the
+    threshold, not the document's total.
+    """
+    if parse_result.needs_vision_handoff:
+        return IngestResult(
+            strategy=IngestStrategy.VISION_HANDOFF_REQUIRED,
+            doc_ref=doc_ref,
+            token_count=0,
+        )
+
     full_text = parse_result.full_text
-    token_count = count_tokens(full_text) if full_text else 0
+    effective_threshold = (
+        threshold_tokens if threshold_tokens is not None else resolve_inject_threshold()
+    )
+    token_count = count_tokens_capped(full_text, effective_threshold) if full_text else 0
 
     if token_count == 0:
         # No usable text — the parsers raise CorruptDocumentError before
@@ -214,10 +274,6 @@ def ingest_document(
             full_text="",
         )
 
-    effective_threshold = (
-        threshold_tokens if threshold_tokens is not None else resolve_inject_threshold()
-    )
-
     if token_count <= effective_threshold:
         return IngestResult(
             strategy=IngestStrategy.WHOLE_INJECT,
@@ -226,21 +282,8 @@ def ingest_document(
             full_text=full_text,
         )
 
-    # Retrieval path — chunk + write to DocumentStore.
-    chunks = chunk_document(
-        sections=list(parse_result.sections),
-        conversation_id=conversation_id,
-        doc_ref=doc_ref,
-        document_format=document_format,
-        title=title,
-        chunk_size_tokens=chunk_size_tokens,
-        overlap_tokens=overlap_tokens,
-    )
-    document_store.write(conversation_id, chunks)
-
     return IngestResult(
         strategy=IngestStrategy.RETRIEVAL,
         doc_ref=doc_ref,
         token_count=token_count,
-        chunk_count=len(chunks),
     )

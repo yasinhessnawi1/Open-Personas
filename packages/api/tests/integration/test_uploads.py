@@ -6,7 +6,8 @@ the spec-13 image_service for validation/storage; this suite covers the
 end-to-end seam:
 
 * Happy path round-trip (POST → GET → bytes match, Content-Type correct).
-* Unsupported media type / oversize body / decompression-bomb reject as 422.
+* Unsupported media type / decompression-bomb reject as 422; an oversize body is 413
+  ``upload_too_large``, the one answer every upload branch gives (PR 17).
 * Cross-tenant access returns 404 (existence-disclosure-safe per D-13).
 * Path-traversal refs ("..") reject as 404 via the sandbox resolver.
 * Rate-limit (D-13-X-rate-limit-bucket: reuse the ``default`` bucket) →
@@ -176,7 +177,7 @@ def test_unsupported_format_returns_422(client: tuple[TestClient, str, str, Path
     assert detail["context"]["reason"] == "unsupported_media_type"
 
 
-def test_oversize_returns_422(client: tuple[TestClient, str, str, Path]) -> None:
+def test_oversize_returns_413(client: tuple[TestClient, str, str, Path]) -> None:
     c, uid_a, _uid_b, _ws = client
     pid = _create_persona(c, uid_a)
     # 21 MB > 20 MB cap. Body starts with PNG signature so the media-type gate
@@ -187,8 +188,12 @@ def test_oversize_returns_422(client: tuple[TestClient, str, str, Path]) -> None
         files={"file": ("big.png", huge, "image/png")},
         headers=_auth(uid_a),
     )
-    assert resp.status_code == 422, resp.text
-    assert resp.json()["detail"]["context"]["reason"] == "oversize"
+    # PR 17: one answer for "too large" on every upload branch (here the request body
+    # bound refuses the 21 MB body before the image branch's own 20 MB cap would).
+    assert resp.status_code == 413, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "upload_too_large"
+    assert detail["context"]["reason"] == "oversize"
 
 
 def test_decompression_bomb_returns_422(client: tuple[TestClient, str, str, Path]) -> None:

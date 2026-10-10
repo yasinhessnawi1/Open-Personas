@@ -42,12 +42,43 @@ from persona.documents.errors import (
     CorruptDocumentError,
     MissingDependencyError,
 )
-from persona.documents.parsers import ParseResult
+from persona.documents.parsers import FLAG_PARTIAL_EXTRACTION, ParseResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-__all__ = ["parse_docx"]
+__all__ = ["MAX_DOCX_BLOCKS", "MAX_TABLE_COLUMNS", "parse_docx"]
+
+#: The most paragraphs plus table cells read from one document: the extraction budget.
+#: Measured: a genuine 1,200-page report is about 23,400 paragraphs and 19,000 cells.
+MAX_DOCX_BLOCKS: int = 200_000
+
+#: The most cells read from any table row. A ``w:gridSpan`` on one cell made
+#: python-docx's ``row.cells`` repeat that cell once per spanned column (a 34 KB file
+#: declaring a span of 100,000 produced 400 KB of text); the table is now walked one
+#: ``w:tc`` at a time and wider rows are cut here.
+MAX_TABLE_COLUMNS: int = 64
+
+#: Failures that say something about the PROCESS, not the file: never relabelled as a
+#: corrupt file. RecursionError is refused once, by the dispatcher, as ``too_complex``.
+_NOT_A_FILE_PROBLEM = (MemoryError, RecursionError)
+
+
+class _Blocks:
+    """Paragraphs and cells read so far across one document."""
+
+    def __init__(self) -> None:
+        self.used = 0
+        self.partial = False
+
+    def take(self) -> bool:
+        """Spend one block; False once the budget is gone (and mark the read partial)."""
+        if self.used >= MAX_DOCX_BLOCKS:
+            self.partial = True
+            return False
+        self.used += 1
+        return True
 
 
 def _import_docx() -> Any:  # noqa: ANN401 — third-party module returned dynamically
@@ -94,6 +125,8 @@ def parse_docx(path: Path) -> ParseResult:
 
     try:
         document = docx.Document(str(path))
+    except _NOT_A_FILE_PROBLEM:
+        raise
     except Exception as exc:  # noqa: BLE001 — adapter-boundary catch per §1
         # python-docx raises PackageNotFoundError from a non-stdlib subclass
         # hierarchy; catch broadly and discriminate by the message.
@@ -103,7 +136,9 @@ def parse_docx(path: Path) -> ParseResult:
             context={"format": "docx", "reason": reason, "filename": filename},
         ) from exc
 
-    sections = _extract_sections(document)
+    blocks = _Blocks()
+    # A RecursionError anywhere below is refused by the dispatcher (``too_complex``).
+    sections = _extract_sections(document, blocks=blocks)
 
     if not sections or not any(s.text.strip() for s in sections):
         raise CorruptDocumentError(
@@ -117,7 +152,7 @@ def parse_docx(path: Path) -> ParseResult:
 
     return ParseResult(
         sections=tuple(sections),
-        flags=(),
+        flags=(FLAG_PARTIAL_EXTRACTION,) if blocks.partial else (),
         size_bytes=size_bytes,
     )
 
@@ -132,7 +167,7 @@ def _classify_open_failure(exc: BaseException) -> str:
     return "unknown"
 
 
-def _extract_sections(document: Any) -> list[DocumentSection]:  # noqa: ANN401
+def _extract_sections(document: Any, *, blocks: _Blocks) -> list[DocumentSection]:  # noqa: ANN401
     """Walk the docx body in order, grouping paragraphs under headings.
 
     The python-docx Document's ``paragraphs`` and ``tables`` are emitted in
@@ -163,13 +198,17 @@ def _extract_sections(document: Any) -> list[DocumentSection]:  # noqa: ANN401
             sections.append(DocumentSection(text=full_body, section=current_heading))
         current_lines = []
 
-    for para in document.paragraphs:
+    from docx.table import Table  # noqa: PLC0415 (the extra is already imported here)
+    from docx.text.paragraph import Paragraph  # noqa: PLC0415
+
+    style_name_for = _paragraph_style_names(document)
+    for para in document.iter_inner_content():
+        if not isinstance(para, Paragraph):
+            continue
+        if not blocks.take():
+            break
         text = para.text.strip()
-        style_name = ""
-        try:
-            style_name = (para.style.name or "").strip()
-        except Exception:  # noqa: BLE001 — adapter-boundary catch
-            style_name = ""
+        style_name = style_name_for(para._p.style)  # noqa: SLF001 (the raw style id)
 
         if style_name.startswith("Heading") and text:
             _flush_heading_section()
@@ -181,8 +220,11 @@ def _extract_sections(document: Any) -> list[DocumentSection]:  # noqa: ANN401
     _flush_heading_section()
 
     # Tables — appended in document order (within the limitation noted above).
-    for table_index, table in enumerate(document.tables):
-        table_text = _format_table(table)
+    tables = (block for block in document.iter_inner_content() if isinstance(block, Table))
+    for table_index, table in enumerate(tables):
+        if blocks.partial:
+            break
+        table_text = _format_table(table, blocks=blocks)
         if table_text.strip():
             sections.append(
                 DocumentSection(
@@ -194,16 +236,66 @@ def _extract_sections(document: Any) -> list[DocumentSection]:  # noqa: ANN401
     return sections
 
 
-def _format_table(table: Any) -> str:  # noqa: ANN401
+def _paragraph_style_names(document: Any) -> Callable[[str | None], str]:  # noqa: ANN401
+    """Resolve paragraph style ids to names from a table built once per document.
+
+    python-docx's ``paragraph.style`` scans every style in the document on every call
+    (measured 2026-10-04: 0.78 ms per paragraph, about 18 seconds for a genuine
+    1,200-page report). The lookup rules are the same as python-docx's: an unknown or
+    missing id, or one naming a non-paragraph style, means the default paragraph style.
+    """
+    from docx.enum.style import WD_STYLE_TYPE  # noqa: PLC0415
+
+    names: dict[str, str] = {}
+    default = ""
+    try:
+        for style in document.styles:
+            if style.type != WD_STYLE_TYPE.PARAGRAPH:
+                continue
+            names[style.style_id] = (style.name or "").strip()
+            if getattr(style.element, "default", False):
+                default = names[style.style_id]
+    except (MemoryError, RecursionError):
+        raise
+    except Exception:  # noqa: BLE001 (adapter-boundary catch: no styles part, no names)
+        names = {}
+
+    def lookup(style_id: str | None) -> str:
+        if style_id is None:
+            return default
+        return names.get(style_id, default)
+
+    return lookup
+
+
+def _format_table(table: Any, *, blocks: _Blocks) -> str:  # noqa: ANN401
     """Render a docx table as a pipe-separated text table.
 
     The first row is treated as the header. Subsequent rows are normalised
     to the header's column count. Cell text is stripped.
+
+    Walks each ``w:tr`` and each of its ``w:tc`` elements once, never python-docx's
+    ``row.cells``: that property repeats a cell once per column of its ``w:gridSpan``
+    and resolves a ``w:vMerge`` continuation by recursing up through every row above it
+    (1,200 merged rows exhausted the stack after 34 seconds). A merged cell's text
+    therefore appears once, in the cell that holds it.
     """
+    from docx.text.paragraph import Paragraph  # noqa: PLC0415
+
     rows = []
-    for row in table.rows:
-        cells = [(cell.text or "").strip() for cell in row.cells]
+    for tr in table._tbl.tr_lst:  # noqa: SLF001 (the raw rows, deliberately; see above)
+        cells: list[str] = []
+        for column, tc in enumerate(tr.tc_lst):
+            if column >= MAX_TABLE_COLUMNS:
+                blocks.partial = True
+                break
+            if not blocks.take():
+                break
+            text = "\n".join(Paragraph(p, table).text for p in tc.p_lst)
+            cells.append(text.strip())
         rows.append(cells)
+        if blocks.partial and blocks.used >= MAX_DOCX_BLOCKS:
+            break
     if not rows:
         return ""
     header = rows[0]

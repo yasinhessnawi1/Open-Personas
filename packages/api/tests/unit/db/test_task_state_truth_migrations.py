@@ -30,7 +30,15 @@ def _ddl_positions(body: str) -> list[int]:
     return [m.start() for m in re.finditer(r"ALTER TABLE|CREATE INDEX|DROP INDEX", body)]
 
 
-@pytest.mark.parametrize("name", ["057_runs_stop_reason.py", "058_jobs_live_task_leg_index.py"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "057_runs_stop_reason.py",
+        "058_jobs_live_task_leg_index.py",
+        # D-FV0-31: the serial-type claim's index takes the same care.
+        "059_jobs_inflight_by_type.py",
+    ],
+)
 @pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
 def test_the_migration_fails_fast_and_leaves_no_timeout_behind(name: str, direction: str) -> None:
     body = _body(name, direction)

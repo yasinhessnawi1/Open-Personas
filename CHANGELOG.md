@@ -74,6 +74,56 @@ Per-spec entries are added by the close-out phase of each spec.
   Public keys and certificates are left alone, since they are not secrets.
 
 ### Fixed
+- **Attaching a PDF, Word document or spreadsheet to a chat now works in the hosted app.** The
+  libraries that read them were installed for the tests but never in the hosted
+  app, so every such upload failed, and the message you saw was
+  `error: [object Object]`. They now ship with the api (the new
+  `persona-core[documents]` extra, which also covers scanned PDFs), and when an
+  upload is refused the message says why.
+- **A document can no longer slow down or crash the app.** Every uploaded file is read
+  in a separate process with its own limits: 1 GiB of memory, 30 seconds of CPU, and
+  it is stopped after 60 seconds. A file that hits a limit is refused with a clear
+  message and the next upload is unaffected. A document yields at most four million
+  characters of text, and a scanned PDF at most four page images.
+- **Long documents are indexed in the background.** Uploading a long document used to
+  hold the request while the whole document was made searchable, which could take
+  minutes and most of the server. The upload now returns at once, the document shows
+  "Indexing…" until it is searchable, and the indexing runs slowly at low priority,
+  using at most a quarter of one processor core on average, so chat stays responsive.
+  People take turns, and whoever has had the least indexed in the last hour goes next,
+  so one person's many documents, or many accounts, do not hold up a newcomer. If the
+  indexing gets stuck, it pauses instead of marking documents failed, and the health
+  check (`/healthz`) reports it. Up
+  to 1,000 passages of one document are made searchable ("Partly indexed" past that),
+  up to 2,000 passages per person per hour, and up to 20 documents per person can wait
+  to be indexed at once. Still to be verified on the hosted servers: whether the
+  quarter-core cap is low enough for their shared processors.
+- **Your persona now says when it cannot use all of a document:** still being
+  indexed, only partly indexed, could not be indexed, only partly read, or a scanned
+  document whose pages it cannot see.
+- **One person's uploads cannot hold up everyone else's.** People take turns when
+  documents queue to be read. An upload waits at most 15 seconds for its turn before
+  you are asked to try again shortly. Each person has one upload being read at a
+  time, two arriving at once, and 3 minutes of reading time in any 10 minutes; after
+  a file that hit a limit, that person waits a minute and then goes behind everyone
+  else for ten minutes. Uploads past these limits, or past the request rate limit,
+  are refused before the file is received.
+- **A file too large gets one clear answer.** An image, a document or a file attached to
+  a task that is over the 20 MB limit is refused with "The file is too large: the upload
+  limit is 20 MB." For API clients this is now always 413 `upload_too_large` (an image
+  or task attachment over the limit was 422, a document 413 `document_too_large`).
+- **Text that contains a model's special token markers, or a very long run of spaces,
+  no longer fails the upload.**
+- **A document whose name contains a dot, or `.page-`, is no longer mixed up with
+  another document** or reported as unreadable on every turn.
+- **Hostile Office files are refused before anything unpacks them.** A Word or Excel
+  file is a zip archive, and a small one can claim to hold gigabytes. Every docx and
+  xlsx is now checked first: too many parts, parts that unpack to more than they
+  declare, or more than 256 MiB in total, and the file is refused without being
+  opened. Document uploads are also capped at 20 MiB, the same limit images already
+  had, and the server never reads more of a request than that.
+- **A spreadsheet with a malformed sheet is reported as unreadable** instead of
+  failing the upload with a server error.
 - **A task you set up over Telegram now actually gets set up.** Confirming a piece
   of work in a chat app got you "Done, I've set that up" and created nothing. The
   reply was written before the part that does the work, so nothing ever went red

@@ -44,9 +44,9 @@ dev = [
     # import-graph level; these are direct test-environment deps so
     # pytest can exercise the actual parsers, not just simulated-missing
     # paths).
-    "pypdf>=6.0,<7",
-    "pypdfium2>=5.0,<6",
-    "python-docx>=1.1,<2",
+    "pypdf>=6.19,<7",
+    "pypdfium2>=5.14,<6",
+    "python-docx>=1.2,<2",
     "openpyxl>=3.1,<4",
     # Spec 16 T11-T14 — host-side parsers for the §3.7 inspection asserts.
     # python-pptx mirrors the sandbox image manifest pin so the test side and

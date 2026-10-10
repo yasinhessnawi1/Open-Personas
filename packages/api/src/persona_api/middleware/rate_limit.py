@@ -165,7 +165,14 @@ def rate_limit(endpoint_key: str) -> Callable[..., Awaitable[None]]:
         user: AuthenticatedUser = Depends(get_current_user),
     ) -> None:
         limiter: RateLimiter = request.app.state.rate_limiter
-        decision = limiter.check(user.id, endpoint_key)
+        decision: RateLimitDecision | None = getattr(request.state, "rate_limit_decision", None)
+        if decision is None or getattr(request.state, "rate_limit_counted", None) != (
+            user.id,
+            endpoint_key,
+        ):
+            # Not counted yet. A route that must refuse before reading its body (the
+            # upload route) counts the request earlier and leaves the decision here.
+            decision = limiter.check(user.id, endpoint_key)
         # For normal (JSON) responses, headers on the injected Response merge into
         # the final response. For a route that returns its OWN StreamingResponse,
         # they DON'T (FastAPI doesn't merge into a route-constructed Response) —

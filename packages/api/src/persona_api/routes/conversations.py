@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from persona.approvals import is_decision_cue
+from persona.logging import get_logger
 from persona.stores.episodic import EpisodicStore
 
 from persona_api.approvals import ApprovalStore
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
     from persona.approvals import ProposalStatus
 
     from persona_api.approvals.resolver import ResolutionOutcome
+
+_log = get_logger("api.conversations")
 
 router = APIRouter(prefix="/v1", tags=["conversations"])
 
@@ -207,19 +210,11 @@ async def delete_conversation(
             memory_service.match_episodic_by_text, memory_backend, audit_logger
         )
 
-    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
-    chat_service.delete_conversation(
-        rls_engine=request.app.state.rls_engine,
-        conversation_id=conversation_id,
-        forget_memory=forget_memory,
-        persona_id=persona_id,
-        episodic_store=episodic_store,
-        match_texts=match_texts,
-        match_floor=memory_service.ForgetSettings().similarity_floor,
-    )
-
     # T19 — document workspace + DocumentStore chunks cascade (R5-D-4: via the
-    # storage backend so uploads on S3 cascade-delete too).
+    # storage backend so uploads on S3 cascade-delete too). BEFORE the row goes: the
+    # chunks' RLS policy matches through the conversation, so once the row is deleted
+    # the chunk delete matches nothing and they stay behind (fourth review finding 7).
+    # The documents waiting for the index leave its backlog too.
     file_storage = getattr(request.app.state, "file_storage", None)
     build_document_store = getattr(request.app.state, "build_document_store", None)
     if file_storage is not None and build_document_store is not None:
@@ -230,6 +225,25 @@ async def delete_conversation(
             conversation_id=conversation_id,
             document_store=build_document_store(),
         )
+    index_scheduler = getattr(request.app.state, "document_index_scheduler", None)
+    if index_scheduler is not None:
+        try:
+            await index_scheduler.forget_conversation(
+                owner_id=user.id, conversation_id=conversation_id
+            )
+        except Exception:  # noqa: BLE001 - a waiting document of a deleted conversation is skipped
+            _log.warning("could not drop the index backlog of {}", conversation_id)
+
+    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
+    chat_service.delete_conversation(
+        rls_engine=request.app.state.rls_engine,
+        conversation_id=conversation_id,
+        forget_memory=forget_memory,
+        persona_id=persona_id,
+        episodic_store=episodic_store,
+        match_texts=match_texts,
+        match_floor=memory_service.ForgetSettings().similarity_floor,
+    )
 
     # (Spec 13 T12 inserts its image-workspace-cascade here when it lands.)
 
@@ -367,13 +381,16 @@ async def post_message(
             conversation_id=conversation_id,
         )
         persona_id_for_docs = str(conversation_row["persona_id"])
-        document_context = document_service.build_document_context(
+        document_context = await document_service.build_document_context(
+            parser=request.app.state.document_parser,
             file_storage=request.app.state.file_storage,
             owner_id=user.id,
             persona_id=persona_id_for_docs,
             conversation_id=conversation_id,
             user_message=body.content,
             document_store=(document_store_builder() if document_store_builder else None),
+            # D-FV0-31: a document whose index never started is picked up here.
+            index_scheduler=getattr(request.app.state, "document_index_scheduler", None),
         )
     except Exception:  # noqa: BLE001 — document path is best-effort
         # If document-context construction fails, log + continue with

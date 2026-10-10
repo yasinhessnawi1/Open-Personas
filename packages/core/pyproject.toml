@@ -143,15 +143,33 @@ turbovec = [
 sandbox = [
     "docker>=7,<8",
 ]
+# The document libraries (D-FV0-06 and D-FV0-07, owner rulings 2026-10-04; supersedes the
+# D-14-X-documents-extra deferral). The parsers in ``persona.documents.parsers`` lazy-import
+# these and raise ``MissingDependencyError`` naming this extra when one is absent, so a
+# minimal ``pip install persona-core`` stays minimal. persona-api installs the extra, which
+# is how the production image gets them (its build installs no dev dependencies).
+#
+# - python-docx ``>=1.2`` is deliberate (D-FV0-16): the sandbox image still pins 1.1.2 for
+#   generation, and the difference is a stated decision, not drift.
+# - pypdfium2 rasterises scanned PDF pages (persona-api ``document_service``). Its wheel
+#   bundles a PDFium binary carrying permissive third-party licences (ICU, FreeType used
+#   under the FreeType License option, IJG, zlib, libpng, libtiff and others), shipped in
+#   its ``dist-info/licenses``; the same set Pillow already bundles.
+documents = [
+    "openpyxl>=3.1,<4",
+    "python-docx>=1.2,<2",
+    "pypdf>=6.19,<7",
+    "pypdfium2>=5.14,<6",
+]
 # Spec 16 T01 — pypdf as a host-side test-only dependency for the §3.7 PDF
 # inspection asserts in T11/T14 (PdfReader.pages count, page text extraction,
 # /Resources/XObject walk). NOT in the Spec 12 sandbox image manifest — never
 # imported by persona-core / persona-runtime code paths inside the sandbox.
-# Pin range matches the workspace dev group (`pypdf>=6.0,<7` added by Spec 14
-# T21 for the pypdfium2-aligned PDF parser) so `uv sync` resolves a single
-# version across the workspace.
+# Pin range matches the workspace dev group (`pypdf>=6.19,<7`, first added by Spec 14
+# T21 for the pypdfium2-aligned PDF parser; the floor rose from 6.0 at the document
+# parsers' security review) so `uv sync` resolves a single version across the workspace.
 test = [
-    "pypdf>=6.0,<7",
+    "pypdf>=6.19,<7",
 ]
 
 [project.scripts]

@@ -20,9 +20,13 @@ import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useAuth } from "@/auth";
 import { buttonVariants } from "@/components/ui/button";
-import { ApiError, type TokenGetter } from "@/lib/api/client";
+import type { TokenGetter } from "@/lib/api/client";
 import { DOCUMENT_EXTENSIONS, IMAGE_MEDIA_TYPES } from "@/lib/api/limits";
-import { type TaskAttachmentRef, uploadTaskAttachment } from "@/lib/upload";
+import {
+  describeUploadError,
+  type TaskAttachmentRef,
+  uploadTaskAttachment,
+} from "@/lib/upload";
 import { cn } from "@/lib/utils";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
@@ -87,12 +91,7 @@ export function useHandOffAttachments(
         });
         patch(id, { state: "ready", ref });
       } catch (e) {
-        const detail =
-          e instanceof ApiError
-            ? `${e.code}${e.detail ? `: ${String(e.detail)}` : ""}`
-            : e instanceof Error
-              ? e.message
-              : String(e);
+        const detail = describeUploadError(e);
         patch(id, { state: "error", detail });
       }
     },

@@ -186,11 +186,20 @@ class DocumentStore:
             msg = f"doc_ref must not contain '::'; got {doc_ref!r}"
             raise ValueError(msg)
 
+        prefix = f"{conversation_id}::{DOCUMENT_STORE_KIND}::{doc_ref}::"
+        # A backend that can delete by id prefix does it in one statement: reading every
+        # chunk of the conversation with its vector to find one document's cost 3 s and
+        # 350 MiB at 20,000 chunks (fourth security review finding 3).
+        delete_by_prefix = getattr(self._backend, "delete_by_id_prefix", None)
+        if delete_by_prefix is not None:
+            delete_by_prefix(
+                persona_id=conversation_id, store_kind=DOCUMENT_STORE_KIND, prefix=prefix
+            )
+            return
         all_chunks = self._backend.get_all(
             persona_id=conversation_id,
             store_kind=DOCUMENT_STORE_KIND,
         )
-        prefix = f"{conversation_id}::{DOCUMENT_STORE_KIND}::{doc_ref}::"
         matching_ids = [c.id for c in all_chunks if c.id.startswith(prefix)]
         if not matching_ids:
             return

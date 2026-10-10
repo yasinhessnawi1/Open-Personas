@@ -485,3 +485,81 @@ def test_walks_nested_subdirectories(client: TestClient, persona_root: Path) -> 
     refs = {item["ref"] for item in body["items"]}
     assert "charts/abc.png" in refs
     assert "intermediate/data.parquet" in refs
+
+
+# -- F3 (second review): documents are deleted only through the document delete ------
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "conversations/conv_1/documents/lease-1a2b3c4d.pdf",
+        "conversations/conv_1/documents/lease-1a2b3c4d.pdf.text.json",
+        "conversations/conv_1/documents/lease-1a2b3c4d.page-0001.png",
+        "./conversations/conv_1/documents/lease-1a2b3c4d.pdf",
+        "conversations/conv_1/other/../documents/lease-1a2b3c4d.pdf",
+        "conversations//conv_1//documents/lease-1a2b3c4d.pdf",
+    ],
+)
+def test_an_attached_document_cannot_be_deleted_as_an_artifact(
+    client: TestClient, persona_root: Path, ref: str
+) -> None:
+    stored = _seed(persona_root, "conversations/conv_1/documents/lease-1a2b3c4d.pdf")
+    resp = client.delete(f"/v1/personas/astrid/artifacts/{ref}", headers=_auth())
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "document_managed"
+    assert stored.is_file()
+
+
+def test_other_conversation_artifacts_can_still_be_deleted(
+    client: TestClient, persona_root: Path
+) -> None:
+    """Valid input passes: only the documents directory is held back."""
+    chart = _seed(persona_root, "conversations/conv_1/charts/c.png")
+    resp = client.delete(
+        "/v1/personas/astrid/artifacts/conversations/conv_1/charts/c.png", headers=_auth()
+    )
+    assert resp.status_code == 204
+    assert not chart.is_file()
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("conversations/c/documents/x.pdf", True),
+        ("conversations\\c\\documents\\x.pdf", True),
+        ("/conversations/c/documents", True),
+        ("conversations/c/documents-old/x.pdf", False),
+        ("conversations/documents/x.pdf", False),
+        ("uploads/conversations/c/documents/x.pdf", False),
+        ("conversations/c/documents/../charts/x.png", False),
+        # Third review, finding 16: a case-insensitive filesystem (community installs on
+        # macOS or Windows) opens these as the documents directory too.
+        ("Conversations/c/documents/x", True),
+        ("conversations/c/Documents/x.pdf", True),
+        ("CONVERSATIONS/c/DOCUMENTS/x.pdf", True),
+        ("conver\u017fations/c/documents/x.pdf", True),
+        ("Conversations/c/Documents-old/x.pdf", False),
+    ],
+)
+def test_the_documents_directory_is_recognised_however_it_is_spelled(
+    ref: str, expected: bool
+) -> None:
+    from persona_api.routes.artifacts import is_document_workspace_ref  # noqa: PLC0415
+
+    assert is_document_workspace_ref(ref) is expected
+
+
+def test_a_users_own_index_or_text_json_is_listed_and_document_sidecars_are_not(
+    client: TestClient, persona_root: Path
+) -> None:
+    """Fourth security review finding 8: the sidecar suffixes are scoped to documents."""
+    _seed(persona_root, "outputs/search.index.json", b"{}")
+    _seed(persona_root, "outputs/report.text.json", b"{}")
+    _seed(persona_root, "conversations/conv_1/documents/lease-1a2b3c4d.pdf.index.json", b"{}")
+    _seed(persona_root, "conversations/conv_1/documents/lease-1a2b3c4d.pdf.text.json", b"{}")
+    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    refs = {item["ref"] for item in resp.json()["items"]}
+    assert {"outputs/search.index.json", "outputs/report.text.json"} <= refs
+    hidden = [r for r in refs if "documents/" in r and r.endswith((".index.json", ".text.json"))]
+    assert hidden == []

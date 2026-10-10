@@ -172,6 +172,13 @@ async def test_success_persists_bytes_writes_both_sidecars(tmp_path: Path) -> No
     assert doc.workspace_path == (
         f"owner_1/persona_1/conversations/conv_1/documents/{persisted_name}"
     )
+    # D-FV0-31: a retrieval document like an upload's, so the index makes it searchable:
+    # stored with its text, ``pending`` until the index job runs (never "ready" with none).
+    assert (doc.text_stored, doc.index_state, doc.chunks_indexed) == (True, "pending", 0)
+    import json  # noqa: PLC0415
+
+    stored = json.loads(target.with_name(target.name + ".text.json").read_text("utf-8"))
+    assert stored == {"version": 2, "sections": [{"text": "Weekly, rotating hosts."}]}
 
     # F5 .f5.json — UNCHANGED contract, new location; the shape the chat Files
     # viewer (GET /v1/personas/{id}/artifacts, useConversationArtifacts) reads.

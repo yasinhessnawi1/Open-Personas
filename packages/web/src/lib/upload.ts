@@ -18,7 +18,7 @@
  * what eventually lands in `PostMessageRequest.images` (T06).
  */
 
-import type { TokenGetter } from "@/lib/api/client";
+import type { ApiErrorBody, TokenGetter } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/client";
 import type { components } from "@/lib/api/schema";
 
@@ -176,6 +176,61 @@ export async function uploadTaskAttachment(
 }
 
 /**
+ * The structured error body inside an upload's error response.
+ *
+ * The upload route raises FastAPI `HTTPException`s, which arrive wrapped as
+ * `{"detail": {"error", "detail", "context"}}`. Read flat, that left `code` as
+ * `"error"` and `detail` as an object, so the composer's toast read
+ * `error: [object Object]` (D-FV0-09). This unwraps the envelope when it holds a
+ * structured body and passes any other shape through unchanged.
+ */
+export function uploadErrorBody(parsed: unknown): ApiErrorBody | undefined {
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const body = parsed as ApiErrorBody;
+  const inner = body.detail;
+  if (
+    body.error === undefined &&
+    inner !== null &&
+    typeof inner === "object" &&
+    !Array.isArray(inner) &&
+    typeof (inner as ApiErrorBody).error === "string"
+  ) {
+    return inner as ApiErrorBody;
+  }
+  return body;
+}
+
+/** The error code every upload branch answers a file too large with (413). */
+export const UPLOAD_TOO_LARGE = "upload_too_large";
+
+/**
+ * One line describing a failed upload, for a toast or an attachment chip.
+ *
+ * `code: message` when the server said why; for a file too large, just the server's
+ * sentence (the image chip, the document toast and the task hand-off all show it). A
+ * `detail` that is not text (a validation error list, an unexpected object) is rendered
+ * as JSON rather than as `[object Object]`.
+ */
+export function describeUploadError(error: unknown): string {
+  if (error instanceof ApiError) {
+    const detail = error.detail;
+    // One answer for "too large" on every upload branch (PR 17): 413
+    // `upload_too_large`, whose detail is already a sentence for a person.
+    if (error.code === UPLOAD_TOO_LARGE) {
+      return typeof detail === "string" && detail !== ""
+        ? detail
+        : "The file is too large to upload.";
+    }
+    if (detail === undefined || detail === null || detail === "")
+      return error.code;
+    const text = typeof detail === "string" ? detail : JSON.stringify(detail);
+    return `${error.code}: ${text}`;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/**
  * Internal: POST a `FormData` body with the Bearer token + optional
  * progress + optional abort. Maps non-2xx → {@link ApiError}; network
  * failure / abort → distinct messages so the UI can branch on intent.
@@ -230,24 +285,16 @@ async function sendMultipart(
         return;
       }
       reject(
-        new ApiError(
-          xhr.status,
-          (parsed as {
-            error?: string;
-            detail?: unknown;
-            context?: Record<string, string>;
-          }) ?? undefined,
-          {
-            // Rate-limit headers are exposed even on error responses; mirror
-            // client.ts readRateLimit shape without re-importing Headers.
-            limit: numberOrNull(xhr.getResponseHeader("X-RateLimit-Limit")),
-            remaining: numberOrNull(
-              xhr.getResponseHeader("X-RateLimit-Remaining"),
-            ),
-            reset: numberOrNull(xhr.getResponseHeader("X-RateLimit-Reset")),
-            retryAfter: numberOrNull(xhr.getResponseHeader("Retry-After")),
-          },
-        ),
+        new ApiError(xhr.status, uploadErrorBody(parsed), {
+          // Rate-limit headers are exposed even on error responses; mirror
+          // client.ts readRateLimit shape without re-importing Headers.
+          limit: numberOrNull(xhr.getResponseHeader("X-RateLimit-Limit")),
+          remaining: numberOrNull(
+            xhr.getResponseHeader("X-RateLimit-Remaining"),
+          ),
+          reset: numberOrNull(xhr.getResponseHeader("X-RateLimit-Reset")),
+          retryAfter: numberOrNull(xhr.getResponseHeader("Retry-After")),
+        }),
       );
     };
 

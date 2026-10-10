@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from persona.errors import PermanentJobError
+from persona.errors import JobDeferredError, PermanentJobError
 from persona.jobs import JobPayload, JobRegistry, JobState, JobTypeSpec, RetryPolicy
 from persona_api.jobs import JobQueue
 from persona_api.jobs.executor import JobExecutor
@@ -213,3 +213,46 @@ def test_crash_loop_cap_dead_letters_without_running(seeded: Engine, app_engine:
     state, last_error, _ = _row(seeded, rec.id)
     assert state == "dead"
     assert last_error == "max attempts exceeded"
+
+
+class _Paused:
+    """Handler that defers its job (D-FV0-31: the document indexer's lane pause)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def handle(self, payload: _Payload, context: JobContext) -> None:
+        self.calls += 1
+        msg = "paused"
+        raise JobDeferredError(msg, delay_seconds=120.0)
+
+
+def test_a_deferred_job_goes_back_due_later_at_the_same_attempt(
+    seeded: Engine, app_engine: Engine
+) -> None:
+    import asyncio
+
+    handler = _Paused()
+    queue = JobQueue(seeded)
+    executor = _executor(seeded, app_engine, handler, RetryPolicy(max_attempts=2))
+    rec = queue.enqueue(
+        type="boom", owner_id="user_a", payload={"marker": "m"}, idempotency_key="boom:m"
+    )
+    assert rec is not None
+    for _ in range(4):  # more deferrals than attempts: never dead-lettered
+        with seeded.begin() as conn:
+            conn.execute(text("UPDATE jobs SET scheduled_at = now() WHERE id = :i"), {"i": rec.id})
+        t0 = datetime.now(UTC)
+        outcome = asyncio.run(_claim_and_execute(executor, queue))
+        assert outcome is JobState.QUEUED
+        state, last_error, scheduled_at = _row(seeded, rec.id)
+        assert state == "queued"
+        assert last_error is not None
+        assert "paused" in last_error
+        assert scheduled_at >= t0 + timedelta(seconds=110)
+        with seeded.begin() as conn:
+            attempt = conn.execute(
+                text("SELECT attempt FROM jobs WHERE id = :i"), {"i": rec.id}
+            ).scalar_one()
+        assert attempt == 0
+    assert handler.calls == 4

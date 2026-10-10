@@ -75,7 +75,13 @@ pip install persona-core[local]          # + torch / transformers for local HF i
 pip install persona-core[postgres]       # + psycopg + pgvector for the Postgres backend
 pip install persona-core[sandbox]        # + docker SDK for the LocalDockerSandbox
 pip install persona-core[turbovec]       # + turbovec for the optional quantized graph index
+pip install persona-core[documents]      # + pypdf, python-docx, openpyxl, pypdfium2 to read pdf, docx and xlsx
 ```
+
+Without `[documents]`, parsing a pdf, docx or xlsx raises `MissingDependencyError`
+naming this extra; text, markdown, csv and code parse with the standard library alone.
+pypdfium2 bundles the PDFium library, which carries its own permissive third-party
+licences in the wheel's `dist-info/licenses`.
 
 Python 3.11 or newer. For workspace development from the monorepo:
 

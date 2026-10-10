@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 dependencies = [
-    "persona-core[postgres]",
+    # ``documents`` (D-FV0-06): the production image is built with ``--no-dev``, so the
+    # document parsers' libraries reach it only through this extra.
+    "persona-core[postgres,documents]",
     "persona-runtime",
     "fastapi>=0.111,<1",
     "uvicorn[standard]>=0.30,<1",

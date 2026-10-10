@@ -166,6 +166,29 @@ python -m persona_api.db.community_import \
 </details>
 
 <details>
+<summary><b>📄 Document uploads: parsed in a separate worker process, indexed in the background</b></summary>
+<br>
+
+Every uploaded PDF, Word, Excel or text file is parsed in a separate worker process, never in the API itself. A file that exhausts a limit or crashes the parser takes down only its worker: the API answers with a clean refusal and starts a fresh worker for the next upload. The worker starts on the first upload, in an empty directory, with none of your environment's variables except the few it needs to run, and it never opens the database. A worker serves one user for its whole life; a spare worker (about 35 MB) is kept ready so the next user does not wait for one to start.
+
+What this does **not** do: the worker runs as the **same operating-system user** as the API. If a file exploited a bug in the native PDF or image code to take over the worker, that code could read or change any file your user can read (your `.env` and every user's workspace included), or signal the API process, and hand data back as document text. On Linux the API marks itself non-dumpable, so the worker cannot read the API's memory or environment, at the cost that `py-spy` and `gdb` can no longer attach to the API without root. Run the API as a dedicated user that can read nothing it does not need.
+
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Crash isolation | yes | yes | yes |
+| 60 s wall-clock kill | yes | yes | yes |
+| 30 s CPU limit per file | yes | yes | no (no `resource` module) |
+| 1 GiB memory limit | yes | no (macOS does not enforce `RLIMIT_AS`) | no |
+| Worker time charged as CPU time | yes | no: wall time (no `/proc`) | no: wall time |
+| Background index at low priority | yes (niceness 19, one core) | normal priority; one core where torch's OpenMP runtime is found | same as macOS |
+
+`PERSONA_DOC_PARSER_WORKERS` sets how many files parse at once (default 1; each worker may use up to 1 GiB). While every worker is busy, up to four uploads wait, for at most 15 s (`PERSONA_DOC_PARSER_UPLOAD_WAIT_SECONDS`; keep it well under your proxy's idle timeout, since an upload sends nothing back until it is parsed), users taking turns; past that the API answers `503 parser_busy` with a `Retry-After`. Per user: one upload at a time (`429 upload_in_progress`), at most two upload bodies arriving at once (`429 uploads_arriving`, checked with the rate limit before the body is read), 180 s of worker time in any 10 minutes (`429 parse_budget_exhausted`), and a one-minute wait after a file that hit a limit (`429 parse_cooldown`); for ten minutes after that, the user's files wait behind everyone else's. A document yields at most four million characters of text and 10,000 sections, and a scanned PDF at most four rendered pages.
+
+A document too long to put into a turn whole is stored at once and **indexed in the background**: the upload returns straight away, the document shows "Indexing…", and the persona is told what it cannot search yet. The index runs on one low-priority thread, a few dozen chunks at a time, and uses at most a quarter of one core on average (`PERSONA_DOC_INDEX_DUTY_CYCLE`, default 0.25, about 3,000 chunks an hour), so chat stays responsive while it runs. On a burstable VM such as Fly's shared CPUs, low priority alone does not stop the index spending the machine's CPU burst balance; lower the setting if it does (this is still to be verified on Fly). A document is indexed up to 1,000 chunks (the rest is not searchable and the document shows "Partly indexed"), and one user's documents up to 2,000 chunks in any hour (past that, indexing pauses until the hour allows more). Users take turns: each has one place in the index queue however many documents they upload, and at most 20 documents may wait to be indexed at once (`429 index_backlog_full`). With the jobs worker (`PERSONA_API_IN_PROCESS_WORKER`) the index survives a restart; without it, an interrupted index resumes the next time its conversation is opened.
+
+</details>
+
+<details>
 <summary><b>☁️ Cloud edition: hosting for many tenants</b></summary>
 <br>
 

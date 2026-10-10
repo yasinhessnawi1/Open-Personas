@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import _document_upload
 import pytest
 from persona.documents.ingest import IngestStrategy
 from persona.schema.conversation import Conversation
@@ -45,6 +46,7 @@ from persona.stores.document_store import DocumentStore
 from persona.stores.postgres import PostgresBackend
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services import document_service
+from persona_api.services.document_parsing import ThreadDocumentParser
 from persona_api.services.runtime_factory import RuntimeFactory
 from persona_api.storage import LocalFileStorage
 from sqlalchemy import text
@@ -246,7 +248,7 @@ async def test_production_shape_upload_to_prompt(
         # the boundary that exercises gap #2 (migration 005 aux RLS
         # policy on memory_chunks for kind='document'). Without the
         # policy this write raises InsufficientPrivilege.
-        ref = document_service.upload(
+        ref = _document_upload.upload(
             file_storage=LocalFileStorage(workspace_root),
             owner_id=owner,
             persona_id=persona_id,
@@ -265,13 +267,14 @@ async def test_production_shape_upload_to_prompt(
         # The build_document_context boundary — gap #3 source. This is
         # what routes/conversations.py calls before stream_chat to build
         # the DocumentContext the runtime threads into PromptBuilder.
-        document_context = document_service.build_document_context(
+        document_context = await document_service.build_document_context(
             file_storage=LocalFileStorage(workspace_root),
             owner_id=owner,
             persona_id=persona_id,
             conversation_id=conversation_id,
             user_message=f"What does the {_DISTINCTIVE_TOKEN} clause say?",
             document_store=document_store,
+            parser=ThreadDocumentParser(),
         )
 
         # Retrieval ran — chunks must have come back from the DB (proves

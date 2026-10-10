@@ -56,6 +56,8 @@ export function ConversationDocumentList({
             // writing the sidecar).
             doc.strategy as "whole_inject" | "retrieval" | "vision_handoff"
           }
+          indexState={doc.index_state}
+          textPartial={doc.text_partial}
           onRemove={onRemove}
         />
       ))}
