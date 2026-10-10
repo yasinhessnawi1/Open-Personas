@@ -1769,13 +1769,19 @@ class TestTheIndexerThread:
 
     def test_its_torch_runs_on_one_thread_and_no_other_threads_change(self) -> None:
         torch = pytest.importorskip("torch")
-        cores = os.cpu_count() or 1
-        if cores == 1 or "OMP_NUM_THREADS" in os.environ:
-            pytest.skip("needs several cores and torch's own default thread count")
-        # torch's default is every core; an index that changed it for the whole process
-        # (even from its own thread, before this thread first asked) would show here.
+        # torch's own default, as a thread that has set nothing reads it, before the indexer
+        # runs. It is not ``os.cpu_count()``: torch counts physical cores (2 on a 4-vCPU CI
+        # runner), and OMP_NUM_THREADS overrides it.
+        default: list[int] = []
+        first = threading.Thread(target=lambda: default.append(torch.get_num_threads()))
+        first.start()
+        first.join()
+        if default[0] == 1:
+            pytest.skip("torch defaults to one thread here: a limit to one would not show")
+        # an index that changed it for the whole process (even from its own thread, before
+        # this thread first asked) would show here
         before = torch.get_num_threads()
-        assert before == cores
+        assert before == default[0]
         indexer = DocumentIndexer()
         try:
             inside = asyncio.run(indexer.run(torch.get_num_threads))
