@@ -114,7 +114,9 @@ Like the rest of the stack, it carries an **edition** stance
 
 ## Install and run
 
-`persona-voice` is a `uv` workspace package. From the repo root:
+`persona-voice` is a `uv` workspace package. It runs on Linux and macOS; on Windows
+the service refuses to start and says that voice is not available on Windows (the
+rest of the community edition runs there). From the repo root:
 
 ```bash
 uv sync                       # install the workspace

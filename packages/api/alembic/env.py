@@ -23,10 +23,14 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Let DATABASE_URL win over the ini default; coerce a stray async DSN to sync.
+# Let DATABASE_URL win over the ini default; coerce a stray async DSN to sync. The ini
+# value goes through configparser interpolation, where "%" is special, so a
+# percent-encoded DSN (a Windows socket folder, a password with "%") is escaped.
 _env_url = os.environ.get("DATABASE_URL")
 if _env_url:
-    config.set_main_option("sqlalchemy.url", _env_url.replace("+asyncpg", "+psycopg"))
+    config.set_main_option(
+        "sqlalchemy.url", _env_url.replace("+asyncpg", "+psycopg").replace("%", "%%")
+    )
 
 
 def run_migrations_offline() -> None:

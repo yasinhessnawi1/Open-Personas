@@ -46,3 +46,18 @@ def test_enable_graph_writes_is_idempotent_on_sqlite(tmp_path: Path) -> None:
     factory.enable_graph_writes(audit_root=tmp_path)
     factory.enable_graph_writes(audit_root=tmp_path)
     assert factory.graph_store is None
+
+
+def test_the_unavailable_graph_log_line_names_the_engine(tmp_path: Path) -> None:
+    """Spec WIN T2: the line printed a literal ``%s``; it now names the dialect."""
+    from loguru import logger
+
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="INFO")
+    try:
+        _factory(create_engine("sqlite://"), tmp_path).enable_graph_writes(audit_root=tmp_path)
+    finally:
+        logger.remove(sink)
+    [line] = [text for text in lines if "graph store unavailable" in text]
+    assert "on a sqlite engine" in line
+    assert "%s" not in line

@@ -119,6 +119,11 @@ def parse_text(path: Path) -> ParseResult:
         text_strict_failed = True
         text = raw_bytes.decode("utf-8", errors="replace")
 
+    # Spec WIN T2: a file written on Windows (CRLF) or classic Mac (lone CR) splits into
+    # the same paragraphs, headings and lines as one written with LF. Without this a
+    # CRLF .txt uploaded to any server parsed as a single paragraph.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     if not text.strip():
         # Non-empty bytes that decode to nothing useful — criterion #8.
         raise CorruptDocumentError(

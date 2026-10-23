@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,6 +127,9 @@ def _build_legacy_store(root: Path, embedder: HashEmbedder384) -> tuple[Path, Pa
         chunks=[_chunk(convo_id, "document", "a lease agreement excerpt")],
     )
     expected = {"identity": 2, "self_facts": 1, "document": 1, "vector_total": 4}
+    # Release the folder as the legacy app would on exit; on Windows an open client
+    # would block the importer's rename of the Chroma folder (Spec WIN T2).
+    chroma.close()
     return sqlite_path, chroma_path, expected
 
 
@@ -134,7 +138,9 @@ def _build_legacy_store(root: Path, embedder: HashEmbedder384) -> tuple[Path, Pa
 
 @pytest.fixture(scope="module")
 def instance() -> Iterator[CommunityDbManager]:
-    base = tempfile.mkdtemp(prefix="k10imp", dir="/tmp")
+    # A short base keeps the socket path under the AF_UNIX cap; on Windows the default
+    # temp folder is short enough and "/tmp" does not exist.
+    base = tempfile.mkdtemp(prefix="k10imp", dir=None if sys.platform == "win32" else "/tmp")
     mgr = CommunityDbManager(external_url=None, base_dir=Path(base))
     try:
         mgr.start()

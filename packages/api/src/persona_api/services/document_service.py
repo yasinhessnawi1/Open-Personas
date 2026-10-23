@@ -63,6 +63,8 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -72,6 +74,7 @@ from persona.logging import get_logger
 from persona.schema.content import ImageContent
 from pydantic import BaseModel, ConfigDict, Field
 
+from persona_api.errors import DocumentReadError
 from persona_api.services.artifact_metadata import (
     SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
@@ -234,11 +237,7 @@ def upload(
     # scratch, NOT the durable copy. The durable bytes go to ``file_storage``
     # (local byte-identical / S3 object) only AFTER a successful parse, so a parse
     # failure leaves NO orphan (the temp auto-deletes; nothing was persisted).
-    with tempfile.NamedTemporaryFile(suffix=extension) as tmp:
-        tmp.write(file_bytes)
-        tmp.flush()
-        tmp_path = Path(tmp.name)
-
+    with _staged_file(file_bytes, extension) as tmp_path:
         parse_result = parse_document(tmp_path)
         title = filename
         ingest_result = ingest_document(
@@ -416,13 +415,27 @@ def build_document_context(
             )
         )
         if ref.strategy == IngestStrategy.WHOLE_INJECT:
-            text = get_document_text(
-                file_storage=file_storage,
-                owner_id=owner_id,
-                persona_id=persona_id,
-                conversation_id=conversation_id,
-                doc_ref=ref.doc_ref,
-            )
+            try:
+                text = get_document_text(
+                    file_storage=file_storage,
+                    owner_id=owner_id,
+                    persona_id=persona_id,
+                    conversation_id=conversation_id,
+                    doc_ref=ref.doc_ref,
+                )
+            except DocumentReadError as exc:
+                # Loud, not silent: logged as an error, and the model is told the
+                # document could not be read instead of it silently disappearing.
+                _log.error(
+                    "an attached document could not be read",
+                    doc_ref=ref.doc_ref,
+                    reason=exc.context.get("reason", "unknown"),
+                )
+                text = (
+                    f"[This document could not be read "
+                    f"({exc.context.get('reason', 'unknown')}), so its text is not "
+                    f"included. Tell the user and ask them to upload it again.]"
+                )
             if text:
                 whole_inject.append(
                     DocumentInjection(
@@ -478,8 +491,12 @@ def get_document_text(
         doc_ref: Document reference.
 
     Returns:
-        The full extracted text. Empty string if the document isn't
-        found or is unreadable (T14 handles empty cleanly).
+        The full extracted text.
+
+    Raises:
+        DocumentReadError: the original is missing, the storage read failed, or it
+            no longer parses (Spec WIN T2: never an empty string that would look, to
+            the model, like an empty document).
     """
     prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
@@ -488,19 +505,48 @@ def get_document_text(
             continue
         try:
             data = file_storage.get(obj.key)
-        except OSError:
-            _log.warning("get_document_text failed for ref {}", doc_ref)
-            return ""
+        except OSError as exc:
+            raise DocumentReadError(
+                "the stored document could not be read",
+                context={"reason": "storage_error", "doc_ref": doc_ref},
+            ) from exc
         # parse_document needs a local path; stage the bytes in a node-local temp.
-        with tempfile.NamedTemporaryFile(suffix=Path(name).suffix) as tmp:
-            tmp.write(data)
-            tmp.flush()
+        with _staged_file(data, Path(name).suffix) as staged:
             try:
-                return parse_document(Path(tmp.name)).full_text
-            except Exception:  # noqa: BLE001 — fail-safe; T14 handles empty
-                _log.warning("get_document_text failed for ref {}", doc_ref)
-                return ""
-    return ""
+                return parse_document(staged).full_text
+            except Exception as exc:
+                raise DocumentReadError(
+                    "the stored document no longer parses",
+                    context={"reason": "unreadable", "doc_ref": doc_ref},
+                ) from exc
+    raise DocumentReadError(
+        "the stored document is missing",
+        context={"reason": "not_found", "doc_ref": doc_ref},
+    )
+
+
+@contextmanager
+def _staged_file(data: bytes, suffix: str) -> Iterator[Path]:
+    """Stage ``data`` in a node-local temp file that is CLOSED while the parsers read it.
+
+    A ``NamedTemporaryFile`` held open is locked on Windows, so reopening it by name
+    (which every parser does) fails there (Spec WIN T2). ``mkstemp`` creates the file
+    owner-only, the bytes are written and the handle closed, and the file is always
+    removed afterwards, on every platform.
+    """
+    handle, name = tempfile.mkstemp(suffix=suffix)
+    path = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as staged:
+            staged.write(data)
+        yield path
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _log.warning("could not remove a staged document", exc_type=type(exc).__name__)
 
 
 def _is_original_name(name: str, doc_ref: str) -> bool:

@@ -77,6 +77,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Engine, create_engine, event, text
 
 from persona_voice.config import VoiceConfig
+from persona_voice.platform import require_voice_platform
 from persona_voice.stt.errors import (
     STTAudioFormatError,
     STTAuthenticationError,
@@ -945,5 +946,10 @@ def create_app(config: VoiceConfig | None = None) -> FastAPI:
     the app. The token-only deployment, the catalogue, and (when
     ``PERSONA_VOICE_AGENT_INPROCESS=true``) the dev agent launcher are all set up
     inside :func:`build_app`.
+
+    Raises:
+        VoicePlatformUnsupportedError: started on Windows, where voice is not
+            supported (Spec WIN T5, D-VOICE-vendor-only).
     """
+    require_voice_platform()
     return build_app(config or VoiceConfig())

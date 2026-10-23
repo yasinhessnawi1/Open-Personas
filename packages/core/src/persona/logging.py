@@ -17,13 +17,15 @@ import contextlib
 import re
 import sys
 import threading
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TextIO
 
 from loguru import logger as _root_logger
 
 from persona.config import PersonaCoreConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from loguru import Logger, Record
 
 __all__ = ["get_logger", "looks_like_secret", "redact_secrets", "reset_for_testing"]
@@ -192,6 +194,30 @@ def _attach_ctx(record: Record) -> None:
     extra["_ctx"] = " | " + " ".join(f"{k}={v}" for k, v in fields.items()) if fields else ""
 
 
+def _stderr_sink() -> TextIO | Callable[[str], None]:
+    """The stderr sink: ``sys.stderr`` itself, or a UTF-8 writer when it is not UTF-8.
+
+    On Windows a redirected stderr (a log file, a service, a pipe) uses the ANSI code
+    page (cp1252), so every non-ASCII character in a log line was mangled (Spec WIN T2).
+    Then the record is written to the underlying binary buffer as UTF-8. A UTF-8 stderr
+    (a Windows console, and every normal Linux or macOS setup) is used unchanged. The
+    buffer is written directly rather than wrapped, because a wrapper would close the
+    real stderr when it is garbage-collected.
+    """
+    stream = sys.stderr
+    encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+    buffer = getattr(stream, "buffer", None)
+    if encoding in ("utf-8", "utf8") or buffer is None:
+        return stream
+
+    def write_utf8(message: str) -> None:
+        stream.flush()
+        buffer.write(message.encode("utf-8", errors="backslashreplace"))
+        buffer.flush()
+
+    return write_utf8
+
+
 def _configure_sinks(config: PersonaCoreConfig) -> None:
     """Add the configured sinks to the root loguru logger.
 
@@ -203,7 +229,7 @@ def _configure_sinks(config: PersonaCoreConfig) -> None:
     _root_logger.configure(patcher=_attach_ctx)
     if config.log_format == "json":
         sink_id = _root_logger.add(
-            sys.stderr,
+            _stderr_sink(),
             level=config.log_level,
             serialize=True,
             backtrace=False,
@@ -211,7 +237,7 @@ def _configure_sinks(config: PersonaCoreConfig) -> None:
         )
     else:
         sink_id = _root_logger.add(
-            sys.stderr,
+            _stderr_sink(),
             level=config.log_level,
             format=_PRETTY_FORMAT,
             backtrace=False,

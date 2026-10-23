@@ -17,13 +17,13 @@ write — a symlink swap of the final path component is rejected.
 
 from __future__ import annotations
 
-import mimetypes
 import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.errors import SandboxViolationError, WorkspaceLinkRefusedError
 from persona.logging import get_logger
+from persona.media_types import media_type_for
 from persona.schema.tools import PersistedArtifact, ToolResult
 from persona.tools._sandbox import (
     SandboxRootProvider,
@@ -208,7 +208,7 @@ def make_file_write_tool(
         # Populate produced_files for parity with sandbox/tool.py's code_execution
         # result shape, so downstream consumers (Spec 19 file-output surfaces) can
         # treat both code-execution outputs and direct writes uniformly.
-        media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        media_type = media_type_for(path)
         produced_files = [
             {
                 "path": path,

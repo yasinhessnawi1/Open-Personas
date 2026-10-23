@@ -46,6 +46,7 @@ __all__ = [
     "CloudConfigRefusedError",
     "CommunityDbError",
     "CommunitySchemaUpgradeError",
+    "DocumentReadError",
     "ApprovalPendingError",
     "ConcurrencyCappedError",
     "LegGateMissingTaskError",
@@ -148,6 +149,16 @@ class CloudConfigRefusedError(PersonaError):
     tripped). There is intentionally NO request-time exception handler: like its
     sibling guards (:class:`PublicNoAuthRefusedError`,
     :class:`CloudGatewayNotVettedError`) this must crash the boot, never degrade.
+    """
+
+
+class DocumentReadError(PersonaError):
+    """An attached document's text could not be read back (Spec WIN T2).
+
+    Raised by ``document_service.get_document_text`` instead of returning an empty
+    string: a document that silently vanished from the prompt would look, to the model
+    and the user, as if it had been read. ``context["reason"]`` is one of
+    ``not_found``, ``storage_error`` or ``unreadable``.
     """
 
 

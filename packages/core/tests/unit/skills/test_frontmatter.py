@@ -98,7 +98,9 @@ class TestEncodingTolerance:
 
     def test_crlf_normalised(self, tmp_path: Path) -> None:
         text = "---\r\nname: x\r\ndescription: y\r\n---\r\n\r\nBody.\r\n"
-        path = _write(tmp_path, "SKILL.md", text)
+        # write_bytes: write_text would turn each \n into \r\n again on Windows.
+        path = tmp_path / "SKILL.md"
+        path.write_bytes(text.encode("utf-8"))
         meta, body = parse_skill_markdown(path)
         assert meta == {"name": "x", "description": "y"}
         # CRLF normalised inside parser; body retains LF

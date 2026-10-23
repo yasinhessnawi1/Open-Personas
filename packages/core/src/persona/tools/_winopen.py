@@ -386,8 +386,11 @@ def _owner_only_descriptor() -> int:
 
     ``D:P`` makes the DACL protected, so nothing is inherited from the folder: the
     Windows reading of ``0o600`` (owner read/write, the system account still able to act).
+    ``O:`` makes this user the file's owner even in an elevated process, whose default
+    owner would be the Administrators group.
     """
-    sddl = f"D:P(A;;FA;;;{_current_user_sid()})(A;;FA;;;SY)"
+    sid = _current_user_sid()
+    sddl = f"O:{sid}D:P(A;;FA;;;{sid})(A;;FA;;;SY)"
     descriptor = ctypes.c_void_p()
     if not _ConvertSddlToSd(sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), None):
         raise _last_error("security descriptor")

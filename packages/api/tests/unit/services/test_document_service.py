@@ -19,9 +19,11 @@ from persona.documents.errors import (
 )
 from persona.documents.ingest import IngestStrategy
 from persona.stores.document_store import DocumentStore
+from persona_api.errors import DocumentReadError
 from persona_api.services.document_service import (
     DOCUMENT_DIR_NAME,
     DocumentRef,
+    build_document_context,
     get_document_text,
     list_for_conversation,
     remove_all_for_conversation,
@@ -454,15 +456,140 @@ class TestGetDocumentText:
         )
         assert "twelve months" in text
 
-    def test_empty_for_missing_doc(self, sandbox_root: Path) -> None:
-        text = get_document_text(
-            file_storage=LocalFileStorage(sandbox_root),
+    def test_a_missing_document_fails_loudly(self, sandbox_root: Path) -> None:
+        """Spec WIN T2: never an empty string that would look like an empty document."""
+        with pytest.raises(DocumentReadError) as info:
+            get_document_text(
+                file_storage=LocalFileStorage(sandbox_root),
+                owner_id="owner",
+                persona_id="astrid",
+                conversation_id="conv1",
+                doc_ref="does-not-exist",
+            )
+        assert info.value.context["reason"] == "not_found"
+
+    def test_a_stored_document_that_no_longer_parses_fails_loudly(
+        self, sandbox_root: Path, document_store: DocumentStore
+    ) -> None:
+        storage = LocalFileStorage(sandbox_root)
+        ref = upload(
+            file_storage=storage,
             owner_id="owner",
             persona_id="astrid",
             conversation_id="conv1",
-            doc_ref="does-not-exist",
+            file_bytes=b"The lease runs for twelve months.",
+            filename="memo.txt",
+            document_store=document_store,
         )
-        assert text == ""
+        storage.put(ref.workspace_path, b"")  # the original is now empty: unparseable
+        with pytest.raises(DocumentReadError) as info:
+            get_document_text(
+                file_storage=storage,
+                owner_id="owner",
+                persona_id="astrid",
+                conversation_id="conv1",
+                doc_ref=ref.doc_ref,
+            )
+        assert info.value.context["reason"] == "unreadable"
+
+    def test_a_storage_error_fails_loudly(
+        self, sandbox_root: Path, document_store: DocumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = LocalFileStorage(sandbox_root)
+        ref = upload(
+            file_storage=storage,
+            owner_id="owner",
+            persona_id="astrid",
+            conversation_id="conv1",
+            file_bytes=b"The lease runs for twelve months.",
+            filename="memo.txt",
+            document_store=document_store,
+        )
+
+        def broken(_key: str) -> bytes:
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(storage, "get", broken)
+        with pytest.raises(DocumentReadError) as info:
+            get_document_text(
+                file_storage=storage,
+                owner_id="owner",
+                persona_id="astrid",
+                conversation_id="conv1",
+                doc_ref=ref.doc_ref,
+            )
+        assert info.value.context["reason"] == "storage_error"
+
+    def test_the_prompt_is_told_when_a_document_cannot_be_read(
+        self, sandbox_root: Path, document_store: DocumentStore
+    ) -> None:
+        storage = LocalFileStorage(sandbox_root)
+        ref = upload(
+            file_storage=storage,
+            owner_id="owner",
+            persona_id="astrid",
+            conversation_id="conv1",
+            file_bytes=b"The lease runs for twelve months.",
+            filename="memo.txt",
+            document_store=document_store,
+        )
+        storage.put(ref.workspace_path, b"")
+        context = build_document_context(
+            file_storage=storage,
+            owner_id="owner",
+            persona_id="astrid",
+            conversation_id="conv1",
+            user_message="what does it say?",
+            document_store=document_store,
+        )
+        [injection] = context.whole_inject_docs
+        assert "could not be read (unreadable)" in injection.full_text
+        assert "ask them to upload it again" in injection.full_text
+
+    def test_staged_temp_files_are_always_removed(
+        self, sandbox_root: Path, document_store: DocumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The node-local copy the parsers read is closed while they read it (a held-open
+        temp file is locked on Windows) and removed afterwards, even on a parse error."""
+        import tempfile
+
+        created: list[str] = []
+        real = tempfile.mkstemp
+
+        def recording(suffix: str | None = None) -> tuple[int, str]:
+            handle, name = real(suffix=suffix)
+            created.append(name)
+            return handle, name
+
+        monkeypatch.setattr(tempfile, "mkstemp", recording)
+        storage = LocalFileStorage(sandbox_root)
+        ref = upload(
+            file_storage=storage,
+            owner_id="owner",
+            persona_id="astrid",
+            conversation_id="conv1",
+            file_bytes=b"The lease runs for twelve months.",
+            filename="memo.txt",
+            document_store=document_store,
+        )
+        get_document_text(
+            file_storage=storage,
+            owner_id="owner",
+            persona_id="astrid",
+            conversation_id="conv1",
+            doc_ref=ref.doc_ref,
+        )
+        storage.put(ref.workspace_path, b"")
+        with pytest.raises(DocumentReadError):
+            get_document_text(
+                file_storage=storage,
+                owner_id="owner",
+                persona_id="astrid",
+                conversation_id="conv1",
+                doc_ref=ref.doc_ref,
+            )
+        assert len(created) == 3
+        assert not any(Path(name).exists() for name in created)
 
 
 class TestRemoveDocument:

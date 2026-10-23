@@ -368,10 +368,12 @@ class RuntimeFactory:
         # edition gate — self-hosted community-on-Postgres still gets the full graph);
         # graph RETRIEVAL is separately fail-soft-to-memoryless (R4-C1-7).
         if self._engine.dialect.name != "postgresql":
+            # Spec WIN T2: loguru formats with ``{}``, so the dialect is a named field
+            # (a ``%s`` placeholder was printed literally).
             _logger.info(
-                "graph store unavailable on a %s engine — record_user_fact absent + "
-                "Memory reads empty (the K0 graph is Postgres-only)",
-                self._engine.dialect.name,
+                "graph store unavailable on a {dialect} engine: record_user_fact absent "
+                "and Memory reads empty (the K0 graph is Postgres-only)",
+                dialect=self._engine.dialect.name,
             )
             return
         from persona.audit import JSONLAuditLogger

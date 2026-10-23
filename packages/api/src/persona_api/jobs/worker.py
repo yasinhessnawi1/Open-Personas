@@ -658,11 +658,28 @@ class Worker:
         return self._poll_interval + secrets.randbelow(1000) / 1000 * self._poll_jitter
 
     def _install_signal_handlers(self) -> None:
-        """Trap SIGTERM/SIGINT → ``request_drain``. No-op where unsupported."""
+        """Trap SIGTERM/SIGINT (and SIGBREAK where it exists) → ``request_drain``.
+
+        POSIX uses ``loop.add_signal_handler`` (unchanged). The Windows event loop does
+        not support it, so the drain was silently skipped there and ^C killed in-flight
+        work (Spec WIN T2); on Windows the handler is installed with ``signal.signal``
+        and hands the drain to the loop thread-safely. SIGBREAK is Ctrl+Break and what
+        a Windows service stop sends.
+        """
         loop = asyncio.get_running_loop()
-        for sig in _DRAIN_SIGNALS:
-            with contextlib.suppress(NotImplementedError, ValueError):
+        drain_signals = [*_DRAIN_SIGNALS]
+        if hasattr(signal, "SIGBREAK"):
+            drain_signals.append(signal.SIGBREAK)
+        for sig in drain_signals:
+            try:
                 loop.add_signal_handler(sig, self.request_drain)
+            except NotImplementedError:
+                with contextlib.suppress(ValueError, OSError):
+                    signal.signal(
+                        sig, lambda _sig, _frame: loop.call_soon_threadsafe(self.request_drain)
+                    )
+            except ValueError:
+                continue
 
     def livez(self) -> tuple[str, int]:
         """DB-free liveness — the process is up. Mirrors the api ``/livez``."""

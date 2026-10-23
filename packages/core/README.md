@@ -77,7 +77,9 @@ pip install persona-core[sandbox]        # + docker SDK for the LocalDockerSandb
 pip install persona-core[turbovec]       # + turbovec for the optional quantized graph index
 ```
 
-Python 3.11 or newer. For workspace development from the monorepo:
+Python 3.11 or newer, on Linux, macOS or Windows (the `[sandbox]` extra's local
+Docker sandbox is not supported on Windows). For workspace development from the
+monorepo:
 
 ```bash
 git clone https://github.com/yasinhessnawi1/Open-Personas-ai.git

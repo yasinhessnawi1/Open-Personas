@@ -105,6 +105,14 @@ class BuiltinMCPSupervisor:
         self._host = host
         self._python = python_executable
         self._child_uid = child_uid
+        if child_uid is not None and sys.platform == "win32":
+            # Spec WIN (review INFO): there is no setuid on Windows, so the privilege drop
+            # cannot happen; say so rather than let the setting look effective.
+            _logger.warning(
+                "PERSONA_MCP_BUILTIN_UID is set but Windows has no user switch for child "
+                "processes, so the built-in MCP servers run as this user",
+                child_uid=child_uid,
+            )
         self._spawn_timeout_s = spawn_timeout_s
         authored = authored_server_names()
         # Preserve declared order; keep only authored (launchable) names.
@@ -294,7 +302,9 @@ class BuiltinMCPSupervisor:
         user.
         """
         uid = self._child_uid
-        if uid is None or not hasattr(os, "setuid"):
+        # ``sys.platform`` rather than only ``hasattr``: mypy narrows on the platform
+        # check, so the module type-checks for Windows too (Spec WIN).
+        if uid is None or sys.platform == "win32" or not hasattr(os, "setuid"):
             return None
 
         def _drop_privileges() -> None:  # pragma: no cover — runs in the child process

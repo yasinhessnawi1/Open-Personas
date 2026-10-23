@@ -65,6 +65,18 @@ class ChromaBackend:
         self._client = chromadb.PersistentClient(path=str(self.persist_path))
         _log.info("ChromaBackend ready path={path}", path=str(self.persist_path))
 
+    def close(self) -> None:
+        """Release the persistence folder's open files (Spec WIN T2).
+
+        Windows cannot rename or delete a folder while Chroma holds its files open,
+        so a caller that moves the folder afterwards (the community auto-import's
+        rename) closes the backend first. Chroma's close is reference-counted: other
+        clients on the same path keep working until the last one closes.
+        """
+        # ``PersistentClient`` is typed as ``ClientAPI``, which omits ``close``; the
+        # concrete ``Client`` it returns has it (chromadb 1.x).
+        self._client.close()  # type: ignore[attr-defined]
+
     def _collection(self, persona_id: str, store_kind: str) -> Any:  # noqa: ANN401 — Chroma's API
         return self._client.get_or_create_collection(
             name=collection_name_for(persona_id, store_kind),

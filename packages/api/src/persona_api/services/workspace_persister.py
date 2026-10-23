@@ -24,9 +24,9 @@ indistinguishable from the operator path downstream.
 from __future__ import annotations
 
 import hashlib
-import mimetypes
 from typing import TYPE_CHECKING
 
+from persona.media_types import extension_for_media_type
 from persona.schema.tools import PersistedArtifact
 
 from persona_api.sandbox import get_sandbox_request_context
@@ -41,7 +41,7 @@ __all__ = ["WorkspaceDirPersister"]
 _UPLOAD_DIR_NAME = "uploads"
 
 #: Media-type → extension for the Spec 28 render set. Falls back to
-#: ``mimetypes.guess_extension`` then ``.bin`` for unknown types.
+#: the explicit ``persona.media_types`` table, then ``.bin`` for unknown types.
 _EXT_BY_MIME: dict[str, str] = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -76,7 +76,7 @@ def _ext_for(mime_type: str, suggested_filename: str) -> str:
         return _EXT_BY_MIME[mime_type]
     if "." in suggested_filename:
         return "." + suggested_filename.rsplit(".", 1)[-1].lower()
-    return mimetypes.guess_extension(mime_type) or ".bin"
+    return extension_for_media_type(mime_type) or ".bin"
 
 
 def _sidecar_type_for(mime_type: str) -> str:

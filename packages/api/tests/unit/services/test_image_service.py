@@ -638,7 +638,7 @@ class TestRichOutputServeExtensions:
         owner, persona = "user_x", "persona_y"
         uploads = workspace / owner / persona / "uploads"
         uploads.mkdir(parents=True)
-        (uploads / "abc.md").write_text("# Hi\n")
+        (uploads / "abc.md").write_bytes(b"# Hi\n")  # the exact bytes on every platform
         body, media = image_service.fetch(
             file_storage=LocalFileStorage(workspace),
             owner_id=owner,

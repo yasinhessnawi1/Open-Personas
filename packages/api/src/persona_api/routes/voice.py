@@ -48,6 +48,7 @@ than that this one input was too big.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -66,6 +67,12 @@ if TYPE_CHECKING:
     from persona.schema.persona import CatalogueVoice
 
 router = APIRouter(prefix="/v1", tags=["voice"])
+
+#: Spec WIN T5 (D-VOICE-vendor-only): the voice service runs on Linux and macOS only.
+VOICE_UNAVAILABLE_ON_WINDOWS = (
+    "Voice is not available on Windows. The voice service runs on Linux and macOS; "
+    "to use voice, run it on a Linux or macOS machine and set PERSONA_VOICE_SERVICE_URL."
+)
 
 # One-shot synthesis / transcription can legitimately take a few seconds
 # (Cartesia synthesis of up to ~4k chars; Deepgram prerecorded transcription
@@ -122,6 +129,11 @@ def _voice_service_base(request: Request) -> str:
     effective = getattr(config, "effective_voice_service_url", None)
     raw = effective() if callable(effective) else getattr(config, "voice_service_url", "")
     base = str(raw or "").rstrip("/")
+    if not base and sys.platform == "win32":
+        # Spec WIN T5 (D-VOICE-vendor-only): say why, rather than "not configured".
+        raise VoiceServiceUnavailableError(
+            VOICE_UNAVAILABLE_ON_WINDOWS, context={"reason": "unsupported_platform"}
+        )
     if not base:
         raise VoiceServiceUnavailableError(
             "the voice service is not configured", context={"reason": "not_configured"}

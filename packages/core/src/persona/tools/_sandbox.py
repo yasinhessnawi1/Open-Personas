@@ -414,11 +414,11 @@ def resolve_request_sandbox_root(source: SandboxRootProvider) -> Path:
 # ``str(exc)``, so there is no per-tool copy to drift.
 _CORRECTION_BY_REASON: dict[str, str] = {
     "absolute": (
-        "Paths must be RELATIVE to the working directory and stay inside it — "
+        "Paths must be RELATIVE to the working directory and stay inside it, "
         "e.g. 'out/report.md'. Do not use an absolute path (a leading '/') or '..'."
     ),
     "escape": (
-        "Paths must be RELATIVE to the working directory and stay inside it — "
+        "Paths must be RELATIVE to the working directory and stay inside it, "
         "e.g. 'out/report.md'. Do not use '..' or any path that climbs out of "
         "the working directory."
     ),
@@ -457,7 +457,7 @@ _CORRECTION_BY_REASON: dict[str, str] = {
     ),
     "no_scope": (
         "No workspace is bound for this request, so file access is unavailable "
-        "right now — changing the path will not help; do not retry."
+        "right now. Changing the path will not help; do not retry."
     ),
 }
 

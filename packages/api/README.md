@@ -144,7 +144,9 @@ those engines.
 
 ## Install and run
 
-`persona-api` is a `uv` workspace package. From the repo root:
+`persona-api` is a `uv` workspace package, installed from a clone; it is not on
+PyPI. The `persona-api` project on PyPI is an unrelated project, so do not
+`pip install persona-api`. From the repo root:
 
 ```bash
 uv sync                       # install the workspace
@@ -169,6 +171,11 @@ uvicorn. Bind is configurable from the environment via `PERSONA_API_HOST` (defau
 `127.0.0.1`), `PERSONA_API_PORT` (default `8000`), and `PERSONA_API_RELOAD`
 (default off). Existing env vars always win over `.env`, so
 `PERSONA_API_PORT=9000 uv run persona-api` works.
+
+On Windows the same commands run in PowerShell; set a variable with
+`$env:PERSONA_PROVIDER = "anthropic"` instead of `export`. Voice and the local Docker
+sandbox are not available on Windows; see the Windows section of the
+[root README](../../README.md) for what works there.
 
 ### Cloud (Clerk auth, Postgres RLS, credits)
 

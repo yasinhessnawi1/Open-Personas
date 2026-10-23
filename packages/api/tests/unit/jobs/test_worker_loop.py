@@ -99,7 +99,10 @@ def test_run_default_standalone_mode_installs_both_drain_signals() -> None:
         await w.run()  # default: the standalone worker process owns its signals
 
     calls = _run_with_recorded_signal_installs(scenario, worker)
-    assert {sig for sig, _ in calls} == {signal.SIGTERM, signal.SIGINT}
+    expected = {signal.SIGTERM, signal.SIGINT}
+    if hasattr(signal, "SIGBREAK"):  # Windows only: Ctrl+Break and service stop (Spec WIN T2)
+        expected.add(signal.SIGBREAK)
+    assert {sig for sig, _ in calls} == expected
     assert all(cb == worker.request_drain for _, cb in calls), (
         "the installed handler must be the graceful drain"
     )
@@ -295,3 +298,30 @@ async def test_the_real_loop_stamps_its_heartbeat() -> None:
         worker.request_drain()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_without_loop_signal_support_a_signal_still_requests_a_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec WIN T2: the Windows event loop cannot ``add_signal_handler``; the worker falls
+    back to ``signal.signal`` so ^C (and Ctrl+Break) still starts a graceful drain."""
+    worker = _worker()
+    loop = asyncio.get_running_loop()
+
+    def unsupported(*_args: object, **_kwargs: object) -> None:
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop, "add_signal_handler", unsupported)
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    if hasattr(signal, "SIGBREAK"):
+        saved[signal.SIGBREAK] = signal.getsignal(signal.SIGBREAK)
+    try:
+        worker._install_signal_handlers()
+        assert not worker._draining.is_set()
+        signal.raise_signal(signal.SIGINT)
+        await asyncio.sleep(0.05)
+        assert worker._draining.is_set()
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)

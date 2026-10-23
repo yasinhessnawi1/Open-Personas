@@ -29,12 +29,12 @@ artifacts / uploads / images.
 
 from __future__ import annotations
 
-import mimetypes
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
+from persona.media_types import media_type_for
 from persona.tools._sandbox import (
     delete_regular_file_nofollow,
     is_regular_file_nofollow,
@@ -210,7 +210,7 @@ class S3FileStorage:
         self._client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
 
     def put(self, key: str, data: bytes, *, content_type: str | None = None) -> str:
-        ctype = content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
+        ctype = content_type or media_type_for(key)
         self._client.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType=ctype)
         return key
 

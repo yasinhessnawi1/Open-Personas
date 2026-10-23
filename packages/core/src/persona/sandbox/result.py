@@ -22,10 +22,12 @@ of ``allowed_hosts``.
 
 from __future__ import annotations
 
-import mimetypes
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from persona.media_types import DEFAULT_MEDIA_TYPE as _DEFAULT_MEDIA_TYPE
+from persona.media_types import media_type_for
 
 __all__ = [
     "DEFAULT_MEDIA_TYPE",
@@ -44,7 +46,7 @@ __all__ = [
 #: The frontend renderer + the GET serve route both treat this as "binary,
 #: not inline" — so a file with this type lands as a download card, never an
 #: inline image (the safe default).
-DEFAULT_MEDIA_TYPE = "application/octet-stream"
+DEFAULT_MEDIA_TYPE = _DEFAULT_MEDIA_TYPE
 
 
 def guess_media_type(path: str) -> str:
@@ -58,10 +60,9 @@ def guess_media_type(path: str) -> str:
     produced file is :data:`DEFAULT_MEDIA_TYPE` and a produced PNG never renders
     inline (D-12-X-produced-media-type).
 
-    Uses the stdlib :func:`mimetypes.guess_type` table (covers the image,
-    document, and text formats the renderers support) and falls back to
-    :data:`DEFAULT_MEDIA_TYPE` for unknown / extension-less paths so the
-    contract is always a well-formed media type.
+    Uses the explicit :mod:`persona.media_types` table (Spec WIN, T2), never the
+    stdlib :mod:`mimetypes` database, whose answer depends on the machine (the
+    Windows registry, ``/etc/mime.types``, the Python patch release).
 
     Args:
         path: A file path or basename (relative or absolute). Only the
@@ -71,8 +72,7 @@ def guess_media_type(path: str) -> str:
         An IANA media type string (e.g. ``"image/png"``) or
         :data:`DEFAULT_MEDIA_TYPE` when the extension is unknown.
     """
-    guessed, _encoding = mimetypes.guess_type(path)
-    return guessed or DEFAULT_MEDIA_TYPE
+    return media_type_for(path)
 
 
 ExecutionOutcome = Literal["ok", "error", "timeout", "oom", "killed"]

@@ -136,6 +136,31 @@ uv run persona init                                       # interactive → a pe
 uv run persona chat packages/core/examples/astrid_tenancy_law.yaml
 ```
 
+> **The api is not on PyPI.** Install it from a clone as above. Our PyPI packages are `persona-core`, `persona-runtime` and `persona-voice`; the `persona-api` project on PyPI is an unrelated project, so do not `pip install persona-api`.
+
+<details>
+<summary><b>Windows</b></summary>
+<br>
+
+The community edition runs on Windows 10 (version 1803 or later) and Windows 11, 64-bit.
+
+**What works on Windows:** the `persona` CLI from PyPI (`pip install persona-core persona-runtime`); the community api from a clone, with SQLite (`legacy-sqlite`) or the bundled Postgres (`auto`, `embedded`, including the automatic import); chat, memory with the knowledge graph, file tools, uploads, artifacts, the builtin MCP servers, skills, schedules and tasks; the web app pointed at the api; running code through the hosted E2B sandbox; local models through Ollama (the Hugging Face `local` extra is best effort).
+
+**What does not:** voice (the voice service runs on Linux and macOS; on Windows it refuses to start and says so, and the api answers that voice is not available on Windows); the local Docker code sandbox (use E2B); the hosted cloud edition; the bash and fly scripts under `scripts/`.
+
+The quick start above works in PowerShell with one change, how you set a variable:
+
+```powershell
+$env:PERSONA_PROVIDER = "anthropic"
+$env:PERSONA_API_KEY = "sk-ant-..."
+$env:PERSONA_MODEL = "claude-sonnet-4-6"
+uv run persona-api
+```
+
+**Keep the working folder and `~/.persona` out of OneDrive.** The persona workspace never follows a link or shortcut, and on Windows it refuses every reparse point. A file that OneDrive keeps online only is a cloud placeholder, which is a reparse point, so the workspace refuses it the way it refuses a link ("This path goes through a link or shortcut"). Put the clone and your data in a plain local folder such as `C:\dev`.
+
+</details>
+
 <details>
 <summary><b>🗄️ Community storage: the invisible managed Postgres</b></summary>
 <br>
@@ -151,7 +176,7 @@ The community edition is moving to a **Postgres + pgvector the product manages f
 | `embedded` | always the bundled Postgres (datadir under `~/.persona/pg16/`). |
 | `external` | use your own `DATABASE_URL`. |
 
-The bundled database is genuinely invisible. It runs **rootless over a unix socket with no TCP listener** (it can never conflict with a port or be exposed on the network), is created and migrated on first boot (**~4.2 s** first boot, **~2.2 s** after), and stops cleanly when the app exits. Upgrading the app applies new migrations on the next boot; you never run a migration command.
+The bundled database is genuinely invisible. It runs **rootless over a unix socket with no TCP listener** on Linux, macOS and Windows (it can never conflict with a port or be exposed on the network), is created and migrated on first boot (on Linux **~4.2 s** first boot, **~2.2 s** after), and stops cleanly when the app exits. The socket sits inside the data folder, which only your account can open. On Windows the database also requires a password: it is generated on first boot and kept beside the data folder in `~/.persona/pg16.pgpass`, readable only by your account, and the connection names that file rather than carrying the password. Keep that file with the data folder; without it the database refuses to start. If you move the data with `PERSONA_API_COMMUNITY_MANAGED_DB_DIR`, pick a folder only your account can change, such as one in your user profile: the database refuses a folder where another account can create or replace files, and a data folder or password file that another account owns. A data folder that an earlier build set up in such a place (for example under `C:\data`) is now refused at start: stop the app, move `pg16` and `pg16.pgpass` into `%USERPROFILE%\.persona`, and unset `PERSONA_API_COMMUNITY_MANAGED_DB_DIR` (or point it at another folder in your user profile). Move those two, not the folder around them: a moved folder keeps the access it had where it was. Upgrading the app applies new migrations on the next boot; you never run a migration command.
 
 **Existing SQLite users:** on the first managed boot the app **imports your data automatically** (typed memory gets new embeddings; relational rows are copied in FK order) and renames the old files to `*.migrated-<date>` as a rollback marker. The import survives a crash and resumes. To run it by hand:
 

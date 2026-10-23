@@ -16,6 +16,7 @@ ensure ``enqueue=True`` sinks flush.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from typing import TYPE_CHECKING
 
@@ -215,3 +216,30 @@ def test_pretty_format_no_context_suffix_when_no_extra_kwargs(
     log.info("just a message")
     out = _capture_stderr(capsys).rstrip()
     assert out.endswith("just a message")
+
+
+def test_a_non_utf8_stderr_still_receives_utf8_log_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec WIN T2: a redirected stderr on Windows is cp1252; log lines are written to its
+    buffer as UTF-8, so non-ASCII text survives instead of turning into '?'."""
+    import io
+
+    from persona import logging as persona_logging
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", write_through=True)
+    monkeypatch.setattr(sys, "stderr", stream)
+    sink = persona_logging._stderr_sink()
+    assert not isinstance(sink, io.TextIOBase)  # a UTF-8 writer, not the cp1252 stream
+    assert callable(sink)
+    sink("chain fell back \u2014 caf\u00e9 \u6587\n")
+    assert raw.getvalue().decode("utf-8") == "chain fell back \u2014 caf\u00e9 \u6587\n"
+
+
+def test_a_utf8_stderr_is_used_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    from persona import logging as persona_logging
+
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr(sys, "stderr", stream)
+    assert persona_logging._stderr_sink() is stream

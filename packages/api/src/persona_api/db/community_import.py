@@ -193,24 +193,28 @@ class CommunityImporter:
 
         chroma = ChromaBackend(persist_path=self._chroma_path, embedder=self._embedder)
         target_backend = PostgresBackend(engine=self._target, embedder=self._embedder)
-
-        for owner_id, kind in self._vector_units(source):
-            unit_id = f"vector:{kind}:{owner_id}"
-            chunks = chroma.get_all(persona_id=owner_id, store_kind=kind)
-            if not chunks:
-                continue  # empty collection — not a unit
-            expected.add(unit_id)
-            if unit_id in done:
-                report.units_skipped += 1
-                continue
-            # Re-embed via the SAME write path the app uses (ON CONFLICT (id) DO
-            # UPDATE → idempotent; re-running after a crash is a safe no-op).
-            target_backend.upsert(persona_id=owner_id, store_kind=kind, chunks=chunks)
-            with self._target.begin() as conn:
-                self._mark(conn, unit_id)
-            report.vector_chunks[unit_id] = len(chunks)
-            report.units_imported += 1
-            self._on_unit_committed(unit_id)
+        try:
+            for owner_id, kind in self._vector_units(source):
+                unit_id = f"vector:{kind}:{owner_id}"
+                chunks = chroma.get_all(persona_id=owner_id, store_kind=kind)
+                if not chunks:
+                    continue  # an empty collection is not a unit
+                expected.add(unit_id)
+                if unit_id in done:
+                    report.units_skipped += 1
+                    continue
+                # Re-embed via the SAME write path the app uses (ON CONFLICT (id) DO
+                # UPDATE → idempotent; re-running after a crash is a safe no-op).
+                target_backend.upsert(persona_id=owner_id, store_kind=kind, chunks=chunks)
+                with self._target.begin() as conn:
+                    self._mark(conn, unit_id)
+                report.vector_chunks[unit_id] = len(chunks)
+                report.units_imported += 1
+                self._on_unit_committed(unit_id)
+        finally:
+            # Spec WIN T2: release Chroma's open files, or Windows refuses the rename of
+            # the Chroma folder that follows a complete import.
+            chroma.close()
 
     def _vector_units(self, source: Engine) -> list[tuple[str, str]]:
         """(``id``, ``store_kind``) pairs, ids taken from SQLite (never name-parsed).

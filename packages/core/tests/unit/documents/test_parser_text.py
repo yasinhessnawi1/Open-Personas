@@ -133,3 +133,28 @@ class TestFrozenResult:
         result = parse_text(FIXTURE_DIR / "sample.txt")
         with pytest.raises(Exception):  # noqa: B017,PT011 — pydantic validation error
             result.flags = ("mutated",)  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_line_endings_do_not_change_the_paragraphs(tmp_path: Path, newline: str) -> None:
+    """Spec WIN T2: LF, CRLF (Windows) and lone CR give identical sections, on every
+    platform. The bytes are written as-is, never through text-mode translation."""
+    body = newline.join(
+        ["First paragraph line one.", "Line two.", "", "Second paragraph.", "", "Third."]
+    )
+    target = tmp_path / f"endings{len(newline)}{'r' if newline == chr(13) else 'n'}.txt"
+    target.write_bytes(body.encode("utf-8"))
+    sections = [s.text for s in parse_text(target).sections]
+    assert sections == ["First paragraph line one.\nLine two.", "Second paragraph.", "Third."]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_markdown_headings_split_the_same_for_every_line_ending(
+    tmp_path: Path, newline: str
+) -> None:
+    body = newline.join(["# One", "alpha", "", "## Two", "beta"])
+    target = tmp_path / f"endings{len(newline)}{'r' if newline == chr(13) else 'n'}.md"
+    target.write_bytes(body.encode("utf-8"))
+    sections = parse_text(target).sections
+    assert [s.section for s in sections] == ["One", "Two"]
+    assert all("\r" not in s.text for s in sections)

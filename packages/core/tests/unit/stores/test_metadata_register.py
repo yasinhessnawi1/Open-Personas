@@ -106,7 +106,7 @@ def _collect() -> tuple[list[_Site], list[tuple[str, int]]]:
 
     for path in sorted(_PACKAGES.glob("*/src/**/*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        rel = str(path.relative_to(_PACKAGES)).split("src/", 1)[-1]
+        rel = path.relative_to(_PACKAGES).as_posix().split("src/", 1)[-1]
         functions = [
             n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
         ]

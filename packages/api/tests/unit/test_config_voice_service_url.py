@@ -9,14 +9,26 @@ no voice, on the one edition where the service is guaranteed to be local.
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
+from fastapi import Request
 from persona_api.config import APIConfig, Edition
+from persona_api.errors import VoiceServiceUnavailableError
+
+# Imported here, not inside the tests: the tests patch sys.platform, and a module
+# first imported under a patched platform can take the wrong branch at import time.
+from persona_api.routes.voice import _voice_service_base  # noqa: PLC2701
+from persona_api.services.voice_assignment_service import _voice_service_url  # noqa: PLC2701
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PERSONA_VOICE_SERVICE_URL", raising=False)
     monkeypatch.delenv("PERSONA_EDITION", raising=False)
+    # The local default is the Linux and macOS contract; Windows has its own tests below.
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def test_community_defaults_to_the_local_voice_service() -> None:
@@ -42,9 +54,6 @@ def test_the_service_reads_the_url_through_the_effective_accessor() -> None:
     A helper that only read ``config.voice_service_url`` would pass the config tests
     above while community personas stayed voiceless in production.
     """
-    from types import SimpleNamespace
-
-    from persona_api.services.voice_assignment_service import _voice_service_url  # noqa: PLC2701
 
     assert _voice_service_url(APIConfig(edition=Edition.community)) == "http://localhost:8001"
     # Duck-typed configs (the existing test fixtures) keep working through the fallback.
@@ -61,10 +70,6 @@ def test_the_read_aloud_and_dictation_routes_read_the_url_the_same_way() -> None
     touching the database. One accessor, every caller, or the default is dead in the
     places a person actually presses.
     """
-    from types import SimpleNamespace
-
-    from fastapi import Request
-    from persona_api.routes.voice import _voice_service_base  # noqa: PLC2701
 
     def _request(config: object) -> Request:
         scope = {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(config=config))}
@@ -77,3 +82,37 @@ def test_the_read_aloud_and_dictation_routes_read_the_url_the_same_way() -> None
     assert (
         _voice_service_base(_request(SimpleNamespace(voice_service_url="http://x/"))) == "http://x"
     )
+
+
+def _voice_request(config: object) -> Request:
+    scope = {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(config=config))}
+    return Request(scope)
+
+
+def test_windows_community_has_no_local_voice_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec WIN T5 (D-VOICE-vendor-only): no voice service runs on Windows, so none is assumed."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert APIConfig(edition=Edition.community).effective_voice_service_url() == ""
+    cfg = APIConfig(edition=Edition.community, voice_service_url="https://voice.example.test")
+    assert cfg.effective_voice_service_url() == "https://voice.example.test"
+
+
+def test_windows_voice_routes_say_voice_is_not_available_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(VoiceServiceUnavailableError) as caught:
+        _voice_service_base(_voice_request(APIConfig(edition=Edition.community)))
+    assert caught.value.context["reason"] == "unsupported_platform"
+    assert str(caught.value).startswith(
+        "Voice is not available on Windows. The voice service runs on Linux and macOS; "
+        "to use voice, run it on a Linux or macOS machine and set PERSONA_VOICE_SERVICE_URL."
+    )
+
+
+def test_an_unset_url_off_windows_is_still_not_configured() -> None:
+
+    with pytest.raises(VoiceServiceUnavailableError) as caught:
+        _voice_service_base(_voice_request(APIConfig(edition=Edition.cloud)))
+    assert caught.value.context["reason"] == "not_configured"

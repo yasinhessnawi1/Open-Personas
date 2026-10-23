@@ -1,0 +1,36 @@
+name: CI (Windows)
+
+# Spec WIN T4: the community edition runs on Windows, so the unit suites of the
+# packages inside the Windows support boundary (core, runtime, api) run on Windows
+# on every push and pull request. Voice, the connectors' ops tooling and the bash and
+# fly scripts are outside the boundary (owner, 2026-09-26) and are tested on Linux
+# only, by ci.yml.
+#
+# This is its own workflow on purpose: Deploy runs on the "CI" workflow's success, so
+# a job inside ci.yml would also gate production deploys. Whether Windows should gate
+# deploys is the owner's call; moving this job into ci.yml makes it so.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync --all-packages
+      # The default suite (integration, external and soak are excluded by addopts).
+      - run: uv run pytest packages/core/tests packages/runtime/tests packages/api/tests
+      # The bundled Postgres started the Windows way, for real: socket only, a
+      # password, owner-only files, and the upgrade of a datadir made with trust.
+      - run: uv run pytest packages/api/tests/integration/test_win_managed_postgres.py -m integration

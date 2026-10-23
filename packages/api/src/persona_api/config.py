@@ -14,6 +14,7 @@ already use.
 
 from __future__ import annotations
 
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -857,10 +858,15 @@ class APIConfig(BaseSettings):
         (create-time auto-pick, the lazy remap, the boot sweep) returns early on an empty
         URL, and nothing in the community setup ever set it. The web talked to :8001 for
         calls while the api believed there was no voice service at all.
+
+        On Windows the community default is ``""`` too: the voice service does not run
+        there (Spec WIN T5, D-VOICE-vendor-only), so the voice paths answer at once that
+        voice is unavailable instead of dialling a local service that cannot exist. An
+        explicit URL to a voice service on another machine still wins.
         """
         if self.voice_service_url:
             return self.voice_service_url
-        if self.edition is Edition.community:
+        if self.edition is Edition.community and sys.platform != "win32":
             return "http://localhost:8001"
         return ""
 

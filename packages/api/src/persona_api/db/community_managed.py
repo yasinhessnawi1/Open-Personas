@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -244,7 +245,9 @@ def run_migrations(database_url: str) -> None:
     os.environ["DATABASE_URL"] = database_url  # env.py prefers this over the ini
     cfg = Config(str(api_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(api_dir / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", database_url)
+    # The ini value goes through configparser interpolation, where "%" is special: a
+    # percent-encoded DSN (a Windows socket folder, a password with "%") must be escaped.
+    cfg.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     command.upgrade(cfg, "head")
 
 
@@ -263,7 +266,11 @@ class CommunityDbManager:
 
     def __init__(self, *, external_url: str | None, base_dir: Path) -> None:
         self._external_url = external_url
-        self._base_dir = base_dir
+        # Spec WIN (review L-3): on Windows the base folder is resolved once, so one
+        # reached through a junction, an 8.3 short name or a subst drive is spelled the
+        # same way everywhere after (the no-follow opener compares the file's path with
+        # its folder). Linux and macOS keep the path as given.
+        self._base_dir = base_dir.expanduser().resolve() if sys.platform == "win32" else base_dir
         self._datadir: Path | None = None
         self._server: _EmbeddedServer | None = None
         self._database_url: str | None = None
@@ -295,6 +302,8 @@ class CommunityDbManager:
         guard_datadir_major(datadir, expected_major=EMBEDDED_PG_MAJOR)
         # ``get_server`` creates the datadir but its PARENT must already exist.
         datadir.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            return self._start_embedded_windows(datadir)
         try:
             import pixeltable_pgserver
         except ImportError as exc:  # pragma: no cover — the dep is a hard requirement
@@ -312,7 +321,7 @@ class CommunityDbManager:
         # stop the postmaster in this mode). ``get_server`` reattaches to an
         # already-running postmaster for this datadir (D-K10-9 reattach-if-found).
         # ``pixeltable_pgserver`` ships no py.typed and does not re-export via __all__.
-        server: _EmbeddedServer = pixeltable_pgserver.get_server(  # type: ignore[attr-defined]
+        server: _EmbeddedServer = pixeltable_pgserver.get_server(  # type: ignore[attr-defined,unused-ignore]
             datadir, cleanup_mode=None
         )
         # ``get_server`` caches the handle per datadir (``PostgresServer._instances``),
@@ -323,13 +332,38 @@ class CommunityDbManager:
         server.ensure_postgres_running()
         self._server = server
         self._datadir = datadir
-        self._ensure_database(server)
+        self._ensure_database(to_sync_psycopg_url(server.get_uri(database="postgres")))
         self._database_url = to_sync_psycopg_url(server.get_uri(database=_DB_NAME))
         return self._database_url
 
-    def _ensure_database(self, server: _EmbeddedServer) -> None:
+    def _start_embedded_windows(self, datadir: Path) -> str:
+        """The Windows lifecycle: socket only, a password, owner-only files (Spec WIN T2).
+
+        The bundled launcher would listen on loopback TCP with ``trust`` for every local
+        account, so on Windows the manager starts the bundled binaries itself; see
+        :mod:`persona_api.db._managed_windows`.
+        """
+        from persona_api.db._managed_windows import start_socket_only
+
+        bin_dir = _pginstall_bin_dir()
+        if bin_dir is None:
+            raise CommunityDbError(
+                "the embedded Postgres package (pixeltable-pgserver) is not installed; "
+                "reinstall the app dependencies or set DATABASE_URL to use an external Postgres.",
+                context={"reason": "embedded_package_missing"},
+            )
+        _LOG.info(
+            "community managed DB: starting the embedded Postgres socket-only at {dir}",
+            dir=str(datadir),
+        )
+        target = start_socket_only(datadir, bin_dir)
+        self._datadir = datadir
+        self._ensure_database(target.sqlalchemy_url("postgres"))
+        self._database_url = target.sqlalchemy_url(_DB_NAME)
+        return self._database_url
+
+    def _ensure_database(self, admin_url: str) -> None:
         """Create the ``persona`` database if absent (idempotent, autocommit)."""
-        admin_url = to_sync_psycopg_url(server.get_uri(database="postgres"))
         admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
         try:
             with admin_engine.connect() as conn:
@@ -380,9 +414,23 @@ class CommunityDbManager:
     @staticmethod
     def _pg_ctl_path() -> Path | None:
         """Locate the bundled ``pg_ctl`` binary shipped inside pixeltable-pgserver."""
-        try:
-            import pixeltable_pgserver
-        except ImportError:  # pragma: no cover
+        bin_dir = _pginstall_bin_dir()
+        if bin_dir is None:
             return None
-        candidate = Path(pixeltable_pgserver.__file__).parent / "pginstall" / "bin" / "pg_ctl"
+        candidate = bin_dir / _executable_name("pg_ctl")
         return candidate if candidate.exists() else None
+
+
+def _executable_name(tool: str) -> str:
+    """``pg_ctl`` on Linux and macOS, ``pg_ctl.exe`` on Windows (Spec WIN T2)."""
+    return f"{tool}.exe" if sys.platform == "win32" else tool
+
+
+def _pginstall_bin_dir() -> Path | None:
+    """The ``bin`` folder of the Postgres bundled inside pixeltable-pgserver, if installed."""
+    try:
+        import pixeltable_pgserver
+    except ImportError:  # pragma: no cover
+        return None
+    bin_dir = Path(pixeltable_pgserver.__file__).parent / "pginstall" / "bin"
+    return bin_dir if bin_dir.is_dir() else None

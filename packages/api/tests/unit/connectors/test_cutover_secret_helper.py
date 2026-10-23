@@ -23,9 +23,18 @@ against a filter that never runs.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+# A bash ops script, run under /bin/bash. Spec WIN boundary decision (owner, Phase 1 gate,
+# 2026-09-26): connectors' ops tooling and the bash and fly scripts are OUT of Windows
+# support, so on Windows these tests are skipped rather than ported.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Spec WIN boundary (owner, 2026-09-26): bash and fly ops scripts are out on Windows",
+)
 
 
 def _repo_script() -> Path:
