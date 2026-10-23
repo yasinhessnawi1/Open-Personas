@@ -65,10 +65,47 @@ def _grant_persona_app(dsn: str) -> None:
         engine.dispose()
 
 
+_PLATFORM_GRANTS = (
+    "GRANT USAGE ON SCHEMA public TO persona_platform",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO persona_platform",
+    "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO persona_platform",
+    "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO persona_platform",
+    "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+    "GRANT USAGE, SELECT ON SEQUENCES TO persona_platform",
+)
+
+
+def _grant_persona_platform(dsn: str) -> None:
+    """Grant the api's long-running cross-tenant role on every current and future table.
+
+    On the Hetzner box the api process no longer holds the superuser DSN: its
+    ``DATABASE_URL`` (the admin, dispatch and JIT-provisioning engines) is the
+    ``persona_platform`` role, which bypasses RLS but is NOT a superuser and runs no DDL,
+    so a compromised api cannot ``COPY ... TO PROGRAM``, alter roles or read server files.
+    Only this release step keeps the superuser DSN. ``deploy/hetzner/bin/restore.sh``
+    creates the role; this step keeps its DML grants complete after every migration and
+    sets the default privileges, so a table a future migration creates (as the superuser
+    running this step) is reachable at once. No-op when the role is absent: the Fly-era
+    layout, CI and community are unaffected.
+    """
+    engine = create_engine(dsn, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            if conn.execute(
+                text("SELECT 1 FROM pg_roles WHERE rolname = 'persona_platform'")
+            ).first():
+                for statement in _PLATFORM_GRANTS:
+                    conn.execute(text(statement))
+    finally:
+        engine.dispose()
+
+
 def main() -> None:
     dsn = os.environ["DATABASE_URL"]  # superuser DSN; read at runtime, not import
     _upgrade_to_head(dsn)
     _grant_persona_app(dsn)
+    _grant_persona_platform(dsn)
 
 
 if __name__ == "__main__":
