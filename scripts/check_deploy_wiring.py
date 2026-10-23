@@ -30,7 +30,10 @@ Refused wherever they appear:
   ``set +e``, ``trap``) and command tracing;
 * a job that holds a secret without ``environment: production``, and any job whose ``if``
   fails the gate the fork test enforces, reusing its parser (``gate_problems`` in
-  ``packages/api/tests/unit/test_deploy_fork_gate.py``) rather than a second one.
+  ``packages/api/tests/unit/test_deploy_fork_gate.py``) rather than a second one;
+* any trigger but a bare ``workflow_dispatch`` (``ALLOWED_TRIGGERS``): automatic deploys
+  are paused since 2026-10-23, so a restored ``workflow_run`` (or a ``push``) fails until
+  the owner turns them back on here too.
 
 It proves itself on every run: ``FIXTURES`` break a sample workflow in each of those ways,
 through the same :func:`check_deploy_wiring` that decides the real verdict.
@@ -99,6 +102,11 @@ RUNNER = "ubuntu-latest"
 #: Workflow-level ``env`` and ``defaults`` reach every job, so neither is allowed.
 WORKFLOW_KEYS = frozenset({"name", "run-name", "on", True, "permissions", "concurrency", "jobs"})
 WORKFLOW_PERMISSIONS = {"contents": "read"}
+#: The only way the workflow may start. Automatic deploys are PAUSED since 2026-10-23: every
+#: Fly app was deleted on 2026-10-02 ahead of the Hetzner move, so the ``workflow_run`` of CI
+#: is off and a deploy runs only when started by hand (from ``main``: the fork gate's manual
+#: path). Re-enabling them is a deliberate change here AND in the workflow's ``on:`` block.
+ALLOWED_TRIGGERS: dict[str, Any] = {"workflow_dispatch": None}
 
 _EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 _SECRETS = re.compile(r"(?i)\bsecrets\b")
@@ -293,6 +301,18 @@ def _needs(job: Mapping[str, Any]) -> set[str]:
 # ---- the checks --------------------------------------------------------------------------
 
 
+def _trigger_problems(workflow: Mapping[Any, Any]) -> list[str]:
+    # ``on`` parses as ``True`` under YAML 1.1 (PyYAML); accept either spelling.
+    triggers = workflow.get(True, workflow.get("on"))
+    if triggers == ALLOWED_TRIGGERS:
+        return []
+    found = sorted(triggers) if isinstance(triggers, dict) else triggers
+    return [
+        "workflow: automatic deploys are paused; the only trigger allowed is a bare "
+        f"workflow_dispatch, found {found}"
+    ]
+
+
 def _structure_problems(workflow: Mapping[str, Any]) -> list[str]:
     jobs = _jobs(workflow)
     required = {
@@ -450,6 +470,7 @@ def check_deploy_wiring(workflow: Mapping[str, Any], gate_problems: GateCheck) -
         for problem in gate_problems(name, job.get("if"))
     ]
     return [
+        *_trigger_problems(workflow),
         *_key_problems(workflow),
         *_structure_problems(workflow),
         *_allow_list_problems(workflow),
@@ -480,7 +501,7 @@ _VERIFY_GATE = (
 )
 
 
-def _sample() -> dict[str, Any]:
+def _sample() -> dict[Any, Any]:
     """The smallest workflow wired correctly, built from the allow-list itself."""
 
     def job(name: str, needs: list[str], gate: str = _GATE) -> dict[str, Any]:
@@ -491,6 +512,7 @@ def _sample() -> dict[str, Any]:
         return spec
 
     return {
+        True: copy.deepcopy(ALLOWED_TRIGGERS),
         "permissions": dict(WORKFLOW_PERMISSIONS),
         "concurrency": {"group": "deploy", "cancel-in-progress": False},
         "jobs": {
@@ -503,12 +525,12 @@ def _sample() -> dict[str, Any]:
     }
 
 
-def _job(w: dict[str, Any], name: str) -> dict[str, Any]:
+def _job(w: dict[Any, Any], name: str) -> dict[str, Any]:
     job: dict[str, Any] = w["jobs"][name]
     return job
 
 
-def _step(w: dict[str, Any], name: str, index: int) -> dict[str, Any]:
+def _step(w: dict[Any, Any], name: str, index: int) -> dict[str, Any]:
     step: dict[str, Any] = _job(w, name)["steps"][index]
     return step
 
@@ -521,7 +543,7 @@ _TOOLING = f"Python tooling in a job that holds {TOKEN}"
 _KEY = "is not allowed on a job that holds a secret"
 
 #: (name, how the sample is broken, the problems the gate must report). Run every invocation.
-FIXTURES: tuple[tuple[str, Callable[[dict[str, Any]], None] | None, list[str]], ...] = (
+FIXTURES: tuple[tuple[str, Callable[[dict[Any, Any]], None] | None, list[str]], ...] = (
     ("the correct sample", None, []),
     (
         "an extra step echoing a fragment",
@@ -711,6 +733,32 @@ FIXTURES: tuple[tuple[str, Callable[[dict[str, Any]], None] | None, list[str]], 
         "no workflow-level concurrency",
         lambda w: w.pop("concurrency"),
         ["workflow: no single concurrency group with cancel-in-progress: false"],
+    ),
+    (
+        "the paused workflow_run of CI restored",
+        lambda w: w[True].update(
+            workflow_run={"workflows": ["CI"], "branches": ["main"], "types": ["completed"]}
+        ),
+        [
+            "workflow: automatic deploys are paused; the only trigger allowed is a bare "
+            "workflow_dispatch, found ['workflow_dispatch', 'workflow_run']"
+        ],
+    ),
+    (
+        "a push trigger in place of the manual one",
+        lambda w: w.update({True: {"push": {"branches": ["main"]}}}),
+        [
+            "workflow: automatic deploys are paused; the only trigger allowed is a bare "
+            "workflow_dispatch, found ['push']"
+        ],
+    ),
+    (
+        "no trigger at all",
+        lambda w: w.pop(True),
+        [
+            "workflow: automatic deploys are paused; the only trigger allowed is a bare "
+            "workflow_dispatch, found None"
+        ],
     ),
 )
 

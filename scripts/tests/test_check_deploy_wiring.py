@@ -94,6 +94,32 @@ def test_the_token_is_never_in_the_validate_job(workflow: dict[Any, Any]) -> Non
     assert "FLY_API_TOKEN" not in yaml.safe_dump(workflow["jobs"]["validate-model-chains"])
 
 
+# ---- paused since 2026-10-23: only a manual run starts a deploy ---------------------------
+
+_PAUSED = (
+    "workflow: automatic deploys are paused; the only trigger allowed is a bare "
+    "workflow_dispatch, found "
+)
+
+
+def test_the_real_workflow_starts_only_by_hand(gate: ModuleType, workflow: dict[Any, Any]) -> None:
+    assert workflow[True] == gate.ALLOWED_TRIGGERS == {"workflow_dispatch": None}
+
+
+def test_restoring_the_workflow_run_of_ci_is_caught(check: Any, workflow: dict[Any, Any]) -> None:  # noqa: ANN401
+    workflow[True]["workflow_run"] = {
+        "workflows": ["CI"],
+        "branches": ["main"],
+        "types": ["completed"],
+    }
+    assert check(workflow) == [f"{_PAUSED}['workflow_dispatch', 'workflow_run']"]
+
+
+def test_a_push_trigger_is_caught(check: Any, workflow: dict[Any, Any]) -> None:  # noqa: ANN401
+    workflow[True]["push"] = {"branches": ["main"]}
+    assert check(workflow) == [f"{_PAUSED}['push', 'workflow_dispatch']"]
+
+
 # ---- item 1: the job, not the step, is the boundary ---------------------------------------
 
 

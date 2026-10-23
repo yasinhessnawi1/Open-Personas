@@ -3,6 +3,8 @@ name: Deploy
 # Auto-deploy persona-api, persona-voice AND the self-hosted LiveKit SFU to Fly.
 # Fires only for a green CI run on a PUSH to `main` in THIS repository, or for a
 # manual run started from `main`. Never on a pull request, never on a red build.
+# PAUSED: automatic deploys are off since 2026-10-23 and only a manual run from
+# `main` starts this workflow; see the `on:` block below.
 #
 # Why every job checks the event and the repository, not just the branch name:
 # this workflow runs on `workflow_run`, in the base repository, with the production
@@ -84,10 +86,17 @@ name: Deploy
 # groups of their own.
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    branches: [main]
-    types: [completed]
+  # Automatic deploys are PAUSED since 2026-10-23: every Fly app this workflow
+  # deploys was deleted on 2026-10-02 ahead of the move to Hetzner, so a deploy
+  # after each green CI run could only fail. Deploys now run only when started by
+  # hand. Restoring the workflow_run block below re-enables them (and the trigger
+  # check in scripts/check_deploy_wiring.py, ALLOWED_TRIGGERS, with it). Every
+  # job keeps its CI-run path in its `if`, dead while the trigger is off, so the
+  # revert is this one block.
+  # workflow_run:
+  #   workflows: ["CI"]
+  #   branches: [main]
+  #   types: [completed]
   # Allow manual re-deploy from the Actions tab without a code change. Accepted
   # from `main` only: a manual run uses the chosen branch's copy of this file.
   workflow_dispatch:

@@ -12,6 +12,14 @@ These tests read the real workflow and require every job's ``if`` to be exactly 
 * a CI run that succeeded for a PUSH to ``main`` in THIS repository, or
 * a manual run from ``refs/heads/main``.
 
+Automatic deploys are PAUSED since 2026-10-23 (every Fly app was deleted on 2026-10-02
+ahead of the Hetzner move): the workflow's only trigger is ``workflow_dispatch``, so the
+only path that can run is the manual one from ``refs/heads/main``. The CI-run path is KEPT
+in every gate on purpose, dead while its trigger is off (``github.event.workflow_run`` is
+null on a manual run, so ``conclusion == 'success'`` is false): turning automatic deploys
+back on is then restoring the one ``workflow_run`` block, with the fork protection already
+in place, rather than rewriting six gates and hoping none is missed.
+
 The expression is parsed into its ``||`` paths and each path's ``&&`` conditions, so a
 condition that is present but reachable around (``A || event == 'push'``) fails too.
 """
@@ -102,6 +110,35 @@ def _jobs() -> dict[str, dict[str, Any]]:
 
 def test_the_workflow_has_deploy_jobs_to_check() -> None:
     assert {"deploy-api", "deploy-voice", "deploy-livekit"} <= set(_jobs())
+
+
+def _triggers() -> object:
+    loaded = _load()
+    # ``on`` parses as ``True`` under YAML 1.1 (PyYAML); accept either spelling.
+    return loaded.get(True, loaded.get("on"))
+
+
+def test_automatic_deploys_are_paused_and_only_a_manual_run_starts_one() -> None:
+    """No ``workflow_run`` of CI, no ``push``: a deploy starts only when started by hand."""
+    assert _triggers() == {"workflow_dispatch": None}
+
+
+def test_the_paused_ci_path_is_kept_dead_and_the_live_path_is_main_only() -> None:
+    """The decision, pinned: every gate keeps its CI-run path for a one-block revert, and
+    with no ``workflow_run`` trigger that path cannot be taken, because every one of them
+    requires ``github.event.workflow_run.conclusion == 'success'``. What can run is the
+    manual path, and it still requires ``refs/heads/main``."""
+    triggers = _triggers()
+    assert isinstance(triggers, dict)
+    assert "workflow_run" not in triggers
+    for job, spec in _jobs().items():
+        found = paths(spec["if"])
+        dead = [p for p in found if "github.event_name == 'workflow_dispatch'" not in p]
+        live = [p for p in found if p not in dead]
+        assert dead, f"{job}: the CI path was dropped; restoring the trigger would not gate it"
+        assert all("github.event.workflow_run.conclusion == 'success'" in p for p in dead), job
+        assert all(p >= _MANUAL_RUN_FROM_MAIN for p in live), job
+        assert live, f"{job}: no manual path, so the paused workflow could never run"
 
 
 #: Conditions ONE job may carry on BOTH paths on top of the canonical ones. Only the job that
