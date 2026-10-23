@@ -55,17 +55,20 @@ usermod -aG docker,sudo "${OP_USER}"
 apt-get update -q
 apt-get install -y -q ufw fail2ban unattended-upgrades ca-certificates curl git jq gnupg
 
-write_file /etc/ssh/sshd_config.d/10-open-persona.conf <<'EOF'
+# Only with a real key in place: written without one, the next sshd restart (an openssh
+# security update, a reboot) would lock everyone out. A key line starts with its type.
+if grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' "/home/${OP_USER}/.ssh/authorized_keys" 2>/dev/null; then
+  write_file /etc/ssh/sshd_config.d/10-open-persona.conf <<'EOF'
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AllowUsers deploy
 EOF
-if [ -s "/home/${OP_USER}/.ssh/authorized_keys" ]; then
   sshd -t && systemctl reload ssh
 else
-  say "WARNING: ${OP_USER} has no authorized_keys; SSH config written but NOT reloaded (it would lock you out)"
+  rm -f /etc/ssh/sshd_config.d/10-open-persona.conf
+  say "WARNING: ${OP_USER} has no SSH key; the SSH lockdown was NOT applied. Add the key, then run this again."
 fi
 
 write_file /etc/fail2ban/jail.d/sshd.local <<'EOF'

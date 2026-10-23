@@ -6,8 +6,8 @@
 #   2. refuse an EMPTY database: production is restored from backup first (restore.sh);
 #      migrating an empty database would create a fresh schema that the restore then
 #      refuses to overwrite
-#   3. keep the running images as :previous (the rollback)
-#   4. build natively, at low CPU priority so live calls keep the cores
+#   3. keep the images the running containers use as :previous (the rollback)
+#   4. build natively on the box (it competes with live calls: deploy off-hours)
 #   5. a pg_dump BEFORE migrating (migrations are not reversible by image rollback)
 #   6. migrate: the `migrate` service runs packages/api/release.py once
 #   7. up -d, then wait for api /livez and /healthz and the voice listener
@@ -46,28 +46,42 @@ say "LiveKit mode: ${LIVEKIT_MODE}"
 
 # --- 2 ------------------------------------------------------------------------------
 compose up -d postgres
+ready=0
 for _ in $(seq 1 60); do
-  compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona >/dev/null 2>&1 && break
+  if compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona >/dev/null 2>&1; then
+    ready=1; break
+  fi
   sleep 2
 done
+[ "${ready}" = 1 ] || die "postgres did not become ready"
 tables="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
-  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")"
-[ "${tables}" != "0" ] || die "the database is empty: run bin/restore.sh first (RUNBOOK.md step 4)"
+  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" || die "could not query the database"
+[ "${tables}" != "0" ] || die "the database is empty: run bin/restore.sh first (RUNBOOK.md step 5)"
 
 # --- 3 ------------------------------------------------------------------------------
-for img in api voice livekit; do
-  if docker image inspect "open-persona/${img}:${OP_IMAGE_TAG}" >/dev/null 2>&1; then
-    docker image tag "open-persona/${img}:${OP_IMAGE_TAG}" "open-persona/${img}:previous"
-  fi
-done
+# :previous is the image the RUNNING container uses, not whatever :current points at:
+# after a failed migrate, :current is already the new build while the old containers
+# still serve. Only a build replaces :current, so --skip-build leaves :previous alone.
+if [ "${SKIP_BUILD}" = 0 ]; then
+  for svc in api voice livekit; do
+    cid="$(compose ps -q "${svc}" 2>/dev/null || true)"
+    [ -n "${cid}" ] || continue
+    running="$(docker inspect --format '{{.Image}}' "${cid}")"
+    docker image tag "${running}" "open-persona/${svc}:previous"
+    say "rollback image for ${svc}: ${running:7:12}"
+  done
+fi
 
 # --- 4 ------------------------------------------------------------------------------
+# The build runs inside dockerd (BuildKit), so `nice` on this client would change
+# nothing: a build competes with live calls for CPU. Deploy outside call hours.
 if [ "${SKIP_BUILD}" = 0 ]; then
-  say "building $(git -C "${KIT_DIR}" rev-parse --short HEAD) (nice 10)"
-  nice -n 10 docker compose -f "${KIT_DIR}/docker-compose.yml" build
+  say "building $(git -C "${KIT_DIR}" rev-parse --short HEAD)"
+  compose build
 fi
 
 # --- 5 ------------------------------------------------------------------------------
+umask 077
 mkdir -p "${OP_DATA_DIR}/backups"
 dump="${OP_DATA_DIR}/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
 say "pre-migrate dump: ${dump}"
@@ -104,4 +118,4 @@ else
   say "WARNING: Caddy did not serve api.openpersonasai.com yet (DNS or the certificate). The services are up."
 fi
 
-say "deployed $(git -C "${KIT_DIR}" rev-parse --short HEAD). Rollback: RUNBOOK.md 'Rolling back a deploy'."
+say "deployed $(git -C "${KIT_DIR}" rev-parse --short HEAD). Rollback: RUNBOOK.md, section 'Rolling back'."

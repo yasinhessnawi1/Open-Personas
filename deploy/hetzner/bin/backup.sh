@@ -9,7 +9,7 @@
 #   facts.txt            schema shape and row counts (bin/restore.sh checks against it)
 #   SHA256SUMS
 # and keeps the newest ${KEEP_DAYS} days. A backup on the same disk is not a backup of the
-# disk: copy each night's directory OFF the box too (RUNBOOK.md, "Backups"). The off-site
+# disk: copy each night's directory OFF the box too (RUNBOOK.md step 12). The off-site
 # target is the owner's to choose; set OFFSITE_CMD to a command that receives the
 # directory path as its argument (for example an rsync to a Storage Box) to have this
 # script run it.
@@ -37,8 +37,10 @@ compose exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' \
   < "${KIT_DIR}/sql/verify.sql" > "${dest}/facts.txt"
 compose exec -T postgres pg_dump -U persona -Fc persona > "${dest}/persona.dump"
 compose exec -T postgres pg_dumpall -U persona --globals-only > "${dest}/globals.sql"
+# GNU tar exits 1 for "file changed as we read it", which is normal on a live directory
+# (audit and turn logs are appended continuously). Exit 2 and above are real failures.
 tar -czf "${dest}/persona_volume.tgz" --numeric-owner --exclude=./hf \
-  -C "${OP_DATA_DIR}/persona" .
+  -C "${OP_DATA_DIR}/persona" . || [ $? -eq 1 ]
 (cd "${dest}" && sha256sum facts.txt persona.dump globals.sql persona_volume.tgz > SHA256SUMS)
 
 # A dump that pg_restore cannot list is not a backup.

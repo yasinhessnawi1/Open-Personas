@@ -486,7 +486,6 @@ def test_cloud_init_locks_the_box_down_from_first_boot() -> None:
     text = (KIT / "cloud-init.yaml").read_text(encoding="utf-8")
     assert text.startswith("#cloud-config\n")
     config = yaml.safe_load(text)
-    assert config["disable_root"] is True
     assert config["ssh_pwauth"] is False
     (user,) = config["users"]
     assert user["name"] == "deploy"
@@ -496,6 +495,24 @@ def test_cloud_init_locks_the_box_down_from_first_boot() -> None:
     assert user["ssh_authorized_keys"] == ["__OWNER_SSH_PUBLIC_KEY__"]
     assert "ufw limit 22/tcp" in config["runcmd"]
     assert "ufw --force enable" in config["runcmd"]
+    # Root login is closed by the sshd drop-in, which the lockout guard removes when the
+    # deploy key never arrived, so root's console key stays a way in.
+    (drop_in,) = [f for f in config["write_files"] if f["path"].endswith("10-open-persona.conf")]
+    assert "PermitRootLogin no" in drop_in["content"]
+    assert "AllowUsers deploy" in drop_in["content"]
+    assert config["disable_root"] is False
+    guard = next(c for c in config["runcmd"] if "authorized_keys" in str(c))
+    assert "rm -f /etc/ssh/sshd_config.d/10-open-persona.conf" in guard
+    assert config["runcmd"].index(guard) < config["runcmd"].index("systemctl restart ssh")
+
+
+def test_the_key_placeholder_never_passes_for_a_key() -> None:
+    """The guard and provision.sh recognise a key by its type prefix; the placeholder has none."""
+    key_line = re.compile(r"^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)")
+    assert not key_line.match("__OWNER_SSH_PUBLIC_KEY__")
+    assert key_line.match("ssh-ed25519 AAAAC3Nza fake@example")
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert "^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)" in provision
 
 
 def test_provision_opens_exactly_the_public_ports() -> None:

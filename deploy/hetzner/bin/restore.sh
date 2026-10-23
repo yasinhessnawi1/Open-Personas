@@ -6,7 +6,7 @@
 # never modifies the backup files and never prints their contents, only counts and
 # schema facts.
 #
-# What it does, in order (RUNBOOK.md step 4):
+# What it does, in order (RUNBOOK.md step 5):
 #   1. Verifies the backup checksums (SHA256SUMS written on the owner's PC).
 #   2. Checks the target database is EMPTY. It refuses to restore over data.
 #   3. Recreates persona_app with the attributes globals.sql records (checked, not
@@ -96,6 +96,10 @@ psql_q() { pg_exec psql -U persona -d persona -v ON_ERROR_STOP=1 -X -q -t -A "$@
 if [ -f "${BACKUP_DIR}/SHA256SUMS" ]; then
   say "verifying checksums"
   (cd "${BACKUP_DIR}" && sha256sum --quiet -c SHA256SUMS) || die "checksum mismatch"
+elif [ -f "${FACTS_FILE}" ]; then
+  # A nightly backup always ends with SHA256SUMS; its absence means that night's backup
+  # stopped part-way, and a half-written set must not be restored as if it were whole.
+  die "facts.txt without SHA256SUMS: this nightly backup is incomplete"
 else
   say "WARNING: no SHA256SUMS next to the backups; transfer integrity is unverified"
 fi
@@ -124,7 +128,8 @@ for _ in $(seq 1 60); do
 done
 pg_exec pg_isready -h 127.0.0.1 -U persona -d persona >/dev/null 2>&1 || die "postgres did not become ready"
 
-existing="$(psql_q -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")"
+existing="$(psql_q -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" \
+  || die "could not query the database"
 [ "${existing}" = "0" ] || die "database already has ${existing} tables; refusing to restore over data"
 
 # --- 3. roles -------------------------------------------------------------------------
@@ -139,9 +144,18 @@ done
 grep -Eq '^CREATE ROLE persona;' "${GLOBALS}" || die "globals.sql does not define role persona"
 
 say "creating persona_app (attributes from globals.sql, new password)"
-# The password goes in on stdin, never on a command line.
+# The password goes in on stdin, never on a command line. Idempotent: a role left behind
+# by a failed earlier run (pg_restore's rollback does not remove roles) is brought to the
+# same attributes and password instead of failing the re-run.
 pg_exec psql -U persona -d persona -v ON_ERROR_STOP=1 -X -q <<SQL
-CREATE ROLE persona_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION INHERIT PASSWORD '${APP_PW}';
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'persona_app') THEN
+    CREATE ROLE persona_app;
+  END IF;
+END
+\$\$;
+ALTER ROLE persona_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION INHERIT PASSWORD '${APP_PW}';
 SQL
 unset APP_PW
 
@@ -152,11 +166,12 @@ psql_q -c "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" >/dev/null
 # --- 5. data --------------------------------------------------------------------------
 say "pg_restore (single transaction, exit on first error)"
 pg_exec pg_restore -U persona -d persona --single-transaction --exit-on-error < "${DUMP}" \
-  || die "pg_restore failed; the transaction rolled back and the database is empty again"
+  || die "pg_restore failed; the transaction rolled back, so no table was left behind and a re-run is safe"
 
 # --- 6. verification --------------------------------------------------------------------
 say "verifying"
-facts="$(pg_exec psql -U persona -d persona -v ON_ERROR_STOP=1 -X -q -t -A -F '|' < "${KIT_DIR}/sql/verify.sql")"
+facts="$(pg_exec psql -U persona -d persona -v ON_ERROR_STOP=1 -X -q -t -A -F '|' < "${KIT_DIR}/sql/verify.sql")" \
+  || die "sql/verify.sql failed"
 printf '%s\n' "${facts}" | sed 's/^/restore:   /' >&2
 fact() { printf '%s\n' "${facts}" | awk -F'|' -v k="$1" '$1==k {print $2}'; }
 [ "$(fact tables)" = "${EXPECT_TABLES}" ] || die "expected ${EXPECT_TABLES} tables, found $(fact tables)"
@@ -182,7 +197,7 @@ rls_leak="$(pg_exec psql -U persona -d persona -v ON_ERROR_STOP=1 -X -q -t -A <<
 SET ROLE persona_app;
 SELECT count(*) FROM personas;
 SQL
-)"
+)" || die "the RLS probe as persona_app failed (a policy that errors with no user set?)"
 [ "${rls_leak}" = "0" ] || die "persona_app saw ${rls_leak} personas with no user set; RLS is not enforcing"
 say "RLS check passed: persona_app with no user set sees 0 personas"
 

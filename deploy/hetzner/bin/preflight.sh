@@ -46,36 +46,53 @@ fi
 [ "${ENV_ONLY}" = 1 ] && { [ "${fails}" = 0 ] && exit 0 || exit 1; }
 
 # --- host -----------------------------------------------------------------------------
-if sudo ufw status | grep -q "Status: active"; then
+# Every command's output is captured ONCE and searched from a here-string: with pipefail,
+# `cmd | grep -q` can report failure when grep exits early and cmd gets SIGPIPE, which
+# would turn a positive check into a false FAIL and a negative check into a silent pass.
+has()  { grep -q "$2" <<<"$1"; }
+hasE() { grep -qE "$2" <<<"$1"; }
+
+ufw_out="$(sudo ufw status 2>&1 || true)"
+if has "${ufw_out}" "Status: active"; then
   ok "ufw active"
   for rule in "22/tcp" "80/tcp" "443/tcp" "7881/tcp" "7882/udp"; do
-    sudo ufw status | grep -q "^${rule}" && ok "ufw allows ${rule}" || bad "ufw does not allow ${rule}"
+    if hasE "${ufw_out}" "^${rule}"; then ok "ufw allows ${rule}"; else bad "ufw does not allow ${rule}"; fi
   done
-  sudo ufw status | grep -qE '^(5432|7880|8000|8001)' && bad "ufw opens an internal port (5432/7880/8000/8001)"
+  if hasE "${ufw_out}" '^(5432|7880|8000|8001)'; then
+    bad "ufw opens an internal port (5432/7880/8000/8001)"
+  fi
 else
   bad "ufw is not active"
 fi
-docker ps --format '{{.Ports}}' | grep -E '0\.0\.0\.0:|\[::\]:' >/dev/null \
-  && bad "a container publishes on a public address (Docker bypasses ufw)" \
-  || ok "no container publishes on a public address"
+ports_out="$(docker ps --format '{{.Ports}}' 2>&1)" || bad "docker ps failed"
+if hasE "${ports_out}" '0\.0\.0\.0:|\[::\]:'; then
+  bad "a container publishes on a public address (Docker bypasses ufw)"
+else
+  ok "no container publishes on a public address"
+fi
 
 # --- DNS points here --------------------------------------------------------------------
-ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
 for host in api.openpersonasai.com api.openpersona.online connectors.openpersonasai.com \
             voice.openpersonasai.com livekit.openpersonasai.com; do
-  resolved="$(getent ahostsv4 "${host}" | awk 'NR==1 {print $1}')"
+  resolved="$(getent ahostsv4 "${host}" | awk 'NR==1 {print $1}' || true)"
   if [ "${resolved}" = "${ip4}" ]; then ok "${host} -> this box"
   else warn "${host} resolves to '${resolved:-nothing}', not this box (${ip4})"; fi
 done
 
 # --- listeners ----------------------------------------------------------------------------
-ss -ltn | grep -q '127.0.0.1:8000 ' && ok "api on 127.0.0.1:8000" || bad "api not listening"
-ss -ltn | grep -q '127.0.0.1:8001 ' && ok "voice on 127.0.0.1:8001" || bad "voice not listening"
-ss -ltn | grep -qE ':443 ' && ok "caddy on :443" || bad "caddy not on :443"
+tcp_out="$(ss -ltn)"
+udp_out="$(ss -lun)"
+listening() {  # listening <output> <pattern> <label>
+  if hasE "$1" "$2"; then ok "$3"; else bad "$3: not listening"; fi
+}
+listening "${tcp_out}" '127\.0\.0\.1:8000 ' "api on 127.0.0.1:8000"
+listening "${tcp_out}" '127\.0\.0\.1:8001 ' "voice on 127.0.0.1:8001"
+listening "${tcp_out}" ':443 ' "caddy on :443"
 if [ "${selfhosted}" = 1 ]; then
-  ss -ltn | grep -qE ':7880 ' && ok "livekit signaling :7880" || bad "livekit signaling not listening"
-  ss -ltn | grep -qE ':7881 ' && ok "livekit ICE/TCP :7881" || bad "livekit ICE/TCP not listening"
-  ss -lun | grep -qE ':7882 ' && ok "livekit ICE/UDP :7882" || bad "livekit UDP 7882 not listening"
+  listening "${tcp_out}" ':7880 ' "livekit signaling :7880"
+  listening "${tcp_out}" ':7881 ' "livekit ICE/TCP :7881"
+  listening "${udp_out}" ':7882 ' "livekit ICE/UDP :7882"
   warn "a listening UDP socket does not prove media flows: run the browser check in RUNBOOK.md step 9"
 fi
 

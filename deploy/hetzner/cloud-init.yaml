@@ -4,6 +4,7 @@
 # Paste this into "Cloud config" when creating the server in the Hetzner console, after
 # replacing the one placeholder below with the owner's SSH PUBLIC key. It makes the box
 # safe from its first minute: one non-root admin user with key-only SSH, root login off,
+# (unless the deploy key is missing, see the lockout guard in runcmd),
 # a default-deny firewall that admits only SSH, fail2ban and unattended security
 # upgrades. Everything else (Docker, the app's firewall ports, directories, the backup
 # timer) is bin/provision.sh, which is idempotent and re-asserts this baseline too.
@@ -22,7 +23,10 @@ users:
     ssh_authorized_keys:
       - "__OWNER_SSH_PUBLIC_KEY__"
 
-disable_root: true
+# Root login is closed by the sshd drop-in below (PermitRootLogin no), NOT by cloud-init's
+# disable_root, so that the lockout guard in runcmd can keep root's console-selected key
+# as the way in when the deploy key was left as the placeholder.
+disable_root: false
 ssh_pwauth: false
 
 package_update: true
@@ -74,6 +78,12 @@ runcmd:
   - ufw limit 22/tcp
   - ufw --force enable
   - systemctl enable --now fail2ban
+  # Lockout guard: if no real key reached `deploy` (the placeholder was left in), drop the
+  # lockdown so root's key from the console's "SSH key" field still gets in, and say so.
+  - >-
+    grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' /home/deploy/.ssh/authorized_keys ||
+    { rm -f /etc/ssh/sshd_config.d/10-open-persona.conf;
+    echo 'OPEN PERSONA: deploy has no SSH key; lockdown NOT applied. Add the key, run bin/provision.sh.' > /etc/motd; }
   - systemctl restart ssh
   - mkdir -p /opt/open-persona /srv/open-persona
   - chown deploy:deploy /opt/open-persona /srv/open-persona

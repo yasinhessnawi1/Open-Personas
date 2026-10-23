@@ -107,12 +107,16 @@ Note the IPv4 and IPv6 addresses.
 
 ## Step 2: put the code on the box
 
-The box needs no GitHub credential for this. From the owner's PC, in the repo:
+The box needs no GitHub credential for this. From the owner's PC, in the repo, with a
+LOCAL branch that holds this kit (`main` once the Hetzner branch is merged, until then
+`feat/hetzner-move`). A bundle of `origin/main` would not work: it carries a remote ref,
+no branch, and the clone comes up empty.
 
 ```bash
-git bundle create /tmp/open-persona.bundle origin/main
+BRANCH=main                                   # or feat/hetzner-move before the merge
+git bundle create /tmp/open-persona.bundle "$BRANCH"
 scp /tmp/open-persona.bundle deploy@<ip>:/tmp/
-ssh deploy@<ip> 'git clone /tmp/open-persona.bundle /opt/open-persona/repo && rm /tmp/open-persona.bundle'
+ssh deploy@<ip> "git clone -b $BRANCH /tmp/open-persona.bundle /opt/open-persona/repo && rm /tmp/open-persona.bundle"
 ```
 
 (Alternative: a read-only GitHub deploy key on the box and `git clone` over SSH. That is
@@ -191,10 +195,11 @@ RLS check passed: persona_app with no user set sees 0 personas
 volume entries: 214 (the backup listed 214)
 ```
 
-Anything else stops the script,
-and `pg_restore` runs in one transaction, so a failed restore leaves no tables behind
-(the `persona_app` role and the extension remain; drop the `pgdata` volume to start clean:
-`docker compose -f docker-compose.yml down` then `docker volume rm open-persona-hetzner_pgdata`).
+Anything else stops the script. `pg_restore` runs in one transaction, so a failed restore
+leaves no tables behind, and the role and extension steps are idempotent: fix the cause
+and run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification
+check), the tables are there and the script refuses to restore over them; start clean with
+`docker compose -f docker-compose.yml down` then `docker volume rm open-persona-hetzner_pgdata`.
 
 ## Step 6: deploy
 
@@ -375,8 +380,9 @@ recommended replacement:
   (15 `nvidia-*` packages in `uv.lock`) and are several GB each: GHCR storage for a private
   repository beyond the free quota costs money and every deploy would push and pull GBs.
   A native build on 8 vCPU takes minutes, and the only new secret class is one SSH key.
-  The cost is build CPU on the live box: `deploy.sh` builds at `nice 10`, and deploys
-  should run outside call hours.
+  The cost is build CPU on the live box: the build runs inside dockerd, so nothing in
+  `deploy.sh` can lower its priority, and deploys must run outside call hours. (If that
+  ever bites, `systemctl set-property docker.service CPUWeight=...` is the lever to test.)
 - **Revisit GHCR** when the images shrink (a CPU-only torch index) or a second box
   (staging) exists; then build once in Actions, push by digest, and `docker compose pull`
   on the box.
