@@ -39,7 +39,7 @@ public_ipv4() {
 
 generate() {
   case "$1" in
-    POSTGRES_PASSWORD|APP_DB_PASSWORD) hex 32 ;;
+    POSTGRES_PASSWORD|APP_DB_PASSWORD|PLATFORM_DB_PASSWORD) hex 32 ;;
     LIVEKIT_API_KEY) printf 'API%s' "$(hex 8)" ;;
     LIVEKIT_API_SECRET) hex 32 ;;
     NODE_IP) public_ipv4 || die "could not determine the public IPv4; set it by hand in ${STORE} as NODE_IP=<ip>" ;;

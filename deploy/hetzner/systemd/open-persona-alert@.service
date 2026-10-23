@@ -1,0 +1,10 @@
+# Open Persona alert: runs when an Open Persona unit fails (OnFailure=), with the failed
+# unit's name as the instance. bin/alert.sh records it in the marker file that preflight
+# and the login banner report, and runs the owner's notifier command if alert.env sets one.
+[Unit]
+Description=Open Persona alert for %i
+
+[Service]
+Type=oneshot
+Environment=OP_ENV_DIR=/opt/open-persona/env
+ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/alert.sh %i "systemd unit %i failed; see: journalctl -u %i"

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Open Persona login banner (installed into /etc/update-motd.d by bin/provision.sh).
+# Shows unacknowledged alerts; clear them with bin/alert.sh --ack once handled.
+ALERTS=/var/lib/open-persona/alerts/ALERTS
+if [ -s "$ALERTS" ]; then
+  echo ""
+  echo "  !!! OPEN PERSONA ALERTS: $(wc -l < "$ALERTS") unacknowledged !!!"
+  tail -n 5 "$ALERTS" | sed 's/^/  /'
+  echo "  Handle them, then: /opt/open-persona/repo/deploy/hetzner/bin/alert.sh --ack"
+  echo ""
+fi

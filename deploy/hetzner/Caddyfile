@@ -6,16 +6,29 @@
 # production once every name answers. HTTP is redirected to HTTPS automatically, which
 # is what Fly's force_https did.
 #
-# No access logs: LiveKit signaling carries the access token in the query string, and
-# connector webhooks carry provider payload metadata in theirs.
+# The admin API is OFF: nothing on the box can reconfigure Caddy at runtime. A config
+# change is a container restart (`docker compose ... up -d --force-recreate caddy`), and
+# bin/deploy.sh validates this file before every start.
+#
+# No access logs. The error log drops the request URI (LiveKit signaling carries its
+# access token in the query string) and the Authorization and Cookie headers.
 #
 # The hostnames are the ones production used on Fly. Keeping them is what keeps every
 # provider registration valid unchanged: the Stripe webhook, the Discord, Slack and GitHub
 # OAuth redirects, and the Twilio and Postmark webhooks.
 
 {
+	admin off
 	email {$ACME_EMAIL}
 	acme_ca {$ACME_CA}
+	log default {
+		output stderr
+		format filter {
+			request>uri delete
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+		}
+	}
 }
 
 (edge) {
@@ -25,19 +38,45 @@
 	}
 }
 
-# The api, under both domains, and the connector webhooks and OAuth callbacks, which have
-# been served by the api process since the I1 fold. flush_interval -1 streams SSE (chat
-# and agentic runs) without buffering.
-api.openpersonasai.com, api.openpersona.online, connectors.openpersonasai.com {
+# The api, under both domains. flush_interval -1 streams SSE (chat and agentic runs)
+# without buffering. Request bodies are capped above the app's own 20 MB upload limit
+# (image_service.MAX_UPLOAD_BYTES, chat_service.MAX_STAGED_DOCUMENT_BYTES) plus
+# multipart overhead.
+api.openpersonasai.com, api.openpersona.online {
 	import edge
+	request_body {
+		max_size 32MB
+	}
 	reverse_proxy 127.0.0.1:8000 {
 		flush_interval -1
+	}
+}
+
+# The connector host serves ONLY the provider webhooks and OAuth callbacks the I1 fold
+# mounted on the api (persona_connectors: discord/slack OAuth callbacks, the Slack events
+# URL, the Telegram and Postmark webhooks, and Twilio's webhook and status callback for
+# sms and whatsapp). Everything else on this name is a 404, so the api's own routes are
+# not reachable through it. Postmark inbound mail can reach 35 MB with attachments.
+connectors.openpersonasai.com {
+	import edge
+	@provider path /discord/oauth/callback /slack/oauth/callback /slack/events /telegram/webhook /email/webhook /sms/webhook /sms/status /whatsapp/webhook /whatsapp/status
+	handle @provider {
+		request_body {
+			max_size 40MB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		respond 404
 	}
 }
 
 # persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
 voice.openpersonasai.com {
 	import edge
+	request_body {
+		max_size 1MB
+	}
 	reverse_proxy 127.0.0.1:8001
 }
 
@@ -46,5 +85,8 @@ voice.openpersonasai.com {
 # 502, which is harmless; keep the DNS record so switching modes needs no DNS change.
 livekit.openpersonasai.com {
 	import edge
+	request_body {
+		max_size 1MB
+	}
 	reverse_proxy 127.0.0.1:7880
 }

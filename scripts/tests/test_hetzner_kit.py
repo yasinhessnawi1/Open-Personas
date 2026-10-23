@@ -89,9 +89,11 @@ TOKEN = re.compile(
 )
 GEN = re.compile(r"__GEN_[A-Z0-9_]+__")
 DSN = re.compile(
-    r"^postgresql\+psycopg://(persona|persona_app):__GEN_[A-Z_]+__@postgres:5432/persona$"
+    r"^postgresql\+psycopg://(persona|persona_app|persona_platform):__GEN_[A-Z_]+__"
+    r"@postgres:5432/persona$"
 )
 FIXED_VALUES = {
+    "",  # alert.env OP_ALERT_CMD: empty means the on-box marker only
     "0",
     "false",
     "persona",
@@ -206,12 +208,37 @@ def test_initiative_and_per_tenant_mcp_are_pinned_off() -> None:
     assert api["PERSONA_ALLOW_PER_TENANT_MCP"] == "0"
 
 
-def test_the_request_paths_use_the_rls_role_and_migrations_the_owner() -> None:
+def test_only_the_migration_holds_the_superuser_dsn() -> None:
+    """H1: the long-running api never holds superuser credentials."""
     api = dict(_template("api"))
     voice = dict(_template("voice"))
-    assert "//persona:" in api["DATABASE_URL"]
+    migrate = dict(_template("migrate"))
+    assert "//persona_platform:" in api["DATABASE_URL"]
     assert "//persona_app:" in api["APP_DATABASE_URL"]
     assert "//persona_app:" in voice["PERSONA_VOICE_DATABASE_URL"]
+    assert "//persona:" in migrate["DATABASE_URL"]
+    holders = [
+        name
+        for name, pairs in _all_templates().items()
+        if any("//persona:" in value for _, value in pairs)
+    ]
+    assert holders == ["migrate"]
+
+
+def test_migrate_reads_only_its_own_env_file_and_has_no_route_out() -> None:
+    migrate = _compose()["services"]["migrate"]
+    assert migrate["env_file"] == ["${OP_ENV_DIR:-/opt/open-persona/env}/migrate.env"]
+    assert migrate["networks"] == ["db"]
+
+
+def test_every_generated_database_password_has_a_generator() -> None:
+    fill = (KIT / "bin" / "fill_generated.sh").read_text(encoding="utf-8")
+    tokens = {
+        t for pairs in _all_templates().values() for _, value in pairs for t in GEN.findall(value)
+    }
+    for token in tokens:
+        name = token.removeprefix("__GEN_").removesuffix("__")
+        assert re.search(rf"\b{name}\b", fill), f"fill_generated.sh cannot make {name}"
 
 
 def test_livekit_key_pair_is_the_same_for_the_sfu_and_voice() -> None:
@@ -231,6 +258,32 @@ def _compose() -> dict[str, Any]:
 
 def test_postgres_is_never_published() -> None:
     assert "ports" not in _compose()["services"]["postgres"]
+
+
+def test_postgres_sits_only_on_an_internal_network() -> None:
+    compose = _compose()
+    assert compose["services"]["postgres"]["networks"] == ["db"]
+    assert compose["networks"]["db"]["internal"] is True
+    assert "@sha256:" in compose["services"]["postgres"]["image"]
+
+
+def test_app_containers_drop_every_capability_and_cap_pids() -> None:
+    services = _compose()["services"]
+    for name in ("api", "voice", "migrate", "livekit", "caddy"):
+        assert services[name]["cap_drop"] == ["ALL"], name
+        assert services[name]["pids_limit"] <= 1024, name
+    assert services["caddy"]["cap_add"] == ["NET_BIND_SERVICE"]
+    for name in ("api", "voice", "migrate", "livekit"):
+        assert "cap_add" not in services[name], name
+    assert services["livekit"]["user"] == "65534:65534"
+
+
+def test_the_daemon_forbids_new_privileges_and_keeps_containers_across_upgrades() -> None:
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert '"no-new-privileges": true' in provision
+    assert '"live-restore": true' in provision
+    assert "origin=Docker,label=Docker CE" in provision
+    assert "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" in provision
 
 
 def test_app_ports_are_published_on_loopback_only() -> None:
@@ -302,6 +355,45 @@ HOSTS = {
     "voice.openpersonasai.com",
     "livekit.openpersonasai.com",
 }
+
+
+def test_caddy_admin_api_is_off_and_bodies_are_capped() -> None:
+    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
+    assert re.search(r"^\tadmin off$", caddyfile, re.M)
+    sites = caddyfile.count("reverse_proxy 127.0.0.1")
+    assert caddyfile.count("max_size") == sites
+    assert "request>uri delete" in caddyfile
+
+
+def test_the_connector_host_serves_exactly_the_provider_paths() -> None:
+    """connectors.* may reach only the webhooks and OAuth callbacks the code mounts."""
+    src = ROOT / "packages" / "connectors" / "src" / "persona_connectors"
+    constants = {
+        "discord/app.py": "_CALLBACK_PATH",
+        "slack/app.py": "_CALLBACK_PATH",
+        "slack/events.py": "_EVENTS_PATH",
+        "telegram/app.py": "_WEBHOOK_PATH",
+    }
+    expected = set()
+    for file, constant in constants.items():
+        match = re.search(
+            rf'^{constant} = "([^"]+)"', (src / file).read_text(encoding="utf-8"), re.M
+        )
+        assert match, f"{file} {constant}"
+        expected.add(match.group(1))
+    email = (src / "email" / "app.py").read_text(encoding="utf-8")
+    expected.update(re.findall(r'@app\.post\("(/email/[^"]+)"\)', email))
+    twilio = (src / "_twilio" / "app.py").read_text(encoding="utf-8")
+    assert 'webhook_path = f"/{platform}/webhook"' in twilio
+    assert 'status_path = f"/{platform}/status"' in twilio
+    service = (src / "service.py").read_text(encoding="utf-8")
+    for platform in sorted(set(re.findall(r'http_apps\["(sms|whatsapp)"\]', service))):
+        expected.update({f"/{platform}/webhook", f"/{platform}/status"})
+
+    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
+    matcher = re.search(r"^\t@provider path (.+)$", caddyfile, re.M)
+    assert matcher
+    assert set(matcher.group(1).split()) == expected
 
 
 def test_caddy_serves_every_production_hostname() -> None:
@@ -489,8 +581,8 @@ def test_cloud_init_locks_the_box_down_from_first_boot() -> None:
     assert config["ssh_pwauth"] is False
     (user,) = config["users"]
     assert user["name"] == "deploy"
-    # uid 1000 is the images' `persona` user, so the bind mounts need no remapping.
-    assert user["uid"] == 1000
+    # NOT 1000: uid 1000 is the images' `persona` user and owns the app's data.
+    assert user["uid"] == 2000
     assert user["lock_passwd"] is True
     assert user["ssh_authorized_keys"] == ["__OWNER_SSH_PUBLIC_KEY__"]
     assert "ufw limit 22/tcp" in config["runcmd"]
@@ -524,7 +616,26 @@ def test_provision_opens_exactly_the_public_ports() -> None:
 def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None:
     service = (KIT / "systemd" / "open-persona-backup.service").read_text(encoding="utf-8")
     assert "ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh" in service
-    assert "User=deploy" in service
+    # Root: the data is owned by uid 1000 and the operator (uid 2000) does not own it.
+    assert "User=" not in service
+
+
+@pytest.mark.parametrize("unit", ["open-persona-backup.service", "open-persona-diskcheck.service"])
+def test_a_failing_timer_job_raises_an_alert(unit: str) -> None:
+    text = (KIT / "systemd" / unit).read_text(encoding="utf-8")
+    assert "OnFailure=open-persona-alert@%n.service" in text
+
+
+def test_provision_installs_every_systemd_file() -> None:
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    for unit in (KIT / "systemd").iterdir():
+        assert unit.name in provision, f"provision.sh never installs {unit.name}"
+
+
+def test_backup_refuses_below_the_free_space_floor() -> None:
+    backup = (KIT / "bin" / "backup.sh").read_text(encoding="utf-8")
+    assert "OP_BACKUP_MIN_FREE_GB" in backup
+    assert "REFUSED" in backup
 
 
 # --- the inventory and the MCP seam ----------------------------------------------------------
@@ -579,6 +690,11 @@ def test_the_mcp_seam_is_named_and_the_app_never_gets_the_docker_socket() -> Non
     assert "SEAM: per-tenant MCP runtime" in text
     assert "SEAM: per-tenant MCP runtime" in (KIT / "RUNBOOK.md").read_text(encoding="utf-8")
     services = _compose()["services"]
-    for name in ("api", "voice", "migrate"):
-        mounts = [str(v) for v in services[name].get("volumes", [])]
-        assert not any("docker.sock" in m for m in mounts), f"{name} mounts the Docker socket"
+    for name, service in services.items():
+        for mount in (str(v) for v in service.get("volumes", [])):
+            source = mount.split(":", 1)[0]
+            assert "docker.sock" not in mount, f"{name} mounts the Docker socket"
+            assert not source.startswith(("/run", "/var/run")), f"{name} mounts {source}"
+        assert service.get("privileged") is not True, f"{name} is privileged"
+        environment = service.get("environment", {}) or {}
+        assert "DOCKER_HOST" not in environment, f"{name} is pointed at a Docker daemon"

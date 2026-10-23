@@ -15,6 +15,32 @@ gone. What exists is the backup set in `~/Backups/fly-2026-10-02` on the owner's
 Treat the first three as production user data: never paste their contents anywhere, never
 commit them, delete the copy on the box once the move is signed off.
 
+> **Target change (2026-10-23):** the owner moved the target from Hetzner to Azure. The
+> container kit here (compose, Caddy, the scripts, the env templates, the restore) is
+> target-independent and carries over; the Hetzner-specific steps (the console, its
+> cloud-init, its snapshots) are superseded by the Azure plan and are kept only as a
+> reference until that lands.
+
+**Never paste the output of `docker compose config`, `printenv`, `env` or
+`docker inspect` anywhere** (a chat, an issue, a log paste): each prints every secret the
+service holds. The same goes for `pg_restore` error output, which can echo row data.
+
+## Who can do what
+
+- **`deploy` is root-equivalent**: it has passwordless sudo and is in the `docker` group,
+  either of which is root on the box. Its SSH key IS the key to production. Use a hardware
+  key (`ssh-keygen -t ed25519-sk`, FIDO2) or at least a passphrase-protected key that never
+  leaves the owner's machine.
+- `deploy` is uid 2000. The app's data is owned by uid 1000 (the images' `persona` user),
+  so the operator's login does not own it; the nightly backup runs as root.
+- **Database roles.** `persona` (superuser) is used only by the one-shot `migrate` service
+  (`migrate.env`, read by nothing else) and by the restore scripts. The api's cross-tenant
+  engines use `persona_platform` (bypasses RLS, NOT a superuser, DML only: it cannot
+  `COPY ... TO PROGRAM`, alter roles or create tables). Every request path, api and voice,
+  uses `persona_app` (RLS enforced). `bin/preflight.sh` checks all three.
+- Turn on two-factor authentication on the cloud account and the DNS account before any
+  production data is uploaded (step 5).
+
 ## What is in this directory
 
 | file | role |
@@ -29,7 +55,8 @@ commit them, delete the copy on the box once the move is signed off.
 | `bin/restore.sh` | on the box: roles, pgvector, `pg_restore`, verification, the api volume |
 | `bin/deploy.sh` | on the box: build, pre-migrate dump, migrate, start, health checks |
 | `bin/preflight.sh` | on the box: env completeness, firewall, DNS, listeners |
-| `bin/backup.sh` + `systemd/` | nightly dump, roles, api data, facts, checksums |
+| `bin/backup.sh` + `systemd/` | nightly dump, roles, api data, facts, checksums; refuses below a free-space floor |
+| `bin/alert.sh`, `bin/diskcheck.sh` | a failed backup or a full disk raises an alert (marker, login banner, optional notifier) |
 | `sql/verify.sql` | the post-restore facts (counts and schema facts only) |
 
 Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script test).
@@ -120,7 +147,14 @@ BRANCH=main                                   # or feat/hetzner-move before the 
 git bundle create /tmp/open-persona.bundle "$BRANCH"
 scp /tmp/open-persona.bundle deploy@<ip>:/tmp/
 ssh deploy@<ip> "git clone -b $BRANCH /tmp/open-persona.bundle /opt/open-persona/repo && rm /tmp/open-persona.bundle"
+rm /tmp/open-persona.bundle
+# The clone's `origin` is the bundle file, now deleted. Point it at GitHub for later pulls:
+ssh deploy@<ip> "git -C /opt/open-persona/repo remote set-url origin https://github.com/<owner>/<repo>.git"
 ```
+
+On the first `ssh`, compare the host key fingerprint it shows with the one the server
+console reports (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` in the provider's web
+console). Do not upload anything until they match.
 
 (Alternative: a read-only GitHub deploy key on the box and `git clone` over SSH. That is
 what the CI deploy will need anyway, see the last section.)
@@ -164,19 +198,22 @@ It prints every name with its state, never a value. Then edit the files in `~/op
   set it (the code default then applies, exactly as on Fly).
 - Every name marked `[d]` in the inventory: replace the copied dev value with production's.
 
-Copy them to the box and finish them there:
+Copy them to the box over SSH only (scp; never a chat, mail or shared drive), and finish
+them there:
 
 ```bash
 scp ~/op-env/*.env deploy@<ip>:/opt/open-persona/env/
 ssh deploy@<ip>
 cd /opt/open-persona/repo/deploy/hetzner
-bin/fill_generated.sh          # new DB passwords, LiveKit key pair, node IP
-bin/preflight.sh --env-only    # must pass
+bin/fill_generated.sh          # new DB passwords (3 roles), LiveKit key pair, node IP
+bin/preflight.sh --env-only    # must pass: roles separated, no dev Clerk instance
 ```
 
 `/opt/open-persona/env/.generated` now holds the only copy of the new database passwords.
 Put the whole `/opt/open-persona/env` directory in the owner's password manager. Delete
-`~/op-env` from the PC afterwards.
+`~/op-env` from the PC afterwards (`shred -u ~/op-env/*.env` where available).
+
+`alert.env` decides where alerts go besides the on-box marker (see "Alerts" below).
 
 ## Step 5: restore
 
@@ -203,9 +240,12 @@ What a correct restore prints (from the 2026-10-23 rehearsal against this exact 
 tables|54   forced_rls_tables|45   policies|46
 persona_app_superuser|false   persona_app_bypassrls|false
 persona_app_tables_without_select|0
+persona_platform_superuser|false   persona_platform_tables_without_dml|0
 vector_columns|4   hnsw_indexes|3
 alembic_revision|058_jobs_live_task_leg_index
 RLS check passed: persona_app with no user set sees 0 personas
+platform check passed: persona_platform has no DDL
+volume archive scan passed: regular files and directories only
 volume entries: 214 (the backup listed 214)
 ```
 
@@ -214,12 +254,25 @@ leaves no tables behind, and the role and extension steps are idempotent: fix th
 and run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification
 check), the tables are there and the script refuses to restore over them; start clean with
 `docker compose -f docker-compose.yml down` then `docker volume rm open-persona-hetzner_pgdata`.
+**Only before go-live:** once real users write to this database, that command destroys
+production. After go-live a failed step is fixed in place, never by dropping the volume.
+
+The volume is unpacked as uid 1000, never as root, after a scan that refuses any symlink,
+hardlink, device node, absolute path or `..` path; no owners or modes come from the
+archive. `bin/restore.sh --roles-only` re-applies the roles and grants to an existing
+database (a password rotation), touching no data.
 
 ## Step 6: deploy
 
 ```bash
 bin/deploy.sh
 ```
+
+Before the first `deploy.sh`, pin Caddy by digest (the kit could not fetch it offline):
+`docker pull caddy:2.10.2 && docker image inspect caddy:2.10.2 --format '{{index .RepoDigests 0}}'`,
+then commit that digest into `docker-compose.yml` as `caddy:2.10.2@sha256:...`.
+`deploy.sh` validates the Caddyfile before every start (Caddy's admin API is off, so a
+config change only ever lands through a restart).
 
 The first build takes a while (both images carry CUDA torch wheels, several GB each). The
 migrate step is expected to be a **no-op** on today's main: the dump is already at head
@@ -326,6 +379,10 @@ Switching back to Cloud is the same three lines in voice.env and
 ## Step 12: sign-off
 
 - Delete `/srv/open-persona/restore` on the box (production data, no longer needed there).
+- Delete the "restored, not yet public" snapshot from step 7: it holds the database and
+  secrets as they were before go-live, and is no longer the rollback once users write.
+- Optional: CAA records (`0 issue "letsencrypt.org"`) on both domains, so no other CA can
+  issue for our hostnames.
 - Confirm the nightly backup ran (`systemctl list-timers open-persona-backup.timer`,
   `ls /srv/open-persona/backups/nightly`) and set up the off-site copy (`OFFSITE_CMD` in
   `systemd/open-persona-backup.service`).
@@ -351,6 +408,34 @@ delivers its runtime. The seam is marked `SEAM: per-tenant MCP runtime` in
 
 Switching it on is then: the runtime's env, `PERSONA_ALLOW_PER_TENANT_MCP=1`, its compose
 profile, `bin/deploy.sh`.
+
+## Alerts
+
+A failed nightly backup, a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
+backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB`, default 20) is never
+silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
+
+1. appends a line to `/var/lib/open-persona/alerts/ALERTS`, shown on every SSH login (the
+   banner) and failed by `bin/preflight.sh` until acknowledged with `bin/alert.sh --ack`;
+2. runs `OP_ALERT_CMD` from `alert.env` if the owner set one (a webhook or a mail
+   command; examples in `env/alert.env.example`). The marker never depends on it.
+
+## Backups off the box (owner-provided, soon after go-live; not built here)
+
+A backup on the box's own disk does not survive the disk. The minimum design, to be
+provided on the new target:
+
+- **Encrypted on the box** before it leaves (`age` or `gpg` to a public key), with the
+  decryption key kept OFF the box (the owner's password manager and one offline copy).
+- **Append-only credentials**: the box can write new backups but cannot delete or overwrite
+  old ones (an immutability or retention lock on the storage side), so a compromised box
+  cannot erase history.
+- **14 to 30 days** of nightly sets (`persona.dump`, `globals.sql`, `persona_volume.tgz`,
+  `facts.txt`, `SHA256SUMS`).
+- **One test restore** into a throwaway database (`bin/restore.sh --container ...
+  --db-only`) after setup, and again after any change to the pipeline.
+- Wired through `OFFSITE_CMD` in `systemd/open-persona-backup.service`; a failing copy
+  fails the unit and raises an alert.
 
 ## Rolling back
 
@@ -378,7 +463,7 @@ shape against that night's own facts and warns on any table whose row count move
 | on Fly | here (from `/opt/open-persona/repo/deploy/hetzner`) |
 |---|---|
 | `flyctl ssh console -a open-persona-api` | `docker compose -f docker-compose.yml exec api bash` |
-| `flyctl ssh console -C "printenv NAME"` | `docker compose -f docker-compose.yml exec api printenv NAME` |
+| `flyctl ssh console -C "printenv NAME"` | `docker compose -f docker-compose.yml exec api printenv NAME` (prints a secret: never paste it) |
 | `flyctl logs -a open-persona-voice` | `docker compose -f docker-compose.yml logs -f voice` |
 | `flyctl status` | `docker compose -f docker-compose.yml ps` |
 | release_command | `docker compose -f docker-compose.yml run --rm migrate` |
@@ -409,7 +494,11 @@ recommended replacement:
   `command="/opt/open-persona/bin/ci-deploy",restrict ssh-ed25519 ...`: the key can run
   exactly one script. `ci-deploy` validates the SHA (40 hex), fetches and checks it out
   (a read-only GitHub deploy key on the box if the repository is private), writes the seven
-  settings into `common.env`, and runs `deploy.sh`.
+  settings into `common.env`, and runs `deploy.sh`. It reads exactly seven `NAME=value`
+  lines from stdin, accepts only the seven known names, rejects any value containing a
+  newline, a carriage return, a quote or a `$`, and checks each value against a strict
+  per-name pattern (a comma list of `provider/model` slugs; `free` or `paid` for the
+  mode) before writing anything.
 - **Build on the box, not in GitHub Actions + GHCR, for now.** The images carry CUDA torch
   (15 `nvidia-*` packages in `uv.lock`) and are several GB each: GHCR storage for a private
   repository beyond the free quota costs money and every deploy would push and pull GBs.

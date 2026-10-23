@@ -12,6 +12,16 @@
 #     are opened in ufw; livekit's 7880 signaling port is NOT, and is reached only through
 #     caddy on 127.0.0.1. Caddy on the host network also sees real client addresses.
 #
+# Networks: postgres sits ONLY on `db`, an internal network with no route out; api, voice
+# and migrate join `db` to reach it and `backend` for outbound calls (model providers).
+#
+# Hardening on every app container: all Linux capabilities dropped (caddy keeps only
+# NET_BIND_SERVICE), a pids limit, and the daemon-wide no-new-privileges (provision.sh,
+# /etc/docker/daemon.json). Nothing mounts the Docker socket, /run or /var/run.
+#
+# Never paste the output of `docker compose config` or `printenv` anywhere: both print
+# every secret in the env files.
+#
 # Env files live OUTSIDE the checkout in ${OP_ENV_DIR} (default /opt/open-persona/env),
 # rendered by render_env.py and completed by bin/fill_generated.sh. Values that are not
 # secrets and never vary are pinned below in `environment:`, which wins over env_file, so
@@ -32,7 +42,10 @@ x-logging: &logging
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned by digest: the exact image the 2026-10-23 restore rehearsal ran (16.15).
+    # The kit's other third-party image (caddy) is pinned by tag only; pin it by digest
+    # on the first pull (RUNBOOK.md step 6). The Dockerfiles' bases are not the kit's.
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/postgres.env
     # Sized for a 16 GB box shared with api, voice and livekit. Postgres gets about a
@@ -53,8 +66,8 @@ services:
       - wal_compression=on
     volumes:
       - pgdata:/var/lib/postgresql/data
-    # No `ports:`. The database is reachable only on the compose network.
-    networks: [backend]
+    # No `ports:`, and only the internal `db` network: no route in, no route out.
+    networks: [db]
     shm_size: 256mb
     mem_limit: 5g
     restart: unless-stopped
@@ -65,17 +78,20 @@ services:
       retries: 6
     logging: *logging
 
-  # One-shot: `alembic upgrade head` + the persona_app grants (packages/api/release.py),
-  # the job Fly's release_command did. bin/deploy.sh runs it before the api starts, once
-  # per deploy, never on container start. Profile `tools` keeps `up` from starting it.
+  # One-shot: `alembic upgrade head` + the persona_app and persona_platform grants
+  # (packages/api/release.py), the job Fly's release_command did. bin/deploy.sh runs it
+  # before the api starts, once per deploy, never on container start. Profile `tools`
+  # keeps `up` from starting it. It reads ONLY migrate.env, the one file holding the
+  # superuser DSN, and needs no outbound network.
   migrate:
     image: open-persona/api:${OP_IMAGE_TAG:-current}
     profiles: [tools]
     env_file:
-      - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
-      - ${OP_ENV_DIR:-/opt/open-persona/env}/api.env
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/migrate.env
     command: ["python", "packages/api/release.py"]
-    networks: [backend]
+    networks: [db]
+    cap_drop: [ALL]
+    pids_limit: 256
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,7 +146,11 @@ services:
       - ${OP_DATA_DIR:-/srv/open-persona}/persona:/var/lib/persona
     ports:
       - "127.0.0.1:8000:8000"
-    networks: [backend]
+    networks: [backend, db]
+    # Runs as the image's non-root `persona` user and needs no capability. The pids limit
+    # leaves room for the built-in MCP children and the worker's threads.
+    cap_drop: [ALL]
+    pids_limit: 1024
     depends_on:
       postgres:
         condition: service_healthy
@@ -177,7 +197,9 @@ services:
       - ${OP_DATA_DIR:-/srv/open-persona}/voice:/var/lib/persona-voice
     ports:
       - "127.0.0.1:8001:8001"
-    networks: [backend]
+    networks: [backend, db]
+    cap_drop: [ALL]
+    pids_limit: 1024
     depends_on:
       postgres:
         condition: service_healthy
@@ -222,6 +244,10 @@ services:
     image: open-persona/livekit:${OP_IMAGE_TAG:-current}
     profiles: [selfhosted-livekit]
     network_mode: host
+    # Every port it binds is above 1024, so it runs as nobody with no capability.
+    user: "65534:65534"
+    cap_drop: [ALL]
+    pids_limit: 512
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/livekit.env
     environment:
@@ -233,6 +259,10 @@ services:
   caddy:
     image: caddy:2.10.2
     network_mode: host
+    # Binding 80 and 443 is the only privilege it needs.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 256
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/caddy.env
     volumes:
@@ -245,6 +275,9 @@ services:
 
 networks:
   backend: {}
+  # internal: no gateway, so nothing on it reaches the internet or the host's ports.
+  db:
+    internal: true
 
 volumes:
   pgdata: {}

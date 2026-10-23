@@ -24,7 +24,18 @@ OP_DATA_DIR="${OP_DATA_DIR:-/srv/open-persona}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
 OFFSITE_CMD="${OFFSITE_CMD:-}"
 
+# Below this much free space the backup refuses to start rather than fill the disk the
+# database lives on. Any failure exits non-zero, and the unit's OnFailure= raises an alert.
+MIN_FREE_GB="${OP_BACKUP_MIN_FREE_GB:-20}"
+
 compose() { docker compose -f "${KIT_DIR}/docker-compose.yml" "$@"; }
+
+mkdir -p "${OP_DATA_DIR}/backups/nightly"
+free_gb="$(df --output=avail -BG "${OP_DATA_DIR}/backups" | tail -n 1 | tr -dc '0-9')"
+if [ "${free_gb}" -lt "${MIN_FREE_GB}" ]; then
+  echo "backup: REFUSED: ${free_gb} GB free under ${OP_DATA_DIR}/backups, need ${MIN_FREE_GB} GB" >&2
+  exit 1
+fi
 
 dest="${OP_DATA_DIR}/backups/nightly/$(date -u +%Y-%m-%d)"
 mkdir -p "${dest}"

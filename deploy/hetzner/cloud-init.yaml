@@ -14,7 +14,9 @@ groups:
 
 users:
   - name: deploy
-    uid: 1000
+    # uid 2000, NOT 1000: the app data is owned by uid 1000 (the images' `persona` user),
+    # and the operator's login must not own it.
+    uid: 2000
     gecos: Open Persona operator
     shell: /bin/bash
     groups: [sudo, docker]

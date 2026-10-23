@@ -1,0 +1,16 @@
+# Open Persona: bridged containers cannot reach the cloud metadata address. Installed by
+# bin/provision.sh. Re-applied whenever Docker (re)starts, because the rule lives in
+# Docker's DOCKER-USER chain, which does not survive a reboot.
+[Unit]
+Description=Drop container traffic to 169.254.169.254
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP'
+ExecStop=/bin/sh -c 'iptables -D DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true'
+
+[Install]
+WantedBy=docker.service

@@ -1,0 +1,9 @@
+# Open Persona daily disk check. Installed by bin/provision.sh.
+[Unit]
+Description=Open Persona disk usage check
+OnFailure=open-persona-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=OP_DATA_DIR=/srv/open-persona
+ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/diskcheck.sh

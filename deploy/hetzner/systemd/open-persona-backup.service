@@ -1,16 +1,18 @@
 # Open Persona nightly backup. Installed by bin/provision.sh into /etc/systemd/system.
+# Runs as root: the api's data is owned by uid 1000 with private file modes, and the
+# operator (deploy, uid 2000) deliberately does not own it. The backup is written 0600.
 [Unit]
 Description=Open Persona nightly backup (database, roles, api data)
 Wants=docker.service
 After=docker.service
+# A failed backup is never silent: it raises an alert (bin/alert.sh).
+OnFailure=open-persona-alert@%n.service
 
 [Service]
 Type=oneshot
-User=deploy
-Group=deploy
 Environment=OP_ENV_DIR=/opt/open-persona/env
 Environment=OP_DATA_DIR=/srv/open-persona
-# Optional off-site copy, the owner's choice of target (see bin/backup.sh):
+# Optional off-site copy, the owner's target (RUNBOOK.md, "Backups off the box"):
 # Environment="OFFSITE_CMD=/opt/open-persona/bin/offsite-copy"
 ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh
 Nice=10

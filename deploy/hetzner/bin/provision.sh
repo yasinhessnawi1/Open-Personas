@@ -5,19 +5,26 @@
 #
 # Re-asserts the cloud-init.yaml baseline (key-only SSH for `deploy`, no root login, ufw
 # default deny, fail2ban, unattended security upgrades without automatic reboots), then:
-#   * Docker Engine + the compose plugin from Docker's own apt repository
+#   * Docker Engine + the compose plugin from Docker's own apt repository, its signing key
+#     checked against the published fingerprint, and Docker included in unattended upgrades
+#   * /etc/docker/daemon.json: log rotation, live-restore (containers survive a daemon
+#     upgrade), no-new-privileges for every container
+#   * the cloud metadata address (169.254.169.254) dropped for bridged containers
 #   * ufw rules for the app: 80/tcp, 443/tcp (Caddy), 7881/tcp + 7882/udp (LiveKit media)
-#   * Docker log rotation defaults
-#   * the directory layout (below), owned by `deploy` (uid 1000, the same uid as the
-#     images' `persona` user, so the bind mounts need no remapping)
-#   * the nightly backup timer
+#   * the directory layout (below)
+#   * the nightly backup, the daily disk check, the failure alert and the login banner
 #
 #   /opt/open-persona/repo     the git checkout (bin/deploy.sh builds from it)
 #   /opt/open-persona/env      the env files, mode 0700 dir / 0600 files, OUTSIDE the checkout
-#   /srv/open-persona/persona  the api data (audit, workspace, tools, mirrors, HF cache)
-#   /srv/open-persona/voice    voice's HF cache
-#   /srv/open-persona/restore  the uploaded Fly backup set, during the restore only
-#   /srv/open-persona/backups  pre-deploy dumps and nightly backups
+#   /srv/open-persona/persona  the api data, owned by uid 1000 (the images' `persona` user)
+#   /srv/open-persona/voice    voice's HF cache, uid 1000
+#   /srv/open-persona/restore  the uploaded Fly backup set, during the restore only (deploy)
+#   /srv/open-persona/backups  pre-deploy dumps (deploy) and nightly backups (root)
+#   /var/lib/open-persona/alerts  the alert marker bin/alert.sh writes
+#
+# `deploy` is uid 2000 on purpose, NOT 1000: the operator's login never owns the app's
+# data. It is still root-equivalent (sudo and the docker group), so its SSH key is the
+# key to the box (RUNBOOK.md, "Who can do what").
 #
 # What it does NOT do: open 7880 (LiveKit signaling goes through Caddy), 5432, 8000 or
 # 8001. Docker-published ports would bypass ufw, which is why the compose file publishes
@@ -29,27 +36,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_DIR="$(dirname "${SCRIPT_DIR}")"
 OP_USER="deploy"
+OP_UID=2000
+DATA_UID=1000
+# Docker's published release-signing key (docs.docker.com/engine/install/ubuntu).
+DOCKER_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 say() { echo "provision: $*"; }
+die() { echo "provision: FAILED: $*" >&2; exit 1; }
 # Writes stdin to a root-owned 0644 config file.
 write_file() { install -d -m 0755 "$(dirname "$1")"; cat > "$1"; chmod 0644 "$1"; }
 
 . /etc/os-release
 [ "${ID}" = ubuntu ] && [ "${VERSION_ID}" = "24.04" ] \
   || say "WARNING: written for Ubuntu 24.04, found ${ID} ${VERSION_ID}"
-[ "$(uname -m)" = x86_64 ] || { echo "provision: x86_64 only (silero-vad-lite has no arm64 wheel)" >&2; exit 1; }
+[ "$(uname -m)" = x86_64 ] || die "x86_64 only (silero-vad-lite has no arm64 wheel)"
 
 export DEBIAN_FRONTEND=noninteractive
 
 # --- the operator user ------------------------------------------------------------------
 getent group docker >/dev/null || groupadd docker
 if ! id "${OP_USER}" >/dev/null 2>&1; then
-  useradd --uid 1000 --create-home --shell /bin/bash --groups sudo,docker "${OP_USER}"
+  useradd --uid "${OP_UID}" --create-home --shell /bin/bash --groups sudo,docker "${OP_USER}"
   passwd -l "${OP_USER}" >/dev/null
   say "created ${OP_USER}; add its SSH key to /home/${OP_USER}/.ssh/authorized_keys BEFORE logging out"
 fi
 usermod -aG docker,sudo "${OP_USER}"
-[ "$(id -u "${OP_USER}")" = 1000 ] \
-  || say "WARNING: ${OP_USER} is not uid 1000; chown the data dirs to 1000 instead of ${OP_USER}"
+[ "$(id -u "${OP_USER}")" != "${DATA_UID}" ] \
+  || say "WARNING: ${OP_USER} is uid ${DATA_UID}, the app's data owner; recreate it as uid ${OP_UID}"
 
 # --- baseline packages and SSH ----------------------------------------------------------
 apt-get update -q
@@ -65,7 +77,9 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AllowUsers deploy
 EOF
-  sshd -t && systemctl reload ssh
+  # A config sshd rejects must never be reloaded into: stop here instead.
+  sshd -t || die "sshd rejects its configuration; nothing was reloaded"
+  systemctl reload ssh
 else
   rm -f /etc/ssh/sshd_config.d/10-open-persona.conf
   say "WARNING: ${OP_USER} has no SSH key; the SSH lockdown was NOT applied. Add the key, then run this again."
@@ -82,10 +96,15 @@ EOF
 systemctl enable --now fail2ban
 systemctl restart fail2ban
 
+# Docker's repository joins the upgrade origins: its security fixes install like
+# Ubuntu's, and live-restore (below) keeps the containers running across the restart.
 write_file /etc/apt/apt.conf.d/52open-persona-unattended <<'EOF'
 // Security updates install by themselves; the box never reboots by itself (calls drop).
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Docker,label=Docker CE,codename=${distro_codename}";
+};
 EOF
 write_file /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
@@ -97,6 +116,11 @@ systemctl enable --now unattended-upgrades
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  fpr="$(gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc | awk -F: '/^fpr/ {print $10; exit}')"
+  if [ "${fpr}" != "${DOCKER_KEY_FPR}" ]; then
+    rm -f /etc/apt/keyrings/docker.asc
+    die "Docker's signing key fingerprint is '${fpr}', expected ${DOCKER_KEY_FPR}; refusing it"
+  fi
   chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list
@@ -107,11 +131,18 @@ write_file /etc/docker/daemon.json <<'EOF'
 {
   "log-driver": "json-file",
   "log-opts": { "max-size": "50m", "max-file": "5" },
-  "live-restore": true
+  "live-restore": true,
+  "no-new-privileges": true
 }
 EOF
 systemctl enable docker
 systemctl restart docker
+
+# --- the cloud metadata address, out of reach of bridged containers -----------------------
+# Hetzner serves server metadata (including the cloud-init user data) on 169.254.169.254.
+# No container needs it. Host-network containers (caddy, livekit) are not covered by
+# DOCKER-USER; they hold nothing an attacker would trade for it.
+install -m 0644 "${KIT_DIR}/systemd/open-persona-metadata-block.service" /etc/systemd/system/
 
 # --- firewall ---------------------------------------------------------------------------
 ufw default deny incoming
@@ -126,15 +157,24 @@ ufw --force enable
 # --- directories ------------------------------------------------------------------------
 install -d -o "${OP_USER}" -g "${OP_USER}" -m 0755 /opt/open-persona /srv/open-persona
 install -d -o "${OP_USER}" -g "${OP_USER}" -m 0700 /opt/open-persona/env
-for d in persona voice backups restore; do
-  install -d -o 1000 -g 1000 -m 0750 "/srv/open-persona/${d}"
+for d in persona voice; do
+  install -d -o "${DATA_UID}" -g "${DATA_UID}" -m 0750 "/srv/open-persona/${d}"
 done
+for d in backups restore; do
+  install -d -o "${OP_USER}" -g "${OP_USER}" -m 0700 "/srv/open-persona/${d}"
+done
+install -d -o root -g "${OP_USER}" -m 2770 /var/lib/open-persona/alerts
 
-# --- nightly backup timer ---------------------------------------------------------------
-install -m 0644 "${KIT_DIR}/systemd/open-persona-backup.service" /etc/systemd/system/
-install -m 0644 "${KIT_DIR}/systemd/open-persona-backup.timer" /etc/systemd/system/
+# --- timers, the failure alert and the login banner -------------------------------------
+for unit in open-persona-backup.service open-persona-backup.timer \
+            open-persona-diskcheck.service open-persona-diskcheck.timer \
+            open-persona-alert@.service; do
+  install -m 0644 "${KIT_DIR}/systemd/${unit}" /etc/systemd/system/
+done
+install -m 0755 "${KIT_DIR}/systemd/99-open-persona-alerts" /etc/update-motd.d/
 systemctl daemon-reload
-systemctl enable --now open-persona-backup.timer
+systemctl enable --now open-persona-metadata-block.service
+systemctl enable --now open-persona-backup.timer open-persona-diskcheck.timer
 
 say "done. $(docker --version); $(docker compose version)"
 say "ufw:"; ufw status verbose | sed 's/^/provision:   /'

@@ -57,6 +57,12 @@ done
 tables="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" || die "could not query the database"
 [ "${tables}" != "0" ] || die "the database is empty: run bin/restore.sh first (RUNBOOK.md step 5)"
+# The api's DATABASE_URL is persona_platform: it must exist and must not be a superuser.
+platform_super="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
+  -c "SELECT rolsuper::text FROM pg_roles WHERE rolname = 'persona_platform'")" \
+  || die "could not query the database"
+[ "${platform_super}" = "false" ] \
+  || die "persona_platform is missing or a superuser: run bin/restore.sh --roles-only"
 
 # --- 3 ------------------------------------------------------------------------------
 # :previous is the image the RUNNING container uses, not whatever :current points at:
@@ -93,6 +99,10 @@ say "migrating"
 compose run --rm migrate || die "migration failed; nothing was restarted (the old containers still serve)"
 
 # --- 7 ------------------------------------------------------------------------------
+# Caddy runs with its admin API off, so a bad Caddyfile is only found at start: check it
+# first, with the same image and env file.
+compose run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+  >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
 say "starting"
 compose up -d --remove-orphans
 
