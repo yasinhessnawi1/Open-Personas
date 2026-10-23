@@ -73,6 +73,10 @@ packages/web/evidence/
 # cause (a tracked docs symlink got checked out over the real docs/ directory).
 /docs
 deploy/*
+# The Hetzner deploy kit is tracked. It holds no secret: every env file it ships is a
+# *.env.example template, and the real env files live on the box outside the checkout.
+!deploy/hetzner/
+deploy/hetzner/**/*.env
 CLAUDE.md
 
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.

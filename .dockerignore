@@ -28,6 +28,9 @@ packages/web/playwright-report/
 packages/api/.secrets/
 packages/web/.env.local
 deploy/.env.production
+# The whole deploy kit stays out of every build context: no image needs anything under
+# deploy/, and an env file rendered there by mistake must never reach a build.
+deploy/
 
 # Build/release artifacts
 dist/
