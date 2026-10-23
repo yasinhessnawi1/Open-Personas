@@ -1,0 +1,79 @@
+#cloud-config
+# Open Persona: first-boot baseline for the Hetzner box (Ubuntu 24.04 x86_64).
+#
+# Paste this into "Cloud config" when creating the server in the Hetzner console, after
+# replacing the one placeholder below with the owner's SSH PUBLIC key. It makes the box
+# safe from its first minute: one non-root admin user with key-only SSH, root login off,
+# a default-deny firewall that admits only SSH, fail2ban and unattended security
+# upgrades. Everything else (Docker, the app's firewall ports, directories, the backup
+# timer) is bin/provision.sh, which is idempotent and re-asserts this baseline too.
+
+groups:
+  - docker
+
+users:
+  - name: deploy
+    uid: 1000
+    gecos: Open Persona operator
+    shell: /bin/bash
+    groups: [sudo, docker]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "__OWNER_SSH_PUBLIC_KEY__"
+
+disable_root: true
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+packages:
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - ca-certificates
+  - curl
+  - git
+  - jq
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-open-persona.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      AllowUsers deploy
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      maxretry = 5
+      findtime = 10m
+      bantime = 1h
+  - path: /etc/apt/apt.conf.d/52open-persona-unattended
+    permissions: "0644"
+    content: |
+      // Security updates install by themselves. The box does NOT reboot by itself: a
+      // reboot drops every live call. The operator reboots in a quiet hour when
+      // /var/run/reboot-required exists (RUNBOOK.md, "Routine operations").
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw limit 22/tcp
+  - ufw --force enable
+  - systemctl enable --now fail2ban
+  - systemctl restart ssh
+  - mkdir -p /opt/open-persona /srv/open-persona
+  - chown deploy:deploy /opt/open-persona /srv/open-persona

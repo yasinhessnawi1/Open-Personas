@@ -1,0 +1,11 @@
+# Open Persona nightly backup at 03:30 UTC (outside European evening call hours).
+[Unit]
+Description=Run the Open Persona nightly backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,50 @@
+# Open Persona: the TLS edge on the Hetzner box (replaces Fly's proxy and cert manager).
+#
+# Caddy runs on the host network and obtains a Let's Encrypt certificate per hostname
+# with the HTTP-01 challenge, so each name's DNS A/AAAA record must already point at this
+# box. ACME_CA starts on Let's Encrypt STAGING (caddy.env); RUNBOOK.md switches it to
+# production once every name answers. HTTP is redirected to HTTPS automatically, which
+# is what Fly's force_https did.
+#
+# No access logs: LiveKit signaling carries the access token in the query string, and
+# connector webhooks carry provider payload metadata in theirs.
+#
+# The hostnames are the ones production used on Fly. Keeping them is what keeps every
+# provider registration valid unchanged: the Stripe webhook, the Discord, Slack and GitHub
+# OAuth redirects, and the Twilio and Postmark webhooks.
+
+{
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+}
+
+(edge) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# The api, under both domains, and the connector webhooks and OAuth callbacks, which have
+# been served by the api process since the I1 fold. flush_interval -1 streams SSE (chat
+# and agentic runs) without buffering.
+api.openpersonasai.com, api.openpersona.online, connectors.openpersonasai.com {
+	import edge
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
+}
+
+# persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
+voice.openpersonasai.com {
+	import edge
+	reverse_proxy 127.0.0.1:8001
+}
+
+# Self-hosted LiveKit signaling (WebSocket). Media does NOT pass through Caddy: it goes
+# straight to UDP 7882 (or TCP 7881) on the box. With LiveKit Cloud this site answers
+# 502, which is harmless; keep the DNS record so switching modes needs no DNS change.
+livekit.openpersonasai.com {
+	import edge
+	reverse_proxy 127.0.0.1:7880
+}

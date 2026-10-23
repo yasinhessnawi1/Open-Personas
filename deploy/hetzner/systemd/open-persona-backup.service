@@ -1,0 +1,17 @@
+# Open Persona nightly backup. Installed by bin/provision.sh into /etc/systemd/system.
+[Unit]
+Description=Open Persona nightly backup (database, roles, api data)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+Environment=OP_ENV_DIR=/opt/open-persona/env
+Environment=OP_DATA_DIR=/srv/open-persona
+# Optional off-site copy, the owner's choice of target (see bin/backup.sh):
+# Environment="OFFSITE_CMD=/opt/open-persona/bin/offsite-copy"
+ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh
+Nice=10
+IOSchedulingClass=idle
