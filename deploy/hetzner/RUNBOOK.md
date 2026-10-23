@@ -197,6 +197,20 @@ It prints every name with its state, never a value. Then edit the files in `~/op
 - `__MISSING_FROM_DOTENV__`: supply the value, or **delete the line** if production never
   set it (the code default then applies, exactly as on Fly).
 - Every name marked `[d]` in the inventory: replace the copied dev value with production's.
+- `__OWNER_CLERK_PROD__`: every Clerk-derived value. `.env` holds the DEVELOPMENT Clerk
+  instance's, so none is copied (owner ruling 2026-10-23). In the Clerk dashboard, switch to
+  the **production** instance (Frontend API `clerk.openpersona.online`), then:
+  - `PERSONA_API_JWT_PUBLIC_KEY`, `PERSONA_VOICE_JWT_PUBLIC_KEY` and
+    `PERSONA_CONNECTORS_JWT_PUBLIC_KEY`: Configure > API keys > the JWT public key, PEM
+    format. The same PEM in all three.
+  - `PERSONA_CONNECTORS_JWT_JWKS_URL`: the JWKS URL on the same page
+    (`https://clerk.openpersona.online/.well-known/jwks.json`).
+  - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line in
+    production (the connectors verify RS256 with the PEM above).
+  - Check under Configure > JWT templates that the production instance has the
+    `persona-api` template with `aud` = `persona-api` (the audience the compose file pins).
+  `bin/preflight.sh` blocks until every one is pasted, and refuses any value naming
+  `*.clerk.accounts.dev`.
 
 Copy them to the box over SSH only (scp; never a chat, mail or shared drive), and finish
 them there:

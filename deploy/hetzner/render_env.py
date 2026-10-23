@@ -18,7 +18,9 @@ For every ``deploy/hetzner/env/<name>.env.example`` it writes ``<out>/<name>.env
 ``bin/preflight.sh`` on the box refuses to start while any remain:
 
 * ``__GEN_<NAME>__`` stays for ``bin/fill_generated.sh`` on the box (by design).
-* ``__OWNER__`` and an unconfirmed ``__GITHUB_PRODUCTION__`` stay for the owner to fill in.
+* ``__OWNER__``, ``__OWNER_CLERK_PROD__`` (Clerk values: .env holds the development
+  instance's, so they are never copied) and an unconfirmed ``__GITHUB_PRODUCTION__`` stay for
+  the owner to fill in.
 * ``__MISSING_FROM_DOTENV__`` replaces a ``__FROM_ENV__`` whose name .env lacks.
 
 It NEVER prints a value: output is setting names and fixed states, the same rule as
@@ -47,6 +49,9 @@ FROM_ENV = "__FROM_ENV__"
 FROM_ENV_OTHER = re.compile(r"^__FROM_ENV:([A-Z][A-Z0-9_]*)__$")
 GITHUB_PRODUCTION = "__GITHUB_PRODUCTION__"
 OWNER = "__OWNER__"
+# Clerk-derived values: .env holds the DEVELOPMENT instance's (owner, 2026-10-23), so these
+# are never copied; the owner pastes the production instance's values.
+OWNER_CLERK = "__OWNER_CLERK_PROD__"
 MISSING = "__MISSING_FROM_DOTENV__"
 GENERATED = re.compile(r"__GEN_[A-Z0-9_]+__")
 LIVEKIT_TOKENS = ("__LIVEKIT_URL__", "__LIVEKIT_API_KEY__", "__LIVEKIT_API_SECRET__")
@@ -118,6 +123,8 @@ def resolve(
         return value, f"{state} (cloud, from {CLOUD_LIVEKIT_SOURCES[template_value]})"
     if template_value == OWNER:
         return template_value, "owner must supply"
+    if template_value == OWNER_CLERK:
+        return template_value, "owner: production Clerk instance (never copied from .env)"
     if GENERATED.search(template_value):
         return template_value, "generated on the box"
     return template_value, "fixed"

@@ -38,7 +38,7 @@ for f in ${required}; do
   mode="$(stat -c '%a' "${path}")"
   [ "${mode}" = "600" ] || bad "${f}.env mode is ${mode}, want 600"
   # Any token left means a value nobody has supplied yet.
-  left="$(grep -oE '^[A-Z][A-Z0-9_]*=.*__(OWNER|GITHUB_PRODUCTION|MISSING_FROM_DOTENV|LIVEKIT_[A-Z_]+|GEN_[A-Z0-9_]+|FROM_ENV[A-Z0-9_:]*)__' "${path}" | cut -d= -f1)"
+  left="$(grep -oE '^[A-Z][A-Z0-9_]*=.*__(OWNER|OWNER_CLERK_PROD|GITHUB_PRODUCTION|MISSING_FROM_DOTENV|LIVEKIT_[A-Z_]+|GEN_[A-Z0-9_]+|FROM_ENV[A-Z0-9_:]*)__' "${path}" | cut -d= -f1)"
   if [ -n "${left}" ]; then
     bad "${f}.env still has unresolved values: $(echo ${left})"
   else

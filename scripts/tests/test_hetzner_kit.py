@@ -84,7 +84,7 @@ FORBIDDEN = {
 }
 
 TOKEN = re.compile(
-    r"^__(FROM_ENV(:[A-Z][A-Z0-9_]*)?|GITHUB_PRODUCTION|OWNER|LIVEKIT_URL|LIVEKIT_API_KEY"
+    r"^__(FROM_ENV(:[A-Z][A-Z0-9_]*)?|GITHUB_PRODUCTION|OWNER|OWNER_CLERK_PROD|LIVEKIT_URL|LIVEKIT_API_KEY"
     r"|LIVEKIT_API_SECRET)__$"
 )
 GEN = re.compile(r"__GEN_[A-Z0-9_]+__")
@@ -526,8 +526,10 @@ def test_render_copies_resolves_and_never_prints_a_value(
     api = _rendered(out, "api")
     common = _rendered(out, "common")
     voice = _rendered(out, "voice")
-    assert api["PERSONA_API_JWT_PUBLIC_KEY"] == values["PERSONA_API_JWT_PUBLIC_KEY"]
-    assert voice["PERSONA_VOICE_JWT_PUBLIC_KEY"] == values["PERSONA_API_JWT_PUBLIC_KEY"]
+    # Clerk values are the development instance's in .env: never copied (owner, 2026-10-23).
+    assert api["PERSONA_API_JWT_PUBLIC_KEY"] == "__OWNER_CLERK_PROD__"
+    assert voice["PERSONA_VOICE_JWT_PUBLIC_KEY"] == "__OWNER_CLERK_PROD__"
+    assert values["PERSONA_API_JWT_PUBLIC_KEY"] not in (out / "api.env").read_text(encoding="utf-8")
     assert api["PERSONA_STRIPE_SECRET_KEY"] == values["PERSONA_STRIPE_SECRET_KEY"]
     assert common["PERSONA_OPENROUTER_API_KEY"] == values["PERSONA_OPENROUTER_API_KEY"]
     # .env's initiative state is ignored on purpose; the dev-only name is never rendered.
@@ -657,12 +659,8 @@ def test_inventory_lists_presence_and_destination_and_never_a_value(
     assert ".env: empty" in lines["E2B_API_KEY"]
     assert ".env: absent" in lines["MCP_CREDENTIAL_KEY"]
     assert "-> api.env" in lines["MCP_CREDENTIAL_KEY"]
-    # A copy under another name says where it lands; voice gets the api's Clerk PEM.
-    voice_pem = [
-        line for line in printed.splitlines() if "voice.env as PERSONA_VOICE_JWT_PUBLIC_KEY" in line
-    ]
-    assert len(voice_pem) == 1
-    assert "PERSONA_API_JWT_PUBLIC_KEY" in voice_pem[0]
+    # Clerk values never come from .env, so the inventory does not offer them.
+    assert not [line for line in printed.splitlines() if "JWT_PUBLIC_KEY" in line]
     # The chains and the LiveKit Cloud sources are listed: a render could copy them.
     assert "PERSONA_FRONTIER_MODELS" in lines
     assert "PERSONA_LIVEKIT_URL" in printed
@@ -698,3 +696,28 @@ def test_the_mcp_seam_is_named_and_the_app_never_gets_the_docker_socket() -> Non
         assert service.get("privileged") is not True, f"{name} is privileged"
         environment = service.get("environment", {}) or {}
         assert "DOCKER_HOST" not in environment, f"{name} is pointed at a Docker daemon"
+
+
+CLERK_DERIVED = re.compile(r"JWT_(PUBLIC_KEY|SECRET|JWKS_URL|ISSUER)$|CLERK")
+
+
+def test_every_clerk_derived_value_is_owner_supplied_from_production() -> None:
+    """.env holds the development Clerk instance (owner, 2026-10-23): never render from it."""
+    found = []
+    for template, pairs in _all_templates().items():
+        for name, value in pairs:
+            if CLERK_DERIVED.search(name):
+                found.append(name)
+                assert value == "__OWNER_CLERK_PROD__", f"{template}.env {name} = {value}"
+    assert set(found) >= {
+        "PERSONA_API_JWT_PUBLIC_KEY",
+        "PERSONA_VOICE_JWT_PUBLIC_KEY",
+        "PERSONA_CONNECTORS_JWT_PUBLIC_KEY",
+        "PERSONA_CONNECTORS_JWT_JWKS_URL",
+    }
+
+
+def test_preflight_blocks_until_the_clerk_values_are_pasted() -> None:
+    preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
+    assert "OWNER_CLERK_PROD" in preflight
+    assert "clerk\\.accounts\\.dev" in preflight
