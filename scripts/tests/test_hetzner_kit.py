@@ -525,3 +525,60 @@ def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None
     service = (KIT / "systemd" / "open-persona-backup.service").read_text(encoding="utf-8")
     assert "ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh" in service
     assert "User=deploy" in service
+
+
+# --- the inventory and the MCP seam ----------------------------------------------------------
+
+
+def test_inventory_lists_presence_and_destination_and_never_a_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    render = _load_render()
+    dotenv, values = _fake_dotenv(tmp_path)
+    dotenv.write_text(dotenv.read_text(encoding="utf-8") + 'E2B_API_KEY=""\n', encoding="utf-8")
+
+    assert render.main(["--dotenv", str(dotenv), "--inventory"]) == 0
+    printed = capsys.readouterr().out
+    for value in (v for v in values.values() if len(v) > 8):
+        assert value not in printed
+    lines = {line.split()[2]: line for line in printed.splitlines() if line.startswith("[ ] ")}
+    assert ".env: set" in lines["PERSONA_OPENROUTER_API_KEY"]
+    assert ".env: empty" in lines["E2B_API_KEY"]
+    assert ".env: absent" in lines["MCP_CREDENTIAL_KEY"]
+    assert "-> api.env" in lines["MCP_CREDENTIAL_KEY"]
+    # A copy under another name says where it lands; voice gets the api's Clerk PEM.
+    voice_pem = [
+        line for line in printed.splitlines() if "voice.env as PERSONA_VOICE_JWT_PUBLIC_KEY" in line
+    ]
+    assert len(voice_pem) == 1
+    assert "PERSONA_API_JWT_PUBLIC_KEY" in voice_pem[0]
+    # The chains and the LiveKit Cloud sources are listed: a render could copy them.
+    assert "PERSONA_FRONTIER_MODELS" in lines
+    assert "PERSONA_LIVEKIT_URL" in printed
+    # Fixed and generated values are not .env's business and are not listed.
+    assert "PERSONA_INITIATIVE_ENABLED" not in lines
+    assert "DATABASE_URL" not in lines
+
+
+def test_inventory_writes_nothing(tmp_path: Path) -> None:
+    render = _load_render()
+    dotenv, _ = _fake_dotenv(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert render.main(["--dotenv", str(dotenv), "--inventory"]) == 0
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_rendering_still_requires_out_and_livekit(tmp_path: Path) -> None:
+    render = _load_render()
+    dotenv, _ = _fake_dotenv(tmp_path)
+    assert render.main(["--dotenv", str(dotenv), "--out", str(tmp_path / "o")]) == 2
+
+
+def test_the_mcp_seam_is_named_and_the_app_never_gets_the_docker_socket() -> None:
+    text = (KIT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "SEAM: per-tenant MCP runtime" in text
+    assert "SEAM: per-tenant MCP runtime" in (KIT / "RUNBOOK.md").read_text(encoding="utf-8")
+    services = _compose()["services"]
+    for name in ("api", "voice", "migrate"):
+        mounts = [str(v) for v in services[name].get("volumes", [])]
+        assert not any("docker.sock" in m for m in mounts), f"{name} mounts the Docker socket"

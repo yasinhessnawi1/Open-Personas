@@ -39,9 +39,10 @@ Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script t
 - **Per-tenant MCP runtime: OFF** (`PERSONA_ALLOW_PER_TENANT_MCP=0`, no `FLY_API_TOKEN`,
   no `PERSONA_MCP_RUNTIME_FLY_APP`). It booted one Fly Machine per (tenant, server) through
   the Fly Machines API, and its Fly app is deleted. Users keep the built-in MCP surface.
-  The boot line says `off (reason: unconfigured)`. The replacement, a Docker runtime behind
-  the same Protocol (`persona_api/mcp/fly.py` is "a Protocol + one httpx implementation"),
-  is registered later work. Pending the owner's confirmation.
+  The boot line says `off (reason: unconfigured)`. OFF at launch only: the owner wants
+  per-tenant MCP supported and done right, and the session that owns tooling and MCP
+  builds the replacement. It plugs into the named seam (see "Seam: the per-tenant MCP
+  runtime" below); this kit does not design it.
 - **Initiative: OFF** until the A5-R-1 re-run is green and the owner says so. The api
   template pins `PERSONA_INITIATIVE_ENABLED=false` whatever `.env` says.
 - **Hostnames are kept**, so no provider registration changes: Stripe webhook, Discord,
@@ -56,7 +57,9 @@ Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script t
 - [ ] A Hetzner server (step 1). No API token is needed: nothing here calls Hetzner.
 - [ ] The SSH public key for `deploy` (and later a second key for CI, see the last section).
 - [ ] DNS access to `openpersonasai.com` and `openpersona.online`, and the full record list.
-- [ ] Confirmation that `.env` holds **production** values, not dev ones, in particular:
+- [ ] The `render_env.py --inventory` checklist (step 4) marked `[p]` or `[d]` per name, and
+      the production value for every `[d]`. `.env` holds production values for only some
+      names. Look hardest at:
       `PERSONA_API_JWT_PUBLIC_KEY` and `PERSONA_CONNECTORS_JWT_*` (the production Clerk
       instance, not a `*.clerk.accounts.dev` key), `MCP_CREDENTIAL_KEY` (must be the exact
       production key or stored MCP credentials become unreadable), the Stripe test keys and
@@ -71,13 +74,13 @@ Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script t
 - [ ] LiveKit: Cloud (the project still exists: its URL, key and secret) or self-hosted.
 - [ ] Later: an off-site backup target (a Hetzner Storage Box, or Oracle free block storage).
 
-## Step 0: now, before the box exists
+## Step 0: close the subdomain takeover (DONE 2026-10-23)
 
-**Close the subdomain takeover.** The production records are CNAMEs to `*.fly.dev`
+**Done by the owner on 2026-10-23: the dangling records are removed.** Kept for the
+record and for any record found later. The production records were CNAMEs to `*.fly.dev`
 names (`open-persona-api.fly.dev` and siblings) whose apps were deleted. Those names are
 free: anyone can create a Fly app with that name, add a certificate for our hostname and
-serve content on it. Today, for every name below, delete the record or point it at
-something we control:
+serve content on it. Any record that still names `*.fly.dev` must go:
 
 ```
 api.openpersonasai.com         connectors.openpersonasai.com
@@ -85,8 +88,8 @@ voice.openpersonasai.com       livekit.openpersonasai.com
 api.openpersona.online         (and any other record that names *.fly.dev)
 ```
 
-Then, at least a day before step 8, make sure each record that will come back has a TTL
-of 300 seconds or less.
+At step 8 the records come back as A/AAAA records pointing at the box; create them with
+a TTL of 300 seconds and raise it once stable.
 
 ## Step 1: create the server (Hetzner console)
 
@@ -135,7 +138,17 @@ a reboot is required, reboot now. Then take a **snapshot** in the console
 
 ## Step 4: the env files
 
-On the **owner's PC**, from the repo, into a directory OUTSIDE the repo:
+On the **owner's PC**, from the repo. First the inventory: it writes nothing and lists,
+for every name the render would take from `.env`, whether `.env` has a value (`set`,
+`empty` or `absent`, never the value) and which env file it goes to. `.env` holds
+production values for only some names, so mark each line `[p]` or `[d]` and have the
+production value ready for every `[d]` before rendering:
+
+```bash
+uv run python -I deploy/hetzner/render_env.py --dotenv .env --inventory > ~/op-inventory.txt
+```
+
+Then render, into a directory OUTSIDE the repo:
 
 ```bash
 uv run python -I deploy/hetzner/render_env.py --dotenv .env --out ~/op-env \
@@ -149,6 +162,7 @@ It prints every name with its state, never a value. Then edit the files in `~/op
 - `__GITHUB_PRODUCTION__`: fill in the Production environment's value.
 - `__MISSING_FROM_DOTENV__`: supply the value, or **delete the line** if production never
   set it (the code default then applies, exactly as on Fly).
+- Every name marked `[d]` in the inventory: replace the copied dev value with production's.
 
 Copy them to the box and finish them there:
 
@@ -317,6 +331,26 @@ Switching back to Cloud is the same three lines in voice.env and
   `systemd/open-persona-backup.service`).
 - Snapshot "live".
 - Initiative stays OFF until the A5-R-1 re-run.
+
+## Seam: the per-tenant MCP runtime
+
+Per-tenant MCP is OFF at launch and comes back when the session that owns tooling and MCP
+delivers its runtime. The seam is marked `SEAM: per-tenant MCP runtime` in
+`docker-compose.yml`. The contract this kit holds that work to, nothing more:
+
+- The runtime is its own compose service on the `backend` network, behind its own
+  profile, so the stack without it is exactly today's.
+- The api learns about it only from settings in `api.env`: `PERSONA_ALLOW_PER_TENANT_MCP`
+  plus whatever settings the runtime defines. `fill_generated.sh`, `render_env.py` and the
+  templates gain those names in the same change that adds the service.
+- **The api never gets `/var/run/docker.sock`.** The api holds every tenant's data and
+  credentials; host-level container control does not belong in that process. Whatever the
+  runtime needs, it holds itself. `scripts/tests/test_hetzner_kit.py` fails if the api or
+  voice service mounts the socket.
+- Nothing it adds is published past 127.0.0.1, and ufw gains no rule for it.
+
+Switching it on is then: the runtime's env, `PERSONA_ALLOW_PER_TENANT_MCP=1`, its compose
+profile, `bin/deploy.sh`.
 
 ## Rolling back
 

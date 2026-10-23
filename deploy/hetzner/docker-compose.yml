@@ -194,6 +194,23 @@ services:
       retries: 3
     logging: *logging
 
+  # ---------------------------------------------------------------------------------
+  # SEAM: per-tenant MCP runtime (OFF at launch; owned by the tooling/MCP session)
+  # ---------------------------------------------------------------------------------
+  # The Fly runtime (Spec N6) is gone with Fly, and the api runs with
+  # PERSONA_ALLOW_PER_TENANT_MCP=0. The replacement plugs in HERE, designed by the session
+  # that owns tooling and MCP, not by this kit. What this kit fixes in advance:
+  #   * it is its OWN service on the `backend` network, under its own compose profile,
+  #     so it starts only when switched on and a deploy without it is unchanged;
+  #   * the api reaches it only through settings in api.env (the switch above plus the
+  #     runtime's own settings) and over the `backend` network;
+  #   * the api NEVER mounts /var/run/docker.sock (scripts/tests/test_hetzner_kit.py
+  #     fails if it does). Whatever host access the runtime needs is the runtime
+  #     service's own, isolated from the process that holds every tenant's data;
+  #   * its ports, like every app port here, are not published past 127.0.0.1.
+  # RUNBOOK.md, "Seam: the per-tenant MCP runtime", carries the same contract.
+  # ---------------------------------------------------------------------------------
+
   # Self-hosted LiveKit SFU, only with --profile selfhosted-livekit.
   # The packages/livekit image unchanged: its entrypoint takes LIVEKIT_NODE_IP (the box's
   # public IPv4, livekit.env) instead of the Fly-only `$FLY_APP_NAME.fly.dev` lookup, and

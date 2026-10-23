@@ -1,7 +1,13 @@
 #!/usr/bin/env python
 """Render the Hetzner env files from the templates and the owner's local .env.
 
-Runs on the OWNER'S PC, never on the box and never in CI:
+Runs on the OWNER'S PC, never on the box and never in CI. First, the inventory, which
+writes nothing and lists every name the render would take from .env, whether .env has a
+value for it, and where it goes, so the owner can mark which values are dev:
+
+    uv run python -I deploy/hetzner/render_env.py --dotenv .env --inventory
+
+Then the render:
 
     uv run python -I deploy/hetzner/render_env.py --dotenv .env --out <dir outside the repo> \\
         --livekit cloud|selfhosted [--chains-from-dotenv]
@@ -176,17 +182,75 @@ def render(
     return report
 
 
+def _presence(source: str, dotenv: dict[str, str]) -> str:
+    if source not in dotenv:
+        return "absent"
+    return "set" if dotenv[source].strip() else "empty"
+
+
+def inventory(dotenv: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    """Every name the render would take from .env, BEFORE anything is written.
+
+    Returns ``(source name in .env, presence, destination file, destination name)`` rows.
+    Presence is ``set``, ``empty`` or ``absent``: never the value. The seven shared settings
+    and both LiveKit Cloud sources are listed too, because ``--chains-from-dotenv`` and
+    ``--livekit cloud`` would copy them.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for template in sorted(TEMPLATE_DIR.glob(f"*{TEMPLATE_SUFFIX}")):
+        target = template.name.removesuffix(".example")
+        for name, template_value in parse_template(template):
+            other = FROM_ENV_OTHER.match(template_value)
+            if template_value in (FROM_ENV, GITHUB_PRODUCTION):
+                source = name
+            elif other is not None:
+                source = other.group(1)
+            elif template_value in CLOUD_LIVEKIT_SOURCES:
+                source = CLOUD_LIVEKIT_SOURCES[template_value]
+            else:
+                continue
+            rows.append((source, _presence(source, dotenv), target, name))
+    return rows
+
+
+def print_inventory(rows: list[tuple[str, str, str, str]]) -> None:
+    """A checklist the owner marks prod or dev per name. Names and presence only."""
+    width = max(len(source) for source, *_ in rows)
+    print("# Mark each line [p] production or [d] dev (then supply the production value).")
+    print("# Presence only: this never shows a value.\n")
+    for source, presence, target, name in rows:
+        destination = target if source == name else f"{target} as {name}"
+        print(f"[ ] {source:<{width}}  .env: {presence:<6}  -> {destination}")
+    counts = {p: sum(1 for _, q, *_ in rows if q == p) for p in ("set", "empty", "absent")}
+    print(
+        f"\n{len(rows)} names: {counts['set']} set, {counts['empty']} empty, "
+        f"{counts['absent']} absent in .env."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dotenv", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--livekit", choices=("cloud", "selfhosted"), required=True)
+    parser.add_argument(
+        "--inventory",
+        action="store_true",
+        help="write nothing; list every name the render would take from .env, whether .env "
+        "has a value for it, and its destination file (names only, never values)",
+    )
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--livekit", choices=("cloud", "selfhosted"))
     parser.add_argument("--chains-from-dotenv", action="store_true")
     args = parser.parse_args(argv)
 
     if not args.dotenv.is_file():
         print(f"render_env: no such file: {args.dotenv}", file=sys.stderr)
         return 1
+    if args.inventory:
+        print_inventory(inventory(load_dotenv(args.dotenv)))
+        return 0
+    if args.out is None or args.livekit is None:
+        print("render_env: --out and --livekit are required to render", file=sys.stderr)
+        return 2
     if inside_checkout(args.out):
         print(
             "render_env: refusing to write inside the repository checkout; "
