@@ -166,7 +166,7 @@ def _candidate() -> InitiativeCandidate:
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
     )
 
@@ -184,7 +184,7 @@ def _pipeline(
             ),
             backend=_VerbatimYesJudge(),  # type: ignore[arg-type]
         ),
-        wellbeing=ApiWellbeingSubjectCheck(graph_store),
+        wellbeing=ApiWellbeingSubjectCheck(graph_store, app_engine),
         declines=DeclineStore(app_engine),
         ledger=LedgerAdapter(InitiativeLedger(app_engine)),
         users=ApiUserContextReader(app_engine, default_timezone="Europe/Oslo"),

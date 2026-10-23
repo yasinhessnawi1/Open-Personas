@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona.initiative import MAX_CITED_NODE_READS, CitationKind
+from persona.logging import get_logger
 from persona.schedules.quiet_hours import QuietHours
 from persona.timezone import resolve_timezone
 from sqlalchemy import select, text
@@ -19,6 +21,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import users as users_t
 from persona_api.initiative.store import InitiativeLedger, NoticeDisposition
+from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate, node_sources
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -26,7 +29,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from persona.graph.protocol import GraphStore
-    from persona.initiative import InitiativeCandidate
+    from persona.initiative import GroundingCitation, InitiativeCandidate
     from persona.initiative.restraint import CadenceCounts
     from sqlalchemy import Engine
 
@@ -44,16 +47,66 @@ __all__ = [
 ]
 
 
+_log = get_logger("api.initiative.pipeline_wiring")
+
+
 class ApiWellbeingSubjectCheck:
-    """The subject-exclusion read over the graph store (all five categories)."""
+    """The subject-exclusion read over the graph store (all five categories).
 
-    def __init__(self, store: GraphStore) -> None:
+    Every cited item is judged by the shared :class:`ConversationWellbeingGate`, the
+    definition A7's event door and the scan's readers use:
+
+    - a NODE is gated if it carries any wellbeing category, or if any interaction it
+      was learned from is gated (R9-249 review HIGH-1: the untagged node synthesis
+      extracted from a disclosing conversation);
+    - a CONVERSATION is gated if it is;
+    - a TASK is gated if its id or one of its runs is (the kind-agnostic disclosed
+      rule: a flagged node learned from the task's run), or if its originating
+      conversation is.
+    """
+
+    def __init__(self, store: GraphStore, engine: Engine) -> None:
+        """Bind the graph store and the owner-scoped engine (freshness, task origins)."""
         self._store = store
+        self._engine = engine
+        self._gate = ConversationWellbeingGate(store, engine)
 
-    def tagged_refs(self, owner_id: str, node_refs: Sequence[str]) -> set[str]:
-        """Cited node refs whose CURRENT node carries any wellbeing category."""
-        wanted = set(node_refs)
-        return {n.id for n in self._store.flagged_nodes(owner_id) if n.id in wanted}
+    def tagged_refs(
+        self,
+        owner_id: str,
+        citations: Sequence[GroundingCitation],
+        *,
+        include_unsynthesised: bool,
+    ) -> set[str]:
+        """The cited refs that are gated (any one disqualifies the subject)."""
+        by_kind = _refs_by_kind(citations)
+        nodes, conversations, tasks = (
+            by_kind[CitationKind.NODE],
+            by_kind[CitationKind.CONVERSATION],
+            by_kind[CitationKind.TASK],
+        )
+        flagged = self._store.flagged_nodes(owner_id)
+        gated = {n.id for n in flagged if n.id in nodes}
+        if len(nodes) > MAX_CITED_NODE_READS:
+            _log.warning("too many cited nodes to check their sources; gating the subject")
+            return gated | nodes
+        sources = {ref: node_sources(self._store.get_node(owner_id, ref)) for ref in nodes}
+        origins = self._gate.task_origins(owner_id, tasks)
+        judged = set().union(*sources.values(), *origins.values()) | conversations | tasks
+        hit = self._gate.gated(
+            owner_id, judged, include_unsynthesised=include_unsynthesised, flagged=flagged
+        )
+        gated |= {ref for ref, src in sources.items() if src & hit}
+        gated |= conversations & hit
+        gated |= {t for t in tasks if t in hit or origins.get(t, set()) & hit}
+        return gated
+
+
+def _refs_by_kind(citations: Sequence[GroundingCitation]) -> dict[CitationKind, set[str]]:
+    out: dict[CitationKind, set[str]] = {kind: set() for kind in CitationKind}
+    for citation in citations:
+        out[citation.kind].add(citation.ref)
+    return out
 
 
 class LedgerAdapter:

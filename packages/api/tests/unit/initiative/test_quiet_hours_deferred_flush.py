@@ -108,7 +108,7 @@ def _candidate(persona_id: str = _PERSONA, ref: str = "node-91") -> InitiativeCa
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=persona_id,
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_SCAN_FIRE - timedelta(days=1),
     )
 
@@ -132,12 +132,14 @@ def _disposition(ledger: InitiativeLedger, notice_id: str) -> NoticeDisposition 
 
 
 class _FakeGrounding:
-    async def check(self, candidate: InitiativeCandidate) -> GroundingVerdict:
+    async def check(self, candidate: InitiativeCandidate, **_: object) -> GroundingVerdict:
         return GroundingVerdict(admitted=True, supporting_quote="the hearing is Friday")
 
 
 class _FakeWellbeing:
-    def tagged_refs(self, owner_id: str, node_refs: Sequence[str]) -> set[str]:
+    def tagged_refs(
+        self, owner_id: str, citations: Sequence[object], *, include_unsynthesised: bool
+    ) -> set[str]:
         return set()
 
 

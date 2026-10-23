@@ -12,7 +12,7 @@ fail-soft (a seam error discards + audits, never raises, never blocks the batch)
 # ruff: noqa: ARG002 — fakes deliberately ignore some args
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v1",
+        "prompt_version": "a5-scan-v5",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -71,7 +71,7 @@ class _FakeGrounding:
         self._admit = admit
         self._raises = raises
 
-    async def check(self, candidate: InitiativeCandidate) -> GroundingVerdict:
+    async def check(self, candidate: InitiativeCandidate, **_: object) -> GroundingVerdict:
         self._trace.calls.append("grounding")
         if self._raises:
             msg = "grounding infra down"
@@ -82,13 +82,30 @@ class _FakeGrounding:
 
 
 class _FakeWellbeing:
-    def __init__(self, trace: _Trace, tagged: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        trace: _Trace,
+        tagged: set[str] | None = None,
+        *,
+        unsynthesised: set[str] | None = None,
+    ) -> None:
         self._trace = trace
         self._tagged = tagged or set()
+        self._unsynthesised = unsynthesised or set()
+        self.asked: list[tuple[list[str], bool]] = []
 
-    def tagged_refs(self, owner_id: str, node_refs: list[str]) -> set[str]:
+    def tagged_refs(
+        self,
+        owner_id: str,
+        citations: tuple[GroundingCitation, ...],
+        *,
+        include_unsynthesised: bool,
+    ) -> set[str]:
         self._trace.calls.append("wellbeing")
-        return self._tagged & set(node_refs)
+        refs = [c.ref for c in citations]
+        self.asked.append((refs, include_unsynthesised))
+        gated = self._tagged | (self._unsynthesised if include_unsynthesised else set())
+        return gated & set(refs)
 
 
 class _FakeDeclines:
@@ -252,6 +269,7 @@ class TestGateOrder:
         h = _Harness()
         await h.pipeline.submit((_candidate(),))
         assert h.trace.calls == [
+            "user_context",  # the user's local date, for the judge (third review LOW 2)
             "grounding",
             "wellbeing",
             "declines",
@@ -267,7 +285,7 @@ class TestGateOrder:
         h.grounding = _FakeGrounding(h.trace, admit=False)
         h.pipeline._grounding = h.grounding  # noqa: SLF001 — rewire the one fake
         await h.pipeline.submit((_candidate(),))
-        assert h.trace.calls == ["grounding"]  # nothing after the first gate
+        assert h.trace.calls == ["user_context", "grounding"]  # nothing after the first gate
         assert h.audit_events() == ["initiative.discard_ungrounded"]
         assert h.ledger.claims == []
 
@@ -277,7 +295,7 @@ class TestGateOrder:
         h.wellbeing = _FakeWellbeing(h.trace, tagged={"node-91"})
         h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
         await h.pipeline.submit((_candidate(),))
-        assert h.trace.calls == ["grounding", "wellbeing"]
+        assert h.trace.calls == ["user_context", "grounding", "wellbeing"]
         assert h.audit_events() == ["initiative.discard_wellbeing_subject"]
         assert h.ledger.claims == []
 
@@ -605,3 +623,327 @@ class TestFailSoft:
         # the second net — and one bad candidate must not block the rest.
         await h.pipeline.submit((_candidate(), _candidate()))
         assert h.audit_events() == ["initiative.discard_error", "initiative.discard_error"]
+
+
+class TestWellbeingSubjectOverConversations:
+    """R9-249 and its review: the subject rule judges EVERY cited item, of every kind."""
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_citing_a_disclosing_conversation_is_discarded(self) -> None:
+        h = _Harness(wellbeing=None)
+        h.wellbeing = _FakeWellbeing(h.trace, tagged={"conv-7"})
+        h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
+        conv_only = _candidate(
+            citations=(GroundingCitation(kind=CitationKind.CONVERSATION, ref="conv-7"),)
+        )
+        await h.pipeline.submit((conv_only,))
+        assert h.audit_events() == ["initiative.discard_wellbeing_subject"]
+        assert h.ledger.claims == []
+
+    @pytest.mark.asyncio
+    async def test_every_cited_item_is_asked_whatever_its_kind(self) -> None:
+        """Nodes, conversations AND tasks (review MEDIUM-1: a task begun in a disclosure)."""
+        h = _Harness(wellbeing=None)
+        h.wellbeing = _FakeWellbeing(h.trace)
+        h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
+        mixed = _candidate(
+            citations=(
+                GroundingCitation(kind=CitationKind.NODE, ref="node-91"),
+                GroundingCitation(kind=CitationKind.CONVERSATION, ref="conv-7"),
+                GroundingCitation(kind=CitationKind.TASK, ref="task-3"),
+            )
+        )
+        await h.pipeline.submit((mixed,))
+        assert h.wellbeing.asked == [(["node-91", "conv-7", "task-3"], True)]
+
+    @pytest.mark.asyncio
+    async def test_a_gated_task_citation_discards_the_candidate(self) -> None:
+        h = _Harness(wellbeing=None)
+        h.wellbeing = _FakeWellbeing(h.trace, tagged={"task-3"})
+        h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
+        task_only = _candidate(citations=(GroundingCitation(kind=CitationKind.TASK, ref="task-3"),))
+        await h.pipeline.submit((task_only,))
+        assert h.audit_events() == ["initiative.discard_wellbeing_subject"]
+        assert h.ledger.claims == []
+
+    @pytest.mark.asyncio
+    async def test_a_scan_candidate_is_held_to_the_synthesis_freshness_gate(self) -> None:
+        """A conversation synthesis has not tagged yet is not the subject of a SCAN notice."""
+        h = _Harness(wellbeing=None)
+        h.wellbeing = _FakeWellbeing(h.trace, unsynthesised={"conv-new"})
+        h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
+        fresh = _candidate(
+            citations=(GroundingCitation(kind=CitationKind.CONVERSATION, ref="conv-new"),)
+        )
+        await h.pipeline.submit((fresh,))
+        assert h.audit_events() == ["initiative.discard_wellbeing_subject"]
+
+    @pytest.mark.asyncio
+    async def test_an_event_candidate_is_not_held_to_the_freshness_gate(self) -> None:
+        """A7 events fire as a message arrives, before synthesis: freshness is scan-only."""
+        h = _Harness(wellbeing=None)
+        h.wellbeing = _FakeWellbeing(h.trace, unsynthesised={"conv-new"})
+        h.pipeline._wellbeing = h.wellbeing  # noqa: SLF001
+        event = _candidate(
+            source=CandidateSource.EVENT,
+            citations=(GroundingCitation(kind=CitationKind.CONVERSATION, ref="conv-new"),),
+        )
+        await h.pipeline.submit((event,))
+        assert h.wellbeing.asked == [(["conv-new"], False)]
+        assert "initiative.discard_wellbeing_subject" not in h.audit_events()
+
+
+class _RaisingWellbeing:
+    def tagged_refs(
+        self,
+        owner_id: str,
+        citations: tuple[GroundingCitation, ...],
+        *,
+        include_unsynthesised: bool,
+    ) -> set[str]:
+        msg = "graph unavailable"
+        raise RuntimeError(msg)
+
+
+class TestFlushReappliesTheSubjectRule:
+    """R9-249 review HIGH-A: every notice is BATCH-held in v1 and goes out at a flush, so
+    the wellbeing rule and the prompt-version floor are re-applied there, before delivery."""
+
+    def _harness(
+        self,
+        *,
+        candidate: InitiativeCandidate | None = None,
+        wellbeing: Any = None,  # noqa: ANN401
+    ) -> tuple[_Harness, _FakeDelivery]:
+        delivery = _FakeDelivery()
+        h = _Harness(delivery=delivery)
+        held = _Held(candidate or _candidate(), created_at=datetime.now(UTC))
+        h.ledger = _FakeLedger(h.trace, held=[held])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        if wellbeing is not None:
+            h.wellbeing = wellbeing
+            h.pipeline._wellbeing = wellbeing  # noqa: SLF001
+        return h, delivery
+
+    @pytest.mark.asyncio
+    async def test_a_conversation_disclosed_after_the_hold_expires_the_notice(self) -> None:
+        """Monday a clean node is held; Tuesday its conversation discloses; Wednesday's
+        flush must not deliver it."""
+        h, delivery = self._harness()
+        h.pipeline._wellbeing = _FakeWellbeing(h.trace, tagged={"node-91"})  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "wellbeing_subject")]
+        assert delivery.calls == []
+        assert "grounding" not in h.trace.calls  # no judge spend on a notice that never goes out
+
+    @pytest.mark.asyncio
+    async def test_a_scan_notice_whose_source_synthesis_has_not_caught_up_stays_held(
+        self,
+    ) -> None:
+        h, delivery = self._harness()
+        h.pipeline._wellbeing = _FakeWellbeing(h.trace, unsynthesised={"node-91"})  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_event_notice_is_not_held_to_freshness_at_the_flush(self) -> None:
+        h, delivery = self._harness(candidate=_candidate(source=CandidateSource.EVENT))
+        h.pipeline._wellbeing = _FakeWellbeing(h.trace, unsynthesised={"node-91"})  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_subject_check_keeps_the_notice_held(self) -> None:
+        h, delivery = self._harness(wellbeing=_RaisingWellbeing())
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == []
+
+    @pytest.mark.parametrize(
+        "version",
+        [
+            "a5-scan-v1",
+            "a5-scan-v4",
+            "a7-event-candidate-v1",
+            "a7-event-candidate-v2",
+            "v1",
+            "scripted",
+            "",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_notice_from_a_superseded_prompt_expires_and_never_flushes(
+        self, version: str
+    ) -> None:
+        stale = _candidate().model_copy(update={"prompt_version": version})
+        h, delivery = self._harness(candidate=stale)
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "prompt_superseded")]
+        assert delivery.calls == []
+
+    @pytest.mark.parametrize("version", ["a5-scan-v5", "a5-scan-v9", "a7-event-candidate-v3"])
+    @pytest.mark.asyncio
+    async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
+        current = _candidate().model_copy(update={"prompt_version": version})
+        h, delivery = self._harness(candidate=current)
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+
+    def test_the_scan_prompt_in_force_is_deliverable(self) -> None:
+        from persona.initiative import prompt_version_deliverable
+        from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
+
+        assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
+
+
+class TestTheVoiceStage:
+    """R9-256 and the re-review (LOW 2): the voice guard runs in the pipeline, for scans and
+    A7 events alike, BEFORE grounding, and a void is audited so the rate is visible."""
+
+    @pytest.mark.parametrize("source", [CandidateSource.SCAN, CandidateSource.EVENT])
+    @pytest.mark.asyncio
+    async def test_a_safe_object_is_rewritten_before_grounding_and_the_claim(
+        self, source: CandidateSource
+    ) -> None:
+        seen: list[InitiativeCandidate] = []
+        h = _Harness()
+        real = h.grounding.check
+
+        async def _check(candidate: InitiativeCandidate, **_: object) -> GroundingVerdict:
+            seen.append(candidate)
+            return await real(candidate)
+
+        h.grounding.check = _check  # type: ignore[method-assign]
+        third = _candidate(
+            source=source,
+            why_now="The user's hearing is Friday.",
+            next_step="draft the letter and show it to the user for approval",
+        )
+        await h.pipeline.submit((third,))
+        assert seen[0].why_now == "Your hearing is Friday."  # judged as the user reads it
+        assert seen[0].next_step == "draft the letter and show it to you for approval"
+        assert h.ledger.claims  # and claimed (stored) that way
+
+    @pytest.mark.parametrize(
+        ("field", "text"),
+        [
+            ("why_now", "The user expressed anxiety today."),
+            ("next_step", "send the user manual"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_unsafe_third_person_text_is_voided_and_audited(
+        self, field: str, text: str
+    ) -> None:
+        h = _Harness()
+        await h.pipeline.submit((_candidate(**{field: text}),))
+        assert h.audit_events() == ["initiative.discard_voice"]
+        assert h.auditor.events[0][2] == "third_person"
+        assert "grounding" not in h.trace.calls  # no judge spend on a void
+        assert h.ledger.claims == []
+
+
+class TestTooManyNodeCitations:
+    """Re-review LOW 4: past the bounded node read the subject is gated whole, audited
+    under its own reason (never mistaken for a wellbeing tag), with no read at all."""
+
+    @pytest.mark.asyncio
+    async def test_more_cited_nodes_than_the_bound_are_discarded_by_name(self) -> None:
+        from persona.initiative import MAX_CITED_NODE_READS
+
+        h = _Harness()
+        many = _candidate(
+            citations=tuple(
+                GroundingCitation(kind=CitationKind.NODE, ref=f"node-{i}")
+                for i in range(MAX_CITED_NODE_READS + 1)
+            )
+        )
+        await h.pipeline.submit((many,))
+        assert h.auditor.events == [
+            (
+                "initiative.discard_wellbeing_subject",
+                many.opportunity_key,
+                "too_many_node_citations",
+            )
+        ]
+        assert h.wellbeing.asked == []
+        assert h.ledger.claims == []
+
+    @pytest.mark.asyncio
+    async def test_the_bound_itself_is_still_judged(self) -> None:
+        from persona.initiative import MAX_CITED_NODE_READS
+
+        h = _Harness()
+        refs = [f"node-{i}" for i in range(MAX_CITED_NODE_READS)]
+        at_bound = _candidate(
+            citations=tuple(GroundingCitation(kind=CitationKind.NODE, ref=r) for r in refs)
+        )
+        await h.pipeline.submit((at_bound,))
+        assert h.wellbeing.asked == [(refs, True)]
+
+
+class TestThirdReviewFlushOrderAndLocalDay:
+    @pytest.mark.asyncio
+    async def test_a_waiting_notice_still_ages_out(self) -> None:
+        """LOW 6: hold age runs BEFORE the subject rule, so a notice the rule keeps
+        waiting (synthesis behind) cannot hold its duplicate slot forever."""
+        delivery = _FakeDelivery()
+        h = _Harness(delivery=delivery)
+        old = _Held(_candidate(), created_at=datetime.now(UTC) - timedelta(days=8))
+        h.ledger = _FakeLedger(h.trace, held=[old])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.pipeline._wellbeing = _FakeWellbeing(h.trace, unsynthesised={"node-91"})  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "hold_age")]
+        assert delivery.calls == []
+
+    @pytest.mark.asyncio
+    async def test_the_judge_gets_the_users_local_date_and_zone(self) -> None:
+        """LOW 2: 23:30 UTC on 25 September is already 26 September in Oslo."""
+        seen: list[dict[str, object]] = []
+        clock_now = datetime(2026, 9, 25, 23, 30, tzinfo=UTC)
+        h = _Harness(users=None, clock=lambda: clock_now, delivery=_FakeDelivery())
+        h.users = _FakeUsers(h.trace, _Context(timezone="Europe/Oslo"))
+        h.pipeline._users = h.users  # noqa: SLF001
+        real = h.grounding.check
+
+        async def _check(candidate: InitiativeCandidate, **kwargs: object) -> GroundingVerdict:
+            seen.append(kwargs)
+            return await real(candidate)
+
+        h.grounding.check = _check  # type: ignore[method-assign]
+        await h.pipeline.submit((_candidate(),))
+        assert seen == [{"today": date(2026, 9, 26), "timezone": "Europe/Oslo"}]
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_timezone_judges_in_utc(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        class _BrokenUsers:
+            def user_context(self, owner_id: str) -> _Context:
+                msg = "users table unavailable"
+                raise RuntimeError(msg)
+
+        h = _Harness(clock=lambda: datetime(2026, 9, 25, 23, 30, tzinfo=UTC))
+        h.pipeline._users = _BrokenUsers()  # noqa: SLF001
+        real = h.grounding.check
+
+        async def _check(candidate: InitiativeCandidate, **kwargs: object) -> GroundingVerdict:
+            seen.append(kwargs)
+            return await real(candidate)
+
+        h.grounding.check = _check  # type: ignore[method-assign]
+        await h.pipeline.submit((_candidate(),))
+        assert seen[0] == {"today": date(2026, 9, 25), "timezone": "UTC"}
+
+
+def test_the_scan_floor_is_the_version_in_force() -> None:
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v5)."""
+    from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
+    from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
+
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v5"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 5
+    assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
+    assert not prompt_version_deliverable("a5-scan-v4")

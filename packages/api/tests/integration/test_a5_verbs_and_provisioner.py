@@ -271,7 +271,7 @@ def _candidate() -> InitiativeCandidate:
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
     )
 
@@ -303,7 +303,7 @@ def _pipeline(
             ),
             backend=_ScriptedBackend(),  # type: ignore[arg-type]
         ),
-        wellbeing=ApiWellbeingSubjectCheck(graph_store),
+        wellbeing=ApiWellbeingSubjectCheck(graph_store, app_engine),
         declines=DeclineStore(app_engine),
         ledger=LedgerAdapter(InitiativeLedger(app_engine)),
         users=ApiUserContextReader(app_engine, default_timezone="Europe/Oslo"),
@@ -464,18 +464,19 @@ async def test_dial_verb_flows_through_the_real_loop_service_and_next_scan_cycle
         current_user_id.reset(token)
 
     registry = JobRegistry()
+    scan_store = build_graph_store(
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+    )
+    scan_gate = __import__(
+        "persona_api.initiative.wellbeing_gate", fromlist=["ConversationWellbeingGate"]
+    ).ConversationWellbeingGate(scan_store, app_engine)
     scanner = InitiativeScanner(
         graph=__import__(
             "persona_api.initiative.readers", fromlist=["ApiScanGraphReader"]
-        ).ApiScanGraphReader(
-            build_graph_store(engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger())
-        ),
-        conversations=__import__(
-            "persona_api.initiative.readers", fromlist=["ApiScanConversationReader"]
-        ).ApiScanConversationReader(app_engine),
+        ).ApiScanGraphReader(scan_store, scan_gate),
         tasks=__import__(
             "persona_api.initiative.readers", fromlist=["ApiScanTaskReader"]
-        ).ApiScanTaskReader(TaskStore(app_engine), CheckpointStore(app_engine)),
+        ).ApiScanTaskReader(TaskStore(app_engine), CheckpointStore(app_engine), scan_gate),
         backend=_ScriptedBackend(),  # type: ignore[arg-type]
         settings=settings,
     )

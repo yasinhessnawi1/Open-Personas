@@ -47,6 +47,7 @@ from persona.errors import (
     ScheduleNotFoundError,
     TaskNotFoundError,
 )
+from persona.initiative import address_user
 from persona.initiative.envelope import EnvelopeAction
 from persona.logging import get_logger
 from persona.schedules import MissedFirePolicy, RecurrenceRule, Schedule
@@ -94,22 +95,27 @@ def initiative_reschedule_proposal_id(notice_id: str) -> str:
 
 
 #: Bumped on any wording change (the Spec-10 discipline; A5-R-1 tunes the tone).
-INITIATIVE_PROPOSAL_TEMPLATE_VERSION = "a5-propose-v1"
+#: v2 (R9-256): the message opens with the reason told to the user (``why_now``, "you"),
+#: never "From your notes:" and a pasted grounding sentence about "the user".
+INITIATIVE_PROPOSAL_TEMPLATE_VERSION = "a5-propose-v2"
 
 
 def render_proposal(candidate: InitiativeCandidate) -> str:
     """The persona-voiced proposal text — honest why, explicit ask (criterion 8).
 
-    The attribution ("from your notes") is the human-readable why K3's rule
-    demands: unprompted contact WITH the reason reads as attentiveness. The ask
-    is explicit and decline-friendly — a proposal is a question, never a nudge.
+    The why is the candidate's ``why_now``: one sentence to the user, in "you", saying
+    what was noticed and why it matters now (K3's honest attribution, as a person says
+    it; unprompted contact WITH the reason reads as attentiveness). The grounding
+    ``observation`` is what the judge checked and is not pasted in. The ask is explicit
+    and decline-friendly: a proposal is a question, never a nudge.
     """
-    ask = candidate.next_step.rstrip(".")
-    ask = ask[0].lower() + ask[1:] if ask else ask
-    return (
-        f"From your notes: {candidate.observation} {candidate.why_now}\n"
-        f"Want me to {ask}? Say yes and I'll get started, or tell me to leave it."
-    )
+    reason = candidate.why_now.strip()
+    if reason and reason[-1] not in ".!?":
+        reason += "."
+    # The case is left alone (a name, "I" or an acronym must survive; the prompts ask
+    # for a lowercase verb start); closing punctuation is dropped before the "?".
+    ask = candidate.next_step.strip().rstrip(".?! ")
+    return f"{reason}\nWant me to {ask}? Say yes and I'll get started, or tell me to leave it."
 
 
 class ProposalSender(Protocol):
@@ -144,7 +150,23 @@ def _build_contract(candidate: InitiativeCandidate) -> Contract:
     (defense in depth; the plan is intent, the gate is the guarantee).
     """
     scope = f"{candidate.why_now} Grounded in: " + ", ".join(c.anchor for c in candidate.citations)
-    return Contract(goal=candidate.next_step, scope=scope)
+    return Contract(goal=_task_goal(candidate), scope=scope)
+
+
+_NEUTRAL_GOAL = "Carry out the proposed plan."
+
+
+def _task_goal(candidate: InitiativeCandidate) -> str:
+    """The implicit task's goal: the plan's steps, a neutral task statement.
+
+    Never the offer (``next_step``), which speaks to the user ("for you to review")
+    and reads wrong as a task's goal. The steps pass the same voice guard as every
+    user-facing text (third review LOW 8: the task and its reports are shown to the
+    user); a step that cannot be voiced leaves the neutral goal, never unvoiced text.
+    """
+    steps = "; ".join(step.description.strip().rstrip(".") for step in candidate.plan)
+    voiced = address_user(steps) if steps else None
+    return (voiced[:1].upper() + voiced[1:] + ".") if voiced else _NEUTRAL_GOAL
 
 
 class InitiativeDeliveryExecutor:

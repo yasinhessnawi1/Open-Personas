@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from persona.errors import ScheduleNotFoundError, TaskNotFoundError
 from persona.initiative import (
     CandidateSource,
@@ -39,15 +40,20 @@ def _candidate() -> InitiativeCandidate:
         citations=(GroundingCitation(kind=CitationKind.NODE, ref="node-91"),),
         trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
         why_now="The date entered the horizon.",
-        plan=(PlannedStep(description="draft", categories=frozenset({ActionCategory.DRAFT})),),
-        next_step="Draft the response letter.",
+        plan=(
+            PlannedStep(
+                description="draft the response letter",
+                categories=frozenset({ActionCategory.DRAFT}),
+            ),
+        ),
+        next_step="draft the response letter for you to review",
         value=0.9,
         acceptance=0.8,
         urgency=Urgency.BATCH,
         source=CandidateSource.SCAN,
         owner_id="u1",
         persona_id="p-scanner",
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
     )
 
@@ -306,14 +312,95 @@ def test_generic_proposal_sends_versioned_persona_voiced_ask() -> None:
     assert asyncio.run(executor.deliver("u1", "n-1", EnvelopeAction.PROPOSE)) is True
     assert len(sender.sent) == 1
     content = sender.sent[0]["content"]
-    assert "From your notes" in content  # the honest why (criterion 8)
-    assert "Want me to draft the response letter?" in content
-    assert "leave it" in content  # decline-friendly ask
+    assert content == (  # the honest why (criterion 8), then a decline-friendly ask
+        "The date entered the horizon.\n"
+        "Want me to draft the response letter for you to review? Say yes and I'll get "
+        "started, or tell me to leave it."
+    )
     # Unconfirmed creates NOTHING (T9 bar 2): no task, no schedule.
     assert tasks.created == []
     assert schedules.created == []
-    assert INITIATIVE_PROPOSAL_TEMPLATE_VERSION == "a5-propose-v1"
+    assert INITIATIVE_PROPOSAL_TEMPLATE_VERSION == "a5-propose-v2"
     assert render_proposal(_notice().candidate) == content
+
+
+#: The five A5-R-1 rubric shapes (T01 to T05), written the way the v4 prompts ask: the
+#: reason to "you" in one sentence, changeable facts held lightly, the offer to "you".
+_RUBRIC_SHAPES = [
+    (
+        "T01",
+        "Your library books are due back on Thursday 1 October.",
+        "renew them online for you",
+        "Your library books are due back on Thursday 1 October.\n"
+        "Want me to renew them online for you? Say yes and I'll get started, "
+        "or tell me to leave it.",
+    ),
+    (
+        "T02",
+        "Your car insurance with If renews on Sunday 4 October, so if you haven't compared "
+        "offers yet, there is still time",
+        "put together a shortlist of other car insurance offers for you to review",
+        "Your car insurance with If renews on Sunday 4 October, so if you haven't compared "
+        "offers yet, there is still time.\n"
+        "Want me to put together a shortlist of other car insurance offers for you to review? "
+        "Say yes and I'll get started, or tell me to leave it.",
+    ),
+    (
+        "T03",
+        "Your deposit hearing is on Friday 2 October, and the tribunal asked for a written "
+        "response before it; if you haven't written it yet, there are a few days left.",
+        "draft the response letter for you to look over",
+        "Your deposit hearing is on Friday 2 October, and the tribunal asked for a written "
+        "response before it; if you haven't written it yet, there are a few days left.\n"
+        "Want me to draft the response letter for you to look over? Say yes and I'll get "
+        "started, or tell me to leave it.",
+    ),
+    (
+        "T04",
+        "The Oslo Glass quote for the bathroom window, the cheapest of the three, is valid "
+        "until Thursday 1 October, if it is still the one you want.",
+        "remind you on Wednesday, before it lapses",
+        "The Oslo Glass quote for the bathroom window, the cheapest of the three, is valid "
+        "until Thursday 1 October, if it is still the one you want.\n"
+        "Want me to remind you on Wednesday, before it lapses? Say yes and I'll get started, "
+        "or tell me to leave it.",
+    ),
+    (
+        "T05",
+        "Your car insurance renews on Sunday 4 October; if you still want to compare offers, "
+        "I can line some up.",
+        "compare three other car insurance options for you",
+        "Your car insurance renews on Sunday 4 October; if you still want to compare offers, "
+        "I can line some up.\n"
+        "Want me to compare three other car insurance options for you? Say yes and I'll get "
+        "started, or tell me to leave it.",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("why_now", "next_step", "expected"),
+    [shape[1:] for shape in _RUBRIC_SHAPES],
+    ids=[shape[0] for shape in _RUBRIC_SHAPES],
+)
+def test_the_rubric_shapes_render_as_a_person_talking(
+    why_now: str, next_step: str, expected: str
+) -> None:
+    """R9-256: the reason to "you", never "From your notes:" and a pasted grounding."""
+    from persona_api.initiative.delivery import render_proposal
+
+    candidate = _candidate().model_copy(
+        update={
+            "observation": "The user has a dated commitment (the grounding: never shown).",
+            "why_now": why_now,
+            "next_step": next_step,
+        }
+    )
+    text = render_proposal(candidate)
+    assert text == expected
+    assert "From your notes" not in text
+    assert "the user" not in text.lower()
+    assert "never shown" not in text  # the grounding observation is not pasted in
 
 
 def test_generic_proposal_without_sender_stays_held() -> None:
@@ -332,3 +419,65 @@ def test_generic_proposal_without_persona_tag_stays_held() -> None:
     )
     assert asyncio.run(executor.deliver("u1", "n-1", EnvelopeAction.PROPOSE)) is False
     assert sender.sent == []
+
+
+@pytest.mark.parametrize(
+    ("next_step", "ask"),
+    [
+        ("OCR the receipts for you", "Want me to OCR the receipts for you?"),  # case kept
+        ("ask Mia whether Thursday works", "Want me to ask Mia whether Thursday works?"),
+        ("draft it for you?", "Want me to draft it for you?"),  # no doubled "?"
+        ("draft it for you!", "Want me to draft it for you?"),
+        ("draft it for you.", "Want me to draft it for you?"),
+    ],
+)
+def test_the_offer_keeps_its_case_and_loses_its_closing_punctuation(
+    next_step: str, ask: str
+) -> None:
+    from persona_api.initiative.delivery import render_proposal
+
+    text = render_proposal(_candidate().model_copy(update={"next_step": next_step}))
+    assert text.splitlines()[1].startswith(ask + " Say yes")
+
+
+def test_the_act_path_task_goal_is_the_plan_not_the_offer_to_you() -> None:
+    """Re-review LOW 7: the implicit task's goal is a neutral task statement."""
+    from persona_api.initiative.delivery import _build_contract
+
+    candidate = _candidate().model_copy(
+        update={
+            "plan": (
+                PlannedStep(
+                    description="compare three insurance offers",
+                    categories=frozenset({ActionCategory.COMPUTE}),
+                ),
+                PlannedStep(
+                    description="draft a short summary.",
+                    categories=frozenset({ActionCategory.DRAFT}),
+                ),
+            ),
+            "next_step": "put together a shortlist of offers for you to review",
+        }
+    )
+    assert _build_contract(candidate).goal == (
+        "Compare three insurance offers; draft a short summary."
+    )
+
+
+@pytest.mark.parametrize(
+    ("steps", "goal"),
+    [
+        (("compare offers for the user",), "Compare offers for you."),
+        (("draft a reply for the user to review",), "Draft a reply for you to review."),
+        (("send the user manual",), "Carry out the proposed plan."),  # cannot be voiced
+    ],
+)
+def test_the_act_path_task_goal_passes_the_voice_guard(steps: tuple[str, ...], goal: str) -> None:
+    """Third review LOW 8: the task goal is shown to the user too, so it is voiced, and a
+    step that cannot be voiced leaves the neutral goal, never unvoiced text."""
+    from persona_api.initiative.delivery import _build_contract
+
+    plan = tuple(
+        PlannedStep(description=d, categories=frozenset({ActionCategory.DRAFT})) for d in steps
+    )
+    assert _build_contract(_candidate().model_copy(update={"plan": plan})).goal == goal

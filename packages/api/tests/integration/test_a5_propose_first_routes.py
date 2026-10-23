@@ -86,7 +86,10 @@ _NOW = datetime(2026, 7, 4, 6, 0, tzinfo=UTC)
 _OWNER = "own_a5pf"
 _PERSONA = "pers_pf_a"
 _NODE = f"{_OWNER}::node::checkin1"
-_CONTENT = "The daily check-in keeps colliding with the user's early meetings."
+_CONTENT = (
+    "The daily check-in keeps colliding with the user's early meetings; "
+    "the user said 09:00 would suit better."
+)
 _TASK_ID = "t_pf_standing"
 _SCHED_ID = "s_pf_standing"
 _LOCK = 0x5A5C43
@@ -222,7 +225,7 @@ def _candidate(*, schedule_change: ScheduleChange | None = None) -> InitiativeCa
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
         schedule_change=schedule_change,
     )
@@ -239,7 +242,7 @@ def _pipeline(app_engine: Engine, executor: InitiativeDeliveryExecutor) -> Initi
             ),
             backend=_VerbatimYesJudge(),  # type: ignore[arg-type]
         ),
-        wellbeing=ApiWellbeingSubjectCheck(graph_store),
+        wellbeing=ApiWellbeingSubjectCheck(graph_store, app_engine),
         declines=DeclineStore(app_engine),
         ledger=LedgerAdapter(InitiativeLedger(app_engine)),
         users=ApiUserContextReader(app_engine, default_timezone="Europe/Oslo"),
@@ -372,7 +375,9 @@ def test_generic_proposal_delivers_c0_message_and_creates_nothing(
         assert delivered is not None
         assert delivered.disposition is NoticeDisposition.DELIVERED
         assert len(sender.sent) == 1
-        assert "From your notes" in sender.sent[0]["content"]  # the honest why
+        content = sender.sent[0]["content"]
+        assert "From your notes" not in content  # R9-256: the reason, told to "you"
+        assert content.endswith("Say yes and I'll get started, or tell me to leave it.")
 
         # Unconfirmed creates NOTHING: only the seeded standing task/schedule exist.
         with migrated_engine.begin() as conn:

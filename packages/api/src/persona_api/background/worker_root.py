@@ -97,11 +97,11 @@ from persona_api.initiative.pipeline_wiring import (
 )
 from persona_api.initiative.provisioner import InitiativeProvisioner
 from persona_api.initiative.readers import (
-    ApiScanConversationReader,
     ApiScanGraphReader,
     ApiScanTaskReader,
 )
 from persona_api.initiative.store import DeclineStore, InitiativeLedger
+from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
 from persona_api.jobs.catalog_sync import build_catalog_sync
 from persona_api.jobs.handlers.avatar import avatar_queue_ready, register_avatar_handler
 from persona_api.jobs.handlers.consolidation import (
@@ -573,10 +573,12 @@ def build_worker_registry(
             free_tier_registry=free_tier_registry,
             metered=True,
         )
+        # R9-249 review: both readers drop items learned from, or begun in, a gated
+        # interaction; one shared gate definition (the subject rule and A7 use it too).
+        scan_gate = ConversationWellbeingGate(graph_store, rls_engine)
         scanner = InitiativeScanner(
-            graph=ApiScanGraphReader(graph_store),
-            conversations=ApiScanConversationReader(rls_engine),
-            tasks=ApiScanTaskReader(TaskStore(rls_engine), CheckpointStore(rls_engine)),
+            graph=ApiScanGraphReader(graph_store, scan_gate),
+            tasks=ApiScanTaskReader(TaskStore(rls_engine), CheckpointStore(rls_engine), scan_gate),
             backend=initiative_backend,
             settings=initiative_settings,
         )
@@ -629,8 +631,9 @@ def build_worker_registry(
                     rls_engine, TaskStore(rls_engine), CheckpointStore(rls_engine)
                 ),
                 backend=initiative_backend,
+                max_output_tokens=initiative_settings.judge_max_output_tokens,
             ),
-            wellbeing=ApiWellbeingSubjectCheck(graph_store),
+            wellbeing=ApiWellbeingSubjectCheck(graph_store, rls_engine),
             declines=DeclineStore(rls_engine),
             ledger=LedgerAdapter(initiative_ledger),
             users=ApiUserContextReader(
@@ -732,7 +735,7 @@ def build_worker_registry(
                     settings=initiative_settings,
                 ),
                 sink=pipeline,
-                wellbeing=ApiEventWellbeingCheck(graph_store),
+                wellbeing=ApiEventWellbeingCheck(graph_store, rls_engine),
                 audit=_event_candidate_audit,
             )
     # Avatar generation (Spec A0 T9 → completed at R9-013, default path since the

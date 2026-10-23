@@ -8,16 +8,16 @@ from persona_runtime.initiative.grounding import (
     GroundingVerdict,
 )
 from persona_runtime.initiative.pipeline import (
+    HeldSubject,
     InitiativePipeline,
     NoticeLedger,
     PipelineAuditor,
     UserContextReader,
     WellbeingSubjectCheck,
+    held_notice_subject,
 )
 from persona_runtime.initiative.scan import (
     InitiativeScanner,
-    ScanConversation,
-    ScanConversationReader,
     ScanGraphReader,
     ScanLink,
     ScanNode,
@@ -37,17 +37,17 @@ __all__ = [
     "GroundingRejection",
     "GroundingSource",
     "GroundingVerdict",
+    "HeldSubject",
     "InitiativePipeline",
     "InitiativeScanner",
     "NoticeLedger",
     "PipelineAuditor",
     "UserContextReader",
     "WellbeingSubjectCheck",
-    "ScanConversation",
-    "ScanConversationReader",
     "ScanGraphReader",
     "ScanLink",
     "ScanNode",
     "ScanTask",
     "ScanTaskReader",
+    "held_notice_subject",
 ]

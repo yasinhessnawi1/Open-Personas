@@ -46,11 +46,14 @@ from persona.schema.conversation import ConversationMessage
 from persona.tools.categories import ActionCategory
 from pydantic import ValidationError
 
+from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
+
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
     from persona.graph.protocol import GraphStore
     from persona.initiative import InitiativeSettings
     from persona.jobs import JobContext
+    from sqlalchemy import Engine
 
     from persona_api.events.candidate_handler import EventCandidatePayload
 
@@ -68,7 +71,10 @@ _CONTENT_SNIPPET = 2000  # the citable grounding tail handed to the model (bound
 
 #: Bumped on any rule/example change; stamped on every produced candidate's ``prompt_version`` so a
 #: behaviour change is traceable (the A5 INITIATIVE_SCAN_PROMPT_VERSION discipline).
-EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v1"
+#: v3 (R9-249 re-review): "next_step" starts with a lowercase verb (the template keeps its case).
+#: v2 (R9-256): "why_now" and "next_step" address the user as "you" and hold changeable
+#: facts lightly; the same voice rule and mechanical backstop as the A5 scan.
+EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v3"
 
 
 @runtime_checkable
@@ -86,22 +92,30 @@ class ApiEventWellbeingCheck:
     A grounding is gated iff a wellbeing-flagged node was *sourced from* it — i.e. some
     :meth:`~persona.graph.protocol.GraphStore.flagged_nodes` node carries a provenance entry whose
     ``interaction_id`` equals the grounding ref. In practice this fires for ``conversation``
-    grounding (an inbound message that ingestion has already tagged as sensitive); ``task``
-    grounding never names an interaction, so lifecycle candidates fall to the model drop (layer b) —
-    the honest residual (a task's goal/conclusions are not the sensitive-disclosure vector criterion
-    8 targets). Reuses the SAME flagged set the pipeline's subject rule reads, so it does not shrink
+    grounding (an inbound message that ingestion has already tagged as sensitive). For ``task``
+    grounding (R9-249 re-review LOW 3) the door also judges the task's recorded origins, its
+    originating conversation and its runs, the rule the pipeline's subject check applies, so
+    the producer's model call is never spent on a task-grounded event the pipeline would
+    discard. Reuses the SAME flagged set the pipeline's subject rule reads, so it does not shrink
     the real residual (why option B — a parallel gate — was rejected).
     """
 
-    def __init__(self, store: GraphStore) -> None:
-        self._store = store
+    def __init__(self, store: GraphStore, engine: Engine | None = None) -> None:
+        # R9-249: the rule lives in the shared ConversationWellbeingGate (the scan's
+        # reader and the pipeline's subject rule use the same one). The event door keeps
+        # its disclosed-only posture: an event fires as its message arrives, before
+        # synthesis could run, so the freshness half is not applied here. ``engine``
+        # serves the task-origin read (a task-grounded event); without it a task ref is
+        # judged by its id alone.
+        self._gate = ConversationWellbeingGate(store, engine)
+        self._engine = engine
 
-    def is_gated_subject(self, owner_id: str, grounding_kind: str, grounding_ref: str) -> bool:  # noqa: ARG002 — kind reserved; the ref match is kind-agnostic and defensive
-        """``True`` iff a wellbeing-flagged node was sourced from this grounding (drop the door)."""
-        for node in self._store.flagged_nodes(owner_id):
-            if any(p.interaction_id == grounding_ref for p in node.provenance):
-                return True
-        return False
+    def is_gated_subject(self, owner_id: str, grounding_kind: str, grounding_ref: str) -> bool:
+        """``True`` iff the grounding, or what it came from, is disclosed (drop the door)."""
+        judged = {grounding_ref}
+        if grounding_kind == "task" and self._engine is not None:
+            judged |= self._gate.task_origins(owner_id, [grounding_ref]).get(grounding_ref, set())
+        return bool(self._gate.gated(owner_id, judged, include_unsynthesised=False))
 
 
 class SmallTierEventCandidateProducer:
@@ -247,14 +261,18 @@ Return ONLY a JSON object of the form {"candidate": { ... }} or {"candidate": nu
 no markdown fences. If nothing clears the bar: {"candidate": null}.
 
 The candidate object has these fields:
-- "observation": what was noticed, one plain sentence, STATED by the material below.
+- "observation": what was noticed, one plain factual sentence, STATED by the material below \
+(it is checked against the material and never shown to the user).
 - "trigger": EXACTLY one of: "approaching_commitment", "task_followup", "conflict", \
 "stale_open_loop". There are NO other triggers — an event that fits none is not a candidate.
-- "why_now": what makes this timely (the event just happened / what it changed).
+- "why_now": the reason, as you would say it TO the user: ONE natural sentence saying what \
+happened and why it matters now, addressed to them as "you". It is the first thing they read.
 - "plan": the proposed steps, each {"description": ..., "categories": [...]} using ONLY: \
 "observe", "compute", "draft", "notify_user" (safe) or "communicate_as_user", "spend", \
 "external_mutate", "credentialed_access" (will require the user's confirmation).
-- "next_step": the ONE concrete thing the user would see next. A pure FYI is not worth raising.
+- "next_step": the ONE concrete thing you offer to do, worded to follow "Want me to": it \
+starts with a lowercase verb, has no closing punctuation, and addresses the user as "you". \
+A pure FYI is not worth raising.
 - "value": 0..1 — how much this matters to the user's LIFE (never to the conversation).
 - "acceptance": 0..1 — honestly, would they welcome being told this NOW? Can only LOWER the odds.
 - "urgency": "interrupt" ONLY for a hard dated commitment in the next ~2 days; else "batch".
@@ -268,6 +286,9 @@ is NOT what you bring up — return {"candidate": null}. This rule is absolute.
 3. NEVER produce check-ins, conversation-starters, or anything whose purpose is interaction rather \
 than the user's life and work — even if the user would welcome it.
 4. AT MOST ONE candidate. If it is not clearly worth an unprompted notice, return null.
+5. SPEAK TO THE USER. "why_now" and "next_step" are read by the user: say "you" and "your", \
+never "the user", "they" or "the person". Do not paste or quote the material. Anything that \
+could have changed is held lightly ("if it is still open"), never asserted as still true.
 
 EXAMPLE (event → correct output):
 - A message about a self-harm disclosure arrives → {"candidate": null}

@@ -36,10 +36,20 @@ silence is the safe state; the pipeline never raises into the scan job.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
-from persona.initiative import InitiativeCandidate, InitiativeDial, Urgency
+from persona.initiative import (
+    MAX_CITED_NODE_READS,
+    CandidateSource,
+    InitiativeCandidate,
+    InitiativeDial,
+    Urgency,
+    address_user,
+    prompt_version_deliverable,
+)
 from persona.initiative.arbitration import arbitrate_voicer
 from persona.initiative.envelope import EnvelopeAction, decide_envelope
 from persona.initiative.restraint import (
@@ -57,7 +67,7 @@ from persona.logging import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from persona.initiative import InitiativeSettings
+    from persona.initiative import GroundingCitation, InitiativeSettings
     from persona.initiative.restraint import CadenceCounts, DeliveryResolution
     from persona.schedules.quiet_hours import QuietHours
 
@@ -66,6 +76,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DeferredFlushScheduler",
     "HeldNotice",
+    "HeldSubject",
     "InitiativePipeline",
     "NoticeClaim",
     "NoticeLedger",
@@ -73,6 +84,7 @@ __all__ = [
     "UserContext",
     "UserContextReader",
     "WellbeingSubjectCheck",
+    "held_notice_subject",
 ]
 
 _logger = get_logger("runtime.initiative.pipeline")
@@ -83,10 +95,25 @@ _logger = get_logger("runtime.initiative.pipeline")
 
 @runtime_checkable
 class WellbeingSubjectCheck(Protocol):
-    """The subject-exclusion read: which cited node refs are wellbeing-tagged."""
+    """The subject-exclusion read over EVERY cited item (R9-249 and its review).
 
-    def tagged_refs(self, owner_id: str, node_refs: Sequence[str]) -> set[str]:
-        """The subset of ``node_refs`` carrying ANY wellbeing category."""
+    An item is gated when it, or the interaction it came from, is. A conversation is
+    gated when a wellbeing-tagged node was sourced from it (the rule A7's event door
+    uses, one shared definition) and, when ``include_unsynthesised`` is set, also when
+    K2 synthesis has not yet caught up with it: a disclosure made today cannot have
+    been tagged before synthesis runs (precision first). A node is gated when it
+    carries any wellbeing category or was learned from a gated conversation; a task
+    when its id or its originating conversation is gated.
+    """
+
+    def tagged_refs(
+        self,
+        owner_id: str,
+        citations: Sequence[GroundingCitation],
+        *,
+        include_unsynthesised: bool,
+    ) -> set[str]:
+        """The refs among ``citations`` that are gated."""
         ...
 
 
@@ -230,6 +257,48 @@ class DeferredFlushScheduler(Protocol):
         ...
 
 
+class HeldSubject(StrEnum):
+    """The wellbeing subject rule's answer for a held notice (R9-249 review HIGH-A)."""
+
+    CLEAR = "clear"
+    DISCLOSED = "disclosed"
+    WAIT = "wait"
+
+
+def held_notice_subject(
+    check: WellbeingSubjectCheck, owner_id: str, candidate: InitiativeCandidate
+) -> HeldSubject:
+    """The wellbeing subject rule for a HELD notice (the flush and the digest, one rule).
+
+    DISCLOSED when a citation is gated by a disclosure (the notice must never go out);
+    WAIT when a scan candidate is gated only because synthesis has not caught up, or
+    when the check itself fails (fail closed, retried at the next flush); CLEAR
+    otherwise. Freshness is scan-only, as at submit.
+    """
+    try:
+        if check.tagged_refs(owner_id, candidate.citations, include_unsynthesised=False):
+            return HeldSubject.DISCLOSED
+        if candidate.source is CandidateSource.SCAN and check.tagged_refs(
+            owner_id, candidate.citations, include_unsynthesised=True
+        ):
+            return HeldSubject.WAIT
+    except Exception:  # noqa: BLE001 (an unknown subject never means "deliver")
+        _logger.opt(exception=True).warning("held-notice subject check failed; stays held")
+        return HeldSubject.WAIT
+    return HeldSubject.CLEAR
+
+
+def _address_user(candidate: InitiativeCandidate) -> InitiativeCandidate | None:
+    """The candidate with its user-facing texts addressed to "you", or ``None`` (void)."""
+    why_now = address_user(candidate.why_now)
+    next_step = address_user(candidate.next_step)
+    if why_now is None or next_step is None:
+        return None
+    if (why_now, next_step) == (candidate.why_now, candidate.next_step):
+        return candidate
+    return candidate.model_copy(update={"why_now": why_now, "next_step": next_step})
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -290,8 +359,20 @@ class InitiativePipeline:
         now = self._clock()
         owner = candidate.owner_id
 
-        # (1) grounding — T4's two mechanical layers. No grounding, no candidate.
-        verdict = await self._grounding.check(candidate)
+        # (0) the voice (R9-256): why_now and next_step are read BY the user. A safe
+        # rewrite ("for the user to review" to "for you to review") is applied here,
+        # BEFORE grounding, so the judged text is the delivered text; any other
+        # third-person reference voids the candidate, audited so the rate is visible.
+        voiced = _address_user(candidate)
+        if voiced is None:
+            self._audit(candidate, "initiative.discard_voice", "third_person")
+            return
+        candidate = voiced
+
+        # (1) grounding: T4's mechanical layers and the judge. No grounding, no candidate. The
+        # judge is told the user's local date, so a relative claim can be verified.
+        today, zone = self._local_day(owner, now)
+        verdict = await self._grounding.check(candidate, today=today, timezone=zone)
         if not verdict.admitted:
             self._audit(
                 candidate,
@@ -300,10 +381,26 @@ class InitiativePipeline:
             )
             return
 
-        # (2) the wellbeing-subject rule — ANY tagged citation disqualifies the
-        # SUBJECT (all five categories; stronger than K4's chat gate — ruling 6).
+        # (2) the wellbeing-subject rule: ANY gated citation disqualifies the SUBJECT
+        # (all five categories; stronger than K4's chat gate, ruling 6). Every cited
+        # item, judged with the interaction it came from (R9-249 and its review: a
+        # conversation, an untagged node learned from a disclosing conversation, a
+        # task begun in one). The synthesis-freshness half applies to SCAN
+        # candidates: an A7 event fires as its message arrives, before synthesis
+        # could run, and A7's own handler already applies the disclosed rule to it.
         node_refs = [c.ref for c in candidate.citations if c.kind.value == "node"]
-        if node_refs and self._wellbeing.tagged_refs(owner, node_refs):
+        if len(set(node_refs)) > MAX_CITED_NODE_READS:
+            # Too many cited nodes to read their sources: the subject is gated whole
+            # (fail closed), under its own reason so it is never mistaken for a tag.
+            self._audit(
+                candidate, "initiative.discard_wellbeing_subject", "too_many_node_citations"
+            )
+            return
+        if self._wellbeing.tagged_refs(
+            owner,
+            candidate.citations,
+            include_unsynthesised=candidate.source is CandidateSource.SCAN,
+        ):
             self._audit(candidate, "initiative.discard_wellbeing_subject", "tagged_citation")
             return
 
@@ -395,6 +492,12 @@ class InitiativePipeline:
         """Release the held batch — re-validated BOTH ways a hold can rot.
 
         Runs at the daily scan fire (the morning window). Per held notice:
+        (0) a notice produced under a superseded prompt version expires
+        (``prompt_superseded``: it may cite a conversation or speak of "the user");
+        (0b) the wellbeing subject rule, re-applied (R9-249 review HIGH-A: a
+        conversation can become disclosing AFTER the notice was held): gated by a
+        disclosure it expires (``wellbeing_subject``); gated only because synthesis
+        has not caught up, or the check failed, it stays held;
         (a) hold-age bound — a buffer, not a queue; (b) the why-now time half
         (T2's pure predicate; anchor time is None in v1 so this never trips —
         wired for when a mechanical deadline source exists); (c) the T4 check
@@ -460,14 +563,27 @@ class InitiativePipeline:
 
     async def _flush_one(self, owner_id: str, notice: HeldNotice, now: datetime) -> None:
         candidate = notice.candidate
+        if not prompt_version_deliverable(candidate.prompt_version):
+            self._ledger.expire_stale(owner_id, notice.id, reason="prompt_superseded", now=now)
+            return
+        # Hold age BEFORE the subject rule (third review LOW 6): a notice the subject
+        # rule keeps waiting (synthesis behind, or a failing check) still ages out, so
+        # it can never hold its opportunity's duplicate slot forever.
         max_age = timedelta(days=self._settings.hold_max_days)
         if now - notice.created_at > max_age:
             self._ledger.expire_stale(owner_id, notice.id, reason="hold_age", now=now)
             return
+        subject = held_notice_subject(self._wellbeing, owner_id, candidate)
+        if subject is HeldSubject.DISCLOSED:
+            self._ledger.expire_stale(owner_id, notice.id, reason="wellbeing_subject", now=now)
+            return
+        if subject is HeldSubject.WAIT:
+            return  # synthesis not caught up, or the check failed: stays held
         if why_now_lapsed(anchor_time=None, now=now):  # v1: no mechanical anchor time
             self._ledger.expire_stale(owner_id, notice.id, reason="why_now_lapsed", now=now)
             return
-        verdict = await self._grounding.check(candidate)
+        today, zone = self._local_day(owner_id, now)
+        verdict = await self._grounding.check(candidate, today=today, timezone=zone)
         if not verdict.admitted:
             self._ledger.expire_stale(owner_id, notice.id, reason="grounding_dissolved", now=now)
             return
@@ -485,6 +601,15 @@ class InitiativePipeline:
             self._ledger.mark_delivered(owner_id, notice.id, envelope_action=action.value, now=now)
 
     # --- helpers ----------------------------------------------------------------
+
+    def _local_day(self, owner_id: str, now: datetime) -> tuple[date, str]:
+        """The user's local date and timezone name, for the judge (UTC if unreadable)."""
+        try:
+            zone = self._users.user_context(owner_id).timezone
+            return now.astimezone(ZoneInfo(zone)).date(), zone
+        except Exception:  # noqa: BLE001 (the judge is then told UTC, and says so)
+            _logger.opt(exception=True).warning("user timezone read failed; judging in UTC")
+            return now.astimezone(UTC).date(), "UTC"
 
     def _claim_held(
         self,

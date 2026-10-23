@@ -26,6 +26,7 @@ from persona_api.db.engine import rls_connection
 from persona_api.db.models import personas as personas_t
 from persona_api.digest import DeferredDigestStore, MorningDigest, build_morning_digest
 from persona_api.initiative.handler import read_initiative_dial, set_initiative_dial
+from persona_api.initiative.pipeline_wiring import ApiWellbeingSubjectCheck
 from persona_api.initiative.store import DeclineSource, DeclineStore, InitiativeLedger
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.store import ScheduleStore
@@ -86,12 +87,17 @@ async def get_review(
     engine = request.app.state.rls_engine
     now = datetime.now(UTC)
     deferred = DeferredDigestStore(engine).consume_undelivered(user.id, now=now)
+    # R9-249 review HIGH-A: held initiatives are listed through the flush's own
+    # wellbeing rule; with no graph store (no initiative either) none are listed.
+    store = getattr(request.app.state, "graph_store", None)
+    wellbeing = ApiWellbeingSubjectCheck(store, engine) if store is not None else None
     return build_morning_digest(
         engine,
         owner_id=user.id,
         config=request.app.state.config,
         now=now,
         deferred=deferred,
+        wellbeing=wellbeing,
     )
 
 

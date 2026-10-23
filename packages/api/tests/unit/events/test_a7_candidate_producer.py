@@ -123,6 +123,17 @@ async def test_model_failure_degrades_to_silence() -> None:
     assert candidate is None  # a model error is silence, never a crash
 
 
+def test_the_event_prompt_version_and_voice_rule() -> None:
+    """R9-256: the A7 prompt asks for "you", like the scan's; the voice guard itself runs
+    in the pipeline, for events and scans alike (tested there)."""
+    from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
+
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v3"
+    assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
+        "\n", " "
+    )
+
+
 @pytest.mark.asyncio
 async def test_malformed_candidate_is_dropped_conservatively() -> None:
     # An unknown trigger — the closed catalogue is enforced by construction; drop, don't guess.
@@ -130,3 +141,12 @@ async def test_malformed_candidate_is_dropped_conservatively() -> None:
     grounding = _FakeGrounding(conversation="some content")
     candidate = await _producer(backend, grounding).produce(_PAYLOAD, _CTX)  # type: ignore[arg-type]
     assert candidate is None
+
+
+def test_the_event_floor_is_the_version_in_force() -> None:
+    """Third review LOW 5: the deliverable floor is A7's prompt in force."""
+    from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
+
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 3
+    assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
+    assert not prompt_version_deliverable("a7-event-candidate-v2")

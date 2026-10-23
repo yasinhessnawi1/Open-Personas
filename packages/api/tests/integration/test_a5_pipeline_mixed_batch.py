@@ -200,7 +200,7 @@ def _candidate(ref: str, **overrides: Any) -> InitiativeCandidate:  # noqa: ANN4
         "source": CandidateSource.SCAN,
         "owner_id": _OWNER,
         "persona_id": "pers_mb_a",
-        "prompt_version": "a5-scan-v1",
+        "prompt_version": "a5-scan-v5",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -225,7 +225,7 @@ def _pipeline(app_engine: Engine) -> InitiativePipeline:
             ),
             backend=_VerbatimYesJudge(),  # type: ignore[arg-type] — the ONLY scripted piece
         ),
-        wellbeing=ApiWellbeingSubjectCheck(graph_store),
+        wellbeing=ApiWellbeingSubjectCheck(graph_store, app_engine),
         declines=DeclineStore(app_engine),
         ledger=LedgerAdapter(InitiativeLedger(app_engine)),
         users=ApiUserContextReader(app_engine, default_timezone="Europe/Oslo"),

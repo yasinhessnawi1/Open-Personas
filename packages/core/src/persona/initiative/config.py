@@ -18,6 +18,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["InitiativeSettings"]
 
+#: The ceiling on either output cap: a mistyped setting (an extra zero) must fail at
+#: startup, not let one scan or one judge call run up an unbounded bill.
+_MAX_OUTPUT_TOKENS_CAP = 16384
+
 
 class InitiativeSettings(BaseSettings):
     """Initiative tunables, read from ``PERSONA_INITIATIVE_*`` env vars.
@@ -31,6 +35,13 @@ class InitiativeSettings(BaseSettings):
             router profile; the K2 ``synthesis_tier`` precedent).
         scan_max_input_tokens: Hard cap on the scan's assembled input (the
             bounded-work knob).
+        scan_max_output_tokens: The scan call's ``max_tokens`` (R9-248). A
+            reasoning model spends its reasoning inside this cap; at 1200 the
+            A5-R-1 pass saw scans cut off mid-JSON. The model stops when done,
+            so a typical scan costs the same; only a would-be truncation grows.
+        judge_max_output_tokens: The grounding judge's ``max_tokens`` (R9-248);
+            at 300 the pass saw a judge answer cut off mid-quote. Both caps are
+            bounded above at 16384.
         scan_candidate_cap: Max candidates per scan, rank-ordered (≤3 — the
             research §6 hard cap; Pulse ships 5–10/day, we cap lower).
         recent_nodes_limit: The noticing-pool size read via
@@ -60,6 +71,8 @@ class InitiativeSettings(BaseSettings):
     scan_hour: int = Field(default=7, ge=0, le=23)
     scan_tier: str = Field(default="small", min_length=1)
     scan_max_input_tokens: int = Field(default=8000, gt=0)
+    scan_max_output_tokens: int = Field(default=4096, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    judge_max_output_tokens: int = Field(default=1024, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     scan_candidate_cap: int = Field(default=3, gt=0)
     recent_nodes_limit: int = Field(default=30, gt=0)
     value_threshold: float = Field(default=0.6, ge=0.0, le=1.0)

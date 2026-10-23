@@ -57,6 +57,7 @@ from persona_api.initiative.pipeline_wiring import (
 from persona_api.initiative.readers import ApiScanGraphReader
 from persona_api.initiative.store import DeclineStore, InitiativeLedger
 from persona_api.initiative.verb_service import InitiativeVerbService
+from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.schedules import ScheduleStore
 from persona_api.tasks.store import CheckpointStore, TaskStore
@@ -203,7 +204,7 @@ def _pipeline(app_engine: Engine, backend: object) -> InitiativePipeline:
             ),
             backend=backend,  # type: ignore[arg-type]
         ),
-        wellbeing=ApiWellbeingSubjectCheck(graph_store),
+        wellbeing=ApiWellbeingSubjectCheck(graph_store, app_engine),
         declines=DeclineStore(app_engine),
         ledger=LedgerAdapter(InitiativeLedger(app_engine)),
         users=ApiUserContextReader(app_engine, default_timezone="Europe/Oslo"),
@@ -240,7 +241,8 @@ def test_criterion_6_sensitive_content_never_becomes_the_subject(
     token = current_user_id.set(_OWNER)
     try:
         # Layer 1: the REAL reader's pool never contains the tagged node.
-        pool = ApiScanGraphReader(graph_store).noticing_pool(_OWNER, limit=30)
+        gate = ConversationWellbeingGate(graph_store, app_engine)
+        pool = ApiScanGraphReader(graph_store, gate).noticing_pool(_OWNER, limit=30)
         assert {n.id for n in pool} == {_PLAIN}
         assert all(sensitive_node not in (n.content + n.id) for n in pool)
 
@@ -265,7 +267,7 @@ def test_criterion_6_sensitive_content_never_becomes_the_subject(
             source=CandidateSource.SCAN,
             owner_id=_OWNER,
             persona_id=_PERSONA,
-            prompt_version="a5-scan-v1",
+            prompt_version="a5-scan-v5",
             scanned_at=_NOW,
         )
         asyncio.run(_pipeline(app_engine, backend).submit((hostile,)))
@@ -301,7 +303,7 @@ def test_criterion_5_decline_suppresses_across_scan_cycles(
             source=CandidateSource.SCAN,
             owner_id=_OWNER,
             persona_id=_PERSONA,
-            prompt_version="a5-scan-v1",
+            prompt_version="a5-scan-v5",
             scanned_at=_NOW,
         )
 
@@ -372,7 +374,7 @@ def test_b14_high_acceptance_bait_never_fires(migrated_engine: Engine, app_engin
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
     )
     token = current_user_id.set(_OWNER)

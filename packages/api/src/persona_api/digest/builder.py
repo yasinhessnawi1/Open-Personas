@@ -19,8 +19,10 @@ from datetime import datetime, timedelta  # noqa: TC003 — runtime Pydantic fie
 from typing import TYPE_CHECKING
 
 import yaml as _yaml
+from persona.initiative import InitiativeSettings, prompt_version_deliverable
 from persona.tasks import TaskState
 from persona.tasks.reports import build_completion_report, build_stuck_report
+from persona_runtime.initiative import HeldSubject, held_notice_subject
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
@@ -41,10 +43,12 @@ from persona_api.textline import LINE_BUDGET, one_line
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from persona_runtime.initiative import WellbeingSubjectCheck
     from sqlalchemy import Engine
 
     from persona_api.config import APIConfig
     from persona_api.digest.store import DeferredDigestItem
+    from persona_api.initiative.store import NoticeRecord
 
 __all__ = [
     "DigestItem",
@@ -188,6 +192,28 @@ def _ran_because_for_tasks(
     return out
 
 
+def _listable(
+    notice: NoticeRecord,
+    owner_id: str,
+    wellbeing: WellbeingSubjectCheck | None,
+    *,
+    now: datetime,
+    hold_max_days: int,
+) -> bool:
+    """Whether a held initiative may be shown: the flush's own rules, never looser.
+
+    The prompt-version floor, the hold age and the subject rule are the flush's, applied
+    the same way. Re-grounding (the judge) stays flush-only: the digest is a read and
+    spends no model call; a notice the flush later finds dissolved simply expires then.
+    """
+    candidate = notice.candidate
+    if wellbeing is None or not prompt_version_deliverable(candidate.prompt_version):
+        return False
+    if now - notice.created_at > timedelta(days=hold_max_days):
+        return False
+    return held_notice_subject(wellbeing, owner_id, candidate) is HeldSubject.CLEAR
+
+
 def build_morning_digest(
     engine: Engine,
     *,
@@ -195,12 +221,21 @@ def build_morning_digest(
     config: APIConfig,
     now: datetime,
     deferred: Sequence[DeferredDigestItem] = (),
+    wellbeing: WellbeingSubjectCheck | None = None,
+    hold_max_days: int | None = None,
 ) -> MorningDigest:
     """Compose the owner's morning digest from durable A0–A5 state (RLS-scoped per source).
 
     ``deferred`` is the already-consumed over-cap chatter (a secondary input, folded into "done").
     Pure composition over the RLS engine + ``config`` (for occurrences) — no RuntimeFactory.
+
+    ``wellbeing`` is the initiative subject check (R9-249 review HIGH-A): a held initiative
+    is listed only when the flush could deliver it (its prompt version is current and its
+    subject is clear). Without the check, no initiative is listed (fail closed).
+    ``hold_max_days`` is the flush's hold-age bound (default: the configured setting).
     """
+    if hold_max_days is None:
+        hold_max_days = InitiativeSettings().hold_max_days
     # Every title/detail below passes through _line — the digest promises one
     # calm line per item, whatever the executor/persona wrote (R11-B2 fix).
     # Spec W1 (D-W1-5 / D-W1-6): "waiting" and "stuck" come from the ONE attention query the
@@ -273,13 +308,12 @@ def build_morning_digest(
     # secondary: the deferred chatter, as one-liners under "done" (never load-bearing).
     done.extend(DigestItem(persona_id=d.persona_id, title=_line(d.content)) for d in deferred)
 
+    # R9-256: a held initiative reads as its user-facing reason ("you"), never the
+    # grounding observation written about "the user".
     initiatives = [
-        DigestItem(
-            persona_id=n.persona_id,
-            title=_line(n.candidate.observation),
-            detail=_line(n.candidate.why_now),
-        )
+        DigestItem(persona_id=n.persona_id, title=_line(n.candidate.why_now))
         for n in InitiativeLedger(engine).held_for_owner(owner_id)
+        if _listable(n, owner_id, wellbeing, now=now, hold_max_days=hold_max_days)
     ]
 
     occ = occurrences_service.list_occurrences(

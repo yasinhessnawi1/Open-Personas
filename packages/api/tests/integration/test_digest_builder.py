@@ -6,12 +6,12 @@ caps with an honest overflow, and that deferred chatter is a SECONDARY input (th
 never depend on it). The report-builder internals are proven in core; not re-exercised here.
 """
 
-# ruff: noqa: ARG001 — ``migrated_engine`` is a dependency-ordering fixture param.
+# ruff: noqa: ARG001, ARG002 (``migrated_engine`` orders fixtures; the scripted check ignores owner)
 from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from persona.approvals import ActionProposal
@@ -286,3 +286,111 @@ def test_waiting_and_dead_lettered_tasks_reach_the_review_and_the_badge_matches(
     listed = sum(len(s.items) + s.overflow for k, s in by_kind.items() if k in ("waiting", "stuck"))
     badge = nav_counts_service.get_nav_counts(app_engine, owner_id="u", include_memory=False)
     assert badge["attention"] == listed == 4
+
+
+class _Subject:
+    """A scripted wellbeing subject check: gates ``disclosed`` always, ``fresh`` in scan mode."""
+
+    def __init__(self, *, disclosed: set[str] = frozenset(), fresh: set[str] = frozenset()) -> None:
+        self._disclosed = set(disclosed)
+        self._fresh = set(fresh)
+
+    def tagged_refs(
+        self, owner_id: str, citations: object, *, include_unsynthesised: bool
+    ) -> set[str]:
+        refs = {c.ref for c in citations}  # type: ignore[attr-defined]
+        gated = self._disclosed | (self._fresh if include_unsynthesised else set())
+        return refs & gated
+
+
+def _hold(
+    app_engine: Engine,
+    *,
+    ref: str = "u::node::n1",
+    version: str = "a5-scan-v5",
+    at: datetime = _NOW,
+) -> str:
+    from persona.initiative import (
+        CandidateSource,
+        CitationKind,
+        GroundingCitation,
+        InitiativeCandidate,
+        InitiativeTrigger,
+        PlannedStep,
+        Urgency,
+    )
+    from persona_api.initiative.store import InitiativeLedger, NoticeDisposition
+
+    candidate = InitiativeCandidate(
+        observation="The user's car insurance with If renews on Sunday 4 October.",
+        citations=(GroundingCitation(kind=CitationKind.NODE, ref=ref),),
+        trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
+        why_now=f"Your car insurance renews on Sunday ({ref}); if you haven't compared offers "
+        "yet, there is still time.",
+        plan=(PlannedStep(description="compare", categories=frozenset({ActionCategory.DRAFT})),),
+        next_step="put together a shortlist of offers for you to review",
+        value=0.8,
+        acceptance=0.8,
+        urgency=Urgency.BATCH,
+        source=CandidateSource.SCAN,
+        owner_id="u",
+        persona_id="kai",
+        prompt_version=version,
+        scanned_at=_NOW,
+    )
+    claimed = InitiativeLedger(app_engine).try_claim(
+        candidate,
+        voicer_persona_id="kai",
+        disposition=NoticeDisposition.HELD,
+        envelope_action="propose",
+        held_until=None,
+        now=at,
+    )
+    assert claimed is not None
+    return candidate.why_now
+
+
+def _initiative_titles(app_engine: Engine, wellbeing: object) -> list[str]:
+    digest = build_morning_digest(
+        app_engine,
+        owner_id="u",
+        config=_CONFIG,
+        now=_NOW,
+        wellbeing=wellbeing,  # type: ignore[arg-type]
+    )
+    section = next((s for s in digest.sections if s.kind == "initiatives"), None)
+    return [] if section is None else [i.title for i in section.items]
+
+
+def test_a_held_initiative_reads_as_its_reason_to_you(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-256: the digest shows the user-facing reason ("you"), never the grounding
+    observation written about "the user"."""
+    _seed_persona(migrated_engine)
+    why_now = _hold(app_engine)
+    digest = build_morning_digest(
+        app_engine, owner_id="u", config=_CONFIG, now=_NOW, wellbeing=_Subject()
+    )
+    section = next(s for s in digest.sections if s.kind == "initiatives")
+    assert [(i.title, i.detail) for i in section.items] == [(why_now, "")]
+    rendered = render_digest_message(digest)
+    assert "the user" not in rendered.lower()
+    assert "Kai: Your car insurance renews on Sunday" in rendered
+
+
+def test_the_digest_lists_only_what_the_flush_could_deliver(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-249 review HIGH-A: a notice gated by a disclosure, gated by freshness, produced
+    under a superseded prompt, past the hold age (third review LOW 7), or listed with no
+    subject check at all, is not shown."""
+    _seed_persona(migrated_engine)
+    clear = _hold(app_engine, ref="u::node::clear")
+    _hold(app_engine, ref="u::node::disclosed")
+    _hold(app_engine, ref="u::node::fresh")
+    _hold(app_engine, ref="u::node::old", version="a5-scan-v3")
+    _hold(app_engine, ref="u::node::aged", at=_NOW - timedelta(days=8))  # past hold age
+    subject = _Subject(disclosed={"u::node::disclosed"}, fresh={"u::node::fresh"})
+    assert _initiative_titles(app_engine, subject) == [clear]
+    assert _initiative_titles(app_engine, None) == []  # fail closed without the check

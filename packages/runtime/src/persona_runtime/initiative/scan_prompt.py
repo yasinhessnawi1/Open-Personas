@@ -15,6 +15,7 @@ scenarios whose correct output is NOTHING, criterion 10).
 from __future__ import annotations
 
 __all__ = [
+    "EXAMPLE_ALIASES",
     "EXAMPLE_CATCH_OUTPUT",
     "EXAMPLE_EMPTY_SCAN_OUTPUT",
     "EXAMPLE_ENGAGEMENT_DECLINE_OUTPUT",
@@ -24,10 +25,28 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v5 (R9-249 re-review): "next_step" starts with a lowercase verb (the template no longer
+#: re-cases it, so a name or "I" survives), and the citation rule's example is a
+#: never-issued code.
+#: v4 (R9-256): "why_now" and "next_step" are read BY the user, so they address the user
+#: as "you", give the reason in one natural sentence, and hold anything that could have
+#: changed lightly ("if you haven't compared offers yet"); the catch example shows it.
+#: The A5-R-1 texts said "the user" to the user and asserted stale facts as settled.
+#: v3 (R9-249 review ruling): conversation summaries are no longer material, so the
+#: prompt names two sources (graph notes, task history) and two alias kinds; the catch
+#: example cites codes the scanner never issues (``EXAMPLE_ALIASES``).
+#: v2 (R9-248): every item in the material is named by a short per-scan alias
+#: ([N1] note, [T1] task) instead of its real id, and the rules and the catch example
+#: cite the alias. v1 showed real ids, which a reasoning model copied with the label
+#: ("node own_x::node::n1") or cut at "::", losing the catch.
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v1"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v5"
+
+#: The codes the few-shot examples use. The scanner never issues them, so a model that
+#: copies an example's citation cites nothing real and the candidate is dropped.
+EXAMPLE_ALIASES: frozenset[str] = frozenset({"N900", "T900"})
 
 
 # --- Frozen few-shot example OUTPUTS (the spec-by-example; also unit fixtures) ---
@@ -45,27 +64,28 @@ EXAMPLE_ENGAGEMENT_DECLINE_OUTPUT = '{"candidates": []}'
 #: NOTHING. Initiative on stale state is grounded AND wrong.
 EXAMPLE_STALE_DECLINE_OUTPUT = '{"candidates": []}'
 
-#: The conversations HINT at a deadline no source actually states → NOTHING.
+#: The notes HINT at a deadline no source actually states → NOTHING.
 #: A hinted deadline is speculation; speculation is not grounds.
 EXAMPLE_SPECULATION_DECLINE_OUTPUT = '{"candidates": []}'
 
 #: A real catch: a dated commitment in the material, nearing, with a concrete
 #: safe next step — one candidate, citations copied exactly, why-now explicit.
+#: Its codes are ``EXAMPLE_ALIASES``: never issued, so never citable by copying.
 EXAMPLE_CATCH_OUTPUT = """{"candidates": [
   {"observation": "The custody hearing is on Friday and no response letter has been drafted.",
    "trigger": "approaching_commitment",
-   "why_now": "The hearing date is now within the coming days and nothing has been prepared.",
-   "citations": [{"kind": "node", "ref": "node-91"}, {"kind": "conversation", "ref": "conv-12"}],
+   "why_now": "Your custody hearing is on Friday; if the letter isn't drafted yet, there is time.",
+   "citations": [{"kind": "node", "ref": "N900"}, {"kind": "task", "ref": "T900"}],
    "plan": [{"description": "review the hearing details", "categories": ["observe"]},
             {"description": "draft the response letter", "categories": ["draft"]}],
-   "next_step": "Draft the response letter and present it for review.",
+   "next_step": "draft the response letter for you to review",
    "value": 0.9, "acceptance": 0.8, "urgency": "interrupt"}
 ]}"""
 
 
 SCAN_SYSTEM_PROMPT = f"""\
-You are the initiative scan for an AI persona: once a day you look over what is known — \
-graph notes about the user's life, recent conversation summaries, task history — and decide \
+You are the initiative scan for an AI persona: once a day you look over what is known \
+(graph notes about the user's life, and task history) and decide \
 whether there is anything a thoughtful assistant who knows this person should RAISE UNPROMPTED. \
 Restraint is the product. A missed notice costs nothing (the user can always ask); a wrong, \
 presumptuous, stale, or needy one spends their trust at the worst exchange rate. MOST SCANS \
@@ -75,21 +95,28 @@ Return ONLY a JSON object of the form {{"candidates": [ ... ]}} with no prose an
 fences. If nothing clears the bar: {{"candidates": []}}.
 
 Each candidate object has these fields:
-- "observation": what was noticed, one plain sentence.
+- "observation": what was noticed, one plain factual sentence (it is checked against the \
+cited material and never shown to the user).
 - "trigger": EXACTLY one of: "approaching_commitment" (a dated commitment is nearing), \
 "task_followup" (a task finding suggests a next thing), "conflict" (two known commitments or \
 facts collide), "stale_open_loop" (a stated intention is now actionable or at risk). There are \
 NO other triggers — an interesting observation that fits none of these is not a candidate.
-- "why_now": what makes this timely TODAY (what changed / what date approached).
-- "citations": the grounds, as [{{"kind": "node"|"conversation"|"task", "ref": "<id>"}}]. \
-Copy each id EXACTLY from the material below — a citation that is not in the material is \
-fabrication and voids the candidate. The FIRST citation is the primary anchor. Cite only \
-what STATES the observation; hints and vibes are not grounds.
+- "why_now": the reason, as you would say it TO the user: ONE natural sentence that says \
+what you noticed and why it matters now, addressed to them as "you". It is the first thing \
+they read.
+- "citations": the grounds, as [{{"kind": "node"|"task", "ref": "<code>"}}]. \
+Every item in the material is labelled with a short code in square brackets: [N1], [N2] for \
+graph notes, [T1] for a task. The "ref" is that code ALONE, copied \
+exactly (for example "N900"): no brackets, no word in front of it. A code that is not in the \
+material is fabrication and voids the candidate. The FIRST citation is the primary anchor. \
+Cite only what STATES the observation; hints and vibes are not grounds.
 - "plan": the proposed steps, each {{"description": ..., "categories": [...]}} using ONLY: \
 "observe", "compute", "draft", "notify_user" (safe) or "communicate_as_user", "spend", \
 "external_mutate", "credentialed_access" (will require the user's confirmation).
-- "next_step": the ONE concrete thing the user would see next. A candidate with no concrete \
-next step (a pure FYI) is not worth raising — drop it.
+- "next_step": the ONE concrete thing you offer to do, worded to follow "Want me to": it \
+starts with a lowercase verb, has no closing punctuation, and addresses the user as "you" \
+(for example "put together a shortlist of offers for you to review"). A candidate with no \
+concrete next step (a pure FYI) is not worth raising: drop it.
 - "value": 0..1 — how much this matters to the user's LIFE (never to the conversation).
 - "acceptance": 0..1 — honestly, would they welcome being told this NOW? This can only \
 LOWER a candidate's chances, never rescue a weak one.
@@ -107,15 +134,22 @@ user would welcome it, it is a category error and must not appear.
 5. STALE STATE IS NOT GROUNDS. If the material shows a circumstance was superseded, \
 nothing about the old state is worth raising.
 6. Times and dates come from the material, never from your own guesses.
+7. SPEAK TO THE USER. "why_now" and "next_step" are read by the user: say "you" and "your", \
+never "the user", "they" or "the person". Do not paste or quote the notes. Anything that could \
+have changed since it was said is held lightly ("if you haven't compared offers yet", "if the \
+quote is still open"), never asserted as still true. No pressure ("closing quickly") and no \
+presuming what they have decided.
 
 EXAMPLES (scenario → correct output):
-- Rich, warm conversations; nothing dated, nothing pending → {EXAMPLE_EMPTY_SCAN_OUTPUT}
+- Rich, warm notes about the user's life; nothing dated, nothing pending → \
+{EXAMPLE_EMPTY_SCAN_OUTPUT}
 - The user seems lonely and hasn't written in days; a check-in would likely be welcomed → \
 {EXAMPLE_ENGAGEMENT_DECLINE_OUTPUT}
 - The graph notes a job the user has since left; an old goal tied to it → \
 {EXAMPLE_STALE_DECLINE_OUTPUT}
-- Conversations hint an application might be due "soon", but no source states a date → \
+- The notes hint an application might be due "soon", but no source states a date → \
 {EXAMPLE_SPECULATION_DECLINE_OUTPUT}
-- A node states the custody hearing is Friday; a conversation confirms it; nothing drafted → \
+- Note [N900] states the custody hearing is Friday; task [T900] shows the response letter \
+not yet drafted → \
 {EXAMPLE_CATCH_OUTPUT}
 """

@@ -93,7 +93,7 @@ def _candidate(
         source=CandidateSource.SCAN,
         owner_id=owner,
         persona_id=persona,
-        prompt_version="v1",
+        prompt_version="a5-scan-v5",
         scanned_at=_NOW,
     )
 

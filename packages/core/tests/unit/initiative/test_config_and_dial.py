@@ -45,6 +45,14 @@ class TestInitiativeSettings:
         with pytest.raises(ValidationError):
             InitiativeSettings(**{field: 1.5})
 
+    @pytest.mark.parametrize("field", ["scan_max_output_tokens", "judge_max_output_tokens"])
+    def test_output_caps_are_bounded_both_ways(self, field: str) -> None:
+        """R9-248's caps: positive, and at most 16384 (a mistyped zero fails at startup)."""
+        assert getattr(InitiativeSettings(**{field: 16384}), field) == 16384
+        for bad in (0, 16385):
+            with pytest.raises(ValidationError):
+                InitiativeSettings(**{field: bad})
+
 
 class TestInitiativeDial:
     def test_default_is_propose_only(self) -> None:

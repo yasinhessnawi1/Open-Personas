@@ -172,10 +172,15 @@ class InitiativeCandidate(BaseModel):
             (A5-D-4); the scan orders citations anchor-first by contract.
         trigger: The closed noticing shape (A5-D-X-trigger-catalogue).
         why_now: What changed since the last scan that makes this timely (a fire
-            condition — research §6; also what flush-expiry re-checks).
+            condition, research §6; also what flush-expiry re-checks). USER-FACING
+            (R9-256): the one sentence the proposal opens with, addressed to the user
+            as "you", holding anything that could have changed lightly. The
+            ``observation`` is the grounding statement the judge checks and is not
+            shown.
         plan: The proposed steps with their category footprints.
         next_step: The concrete, user-visible next action (actionability is a
-            fire condition — no pure-FYI candidates).
+            fire condition: no pure-FYI candidates). USER-FACING: it follows "Want
+            me to" in the proposal, so it addresses the user as "you".
         value: The scan's value-to-the-user estimate in [0, 1]; gated against
             the configured threshold (below ⇒ silently not raised).
         acceptance: The would-they-welcome-it-now estimate in [0, 1]. A

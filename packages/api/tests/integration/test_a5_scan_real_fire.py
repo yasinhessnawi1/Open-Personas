@@ -49,10 +49,10 @@ from persona_api.initiative.handler import (
     register_initiative_scan_handler,
 )
 from persona_api.initiative.readers import (
-    ApiScanConversationReader,
     ApiScanGraphReader,
     ApiScanTaskReader,
 )
+from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
 from persona_api.jobs.executor import JobExecutor
 from persona_api.jobs.queue import JobQueue
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
@@ -93,7 +93,9 @@ class _ScriptedScanBackend:
                         "observation": "The hearing is Friday and nothing is drafted.",
                         "trigger": "approaching_commitment",
                         "why_now": "The date entered the coming days.",
-                        "citations": [{"kind": "node", "ref": _NODE_ID}],
+                        # R9-248: the scan names material by per-scan alias; the one
+                        # seeded node is N1, mapped back to _NODE_ID by the scanner.
+                        "citations": [{"kind": "node", "ref": "N1"}],
                         "plan": [{"description": "draft it", "categories": ["draft"]}],
                         "next_step": "Draft the response letter.",
                         "value": 0.9,
@@ -170,10 +172,10 @@ def _scan_registry(app_engine: Engine) -> tuple[JobRegistry, _ScriptedScanBacken
     graph_store = build_graph_store(
         engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
     )
+    gate = ConversationWellbeingGate(graph_store, app_engine)
     scanner = InitiativeScanner(
-        graph=ApiScanGraphReader(graph_store),
-        conversations=ApiScanConversationReader(app_engine),
-        tasks=ApiScanTaskReader(TaskStore(app_engine), CheckpointStore(app_engine)),
+        graph=ApiScanGraphReader(graph_store, gate),
+        tasks=ApiScanTaskReader(TaskStore(app_engine), CheckpointStore(app_engine), gate),
         backend=backend,  # type: ignore[arg-type] — the only scripted piece
         settings=settings,
     )
@@ -363,9 +365,8 @@ def test_graph_reader_is_owner_scoped_under_persona_app(
     _seed_node(migrated_engine, "own_a5ra", "own_a5ra::node::00000001")
     _seed_node(migrated_engine, "own_a5rb", "own_a5rb::node::00000001")
 
-    reader = ApiScanGraphReader(
-        build_graph_store(engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger())
-    )
+    store = build_graph_store(engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger())
+    reader = ApiScanGraphReader(store, ConversationWellbeingGate(store, app_engine))
     token = current_user_id.set("own_a5ra")
     try:
         pool_a = reader.noticing_pool("own_a5ra", limit=10)
