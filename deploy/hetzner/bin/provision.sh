@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Open Persona: provision and harden the Hetzner box. Idempotent: run it again any time.
 #
-# Run as root from the checkout:  sudo deploy/hetzner/bin/provision.sh
+# PRIMARY PATH (no cloud-init needed): the server is created with only the owner's SSH key
+# on root. Log in as root once and run, from the checkout:
+#     /opt/open-persona/repo/deploy/hetzner/bin/provision.sh
+# It creates `deploy` (uid 2000) with root's key, then closes root login. Every later run
+# is `sudo .../provision.sh` as deploy. cloud-init.yaml is the alternative path.
 #
-# Re-asserts the cloud-init.yaml baseline (key-only SSH for `deploy`, no root login, ufw
-# default deny, fail2ban, unattended security upgrades without automatic reboots), then:
+# Sets up the baseline (the deploy user, key-only SSH, no root login, ufw default deny,
+# fail2ban, unattended security upgrades without automatic reboots), then:
 #   * Docker Engine + the compose plugin from Docker's own apt repository, its signing key
 #     checked against the published fingerprint, and Docker included in unattended upgrades
 #   * /etc/docker/daemon.json: log rotation, live-restore (containers survive a daemon
@@ -45,6 +49,53 @@ die() { echo "provision: FAILED: $*" >&2; exit 1; }
 # Writes stdin to a root-owned 0644 config file.
 write_file() { install -d -m 0755 "$(dirname "$1")"; cat > "$1"; chmod 0644 "$1"; }
 
+# The SSH keys root was created with (the Hetzner console's "SSH key" field). The primary
+# path is: log in as root with that key, run this script once, log in as deploy from then
+# on. Overridable only for the container test.
+ROOT_KEYS="${ROOT_KEYS:-/root/.ssh/authorized_keys}"
+KEY_LINE='^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)'
+
+# --- the operator user ------------------------------------------------------------------
+# Creates `deploy` (uid 2000, sudo without password, docker group, password locked) and,
+# when it has no key of its own yet, gives it root's keys: the same key the owner chose in
+# the console. Idempotent: an existing deploy user keeps its own keys.
+setup_operator_user() {
+  getent group docker >/dev/null || groupadd --system docker  # system gid, never 1000 (the data group)
+  if ! id "${OP_USER}" >/dev/null 2>&1; then
+    useradd --uid "${OP_UID}" --create-home --shell /bin/bash --groups sudo,docker "${OP_USER}"
+    say "created ${OP_USER} (uid ${OP_UID})"
+  fi
+  usermod -aG docker,sudo "${OP_USER}"
+  passwd -l "${OP_USER}" >/dev/null 2>&1 || true
+  [ "$(id -u "${OP_USER}")" != "${DATA_UID}" ] \
+    || say "WARNING: ${OP_USER} is uid ${DATA_UID}, the app's data owner; recreate it as uid ${OP_UID}"
+  install -d -m 0755 /etc/sudoers.d
+  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${OP_USER}" > "/etc/sudoers.d/90-${OP_USER}"
+  chmod 0440 "/etc/sudoers.d/90-${OP_USER}"
+
+  local home keys
+  home="$(getent passwd "${OP_USER}" | cut -d: -f6)"
+  keys="${home}/.ssh/authorized_keys"
+  install -d -o "${OP_USER}" -g "${OP_USER}" -m 0700 "${home}/.ssh"
+  if ! grep -qE "${KEY_LINE}" "${keys}" 2>/dev/null; then
+    if grep -qE "${KEY_LINE}" "${ROOT_KEYS}" 2>/dev/null; then
+      grep -E "${KEY_LINE}" "${ROOT_KEYS}" > "${keys}"
+      say "gave ${OP_USER} root's SSH key(s): $(wc -l < "${keys}") key(s)"
+    else
+      say "WARNING: neither ${OP_USER} nor root has an SSH key; the SSH lockdown will NOT be applied"
+    fi
+  fi
+  if [ -f "${keys}" ]; then
+    chown "${OP_USER}:${OP_USER}" "${keys}"
+    chmod 0600 "${keys}"
+  fi
+}
+
+if [ "${1:-}" = "--only-operator-user" ]; then
+  setup_operator_user
+  exit 0
+fi
+
 . /etc/os-release
 [ "${ID}" = ubuntu ] && [ "${VERSION_ID}" = "24.04" ] \
   || say "WARNING: written for Ubuntu 24.04, found ${ID} ${VERSION_ID}"
@@ -52,16 +103,7 @@ write_file() { install -d -m 0755 "$(dirname "$1")"; cat > "$1"; chmod 0644 "$1"
 
 export DEBIAN_FRONTEND=noninteractive
 
-# --- the operator user ------------------------------------------------------------------
-getent group docker >/dev/null || groupadd docker
-if ! id "${OP_USER}" >/dev/null 2>&1; then
-  useradd --uid "${OP_UID}" --create-home --shell /bin/bash --groups sudo,docker "${OP_USER}"
-  passwd -l "${OP_USER}" >/dev/null
-  say "created ${OP_USER}; add its SSH key to /home/${OP_USER}/.ssh/authorized_keys BEFORE logging out"
-fi
-usermod -aG docker,sudo "${OP_USER}"
-[ "$(id -u "${OP_USER}")" != "${DATA_UID}" ] \
-  || say "WARNING: ${OP_USER} is uid ${DATA_UID}, the app's data owner; recreate it as uid ${OP_UID}"
+setup_operator_user
 
 # --- baseline packages and SSH ----------------------------------------------------------
 apt-get update -q
@@ -69,7 +111,9 @@ apt-get install -y -q ufw fail2ban unattended-upgrades ca-certificates curl git 
 
 # Only with a real key in place: written without one, the next sshd restart (an openssh
 # security update, a reboot) would lock everyone out. A key line starts with its type.
-if grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' "/home/${OP_USER}/.ssh/authorized_keys" 2>/dev/null; then
+# Root login closes here: from now on the box is reached as deploy (the current root
+# session stays open; check `ssh deploy@<ip>` from a second terminal before closing it).
+if grep -qE "${KEY_LINE}" "$(getent passwd "${OP_USER}" | cut -d: -f6)/.ssh/authorized_keys" 2>/dev/null; then
   write_file /etc/ssh/sshd_config.d/10-open-persona.conf <<'EOF'
 PermitRootLogin no
 PasswordAuthentication no
@@ -157,6 +201,10 @@ ufw --force enable
 # --- directories ------------------------------------------------------------------------
 install -d -o "${OP_USER}" -g "${OP_USER}" -m 0755 /opt/open-persona /srv/open-persona
 install -d -o "${OP_USER}" -g "${OP_USER}" -m 0700 /opt/open-persona/env
+# On the primary path root cloned the checkout; deploy builds and pulls from it.
+if [ -d /opt/open-persona/repo ]; then
+  chown -R "${OP_USER}:${OP_USER}" /opt/open-persona/repo
+fi
 for d in persona voice; do
   install -d -o "${DATA_UID}" -g "${DATA_UID}" -m 0750 "/srv/open-persona/${d}"
 done

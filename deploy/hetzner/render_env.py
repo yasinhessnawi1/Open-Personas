@@ -10,7 +10,10 @@ value for it, and where it goes, so the owner can mark which values are dev:
 Then the render:
 
     uv run python -I deploy/hetzner/render_env.py --dotenv .env --out <dir outside the repo> \\
-        --livekit cloud|selfhosted [--chains-from-dotenv]
+        [--livekit selfhosted|cloud] [--chains-from-dotenv]
+
+``--livekit`` defaults to ``selfhosted`` (owner ruling 2026-10-23: LiveKit runs on the box;
+LiveKit Cloud's free plan is the one-setting fallback, ``--livekit cloud``).
 
 For every ``deploy/hetzner/env/<name>.env.example`` it writes ``<out>/<name>.env`` (mode
 0600 where the OS supports it). Values are resolved by the template tokens documented in
@@ -245,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         "has a value for it, and its destination file (names only, never values)",
     )
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--livekit", choices=("cloud", "selfhosted"))
+    parser.add_argument("--livekit", choices=("cloud", "selfhosted"), default="selfhosted")
     parser.add_argument("--chains-from-dotenv", action="store_true")
     args = parser.parse_args(argv)
 
@@ -255,8 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.inventory:
         print_inventory(inventory(load_dotenv(args.dotenv)))
         return 0
-    if args.out is None or args.livekit is None:
-        print("render_env: --out and --livekit are required to render", file=sys.stderr)
+    if args.out is None:
+        print("render_env: --out is required to render", file=sys.stderr)
         return 2
     if inside_checkout(args.out):
         print(

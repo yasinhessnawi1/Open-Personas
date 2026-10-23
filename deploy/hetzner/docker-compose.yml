@@ -27,10 +27,12 @@
 # secrets and never vary are pinned below in `environment:`, which wins over env_file, so
 # a stale env file cannot move a path or an internal URL.
 #
-# LiveKit: two modes, no edit to this file either way.
-#   cloud (default):  voice.env points at the LiveKit Cloud project; `livekit` never runs.
-#   selfhosted:       docker compose --profile selfhosted-livekit up -d
+# LiveKit: two modes, no edit to this file either way. bin/deploy.sh picks the profile
+# from voice.env's PERSONA_VOICE_LIVEKIT_URL.
+#   selfhosted (DEFAULT, owner ruling 2026-10-23): the `selfhosted-livekit` profile runs
 #                     and voice.env points at wss://livekit.openpersonasai.com.
+#   cloud (the fallback): voice.env points at the LiveKit Cloud free-plan project;
+#                     `livekit` never runs.
 
 name: open-persona-hetzner
 
@@ -220,17 +222,16 @@ services:
   # SEAM: per-tenant MCP runtime (OFF at launch; owned by the tooling/MCP session)
   # ---------------------------------------------------------------------------------
   # The Fly runtime (Spec N6) is gone with Fly, and the api runs with
-  # PERSONA_ALLOW_PER_TENANT_MCP=0. The replacement plugs in HERE, designed by the session
-  # that owns tooling and MCP, not by this kit. What this kit fixes in advance:
-  #   * it is its OWN service on the `backend` network, under its own compose profile,
-  #     so it starts only when switched on and a deploy without it is unchanged;
-  #   * the api reaches it only through settings in api.env (the switch above plus the
-  #     runtime's own settings) and over the `backend` network;
-  #   * the api NEVER mounts /var/run/docker.sock (scripts/tests/test_hetzner_kit.py
-  #     fails if it does). Whatever host access the runtime needs is the runtime
-  #     service's own, isolated from the process that holds every tenant's data;
-  #   * its ports, like every app port here, are not published past 127.0.0.1.
-  # RUNBOOK.md, "Seam: the per-tenant MCP runtime", carries the same contract.
+  # PERSONA_ALLOW_PER_TENANT_MCP=0. The coming spec uses provider-hosted MCP (the model
+  # providers call remote MCP servers), so NO runtime service is planned here. Whatever
+  # mechanism comes, designed by the session that owns tooling and MCP, is held to:
+  #   * it reaches the api only through settings in api.env (the switch above plus its
+  #     own), added to the templates, render_env.py and preflight in the same change;
+  #   * no service ever mounts the Docker socket, /run or /var/run, runs privileged or
+  #     sets DOCKER_HOST (scripts/tests/test_hetzner_kit.py fails if one does);
+  #   * an endpoint WE would host for providers to call is a new public Caddy route with
+  #     its own auth and request limits, and a firewall review. None is planned.
+  # RUNBOOK.md, "Seam: per-tenant MCP", carries the same contract.
   # ---------------------------------------------------------------------------------
 
   # Self-hosted LiveKit SFU, only with --profile selfhosted-livekit.

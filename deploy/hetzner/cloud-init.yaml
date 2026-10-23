@@ -9,8 +9,11 @@
 # upgrades. Everything else (Docker, the app's firewall ports, directories, the backup
 # timer) is bin/provision.sh, which is idempotent and re-asserts this baseline too.
 
-groups:
-  - docker
+# No `groups:` block here: cloud-init would create `docker` as a regular group, which on a
+# fresh box takes gid 1000, the app data's group. bootcmd creates it as a system group
+# first; provision.sh adds deploy to it.
+bootcmd:
+  - getent group docker >/dev/null || groupadd --system docker
 
 users:
   - name: deploy

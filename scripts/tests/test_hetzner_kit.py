@@ -677,10 +677,26 @@ def test_inventory_writes_nothing(tmp_path: Path) -> None:
     assert sorted(tmp_path.rglob("*")) == before
 
 
-def test_rendering_still_requires_out_and_livekit(tmp_path: Path) -> None:
+def test_rendering_requires_out(tmp_path: Path) -> None:
     render = _load_render()
     dotenv, _ = _fake_dotenv(tmp_path)
-    assert render.main(["--dotenv", str(dotenv), "--out", str(tmp_path / "o")]) == 2
+    assert render.main(["--dotenv", str(dotenv)]) == 2
+
+
+def test_livekit_defaults_to_selfhosted(tmp_path: Path) -> None:
+    """Owner ruling 2026-10-23: LiveKit runs on the box; Cloud is the opt-in fallback."""
+    render = _load_render()
+    dotenv, _ = _fake_dotenv(tmp_path)
+    assert render.main(["--dotenv", str(dotenv), "--out", str(tmp_path / "o")]) == 0
+    voice = _rendered(tmp_path / "o", "voice")
+    assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonasai.com"
+
+
+def test_provision_gives_deploy_roots_key_on_the_primary_path() -> None:
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert 'ROOT_KEYS="${ROOT_KEYS:-/root/.ssh/authorized_keys}"' in provision
+    assert "--only-operator-user" in provision
+    assert "OP_UID=2000" in provision
 
 
 def test_the_mcp_seam_is_named_and_the_app_never_gets_the_docker_socket() -> None:
@@ -721,3 +737,16 @@ def test_preflight_blocks_until_the_clerk_values_are_pasted() -> None:
     preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
     assert "OWNER_CLERK_PROD" in preflight
     assert "clerk\\.accounts\\.dev" in preflight
+
+
+def test_the_docker_group_is_a_system_group_never_the_data_gid() -> None:
+    """A plain groupadd gave `docker` gid 1000 on a fresh box: the data's group (uid/gid 1000)."""
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert "groupadd --system docker" in provision
+    assert not re.search(r"groupadd docker\b", provision)
+
+
+def test_cloud_init_creates_docker_as_a_system_group_before_the_user() -> None:
+    config = yaml.safe_load((KIT / "cloud-init.yaml").read_text(encoding="utf-8"))
+    assert "groups" not in config
+    assert any("groupadd --system docker" in str(c) for c in config["bootcmd"])

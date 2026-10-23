@@ -15,12 +15,6 @@ gone. What exists is the backup set in `~/Backups/fly-2026-10-02` on the owner's
 Treat the first three as production user data: never paste their contents anywhere, never
 commit them, delete the copy on the box once the move is signed off.
 
-> **Target change (2026-10-23):** the owner moved the target from Hetzner to Azure. The
-> container kit here (compose, Caddy, the scripts, the env templates, the restore) is
-> target-independent and carries over; the Hetzner-specific steps (the console, its
-> cloud-init, its snapshots) are superseded by the Azure plan and are kept only as a
-> reference until that lands.
-
 **Never paste the output of `docker compose config`, `printenv`, `env` or
 `docker inspect` anywhere** (a chat, an issue, a log paste): each prints every secret the
 service holds. The same goes for `pg_restore` error output, which can echo row data.
@@ -38,8 +32,8 @@ service holds. The same goes for `pg_restore` error output, which can echo row d
   engines use `persona_platform` (bypasses RLS, NOT a superuser, DML only: it cannot
   `COPY ... TO PROGRAM`, alter roles or create tables). Every request path, api and voice,
   uses `persona_app` (RLS enforced). `bin/preflight.sh` checks all three.
-- Turn on two-factor authentication on the cloud account and the DNS account before any
-  production data is uploaded (step 5).
+- Turn on two-factor authentication on the Hetzner account and the DNS account before
+  any production data is uploaded (step 5).
 
 ## What is in this directory
 
@@ -47,8 +41,8 @@ service holds. The same goes for `pg_restore` error output, which can echo row d
 |---|---|
 | `docker-compose.yml` | postgres (pgvector pg16, unpublished), migrate (one-shot), api (single instance), voice, livekit (profile `selfhosted-livekit`), caddy |
 | `Caddyfile` | TLS for the five hostnames, Let's Encrypt, HTTP to HTTPS |
-| `cloud-init.yaml` | first-boot baseline: `deploy` user, key-only SSH, ufw, fail2ban, unattended upgrades |
-| `bin/provision.sh` | idempotent provisioning: the baseline again, Docker, app firewall ports, directories, backup timer |
+| `bin/provision.sh` | THE provisioning path: run once as root over SSH; creates `deploy` with root's key, then SSH lockdown, ufw, fail2ban, upgrades, Docker, directories, timers. Idempotent |
+| `cloud-init.yaml` | the alternative path: the same baseline at first boot, then `provision.sh` as usual |
 | `render_env.py` | owner's PC: turns `env/*.env.example` + the local `.env` into the env files, printing names only |
 | `env/*.env.example` | every variable each service needs, with its source |
 | `bin/fill_generated.sh` | on the box: generates the new database passwords, the LiveKit key pair, the node IP |
@@ -63,26 +57,31 @@ Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script t
 
 ## Rulings already made
 
-- **Per-tenant MCP runtime: OFF** (`PERSONA_ALLOW_PER_TENANT_MCP=0`, no `FLY_API_TOKEN`,
-  no `PERSONA_MCP_RUNTIME_FLY_APP`). It booted one Fly Machine per (tenant, server) through
-  the Fly Machines API, and its Fly app is deleted. Users keep the built-in MCP surface.
-  The boot line says `off (reason: unconfigured)`. OFF at launch only: the owner wants
-  per-tenant MCP supported and done right, and the session that owns tooling and MCP
-  builds the replacement. It plugs into the named seam (see "Seam: the per-tenant MCP
-  runtime" below); this kit does not design it.
+- **Per-tenant MCP runtime: OFF at launch** (`PERSONA_ALLOW_PER_TENANT_MCP=0`, no
+  `FLY_API_TOKEN`, no `PERSONA_MCP_RUNTIME_FLY_APP`). It booted one Fly Machine per
+  (tenant, server) through the Fly Machines API, and its Fly app is deleted. Users keep
+  the built-in MCP surface; the boot line says `off (reason: unconfigured)`. The owner's
+  direction: a new spec uses provider-hosted MCP (the model providers call remote MCP
+  servers), so no container runtime is planned on this box. See "Seam: per-tenant MCP".
 - **Initiative: OFF** until the A5-R-1 re-run is green and the owner says so. The api
   template pins `PERSONA_INITIATIVE_ENABLED=false` whatever `.env` says.
 - **Hostnames are kept**, so no provider registration changes: Stripe webhook, Discord,
   Slack and GitHub OAuth redirects, Twilio and Postmark webhooks, Vercel's API and voice
   base URLs. Only DNS records change.
 - **LiveKit UDP: single port 7882** (the proven config), with the TCP 7881 fallback.
-- **LiveKit mode: the owner's call.** Both work without editing compose; see step 9.
+- **LiveKit is SELF-HOSTED on the box** (owner ruling 2026-10-23), with LiveKit Cloud's
+  free plan as a one-setting fallback (step 9). `render_env.py` defaults to it. The box is
+  sized with a core's headroom for it, and the R9-216 latency test is the move's sign-off.
+- **Backups:** Hetzner Backups ON (step 1, mandatory), the nightly on-box backups, and an
+  encrypted append-only off-site copy soon after go-live (owner-provided).
 - **Stripe stays in test mode**, as production ran. Going live is a separate decision.
 
 ## Owner inputs (checklist)
 
-- [ ] A Hetzner server (step 1). No API token is needed: nothing here calls Hetzner.
-- [ ] The SSH public key for `deploy` (and later a second key for CI, see the last section).
+- [ ] A Hetzner server (step 1), created with only the owner's SSH key on root and
+      Hetzner Backups ON. No API token is needed: nothing here calls Hetzner.
+- [ ] Its IPv4 address and IPv6 /64, and SSH access as root from this PC with that key
+      (the key loaded in the ssh agent, or its file path).
 - [ ] DNS access to `openpersonasai.com` and `openpersona.online`, and the full record list.
 - [ ] The `render_env.py --inventory` checklist (step 4) marked `[p]` or `[d]` per name, and
       the production value for every `[d]`. `.env` holds production values for only some
@@ -98,8 +97,10 @@ Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script t
 - [ ] The web origin(s) for `PERSONA_API_CORS_ORIGINS` and `PERSONA_VOICE_CORS_ORIGINS`
       (expected `https://app.openpersonasai.com`, plus any `openpersona.online` origin).
 - [ ] An email address for Let's Encrypt notices (`ACME_EMAIL`).
-- [ ] LiveKit: Cloud (the project still exists: its URL, key and secret) or self-hosted.
-- [ ] Later: an off-site backup target (a Hetzner Storage Box, or Oracle free block storage).
+- [ ] Only if the LiveKit fallback is ever used: the LiveKit Cloud free-plan project's URL,
+      key and secret (kept in the owner's password manager, not on the box).
+- [ ] Soon after go-live: the off-site backup target (a Hetzner Storage Box sub-account
+      is the suggestion; see "Backups off the box").
 
 ## Step 0: close the subdomain takeover (DONE 2026-10-23)
 
@@ -118,57 +119,75 @@ api.openpersona.online         (and any other record that names *.fly.dev)
 At step 8 the records come back as A/AAAA records pointing at the box; create them with
 a TTL of 300 seconds and raise it once stable.
 
-## Step 1: create the server (Hetzner console)
+## Step 1: create the server (Hetzner console, the owner)
 
-- **Type:** the CX42 class (8 vCPU, 16 GB, 160 GB), or its current equivalent. Names and
-  prices may have changed since the plan was written; check on the day. CX is **shared**
-  vCPU. If the R9-216 measurement shows CPU steal, the dedicated CCX line is the upgrade
-  and Hetzner resizes in place. Do not go below 16 GB.
-- **Location:** Falkenstein, Nuremberg or Helsinki.
-- **Image:** Ubuntu 24.04, x86_64 (never ARM: `silero-vad-lite` has no arm64 wheel).
-- **Networking:** a primary IPv4 (billed separately) and IPv6.
-- **SSH key:** the owner's public key.
-- **Cloud config:** paste `cloud-init.yaml` with `__OWNER_SSH_PUBLIC_KEY__` replaced.
-- **Backups:** Hetzner's own backups are recommended (a percentage of the server price).
-- **Firewall (optional, a second layer):** inbound 22/tcp, 80/tcp, 443/tcp, 7881/tcp,
-  7882/udp. Nothing else. A TCP-only rule set looks healthy until no audio flows.
+In Hetzner Cloud console > the project > Add Server:
 
-Note the IPv4 and IPv6 addresses.
+| setting | choose |
+|---|---|
+| Location | **Helsinki (hel1)**: the closest to Norway. Falkenstein or Nuremberg also work |
+| Image | **Ubuntu 24.04** |
+| Type | **Shared vCPU, x86 (Intel/AMD), the CX42 class: 8 vCPU, 16 GB RAM, 160 GB disk** (or its current successor with the same shape). NOT the Arm (CAX) line: `silero-vad-lite` has no arm64 wheel. Not below 16 GB. If the R9-216 test shows CPU steal, resize in place to the dedicated CCX line |
+| Networking | **Public IPv4 ON** (billed separately) and **Public IPv6 ON** |
+| SSH keys | **only the owner's public key** (it lands on root) |
+| Volumes | none |
+| Firewalls | optional second layer; if used, inbound only 22/tcp, 80/tcp, 443/tcp, 7881/tcp, 7882/udp (a TCP-only set looks healthy until no audio flows) |
+| **Backups** | **ON (mandatory)**: Hetzner's daily server backups, about 20 % on top of the server price. The rollback for the whole box |
+| Placement groups, Labels | none needed |
+| Cloud config | **leave empty** (the primary path is `provision.sh`; `cloud-init.yaml` is the alternative) |
+| Name | e.g. `open-persona-prod` |
 
-## Step 2: put the code on the box
+Prices and type names can change; check on the day. Then send: the **IPv4**, the **IPv6
+/64** (the box uses `<prefix>::1`), and confirm `ssh root@<ipv4>` works from this PC.
 
-The box needs no GitHub credential for this. From the owner's PC, in the repo, with a
-LOCAL branch that holds this kit (`main` once the Hetzner branch is merged, until then
-`feat/hetzner-move`). A bundle of `origin/main` would not work: it carries a remote ref,
-no branch, and the clone comes up empty.
+**Host key check, before anything is uploaded:** in the console, "Rescue > Reset root
+password", open the web console (">_"), log in as root and run
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`; the first `ssh root@<ipv4>` must show
+the same fingerprint.
+
+## Step 2: put the code on the box (as root)
+
+The box needs no GitHub credential. From the owner's PC, in the repo, with a LOCAL branch
+that holds this kit (`main` once merged, until then `feat/hetzner-move`). A bundle of
+`origin/main` would not work: it carries a remote ref, no branch, and clones empty.
 
 ```bash
 BRANCH=main                                   # or feat/hetzner-move before the merge
 git bundle create /tmp/open-persona.bundle "$BRANCH"
-scp /tmp/open-persona.bundle deploy@<ip>:/tmp/
-ssh deploy@<ip> "git clone -b $BRANCH /tmp/open-persona.bundle /opt/open-persona/repo && rm /tmp/open-persona.bundle"
+scp /tmp/open-persona.bundle root@<ipv4>:/tmp/
+ssh root@<ipv4> "apt-get update -q && apt-get install -y -q git \
+  && mkdir -p /opt/open-persona \
+  && git clone -b $BRANCH /tmp/open-persona.bundle /opt/open-persona/repo \
+  && rm /tmp/open-persona.bundle"
 rm /tmp/open-persona.bundle
-# The clone's `origin` is the bundle file, now deleted. Point it at GitHub for later pulls:
-ssh deploy@<ip> "git -C /opt/open-persona/repo remote set-url origin https://github.com/<owner>/<repo>.git"
 ```
 
-On the first `ssh`, compare the host key fingerprint it shows with the one the server
-console reports (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` in the provider's web
-console). Do not upload anything until they match.
-
-(Alternative: a read-only GitHub deploy key on the box and `git clone` over SSH. That is
-what the CI deploy will need anyway, see the last section.)
-
-## Step 3: provision
+## Step 3: provision (as root, once)
 
 ```bash
-ssh deploy@<ip>
-sudo /opt/open-persona/repo/deploy/hetzner/bin/provision.sh
+ssh root@<ipv4> /opt/open-persona/repo/deploy/hetzner/bin/provision.sh
 ```
 
-It prints the firewall at the end: 22 (limited), 80, 443, 7881/tcp, 7882/udp. If it says
-a reboot is required, reboot now. Then take a **snapshot** in the console
+It creates `deploy` (uid 2000) with root's SSH key, writes the SSH lockdown (no root
+login, keys only, only `deploy`), then ufw (22 limited, 80, 443, 7881/tcp, 7882/udp),
+fail2ban, unattended upgrades, Docker (signing key fingerprint checked), the directories,
+the backup, disk-check and alert units. The root session that ran it stays open: **before
+closing it, check from a second terminal** that `ssh deploy@<ipv4>` works and
+`sudo -n true` succeeds. From then on everything runs as `deploy`; a later re-run is
+`sudo /opt/open-persona/repo/deploy/hetzner/bin/provision.sh`.
+
+Point the checkout at GitHub for later pulls (its `origin` is the deleted bundle):
+
+```bash
+ssh deploy@<ipv4> "git -C /opt/open-persona/repo remote set-url origin https://github.com/<owner>/<repo>.git"
+```
+
+If it says a reboot is required, reboot now. Then take a console **snapshot**
 ("provisioned, empty").
+
+**Alternative path:** paste `cloud-init.yaml` (with `__OWNER_SSH_PUBLIC_KEY__` replaced)
+into "Cloud config" at step 1. It creates `deploy` and the same baseline at first boot;
+then steps 2 and 3 run as `deploy` with `sudo`.
 
 ## Step 4: the env files
 
@@ -185,9 +204,9 @@ uv run python -I deploy/hetzner/render_env.py --dotenv .env --inventory > ~/op-i
 Then render, into a directory OUTSIDE the repo:
 
 ```bash
-uv run python -I deploy/hetzner/render_env.py --dotenv .env --out ~/op-env \
-    --livekit cloud            # or: --livekit selfhosted   (step 9)
-    # add --chains-from-dotenv only after confirming .env holds the production chains
+uv run python -I deploy/hetzner/render_env.py --dotenv .env --out ~/op-env
+# LiveKit defaults to selfhosted (owner ruling); add --livekit cloud only for the fallback
+# (step 9). Add --chains-from-dotenv only after confirming .env holds the production chains.
 ```
 
 It prints every name with its state, never a value. Then edit the files in `~/op-env`:
@@ -216,8 +235,8 @@ Copy them to the box over SSH only (scp; never a chat, mail or shared drive), an
 them there:
 
 ```bash
-scp ~/op-env/*.env deploy@<ip>:/opt/open-persona/env/
-ssh deploy@<ip>
+scp ~/op-env/*.env deploy@<ipv4>:/opt/open-persona/env/
+ssh deploy@<ipv4>
 cd /opt/open-persona/repo/deploy/hetzner
 bin/fill_generated.sh          # new DB passwords (3 roles), LiveKit key pair, node IP
 bin/preflight.sh --env-only    # must pass: roles separated, no dev Clerk instance
@@ -237,7 +256,7 @@ then upload:
 ```bash
 mkdir -p ~/op-restore && cp ~/Backups/fly-2026-10-02/{persona.dump,globals.sql,persona_volume.tgz} ~/op-restore/
 (cd ~/op-restore && sha256sum persona.dump globals.sql persona_volume.tgz > SHA256SUMS)
-scp ~/op-restore/* deploy@<ip>:/srv/open-persona/restore/
+scp ~/op-restore/* deploy@<ipv4>:/srv/open-persona/restore/
 rm -rf ~/op-restore
 ```
 
@@ -297,7 +316,7 @@ ok` and `voice listener: ok`. The Caddy smoke test warns until DNS points here.
 Before DNS, check through an SSH tunnel from the PC:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 deploy@<ip>
+ssh -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 deploy@<ipv4>
 curl -fsS http://127.0.0.1:8000/healthz
 docker compose -f /opt/open-persona/repo/deploy/hetzner/docker-compose.yml logs api | grep -iE "model chain|mcp runtime|connectors"
 ```
@@ -336,17 +355,18 @@ Once stable for a day, raise the TTLs back to 3600.
 
 ## Step 9: LiveKit
 
-**Recommendation: LiveKit Cloud first, if the project still exists; self-hosted later as
-a separate, measured step.** The self-hosted SFU was retired on 2026-09-03 after the first
-good call on Cloud, and the greeting timeouts of that era (R9-116) were never isolated to
-one cause. Going live on a new host AND a new SFU at once changes two variables; Cloud
-first isolates the host. The Cloud free tier's minute cap remains the watch item.
+**Self-hosted on this box is the owner's ruling (2026-10-23)**; LiveKit Cloud's free plan
+is the one-setting fallback. History to keep in mind while testing: the self-hosted SFU on
+Fly was retired on 2026-09-03 after the first good call on Cloud, and the greeting
+timeouts of that era (R9-116) were never isolated to one cause. If a call misbehaves,
+switching to the fallback for one test call separates the SFU from the rest.
 
-**Cloud.** `render_env.py --livekit cloud` copied `.env`'s `PERSONA_LIVEKIT_URL/_API_KEY/
+**Fallback: Cloud.** `render_env.py --livekit cloud` copies `.env`'s `PERSONA_LIVEKIT_URL/_API_KEY/
 _API_SECRET` into voice.env's `PERSONA_VOICE_LIVEKIT_*`. Nothing runs on the box for it.
 Check a call in the LiveKit Cloud dashboard.
 
-**Self-hosted.** In `/opt/open-persona/env/voice.env` set
+**Self-hosted (the default).** `render_env.py` already rendered it; to return to it from
+the fallback, in `/opt/open-persona/env/voice.env` set
 `PERSONA_VOICE_LIVEKIT_URL='wss://livekit.openpersonasai.com'`,
 `PERSONA_VOICE_LIVEKIT_API_KEY='__GEN_LIVEKIT_API_KEY__'` and
 `PERSONA_VOICE_LIVEKIT_API_SECRET='__GEN_LIVEKIT_API_SECRET__'` (or re-render with
@@ -403,25 +423,21 @@ Switching back to Cloud is the same three lines in voice.env and
 - Snapshot "live".
 - Initiative stays OFF until the A5-R-1 re-run.
 
-## Seam: the per-tenant MCP runtime
+## Seam: per-tenant MCP
 
-Per-tenant MCP is OFF at launch and comes back when the session that owns tooling and MCP
-delivers its runtime. The seam is marked `SEAM: per-tenant MCP runtime` in
-`docker-compose.yml`. The contract this kit holds that work to, nothing more:
+Per-tenant MCP is OFF at launch. The coming spec uses **provider-hosted MCP**: the model
+providers call remote MCP servers themselves, so nothing new needs to run on this box and
+no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtime` in
+`docker-compose.yml`, and whatever mechanism comes is held to this, nothing more:
 
-- The runtime is its own compose service on the `backend` network, behind its own
-  profile, so the stack without it is exactly today's.
-- The api learns about it only from settings in `api.env`: `PERSONA_ALLOW_PER_TENANT_MCP`
-  plus whatever settings the runtime defines. `fill_generated.sh`, `render_env.py` and the
-  templates gain those names in the same change that adds the service.
-- **The api never gets `/var/run/docker.sock`.** The api holds every tenant's data and
-  credentials; host-level container control does not belong in that process. Whatever the
-  runtime needs, it holds itself. `scripts/tests/test_hetzner_kit.py` fails if the api or
-  voice service mounts the socket.
-- Nothing it adds is published past 127.0.0.1, and ufw gains no rule for it.
-
-Switching it on is then: the runtime's env, `PERSONA_ALLOW_PER_TENANT_MCP=1`, its compose
-profile, `bin/deploy.sh`.
+- It reaches the api only through settings in `api.env` (`PERSONA_ALLOW_PER_TENANT_MCP`
+  plus its own), added to the templates, `render_env.py` and preflight in the same change.
+- **The api never gets the Docker socket**, `/run` or `/var/run` mounts, `privileged` or
+  `DOCKER_HOST`. The api holds every tenant's data and credentials.
+  `scripts/tests/test_hetzner_kit.py` fails on any of these, for every service.
+- If it ever needs an endpoint WE host for providers to call, that is a new public route
+  through Caddy with its own auth and request limits, and a firewall review. None is
+  planned.
 
 ## Alerts
 
@@ -436,14 +452,19 @@ silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
 
 ## Backups off the box (owner-provided, soon after go-live; not built here)
 
-A backup on the box's own disk does not survive the disk. The minimum design, to be
-provided on the new target:
+Hetzner Backups (step 1) restore the whole server but live in the same provider account.
+A backup on the box's own disk does not survive the disk. The minimum off-site design,
+with a **Hetzner Storage Box** as the suggested target:
+
+- A dedicated Storage Box **sub-account** for this box, limited to its own directory and
+  reached over SFTP/rsync with its own SSH key.
+- **Storage Box snapshots** taken on a schedule by the MAIN account (14 to 30 kept). The
+  sub-account cannot delete them, so a compromised box that deletes its copies cannot
+  erase history: that is the append-only property.
 
 - **Encrypted on the box** before it leaves (`age` or `gpg` to a public key), with the
   decryption key kept OFF the box (the owner's password manager and one offline copy).
-- **Append-only credentials**: the box can write new backups but cannot delete or overwrite
-  old ones (an immutability or retention lock on the storage side), so a compromised box
-  cannot erase history.
+- The box's credential is the sub-account key only; it never holds the main account's.
 - **14 to 30 days** of nightly sets (`persona.dump`, `globals.sql`, `persona_volume.tgz`,
   `facts.txt`, `SHA256SUMS`).
 - **One test restore** into a throwaway database (`bin/restore.sh --container ...
