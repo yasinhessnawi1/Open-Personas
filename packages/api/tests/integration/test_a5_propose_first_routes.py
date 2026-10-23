@@ -216,7 +216,7 @@ def _candidate(*, schedule_change: ScheduleChange | None = None) -> InitiativeCa
         observation="The daily check-in keeps colliding with early meetings.",
         citations=(GroundingCitation(kind=CitationKind.NODE, ref=_NODE),),
         trigger=InitiativeTrigger.CONFLICT,
-        why_now="The collisions recurred this week.",
+        why_now="The collisions keep recurring.",
         plan=(PlannedStep(description="retime", categories=frozenset({ActionCategory.DRAFT})),),
         next_step="Move the daily check-in to 09:00.",
         value=0.9,
@@ -225,7 +225,7 @@ def _candidate(*, schedule_change: ScheduleChange | None = None) -> InitiativeCa
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v5",
+        prompt_version="a5-scan-v7",
         scanned_at=_NOW,
         schedule_change=schedule_change,
     )

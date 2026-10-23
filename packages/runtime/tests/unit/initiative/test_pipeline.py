@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v5",
+        "prompt_version": "a5-scan-v7",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -765,8 +765,12 @@ class TestFlushReappliesTheSubjectRule:
         [
             "a5-scan-v1",
             "a5-scan-v4",
+            "a5-scan-v5",
+            "a5-scan-v6",
             "a7-event-candidate-v1",
             "a7-event-candidate-v2",
+            "a7-event-candidate-v3",
+            "a7-event-candidate-v4",
             "v1",
             "scripted",
             "",
@@ -782,7 +786,7 @@ class TestFlushReappliesTheSubjectRule:
         assert h.ledger.expired == [("n-held", "prompt_superseded")]
         assert delivery.calls == []
 
-    @pytest.mark.parametrize("version", ["a5-scan-v5", "a5-scan-v9", "a7-event-candidate-v3"])
+    @pytest.mark.parametrize("version", ["a5-scan-v7", "a5-scan-v9", "a7-event-candidate-v5"])
     @pytest.mark.asyncio
     async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
         current = _candidate().model_copy(update={"prompt_version": version})
@@ -939,11 +943,277 @@ class TestThirdReviewFlushOrderAndLocalDay:
 
 
 def test_the_scan_floor_is_the_version_in_force() -> None:
-    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v5)."""
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v7)."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
     from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
 
-    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v5"
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 5
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v7"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 7
     assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a5-scan-v4")
+    assert not prompt_version_deliverable("a5-scan-v6")
+
+
+class _FingerprintGrounding:
+    """Admits with a fixed fingerprint and records what each call was given."""
+
+    def __init__(self, *, kept: bool = False) -> None:
+        self.kwargs: list[dict[str, object]] = []
+        self._kept = kept
+
+    async def check(self, candidate: InitiativeCandidate, **kwargs: object) -> GroundingVerdict:
+        self.kwargs.append(kwargs)
+        return GroundingVerdict(
+            admitted=True, fingerprint="fp-admitted", served_model="m-head", kept=self._kept
+        )
+
+
+class TestTheFingerprintRidesOnTheHeldNotice:
+    @pytest.mark.asyncio
+    async def test_the_claimed_candidate_carries_its_grounding_fingerprint(self) -> None:
+        h = _Harness()
+        claimed: list[InitiativeCandidate] = []
+        real = h.ledger.try_claim_held
+
+        def _claim(candidate: InitiativeCandidate, **kwargs: Any) -> Any:  # noqa: ANN401
+            claimed.append(candidate)
+            return real(candidate, **kwargs)
+
+        h.ledger.try_claim_held = _claim  # type: ignore[method-assign]
+        h.pipeline._grounding = _FingerprintGrounding()  # noqa: SLF001
+        await h.pipeline.submit((_candidate(),))
+        assert [c.grounding_fingerprint for c in claimed] == ["fp-admitted"]
+        assert [c.grounding_served_model for c in claimed] == ["m-head"]
+
+    @pytest.mark.asyncio
+    async def test_the_flush_passes_the_stored_fingerprint_to_the_check(self) -> None:
+        grounding = _FingerprintGrounding()
+        h = _Harness(delivery=_FakeDelivery())
+        stored = _candidate().model_copy(
+            update={"grounding_fingerprint": "fp-stored", "grounding_served_model": "m-stored"}
+        )
+        h.ledger = _FakeLedger(h.trace, held=[_Held(stored, created_at=datetime.now(UTC))])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.pipeline._grounding = grounding  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert grounding.kwargs[0]["admitted_fingerprint"] == "fp-stored"
+        assert grounding.kwargs[0]["admitted_served_model"] == "m-stored"
+        assert "initiative.grounding_kept" not in h.audit_events()  # it was judged
+
+    @pytest.mark.asyncio
+    async def test_a_kept_verdict_is_audited_at_the_flush(self) -> None:
+        """Fifth review LOW-1: each keep is visible, so a re-run can count them."""
+        h = _Harness(delivery=_FakeDelivery())
+        stored = _candidate().model_copy(update={"grounding_fingerprint": "fp-admitted"})
+        h.ledger = _FakeLedger(h.trace, held=[_Held(stored, created_at=datetime.now(UTC))])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.pipeline._grounding = _FingerprintGrounding(kept=True)  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert h.auditor.events == [
+            ("initiative.grounding_kept", stored.opportunity_key, "unchanged_head_undated")
+        ]
+
+
+class TestTheFlushLapsesAPassedDate:
+    """v6: a held notice expires once the latest date its message states is before the
+    user's local today (the why-now time half, anchored mechanically)."""
+
+    def _harness(
+        self,
+        why_now: str,
+        now: datetime,
+        *,
+        next_step: str = "Draft the letter.",
+        scanned_at: datetime = datetime(2026, 9, 26, 5, 0, tzinfo=UTC),
+    ) -> tuple[_Harness, _FakeDelivery]:
+        delivery = _FakeDelivery()
+        h = _Harness(delivery=delivery, clock=lambda: now, users=None)
+        h.users = _FakeUsers(h.trace, _Context(timezone="Europe/Oslo"))
+        h.pipeline._users = h.users  # noqa: SLF001
+        held = _candidate(why_now=why_now, next_step=next_step, scanned_at=scanned_at)
+        h.ledger = _FakeLedger(h.trace, held=[_Held(held, created_at=now - timedelta(hours=24))])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        return h, delivery
+
+    @pytest.mark.asyncio
+    async def test_a_date_already_past_in_the_users_zone_expires_the_notice(self) -> None:
+        # 23:30 UTC on 1 October is 01:30 on 2 October in Oslo: 1 October has passed there.
+        h, delivery = self._harness(
+            "Your quote is valid until Thursday 1 October.",
+            datetime(2026, 10, 1, 23, 30, tzinfo=UTC),
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "why_now_lapsed")]
+        assert delivery.calls == []
+        assert "grounding" not in h.trace.calls  # no judge spend on a lapsed notice
+
+    @pytest.mark.asyncio
+    async def test_a_date_still_today_or_ahead_delivers(self) -> None:
+        h, delivery = self._harness(
+            "Your quote is valid until Thursday 1 October.",
+            datetime(2026, 10, 1, 5, 0, tzinfo=UTC),
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == [("n-held", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_a_message_with_no_date_never_lapses_by_time(self) -> None:
+        h, delivery = self._harness(
+            "Your quote is still open.", datetime(2026, 12, 1, 5, 0, tzinfo=UTC)
+        )
+        h.pipeline._settings = InitiativeSettings(hold_max_days=400)  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert delivery.calls == [("n-held", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_the_earliest_upcoming_date_is_the_moment(self) -> None:
+        """Fourth review LOW 3: the outbound flight has left, so the notice lapses even
+        though the return is still ahead."""
+        h, delivery = self._harness(
+            "You fly out on Saturday 3 October and back on Saturday 10 October.",
+            datetime(2026, 10, 4, 5, 0, tzinfo=UTC),
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "why_now_lapsed")]
+        assert delivery.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_date_in_the_offer_counts(self) -> None:
+        h, delivery = self._harness(
+            "Your quote is still open.",
+            datetime(2026, 10, 1, 5, 0, tzinfo=UTC),
+            next_step="book the fitter before 30 September",
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == [("n-held", "why_now_lapsed")]
+        assert delivery.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_date_already_past_when_written_is_not_the_moment(self) -> None:
+        h, delivery = self._harness(
+            "Power dropped the price on 25 September; the offer runs until 29 September.",
+            datetime(2026, 9, 28, 5, 0, tzinfo=UTC),
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == [("n-held", "propose")]
+
+    @pytest.mark.asyncio
+    async def test_the_writing_day_is_the_users_local_day(self) -> None:
+        # Scanned 23:30 UTC on 25 September: already 26 September in Oslo, so the
+        # 25 September date is history and 30 September is the moment.
+        h, delivery = self._harness(
+            "The price dropped on 25 September; the offer runs until 30 September.",
+            datetime(2026, 9, 27, 5, 0, tzinfo=UTC),
+            scanned_at=datetime(2026, 9, 25, 23, 30, tzinfo=UTC),
+        )
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == [("n-held", "propose")]
+
+
+_POLICY = (
+    "The car insurance renews on Sunday 4 October 2026 (04.10.2026, 4/10/2026, 2026-10-04); "
+    "the policy runs 12 months; the renewal notice was sent in May."
+)
+
+
+class _PolicySource:
+    """The real checker's resolution surface: node-91 holds the policy excerpt."""
+
+    def node_content(self, owner_id: str, node_id: str) -> str | None:  # noqa: ARG002
+        return _POLICY if node_id == "node-91" else None
+
+    def conversation_content(self, owner_id: str, conversation_id: str) -> str | None:  # noqa: ARG002
+        return None
+
+    def task_content(self, owner_id: str, task_id: str) -> str | None:  # noqa: ARG002
+        return None
+
+
+class _NoJudge:
+    """A judge that now says NO, counting its calls (asked only when not kept)."""
+
+    provider_name = "openrouter"
+    model_name = "openai/gpt-oss-120b"
+    supports_native_tools = False
+    supports_vision = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages: Any, **_: Any) -> Any:  # noqa: ANN401, ARG002
+        from persona.backends.types import ChatResponse, TokenUsage
+
+        self.calls += 1
+        return ChatResponse(
+            content='{"entailed": false}',
+            model=self.model_name,
+            provider=self.provider_name,
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            latency_ms=1.0,
+        )
+
+
+class TestEachTimeFamilyIsJudgedAgainAtTheFlush:
+    """Fifth review LOW-4: a real GroundingChecker in the pipeline, the grounds unchanged
+    and the head model's YES stored; a message naming a time in any family is still
+    re-judged (here the judge now says no, so the notice dissolves), and an undated one
+    is kept without a model call."""
+
+    _NOW = datetime(2026, 9, 27, 5, 0, tzinfo=UTC)
+
+    def _flush(self, why_now: str) -> tuple[_Harness, _NoJudge]:
+        from persona_runtime.initiative.grounding import GroundingChecker, excerpts_fingerprint
+
+        judge = _NoJudge()
+        h = _Harness(delivery=_FakeDelivery(), clock=lambda: self._NOW)
+        held = _candidate(
+            why_now=why_now,
+            scanned_at=datetime(2026, 9, 26, 5, 0, tzinfo=UTC),
+            grounding_fingerprint=excerpts_fingerprint([_POLICY]),
+            grounding_served_model="openrouter/openai/gpt-oss-120b",
+        )
+        h.ledger = _FakeLedger(h.trace, held=[_Held(held, created_at=self._NOW)])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.pipeline._grounding = GroundingChecker(source=_PolicySource(), backend=judge)  # noqa: SLF001  # type: ignore[arg-type]
+        return h, judge
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Your car insurance renews on Sunday 4 October.",  # weekday
+            "Your car insurance renews on Sun 4 Oct.",  # abbreviations
+            "Your car insurance renews in October.",  # month
+            "Your car insurance renews in Oct.",  # month abbreviation
+            "The renewal notice was sent in May.",  # May in context
+            "Your car insurance renews on the 4th of October.",  # ordinal day
+            "Your car insurance renews on 2026-10-04.",  # ISO
+            "Your car insurance renews on 04.10.2026.",  # dd.mm.yyyy
+            "Your car insurance renews on 4/10/2026.",  # d/m/yyyy
+            "Your car insurance policy runs 12 months.",  # counted duration
+            "This year's car insurance renewal is due.",  # exempt possessive period
+            "Your car insurance renews in a day or two.",  # exempt "in a day or two"
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_dated_message_is_judged_again(self, why_now: str) -> None:
+        h, judge = self._flush(why_now)
+        await h.pipeline.flush("u1")
+        assert judge.calls == 1
+        assert h.ledger.expired == [("n-held", "grounding_dissolved")]
+
+    @pytest.mark.asyncio
+    async def test_a_relative_phrase_is_refused_without_a_model_call(self) -> None:
+        h, judge = self._flush("Your car insurance renews tomorrow.")
+        await h.pipeline.flush("u1")
+        assert judge.calls == 0
+        assert h.ledger.expired == [("n-held", "grounding_dissolved")]
+
+    @pytest.mark.asyncio
+    async def test_an_undated_message_is_kept_without_a_model_call(self) -> None:
+        h, judge = self._flush("Your car insurance renewal is worth a look.")
+        await h.pipeline.flush("u1")
+        assert judge.calls == 0
+        assert h.ledger.expired == []
+        assert "initiative.grounding_kept" in h.audit_events()

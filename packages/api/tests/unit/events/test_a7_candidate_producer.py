@@ -128,7 +128,7 @@ def test_the_event_prompt_version_and_voice_rule() -> None:
     in the pipeline, for events and scans alike (tested there)."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
-    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v3"
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v5"
     assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
         "\n", " "
     )
@@ -147,6 +147,19 @@ def test_the_event_floor_is_the_version_in_force() -> None:
     """Third review LOW 5: the deliverable floor is A7's prompt in force."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
 
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 3
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 5
     assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a7-event-candidate-v2")
+    assert not prompt_version_deliverable("a7-event-candidate-v4")
+
+
+def test_the_v5_event_prompt_requires_absolute_dates_and_no_countdown() -> None:
+    from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
+
+    flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
+    assert "6. DATES ARE ABSOLUTE." in flat
+    assert '"tomorrow", "this Friday", "next Tuesday", "in 3 days"' in flat
+    assert (
+        'Never write a countdown either: "soon", "shortly", "overnight", "3 days left", "two '
+        'days away", "within a week", "by the weekend". Give the date itself instead ("the '
+        'offer ends on Friday 2 October", not "the offer ends in 3 days").'
+    ) in flat

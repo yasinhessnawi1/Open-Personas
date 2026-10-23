@@ -71,7 +71,7 @@ def _candidate(owner: str, *, persona: str, ref: str = "node-1") -> InitiativeCa
         source=CandidateSource.SCAN,
         owner_id=owner,
         persona_id=persona,
-        prompt_version="a5-scan-v5",
+        prompt_version="a5-scan-v7",
         scanned_at=_NOW,
     )
 

@@ -307,7 +307,7 @@ def _hold(
     app_engine: Engine,
     *,
     ref: str = "u::node::n1",
-    version: str = "a5-scan-v5",
+    version: str = "a5-scan-v7",
     at: datetime = _NOW,
 ) -> str:
     from persona.initiative import (

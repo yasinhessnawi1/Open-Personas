@@ -74,7 +74,9 @@ _CONTENT_SNIPPET = 2000  # the citable grounding tail handed to the model (bound
 #: v3 (R9-249 re-review): "next_step" starts with a lowercase verb (the template keeps its case).
 #: v2 (R9-256): "why_now" and "next_step" address the user as "you" and hold changeable
 #: facts lightly; the same voice rule and mechanical backstop as the A5 scan.
-EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v3"
+#: v4 (judge stability): dates in "why_now" and "next_step" are stated absolutely.
+#: v5 (fifth review): countdowns ("soon", "3 days left", "within a week") are forbidden too.
+EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v5"
 
 
 @runtime_checkable
@@ -289,6 +291,12 @@ than the user's life and work — even if the user would welcome it.
 5. SPEAK TO THE USER. "why_now" and "next_step" are read by the user: say "you" and "your", \
 never "the user", "they" or "the person". Do not paste or quote the material. Anything that \
 could have changed is held lightly ("if it is still open"), never asserted as still true.
+6. DATES ARE ABSOLUTE. The user may read this later than you write it: state every date with \
+its weekday, day and month as the material gives it ("on Friday 2 October"). Never write \
+"today", "tonight", "tomorrow", "this Friday", "next Tuesday", "in 3 days", or a weekday \
+without its date. Never write a countdown either: "soon", "shortly", "overnight", "3 days \
+left", "two days away", "within a week", "by the weekend". Give the date itself instead ("the \
+offer ends on Friday 2 October", not "the offer ends in 3 days").
 
 EXAMPLE (event → correct output):
 - A message about a self-harm disclosure arrives → {"candidate": null}

@@ -36,7 +36,7 @@ silence is the safe state; the pipeline never raises into the scan job.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
@@ -63,6 +63,8 @@ from persona.initiative.restraint import (
     why_now_lapsed,
 )
 from persona.logging import get_logger
+
+from persona_runtime.initiative.specifics import earliest_upcoming_date
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -265,6 +267,21 @@ class HeldSubject(StrEnum):
     WAIT = "wait"
 
 
+def _lapse_anchor(candidate: InitiativeCandidate, zone: str) -> datetime | None:
+    """The instant the notice's moment has passed in the user's zone.
+
+    The moment is the earliest date the message or the offer states on or after the
+    day it was written (:func:`earliest_upcoming_date`); the anchor is the start of
+    the day AFTER it, local. ``None`` when they state no such date (the notice then
+    never lapses by time; its re-grounding still runs).
+    """
+    written_on = candidate.scanned_at.astimezone(ZoneInfo(zone)).date()
+    moment = earliest_upcoming_date(candidate.why_now, candidate.next_step, written_on=written_on)
+    if moment is None:
+        return None
+    return datetime.combine(moment + timedelta(days=1), time(0), ZoneInfo(zone)).astimezone(UTC)
+
+
 def held_notice_subject(
     check: WellbeingSubjectCheck, owner_id: str, candidate: InitiativeCandidate
 ) -> HeldSubject:
@@ -380,6 +397,15 @@ class InitiativePipeline:
                 verdict.rejection.value if verdict.rejection else "unknown",
             )
             return
+        # The fingerprint of what the judge admitted, and the model that admitted it, ride
+        # on the held notice: the flush keeps the YES only on unchanged grounds, from the
+        # head of the judge's chain, for an undated message (GroundingChecker.check).
+        candidate = candidate.model_copy(
+            update={
+                "grounding_fingerprint": verdict.fingerprint,
+                "grounding_served_model": verdict.served_model,
+            }
+        )
 
         # (2) the wellbeing-subject rule: ANY gated citation disqualifies the SUBJECT
         # (all five categories; stronger than K4's chat gate, ruling 6). Every cited
@@ -499,11 +525,20 @@ class InitiativePipeline:
         disclosure it expires (``wellbeing_subject``); gated only because synthesis
         has not caught up, or the check failed, it stays held;
         (a) hold-age bound — a buffer, not a queue; (b) the why-now time half
-        (T2's pure predicate; anchor time is None in v1 so this never trips —
-        wired for when a mechanical deadline source exists); (c) the T4 check
-        re-run — citations that dissolved (K7 merged/superseded, a deleted
-        conversation) or no longer entail EXPIRE the notice. Survivors deliver
-        under the same cadence caps (counted at delivery).
+        (T2's pure predicate), anchored mechanically: the notice expires once the
+        earliest date its message or offer states (on or after the day it was
+        written) is before the user's local today (the texts state dates
+        absolutely since a5-scan-v6); (c) the T4 check
+        re-run: citations that dissolved (K7 merged/superseded, a deleted
+        conversation) EXPIRE the notice, and the mechanical specifics check re-runs.
+        The admitted verdict stands without a model call only when the grounds are
+        unchanged (the stored ``grounding_fingerprint`` matches, prompt version
+        included), the YES came from the head of the judge's chain (the stored
+        ``grounding_served_model``), and the message and the offer name no time
+        (no date, weekday or month): so the judge cannot flip on identical,
+        undated material (the A5-R-1 re-run, 2026-10-23), and a dated message is
+        re-read against the new TODAY. Otherwise the judge is asked again.
+        Survivors deliver under the same cadence caps (counted at delivery).
 
         Quiet hours first (R9-237): inside the user's window NOTHING is
         delivered, expired or re-grounded; the whole batch waits for one flush
@@ -579,14 +614,22 @@ class InitiativePipeline:
             return
         if subject is HeldSubject.WAIT:
             return  # synthesis not caught up, or the check failed: stays held
-        if why_now_lapsed(anchor_time=None, now=now):  # v1: no mechanical anchor time
+        today, zone = self._local_day(owner_id, now)
+        if why_now_lapsed(anchor_time=_lapse_anchor(candidate, zone), now=now):
             self._ledger.expire_stale(owner_id, notice.id, reason="why_now_lapsed", now=now)
             return
-        today, zone = self._local_day(owner_id, now)
-        verdict = await self._grounding.check(candidate, today=today, timezone=zone)
+        verdict = await self._grounding.check(
+            candidate,
+            today=today,
+            timezone=zone,
+            admitted_fingerprint=candidate.grounding_fingerprint,
+            admitted_served_model=candidate.grounding_served_model,
+        )
         if not verdict.admitted:
             self._ledger.expire_stale(owner_id, notice.id, reason="grounding_dissolved", now=now)
             return
+        if verdict.kept:  # visible in the audit, so a re-run can count the keeps
+            self._audit(candidate, "initiative.grounding_kept", "unchanged_head_undated")
         counts = self._ledger.delivered_counts(owner_id, persona_id=notice.persona_id, now=now)
         if cadence_exhausted(counts, self._settings):
             return  # still capped — stays held for the next flush (never dropped)

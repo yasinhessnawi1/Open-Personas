@@ -33,6 +33,7 @@ job, and no failure path can pass a candidate through.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, date, datetime
@@ -43,14 +44,24 @@ from persona.logging import get_logger
 from persona.schema.conversation import ConversationMessage
 from pydantic import BaseModel, ConfigDict
 
-from persona_runtime.initiative.specifics import unsupported_numbers, unsupported_specifics
+from persona_runtime.initiative.specifics import (
+    relative_day_words,
+    time_words,
+    unsupported_numbers,
+    unsupported_specifics,
+)
+from persona_runtime.routing.model_selection import resolve_served_model
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
+    from persona.backends.types import ChatResponse
     from persona.initiative import GroundingCitation, InitiativeCandidate
 
 __all__ = [
     "ENTAILMENT_PROMPT_VERSION",
+    "excerpts_fingerprint",
+    "MIN_QUOTE_PART_CHARS",
+    "quote_in_excerpts",
     "GroundingChecker",
     "GroundingRejection",
     "GroundingSource",
@@ -100,6 +111,17 @@ The quote must be copied character-for-character from the excerpts. If any rule 
 the excerpts do not contain such a span, reply {"entailed": false}.
 """
 
+#: The shortest quote, and the shortest line of a multi-line quote, normalised: every
+#: line must stand as evidence on its own, so a fragment ("the", "2026") never carries a
+#: YES (fourth review LOW 1: characters, not words; the shortest quote in the re-run
+#: records is 40 characters).
+MIN_QUOTE_PART_CHARS = 20
+_QUOTE_MARKS = str.maketrans(
+    {"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+     "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"'}
+)  # fmt: skip
+_WHITESPACE_RE = re.compile(r"\s+")
+
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
@@ -111,6 +133,9 @@ class GroundingRejection(StrEnum):
     JUDGE_ERROR = "judge_error"
     #: The message states a number, weekday or month the excerpts never state (layer 3).
     UNSUPPORTED_SPECIFIC = "unsupported_specific"
+    #: The message or the offer names a day relative to when it was written ("tomorrow",
+    #: "this Friday", a weekday without its date): the user may read it a day later.
+    RELATIVE_DATE = "relative_date"
 
 
 class GroundingVerdict(BaseModel):
@@ -124,6 +149,18 @@ class GroundingVerdict(BaseModel):
     #: material of the user-facing honest attribution (K3's rule, rendered later).
     supporting_quote: str | None = None
     prompt_version: str = ENTAILMENT_PROMPT_VERSION
+    #: The fingerprint of the excerpts this verdict was reached on, and of the judge's
+    #: prompt version (``None`` when no excerpt resolved). The pipeline stores it on the
+    #: held notice, so the flush can tell whether anything the judge read has changed.
+    fingerprint: str | None = None
+    #: The chain member that served the judge call, as ``"provider/model"``, read from
+    #: the chain's attempt ledger (:func:`served_identity`); ``None`` when no model
+    #: answered (a mechanical layer decided, an earlier admission stood, the call
+    #: failed) or the served member is unclear. The pipeline stores it with the
+    #: fingerprint: a YES from any member but the head of the chain is never kept.
+    served_model: str | None = None
+    #: An earlier admission was kept without a model call (the flush audits it).
+    kept: bool = False
 
 
 @runtime_checkable
@@ -184,6 +221,8 @@ class GroundingChecker:
         *,
         today: date | None = None,
         timezone: str | None = None,
+        admitted_fingerprint: str | None = None,
+        admitted_served_model: str | None = None,
     ) -> GroundingVerdict:
         """No grounding, no candidate — never raises; every failure discards.
 
@@ -194,6 +233,16 @@ class GroundingChecker:
         and the plan, told ``today`` (the user's local date; the pipeline passes it
         with ``timezone``; by default the candidate's own scan date in UTC); YES is
         accepted only with a verbatim-in-excerpts quote.
+
+        ``admitted_fingerprint`` and ``admitted_served_model`` are the fingerprint an
+        earlier YES was reached on and the model that gave it (the flush passes the
+        held notice's). The earlier admission stands without a model call only when
+        all of these hold (:meth:`_keeps_admission`; fourth review MEDIUM-1): the
+        freshly resolved excerpts and the prompt version still match the fingerprint;
+        the YES came from the head of the judge's chain, not a fallback; and neither
+        the message nor the offer places itself in time (:func:`time_words`), so a
+        dated message is always re-read against the new TODAY. Otherwise the judge
+        is asked again.
         """
         day = today if today is not None else candidate.scanned_at.date()
         zone = timezone or "UTC"
@@ -208,6 +257,13 @@ class GroundingChecker:
             return GroundingVerdict(
                 admitted=False, rejection=GroundingRejection.UNRESOLVED_CITATION
             )
+        fingerprint = excerpts_fingerprint(excerpts)
+        relative = relative_day_words(candidate.why_now) + relative_day_words(candidate.next_step)
+        if relative:
+            _logger.info("message names a relative day; discarding ({n})", n=len(relative))
+            return GroundingVerdict(
+                admitted=False, rejection=GroundingRejection.RELATIVE_DATE, fingerprint=fingerprint
+            )
         unsupported = unsupported_specifics(
             candidate.why_now, excerpts, today=day
         ) + unsupported_numbers(candidate.next_step, excerpts)
@@ -217,13 +273,48 @@ class GroundingChecker:
                 n=len(unsupported),
             )
             return GroundingVerdict(
-                admitted=False, rejection=GroundingRejection.UNSUPPORTED_SPECIFIC
+                admitted=False,
+                rejection=GroundingRejection.UNSUPPORTED_SPECIFIC,
+                fingerprint=fingerprint,
             )
         try:
-            return await self._judge(candidate, excerpts, today=day, timezone=zone)
+            keep = self._keeps_admission(
+                candidate, fingerprint, admitted_fingerprint, admitted_served_model
+            )
+        except Exception:  # noqa: BLE001: undecidable (e.g. the plan read failed): judge again
+            _logger.warning("could not decide whether to keep the verdict; judging again")
+            keep = False
+        if keep:
+            _logger.info("grounding kept the admitted verdict (unchanged, head model, undated)")
+            return GroundingVerdict(admitted=True, fingerprint=fingerprint, kept=True)
+        try:
+            verdict = await self._judge(candidate, excerpts, today=day, timezone=zone)
+            return verdict.model_copy(update={"fingerprint": fingerprint})
         except Exception:  # noqa: BLE001 — a judge failure discards, never crashes the scan
             _logger.warning("entailment judge failed; discarding candidate (fail-soft)")
             return GroundingVerdict(admitted=False, rejection=GroundingRejection.JUDGE_ERROR)
+
+    def _keeps_admission(
+        self,
+        candidate: InitiativeCandidate,
+        fingerprint: str,
+        admitted_fingerprint: str | None,
+        admitted_served_model: str | None,
+    ) -> bool:
+        """Whether an earlier YES stands without asking the judge again (see :meth:`check`)."""
+        if admitted_fingerprint is None or admitted_fingerprint != fingerprint:
+            return False
+        if admitted_served_model is None or admitted_served_model != head_identity(self._backend):
+            return False  # a fallback member's YES (or an unrecorded one) is not final
+        return not (time_words(candidate.why_now) or time_words(candidate.next_step))
+
+    def _served(self, response: ChatResponse) -> str | None:
+        """The served identity, ``None`` (re-judged at the flush) if it cannot be read."""
+        try:
+            return served_identity(resolve_chain(self._backend), response)
+        except Exception:  # noqa: BLE001: an unreadable identity never discards a verdict
+            _logger.warning("judge's served model could not be read; its YES will not be kept")
+            return None
 
     # --- layer 1: mechanical resolution --------------------------------------
 
@@ -276,19 +367,27 @@ class GroundingChecker:
         response = await self._backend.chat(
             messages, temperature=0.0, max_tokens=self._max_output_tokens
         )
+        served = self._served(response)
         payload = self._load_json(response.content)
         if payload is None:
-            return GroundingVerdict(admitted=False, rejection=GroundingRejection.JUDGE_ERROR)
+            return GroundingVerdict(
+                admitted=False, rejection=GroundingRejection.JUDGE_ERROR, served_model=served
+            )
         if payload.get("entailed") is not True:
-            return GroundingVerdict(admitted=False, rejection=GroundingRejection.NOT_ENTAILED)
+            return GroundingVerdict(
+                admitted=False, rejection=GroundingRejection.NOT_ENTAILED, served_model=served
+            )
         quote = str(payload.get("quote", "")).strip()
         # The conjured-grounds trap: a YES counts only when the quote mechanically
         # appears in the admitted excerpts (the K2 evidence-span bar, by substring
-        # check — never by trusting the judge's own claim of verbatimness).
-        if not quote or not any(quote in content for content in excerpts):
+        # check, never by trusting the judge's own claim of verbatimness), compared
+        # after the normalisation :func:`quote_in_excerpts` documents.
+        if not quote_in_excerpts(quote, excerpts):
             _logger.info("judge YES with a non-verbatim quote; discarding (conjured grounds)")
-            return GroundingVerdict(admitted=False, rejection=GroundingRejection.NOT_ENTAILED)
-        return GroundingVerdict(admitted=True, supporting_quote=quote)
+            return GroundingVerdict(
+                admitted=False, rejection=GroundingRejection.NOT_ENTAILED, served_model=served
+            )
+        return GroundingVerdict(admitted=True, supporting_quote=quote, served_model=served)
 
     @staticmethod
     def _load_json(text: str) -> dict[str, object] | None:
@@ -298,3 +397,94 @@ class GroundingChecker:
         except (json.JSONDecodeError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) else None
+
+
+def _normalise_quote_text(text: str) -> str:
+    """Casefold; curly quotes and apostrophes become straight; every whitespace run
+    becomes one space (the whitespace pattern matches Unicode whitespace, so line breaks
+    and no-break, narrow no-break and thin spaces collapse with the rest)."""
+    text = text.translate(_QUOTE_MARKS).casefold()
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _unwrapped(quote: str) -> str | None:
+    """The quote without one surrounding pair of quotation marks, if it has one."""
+    stripped = quote.strip()
+    marks = stripped.translate(_QUOTE_MARKS)
+    if len(stripped) >= 2 and marks[0] == marks[-1] and marks[0] in "\"'":
+        return stripped[1:-1]
+    return None
+
+
+def _quote_matches(quote: str, texts: list[str]) -> bool:
+    parts = [_normalise_quote_text(part) for part in quote.splitlines() if part.strip()]
+    if not parts or any(len(part) < MIN_QUOTE_PART_CHARS for part in parts):
+        return False
+    return all(any(part in text for text in texts) for part in parts)
+
+
+def quote_in_excerpts(quote: str, excerpts: list[str]) -> bool:
+    """Whether the judge's quote is verbatim in the admitted excerpts.
+
+    Both sides are normalised (:func:`_normalise_quote_text`), so a judge that
+    sentence-cases a clause or re-types a no-break space is not refused for it, and
+    one surrounding pair of quotation marks (straight or curly) the judge wrapped it in
+    is set aside. A quote spanning several excerpts is accepted when it splits on line
+    breaks into parts that are each verbatim in some excerpt. Every part, a single-line
+    quote's too, is at least ``MIN_QUOTE_PART_CHARS`` characters. Nothing else is
+    inferred: a word changed, added or dropped still refuses the YES.
+    """
+    texts = [_normalise_quote_text(content) for content in excerpts]
+    if _quote_matches(quote, texts):
+        return True
+    inner = _unwrapped(quote)
+    return inner is not None and _quote_matches(inner, texts)
+
+
+def resolve_chain(backend: ChatBackend) -> ChatBackend:
+    """The concrete backend behind ``backend``, resolved once (sixth review LOW-4).
+
+    The production judge runs behind a metering wrapper over a per-owner plan wrapper;
+    both offer ``resolve_chain``, which reads the owner's plan once and returns the
+    tier's chain. A backend without it is its own chain.
+    """
+    resolver = getattr(backend, "resolve_chain", None)
+    return resolver() if callable(resolver) else backend
+
+
+def head_identity(backend: ChatBackend) -> str:
+    """The head of the judge's chain as ``"provider/model"`` (a chain reports its
+    primary; a bare backend is its own head), from one resolution."""
+    chain = resolve_chain(backend)
+    return f"{chain.provider_name}/{chain.model_name}"
+
+
+def served_identity(chain: ChatBackend, response: ChatResponse) -> str | None:
+    """The chain member that served ``response``, as ``"provider/model"`` (fifth review
+    LOW-1).
+
+    Read from the chain's attempt ledger (:func:`resolve_served_model`: the primary
+    served when the walk recorded no failed attempt), so a fallback to the same model on
+    another provider is not the head. The response's own echo can only demote: when it
+    names another member (the ledger is shared by concurrent calls on one chain, a
+    registered gap), the member is unclear and ``None`` is returned, so the YES is
+    judged again at the flush rather than kept on a guess.
+    """
+    provider, model = resolve_served_model(chain)
+    if (response.provider, response.model) != (provider, model):
+        _logger.warning("judge's served model is unclear; its YES will not be kept")
+        return None
+    return f"{provider}/{model}"
+
+
+def excerpts_fingerprint(excerpts: list[str]) -> str:
+    """A stable fingerprint of the admitted excerpts, in citation order, and of the
+    judge's prompt version (sha256): a verdict reached under another prompt is not
+    kept (fourth review LOW 5)."""
+    digest = hashlib.sha256()
+    digest.update(ENTAILMENT_PROMPT_VERSION.encode("utf-8"))
+    digest.update(b"\x1d")
+    for content in excerpts:
+        digest.update(content.encode("utf-8"))
+        digest.update(b"\x1e")
+    return digest.hexdigest()

@@ -25,6 +25,11 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v7 (fifth review): countdowns ("soon", "3 days left", "within a week", "by the
+#: weekend") are forbidden in the reason and the offer, like relative days.
+#: v6 (judge stability): every date in "why_now" and "next_step" is stated absolutely
+#: (weekday, day and month: "on Friday 2 October"), never relative to today ("tomorrow",
+#: "this Friday", a weekday without its date): a held notice is read the next morning.
 #: v5 (R9-249 re-review): "next_step" starts with a lowercase verb (the template no longer
 #: re-cases it, so a name or "I" survives), and the citation rule's example is a
 #: never-issued code.
@@ -42,7 +47,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v5"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v7"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -74,7 +79,8 @@ EXAMPLE_SPECULATION_DECLINE_OUTPUT = '{"candidates": []}'
 EXAMPLE_CATCH_OUTPUT = """{"candidates": [
   {"observation": "The custody hearing is on Friday and no response letter has been drafted.",
    "trigger": "approaching_commitment",
-   "why_now": "Your custody hearing is on Friday; if the letter isn't drafted yet, there is time.",
+   "why_now": "Your custody hearing is on Friday 10 July; if the letter isn't drafted yet, \
+there is time.",
    "citations": [{"kind": "node", "ref": "N900"}, {"kind": "task", "ref": "T900"}],
    "plan": [{"description": "review the hearing details", "categories": ["observe"]},
             {"description": "draft the response letter", "categories": ["draft"]}],
@@ -139,6 +145,13 @@ never "the user", "they" or "the person". Do not paste or quote the notes. Anyth
 have changed since it was said is held lightly ("if you haven't compared offers yet", "if the \
 quote is still open"), never asserted as still true. No pressure ("closing quickly") and no \
 presuming what they have decided.
+8. DATES ARE ABSOLUTE. The user may read this a day or more after you write it. In "why_now" \
+and "next_step" state every date with its weekday, day and month as the material gives it \
+("on Friday 2 October"). Never write "today", "tonight", "tomorrow", "this Friday", "next \
+Tuesday", "in 3 days", or a weekday without its date. Never write a countdown either: \
+"soon", "shortly", "overnight", "3 days left", "two days away", "within a week", "by the \
+weekend". Give the date itself instead ("the offer ends on Friday 2 October", not "the offer \
+ends in 3 days").
 
 EXAMPLES (scenario → correct output):
 - Rich, warm notes about the user's life; nothing dated, nothing pending → \

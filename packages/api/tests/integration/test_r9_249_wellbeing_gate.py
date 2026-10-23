@@ -22,6 +22,7 @@ both B3 shapes through the REAL pipeline are discarded with their audit row.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -116,9 +117,10 @@ class _YesJudge:
     async def chat(self, messages: Any, **_: object) -> ChatResponse:  # noqa: ANN401
         prompt = str(messages[-1].content)
         start = prompt.index("[excerpt 1]\n") + len("[excerpt 1]\n")
-        quote = prompt[start : start + 20]
+        block = prompt[start:].split("\n\n[excerpt ", 1)[0].split("\n\nReply with", 1)[0]
+        quote = max(block.splitlines(), key=len)  # one whole line of the excerpt
         return ChatResponse(
-            content='{"entailed": true, "quote": "' + quote.replace('"', "") + '"}',
+            content=json.dumps({"entailed": True, "quote": quote}),
             model="scripted",
             provider="scripted",
             usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
@@ -458,7 +460,7 @@ def test_the_b3_shape_is_discarded_by_the_real_pipeline(
         observation="The user has Mia's dinner party on Thursday.",
         citations=(citation,),
         trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
-        why_now="The dinner party is in a few days.",
+        why_now="The dinner party is coming up.",
         plan=(PlannedStep(description="draft tips", categories=frozenset({ActionCategory.DRAFT})),),
         next_step="Draft a gift idea for the host.",
         value=0.8,
@@ -467,7 +469,7 @@ def test_the_b3_shape_is_discarded_by_the_real_pipeline(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v5",
+        prompt_version="a5-scan-v7",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)
@@ -506,7 +508,7 @@ def test_a_conversation_disclosed_after_the_hold_never_flushes(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v5",
+        prompt_version="a5-scan-v7",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)

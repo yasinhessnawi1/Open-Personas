@@ -3,8 +3,7 @@
 The user reads the candidate's ``why_now`` and ``next_step``; the judge rules on their
 claims, and this layer refuses, without a model call, the specifics it can check exactly.
 It reads digits and English day and month names, as written (LOW 1: nothing else; a
-number spelt out, another language's names, a relative phrase like "next week" are the
-judge's, which sees today's date).
+number spelt out or another language's names are the judge's, which sees today's date).
 
 Normalised first, in both texts, so an honest rewording is never refused:
 
@@ -27,8 +26,44 @@ Then, in the MESSAGE:
   today's). When the excerpts state dates and none falls on it, it is refused; when they
   state no date at all, it is left to the judge.
 
-In the OFFER only numbers are checked: "remind you on Wednesday" is a proposal, not a
-claim.
+In the OFFER only numbers are checked: "remind you on Wednesday 30 September" is a
+proposal, not a claim.
+
+Absolute dates (a5-scan-v6): the user may read a notice a day after it was written (a
+held notice goes out at the next morning's flush), so a day named RELATIVE to the day
+it was written is refused in both user-facing texts (:func:`relative_day_words`):
+
+- "today", "tonight", "tomorrow", "yesterday", "this morning/afternoon/evening";
+- "this" or "next" (optionally "coming") plus a weekday, "week", "weekend", "month" or
+  "year"; "end of the week/month/year";
+- "in N (or a, or a couple/few of) days/weeks/months/years"; "the day after/before";
+- a countdown: "(N, a few, a couple of) days/weeks/fortnights/hours left, away, to go or
+  remaining" (a bare "hours away" too); "less than", "under" or "within" a or N of those;
+  "by/over/at the weekend"; "the next few (or N) days/weeks"; "soon" (not "as soon as"),
+  "shortly", "overnight";
+- a weekday (a full name, or a capitalised abbreviation such as "Fri") without its date,
+  and a day of the month ("the 2nd", "on the 5th") without its month. A weekday is dated
+  by a date beside it, in either order: "Friday 2 October", "Monday the 5th of October",
+  "Friday's hearing on 2 October", "2 October (a Friday)". "Black Friday", "Good Friday"
+  and the like are named days, not weekdays; "every Friday" is refused.
+
+Not refused (fifth review LOW-2, sixth review LOW-2): a possessive period ("this
+year's renewal", "next month's bill"), "in a day or two", a span measured from a stated
+anchor ("within 3 days of the invoice", "within a day of the hearing"), "soon after" and
+"shortly after", and "overnight" before a noun ("overnight delivery", "an overnight
+train"). "I can send it over shortly" stays refused: it counts from now. They still
+count as time words, so the flush re-asks the judge about them (:func:`time_words`), as
+it does for any counted duration ("3 days", "a week", "a few days") the refusal does
+not catch.
+
+A date with no year is read as the most recent such date when that is at most 150 days
+back, otherwise as the next one: "30 December" written on 2 January is last year's,
+"2 January" written on 30 December next year's, and "Friday 3 July" written on 1
+January this year's (fifth review LOW-3).
+
+Dates are read in these forms: "2 October [2026]", "October 2 [2026]", "the 2nd of
+October", ISO "2026-10-02", and day-first "02.10.2026" and "2/10/2026" (fifth review
+LOW-5). Other languages' forms stay the judge's.
 """
 
 from __future__ import annotations
@@ -36,7 +71,13 @@ from __future__ import annotations
 import re
 from datetime import date
 
-__all__ = ["unsupported_numbers", "unsupported_specifics"]
+__all__ = [
+    "earliest_upcoming_date",
+    "relative_day_words",
+    "time_words",
+    "unsupported_numbers",
+    "unsupported_specifics",
+]
 
 _MONTHS = (
     "january", "february", "march", "april", "may", "june",
@@ -60,14 +101,93 @@ _DURATION_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"[A-Za-z]+")
+_COUNT = r"(?:\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_SPAN = r"(?:days?|weeks?|fortnights?|months?|years?|hours?)"
+_FEW = r"(?:a\s+few|a\s+couple(?:\s+of)?|few|couple(?:\s+of)?|several)"
+_COUNTDOWN_UNITS = r"(?:days?|weeks?|fortnights?|hours?)"
+#: A day named relative to the day the text was written (refused: the user may read it a
+#: day later). A count is in digits, "a", or words up to twelve.
+_RELATIVE_RE = re.compile(
+    r"\b(?:today|tonight|tomorrow|yesterday"
+    r"|this\s+(?:morning|afternoon|evening)"
+    r"|(?:this|next)\s+(?:coming\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday"
+    r"|sunday|week|weekend|month|year)"
+    r"|end\s+of\s+(?:the\s+|this\s+|next\s+)?(?:week|month|year)"
+    rf"|in\s+{_COUNT}\s+{_SPAN}"
+    rf"|in\s+(?:a\s+)?(?:couple|few)\s+(?:of\s+)?{_SPAN}"
+    r"|the\s+day\s+(?:after|before)"
+    # Countdowns (fifth review MEDIUM-A): true the day they are written, a day stale
+    # when read.
+    rf"|(?:(?:{_COUNT}|{_FEW})\s+(?:more\s+)?)?{_COUNTDOWN_UNITS}"
+    r"\s+(?:left|away|to\s+go|remaining)"
+    rf"|(?:less\s+than|under|within)\s+{_COUNT}\s+{_COUNTDOWN_UNITS}"
+    r"|(?:by|over|at)\s+the\s+weekend"
+    rf"|next\s+(?:{_FEW}|{_COUNT})\s+{_COUNTDOWN_UNITS}"
+    r"|(?<!as\s)soon|shortly|overnight)\b",
+    re.IGNORECASE,
+)
+#: Exempt from the refusal (still time words): a possessive period, "in a day or two".
+_POSSESSIVE_PERIOD_RE = re.compile(r"(?:this|next)\s+(?:coming\s+)?(?:month|year)", re.I)
+_POSSESSIVE_RE = re.compile(r"['\u2019]s\b")
+_DAY_OR_TWO_RE = re.compile(r"in\s+an?\s+day", re.I)
+_OR_TWO_RE = re.compile(r"\s+or\s+two\b", re.I)
+_ANCHORED_SPAN_RE = re.compile(r"(?:within|under)\s", re.I)
+_OF_RE = re.compile(r"\s+of\b", re.I)
+_AFTER_RE = re.compile(r"\s+after\b", re.I)
+#: "overnight" before a noun ("overnight delivery"): a lower-case word that is not a
+#: preposition, conjunction, article or pronoun ("overnight to Bergen" counts from now).
+_NOUN_AFTER_RE = re.compile(
+    r"\s+(?!(?:and|or|but|nor|so|then|to|in|on|at|by|for|from|with|into|until|before|after"
+    r"|if|when|while|the|a|an|your|you|it|is|was|we|i|they|he|she)\b)[a-z]+"
+)
+#: Any counted duration ("3 days", "a week", "a few days"): a time word, never refused
+#: on its own (a duration is computed, the judge's to check).
+_COUNTED_SPAN_RE = re.compile(rf"\b(?:{_COUNT}|{_FEW})\s+(?:more\s+)?{_SPAN}\b", re.IGNORECASE)
+#: A weekday as written: a full name in any case, an abbreviation capitalised ("Fri",
+#: "FRI"; lower-case "sat" or "wed" is an ordinary word).
+_WEEKDAY_TOKEN_RE = re.compile(
+    r"\b(?:(?i:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+    r"|Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun|MON|TUE|WED|THU|FRI|SAT|SUN)\b"
+)
+#: A named day that is not a weekday reference ("Black Friday", "Good Friday").
+_NAMED_DAY_RE = re.compile(r"\b(?:black|good|cyber|easter|ash|maundy|holy|palm)\s+$", re.I)
+#: Between a weekday and the date after it: "Friday 2 October", "Fri. 2 Oct", "Monday
+#: the 5th of October", "Friday's hearing on 2 October" (two words at most, and not
+#: "and"/"or": "Friday or 2 October" names two days).
+_WEEKDAY_THEN_DATE_RE = re.compile(
+    r"\.?(?:['\u2019]s)?\s*,?\s*(?:(?!(?:and|or|but|not|nor)\b)[A-Za-z]+\s+){0,2}"
+)
+#: Between a date and the weekday after it: "2 October, a Friday", "2 October (a
+#: Friday)", "4 October 2026, Sunday".
+_DATE_THEN_WEEKDAY_RE = re.compile(
+    r"[\s,]*\(?\s*(?:(?:a|an|which\s+is\s+a|that\s+is\s+a)\s+)?", re.I
+)
+#: A month abbreviation as written, capitalised ("Oct", "OCT"), anywhere.
+_MONTH_ABBR_TOKEN_RE = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|JAN|FEB|MAR|APR|JUN|JUL|AUG|SEPT?"
+    r"|OCT|NOV|DEC)\b"
+)
+#: A day of the month named without its month ("the 2nd", "on the 5th"); an ordinal
+#: before a noun ("the 3rd time") is not a day.
+_ORDINAL_DAY_RE = re.compile(
+    r"\b(?:the|on)\s+\d{1,2}(?:st|nd|rd|th)\b"
+    r"(?!\s+(?!(?:at|and|or|by|before|after|until|to|in|from|when|if|of)\b)[a-z])",
+    re.I,
+)
 _MAY_CONTEXT_RE = re.compile(r"\b(?:in|on|by|until|of)\s+$", re.IGNORECASE)
 
 _MONTH_NAMES = "|".join(_MONTHS) + "|" + "|".join(_MONTH_ABBR)
+#: How far back a yearless date may still read as past; further back reads forward.
+_PAST_HORIZON_DAYS = 150
 _DATE_PATTERNS = (
-    re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_NAMES})\.?(?:,?\s+(\d{{4}}))?\b", re.I),
+    re.compile(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_NAMES})\.?(?:,?\s+(\d{{4}}))?\b",
+        re.I,
+    ),
     re.compile(rf"\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b", re.I),
     re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
     re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b"),
+    re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"),
 )
 
 
@@ -90,25 +210,50 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
         return None
 
 
+def _yearless(month: int, day: int, today: date) -> date | None:
+    """A date written without its year: the most recent one when it is at most
+    ``_PAST_HORIZON_DAYS`` back, otherwise the next one on or after ``today``."""
+    years = (today.year - 1, today.year, today.year + 1)
+    dates = [d for year in years if (d := _safe_date(year, month, day)) is not None]
+    recent = max((d for d in dates if d < today), default=None)
+    ahead = min((d for d in dates if d >= today), default=None)
+    if recent is not None and (ahead is None or (today - recent).days <= _PAST_HORIZON_DAYS):
+        return recent
+    return ahead
+
+
 def _stated_dates(text: str, today: date) -> list[date]:
     """Every calendar date the text states (day + month, with or without a year)."""
     found: list[date] = []
     for match in _DATE_PATTERNS[0].finditer(text):
         month = _month_number(match[2])
-        year = int(match[3]) if match[3] else today.year
-        if month is not None and (d := _safe_date(year, month, int(match[1]))):
-            found.append(d)
+        if month is None:
+            continue
+        stated = (
+            _safe_date(int(match[3]), month, int(match[1]))
+            if match[3]
+            else _yearless(month, int(match[1]), today)
+        )
+        if stated:
+            found.append(stated)
     for match in _DATE_PATTERNS[1].finditer(text):
         month = _month_number(match[1])
-        year = int(match[3]) if match[3] else today.year
-        if month is not None and (d := _safe_date(year, month, int(match[2]))):
-            found.append(d)
+        if month is None:
+            continue
+        stated = (
+            _safe_date(int(match[3]), month, int(match[2]))
+            if match[3]
+            else _yearless(month, int(match[2]), today)
+        )
+        if stated:
+            found.append(stated)
     for match in _DATE_PATTERNS[2].finditer(text):
         if d := _safe_date(int(match[1]), int(match[2]), int(match[3])):
             found.append(d)
-    for match in _DATE_PATTERNS[3].finditer(text):
-        if d := _safe_date(int(match[3]), int(match[2]), int(match[1])):
-            found.append(d)
+    for pattern in _DATE_PATTERNS[3:]:  # day first: "02.10.2026", "2/10/2026"
+        for match in pattern.finditer(text):
+            if d := _safe_date(int(match[3]), int(match[2]), int(match[1])):
+                found.append(d)
     return found
 
 
@@ -172,3 +317,86 @@ def unsupported_specifics(message: str, excerpts: list[str], *, today: date) -> 
     if dates:  # with no stated date, a weekday is the judge's to verify
         missing.extend(word for word, day in said_days if day not in weekdays)
     return missing
+
+
+def _date_spans(text: str) -> list[tuple[int, int]]:
+    return [match.span() for pattern in _DATE_PATTERNS for match in pattern.finditer(text)]
+
+
+def _weekday_is_dated(text: str, start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    """A weekday with a date beside it, in either order, or a named day ("Good Friday")."""
+    if _NAMED_DAY_RE.search(text[:start]):
+        return True
+    for span_start, span_end in spans:
+        if span_start >= end and _WEEKDAY_THEN_DATE_RE.fullmatch(text, end, span_start):
+            return True
+        if span_end <= start and _DATE_THEN_WEEKDAY_RE.fullmatch(text, span_end, start):
+            return True
+    return False
+
+
+def _exempt(text: str, match: re.Match[str]) -> bool:
+    """A refused-shape phrase that is not relative to the writing day (the module's
+    "Not refused" list): it stays a time word."""
+    phrase, end = match[0].lower(), match.end()
+    if _POSSESSIVE_PERIOD_RE.fullmatch(phrase):
+        return _POSSESSIVE_RE.match(text, end) is not None
+    if _DAY_OR_TWO_RE.fullmatch(phrase):
+        return _OR_TWO_RE.match(text, end) is not None
+    if _ANCHORED_SPAN_RE.match(phrase):
+        return _OF_RE.match(text, end) is not None
+    if phrase in ("soon", "shortly"):
+        return _AFTER_RE.match(text, end) is not None
+    if phrase == "overnight":
+        return _NOUN_AFTER_RE.match(text, end) is not None
+    return False
+
+
+def relative_day_words(text: str) -> list[str]:
+    """The days ``text`` names relative to when it was written (refused in user text),
+    in the order written; a weekday inside a phrase ("this Friday") is listed once."""
+    matches = [match for match in _RELATIVE_RE.finditer(text) if not _exempt(text, match)]
+    found = [(match.start(), match[0]) for match in matches]
+    phrases = [match.span() for match in matches]
+    spans = _date_spans(text)
+    for match in _WEEKDAY_TOKEN_RE.finditer(text):
+        inside = any(start <= match.start() < end for start, end in phrases)
+        if not inside and not _weekday_is_dated(text, match.start(), match.end(), spans):
+            found.append((match.start(), match[0]))
+    for match in _ORDINAL_DAY_RE.finditer(text):
+        if not any(start < match.end() and match.start() < end for start, end in spans):
+            found.append((match.start(), match[0]))
+    return [word for _, word in sorted(found)]
+
+
+def time_words(text: str) -> list[str]:
+    """Every word or phrase in ``text`` that places it in time: a relative phrase or an
+    undated day (:func:`relative_day_words`, the exempt ones included), any weekday or
+    month name (dated or not, full or abbreviated), any stated date, and any counted
+    duration (fifth review MEDIUM-A). The flush re-asks the judge about a message that
+    has any (fourth review MEDIUM-1 (b)), so it is read against the day it is delivered,
+    not the day it was written."""
+    tokens = (
+        _RELATIVE_RE,
+        _WEEKDAY_TOKEN_RE,
+        _MONTH_ABBR_TOKEN_RE,
+        _ORDINAL_DAY_RE,
+        _COUNTED_SPAN_RE,
+    )
+    found = [match[0] for pattern in tokens for match in pattern.finditer(text)]
+    found += [text[start:end] for start, end in _date_spans(text)]
+    found += [word for word, _ in _calendar_words(text)[0]]
+    return list(dict.fromkeys(found))
+
+
+def earliest_upcoming_date(*texts: str, written_on: date) -> date | None:
+    """The earliest calendar date the texts state on or after the day they were written
+    (``written_on``, which also places a yearless date); ``None`` when they state none.
+
+    The held notice's lapse anchor (fourth review LOWs 3 and 4): the message and the
+    offer both count, and a date already past when written ("dropped on 25 September")
+    is history, not the moment the notice is about.
+    """
+    dates = [d for text in texts for d in _stated_dates(_normalise(text), written_on)]
+    upcoming = [d for d in dates if d >= written_on]
+    return min(upcoming) if upcoming else None

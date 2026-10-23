@@ -462,7 +462,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v5"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v7"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -514,3 +514,21 @@ class TestPromptArtifact:
     def test_prompt_carries_the_closed_catalogue(self) -> None:
         for trigger in InitiativeTrigger:
             assert trigger.value in SCAN_SYSTEM_PROMPT
+
+
+def test_the_v7_prompt_requires_absolute_dates_and_no_countdown() -> None:
+    import json
+
+    from persona_runtime.initiative.specifics import relative_day_words
+
+    flat = " ".join(SCAN_SYSTEM_PROMPT.split())
+    assert "8. DATES ARE ABSOLUTE." in flat
+    assert '("on Friday 2 October")' in flat
+    assert (
+        'Never write a countdown either: "soon", "shortly", "overnight", "3 days left", "two '
+        'days away", "within a week", "by the weekend". Give the date itself instead ("the '
+        'offer ends on Friday 2 October", not "the offer ends in 3 days").'
+    ) in flat
+    example = json.loads(EXAMPLE_CATCH_OUTPUT)["candidates"][0]
+    assert relative_day_words(example["why_now"]) == []  # the example obeys its own rule
+    assert relative_day_words(example["next_step"]) == []

@@ -193,6 +193,18 @@ class InitiativeCandidate(BaseModel):
             voicing to a different persona — A5-D-6 — before delivery).
         prompt_version: The scan-prompt artifact version that produced it.
         scanned_at: The schedule fire instant (tz-aware UTC) this scan ran for.
+        grounding_fingerprint: The fingerprint of the excerpts (and the judge's
+            prompt version) the grounding judge admitted this candidate on (set by
+            the pipeline at claim time; ``None`` before).
+        grounding_served_model: The chain member that gave that admission, as
+            ``"provider/model"``, read from the chain's attempt ledger (set with the
+            fingerprint; ``None`` when unclear). At the flush the admitted verdict
+            stands, and only the mechanical checks re-run, when the fingerprint
+            still matches, this is the head of the judge's chain, and the message
+            names no time (each keep is audited as ``initiative.grounding_kept``);
+            otherwise the judge is asked again. Rollback hazard (``extra="forbid"``): a build
+            that predates these two fields cannot read a notice that carries them;
+            see the A5 state's standing bars for the strip before a rollback.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -215,6 +227,8 @@ class InitiativeCandidate(BaseModel):
     persona_id: str = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
     scanned_at: datetime
+    grounding_fingerprint: str | None = None
+    grounding_served_model: str | None = None
 
     @field_validator("scanned_at")
     @classmethod

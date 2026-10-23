@@ -251,6 +251,16 @@ class PlanScopedChatBackend:
         )
         return registry.get(self._tier)
 
+    def resolve_chain(self) -> ChatBackend:
+        """The current owner's concrete backend for this tier, resolved once.
+
+        One plan read: callers that need several of its attributes (the initiative judge
+        reads the chain's head and attempt ledger) hold the result instead of reading
+        this wrapper's properties, each of which resolves again. Raises like ``chat``
+        when the plan has no such tier.
+        """
+        return self._resolve()
+
     def _resolve_or_none(self) -> ChatBackend | None:
         """Resolve, or ``None`` when the owner's plan has no configured tier.
 

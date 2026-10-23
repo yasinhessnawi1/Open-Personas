@@ -131,6 +131,16 @@ class UsageCollectingBackend:
     def supports_vision(self) -> bool:
         return self._inner.supports_vision
 
+    def resolve_chain(self) -> ChatBackend:
+        """The concrete backend (usually a tier's chain) the next call goes through.
+
+        Delegates to the inner backend's own ``resolve_chain`` when it has one (the plan
+        wrapper), else returns the inner backend. The initiative judge reads the chain's
+        head and attempt ledger from it once per call (sixth review LOW-4).
+        """
+        resolver = getattr(self._inner, "resolve_chain", None)
+        return resolver() if callable(resolver) else self._inner
+
     def _record(self, usage: object) -> None:
         sink = _active_sink.get()
         if sink is None or usage is None:
