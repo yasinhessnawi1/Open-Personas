@@ -41,14 +41,17 @@ COPY packages/voice/pyproject.toml packages/voice/pyproject.toml
 COPY packages/ packages/
 RUN uv sync --frozen --all-packages --no-dev
 
-# silero_vad_lite (and other prebuilt native wheels) ship .so files whose
-# PT_GNU_STACK segment is marked executable; hardened kernels (Fly's) refuse to
-# dlopen a library that requires an executable stack:
+# Some prebuilt native wheels ship .so files whose PT_GNU_STACK segment is marked
+# executable. glibc 2.41 and later (this image's Debian 13 python:3.12-slim base)
+# refuse to dlopen a library that asks for an executable stack:
 #   OSError: ... silero_vad_lite.so: cannot enable executable stack ...
-# Clear the exec-stack flag on every shared object in the venv so the VAD load
-# (and the fastembed/onnxruntime warm-up path) succeeds. --clear-execstack needs
-# patchelf 0.18+ (the apt/pip builds are older), so fetch a static release binary
-# and verify its SHA256 before invoking it against the venv (supply-chain pin).
+# silero-vad-lite 0.2.x was one; the locked 0.3 ships a non-executable stack, and
+# its test (tests/unit/stt/test_vad_native_library.py) keeps it that way. The step
+# stays as a guard for any other wheel in the venv: it clears the exec-stack flag
+# on every shared object so the VAD load and the fastembed/onnxruntime warm-up
+# path succeed. --clear-execstack needs patchelf 0.18+ (the apt/pip builds are
+# older), so fetch a static release binary and verify its SHA256 before invoking
+# it against the venv (supply-chain pin).
 RUN curl -fsSL -o /tmp/patchelf.tgz \
         https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz \
     && echo 'ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0  /tmp/patchelf.tgz' \

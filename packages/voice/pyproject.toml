@@ -79,7 +79,11 @@ dependencies = [
     # sample window pinned at 16 kHz. Used only inside
     # `persona_voice.stt.vad_silero` per the Spec 02 ChatBackend adapter-
     # boundary discipline.
-    "silero-vad-lite>=0.2,<1",
+    # 0.3 is the floor: 0.2.x ships a Linux .so that asks for an executable stack,
+    # which glibc 2.41+ refuses to load (the voice image's Debian base and the
+    # ubuntu-latest runner). The ceiling holds the Silero v5.1 weights; 0.4 swaps in
+    # the v6.2 model, whose different scores need the thresholds rechecked first.
+    "silero-vad-lite>=0.3,<0.4",
     "cartesia[websockets]>=3,<4",
 ]
 

@@ -59,6 +59,7 @@ if str(_VOICE_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_VOICE_TESTS_DIR))
 
 from _mock_stt_backend import MockStreamingSTT  # type: ignore[import-not-found]  # noqa: E402
+from _speech_audio import speech_pcm  # type: ignore[import-not-found]  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -281,8 +282,6 @@ async def test_d_v2_x_echo_cancellation_mute_window_suppresses_speech_started() 
     """The session_state_provider returning True (agent speaking) suppresses
     listener-facing speech_started notifications — V0.1 backstop for the
     undocumented V1 AEC dependency surfaced by Phase-3 critic gate."""
-    import numpy as np
-
     agent_speaking = {"speaking": True}
 
     def state_provider() -> bool:
@@ -292,18 +291,16 @@ async def test_d_v2_x_echo_cancellation_mute_window_suppresses_speech_started() 
         provider="deepgram",
         api_key="test-key",  # type: ignore[arg-type]
         vad_library="silero",
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     vad = SileroVADAdapter(config, session_state_provider=state_provider)
     await vad.load()
-    # Synthesise speech-onset audio.
-    n = int(SILERO_SAMPLE_RATE_HZ * 0.3)  # 300 ms
-    t_arr = np.arange(n, dtype=np.float32) / SILERO_SAMPLE_RATE_HZ
-    sine = 0.5 * np.sin(2.0 * np.pi * 440.0 * t_arr)
-    pcm = (sine * 32767.0).astype(np.int16).tobytes()
-    await vad.push_audio(pcm, SILERO_SAMPLE_RATE_HZ)
-    # Listener-facing event MUST NOT fire while agent is speaking.
+    # 300 ms of real speech (a pure tone is not speech to the model).
+    await vad.push_audio(speech_pcm(300), SILERO_SAMPLE_RATE_HZ)
+    # The model did hear speech (else an empty queue would prove nothing) ...
+    assert vad._in_speech  # noqa: SLF001
+    # ... and the listener-facing event MUST NOT fire while agent is speaking.
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(vad._event_queue.get(), timeout=0.05)  # noqa: SLF001
     await vad.close()

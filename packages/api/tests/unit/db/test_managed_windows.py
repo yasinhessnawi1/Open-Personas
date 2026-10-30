@@ -362,7 +362,10 @@ class TestTheManagerRouting:
         monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", _recorder(admin_urls))
         manager = cm.CommunityDbManager(external_url=None, base_dir=short_base)
         url = manager.start()
-        assert started == [short_base / "pg16"]
+        # On Windows the manager resolves its base folder once (review L-3), so the datadir
+        # is the long spelling even when the temp folder is reached through an 8.3 short
+        # name (the GitHub runner's TEMP is C:\Users\RUNNER~1\...).
+        assert started == [short_base.resolve() / "pg16"]
         assert make_url(admin_urls[0]).database == "postgres"
         assert make_url(url).database == "persona"
         assert str(make_url(url).query["passfile"]).endswith("pg16.pgpass")

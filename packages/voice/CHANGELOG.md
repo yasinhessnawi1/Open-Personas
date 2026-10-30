@@ -13,7 +13,10 @@ mirrors only the `persona-voice`-touching surface.
 
 ## [Unreleased]
 
-(empty, future post-V2 work lands here)
+### Fixed
+
+- **`silero-vad-lite` raised to `>=0.3,<0.4` (0.3.0 locked).** 0.2.x shipped a Linux library that asks for an executable stack, and glibc 2.41 and later refuse to load it ("cannot enable executable stack as shared object requires"). That is the glibc of the voice image's `python:3.12-slim` base and of the Ubuntu 26 CI runner. 0.3.0 ships a non-executable stack and keeps the Silero v5.1 weights; the ceiling holds off 0.4, which swaps in the v6.2 model. 0.3.0 also restores the model's audio context between windows, as upstream Silero does, so speech scores shift: recheck `PERSONA_STT_SILERO_ACTIVATION_THRESHOLD` and `PERSONA_STT_SILERO_MIN_SPEECH_DURATION_MS` before the next deploy.
+- **The Silero tests feed real speech.** They fed a 440 Hz sine at a 0.05 threshold, which 0.2.x read as speech only because of the missing audio context. They now use a slice of the committed V8 corpus at the production threshold (0.5), and the mute-window tests assert that speech was heard. A new test reads `PT_GNU_STACK` from the installed library on Linux, so a release that asks for an executable stack fails on any glibc.
 
 ---
 

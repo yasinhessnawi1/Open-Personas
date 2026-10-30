@@ -12,11 +12,14 @@ symlink cases skip locally but FAIL in CI, so the guarantee is never silently un
 from __future__ import annotations
 
 import contextlib
+import csv
 import ctypes
 import errno
 import os
+import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -32,9 +35,9 @@ from persona.tools import _winopen
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 BACKSLASH = chr(92)
+SYSTEM_SID = "S-1-5-18"
 SECRET = b"OUTSIDE SECRET"
 INSIDE = b"INSIDE"
 
@@ -347,6 +350,60 @@ def _dacl_sddl(path: Path) -> str:
         kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
 
 
+def _full_sid(sddl_trustee: str) -> str:
+    """The ``S-1-...`` form of an SDDL trustee, which may be an alias.
+
+    SDDL renders some well-known accounts as two-letter aliases: ``SY`` for SYSTEM, and
+    ``LA`` for the machine's built-in Administrator account (``S-1-5-21-...-500``), which is
+    the user a GitHub Windows runner runs as. Round-tripping through the SID APIs turns
+    either form into the full string, so trustees compare by SID, not by spelling.
+    """
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    from_string = advapi32.ConvertStringSidToSidW
+    from_string.restype = wintypes.BOOL
+    from_string.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    to_string = advapi32.ConvertSidToStringSidW
+    to_string.restype = wintypes.BOOL
+    to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    sid = ctypes.c_void_p()
+    assert from_string(sddl_trustee, ctypes.byref(sid)), (sddl_trustee, ctypes.get_last_error())
+    try:
+        text = wintypes.LPWSTR()
+        assert to_string(sid, ctypes.byref(text)), (sddl_trustee, ctypes.get_last_error())
+        try:
+            return str(text.value)
+        finally:
+            kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        kernel32.LocalFree(sid)
+
+
+def _whoami_sid() -> str:
+    """The SID of the user this process runs as, read by ``whoami`` (not by the code under
+    test, so a wrong ``TokenUser`` lookup in the product cannot also bless itself here)."""
+    whoami = Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe"
+    line = subprocess.run(
+        [str(whoami), "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    sid = next(csv.reader([line]))[1]
+    assert sid.startswith("S-1-"), line
+    return sid
+
+
+def test_full_sid_resolves_the_sddl_aliases_a_runner_shows() -> None:
+    assert _full_sid("SY") == SYSTEM_SID
+    administrator = _full_sid("LA")  # the account a GitHub Windows runner runs as
+    assert administrator.startswith("S-1-5-21-"), administrator
+    assert administrator.endswith("-500"), administrator
+    assert _full_sid(administrator) == administrator
+
+
 def test_a_created_file_is_readable_only_by_its_user_and_the_system(
     layout: tuple[Path, Path],
 ) -> None:
@@ -357,11 +414,10 @@ def test_a_created_file_is_readable_only_by_its_user_and_the_system(
     sddl = _dacl_sddl(root / "new.txt")
     assert sddl.startswith("D:P"), sddl
     aces = sddl[3:].strip("()").split(")(")
-    trustees = sorted(ace.rsplit(";", 1)[1] for ace in aces)
     assert len(aces) == 2, sddl
     assert all(ace.startswith("A;;FA;;;") for ace in aces), sddl
-    assert "SY" in trustees, sddl
-    assert [t for t in trustees if t != "SY"][0].startswith("S-1-5-"), sddl
+    trustees = {_full_sid(ace.rsplit(";", 1)[1]) for ace in aces}
+    assert trustees == {_whoami_sid(), SYSTEM_SID}, sddl
     assert "ID" not in sddl  # nothing inherited from the folder
 
 

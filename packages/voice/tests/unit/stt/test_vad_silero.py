@@ -15,6 +15,8 @@ DO NOT assert any threshold (T12 external smoke is the operator-pass gate).
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +29,15 @@ from persona_voice.stt.vad_silero import (
     SileroVADAdapter,
     benchmark_onset_latency,
 )
+
+# Real speech for the tests that run the model lives in packages/voice/tests/_speech_audio.py.
+# The root conftest only adds packages/*/src to sys.path, so extend with the voice tests
+# dir for cross-test import (the V2 _mock_stt_backend pattern).
+_VOICE_TESTS_DIR = Path(__file__).resolve().parents[2]
+if str(_VOICE_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_VOICE_TESTS_DIR))
+
+from _speech_audio import speech_pcm  # type: ignore[import-not-found]  # noqa: E402
 
 # ---------- module constants -------------------------------------------------
 
@@ -162,14 +173,6 @@ async def test_push_audio_rejects_wrong_sample_rate() -> None:
 # ---------- state machine: onset / offset emission ---------------------------
 
 
-def _speech_pcm(duration_ms: int, freq_hz: float = 440.0, amplitude: float = 0.5) -> bytes:
-    """Synthesise PCM16 little-endian audio of a pure sine wave."""
-    n = int(SILERO_SAMPLE_RATE_HZ * duration_ms / 1000.0)
-    t = np.arange(n, dtype=np.float32) / SILERO_SAMPLE_RATE_HZ
-    sine = amplitude * np.sin(2.0 * np.pi * freq_hz * t)
-    return (sine * 32767.0).astype(np.int16).tobytes()
-
-
 def _silence_pcm(duration_ms: int) -> bytes:
     n = int(SILERO_SAMPLE_RATE_HZ * duration_ms / 1000.0)
     return (np.zeros(n, dtype=np.int16)).tobytes()
@@ -189,16 +192,15 @@ async def test_silence_emits_no_events() -> None:
 
 @pytest.mark.asyncio
 async def test_speech_burst_emits_speech_started_with_correct_metadata() -> None:
-    # Lower threshold so synthetic sine reliably trips the model on the
-    # tiny synthetic signal — production tuning sits at 0.5 per default.
+    # Real speech at the production threshold (0.5, the default).
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config)
     await adapter.load()
-    # Push 500 ms of sine wave — long enough to clear min_speech_duration.
-    await adapter.push_audio(_speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
+    # Push 500 ms of speech: long enough to clear min_speech_duration.
+    await adapter.push_audio(speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
     # Drain — first event must be SpeechStartedEvent.
     event = await asyncio.wait_for(adapter._event_queue.get(), timeout=0.05)
     assert isinstance(event, SpeechStartedEvent)
@@ -222,13 +224,15 @@ async def test_tts_mute_window_suppresses_speech_started() -> None:
         return speaking["agent"]
 
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config, session_state_provider=state_provider)
     await adapter.load()
-    await adapter.push_audio(_speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
-    # Listener-facing event MUST NOT fire while agent is speaking.
+    await adapter.push_audio(speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
+    # The model did hear speech (else an empty queue would prove nothing) ...
+    assert adapter._in_speech  # noqa: SLF001
+    # ... and the listener-facing event MUST NOT fire while agent is speaking.
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(adapter._event_queue.get(), timeout=0.05)
     await adapter.close()
@@ -242,12 +246,12 @@ async def test_unmuted_state_emits_speech_started() -> None:
         return False  # agent is NOT speaking — listener notifications flow
 
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config, session_state_provider=state_provider)
     await adapter.load()
-    await adapter.push_audio(_speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
+    await adapter.push_audio(speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
     event = await asyncio.wait_for(adapter._event_queue.get(), timeout=0.05)
     assert isinstance(event, SpeechStartedEvent)
     await adapter.close()
@@ -259,12 +263,12 @@ async def test_no_provider_emits_speech_started_the_default_barge_in_path() -> N
     default), onset emission is never suppressed — a barge-in onset always flows,
     even while the persona is speaking."""
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config, session_state_provider=None)
     await adapter.load()
-    await adapter.push_audio(_speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
+    await adapter.push_audio(speech_pcm(500), SILERO_SAMPLE_RATE_HZ)
     event = await asyncio.wait_for(adapter._event_queue.get(), timeout=0.05)
     assert isinstance(event, SpeechStartedEvent)
     await adapter.close()
@@ -274,7 +278,7 @@ async def test_no_provider_emits_speech_started_the_default_barge_in_path() -> N
 async def test_tts_mute_window_does_not_suppress_speech_ended() -> None:
     """speech_ended is NEVER muted — real silence transitions are real."""
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
         silero_min_silence_duration_ms=64,
     )
@@ -288,7 +292,7 @@ async def test_tts_mute_window_does_not_suppress_speech_ended() -> None:
     adapter = SileroVADAdapter(config, session_state_provider=state_provider)
     await adapter.load()
     # Push speech — speech_started fires (agent not speaking).
-    await adapter.push_audio(_speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
+    await adapter.push_audio(speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
     started = await asyncio.wait_for(adapter._event_queue.get(), timeout=0.05)
     assert isinstance(started, SpeechStartedEvent)
     # Now agent starts speaking; push silence — speech_ended must still fire.
@@ -306,12 +310,12 @@ async def test_tts_mute_window_does_not_suppress_speech_ended() -> None:
 @pytest.mark.asyncio
 async def test_speech_activity_events_yields_queue_contents() -> None:
     config = _make_config(
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config)
     await adapter.load()
-    await adapter.push_audio(_speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
+    await adapter.push_audio(speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
     # Iterate one event then close.
     received: list[SpeechStartedEvent | SpeechEndedEvent] = []
 
@@ -373,7 +377,7 @@ async def test_process_runs_off_the_event_loop_thread() -> None:
     # Inject the fake session directly (bypass load() — no native lib needed).
     adapter._vad = _ThreadRecordingVAD()  # type: ignore[assignment]  # noqa: SLF001
 
-    await adapter.push_audio(_speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
+    await adapter.push_audio(speech_pcm(200), SILERO_SAMPLE_RATE_HZ)
 
     assert process_threads, "expected process() to be called for the pushed frames"
     assert all(tid != loop_thread for tid in process_threads)
