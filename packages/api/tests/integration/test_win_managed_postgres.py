@@ -48,10 +48,16 @@ if TYPE_CHECKING:
 def short_base_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     # run_migrations sets os.environ["DATABASE_URL"] (D-K10-8); keep it out of other tests.
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    # A machine with another Postgres often exports PGPASSWORD (the GitHub Windows runner
-    # sets postgres/root), and libpq sends it before reading the password file. Every
-    # test runs with one set, so the lifecycle must not depend on its absence.
+    # A machine with another Postgres often exports libpq variables (the GitHub Windows
+    # runner sets PGUSER=postgres and PGPASSWORD=root). PGPASSWORD is sent before the
+    # password file is read; PGHOSTADDR would take the connection, and the password,
+    # over TCP to 127.0.0.1:5432 instead of the socket; a PGSERVICE that does not exist
+    # fails every connection. Every test runs with all of them set, so the lifecycle
+    # must not depend on their absence.
     monkeypatch.setenv("PGPASSWORD", "another-postgres-password")
+    monkeypatch.setenv("PGHOSTADDR", "127.0.0.1")
+    monkeypatch.setenv("PGSERVICE", "persona-test-no-such-service")
+    monkeypatch.setenv("PGUSER", "postgres")
     base = Path(tempfile.mkdtemp(prefix="wpg"))
     try:
         yield base
@@ -107,6 +113,22 @@ def _connect(manager: CommunityDbManager, **overrides: str) -> None:
         connection.execute("SELECT 1")
 
 
+def _assert_reached_over_the_socket(url: str) -> None:
+    """The managed URL reaches the server over its unix socket, whatever PG* says.
+
+    The server's own view: ``inet_client_addr()`` is NULL only for a unix-socket
+    client, so a connection that PGHOSTADDR had sent over TCP would show an address.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT inet_client_addr()")).scalar() is None
+    finally:
+        engine.dispose()
+
+
 def _assert_locked_down(manager: CommunityDbManager, datadir: Path) -> None:
     import psycopg
 
@@ -121,6 +143,7 @@ def _assert_locked_down(manager: CommunityDbManager, datadir: Path) -> None:
         assert not inherited, path
         assert sorted(p.split("\\")[-1].lower() for p in principals) == sorted([me, "system"])
 
+    _assert_reached_over_the_socket(manager.database_url)
     with pytest.raises(psycopg.OperationalError):
         _connect(manager, passfile=str(datadir.with_name("absent.pgpass")))
     with pytest.raises(psycopg.OperationalError):

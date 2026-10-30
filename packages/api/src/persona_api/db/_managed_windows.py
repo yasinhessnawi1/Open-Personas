@@ -53,11 +53,12 @@ from persona_api.db._managed_files import (
 from persona_api.errors import CommunityDbError
 
 __all__ = [
-    "ENVIRONMENT_PASSWORD",
+    "ENVIRONMENT_OVERRIDES",
     "HBA_CONTENT",
     "SOCKET_PORT",
+    "URL_PINS",
     "SocketTarget",
-    "drop_environment_password",
+    "drop_environment_overrides",
     "password_file_for",
     "pgpass_line",
     "start_socket_only",
@@ -103,27 +104,44 @@ class SocketTarget:
                 "host": str(self.socket_dir),
                 "port": str(self.port),
                 "passfile": str(self.password_file),
+                **URL_PINS,
             },
         )
         return url.render_as_string(hide_password=False)
 
 
-#: libpq sends the password in this variable before it reads the ``passfile`` the
-#: connection string names, so a value left in the environment shadows the password file.
-ENVIRONMENT_PASSWORD = "PGPASSWORD"
+#: libpq variables that take a connection somewhere its connection string does not say.
+#: ``PGPASSWORD`` is sent before the ``passfile`` is read; ``PGHOSTADDR`` connects over
+#: TCP to that address instead of the socket, offering the password file's line there;
+#: ``PGSERVICE`` and ``PGSERVICEFILE`` pull parameters from a service file.
+ENVIRONMENT_OVERRIDES = ("PGPASSWORD", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+
+#: Connection parameters pinned in the URL so no ``PG*`` variable can change them: scram
+#: only (no cleartext or md5 password to whatever answers), no GSS encryption attempt,
+#: and any server role. ``require_auth`` needs libpq 16; psycopg-binary bundles its own
+#: libpq (18 in the locked build), and an older libpq refuses the URL outright rather
+#: than ignoring the pin.
+URL_PINS = {
+    "require_auth": "scram-sha-256",
+    "target_session_attrs": "any",
+    "gssencmode": "disable",
+}
 
 
-def drop_environment_password() -> bool:
-    """Remove ``PGPASSWORD`` from this process's environment; True when one was set.
+def drop_environment_overrides() -> tuple[str, ...]:
+    """Remove :data:`ENVIRONMENT_OVERRIDES` from this process's environment.
 
-    libpq's order is: a ``password`` in the connection string, then ``PGPASSWORD``, then
-    the password file. The bundled database's connection string names only its password
-    file, so any ``PGPASSWORD`` (a machine with another Postgres often sets one; the
+    libpq's order is: the connection string, then these variables, then the password
+    file. The bundled database's connection string names its socket and its password
+    file only, so a ``PGPASSWORD`` (a machine with another Postgres often sets one; the
     GitHub Windows runner sets ``postgres``/``root``) is sent instead and every
-    connection fails authentication. Dropping it also keeps that other password out of
-    the environment of every child process.
+    connection fails, and a ``PGHOSTADDR`` would send the connection, and the password,
+    over TCP. Removing them from ``os.environ`` also keeps them from every child process.
+
+    Returns:
+        The names of the variables that were set (never their values).
     """
-    return os.environ.pop(ENVIRONMENT_PASSWORD, None) is not None
+    return tuple(name for name in ENVIRONMENT_OVERRIDES if os.environ.pop(name, None) is not None)
 
 
 def password_file_for(datadir: Path) -> Path:

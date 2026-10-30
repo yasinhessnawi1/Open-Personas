@@ -344,18 +344,19 @@ class CommunityDbManager:
         :mod:`persona_api.db._managed_windows`.
         """
         from persona_api.db._managed_windows import (
-            ENVIRONMENT_PASSWORD,
-            drop_environment_password,
+            drop_environment_overrides,
             start_socket_only,
         )
 
-        # libpq would send a PGPASSWORD from the environment instead of reading the
-        # password file this lifecycle's connection string names; drop it first.
-        if drop_environment_password():
+        # libpq would let these variables redirect the connection or send another
+        # password; drop them before the first connection. Names only, never values.
+        dropped = drop_environment_overrides()
+        if dropped:
             _LOG.warning(
-                "community managed DB: ignoring {var} from the environment; the bundled "
-                "database authenticates only with its own password file",
-                var=ENVIRONMENT_PASSWORD,
+                "community managed DB: removed {names} from this process's environment, so "
+                "child processes no longer inherit them either; the bundled database is "
+                "reached only through its socket and its own password file",
+                names=", ".join(dropped),
             )
         bin_dir = _pginstall_bin_dir()
         if bin_dir is None:
