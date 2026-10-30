@@ -165,7 +165,9 @@ def test_a_fresh_install_is_socket_only_with_a_password_and_owner_only_files(
             datadir.with_name("pg16.pgpass").read_text(encoding="utf-8").strip().split(":")[-1]
         )
         assert password not in url
-        assert make_url(url).query["host"] == str(datadir)
+        # The manager resolves its base folder once (review L-3), so the URL names the
+        # long spelling even when TEMP is an 8.3 short name (the runner's RUNNER~1).
+        assert make_url(url).query["host"] == str(short_base_dir.resolve() / "pg16")
         _assert_locked_down(manager, datadir)
 
         run_migrations(url)
@@ -185,27 +187,44 @@ def test_a_fresh_install_is_socket_only_with_a_password_and_owner_only_files(
         again.stop()
 
 
-def _legacy_datadir_folder(datadir: Path) -> None:
-    """The data folder as the bundled launcher found it under ``~/.persona``.
+def _profile_like_base(base: Path) -> None:
+    """Give ``base`` the access list of a Windows profile folder (``%USERPROFILE%``).
 
-    A profile folder grants this account explicitly, beside entries inherited from its
-    parent. ``tempfile.mkdtemp`` does not: its 0o700 folder grants SYSTEM, Administrators
-    and OWNER RIGHTS only, and when an elevated administrator creates it (the GitHub
-    runner) the owner is the Administrators group, so nothing names the account itself.
-    ``initdb`` drops Administrators from its token before it touches the folder, could
-    not open it, and failed ("could not create directory ...: File exists"). The
-    account's own entry is added here, and the inherited ones stay, so the manager still
-    has to restrict a folder that is not yet owner-only.
+    A profile folder grants SYSTEM, Administrators and the account itself, explicitly and
+    inheritably, and ``~/.persona/pg16`` made by the bundled launcher inherits all three.
+    ``tempfile.mkdtemp`` does not look like that: its 0o700 folder grants SYSTEM,
+    Administrators and OWNER RIGHTS, and when an elevated administrator creates it (the
+    GitHub runner) the owner is the Administrators group, so no entry names the account.
+    ``initdb`` drops Administrators from its token, could not open the folder, and failed
+    ("could not create directory ...: File exists").
     """
     from persona.tools._winacl import current_user_sid
 
-    datadir.mkdir()
     subprocess.run(  # noqa: S603 - icacls, a Windows builtin
-        ["icacls", str(datadir), "/grant", f"*{current_user_sid()}:(OI)(CI)F"],
+        [
+            "icacls",
+            str(base),
+            "/inheritance:r",
+            "/remove:g",
+            "*S-1-3-4",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            f"*{current_user_sid()}:(OI)(CI)F",
+        ],
         capture_output=True,
         timeout=30,
         check=True,
     )
+
+
+def _explicit_entries(path: Path) -> list[str]:
+    """The entries on ``path``'s DACL that were set on it rather than inherited."""
+    listing = subprocess.run(  # noqa: S603 - icacls, a Windows builtin
+        ["icacls", str(path)], capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    entries = [line.replace(str(path), "").strip() for line in listing.splitlines()]
+    return [e for e in entries if ":" in e and not e.startswith("Successfully") and "(I)" not in e]
 
 
 def test_a_trust_datadir_from_the_bundled_launcher_is_upgraded(short_base_dir: Path) -> None:
@@ -214,8 +233,12 @@ def test_a_trust_datadir_from_the_bundled_launcher_is_upgraded(short_base_dir: P
     from persona_api.db.community_managed import CommunityDbManager
 
     datadir = short_base_dir / "pg16"
-    _legacy_datadir_folder(datadir)
+    _profile_like_base(short_base_dir)
     old = pixeltable_pgserver.get_server(datadir, cleanup_mode=None)  # type: ignore[attr-defined]
+    # The legacy folder, as on a real install: everything on it is inherited (the
+    # Administrators entry among them), which the manager replaces with owner-only
+    # access. An explicit grant to anyone else would be refused (review M-1).
+    assert _explicit_entries(datadir) == [], _explicit_entries(datadir)
     old_pid = _postmaster_pid(datadir)
     assert _tcp_listeners(old_pid) != []  # the launcher's loopback TCP listener, with trust
 
