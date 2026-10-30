@@ -343,8 +343,21 @@ class CommunityDbManager:
         account, so on Windows the manager starts the bundled binaries itself; see
         :mod:`persona_api.db._managed_windows`.
         """
-        from persona_api.db._managed_windows import start_socket_only
+        from persona_api.db._managed_windows import (
+            drop_environment_overrides,
+            start_socket_only,
+        )
 
+        # libpq would let these variables redirect the connection or send another
+        # password; drop them before the first connection. Names only, never values.
+        dropped = drop_environment_overrides()
+        if dropped:
+            _LOG.warning(
+                "community managed DB: removed {names} from this process's environment, so "
+                "child processes no longer inherit them either; the bundled database is "
+                "reached only through its socket and its own password file",
+                names=", ".join(dropped),
+            )
         bin_dir = _pginstall_bin_dir()
         if bin_dir is None:
             raise CommunityDbError(

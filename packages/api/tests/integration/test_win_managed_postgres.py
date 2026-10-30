@@ -48,6 +48,16 @@ if TYPE_CHECKING:
 def short_base_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     # run_migrations sets os.environ["DATABASE_URL"] (D-K10-8); keep it out of other tests.
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    # A machine with another Postgres often exports libpq variables (the GitHub Windows
+    # runner sets PGUSER=postgres and PGPASSWORD=root). PGPASSWORD is sent before the
+    # password file is read; PGHOSTADDR would take the connection, and the password,
+    # over TCP to 127.0.0.1:5432 instead of the socket; a PGSERVICE that does not exist
+    # fails every connection. Every test runs with all of them set, so the lifecycle
+    # must not depend on their absence.
+    monkeypatch.setenv("PGPASSWORD", "another-postgres-password")
+    monkeypatch.setenv("PGHOSTADDR", "127.0.0.1")
+    monkeypatch.setenv("PGSERVICE", "persona-test-no-such-service")
+    monkeypatch.setenv("PGUSER", "postgres")
     base = Path(tempfile.mkdtemp(prefix="wpg"))
     try:
         yield base
@@ -103,6 +113,22 @@ def _connect(manager: CommunityDbManager, **overrides: str) -> None:
         connection.execute("SELECT 1")
 
 
+def _assert_reached_over_the_socket(url: str) -> None:
+    """The managed URL reaches the server over its unix socket, whatever PG* says.
+
+    The server's own view: ``inet_client_addr()`` is NULL only for a unix-socket
+    client, so a connection that PGHOSTADDR had sent over TCP would show an address.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT inet_client_addr()")).scalar() is None
+    finally:
+        engine.dispose()
+
+
 def _assert_locked_down(manager: CommunityDbManager, datadir: Path) -> None:
     import psycopg
 
@@ -117,6 +143,7 @@ def _assert_locked_down(manager: CommunityDbManager, datadir: Path) -> None:
         assert not inherited, path
         assert sorted(p.split("\\")[-1].lower() for p in principals) == sorted([me, "system"])
 
+    _assert_reached_over_the_socket(manager.database_url)
     with pytest.raises(psycopg.OperationalError):
         _connect(manager, passfile=str(datadir.with_name("absent.pgpass")))
     with pytest.raises(psycopg.OperationalError):
@@ -138,7 +165,9 @@ def test_a_fresh_install_is_socket_only_with_a_password_and_owner_only_files(
             datadir.with_name("pg16.pgpass").read_text(encoding="utf-8").strip().split(":")[-1]
         )
         assert password not in url
-        assert make_url(url).query["host"] == str(datadir)
+        # The manager resolves its base folder once (review L-3), so the URL names the
+        # long spelling even when TEMP is an 8.3 short name (the runner's RUNNER~1).
+        assert make_url(url).query["host"] == str(short_base_dir.resolve() / "pg16")
         _assert_locked_down(manager, datadir)
 
         run_migrations(url)
@@ -158,13 +187,58 @@ def test_a_fresh_install_is_socket_only_with_a_password_and_owner_only_files(
         again.stop()
 
 
+def _profile_like_base(base: Path) -> None:
+    """Give ``base`` the access list of a Windows profile folder (``%USERPROFILE%``).
+
+    A profile folder grants SYSTEM, Administrators and the account itself, explicitly and
+    inheritably, and ``~/.persona/pg16`` made by the bundled launcher inherits all three.
+    ``tempfile.mkdtemp`` does not look like that: its 0o700 folder grants SYSTEM,
+    Administrators and OWNER RIGHTS, and when an elevated administrator creates it (the
+    GitHub runner) the owner is the Administrators group, so no entry names the account.
+    ``initdb`` drops Administrators from its token, could not open the folder, and failed
+    ("could not create directory ...: File exists").
+    """
+    from persona.tools._winacl import current_user_sid
+
+    subprocess.run(  # noqa: S603 - icacls, a Windows builtin
+        [
+            "icacls",
+            str(base),
+            "/inheritance:r",
+            "/remove:g",
+            "*S-1-3-4",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            f"*{current_user_sid()}:(OI)(CI)F",
+        ],
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+
+
+def _explicit_entries(path: Path) -> list[str]:
+    """The entries on ``path``'s DACL that were set on it rather than inherited."""
+    listing = subprocess.run(  # noqa: S603 - icacls, a Windows builtin
+        ["icacls", str(path)], capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    entries = [line.replace(str(path), "").strip() for line in listing.splitlines()]
+    return [e for e in entries if ":" in e and not e.startswith("Successfully") and "(I)" not in e]
+
+
 def test_a_trust_datadir_from_the_bundled_launcher_is_upgraded(short_base_dir: Path) -> None:
     import pixeltable_pgserver
     from persona_api.db._managed_windows import HBA_CONTENT
     from persona_api.db.community_managed import CommunityDbManager
 
     datadir = short_base_dir / "pg16"
+    _profile_like_base(short_base_dir)
     old = pixeltable_pgserver.get_server(datadir, cleanup_mode=None)  # type: ignore[attr-defined]
+    # The legacy folder, as on a real install: everything on it is inherited (the
+    # Administrators entry among them), which the manager replaces with owner-only
+    # access. An explicit grant to anyone else would be refused (review M-1).
+    assert _explicit_entries(datadir) == [], _explicit_entries(datadir)
     old_pid = _postmaster_pid(datadir)
     assert _tcp_listeners(old_pid) != []  # the launcher's loopback TCP listener, with trust
 

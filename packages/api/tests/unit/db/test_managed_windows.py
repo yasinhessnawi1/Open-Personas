@@ -9,6 +9,7 @@ file, the order of the tool calls, and the refusals.
 from __future__ import annotations
 
 import errno
+import os
 import shutil
 import sys
 import tempfile
@@ -44,6 +45,14 @@ class TestConnectionString:
         assert url.query["host"] == "C:\\Users\\someone\\.persona\\pg16"
         assert url.query["port"] == "5432"
         assert url.query["passfile"] == "C:\\Users\\someone\\.persona\\pg16.pgpass"
+
+    def test_the_url_pins_what_the_environment_could_otherwise_change(self) -> None:
+        """scram only (no cleartext or md5 password to a server that asks for one), no
+        GSS encryption attempt, and any server role, whatever PG* variables say."""
+        query = make_url(_target().sqlalchemy_url("persona")).query
+        assert query["require_auth"] == "scram-sha-256"
+        assert query["target_session_attrs"] == "any"
+        assert query["gssencmode"] == "disable"
 
     def test_the_url_names_the_password_file_never_the_password(self) -> None:
         rendered = _target().sqlalchemy_url("persona")
@@ -339,6 +348,20 @@ def short_base() -> Iterator[Path]:
         shutil.rmtree(base, ignore_errors=True)
 
 
+@pytest.fixture
+def logged_warnings() -> Iterator[list[str]]:
+    """Every WARNING and above, as logged (persona.logging wraps loguru, so stdlib
+    ``caplog`` sees nothing; the test_api_boot_hermetic.py pattern)."""
+    from loguru import logger
+
+    captured: list[str] = []
+    sink = logger.add(lambda message: captured.append(str(message)), level="WARNING")
+    try:
+        yield captured
+    finally:
+        logger.remove(sink)
+
+
 class TestTheManagerRouting:
     def test_pg_ctl_has_the_exe_suffix_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "platform", "win32")
@@ -389,6 +412,91 @@ class TestTheManagerRouting:
         with pytest.raises(CommunityDbError) as caught:
             manager.start()
         assert caught.value.context["reason"] == "socket_path_too_long"
+
+    def test_libpq_environment_overrides_are_dropped_before_the_first_connection(
+        self,
+        short_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        logged_warnings: list[str],
+    ) -> None:
+        """libpq reads these from the environment, and each one takes the connection
+        somewhere its string does not say: PGPASSWORD is sent before the ``passfile`` is
+        read (the GitHub Windows runner sets PGPASSWORD=root); PGHOSTADDR sends it over
+        TCP to that address instead of the socket, with the password file's line;
+        PGSERVICE and PGSERVICEFILE pull parameters from a service file. The Windows
+        lifecycle drops them all before its first connection and names them, never
+        their values, in one warning.
+        """
+        names = ("PGPASSWORD", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+        seen_at_start: list[dict[str, str | None]] = []
+        seen_at_connect: list[dict[str, str | None]] = []
+
+        def snapshot() -> dict[str, str | None]:
+            return {name: os.environ.get(name) for name in names}
+
+        def fake_start(datadir: Path, _bin_dir: Path) -> mw.SocketTarget:
+            seen_at_start.append(snapshot())
+            return _target(datadir)
+
+        def fake_ensure(_self: object, _admin_url: str) -> None:
+            seen_at_connect.append(snapshot())
+
+        values = {name: f"value-of-{name.lower()}" for name in names}
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("PGUSER", "postgres")  # harmless: the URL names the user
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(mw, "start_socket_only", fake_start)
+        monkeypatch.setattr(cm, "_pginstall_bin_dir", lambda: short_base / "bin")
+        monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", fake_ensure)
+        cm.CommunityDbManager(external_url=None, base_dir=short_base).start()
+        nothing = dict.fromkeys(names)
+        assert seen_at_start == [nothing]
+        assert seen_at_connect == [nothing]
+        assert os.environ.get("PGUSER") == "postgres"
+        warning = " ".join(logged_warnings)
+        assert all(name in warning for name in names), warning
+        assert not any(value in warning for value in values.values()), warning
+        assert "child processes" in warning, warning
+
+    def test_nothing_is_logged_when_no_override_is_set(
+        self,
+        short_base: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        logged_warnings: list[str],
+    ) -> None:
+        for name in mw.ENVIRONMENT_OVERRIDES:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(mw, "start_socket_only", lambda datadir, _bin: _target(datadir))
+        monkeypatch.setattr(cm, "_pginstall_bin_dir", lambda: short_base / "bin")
+        monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", _recorder([]))
+        cm.CommunityDbManager(external_url=None, base_dir=short_base).start()
+        assert not [line for line in logged_warnings if "environment" in line]
+
+    def test_the_posix_lifecycle_leaves_pgpassword_alone(
+        self, short_base: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the Windows lifecycle authenticates by password file; elsewhere the
+        embedded server trusts its 0700 socket, so the environment is not touched."""
+
+        class _Server:
+            def ensure_postgres_running(self) -> None:
+                return None
+
+            def get_uri(self, database: str) -> str:
+                return f"postgresql://postgres@/{database}?host={short_base}"
+
+        import pixeltable_pgserver
+
+        monkeypatch.setenv("PGPASSWORD", "root")
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            pixeltable_pgserver, "get_server", lambda *_a, **_k: _Server(), raising=False
+        )
+        monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", _recorder([]))
+        cm.CommunityDbManager(external_url=None, base_dir=short_base).start()
+        assert os.environ.get("PGPASSWORD") == "root"
 
 
 def _recorder(sink: list[str]) -> Callable[[object, str], None]:
