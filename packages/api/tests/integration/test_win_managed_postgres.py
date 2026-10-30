@@ -162,12 +162,36 @@ def test_a_fresh_install_is_socket_only_with_a_password_and_owner_only_files(
         again.stop()
 
 
+def _legacy_datadir_folder(datadir: Path) -> None:
+    """The data folder as the bundled launcher found it under ``~/.persona``.
+
+    A profile folder grants this account explicitly, beside entries inherited from its
+    parent. ``tempfile.mkdtemp`` does not: its 0o700 folder grants SYSTEM, Administrators
+    and OWNER RIGHTS only, and when an elevated administrator creates it (the GitHub
+    runner) the owner is the Administrators group, so nothing names the account itself.
+    ``initdb`` drops Administrators from its token before it touches the folder, could
+    not open it, and failed ("could not create directory ...: File exists"). The
+    account's own entry is added here, and the inherited ones stay, so the manager still
+    has to restrict a folder that is not yet owner-only.
+    """
+    from persona.tools._winacl import current_user_sid
+
+    datadir.mkdir()
+    subprocess.run(  # noqa: S603 - icacls, a Windows builtin
+        ["icacls", str(datadir), "/grant", f"*{current_user_sid()}:(OI)(CI)F"],
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+
+
 def test_a_trust_datadir_from_the_bundled_launcher_is_upgraded(short_base_dir: Path) -> None:
     import pixeltable_pgserver
     from persona_api.db._managed_windows import HBA_CONTENT
     from persona_api.db.community_managed import CommunityDbManager
 
     datadir = short_base_dir / "pg16"
+    _legacy_datadir_folder(datadir)
     old = pixeltable_pgserver.get_server(datadir, cleanup_mode=None)  # type: ignore[attr-defined]
     old_pid = _postmaster_pid(datadir)
     assert _tcp_listeners(old_pid) != []  # the launcher's loopback TCP listener, with trust
