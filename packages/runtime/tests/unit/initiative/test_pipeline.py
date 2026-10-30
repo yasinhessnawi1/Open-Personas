@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v7",
+        "prompt_version": "a5-scan-v8",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -767,10 +767,12 @@ class TestFlushReappliesTheSubjectRule:
             "a5-scan-v4",
             "a5-scan-v5",
             "a5-scan-v6",
+            "a5-scan-v7",
             "a7-event-candidate-v1",
             "a7-event-candidate-v2",
             "a7-event-candidate-v3",
             "a7-event-candidate-v4",
+            "a7-event-candidate-v5",
             "v1",
             "scripted",
             "",
@@ -786,7 +788,7 @@ class TestFlushReappliesTheSubjectRule:
         assert h.ledger.expired == [("n-held", "prompt_superseded")]
         assert delivery.calls == []
 
-    @pytest.mark.parametrize("version", ["a5-scan-v7", "a5-scan-v9", "a7-event-candidate-v5"])
+    @pytest.mark.parametrize("version", ["a5-scan-v8", "a5-scan-v9", "a7-event-candidate-v6"])
     @pytest.mark.asyncio
     async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
         current = _candidate().model_copy(update={"prompt_version": version})
@@ -943,14 +945,14 @@ class TestThirdReviewFlushOrderAndLocalDay:
 
 
 def test_the_scan_floor_is_the_version_in_force() -> None:
-    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v7)."""
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v8)."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
     from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
 
-    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v7"
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 7
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v8"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 8
     assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a5-scan-v6")
+    assert not prompt_version_deliverable("a5-scan-v7")
 
 
 class _FingerprintGrounding:
@@ -965,6 +967,38 @@ class _FingerprintGrounding:
         return GroundingVerdict(
             admitted=True, fingerprint="fp-admitted", served_model="m-head", kept=self._kept
         )
+
+
+class _ContextDownGrounding:
+    """The judge's context read failed (a transient database error)."""
+
+    async def check(self, candidate: InitiativeCandidate, **kwargs: object) -> GroundingVerdict:  # noqa: ARG002
+        return GroundingVerdict(admitted=False, rejection=GroundingRejection.CONTEXT_UNAVAILABLE)
+
+
+class TestATransientContextErrorKeepsTheNoticeHeld:
+    """Review LOW-5: at the flush a failed context read keeps the notice held for the next
+    flush (the hold age still bounds it); at submit it is discarded, audited."""
+
+    @pytest.mark.asyncio
+    async def test_the_flush_keeps_it_held(self) -> None:
+        delivery = _FakeDelivery()
+        h = _Harness(delivery=delivery)
+        held = _Held(_candidate(), created_at=datetime.now(UTC))
+        h.ledger = _FakeLedger(h.trace, held=[held])
+        h.pipeline._ledger = h.ledger  # noqa: SLF001
+        h.pipeline._grounding = _ContextDownGrounding()  # noqa: SLF001
+        await h.pipeline.flush("u1")
+        assert h.ledger.expired == []
+        assert delivery.calls == []
+
+    @pytest.mark.asyncio
+    async def test_the_submit_discards_it(self) -> None:
+        h = _Harness()
+        h.pipeline._grounding = _ContextDownGrounding()  # noqa: SLF001
+        await h.pipeline.submit((_candidate(),))
+        assert h.auditor.events[0][0] == "initiative.discard_ungrounded"
+        assert h.auditor.events[0][2] == "context_unavailable"
 
 
 class TestTheFingerprintRidesOnTheHeldNotice:
@@ -1129,6 +1163,9 @@ class _PolicySource:
 
     def task_content(self, owner_id: str, task_id: str) -> str | None:  # noqa: ARG002
         return None
+
+    def node_context(self, owner_id: str, node_id: str, *, limit: int) -> list[Any]:  # noqa: ARG002
+        return []
 
 
 class _NoJudge:

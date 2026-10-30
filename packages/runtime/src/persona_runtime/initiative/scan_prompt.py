@@ -25,6 +25,9 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v8 (owner ruling 2026-10-30, F1): the date first, then at most one short advisory
+#: clause ("so you may want to start soon"); counted countdowns stay forbidden; a
+#: weekday only when the material states one.
 #: v7 (fifth review): countdowns ("soon", "3 days left", "within a week", "by the
 #: weekend") are forbidden in the reason and the offer, like relative days.
 #: v6 (judge stability): every date in "why_now" and "next_step" is stated absolutely
@@ -47,7 +50,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v7"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v8"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -146,12 +149,14 @@ have changed since it was said is held lightly ("if you haven't compared offers 
 quote is still open"), never asserted as still true. No pressure ("closing quickly") and no \
 presuming what they have decided.
 8. DATES ARE ABSOLUTE. The user may read this a day or more after you write it. In "why_now" \
-and "next_step" state every date with its weekday, day and month as the material gives it \
-("on Friday 2 October"). Never write "today", "tonight", "tomorrow", "this Friday", "next \
-Tuesday", "in 3 days", or a weekday without its date. Never write a countdown either: \
-"soon", "shortly", "overnight", "3 days left", "two days away", "within a week", "by the \
-weekend". Give the date itself instead ("the offer ends on Friday 2 October", not "the offer \
-ends in 3 days").
+and "next_step" state every date exactly as the material gives it: its day and month, and its \
+weekday ONLY if the material states one ("on Friday 2 October" when the material says Friday; \
+"on 4 October 2026" when it does not). Never write "today", "tonight", "tomorrow", \
+"this Friday", "next Tuesday", or a weekday without its date, and never a counted \
+countdown: "in 3 days", "3 days left", "two days away", "within a week", "by the weekend", \
+"overnight". After the date you may add AT MOST ONE short advisory clause, such as "so \
+you may want to start soon" or "there is still time"; nothing vaguer stands without the \
+date.
 
 EXAMPLES (scenario → correct output):
 - Rich, warm notes about the user's life; nothing dated, nothing pending → \

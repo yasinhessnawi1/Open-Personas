@@ -462,7 +462,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v7"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v8"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -516,19 +516,27 @@ class TestPromptArtifact:
             assert trigger.value in SCAN_SYSTEM_PROMPT
 
 
-def test_the_v7_prompt_requires_absolute_dates_and_no_countdown() -> None:
+def test_the_v8_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
     import json
 
     from persona_runtime.initiative.specifics import relative_day_words
 
     flat = " ".join(SCAN_SYSTEM_PROMPT.split())
     assert "8. DATES ARE ABSOLUTE." in flat
-    assert '("on Friday 2 October")' in flat
+    assert "its weekday ONLY if the material states one" in flat
+    assert '"on 4 October 2026" when it does not' in flat
     assert (
-        'Never write a countdown either: "soon", "shortly", "overnight", "3 days left", "two '
-        'days away", "within a week", "by the weekend". Give the date itself instead ("the '
-        'offer ends on Friday 2 October", not "the offer ends in 3 days").'
+        'Never write "today", "tonight", "tomorrow", "this Friday", "next Tuesday", or a weekday '
+        'without its date, and never a counted countdown: "in 3 days", "3 days left", "two days '
+        'away", "within a week", "by the weekend", "overnight". After the date you may add AT '
+        'MOST ONE short advisory clause, such as "so you may want to start soon" or "there is '
+        'still time"; nothing vaguer stands without the date.'
     ) in flat
     example = json.loads(EXAMPLE_CATCH_OUTPUT)["candidates"][0]
-    assert relative_day_words(example["why_now"]) == []  # the example obeys its own rule
-    assert relative_day_words(example["next_step"]) == []
+    from persona_runtime.initiative.specifics import states_a_date, vague_hedges
+
+    dated = states_a_date(example["why_now"], example["next_step"])
+    assert dated  # the example states its date and keeps one advisory clause
+    assert relative_day_words(example["why_now"], dated=dated) == []
+    assert relative_day_words(example["next_step"], dated=dated) == []
+    assert len(vague_hedges(example["why_now"], example["next_step"])) == 1

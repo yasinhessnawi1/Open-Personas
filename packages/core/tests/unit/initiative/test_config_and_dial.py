@@ -15,13 +15,28 @@ class TestInitiativeSettings:
     def test_defaults_are_the_ratified_numbers(self) -> None:
         s = InitiativeSettings()
         assert s.scan_hour == 7
-        assert s.scan_tier == "small"
+        assert s.model_tier == "mid"  # owner ruling 2026-10-30
+        assert s.judge_max_output_tokens == 2048
+        assert s.scan_max_output_tokens == 4096
         assert s.scan_candidate_cap == 3
         assert s.recent_nodes_limit == 30
         assert s.daily_cap_per_persona == 1
         assert s.weekly_cap_per_persona == 3
         assert s.daily_cap_per_user == 2
         assert s.interrupt_horizon_hours == 48
+
+    @pytest.mark.parametrize("tier", ["small", "mid", "frontier"])
+    def test_the_model_tier_is_set_by_env(self, monkeypatch: pytest.MonkeyPatch, tier: str) -> None:
+        monkeypatch.setenv("PERSONA_INITIATIVE_MODEL_TIER", tier)
+        assert InitiativeSettings().model_tier == tier
+
+    @pytest.mark.parametrize("tier", ["large", "", "background"])
+    def test_an_unknown_model_tier_fails_at_startup(
+        self, monkeypatch: pytest.MonkeyPatch, tier: str
+    ) -> None:
+        monkeypatch.setenv("PERSONA_INITIATIVE_MODEL_TIER", tier)
+        with pytest.raises(ValueError, match="model_tier"):
+            InitiativeSettings()
 
     def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("PERSONA_INITIATIVE_ENABLED", "true")

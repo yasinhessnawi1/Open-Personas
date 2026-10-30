@@ -460,7 +460,7 @@ def test_the_b3_shape_is_discarded_by_the_real_pipeline(
         observation="The user has Mia's dinner party on Thursday.",
         citations=(citation,),
         trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
-        why_now="The dinner party is coming up.",
+        why_now="The dinner party is on your calendar.",
         plan=(PlannedStep(description="draft tips", categories=frozenset({ActionCategory.DRAFT})),),
         next_step="Draft a gift idea for the host.",
         value=0.8,
@@ -469,7 +469,7 @@ def test_the_b3_shape_is_discarded_by_the_real_pipeline(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v7",
+        prompt_version="a5-scan-v8",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)
@@ -508,7 +508,7 @@ def test_a_conversation_disclosed_after_the_hold_never_flushes(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v7",
+        prompt_version="a5-scan-v8",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)

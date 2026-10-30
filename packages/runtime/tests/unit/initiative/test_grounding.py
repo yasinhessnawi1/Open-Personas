@@ -31,6 +31,11 @@ from persona_runtime.initiative import (
     GroundingChecker,
     GroundingRejection,
 )
+from persona_runtime.initiative.grounding import (
+    MAX_CONTEXT_NOTES,
+    MAX_CONTEXT_PER_NODE,
+    ContextNote,
+)
 
 _HEARING_CONTENT = "The user's custody hearing is on Friday 10 July."
 _TASK_CONTENT = "Monitoring task: collected the required forms; hearing prep pending."
@@ -43,7 +48,10 @@ class _FakeSource:
         self.nodes: dict[str, str | None] = {"node-hearing": _HEARING_CONTENT}
         self.conversations: dict[str, str] = {}
         self.tasks: dict[str, str] = {"task-prep": _TASK_CONTENT}
+        self.context: dict[str, list[ContextNote]] = {}
+        self.context_asks: list[tuple[str, int]] = []
         self.raises = False
+        self.context_raises = False
 
     def node_content(self, owner_id: str, node_id: str) -> str | None:  # noqa: ARG002
         if self.raises:
@@ -56,6 +64,13 @@ class _FakeSource:
 
     def task_content(self, owner_id: str, task_id: str) -> str | None:  # noqa: ARG002
         return self.tasks.get(task_id)
+
+    def node_context(self, owner_id: str, node_id: str, *, limit: int) -> list[ContextNote]:  # noqa: ARG002
+        if self.context_raises:
+            msg = "graph unavailable"
+            raise RuntimeError(msg)
+        self.context_asks.append((node_id, limit))
+        return self.context.get(node_id, [])[:limit]
 
 
 #: The stub judge's identity as the chain reports it ("provider/model").
@@ -312,7 +327,7 @@ class TestJudgeOutputCap:
         judge = _StubJudge('{"entailed": false}')
         await GroundingChecker(source=_FakeSource(), backend=judge).check(_candidate())
         assert judge.last_kwargs["max_tokens"] == InitiativeSettings().judge_max_output_tokens
-        assert InitiativeSettings().judge_max_output_tokens == 1024
+        assert InitiativeSettings().judge_max_output_tokens == 2048
 
     @pytest.mark.asyncio
     async def test_the_cap_is_the_injected_value(self) -> None:
@@ -352,7 +367,7 @@ class TestTheJudgeChecksWhatTheUserReads:
             "The hearing is on Friday 17 July.",  # a date the notes never state
             "Your hearing is at 14:00 on Friday 10 July.",  # a time the notes never state
             "The hearing moved to Thursday 9 July.",  # a changed fact
-            "If the form is due in March, there is time.",  # a hedge cannot carry a date
+            "If the form is due in March, act on it.",  # a hedge cannot carry a date
             "Your hearing is on Friday 1 July.",  # "1" is not found inside "10"
             "Your hearing is on Mon 10 July.",  # an abbreviated weekday is checked too
         ],
@@ -395,7 +410,7 @@ class TestTheJudgeChecksWhatTheUserReads:
     def test_the_judge_prompt_defines_the_hedge_and_the_offer_rules(self) -> None:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
 
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v3"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v4"
         flat = " ".join(_SYSTEM_PROMPT.split())
         assert 'introduced by "if", "unless" or "in case"' in flat
         assert '"if the form is due Friday" is a claim, not a hedge' in flat
@@ -511,7 +526,7 @@ class TestProductionShapedSpecifics:
 
         flat = " ".join(_SYSTEM_PROMPT.split())
         assert "A RELATIVE time claim in the MESSAGE" in flat
-        assert "If you cannot verify it from TODAY and the excerpts, rule 5 fails." in flat
+        assert "If you cannot verify it from TODAY and the excerpts, rule 7 fails." in flat
         assert "The OFFER and the PLAN only propose actions." in flat
 
     def test_without_a_date_the_judge_is_told_the_scan_date_in_utc(self) -> None:
@@ -647,6 +662,177 @@ class TestTheQuoteCheckNormalises:
         )
         assert verdict.admitted is True
         assert verdict.supporting_quote == _A4_QUOTE
+
+
+_JOB_LEFT = ContextNote(date(2026, 9, 1), "The user left the job at Nordlys on 31 August 2026.")
+_NEW_JOB = ContextNote(date(2026, 9, 2), "The user started at Fjord Analytics on 1 September 2026.")
+_OLD = ContextNote(date(2026, 6, 1), "In June the user mentioned the hearing to a friend.")
+
+
+class TestTheJudgeSeesTheLinkedContext:
+    """F2 (owner ruling 2026-10-30): the judge is shown the newest notes linked to each
+    cited node as CONTEXT, never as grounds, and says no when it shows the grounds no
+    longer hold (A5-R-1 re-run B7)."""
+
+    @pytest.mark.asyncio
+    async def test_the_context_is_shown_newest_first_and_labelled(self) -> None:
+        source = _FakeSource()
+        source.context["node-hearing"] = [_NEW_JOB, _JOB_LEFT, _OLD]  # newest first (contract)
+        judge = _StubJudge(_YES)
+        await GroundingChecker(source=source, backend=judge).check(_candidate())
+        prompt = str(judge.last_user_prompt)
+        assert (
+            "CONTEXT (newer notes linked to the cited ones; NOT grounds, never quote them):"
+            in prompt
+        )
+        assert "[context 1] (noted 2026-09-02) The user started at Fjord Analytics" in prompt
+        assert "[context 2] (noted 2026-09-01) The user left the job at Nordlys" in prompt
+        assert "In June the user" not in prompt  # read per node at the bound, not beyond it
+        assert source.context_asks == [("node-hearing", MAX_CONTEXT_PER_NODE)]
+        assert prompt.index("CONTEXT (") > prompt.index("The cited excerpts")
+
+    @pytest.mark.asyncio
+    async def test_no_context_section_without_linked_notes(self) -> None:
+        judge = _StubJudge(_YES)
+        await GroundingChecker(source=_FakeSource(), backend=judge).check(_candidate())
+        assert "CONTEXT (" not in str(judge.last_user_prompt)
+
+    @pytest.mark.asyncio
+    async def test_the_context_is_bounded_in_all_and_never_repeats_an_excerpt(self) -> None:
+        source = _FakeSource()
+        source.nodes["node-b"] = "The user's custody hearing moved to the district court."
+        source.nodes["node-c"] = "The user's lawyer is Kari Nordmann at Hjort."
+        notes = [
+            ContextNote(date(2026, 9, d), f"Linked note number {d} about the case.")
+            for d in range(1, 7)
+        ]
+        # The excerpt itself, linked and newest: it must not reappear as context.
+        source.context["node-hearing"] = [
+            ContextNote(date(2026, 9, 30), _HEARING_CONTENT),
+            notes[0],
+        ]
+        source.context["node-b"] = [notes[3], notes[2]]
+        source.context["node-c"] = [notes[5], notes[4]]
+        candidate = _candidate(
+            GroundingCitation(kind=CitationKind.NODE, ref="node-hearing"),
+            GroundingCitation(kind=CitationKind.NODE, ref="node-b"),
+            GroundingCitation(kind=CitationKind.NODE, ref="node-c"),
+        )
+        judge = _StubJudge(_YES)
+        await GroundingChecker(source=source, backend=judge).check(candidate)
+        prompt = str(judge.last_user_prompt)
+        assert prompt.count("[context ") == MAX_CONTEXT_NOTES == 4
+        assert "[context 1] (noted 2026-09-06) Linked note number 6" in prompt
+        assert "[context 4] (noted 2026-09-03) Linked note number 3" in prompt
+        assert "Linked note number 1 " not in prompt  # the oldest falls outside the bound
+        assert prompt.count(_HEARING_CONTENT) == 1  # the excerpt, not again as context
+
+    @pytest.mark.asyncio
+    async def test_only_cited_nodes_are_asked_for_context(self) -> None:
+        source = _FakeSource()
+        candidate = _candidate(GroundingCitation(kind=CitationKind.TASK, ref="task-prep"))
+        await GroundingChecker(source=source, backend=_StubJudge(_YES)).check(candidate)
+        assert source.context_asks == []
+
+    @pytest.mark.asyncio
+    async def test_a_quote_copied_from_the_context_is_refused(self) -> None:
+        source = _FakeSource()
+        source.context["node-hearing"] = [_JOB_LEFT]
+        judge = _StubJudge(json.dumps({"entailed": True, "quote": _JOB_LEFT.content}))
+        verdict = await GroundingChecker(source=source, backend=judge).check(_candidate())
+        assert verdict.rejection is GroundingRejection.NOT_ENTAILED
+
+    @pytest.mark.asyncio
+    async def test_a_context_read_failure_is_its_own_rejection(self) -> None:
+        """Review LOW-5: a transient context read error is named apart from a dissolved
+        citation, so the flush can keep the notice held instead of expiring it."""
+        source = _FakeSource()
+        source.context_raises = True
+        judge = _StubJudge(_YES)
+        verdict = await GroundingChecker(source=source, backend=judge).check(_candidate())
+        assert verdict.admitted is False
+        assert verdict.rejection is GroundingRejection.CONTEXT_UNAVAILABLE
+        assert judge.calls == 0
+        source.context_raises = False
+        source.raises = True  # a citation read failure is still a dissolved citation
+        verdict = await GroundingChecker(source=source, backend=judge).check(_candidate())
+        assert verdict.rejection is GroundingRejection.UNRESOLVED_CITATION
+
+    @pytest.mark.asyncio
+    async def test_a_newly_linked_note_changes_the_fingerprint_and_is_judged(self) -> None:
+        from persona_runtime.initiative.grounding import excerpts_fingerprint
+
+        source = _FakeSource()
+        judge = _StubJudge('{"entailed": false}')
+        before = excerpts_fingerprint([_HEARING_CONTENT])
+        source.context["node-hearing"] = [_JOB_LEFT]
+        verdict = await GroundingChecker(source=source, backend=judge).check(
+            _candidate(), admitted_fingerprint=before, admitted_served_model=_HEAD
+        )
+        assert verdict.fingerprint == excerpts_fingerprint([_HEARING_CONTENT], [_JOB_LEFT])
+        assert verdict.fingerprint != before
+        assert judge.calls == 1  # re-asked, not kept
+
+    def test_the_rule_and_the_version(self) -> None:
+        from persona_runtime.initiative.grounding import _SYSTEM_PROMPT, ENTAILMENT_PROMPT_VERSION
+
+        flat = " ".join(_SYSTEM_PROMPT.split())
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v4"
+        assert (
+            "8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no "
+            "longer hold (the person has left that job or role, moved, cancelled it, already "
+            "done or finished it, or a newer note contradicts an excerpt), rule 8 fails."
+        ) in flat
+
+
+class TestTheJudgeRulesOfV4:
+    """F3 (owner ruling 2026-10-30): the re-run's wrong NOs were an advisory or
+    time-sufficiency clause after a stated deadline, a weekday computed from a stated date
+    (7 of 7 NO), and A3's overlap of two stated times. The rules that now admit them, and
+    the ones that still refuse speculation and unstated facts, pinned verbatim."""
+
+    @staticmethod
+    def _flat() -> str:
+        from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
+
+        return " ".join(_SYSTEM_PROMPT.split())
+
+    def test_an_advisory_clause_after_a_stated_deadline_is_allowed(self) -> None:
+        assert (
+            "4. A second exception to rule 2, an ADVISORY CLAUSE after a stated deadline or "
+            'fact: one short clause such as "so you may want to start soon", "there is still '
+            'time to compare offers", "you still have a few days" or "paying it now avoids the '
+            'reminder fee". It holds when the deadline or consequence it relies on is stated in '
+            "the excerpts and the clause is TRUE on TODAY."
+        ) in self._flat()
+
+    def test_speculation_and_unstated_facts_stay_refused(self) -> None:
+        flat = self._flat()
+        assert (
+            "It may NOT add a deadline, amount, consequence or requirement the excerpts do not "
+            'state, and a date the excerpts only guess at ("might be before Christmas") stays a '
+            "claim."
+        ) in flat
+        assert "Inference, speculation, plausibility" in flat
+        assert "2. Every factual claim in the MESSAGE is stated or directly supported" in flat
+
+    def test_a_weekday_and_a_comparison_are_arithmetic_on_stated_facts(self) -> None:
+        assert (
+            "5. Arithmetic on stated facts is support, not inference: a weekday that matches a "
+            "stated date (the date fixes the weekday), and a comparison of stated dates or times "
+            "across excerpts (they overlap, one comes before the other, the gap between them). "
+            "For a comparison, quote one line from each excerpt it uses, each on its own line."
+        ) in self._flat()
+
+    def test_a_comparison_quote_of_one_line_per_excerpt_is_verbatim(self) -> None:
+        from persona_runtime.initiative.grounding import quote_in_excerpts
+
+        dentist = "The user has a dentist appointment on Tuesday 29 September 2026 at 14:00."
+        budget = "The user presents the Q3 budget on Tuesday 29 September 2026, 13:00 to 16:00."
+        assert quote_in_excerpts(f"{dentist}\n{budget}", [dentist, budget])
+
+    def test_the_relative_rule_names_a_vague_countdown(self) -> None:
+        assert '"within the week", "a few days left") must be TRUE on TODAY' in self._flat()
 
 
 class TestTheFlushKeepsAnUnchangedVerdict:
@@ -894,7 +1080,6 @@ class TestDatesAreAbsolute:
             "It renews in a couple of days.",
             "It renews in a few days.",
             "It renews in a couple days.",
-            "Your insurance renews on 4 October 2026, in a few days' time.",
             "Cancel the day before.",
             "It renews on Sun.",
             "It renews this coming Sunday.",
@@ -994,6 +1179,172 @@ class TestDatesAreAbsolute:
         assert relative_day_words("soon, after all") == ["soon"]
         assert relative_day_words("overnight Delivery") == ["overnight"]  # lower-case noun only
         assert relative_day_words("overnight and early") == ["overnight"]
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Your insurance renews on 4 October 2026, so you may want to compare offers soon.",
+            "Your insurance renews on 4 October 2026; there are a few days left.",
+            "Your insurance renews on 4 October 2026, so you still have a few days.",
+            "Your insurance renews on 4 October 2026; there is still time to compare offers.",
+            "Your insurance renews on 4 October 2026, in a few days' time.",
+            "Your insurance renews on 4 October 2026; I can look at offers shortly.",
+            "Your insurance renews on 4 October 2026; compare offers in the next few days.",
+            "Your insurance renews on 4/10/2026, so you may want to compare offers soon.",
+        ],
+    )
+    def test_a_vague_hedge_on_a_dated_message_passes(self, why_now: str) -> None:
+        """F1 (owner ruling 2026-10-30): the date is stated, the hedge is vague, and a
+        dated message is always re-judged at the flush."""
+        assert _verdict(why_now, _INSURANCE) == _ADMITTED
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Your insurance renews soon.",
+            "You still have a few days to compare offers.",
+            "You still have time to compare offers.",
+            "There is still time to compare offers.",
+            "Your renewal is a few days away.",
+            "Compare offers in the next few days.",
+            "Your renewal is days away.",
+        ],
+    )
+    def test_a_vague_hedge_on_an_undated_message_is_refused(self, why_now: str) -> None:
+        assert _verdict(why_now, _INSURANCE) == _RELATIVE
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Your insurance renews on 4 October 2026, in 2 days.",
+            "Your insurance renews on 4 October 2026; two days left.",
+            "Your insurance renews on 4 October 2026, which is tomorrow.",
+            "Your insurance renews on 4 October 2026, within a week.",
+            "Your insurance renews on 4 October 2026; compare offers by the weekend.",
+            "Your insurance renews on 4 October 2026; it renews overnight.",
+            "Your insurance renews on Sunday 4 October 2026, next Sunday.",
+            "Your insurance renews on 4 October 2026; compare offers in the next 3 days.",
+        ],
+    )
+    def test_a_counted_or_day_naming_form_is_refused_even_when_dated(self, why_now: str) -> None:
+        assert _verdict(why_now, _INSURANCE) == _RELATIVE
+
+    def test_a_date_in_either_text_dates_the_message(self) -> None:
+        dated = "Your insurance renews on 4 October 2026."
+        assert _verdict(dated, _INSURANCE, next_step="compare offers soon") == _ADMITTED
+        undated = "Your insurance renews automatically."
+        assert _verdict(undated, _INSURANCE, next_step="compare offers soon") == _RELATIVE
+        assert (
+            _verdict("Compare offers soon.", _INSURANCE, next_step="before 4 October 2026")
+            == _ADMITTED
+        )
+
+    @pytest.mark.parametrize(
+        "hedge",
+        [
+            "you have time to compare offers",
+            "you have plenty of time to compare offers",
+            "there is plenty of time to compare offers",
+            "there is time to compare offers",
+            "plenty of time remains to compare offers",
+            "you've still got time to compare offers",
+            "it could renew any day now",
+            "it renews before long",
+            "it is not long now",
+            "it is almost due",
+            "compare offers in the coming days",
+            "the renewal is coming up",
+        ],
+    )
+    def test_the_wider_vague_hedges(self, hedge: str) -> None:
+        """Review LOW-3, both ways: refused on an undated message, allowed (alone) on a
+        dated one."""
+        assert _verdict(hedge[0].upper() + hedge[1:] + ".", _INSURANCE) == _RELATIVE
+        dated = f"Your insurance renews on 4 October 2026, and {hedge}."
+        assert _verdict(dated, _INSURANCE) == _ADMITTED
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Your insurance renews on 4 October 2026, so act soon; there is still time.",
+            "Your insurance renews on 4 October 2026; you have time, but not long now.",
+        ],
+    )
+    def test_a_dated_message_carries_at_most_one_vague_hedge(self, why_now: str) -> None:
+        assert _verdict(why_now, _INSURANCE) == _RELATIVE
+
+    def test_only_the_message_counts_toward_the_one_hedge_limit(self) -> None:
+        """Re-review MEDIUM-B: a courtesy in the offer does not use up the message's one
+        advisory clause; two hedges in the message still refuse it."""
+        why = "Your insurance renews on 4 October 2026, so you may want to act soon."
+        assert _verdict(why, _INSURANCE, next_step="compare offers shortly") == _ADMITTED
+        assert _verdict(why, _INSURANCE, next_step="compare offers when you have time") == (
+            _ADMITTED
+        )
+        two = "Your insurance renews on 4 October 2026, so act soon; there is still time."
+        assert _verdict(two, _INSURANCE, next_step="compare offers") == _RELATIVE
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "Compare offers when you have time.",
+            "If you have time, I can compare offers for you.",
+            "You have time-sensitive paperwork for the renewal.",
+            "You have time off planned around the renewal.",
+            "You have time pressure at work this autumn.",
+            "You have time zones to juggle for the renewal call.",
+            "The renewal keeps coming up in your notes.",
+            "There are questions coming up in your driving test.",
+        ],
+    )
+    def test_ordinary_uses_of_time_and_coming_up_are_admitted(self, why_now: str) -> None:
+        """Re-review MEDIUM-B: each probe the review ran, now admitted (no hedge)."""
+        from persona_runtime.initiative.specifics import vague_hedges
+
+        assert vague_hedges(why_now) == []
+        assert _verdict(why_now, _INSURANCE) == _ADMITTED
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "You have time to compare offers.",
+            "You have time.",
+            "There is still time.",
+            "Plenty of time remains to compare offers.",
+            "You've still got time, but act soon.",
+            "The renewal is coming up.",
+            "The renewals are coming up.",
+            "The renewal is coming up soon.",
+            "The renewal is coming up on Sunday.",
+        ],
+    )
+    def test_the_narrowed_hedges_still_refuse_an_undated_message(self, why_now: str) -> None:
+        assert _verdict(why_now, _INSURANCE) == _RELATIVE
+
+    @pytest.mark.parametrize(
+        "why_now",
+        [
+            "You were coming up with ideas for the insurance renewal.",
+            "Coming up with a shortlist of insurers needs the renewal details.",
+        ],
+    )
+    def test_non_temporal_uses_are_not_hedges(self, why_now: str) -> None:
+        from persona_runtime.initiative.specifics import vague_hedges
+
+        assert vague_hedges(why_now) == []
+        assert _verdict(why_now, _INSURANCE) == _ADMITTED
+
+    def test_the_dated_switch_and_the_date_detector(self) -> None:
+        from persona_runtime.initiative.specifics import relative_day_words, states_a_date
+
+        text = "so you may want to act soon; two days left"
+        assert relative_day_words(text) == ["soon", "two days left"]
+        assert relative_day_words(text, dated=True) == ["two days left"]
+        assert states_a_date("due 4 October")
+        assert states_a_date("due 2026-10-04")
+        assert states_a_date("due 4/10/2026")
+        assert states_a_date("x", "due 4.10.2026")
+        assert not states_a_date("due in October", "on Friday")
 
     def test_a_counted_duration_is_a_time_word_but_not_refused(self) -> None:
         """Fifth review MEDIUM-A: a countdown the refusal misses is still re-judged."""

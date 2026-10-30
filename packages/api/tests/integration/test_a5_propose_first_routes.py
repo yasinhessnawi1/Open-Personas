@@ -225,7 +225,7 @@ def _candidate(*, schedule_change: ScheduleChange | None = None) -> InitiativeCa
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v7",
+        prompt_version="a5-scan-v8",
         scanned_at=_NOW,
         schedule_change=schedule_change,
     )

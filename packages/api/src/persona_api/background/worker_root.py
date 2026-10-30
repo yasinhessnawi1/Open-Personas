@@ -56,6 +56,7 @@ from persona.graph.config import GraphSettings
 from persona.graph.index import make_graph_index
 from persona.graph.postgres import PostgresGraphBackend
 from persona.initiative import InitiativeDial, InitiativeSettings
+from persona.initiative.config import warn_renamed_initiative_settings
 from persona.jobs import JobRegistry
 from persona.logging import get_logger
 from persona.stores.engine import EpisodicConsolidationEngine
@@ -94,6 +95,7 @@ from persona_api.initiative.pipeline_wiring import (
     ApiUserContextReader,
     ApiWellbeingSubjectCheck,
     LedgerAdapter,
+    initiative_model_backend,
 )
 from persona_api.initiative.provisioner import InitiativeProvisioner
 from persona_api.initiative.readers import (
@@ -559,6 +561,7 @@ def build_worker_registry(
         register_auto_topup_handler(registry, rls_engine=rls_engine, gateway=_stripe_gateway)
 
     initiative_settings = InitiativeSettings()
+    warn_renamed_initiative_settings()
     if initiative_settings.enabled:
         # Spec M3 (T5b): the scan backend is metered so ``collect_llm_usage`` in the
         # handler captures the scan's real cost for owner billing. R9-096: plan-scoped —
@@ -566,12 +569,11 @@ def build_worker_registry(
         # ``estimate_static`` paid-model pricing in production. One instance is shared by
         # the scanner, the grounding judge and the A7 event-candidate producer; all three
         # run inside the job's owner scope, so all three follow the owner's plan.
-        initiative_backend = plan_scoped_background_backend(
-            tier=initiative_settings.scan_tier,
+        initiative_backend = initiative_model_backend(
+            initiative_settings,
             rls_engine=rls_engine,
             paid_tier_registry=tier_registry,
             free_tier_registry=free_tier_registry,
-            metered=True,
         )
         # R9-249 review: both readers drop items learned from, or begun in, a gated
         # interaction; one shared gate definition (the subject rule and A7 use it too).
@@ -628,7 +630,10 @@ def build_worker_registry(
         pipeline = InitiativePipeline(
             grounding=GroundingChecker(
                 source=ApiGroundingSource(
-                    rls_engine, TaskStore(rls_engine), CheckpointStore(rls_engine)
+                    rls_engine,
+                    TaskStore(rls_engine),
+                    CheckpointStore(rls_engine),
+                    gate=scan_gate,  # the judge's CONTEXT passes the scan's own gate (F2)
                 ),
                 backend=initiative_backend,
                 max_output_tokens=initiative_settings.judge_max_output_tokens,

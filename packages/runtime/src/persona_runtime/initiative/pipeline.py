@@ -64,6 +64,7 @@ from persona.initiative.restraint import (
 )
 from persona.logging import get_logger
 
+from persona_runtime.initiative.grounding import GroundingRejection
 from persona_runtime.initiative.specifics import earliest_upcoming_date
 
 if TYPE_CHECKING:
@@ -267,7 +268,7 @@ class HeldSubject(StrEnum):
     WAIT = "wait"
 
 
-def _lapse_anchor(candidate: InitiativeCandidate, zone: str) -> datetime | None:
+def notice_lapse_anchor(candidate: InitiativeCandidate, zone: str) -> datetime | None:
     """The instant the notice's moment has passed in the user's zone.
 
     The moment is the earliest date the message or the offer states on or after the
@@ -615,7 +616,7 @@ class InitiativePipeline:
         if subject is HeldSubject.WAIT:
             return  # synthesis not caught up, or the check failed: stays held
         today, zone = self._local_day(owner_id, now)
-        if why_now_lapsed(anchor_time=_lapse_anchor(candidate, zone), now=now):
+        if why_now_lapsed(anchor_time=notice_lapse_anchor(candidate, zone), now=now):
             self._ledger.expire_stale(owner_id, notice.id, reason="why_now_lapsed", now=now)
             return
         verdict = await self._grounding.check(
@@ -625,6 +626,8 @@ class InitiativePipeline:
             admitted_fingerprint=candidate.grounding_fingerprint,
             admitted_served_model=candidate.grounding_served_model,
         )
+        if verdict.rejection is GroundingRejection.CONTEXT_UNAVAILABLE:
+            return  # a transient read error: stays held for the next flush (review LOW-5)
         if not verdict.admitted:
             self._ledger.expire_stale(owner_id, notice.id, reason="grounding_dissolved", now=now)
             return

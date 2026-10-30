@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -46,19 +47,26 @@ from pydantic import BaseModel, ConfigDict
 
 from persona_runtime.initiative.specifics import (
     relative_day_words,
+    states_a_date,
     time_words,
     unsupported_numbers,
     unsupported_specifics,
+    vague_hedges,
 )
 from persona_runtime.routing.model_selection import resolve_served_model
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from persona.backends.protocol import ChatBackend
     from persona.backends.types import ChatResponse
     from persona.initiative import GroundingCitation, InitiativeCandidate
 
 __all__ = [
+    "ContextNote",
     "ENTAILMENT_PROMPT_VERSION",
+    "MAX_CONTEXT_NOTES",
+    "MAX_CONTEXT_PER_NODE",
     "excerpts_fingerprint",
     "MIN_QUOTE_PART_CHARS",
     "quote_in_excerpts",
@@ -72,17 +80,23 @@ _logger = get_logger("runtime.initiative.grounding")
 
 #: Bumped on any rule/prompt change; recorded with every verdict for traceability
 #: (the Spec-10 versioned-artifact discipline; the A5-R-1 suite re-runs per version).
+#: v4 (owner ruling 2026-10-30, F3): an advisory clause after a stated deadline, a weekday
+#: matching a stated date, and a comparison across excerpts are support; (F2) the judge also
+#: sees CONTEXT, the newest notes linked to
+#: each cited node (never grounds, never quoted), and answers no when it shows the grounds no
+#: longer hold (A5-R-1 re-run B7: a slides note for a job the user had left).
 #: v3 (R9-249 third review LOW 2, LOW 8): the judge is told TODAY (the user's local date and
 #: timezone) and refuses a relative claim it cannot verify against it; it sees the PLAN.
 #: v2 (R9-249 re-review HIGH-B): one call judges the observation AND the message the user
 #: reads (``why_now``) AND the offer (``next_step``), with a precise rule for hedged clauses.
-ENTAILMENT_PROMPT_VERSION = "a5-entailment-v3"
+ENTAILMENT_PROMPT_VERSION = "a5-entailment-v4"
 
 _SYSTEM_PROMPT = """\
 You verify whether cited excerpts GROUND an observation an assistant wants to raise, \
 unprompted, with its user, and the words it will use. You are given: TODAY (the user's \
 local date), the OBSERVATION (the assistant's grounds), the MESSAGE (the sentence the user \
-will read), the OFFER (what the assistant offers to do) and the PLAN (its steps). The bar is \
+will read), the OFFER (what the assistant offers to do), the PLAN (its steps), the cited \
+excerpts and, when there are any, CONTEXT notes linked to them. The bar is \
 strict. Inference, speculation, \
 plausibility, or "reading between the lines" is NOT support. A wrong unprompted claim about \
 someone's life costs trust; when in doubt, the answer is NO.
@@ -98,17 +112,31 @@ they have done something yet, whether something is still open or still wanted), 
 not state that thing as true. Example: "if you haven't compared offers yet". A hedged \
 clause may NOT introduce a date, time, amount, deadline or requirement the excerpts do not \
 state: "if the form is due Friday" is a claim, not a hedge.
-4. The OFFER and the PLAN only propose actions. They assert no fact the excerpts do not \
+4. A second exception to rule 2, an ADVISORY CLAUSE after a stated deadline or fact: one \
+short clause such as "so you may want to start soon", "there is still time to compare \
+offers", "you still have a few days" or "paying it now avoids the reminder fee". It holds \
+when the deadline or consequence it relies on is stated in the excerpts and the clause is \
+TRUE on TODAY. It may NOT add a deadline, amount, consequence or requirement the excerpts do \
+not state, and a date the excerpts only guess at ("might be before Christmas") stays a claim.
+5. Arithmetic on stated facts is support, not inference: a weekday that matches a stated date \
+(the date fixes the weekday), and a comparison of stated dates or times across excerpts (they \
+overlap, one comes before the other, the gap between them). For a comparison, quote one line \
+from each excerpt it uses, each on its own line.
+6. The OFFER and the PLAN only propose actions. They assert no fact the excerpts do not \
 state.
-5. A RELATIVE time claim in the MESSAGE ("today", "tomorrow", "this Friday", "next week", \
-"in 3 days", "within the week") must be TRUE on TODAY, given the dates the excerpts state. \
-If you cannot verify it from TODAY and the excerpts, rule 5 fails.
+7. A RELATIVE time claim in the MESSAGE ("today", "tomorrow", "this Friday", "next week", \
+"in 3 days", "within the week", "a few days left") must be TRUE on TODAY, given the dates the \
+excerpts state. If you cannot verify it from TODAY and the excerpts, rule 7 fails.
+8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no longer hold \
+(the person has left that job or role, moved, cancelled it, already done or finished it, or \
+a newer note contradicts an excerpt), rule 8 fails.
 
 Reply with ONLY a JSON object, no prose:
 {"entailed": true|false, "quote": "<a VERBATIM span copied exactly from the excerpts that \
 states or directly supports the observation>"}
-The quote must be copied character-for-character from the excerpts. If any rule fails, or \
-the excerpts do not contain such a span, reply {"entailed": false}.
+The quote must be copied character-for-character from the excerpts (for a comparison, one \
+line from each excerpt, on separate lines). If any rule fails, or the excerpts do not contain \
+such a span, reply {"entailed": false}.
 """
 
 #: The shortest quote, and the shortest line of a multi-line quote, normalised: every
@@ -136,6 +164,9 @@ class GroundingRejection(StrEnum):
     #: The message or the offer names a day relative to when it was written ("tomorrow",
     #: "this Friday", a weekday without its date): the user may read it a day later.
     RELATIVE_DATE = "relative_date"
+    #: The judge's CONTEXT could not be read (a transient source error): the scan
+    #: discards, the flush keeps the notice held for its next pass (review LOW-5).
+    CONTEXT_UNAVAILABLE = "context_unavailable"
 
 
 class GroundingVerdict(BaseModel):
@@ -163,6 +194,20 @@ class GroundingVerdict(BaseModel):
     kept: bool = False
 
 
+#: The judge's CONTEXT bound (F2): the newest linked notes read per cited node, and shown
+#: in all. Small on purpose: context can only make the judge say no.
+MAX_CONTEXT_PER_NODE = 2
+MAX_CONTEXT_NOTES = 4
+
+
+@dataclass(frozen=True)
+class ContextNote:
+    """A note linked to a cited node, shown to the judge as CONTEXT, never as grounds."""
+
+    written_on: date | None
+    content: str
+
+
 @runtime_checkable
 class GroundingSource(Protocol):
     """The mechanical citation-resolution surface (api-implemented, T6/T7).
@@ -183,6 +228,12 @@ class GroundingSource(Protocol):
 
     def task_content(self, owner_id: str, task_id: str) -> str | None:
         """The task's goal + report/state summary; ``None`` when unknown."""
+        ...
+
+    def node_context(self, owner_id: str, node_id: str, *, limit: int) -> Sequence[ContextNote]:
+        """Up to ``limit`` notes linked to the node one hop away (the scan's lenses),
+        newest first; never a wellbeing-tagged note or one learned from a gated
+        interaction. Empty when there are none."""
         ...
 
 
@@ -257,8 +308,21 @@ class GroundingChecker:
             return GroundingVerdict(
                 admitted=False, rejection=GroundingRejection.UNRESOLVED_CITATION
             )
-        fingerprint = excerpts_fingerprint(excerpts)
-        relative = relative_day_words(candidate.why_now) + relative_day_words(candidate.next_step)
+        try:
+            context = self._context(candidate, excerpts)
+        except Exception:  # noqa: BLE001 - transient: never read as a dissolved citation
+            _logger.warning("judge context unavailable; not judged this time (fail-soft)")
+            return GroundingVerdict(
+                admitted=False, rejection=GroundingRejection.CONTEXT_UNAVAILABLE
+            )
+        fingerprint = excerpts_fingerprint(excerpts, context)
+        dated = states_a_date(candidate.why_now, candidate.next_step)
+        relative = relative_day_words(candidate.why_now, dated=dated) + relative_day_words(
+            candidate.next_step, dated=dated
+        )
+        hedges = vague_hedges(candidate.why_now)  # the offer's courtesy does not count
+        if dated and len(hedges) > 1:  # at most one advisory clause after the date
+            relative += hedges
         if relative:
             _logger.info("message names a relative day; discarding ({n})", n=len(relative))
             return GroundingVerdict(
@@ -288,7 +352,7 @@ class GroundingChecker:
             _logger.info("grounding kept the admitted verdict (unchanged, head model, undated)")
             return GroundingVerdict(admitted=True, fingerprint=fingerprint, kept=True)
         try:
-            verdict = await self._judge(candidate, excerpts, today=day, timezone=zone)
+            verdict = await self._judge(candidate, excerpts, context, today=day, timezone=zone)
             return verdict.model_copy(update={"fingerprint": fingerprint})
         except Exception:  # noqa: BLE001 — a judge failure discards, never crashes the scan
             _logger.warning("entailment judge failed; discarding candidate (fail-soft)")
@@ -318,6 +382,25 @@ class GroundingChecker:
 
     # --- layer 1: mechanical resolution --------------------------------------
 
+    def _context(self, candidate: InitiativeCandidate, excerpts: list[str]) -> list[ContextNote]:
+        """The CONTEXT for the judge: each cited node's newest linked notes, bounded,
+        without repeating an excerpt, newest first overall (F2)."""
+        from persona.initiative import CitationKind
+
+        notes: list[ContextNote] = []
+        seen = set(excerpts)
+        for citation in candidate.citations:
+            if citation.kind is not CitationKind.NODE:
+                continue
+            for note in self._source.node_context(
+                candidate.owner_id, citation.ref, limit=MAX_CONTEXT_PER_NODE
+            ):
+                if note.content not in seen:
+                    seen.add(note.content)
+                    notes.append(note)
+        notes.sort(key=lambda n: n.written_on or date.min, reverse=True)
+        return notes[:MAX_CONTEXT_NOTES]
+
     def _resolve_all(self, candidate: InitiativeCandidate) -> list[str] | None:
         """Every citation dereferenced, in order; ``None`` if ANY fails to resolve."""
         excerpts: list[str] = []
@@ -344,7 +427,13 @@ class GroundingChecker:
     # --- layer 2: the entailment judge ---------------------------------------
 
     async def _judge(
-        self, candidate: InitiativeCandidate, excerpts: list[str], *, today: date, timezone: str
+        self,
+        candidate: InitiativeCandidate,
+        excerpts: list[str],
+        context: list[ContextNote],
+        *,
+        today: date,
+        timezone: str,
     ) -> GroundingVerdict:
         """One deciding call over the admitted set; conservative parse; quote verified."""
         now = datetime.now(UTC)
@@ -358,6 +447,7 @@ class GroundingChecker:
             f"OFFER (what the assistant offers to do):\n{candidate.next_step}\n\n"
             f"PLAN (the steps the assistant would take):\n{plan}\n\n"
             f"The cited excerpts (the ONLY admissible grounds):\n{cited}\n\n"
+            f"{_render_context(context)}"
             "Reply with the JSON object."
         )
         messages = [
@@ -477,14 +567,34 @@ def served_identity(chain: ChatBackend, response: ChatResponse) -> str | None:
     return f"{provider}/{model}"
 
 
-def excerpts_fingerprint(excerpts: list[str]) -> str:
-    """A stable fingerprint of the admitted excerpts, in citation order, and of the
-    judge's prompt version (sha256): a verdict reached under another prompt is not
-    kept (fourth review LOW 5)."""
+def _render_context(context: list[ContextNote]) -> str:
+    if not context:
+        return ""
+    lines = "\n".join(
+        f"[context {i + 1}] (noted {n.written_on.isoformat() if n.written_on else 'undated'}) "
+        f"{n.content}"
+        for i, n in enumerate(context)
+    )
+    return (
+        "CONTEXT (newer notes linked to the cited ones; NOT grounds, never quote them):\n"
+        f"{lines}\n\n"
+    )
+
+
+def excerpts_fingerprint(excerpts: list[str], context: Sequence[ContextNote] = ()) -> str:
+    """A stable fingerprint of the admitted excerpts, in citation order, of the CONTEXT
+    the judge was shown (F2: a newly linked note re-asks the judge), and of the judge's
+    prompt version (sha256): a verdict reached under another prompt is not kept
+    (fourth review LOW 5)."""
     digest = hashlib.sha256()
     digest.update(ENTAILMENT_PROMPT_VERSION.encode("utf-8"))
     digest.update(b"\x1d")
     for content in excerpts:
         digest.update(content.encode("utf-8"))
+        digest.update(b"\x1e")
+    digest.update(b"\x1c")
+    for note in context:
+        written = note.written_on.isoformat() if note.written_on else ""
+        digest.update(f"{written}\x1f{note.content}".encode())
         digest.update(b"\x1e")
     return digest.hexdigest()

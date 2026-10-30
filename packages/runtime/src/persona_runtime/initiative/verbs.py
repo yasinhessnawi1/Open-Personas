@@ -23,14 +23,19 @@ asking again costs nothing; a wrong dial move or a wrong confirm costs trust).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from persona.logging import get_logger
 
 from persona_runtime.task_origination.confirm import is_affirmative_confirmation
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+_logger = get_logger("runtime.initiative.verbs")
 
 __all__ = [
     "InitiativeVerb",
@@ -38,6 +43,7 @@ __all__ = [
     "PendingProposalProvider",
     "detect_initiative_cue",
     "is_clean_decline",
+    "is_clean_turn_off",
 ]
 
 
@@ -74,9 +80,63 @@ _DECLINE_RE = re.compile(
 )
 
 
+# An unambiguous turn-off, as the WHOLE message (plus "please" and closing punctuation):
+# the dial moves to off without the model (review MEDIUM-2), so a model that answers
+# nothing can never leave "stop suggesting things" undone. Precision-biased like the
+# decline floor: "stop suggesting that restaurant" and "don't stop suggesting" go to the
+# model, which may still read them; nothing here turns the dial ON.
+_TURN_OFF_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"stop\s+(?:suggesting|making\s+suggestions|bringing\s+(?:things|stuff)\s+up)"
+    r"(?:\s+(?:things|stuff))?"
+    r"|(?:stop|disable|turn\s+off)\s+(?:the\s+)?(?:suggestions|initiative)"
+    r"|turn\s+(?:the\s+)?(?:suggestions|initiative)\s+off"
+    r"|no\s+more\s+suggestions"
+    r"|slutt\s+å\s+(?:foreslå|komme\s+med\s+forslag)(?:\s+ting)?"  # Norwegian
+    r"|ingen\s+flere\s+forslag"
+    r"|توقف\s+عن\s+الاقتراحات"  # Arabic
+    r")(?:\s+please)?\s*[!.…]*\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_clean_turn_off(message: str) -> bool:
+    """Whether ``message`` is, as a whole, an unambiguous "turn initiative off"."""
+    return bool(_TURN_OFF_RE.match(message))
+
+
+# A plain request FOR a suggestion (re-review MEDIUM-A): "what would you suggest for
+# dinner?" talks to the persona, not about its initiative, and must not wait on the dial
+# model. It is a cue only if it ALSO carries a dial word ("could you suggest less often?").
+_ASKS_FOR_SUGGESTION_RE = re.compile(
+    r"\b(?:what|which)\s+(?:would|do|could|can|should)\s+you\s+suggest"
+    r"|\b(?:can|could|would|will)\s+you\s+suggest\b"
+    r"|\b(?:any|some|got\s+any)\s+suggestions?\b"
+    r"|\bdo\s+you\s+have\s+(?:any\s+)?suggestions?\b"
+    r"|^\s*(?:please\s+)?suggest\s+(?:a|an|some|me|something|anything|one|two|three)\b",
+    re.IGNORECASE,
+)
+#: A request that also says HOW OFTEN or WHEN to suggest is a dial command ("can you suggest
+#: things only when I ask", "without me asking", "more often"): third review MEDIUM-1, recall
+#: over precision.
+_DIAL_WORD_RE = re.compile(
+    r"\b(?:stop|stopp|turn\s+off|turn\s+on|disable|enable|no\s+more|fewer|less|more|often|only|"
+    r"ask|asks|asked|asking|"
+    r"don'?t|do\s+not|never|ask\s+(?:me\s+)?(?:first|before)|on\s+your\s+own|unprompted|"
+    r"proactive|initiative|check.?in|bring(?:ing)?\s+(?:things|stuff)\s+up|slutt|ingen)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def detect_initiative_cue(message: str) -> bool:
-    """Whether the message plausibly talks ABOUT initiative/suggestions (admission only)."""
-    return bool(_CUE_RE.search(message))
+    """Whether the message plausibly talks ABOUT initiative/suggestions (admission only).
+
+    A plain request FOR a suggestion is not (re-review MEDIUM-A), unless it also carries a
+    dial word.
+    """
+    if not _CUE_RE.search(message):
+        return False
+    return not _ASKS_FOR_SUGGESTION_RE.search(message) or bool(_DIAL_WORD_RE.search(message))
 
 
 def is_clean_decline(reply: str) -> bool:
@@ -132,12 +192,40 @@ asking a question, or anything ambiguous is NOT an instruction. Reply with ONLY 
 object: {"verb": "dial_off"|"dial_propose_only"|"dial_act"} or {"verb": null}.
 """
 
-    def __init__(self, backend: object) -> None:
-        """Inject the small-tier chat backend (the one cheap deciding call)."""
+    def __init__(
+        self,
+        backend: object,
+        *,
+        max_output_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """Inject the initiative tier's chat backend (the one deciding call).
+
+        ``max_output_tokens`` is the call's cap; ``None`` takes the
+        ``InitiativeSettings.verb_max_output_tokens`` default (a reasoning model reasons
+        inside it). ``timeout_seconds`` bounds the wait (``verb_timeout_seconds``); past
+        it the turn reads no verb.
+        """
+        from persona.initiative import InitiativeSettings
+
+        fields = InitiativeSettings.model_fields
         self._backend = backend
+        self._max_output_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else fields["verb_max_output_tokens"].default
+        )
+        self._timeout_seconds = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else fields["verb_timeout_seconds"].default
+        )
 
     async def interpret(self, message: str) -> InitiativeVerb | None:
-        """The dial verb, or ``None`` — any doubt, malformed output, or error is ``None``."""
+        """The dial verb, or ``None``: an unambiguous turn-off needs no model; otherwise
+        any doubt, malformed or empty output, or error is ``None``."""
+        if is_clean_turn_off(message):
+            return InitiativeVerb.DIAL_OFF
         import json
         from datetime import UTC, datetime
 
@@ -145,16 +233,28 @@ object: {"verb": "dial_off"|"dial_propose_only"|"dial_act"} or {"verb": null}.
 
         now = datetime.now(UTC)
         try:
-            response = await self._backend.chat(  # type: ignore[attr-defined]
-                [
-                    ConversationMessage(role="system", content=self._SYSTEM, created_at=now),
-                    ConversationMessage(
-                        role="user", content=f'User message:\n"{message}"', created_at=now
-                    ),
-                ],
-                temperature=0.0,
-                max_tokens=60,
+            response = await asyncio.wait_for(
+                self._backend.chat(  # type: ignore[attr-defined]
+                    [
+                        ConversationMessage(role="system", content=self._SYSTEM, created_at=now),
+                        ConversationMessage(
+                            role="user", content=f'User message:\n"{message}"', created_at=now
+                        ),
+                    ],
+                    temperature=0.0,
+                    max_tokens=self._max_output_tokens,
+                ),
+                timeout=self._timeout_seconds,
             )
+        except TimeoutError:
+            _logger.warning(
+                "dial-verb interpreter timed out after {s}s; no verb this turn",
+                s=self._timeout_seconds,
+            )
+            return None
+        except Exception:  # noqa: BLE001 - the dial never moves on an error
+            return None
+        try:
             payload = json.loads(str(response.content).strip().strip("`"))
             verb = payload.get("verb") if isinstance(payload, dict) else None
             if verb in (

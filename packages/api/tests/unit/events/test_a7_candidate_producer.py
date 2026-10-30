@@ -45,9 +45,11 @@ class _FakeBackend:
         self._content = content
         self._raises = raises
         self.calls = 0
+        self.max_tokens: list[object] = []
 
-    async def chat(self, messages: list[ConversationMessage], **_: object) -> ChatResponse:  # noqa: ARG002
+    async def chat(self, messages: list[ConversationMessage], **kwargs: object) -> ChatResponse:  # noqa: ARG002
         self.calls += 1
+        self.max_tokens.append(kwargs.get("max_tokens"))
         if self._raises:
             raise RuntimeError("provider down")
         return ChatResponse(
@@ -128,7 +130,7 @@ def test_the_event_prompt_version_and_voice_rule() -> None:
     in the pipeline, for events and scans alike (tested there)."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
-    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v5"
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v6"
     assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
         "\n", " "
     )
@@ -147,19 +149,37 @@ def test_the_event_floor_is_the_version_in_force() -> None:
     """Third review LOW 5: the deliverable floor is A7's prompt in force."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
 
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 5
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 6
     assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a7-event-candidate-v4")
+    assert not prompt_version_deliverable("a7-event-candidate-v5")
 
 
-def test_the_v5_event_prompt_requires_absolute_dates_and_no_countdown() -> None:
+def test_the_v6_event_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
     flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
     assert "6. DATES ARE ABSOLUTE." in flat
-    assert '"tomorrow", "this Friday", "next Tuesday", "in 3 days"' in flat
+    assert "its weekday ONLY if the material states one" in flat
     assert (
-        'Never write a countdown either: "soon", "shortly", "overnight", "3 days left", "two '
-        'days away", "within a week", "by the weekend". Give the date itself instead ("the '
-        'offer ends on Friday 2 October", not "the offer ends in 3 days").'
+        'Never write "today", "tonight", "tomorrow", "this Friday", "next Tuesday", or a weekday '
+        'without its date, and never a counted countdown: "in 3 days", "3 days left", "two days '
+        'away", "within a week", "by the weekend", "overnight". After the date you may add AT '
+        'MOST ONE short advisory clause, such as "so you may want to start soon" or "there is '
+        'still time"; nothing vaguer stands without the date.'
     ) in flat
+
+
+@pytest.mark.asyncio
+async def test_the_output_cap_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review LOW-6: the producer's cap was a hard-coded 900; on the mid tier its reasoning
+    head reasons inside it. Now InitiativeSettings.event_candidate_max_output_tokens."""
+    from persona.initiative import InitiativeSettings
+
+    assert InitiativeSettings().event_candidate_max_output_tokens == 2048
+    backend = _FakeBackend('{"candidate": null}')
+    await _producer(backend, _FakeGrounding(conversation="some content")).produce(_PAYLOAD, _CTX)  # type: ignore[arg-type]
+    assert backend.max_tokens == [2048]
+    monkeypatch.setenv("PERSONA_INITIATIVE_EVENT_CANDIDATE_MAX_OUTPUT_TOKENS", "777")
+    backend = _FakeBackend('{"candidate": null}')
+    await _producer(backend, _FakeGrounding(conversation="some content")).produce(_PAYLOAD, _CTX)  # type: ignore[arg-type]
+    assert backend.max_tokens == [777]

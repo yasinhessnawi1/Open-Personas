@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING
 from persona.graph.models import LinkType, NodeKind
 from persona.logging import get_logger
 from persona_runtime.initiative import ScanLink, ScanNode, ScanTask
+from persona_runtime.initiative.grounding import ContextNote
+from sqlalchemy import text
 
+from persona_api.db.engine import rls_connection
 from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate, node_sources
 from persona_api.tasks.reader import APITaskStateReader
 
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
     from persona.graph.models import ConceptNode, TypedLink
     from persona.graph.protocol import GraphStore
     from persona.tasks import Task
+    from sqlalchemy import Engine
 
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
@@ -44,6 +48,100 @@ _log = get_logger("api.initiative.readers")
 #: K0's similarity fabric — navigation, not noticing — and is deliberately out.
 _LENS_TYPES: set[LinkType] = {LinkType.TEMPORAL, LinkType.ENTITY, LinkType.CAUSAL}
 _LENS_LIMIT = 3  # per-node expansion bound (anti-flooding; the pool is the driver)
+
+
+#: The judge's context read (F2): how many of the newest admissible linked notes it reads
+#: before the interaction gate. Tagged, SELF and merged notes are already filtered in SQL,
+#: so only notes learned from a gated interaction can be dropped after; past this many of
+#: those in a row the context comes back short, never older.
+_CONTEXT_FETCH = 50
+
+#: One hop from the cited node by the scan's lenses, newest note first (review MEDIUM-1:
+#: ``neighbors`` reads edges oldest first, so a busy node's newest notes never surfaced).
+#: Temporal and causal links are open edges; ENTITY links are the canonical association,
+#: exactly as the graph store resolves them for the scan. Merged members, tagged and SELF
+#: notes are excluded here (review LOW-1: a merged member keeps any edge made after the
+#: merge, so the filter must be on the node). A direct link (temporal or causal) ranks
+#: ahead of an entity sibling (re-review LOW-1): a hub entity ("Oslo") can link a note to
+#: many newer siblings, which must not crowd out the one link that contradicts it.
+_CONTEXT_SQL = text(
+    """
+    WITH linked AS (
+        SELECT CASE WHEN e.src_node_id = :node THEN e.dst_node_id ELSE e.src_node_id END
+            AS id,
+            0 AS rank
+        FROM graph_edges e
+        WHERE e.owner_id = :owner
+          AND (e.src_node_id = :node OR e.dst_node_id = :node)
+          AND e.link_type IN ('temporal', 'causal')
+          AND e.invalid_at IS NULL
+        UNION
+        SELECT other.node_id, 1 AS rank
+        FROM graph_node_entities mine
+        JOIN graph_node_entities other
+          ON other.entity_id = mine.entity_id AND other.owner_id = mine.owner_id
+        WHERE mine.owner_id = :owner AND mine.node_id = :node AND other.node_id <> :node
+    )
+    , ranked AS (SELECT id, MIN(rank) AS rank FROM linked GROUP BY id)
+    SELECT g.id, g.content, g.created_at, g.provenance
+    FROM graph_nodes g
+    JOIN ranked ON ranked.id = g.id
+    WHERE g.owner_id = :owner
+      AND g.merged_into IS NULL
+      AND g.wellbeing_category IS NULL
+      AND g.node_kind <> :self_kind
+    ORDER BY ranked.rank, g.created_at DESC, g.id DESC
+    LIMIT :fetch
+    """
+)
+
+
+def _row_sources(provenance: object) -> set[str]:
+    """The interactions a stored node was learned from (its provenance JSON).
+
+    Anything but a list raises (re-review LOW-2): reading it as "no sources" would skip
+    the interaction gate; the error makes the judge's context CONTEXT_UNAVAILABLE.
+    """
+    if not isinstance(provenance, list):
+        msg = f"unreadable node provenance: {type(provenance).__name__}"
+        raise ValueError(msg)
+    if not all(isinstance(p, dict) for p in provenance):  # third review LOW-3
+        msg = "unreadable node provenance entry (not an object)"
+        raise ValueError(msg)
+    return {
+        str(p["interaction_id"])
+        for p in provenance
+        if isinstance(p, dict) and p.get("interaction_id") is not None
+    }
+
+
+def judge_context(
+    engine: Engine, gate: ConversationWellbeingGate, owner_id: str, node_id: str, *, limit: int
+) -> list[ContextNote]:
+    """The newest notes linked to ``node_id`` by the scan's lenses, for the judge (F2).
+
+    The scan reader's exclusions apply: no wellbeing-tagged, SELF or merged note, and no
+    note learned from a gated interaction (``include_unsynthesised`` as the reader asks
+    it); a note written directly, with no interaction behind it, is shown, as the scan
+    shows it. Newest first, ties broken by id, at most ``limit``.
+    """
+    with rls_connection(engine, owner_id) as conn:
+        rows = conn.execute(
+            _CONTEXT_SQL,
+            {
+                "owner": owner_id,
+                "node": node_id,
+                "self_kind": NodeKind.SELF.value,
+                "fetch": _CONTEXT_FETCH,
+            },
+        ).all()
+    sources = {src for row in rows for src in _row_sources(row.provenance)}
+    gated = gate.gated(owner_id, sources, include_unsynthesised=True)
+    kept = [row for row in rows if not _row_sources(row.provenance) & gated]
+    return [
+        ContextNote(written_on=row.created_at.date(), content=str(row.content))
+        for row in kept[:limit]
+    ]
 
 
 def _admissible_target(node: ConceptNode) -> bool:

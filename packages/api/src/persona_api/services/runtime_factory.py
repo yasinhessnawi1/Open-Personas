@@ -1592,10 +1592,14 @@ class RuntimeFactory:
         if not settings.enabled:
             return None
         try:
-            backend = self._plan_tier_registry().get(settings.scan_tier)
+            backend = self._plan_tier_registry().get(settings.model_tier)
         except Exception:  # noqa: BLE001 — keyless env: the gate stays inert, never breaks chat
             return None
-        return ModelInitiativeVerbInterpreter(backend)
+        return ModelInitiativeVerbInterpreter(
+            backend,
+            max_output_tokens=settings.verb_max_output_tokens,
+            timeout_seconds=settings.verb_timeout_seconds,
+        )
 
     def _build_initiative_pending_provider(
         self, persona_id: str | None

@@ -307,8 +307,10 @@ def _hold(
     app_engine: Engine,
     *,
     ref: str = "u::node::n1",
-    version: str = "a5-scan-v7",
+    version: str = "a5-scan-v8",
     at: datetime = _NOW,
+    why_now: str | None = None,
+    scanned_at: datetime = _NOW,
 ) -> str:
     from persona.initiative import (
         CandidateSource,
@@ -325,8 +327,9 @@ def _hold(
         observation="The user's car insurance with If renews on Sunday 4 October.",
         citations=(GroundingCitation(kind=CitationKind.NODE, ref=ref),),
         trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
-        why_now=f"Your car insurance renews on Sunday ({ref}); if you haven't compared offers "
-        "yet, there is still time.",
+        why_now=why_now
+        or f"Your car insurance renews on Sunday 4 October 2026 ({ref}); if you haven't "
+        "compared offers yet, there is still time.",
         plan=(PlannedStep(description="compare", categories=frozenset({ActionCategory.DRAFT})),),
         next_step="put together a shortlist of offers for you to review",
         value=0.8,
@@ -336,7 +339,7 @@ def _hold(
         owner_id="u",
         persona_id="kai",
         prompt_version=version,
-        scanned_at=_NOW,
+        scanned_at=scanned_at,
     )
     claimed = InitiativeLedger(app_engine).try_claim(
         candidate,
@@ -376,7 +379,7 @@ def test_a_held_initiative_reads_as_its_reason_to_you(
     assert [(i.title, i.detail) for i in section.items] == [(why_now, "")]
     rendered = render_digest_message(digest)
     assert "the user" not in rendered.lower()
-    assert "Kai: Your car insurance renews on Sunday" in rendered
+    assert "Kai: Your car insurance renews on Sunday 4 October 2026" in rendered
 
 
 def test_the_digest_lists_only_what_the_flush_could_deliver(
@@ -394,3 +397,62 @@ def test_the_digest_lists_only_what_the_flush_could_deliver(
     subject = _Subject(disclosed={"u::node::disclosed"}, fresh={"u::node::fresh"})
     assert _initiative_titles(app_engine, subject) == [clear]
     assert _initiative_titles(app_engine, None) == []  # fail closed without the check
+
+
+def test_a_lapsed_or_a_hedged_and_imminent_notice_is_not_listed(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """The digest reads a held notice without the judge (owner ruling 2026-10-30, T5): a
+    notice whose moment has passed is not listed (the flush's lapse rule), and a message
+    with a vague hedge is listed only while its moment is more than a day away."""
+    _seed_persona(migrated_engine)
+    earlier = _NOW - timedelta(days=3)  # written 4 July; the digest runs on 7 July
+    _hold(
+        app_engine,
+        ref="u::node::lapsed",
+        why_now="Your car insurance renewed on Sunday 5 July 2026.",
+        scanned_at=earlier,
+    )
+    _hold(
+        app_engine,
+        ref="u::node::hedged-tomorrow",
+        why_now="Your car insurance renews on 8 July 2026, so you may want to compare soon.",
+        scanned_at=earlier,
+    )
+    later = _hold(
+        app_engine,
+        ref="u::node::hedged-later",
+        why_now="Your car insurance renews on 9 July 2026, so you may want to compare soon.",
+        scanned_at=earlier,
+    )
+    plain = _hold(
+        app_engine,
+        ref="u::node::plain-tomorrow",
+        why_now="Your car insurance renews on 8 July 2026.",
+        scanned_at=earlier,
+    )
+    assert sorted(_initiative_titles(app_engine, _Subject())) == sorted([later, plain])
+
+
+def test_the_hedge_window_is_counted_on_the_users_local_day(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """At 07:00 UTC on 7 July it is still 6 July in Honolulu, so a hedged notice about
+    8 July is two local days away and listed; an undated hedge is never listed."""
+    _seed_persona(migrated_engine)
+    with migrated_engine.begin() as conn:
+        conn.execute(text("UPDATE users SET timezone = 'Pacific/Honolulu' WHERE id = 'u'"))
+    earlier = _NOW - timedelta(days=3)
+    local = _hold(
+        app_engine,
+        ref="u::node::hedged-local",
+        why_now="Your car insurance renews on 8 July 2026, so you may want to compare soon.",
+        scanned_at=earlier,
+    )
+    _hold(
+        app_engine,
+        ref="u::node::hedged-undated",
+        why_now="Your car insurance renews soon.",
+        scanned_at=earlier,
+    )
+    assert _initiative_titles(app_engine, _Subject()) == [local]

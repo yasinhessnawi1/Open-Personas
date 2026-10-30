@@ -267,7 +267,7 @@ def test_criterion_6_sensitive_content_never_becomes_the_subject(
             source=CandidateSource.SCAN,
             owner_id=_OWNER,
             persona_id=_PERSONA,
-            prompt_version="a5-scan-v7",
+            prompt_version="a5-scan-v8",
             scanned_at=_NOW,
         )
         asyncio.run(_pipeline(app_engine, backend).submit((hostile,)))
@@ -303,7 +303,7 @@ def test_criterion_5_decline_suppresses_across_scan_cycles(
             source=CandidateSource.SCAN,
             owner_id=_OWNER,
             persona_id=_PERSONA,
-            prompt_version="a5-scan-v7",
+            prompt_version="a5-scan-v8",
             scanned_at=_NOW,
         )
 
@@ -374,7 +374,7 @@ def test_b14_high_acceptance_bait_never_fires(migrated_engine: Engine, app_engin
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v7",
+        prompt_version="a5-scan-v8",
         scanned_at=_NOW,
     )
     token = current_user_id.set(_OWNER)

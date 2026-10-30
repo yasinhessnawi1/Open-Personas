@@ -13,10 +13,16 @@ quality gate passes.
 
 from __future__ import annotations
 
+import os
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["InitiativeSettings"]
+__all__ = ["InitiativeSettings", "warn_renamed_initiative_settings"]
+
+#: Environment names initiative no longer reads, and what replaced each (review LOW-8).
+_RENAMED = {"PERSONA_INITIATIVE_SCAN_TIER": "PERSONA_INITIATIVE_MODEL_TIER"}
 
 #: The ceiling on either output cap: a mistyped setting (an extra zero) must fail at
 #: startup, not let one scan or one judge call run up an unbounded bill.
@@ -31,8 +37,15 @@ class InitiativeSettings(BaseSettings):
             at the composition root while False.
         scan_hour: Local hour (user's tz, A8's resolution) the daily scan fires;
             the same fire flushes the held batch (A5-D-1, A5-D-X-flush-on-scan).
-        scan_tier: The TierRegistry tier the scan routes on (ruling 1 — no
-            router profile; the K2 ``synthesis_tier`` precedent).
+        model_tier: The TierRegistry tier initiative's model calls route on: the
+            scan, the grounding judge, A7's event-candidate producer and the dial
+            verbs (ruling 1: no router profile; the K2 ``synthesis_tier`` precedent).
+            Default ``mid`` (owner ruling 2026-10-30: the small tier's judge and scan
+            were too weak for the gate; the higher per-day cost is accepted). The
+            tier resolves per owner plan, so a free owner's initiative runs on the
+            free registry's tier of the same name (``PERSONA_FREE_MID_MODELS``).
+            Renamed from ``scan_tier`` (``PERSONA_INITIATIVE_SCAN_TIER``) when it
+            came to cover more than the scan.
         scan_max_input_tokens: Hard cap on the scan's assembled input (the
             bounded-work knob).
         scan_max_output_tokens: The scan call's ``max_tokens`` (R9-248). A
@@ -40,8 +53,20 @@ class InitiativeSettings(BaseSettings):
             A5-R-1 pass saw scans cut off mid-JSON. The model stops when done,
             so a typical scan costs the same; only a would-be truncation grows.
         judge_max_output_tokens: The grounding judge's ``max_tokens`` (R9-248);
-            at 300 the pass saw a judge answer cut off mid-quote. Both caps are
-            bounded above at 16384.
+            at 300 the pass saw a judge answer cut off mid-quote. 2048 since the
+            mid tier (its head is a reasoning model, which reasons inside the cap; the
+            2026-10-23 re-run's longest small-tier judge reply was 902 of 1024, and
+            the judge's prompt grows with its context). Both caps are bounded above
+            at 16384.
+        event_candidate_max_output_tokens: A7's event-candidate producer's
+            ``max_tokens`` (review LOW-6: a hard-coded 900 before; the mid tier's
+            reasoning head reasons inside it), default 2048.
+        verb_max_output_tokens: The dial-verb interpreter's ``max_tokens``. 1024 since
+            the mid tier (review MEDIUM-2): its reasoning head spent the old 60 reasoning,
+            every verb parsed to nothing, and "stop suggesting things" did nothing.
+        verb_timeout_seconds: How long a chat turn waits on the dial-verb interpreter
+            before reading "no verb" (re-review MEDIUM-A: the call sits in front of the
+            persona's answer); the clear turn-off is deterministic and never waits.
         scan_candidate_cap: Max candidates per scan, rank-ordered (≤3 — the
             research §6 hard cap; Pulse ships 5–10/day, we cap lower).
         recent_nodes_limit: The noticing-pool size read via
@@ -69,10 +94,13 @@ class InitiativeSettings(BaseSettings):
 
     enabled: bool = False
     scan_hour: int = Field(default=7, ge=0, le=23)
-    scan_tier: str = Field(default="small", min_length=1)
+    model_tier: Literal["small", "mid", "frontier"] = "mid"
     scan_max_input_tokens: int = Field(default=8000, gt=0)
     scan_max_output_tokens: int = Field(default=4096, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
-    judge_max_output_tokens: int = Field(default=1024, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    judge_max_output_tokens: int = Field(default=2048, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    verb_max_output_tokens: int = Field(default=1024, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    verb_timeout_seconds: float = Field(default=4.0, gt=0, le=60)
+    event_candidate_max_output_tokens: int = Field(default=2048, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     scan_candidate_cap: int = Field(default=3, gt=0)
     recent_nodes_limit: int = Field(default=30, gt=0)
     value_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -90,3 +118,23 @@ class InitiativeSettings(BaseSettings):
             msg = "weekly_cap_per_persona must be >= daily_cap_per_persona"
             raise ValueError(msg)
         return self
+
+
+def warn_renamed_initiative_settings() -> list[str]:
+    """Name, once at startup, each renamed initiative variable still set (and ignored).
+
+    ``PERSONA_INITIATIVE_SCAN_TIER`` became ``PERSONA_INITIATIVE_MODEL_TIER`` when the
+    tier came to cover the judge, A7's producer and the dial verbs too; a deployment still
+    setting the old name would silently run on the new default. Returns the names found.
+    """
+    from persona.logging import get_logger
+
+    found = [old for old in _RENAMED if os.environ.get(old) is not None]
+    for old in found:
+        get_logger("initiative.config").warning(
+            "{old} is set but no longer read; use {new} (it now covers the scan, the "
+            "judge, A7's producer and the dial verbs)",
+            old=old,
+            new=_RENAMED[old],
+        )
+    return found

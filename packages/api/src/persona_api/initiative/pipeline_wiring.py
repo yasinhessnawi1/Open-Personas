@@ -28,9 +28,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import datetime
 
+    from persona.backends.protocol import ChatBackend
     from persona.graph.protocol import GraphStore
-    from persona.initiative import GroundingCitation, InitiativeCandidate
+    from persona.initiative import GroundingCitation, InitiativeCandidate, InitiativeSettings
     from persona.initiative.restraint import CadenceCounts
+    from persona_runtime.initiative.grounding import ContextNote
+    from persona_runtime.tier import TierRegistry
     from sqlalchemy import Engine
 
     from persona_api.initiative.store import NoticeRecord
@@ -44,10 +47,37 @@ __all__ = [
     "ApiWellbeingSubjectCheck",
     "LedgerAdapter",
     "ResolvedUserContext",
+    "initiative_model_backend",
 ]
 
 
 _log = get_logger("api.initiative.pipeline_wiring")
+
+
+def initiative_model_backend(
+    settings: InitiativeSettings,
+    *,
+    rls_engine: Engine,
+    paid_tier_registry: TierRegistry,
+    free_tier_registry: TierRegistry | None,
+) -> ChatBackend:
+    """The one backend initiative's model calls share: the scan, the grounding judge
+    and A7's event-candidate producer (and so the judge's head-of-chain identity).
+
+    Routed on ``settings.model_tier`` (default ``mid``) through the plan-scoped,
+    metered composition every background surface uses (R9-096): the tier resolves per
+    call against the CURRENT owner's plan, so a free owner's initiative runs on the
+    free registry's tier of the same name and never reaches a paid model.
+    """
+    from persona_api.services.model_tiers import plan_scoped_background_backend
+
+    return plan_scoped_background_backend(
+        tier=settings.model_tier,
+        rls_engine=rls_engine,
+        paid_tier_registry=paid_tier_registry,
+        free_tier_registry=free_tier_registry,
+        metered=True,
+    )
 
 
 class ApiWellbeingSubjectCheck:
@@ -257,10 +287,31 @@ class ApiGroundingSource:
 
     _MESSAGE_WINDOW = 50  # the citable tail; bounded like every read here
 
-    def __init__(self, engine: Engine, tasks: TaskStore, checkpoints: CheckpointStore) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        tasks: TaskStore,
+        checkpoints: CheckpointStore,
+        *,
+        gate: ConversationWellbeingGate | None = None,
+    ) -> None:
+        """Bind the stores; ``gate`` gives the judge its CONTEXT (F2).
+
+        Without it :meth:`node_context` is empty: A7's producer resolves citations here
+        and never asks for context; the grounding judge's source is built with the gate.
+        """
         self._engine = engine
         self._tasks = tasks
         self._checkpoints = checkpoints
+        self._gate = gate
+
+    def node_context(self, owner_id: str, node_id: str, *, limit: int) -> list[ContextNote]:
+        """The newest admissible notes linked to the node (:func:`judge_context`)."""
+        if self._gate is None:
+            return []
+        from persona_api.initiative.readers import judge_context
+
+        return judge_context(self._engine, self._gate, owner_id, node_id, limit=limit)
 
     def node_content(self, owner_id: str, node_id: str) -> str | None:
         with rls_connection(self._engine, owner_id) as conn:

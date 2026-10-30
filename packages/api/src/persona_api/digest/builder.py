@@ -17,18 +17,24 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta  # noqa: TC003 — runtime Pydantic field types
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import yaml as _yaml
+from persona.config import PersonaCoreConfig
 from persona.initiative import InitiativeSettings, prompt_version_deliverable
+from persona.initiative.restraint import why_now_lapsed
 from persona.tasks import TaskState
 from persona.tasks.reports import build_completion_report, build_stuck_report
 from persona_runtime.initiative import HeldSubject, held_notice_subject
+from persona_runtime.initiative.pipeline import notice_lapse_anchor
+from persona_runtime.initiative.specifics import earliest_upcoming_date, vague_hedges
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from persona_api.db.engine import rls_connection
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import personas as personas_t
+from persona_api.initiative.pipeline_wiring import ApiUserContextReader
 from persona_api.initiative.store import InitiativeLedger
 from persona_api.services import occurrences_service
 from persona_api.services.attention_service import (
@@ -192,6 +198,11 @@ def _ran_because_for_tasks(
     return out
 
 
+#: A hedged held notice is listed only while its moment is MORE than this many days away:
+#: the digest shows it without the judge, so "a few days left" must not be read on the eve.
+_HEDGE_MIN_DAYS_AHEAD = 1
+
+
 def _listable(
     notice: NoticeRecord,
     owner_id: str,
@@ -199,18 +210,33 @@ def _listable(
     *,
     now: datetime,
     hold_max_days: int,
+    zone: str,
 ) -> bool:
     """Whether a held initiative may be shown: the flush's own rules, never looser.
 
-    The prompt-version floor, the hold age and the subject rule are the flush's, applied
-    the same way. Re-grounding (the judge) stays flush-only: the digest is a read and
-    spends no model call; a notice the flush later finds dissolved simply expires then.
+    The prompt-version floor, the hold age, the lapse (the earliest date the message or
+    offer looks ahead to has passed in the user's zone) and the subject rule are the
+    flush's, applied the same way. Re-grounding (the judge) stays flush-only: the digest
+    is a read and spends no model call, so a message carrying a vague hedge ("soon", "a
+    few days left") is listed only while its moment is more than a day away; a notice the
+    flush later finds dissolved simply expires then.
     """
     candidate = notice.candidate
     if wellbeing is None or not prompt_version_deliverable(candidate.prompt_version):
         return False
     if now - notice.created_at > timedelta(days=hold_max_days):
         return False
+    if why_now_lapsed(anchor_time=notice_lapse_anchor(candidate, zone), now=now):
+        return False
+    if vague_hedges(candidate.why_now, candidate.next_step):
+        local = ZoneInfo(zone)
+        written_on = candidate.scanned_at.astimezone(local).date()
+        moment = earliest_upcoming_date(
+            candidate.why_now, candidate.next_step, written_on=written_on
+        )
+        today = now.astimezone(local).date()
+        if moment is None or (moment - today).days <= _HEDGE_MIN_DAYS_AHEAD:
+            return False
     return held_notice_subject(wellbeing, owner_id, candidate) is HeldSubject.CLEAR
 
 
@@ -310,10 +336,18 @@ def build_morning_digest(
 
     # R9-256: a held initiative reads as its user-facing reason ("you"), never the
     # grounding observation written about "the user".
+    held = InitiativeLedger(engine).held_for_owner(owner_id)
+    zone = (
+        ApiUserContextReader(engine, default_timezone=PersonaCoreConfig().default_timezone)
+        .user_context(owner_id)
+        .timezone
+        if held
+        else "UTC"
+    )
     initiatives = [
         DigestItem(persona_id=n.persona_id, title=_line(n.candidate.why_now))
-        for n in InitiativeLedger(engine).held_for_owner(owner_id)
-        if _listable(n, owner_id, wellbeing, now=now, hold_max_days=hold_max_days)
+        for n in held
+        if _listable(n, owner_id, wellbeing, now=now, hold_max_days=hold_max_days, zone=zone)
     ]
 
     occ = occurrences_service.list_occurrences(

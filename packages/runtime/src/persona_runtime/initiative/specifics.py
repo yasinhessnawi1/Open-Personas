@@ -37,15 +37,26 @@ it was written is refused in both user-facing texts (:func:`relative_day_words`)
 - "this" or "next" (optionally "coming") plus a weekday, "week", "weekend", "month" or
   "year"; "end of the week/month/year";
 - "in N (or a, or a couple/few of) days/weeks/months/years"; "the day after/before";
-- a countdown: "(N, a few, a couple of) days/weeks/fortnights/hours left, away, to go or
-  remaining" (a bare "hours away" too); "less than", "under" or "within" a or N of those;
-  "by/over/at the weekend"; "the next few (or N) days/weeks"; "soon" (not "as soon as"),
-  "shortly", "overnight";
+- a counted countdown: "N (or a) days/weeks/fortnights/hours left, away, to go or
+  remaining"; "less than", "under" or "within" a or N of those; "by/over/at the
+  weekend"; "the next N days/weeks"; "overnight";
 - a weekday (a full name, or a capitalised abbreviation such as "Fri") without its date,
   and a day of the month ("the 2nd", "on the 5th") without its month. A weekday is dated
   by a date beside it, in either order: "Friday 2 October", "Monday the 5th of October",
   "Friday's hearing on 2 October", "2 October (a Friday)". "Black Friday", "Good Friday"
   and the like are named days, not weekdays; "every Friday" is refused.
+
+VAGUE hedges (also "you have time", "plenty of time", "there is time", "any day now",
+"before long", "not long now", "almost due", "in the coming days", "coming up" but not
+"coming up with") are refused only on a message that states NO absolute date (owner ruling
+2026-10-30, F1): "soon", "shortly", "(a few, a couple of, several) days/weeks/hours
+left, away, to go or remaining" (a bare "days away" too), "in a few/couple of days",
+"the next few days", "still have (a few days / some time / time)", "there is still
+time". On a dated message ("Your application is due on Tuesday 29 September 2026, so you
+may want to finish it soon") ONE of them stays (two are refused, review LOW-3): a dated
+message is never kept at the flush (:func:`time_words`), so the judge re-reads the hedge
+against the day it is delivered.
+:func:`relative_day_words` takes ``dated``; the caller decides it from both texts.
 
 Not refused (fifth review LOW-2, sixth review LOW-2): a possessive period ("this
 year's renewal", "next month's bill"), "in a day or two", a span measured from a stated
@@ -74,6 +85,8 @@ from datetime import date
 __all__ = [
     "earliest_upcoming_date",
     "relative_day_words",
+    "states_a_date",
+    "vague_hedges",
     "time_words",
     "unsupported_numbers",
     "unsupported_specifics",
@@ -114,16 +127,53 @@ _RELATIVE_RE = re.compile(
     r"|sunday|week|weekend|month|year)"
     r"|end\s+of\s+(?:the\s+|this\s+|next\s+)?(?:week|month|year)"
     rf"|in\s+{_COUNT}\s+{_SPAN}"
-    rf"|in\s+(?:a\s+)?(?:couple|few)\s+(?:of\s+)?{_SPAN}"
     r"|the\s+day\s+(?:after|before)"
-    # Countdowns (fifth review MEDIUM-A): true the day they are written, a day stale
-    # when read.
-    rf"|(?:(?:{_COUNT}|{_FEW})\s+(?:more\s+)?)?{_COUNTDOWN_UNITS}"
-    r"\s+(?:left|away|to\s+go|remaining)"
+    # Counted countdowns (fifth review MEDIUM-A): true the day they are written, wrong
+    # the next.
+    rf"|{_COUNT}\s+(?:more\s+)?{_COUNTDOWN_UNITS}\s+(?:left|away|to\s+go|remaining)"
     rf"|(?:less\s+than|under|within)\s+{_COUNT}\s+{_COUNTDOWN_UNITS}"
     r"|(?:by|over|at)\s+the\s+weekend"
-    rf"|next\s+(?:{_FEW}|{_COUNT})\s+{_COUNTDOWN_UNITS}"
-    r"|(?<!as\s)soon|shortly|overnight)\b",
+    rf"|next\s+{_COUNT}\s+{_COUNTDOWN_UNITS}"
+    r"|overnight)\b",
+    re.IGNORECASE,
+)
+#: Vague hedges (F1): refused only on a message that states no absolute date.
+#: "time" ends the hedge (re-review MEDIUM-B): followed by closing punctuation, the end,
+#: or a function word ("time to compare", "time left"), never "-" or a noun ("time-sensitive",
+#: "time off", "time zones").
+_TIME_END = (
+    r"time(?=\s*[.,;:!?)]|\s*$|\s+(?:to|for|before|until|till|and|but|or|left|now|yet|"
+    r"still|remains?|if|so|though|with|in|on|at|of)\b)"
+)
+_VAGUE_RE = re.compile(
+    rf"\b(?:(?:{_FEW}\s+(?:more\s+)?)?{_COUNTDOWN_UNITS}\s+(?:left|away|to\s+go|remaining)"
+    rf"|in\s+(?:a\s+)?(?:couple|few)\s+(?:of\s+)?{_SPAN}"
+    rf"|next\s+{_FEW}\s+{_COUNTDOWN_UNITS}"
+    r"|still\s+have\s+(?:(?:a\s+few|a\s+couple\s+of|some|enough|plenty\s+of)\s+)?"
+    rf"(?:{_TIME_END}|days|weeks)"
+    # Review LOW-3: more ways to say "there is time" or "it is close".
+    r"|you(?:'ve|\u2019ve|\s+have)\s+(?:still\s+)?(?:got\s+)?"
+    rf"(?:(?:plenty\s+of|enough|some)\s+)?{_TIME_END}"
+    rf"|there\s+is\s+(?:still\s+)?(?:(?:plenty\s+of|enough|some)\s+)?{_TIME_END}"
+    rf"|still\s+{_TIME_END}|plenty\s+of\s+{_TIME_END}"
+    r"|any\s+day\s+now|before\s+long|not\s+long\s+now|almost\s+due"
+    r"|in\s+the\s+coming\s+(?:days|weeks)"
+    # Only an event that is coming up (re-review MEDIUM-B), not "keeps coming up in".
+    r"|(?:is|are|['\u2019]s|['\u2019]re)\s+coming\s+up|coming\s+up\s+(?:soon|on)"
+    r"|(?<!as\s)soon|shortly)\b",
+    re.IGNORECASE,
+)
+#: Time words the refusal deliberately does not refuse (third review LOW-1): anything that
+#: may read stale on another day, so the flush re-asks the judge about it. Broad on purpose,
+#: and decoupled from the narrow refusal above.
+_BROAD_TIME_RE = re.compile(
+    r"\bcoming\s+up\b"
+    r"|\b(?:have|has|had)\s+(?:(?:no|some|enough|plenty\s+of|the)\s+)?time\b"
+    r"|\bthere(?:'s|\u2019s|\s+is)\s+(?:still\s+)?(?:(?:some|enough|plenty\s+of)\s+)?time\b"
+    r"|\bstill\s+time\b|\btime\s+(?:left|yet|enough)\b|\benough\s+time\b"
+    r"|\brunning\s+out\s+of\s+time\b"
+    r"|\bnearly\b|\bclose\b|\blong\s+to\s+go\b|\baround\s+the\s+corner\b"
+    r"|['\u2019]til\b",
     re.IGNORECASE,
 )
 #: Exempt from the refusal (still time words): a possessive period, "in a day or two".
@@ -131,6 +181,10 @@ _POSSESSIVE_PERIOD_RE = re.compile(r"(?:this|next)\s+(?:coming\s+)?(?:month|year
 _POSSESSIVE_RE = re.compile(r"['\u2019]s\b")
 _DAY_OR_TWO_RE = re.compile(r"in\s+an?\s+day", re.I)
 _OR_TWO_RE = re.compile(r"\s+or\s+two\b", re.I)
+#: A courtesy, not a countdown: "when you have time", "if you have time" (re-review
+#: MEDIUM-B).
+_COURTESY_TIME_RE = re.compile(r"you(?:'ve|\u2019ve|\s+have)\s", re.I)
+_COURTESY_BEFORE_RE = re.compile(r"\b(?:when|whenever|if)\s+$", re.I)
 _ANCHORED_SPAN_RE = re.compile(r"(?:within|under)\s", re.I)
 _OF_RE = re.compile(r"\s+of\b", re.I)
 _AFTER_RE = re.compile(r"\s+after\b", re.I)
@@ -339,6 +393,8 @@ def _exempt(text: str, match: re.Match[str]) -> bool:
     """A refused-shape phrase that is not relative to the writing day (the module's
     "Not refused" list): it stays a time word."""
     phrase, end = match[0].lower(), match.end()
+    if _COURTESY_TIME_RE.match(phrase) and _COURTESY_BEFORE_RE.search(text[: match.start()]):
+        return True
     if _POSSESSIVE_PERIOD_RE.fullmatch(phrase):
         return _POSSESSIVE_RE.match(text, end) is not None
     if _DAY_OR_TWO_RE.fullmatch(phrase):
@@ -352,10 +408,33 @@ def _exempt(text: str, match: re.Match[str]) -> bool:
     return False
 
 
-def relative_day_words(text: str) -> list[str]:
+def states_a_date(*texts: str) -> bool:
+    """Whether any of ``texts`` states an absolute calendar date (any form read here)."""
+    return any(_date_spans(text) for text in texts)
+
+
+def vague_hedges(*texts: str) -> list[str]:
+    """The vague hedges ("soon", "a few days left", "still have time") the texts carry
+    (the exempt forms excluded); allowed on a dated message, so the digest, which reads a
+    held notice without the judge, checks them against the date itself."""
+    return [m[0] for text in texts for m in _VAGUE_RE.finditer(text) if not _exempt(text, m)]
+
+
+def relative_day_words(text: str, *, dated: bool = False) -> list[str]:
     """The days ``text`` names relative to when it was written (refused in user text),
-    in the order written; a weekday inside a phrase ("this Friday") is listed once."""
-    matches = [match for match in _RELATIVE_RE.finditer(text) if not _exempt(text, match)]
+    in the order written; a weekday inside a phrase ("this Friday") is listed once.
+
+    ``dated``: the message states an absolute date (:func:`states_a_date`), so its vague
+    hedges are allowed (F1); day-naming and counted forms are refused either way.
+    """
+    matches = [m for m in _RELATIVE_RE.finditer(text) if not _exempt(text, m)]
+    if not dated:  # a vague hedge inside a counted form ("two days left") is listed once
+        taken = [m.span() for m in matches]
+        matches += [
+            m
+            for m in _VAGUE_RE.finditer(text)
+            if not _exempt(text, m) and not any(s < m.end() and m.start() < e for s, e in taken)
+        ]
     found = [(match.start(), match[0]) for match in matches]
     phrases = [match.span() for match in matches]
     spans = _date_spans(text)
@@ -378,10 +457,12 @@ def time_words(text: str) -> list[str]:
     not the day it was written."""
     tokens = (
         _RELATIVE_RE,
+        _VAGUE_RE,
         _WEEKDAY_TOKEN_RE,
         _MONTH_ABBR_TOKEN_RE,
         _ORDINAL_DAY_RE,
         _COUNTED_SPAN_RE,
+        _BROAD_TIME_RE,
     )
     found = [match[0] for pattern in tokens for match in pattern.finditer(text)]
     found += [text[start:end] for start, end in _date_spans(text)]

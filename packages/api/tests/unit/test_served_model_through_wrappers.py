@@ -75,6 +75,9 @@ class _Source:
     def task_content(self, owner_id: str, task_id: str) -> str | None:  # noqa: ARG002
         return None
 
+    def node_context(self, owner_id: str, node_id: str, *, limit: int) -> list[Any]:  # noqa: ARG002
+        return []
+
 
 def _wrapped(
     chain: MultiModelChatBackend, monkeypatch: pytest.MonkeyPatch
@@ -110,7 +113,7 @@ def _candidate() -> InitiativeCandidate:
         source=CandidateSource.SCAN,
         owner_id="u1",
         persona_id="p1",
-        prompt_version="a5-scan-v7",
+        prompt_version="a5-scan-v8",
         scanned_at=datetime(2026, 9, 26, 5, 0, tzinfo=UTC),
     )
 

@@ -169,7 +169,7 @@ def _pipeline(app_engine: Engine, judge: _CountingJudge, now: list[datetime]) ->
 
 
 _DATED = "Your car's EU inspection is due by Monday 5 October 2026."
-_UNDATED = "Your car's EU inspection is coming up and no slot is booked."
+_UNDATED = "Your car's EU inspection has no slot booked yet."
 
 
 def _candidate(why_now: str = _DATED) -> InitiativeCandidate:

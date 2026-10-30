@@ -563,7 +563,15 @@ def test_the_worker_root_composes_no_background_backend_from_the_paid_registry()
     # Comments are excluded: the fix's own comments quote the old shape to explain it.
     code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
     assert "tier_registry.get(" not in code
-    assert code.count("plan_scoped_background_backend(") == 5  # the five background surfaces
+    # The five background surfaces: four composed here, and initiative's through its own
+    # helper (owner ruling 2026-10-30: its tier is a setting), which must itself be gated.
+    assert code.count("plan_scoped_background_backend(") == 4
+    assert code.count("initiative_model_backend(") == 1
+    from persona_api.initiative.pipeline_wiring import initiative_model_backend
+
+    helper = inspect.getsource(initiative_model_backend)
+    assert "plan_scoped_background_backend(" in helper
+    assert "tier_registry.get(" not in helper
 
 
 def test_the_free_registry_is_a_required_argument_at_both_worker_entry_points() -> None:
