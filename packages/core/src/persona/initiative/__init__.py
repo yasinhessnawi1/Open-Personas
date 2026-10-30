@@ -20,6 +20,8 @@ from persona.initiative.models import (
     PlannedStep,
     ScheduleChange,
     Urgency,
+    binds_across_triggers,
+    opportunity_anchor,
 )
 from persona.initiative.versions import (
     MAX_CITED_NODE_READS,
@@ -45,5 +47,7 @@ __all__ = [
     "Urgency",
     "address_user",
     "arbitrate_voicer",
+    "binds_across_triggers",
+    "opportunity_anchor",
     "prompt_version_deliverable",
 ]

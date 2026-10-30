@@ -200,7 +200,7 @@ def _candidate(ref: str, **overrides: Any) -> InitiativeCandidate:  # noqa: ANN4
         "source": CandidateSource.SCAN,
         "owner_id": _OWNER,
         "persona_id": "pers_mb_a",
-        "prompt_version": "a5-scan-v8",
+        "prompt_version": "a5-scan-v9",
         "scanned_at": _NOW,
     }
     fields.update(overrides)

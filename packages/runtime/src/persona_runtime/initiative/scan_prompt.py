@@ -25,6 +25,10 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v9 (owner ruling 2026-10-30, the MID measuring set): "this week", "this weekend",
+#: "next week", "tomorrow" and "tonight" are named as forbidden, with "write the date
+#: instead" (the refusals of A6 and C4 on a stated date); "value", "acceptance" and
+#: "urgency" go inside each candidate object (B9's answers closed it before them).
 #: v8 (owner ruling 2026-10-30, F1): the date first, then at most one short advisory
 #: clause ("so you may want to start soon"); counted countdowns stay forbidden; a
 #: weekday only when the material states one.
@@ -50,7 +54,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v8"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v9"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -130,6 +134,8 @@ concrete next step (a pure FYI) is not worth raising: drop it.
 - "acceptance": 0..1 — honestly, would they welcome being told this NOW? This can only \
 LOWER a candidate's chances, never rescue a weak one.
 - "urgency": "interrupt" ONLY for a hard dated commitment in the next ~2 days; else "batch".
+"value", "acceptance" and "urgency" go INSIDE the candidate object, after "next_step"; a \
+candidate without "value" and "acceptance" is discarded.
 
 RULES — follow every one exactly:
 1. GROUNDED OR NOTHING. Every observation must be STATED by the cited material. Never \
@@ -152,11 +158,12 @@ presuming what they have decided.
 and "next_step" state every date exactly as the material gives it: its day and month, and its \
 weekday ONLY if the material states one ("on Friday 2 October" when the material says Friday; \
 "on 4 October 2026" when it does not). Never write "today", "tonight", "tomorrow", \
-"this Friday", "next Tuesday", or a weekday without its date, and never a counted \
-countdown: "in 3 days", "3 days left", "two days away", "within a week", "by the weekend", \
-"overnight". After the date you may add AT MOST ONE short advisory clause, such as "so \
-you may want to start soon" or "there is still time"; nothing vaguer stands without the \
-date.
+"this week", "this weekend", "next week", "this Friday", "next Tuesday", or a weekday \
+without its date: write the date instead ("by 28 September", not "this weekend"). Never a \
+counted countdown either: "in 3 days", "3 days left", "two days away", "within a week", \
+"by the weekend", "overnight". After the date you may add AT MOST ONE short advisory \
+clause, such as "so you may want to start soon" or "there is still time"; nothing vaguer \
+stands without the date.
 
 EXAMPLES (scenario → correct output):
 - Rich, warm notes about the user's life; nothing dated, nothing pending → \

@@ -300,7 +300,7 @@ async def test_a_free_owner_without_a_free_mid_chain_never_reaches_paid(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id="p1",
-        prompt_version="a5-scan-v8",
+        prompt_version="a5-scan-v9",
         scanned_at=datetime(2026, 9, 26, 5, 0, tzinfo=UTC),
     )
     with _owner(_OWNER):

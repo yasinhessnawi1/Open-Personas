@@ -16,8 +16,10 @@ class TestInitiativeSettings:
         s = InitiativeSettings()
         assert s.scan_hour == 7
         assert s.model_tier == "mid"  # owner ruling 2026-10-30
-        assert s.judge_max_output_tokens == 2048
-        assert s.scan_max_output_tokens == 4096
+        # Ruling 3 (2026-10-30 MID set): the judge's 2048 cut a reasoning answer
+        # off mid-JSON (A5 lost); the longest scan was 3324 of 4096.
+        assert s.judge_max_output_tokens == 4096
+        assert s.scan_max_output_tokens == 6144
         assert s.scan_candidate_cap == 3
         assert s.recent_nodes_limit == 30
         assert s.daily_cap_per_persona == 1

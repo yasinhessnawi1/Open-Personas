@@ -88,6 +88,9 @@ __all__ = [
 _logger = get_logger("runtime.initiative.scan")
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+#: A closing brace followed by a scoring field: the field escaped its candidate object by
+#: one level (``InitiativeScanner._load_json``'s single repair keeps the comma and field).
+_ESCAPED_SCORES_RE = re.compile(r'\}(\s*,\s*"(?:value|acceptance|urgency)"\s*:)')
 #: A complete alias: the kind letter then the per-kind ordinal (``N1``, ``T3``). ASCII
 #: digits only: fullwidth or other-script digits never form an alias.
 _ALIAS_RE = re.compile(r"[NT][0-9]+")
@@ -455,9 +458,20 @@ class InitiativeScanner:
 
     @staticmethod
     def _load_json(text: str) -> dict[str, object] | None:
+        """The answer as JSON; failing that, ONE repair and nothing more.
+
+        The repair (owner ruling 2026-10-30, the MID set's B9): a candidate object closed
+        before its scoring fields, which then sit loose in the candidates array, one
+        level out (``"next_step": "..."}, "value": 0.9, ...}``). The stray brace is
+        dropped so the fields fall back into their candidate. No field is ever supplied:
+        a candidate missing "value" or "acceptance" is still dropped when it is built,
+        and any other malformation is still silence.
+        """
         cleaned = _FENCE_RE.sub("", text.strip()).strip()
-        try:
-            parsed = json.loads(cleaned)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
+        for attempt in (cleaned, _ESCAPED_SCORES_RE.sub(r"\1", cleaned)):
+            try:
+                parsed = json.loads(attempt)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            return parsed if isinstance(parsed, dict) else None
+        return None

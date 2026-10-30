@@ -78,7 +78,10 @@ _CONTENT_SNIPPET = 2000  # the citable grounding tail handed to the model (bound
 #: v5 (fifth review): countdowns ("soon", "3 days left", "within a week") are forbidden too.
 #: v6 (owner ruling 2026-10-30, F1): the date first, then at most one short advisory clause;
 #: counted countdowns stay forbidden; a weekday only when the material states one.
-EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v6"
+#: v7 (owner ruling 2026-10-30, the MID measuring set): "this week", "this weekend",
+#: "next week", "tomorrow" and "tonight" are named as forbidden, with "write the date
+#: instead", the same rule as a5-scan-v9.
+EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v7"
 
 
 @runtime_checkable
@@ -295,11 +298,12 @@ never "the user", "they" or "the person". Do not paste or quote the material. An
 could have changed is held lightly ("if it is still open"), never asserted as still true.
 6. DATES ARE ABSOLUTE. The user may read this later than you write it: state every date \
 exactly as the material gives it, its day and month, and its weekday ONLY if the material \
-states one. Never write "today", "tonight", "tomorrow", "this Friday", "next Tuesday", \
-or a weekday without its date, and never a counted countdown: "in 3 days", "3 days left", \
-"two days away", "within a week", "by the weekend", "overnight". After the date you may \
-add AT MOST ONE short advisory clause, such as "so you may want to start soon" or "there is \
-still time"; nothing vaguer stands without the date.
+states one. Never write "today", "tonight", "tomorrow", "this week", "this weekend", \
+"next week", "this Friday", "next Tuesday", or a weekday without its date: write the date \
+instead ("by 28 September", not "this weekend"). Never a counted countdown either: "in 3 \
+days", "3 days left", "two days away", "within a week", "by the weekend", "overnight". After \
+the date you may add AT MOST ONE short advisory clause, such as "so you may want to start \
+soon" or "there is still time"; nothing vaguer stands without the date.
 
 EXAMPLE (event → correct output):
 - A message about a self-harm disclosure arrives → {"candidate": null}

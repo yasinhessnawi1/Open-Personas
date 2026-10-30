@@ -130,6 +130,77 @@ _CATCH = """{"candidates": [
 ]}"""
 
 
+#: Ruling 4 (2026-10-30 MID set, B9): the candidate object closed before its three scoring
+#: fields, which then sit loose in the candidates array, one level out. Not JSON.
+_ESCAPED_SCORES = _CATCH.replace(
+    '"next_step": "Draft the response letter.",\n   "value"',
+    '"next_step": "Draft the response letter."},\n   "value"',
+)
+
+
+class TestTheScoringFieldsPutBackOneLevel:
+    """Ruling 4 (b): a tolerant parse moves "value", "acceptance" and "urgency" that
+    escaped their candidate object back into it, and nothing more: a missing field is
+    still a discard, never invented, and any other malformation is still silence."""
+
+    def test_the_fixture_is_the_b9_shape_and_not_json(self) -> None:
+        import json
+
+        assert _ESCAPED_SCORES != _CATCH
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(_ESCAPED_SCORES)
+
+    @pytest.mark.asyncio
+    async def test_escaped_scoring_fields_go_back_into_their_candidate(self) -> None:
+        from persona.initiative import Urgency
+
+        backend = _StubBackend(_ESCAPED_SCORES)
+        result = await _scanner(_Readers(pool=[_node()]), backend).scan("u", "p", fire_time=_FIRE)
+        assert len(result) == 1
+        assert (result[0].value, result[0].acceptance) == (0.9, 0.8)
+        assert result[0].urgency is Urgency.INTERRUPT
+
+    @pytest.mark.parametrize("missing", ['"value": 0.9, ', '"acceptance": 0.8, '])
+    @pytest.mark.asyncio
+    async def test_a_missing_score_is_still_a_discard(self, missing: str) -> None:
+        for text in (_CATCH, _ESCAPED_SCORES):
+            backend = _StubBackend(text.replace(missing, ""))
+            result = await _scanner(_Readers(pool=[_node()]), backend).scan(
+                "u", "p", fire_time=_FIRE
+            )
+            assert result == ()
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            # another field escaped: not the one repair
+            _CATCH.replace(
+                '"plan": [{"description": "draft the letter", "categories": ["draft"]}],',
+                '"observation2": "x"},\n "plan": [{"description": "d", "categories": ["draft"]}],',
+            ),
+            # two levels out: past the candidates array
+            _CATCH.replace(
+                '"next_step": "Draft the response letter.",\n   "value"',
+                '"next_step": "Draft the response letter."}],\n   "value"',
+            ),
+            # truncated mid-answer
+            _CATCH[:-20],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_any_other_malformation_is_still_silence(self, broken: str) -> None:
+        backend = _StubBackend(broken)
+        result = await _scanner(_Readers(pool=[_node()]), backend).scan("u", "p", fire_time=_FIRE)
+        assert result == ()
+
+    def test_the_prompt_puts_the_scores_inside_each_candidate(self) -> None:
+        flat = " ".join(SCAN_SYSTEM_PROMPT.split())
+        assert (
+            '"value", "acceptance" and "urgency" go INSIDE the candidate object, after '
+            '"next_step"; a candidate without "value" and "acceptance" is discarded.'
+        ) in flat
+
+
 class TestThinMaterial:
     @pytest.mark.asyncio
     async def test_empty_inputs_yield_silence_without_a_model_call(self) -> None:
@@ -369,7 +440,7 @@ class TestCandidateConstruction:
         )
         await scanner.scan("u", "p", fire_time=_FIRE)
         assert backend.last_kwargs["max_tokens"] == 5000
-        assert InitiativeSettings().scan_max_output_tokens == 4096
+        assert InitiativeSettings().scan_max_output_tokens == 6144
 
     @pytest.mark.asyncio
     async def test_lens_link_targets_are_citable(self) -> None:
@@ -462,7 +533,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v8"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v9"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -516,7 +587,7 @@ class TestPromptArtifact:
             assert trigger.value in SCAN_SYSTEM_PROMPT
 
 
-def test_the_v8_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
+def test_the_v9_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
     import json
 
     from persona_runtime.initiative.specifics import relative_day_words
@@ -526,12 +597,20 @@ def test_the_v8_prompt_requires_absolute_dates_and_one_advisory_clause() -> None
     assert "its weekday ONLY if the material states one" in flat
     assert '"on 4 October 2026" when it does not' in flat
     assert (
-        'Never write "today", "tonight", "tomorrow", "this Friday", "next Tuesday", or a weekday '
-        'without its date, and never a counted countdown: "in 3 days", "3 days left", "two days '
-        'away", "within a week", "by the weekend", "overnight". After the date you may add AT '
-        'MOST ONE short advisory clause, such as "so you may want to start soon" or "there is '
-        'still time"; nothing vaguer stands without the date.'
+        'Never write "today", "tonight", "tomorrow", "this week", "this weekend", "next week", '
+        '"this Friday", "next Tuesday", or a weekday without its date: write the date instead '
+        '("by 28 September", not "this weekend"). Never a counted countdown either: "in 3 days", '
+        '"3 days left", "two days away", "within a week", "by the weekend", "overnight". After '
+        'the date you may add AT MOST ONE short advisory clause, such as "so you may want to '
+        'start soon" or "there is still time"; nothing vaguer stands without the date.'
     ) in flat
+    # Ruling 2 (2026-10-30 MID set): "this weekend" and "this week" on top of a stated date
+    # were refused (A6, C4); the prompt names them, the mechanical rule is unchanged.
+    from persona_runtime.initiative.specifics import relative_day_words as _relative
+
+    for word in ("this week", "this weekend", "next week", "tomorrow", "tonight"):
+        assert f'"{word}"' in flat
+        assert _relative(f"It is due on 28 September 2026, so {word} works.", dated=True)
     example = json.loads(EXAMPLE_CATCH_OUTPUT)["candidates"][0]
     from persona_runtime.initiative.specifics import states_a_date, vague_hedges
 

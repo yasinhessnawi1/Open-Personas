@@ -32,11 +32,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from persona.initiative import InitiativeCandidate
+from persona.initiative import InitiativeCandidate, binds_across_triggers, opportunity_anchor
 from persona.initiative.restraint import CadenceCounts
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import aware_utc, rls_connection
@@ -47,7 +47,7 @@ from persona_api.services import audit_service
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sqlalchemy import Engine, RowMapping
+    from sqlalchemy import Connection, Engine, RowMapping
 
 __all__ = [
     "DeclineRecord",
@@ -159,6 +159,46 @@ def _notice_from_row(row: RowMapping) -> NoticeRecord:
     )
 
 
+#: The dispositions that hold a node's anchor across triggers: a notice the user saw or
+#: may still see. An expired notice (``suppressed_stale``) never reached them.
+_HOLDS_THE_ANCHOR = (NoticeDisposition.HELD.value, NoticeDisposition.DELIVERED.value)
+
+
+def _live_notice_on_anchor(conn: Connection, owner_id: str, opportunity_key: str) -> str | None:
+    """The key of a LIVE notice on this key's anchor under ANOTHER trigger, or ``None``.
+
+    The one-live-notice slot binds a NODE anchor, not trigger plus anchor (owner ruling
+    2026-10-30): the same note raised again under another trigger is the same notice to
+    the user. A conversation or task anchor keeps the exact key
+    (:func:`binds_across_triggers`). Only a notice the user saw or may still see holds
+    the anchor: HELD or DELIVERED, never an expired one (``suppressed_stale``, which
+    keeps its exact key's slot as before). The same key is left to the partial unique,
+    as before. Each match is rechecked by its own anchor. On Postgres a
+    transaction-scoped advisory lock on (owner, anchor) serialises this check with the
+    insert, so two triggers racing on one anchor cannot both claim; the community
+    SQLite engine has a single writer.
+    """
+    if not binds_across_triggers(opportunity_key):
+        return None
+    anchor = opportunity_anchor(opportunity_key)
+    if conn.dialect.name == "postgresql":
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"initiative-slot:{owner_id}:{anchor}"},
+        )
+    key = notices_t.c.opportunity_key
+    rows = conn.execute(
+        select(key).where(
+            notices_t.c.owner_id == owner_id,
+            notices_t.c.superseded_at.is_(None),
+            notices_t.c.disposition.in_(_HOLDS_THE_ANCHOR),
+            key != opportunity_key,
+            or_(key == anchor, key.endswith(f":{anchor}", autoescape=True)),
+        )
+    ).all()
+    return next((str(r[0]) for r in rows if opportunity_anchor(str(r[0])) == anchor), None)
+
+
 class DeclineStore:
     """Owner-scoped, audited decline records (A5-D-4).
 
@@ -177,17 +217,35 @@ class DeclineStore:
         typed, spoken as a stop verb, or expressed by silence (see
         :class:`DeclineSource`). Adding a source filter here would quietly
         restore the asymmetry the three sources exist to remove.
+
+        A decline on a NODE anchor binds the anchor, not trigger plus anchor (owner
+        ruling 2026-10-30, the B4 re-pitch): such a key is suppressed when any live
+        decline names the same node under any trigger. A conversation or task anchor
+        keeps the exact key (:func:`binds_across_triggers`). The anchor is read from the
+        stored keys, so existing rows need no migration; it is matched exactly (escaped,
+        never as a pattern).
         """
         if not keys:
             return set()
+        anchors = {opportunity_anchor(key) for key in keys if binds_across_triggers(key)}
+        same_anchor = [
+            declines_t.c.opportunity_key.endswith(f":{anchor}", autoescape=True)
+            for anchor in anchors
+        ]
         with rls_connection(self._engine, owner_id) as conn:
             rows = conn.execute(
                 select(declines_t.c.opportunity_key).where(
-                    declines_t.c.opportunity_key.in_(list(keys)),
+                    or_(declines_t.c.opportunity_key.in_([*keys, *anchors]), *same_anchor),
                     declines_t.c.revived_at.is_(None),
                 )
             ).all()
-        return {r[0] for r in rows}
+        exact = {str(r[0]) for r in rows}
+        declined = {opportunity_anchor(key) for key in exact}
+        return {
+            key
+            for key in keys
+            if key in exact or (binds_across_triggers(key) and opportunity_anchor(key) in declined)
+        }
 
     def is_suppressed(self, owner_id: str, opportunity_key: str) -> bool:
         """Whether one opportunity has a LIVE decline."""
@@ -438,6 +496,8 @@ class InitiativeLedger:
         earlier scan) already owns a LIVE notice for this opportunity — the loser
         no-ops, audited ``initiative.duplicate_suppressed``. One user-level notice
         per opportunity is the invariant, regardless of scan ordering or races.
+        The slot binds the anchor: a live notice on the same anchor under another
+        trigger also wins (``same_anchor_as`` in the audit; owner ruling 2026-10-30).
         """
         record = NoticeRecord(
             id=f"intc_{uuid4().hex}",
@@ -456,6 +516,15 @@ class InitiativeLedger:
         )
         try:
             with rls_connection(self._engine, candidate.owner_id) as conn:
+                holder = _live_notice_on_anchor(conn, candidate.owner_id, record.opportunity_key)
+                if holder is not None:
+                    self._audit(
+                        candidate.owner_id,
+                        "initiative.duplicate_suppressed",
+                        candidate.opportunity_key,
+                        extra={"loser_persona_id": voicer_persona_id, "same_anchor_as": holder},
+                    )
+                    return None
                 conn.execute(
                     insert(notices_t).values(
                         id=record.id,

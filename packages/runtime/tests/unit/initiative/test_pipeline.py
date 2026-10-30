@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v8",
+        "prompt_version": "a5-scan-v9",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -768,11 +768,13 @@ class TestFlushReappliesTheSubjectRule:
             "a5-scan-v5",
             "a5-scan-v6",
             "a5-scan-v7",
+            "a5-scan-v8",
             "a7-event-candidate-v1",
             "a7-event-candidate-v2",
             "a7-event-candidate-v3",
             "a7-event-candidate-v4",
             "a7-event-candidate-v5",
+            "a7-event-candidate-v6",
             "v1",
             "scripted",
             "",
@@ -788,7 +790,7 @@ class TestFlushReappliesTheSubjectRule:
         assert h.ledger.expired == [("n-held", "prompt_superseded")]
         assert delivery.calls == []
 
-    @pytest.mark.parametrize("version", ["a5-scan-v8", "a5-scan-v9", "a7-event-candidate-v6"])
+    @pytest.mark.parametrize("version", ["a5-scan-v9", "a5-scan-v10", "a7-event-candidate-v7"])
     @pytest.mark.asyncio
     async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
         current = _candidate().model_copy(update={"prompt_version": version})
@@ -945,14 +947,14 @@ class TestThirdReviewFlushOrderAndLocalDay:
 
 
 def test_the_scan_floor_is_the_version_in_force() -> None:
-    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v8)."""
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v9)."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
     from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
 
-    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v8"
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 8
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v9"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 9
     assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a5-scan-v7")
+    assert not prompt_version_deliverable("a5-scan-v8")
 
 
 class _FingerprintGrounding:

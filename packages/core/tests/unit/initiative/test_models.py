@@ -143,6 +143,28 @@ class TestInitiativeCandidate:
         b = _candidate(persona_id="persona-bjorn", observation="Hearing Friday; letter missing.")
         assert a.opportunity_key == b.opportunity_key
 
+    def test_the_anchor_is_read_back_from_any_key(self) -> None:
+        """Ruling 1 (2026-10-30): a decline and the live slot bind the anchor, read from
+        the stored key (the trigger is everything before the first colon; an id may hold
+        more colons). A key with no colon is all anchor."""
+        from persona.initiative import opportunity_anchor
+
+        key = _candidate().opportunity_key
+        assert opportunity_anchor(key) == "node/node-hearing-1"
+        assert opportunity_anchor("stale_open_loop:node/own_x::node::n1") == "node/own_x::node::n1"
+        assert opportunity_anchor("legacy-key") == "legacy-key"
+
+    def test_only_a_node_anchor_binds_across_triggers(self) -> None:
+        """Review MEDIUM-2: the scan's node anchors bind; conversation and task anchors
+        (A7's events) keep the exact key."""
+        from persona.initiative import binds_across_triggers
+
+        assert binds_across_triggers("stale_open_loop:node/own_x::node::n1")
+        assert not binds_across_triggers("conflict:conversation/conv_1")
+        assert not binds_across_triggers("task_followup:task/task_1")
+        assert not binds_across_triggers("conflict:conversation/c:node/n1")
+        assert not binds_across_triggers("legacy-key")
+
     def test_new_anchor_is_new_opportunity(self) -> None:
         """A materially new anchor (a NEW deadline node) is not the declined topic (A5-D-4)."""
         old = _candidate()

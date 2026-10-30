@@ -38,7 +38,32 @@ __all__ = [
     "PlannedStep",
     "ScheduleChange",
     "Urgency",
+    "binds_across_triggers",
+    "opportunity_anchor",
 ]
+
+
+def opportunity_anchor(opportunity_key: str) -> str:
+    """The anchor an opportunity key names: everything after the trigger.
+
+    A key is ``{trigger}:{kind}/{ref}`` (:attr:`InitiativeCandidate.opportunity_key`);
+    the trigger holds no colon, the ref may (``own_x::node::n1``), so the split is at
+    the FIRST colon. A key with no colon is all anchor. A decline and the one live
+    notice per opportunity bind this, not the whole key (owner ruling 2026-10-30): the
+    same note raised again under another trigger is the same thing to the user.
+    """
+    return opportunity_key.split(":", 1)[1] if ":" in opportunity_key else opportunity_key
+
+
+def binds_across_triggers(opportunity_key: str) -> bool:
+    """Whether a decline and the live slot bind this key's anchor under every trigger.
+
+    Only a NODE anchor does (the scan's B4 case: one note raised again under another
+    trigger). A conversation or task anchor keeps the exact key, as before the ruling,
+    so A7's event candidates behave as they did (coordinator ruling 2026-10-30).
+    """
+    return opportunity_anchor(opportunity_key).startswith(f"{CitationKind.NODE.value}/")
+
 
 #: Bumped when the trigger catalogue changes (a versioned contract, the
 #: WELLBEING_CATEGORY_SET_VERSION discipline). A7 extends the enum ADDITIVELY.
@@ -252,7 +277,8 @@ class InitiativeCandidate(BaseModel):
         candidate's content, so every persona's scan of the same opportunity
         derives the same key — the ledger's ``UNIQUE(owner_id, opportunity_key)``
         then guarantees one user-level notice per opportunity, and a decline of
-        this key binds all personas.
+        this key binds all personas. A decline and the live slot also bind the
+        anchor under any other trigger (:func:`opportunity_anchor`).
         """
         return f"{self.trigger.value}:{self.anchor.anchor}"
 

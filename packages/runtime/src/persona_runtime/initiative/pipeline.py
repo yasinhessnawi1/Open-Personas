@@ -125,7 +125,11 @@ class DeclineReader(Protocol):
     """The live-decline check (T3's DeclineStore surface, narrowed)."""
 
     def suppressed_keys(self, owner_id: str, keys: Sequence[str]) -> set[str]:
-        """The subset of ``keys`` with a LIVE decline (user-level, binds all personas)."""
+        """The subset of ``keys`` with a LIVE decline (user-level, binds all personas).
+
+        A decline binds the anchor under any trigger (owner ruling 2026-10-30): a key
+        is suppressed when a live decline names its anchor, whatever its trigger.
+        """
         ...
 
 

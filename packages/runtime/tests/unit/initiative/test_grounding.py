@@ -327,7 +327,7 @@ class TestJudgeOutputCap:
         judge = _StubJudge('{"entailed": false}')
         await GroundingChecker(source=_FakeSource(), backend=judge).check(_candidate())
         assert judge.last_kwargs["max_tokens"] == InitiativeSettings().judge_max_output_tokens
-        assert InitiativeSettings().judge_max_output_tokens == 2048
+        assert InitiativeSettings().judge_max_output_tokens == 4096
 
     @pytest.mark.asyncio
     async def test_the_cap_is_the_injected_value(self) -> None:

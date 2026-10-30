@@ -222,7 +222,7 @@ class TestTheDialVerbWaitsBoundedly:
     def test_the_timeout_is_a_setting(self) -> None:
         from persona.initiative import InitiativeSettings
 
-        assert InitiativeSettings().verb_timeout_seconds == 4.0
+        assert InitiativeSettings().verb_timeout_seconds == 8.0  # max seen 5.8 s
 
     @pytest.mark.asyncio
     async def test_a_slow_model_times_out_to_no_verb_and_is_logged(self) -> None:

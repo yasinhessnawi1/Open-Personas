@@ -130,7 +130,7 @@ def test_the_event_prompt_version_and_voice_rule() -> None:
     in the pipeline, for events and scans alike (tested there)."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
-    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v6"
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v7"
     assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
         "\n", " "
     )
@@ -149,24 +149,32 @@ def test_the_event_floor_is_the_version_in_force() -> None:
     """Third review LOW 5: the deliverable floor is A7's prompt in force."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
 
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 6
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 7
     assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a7-event-candidate-v5")
+    assert not prompt_version_deliverable("a7-event-candidate-v6")
 
 
-def test_the_v6_event_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
+def test_the_v7_event_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
     flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
     assert "6. DATES ARE ABSOLUTE." in flat
     assert "its weekday ONLY if the material states one" in flat
     assert (
-        'Never write "today", "tonight", "tomorrow", "this Friday", "next Tuesday", or a weekday '
-        'without its date, and never a counted countdown: "in 3 days", "3 days left", "two days '
-        'away", "within a week", "by the weekend", "overnight". After the date you may add AT '
-        'MOST ONE short advisory clause, such as "so you may want to start soon" or "there is '
-        'still time"; nothing vaguer stands without the date.'
+        'Never write "today", "tonight", "tomorrow", "this week", "this weekend", "next week", '
+        '"this Friday", "next Tuesday", or a weekday without its date: write the date instead '
+        '("by 28 September", not "this weekend"). Never a counted countdown either: "in 3 days", '
+        '"3 days left", "two days away", "within a week", "by the weekend", "overnight". After '
+        'the date you may add AT MOST ONE short advisory clause, such as "so you may want to '
+        'start soon" or "there is still time"; nothing vaguer stands without the date.'
     ) in flat
+    # Ruling 2 (2026-10-30 MID set): "this weekend" and "this week" on top of a stated date
+    # were refused (A6, C4); the prompt names them, the mechanical rule is unchanged.
+    from persona_runtime.initiative.specifics import relative_day_words as _relative
+
+    for word in ("this week", "this weekend", "next week", "tomorrow", "tonight"):
+        assert f'"{word}"' in flat
+        assert _relative(f"It is due on 28 September 2026, so {word} works.", dated=True)
 
 
 @pytest.mark.asyncio

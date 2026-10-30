@@ -52,12 +52,15 @@ class InitiativeSettings(BaseSettings):
             reasoning model spends its reasoning inside this cap; at 1200 the
             A5-R-1 pass saw scans cut off mid-JSON. The model stops when done,
             so a typical scan costs the same; only a would-be truncation grows.
+            6144 since the MID measuring set (2026-10-30): its longest scan was
+            3324 of 4096, too little headroom for a reasoning outlier.
         judge_max_output_tokens: The grounding judge's ``max_tokens`` (R9-248);
             at 300 the pass saw a judge answer cut off mid-quote. 2048 since the
             mid tier (its head is a reasoning model, which reasons inside the cap; the
             2026-10-23 re-run's longest small-tier judge reply was 902 of 1024, and
-            the judge's prompt grows with its context). Both caps are bounded above
-            at 16384.
+            the judge's prompt grows with its context). 4096 since the MID measuring
+            set (2026-10-30): one judge reply used all 2048 and was cut off mid-JSON,
+            losing A5. Both caps are bounded above at 16384.
         event_candidate_max_output_tokens: A7's event-candidate producer's
             ``max_tokens`` (review LOW-6: a hard-coded 900 before; the mid tier's
             reasoning head reasons inside it), default 2048.
@@ -67,6 +70,8 @@ class InitiativeSettings(BaseSettings):
         verb_timeout_seconds: How long a chat turn waits on the dial-verb interpreter
             before reading "no verb" (re-review MEDIUM-A: the call sits in front of the
             persona's answer); the clear turn-off is deterministic and never waits.
+            8 s since the MID measuring set (2026-10-30): 4 of 30 dial-verb calls
+            took longer than 4 s (the longest 5.8 s), so the old default lost them.
         scan_candidate_cap: Max candidates per scan, rank-ordered (≤3 — the
             research §6 hard cap; Pulse ships 5–10/day, we cap lower).
         recent_nodes_limit: The noticing-pool size read via
@@ -96,10 +101,10 @@ class InitiativeSettings(BaseSettings):
     scan_hour: int = Field(default=7, ge=0, le=23)
     model_tier: Literal["small", "mid", "frontier"] = "mid"
     scan_max_input_tokens: int = Field(default=8000, gt=0)
-    scan_max_output_tokens: int = Field(default=4096, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
-    judge_max_output_tokens: int = Field(default=2048, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    scan_max_output_tokens: int = Field(default=6144, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    judge_max_output_tokens: int = Field(default=4096, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     verb_max_output_tokens: int = Field(default=1024, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
-    verb_timeout_seconds: float = Field(default=4.0, gt=0, le=60)
+    verb_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
     event_candidate_max_output_tokens: int = Field(default=2048, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     scan_candidate_cap: int = Field(default=3, gt=0)
     recent_nodes_limit: int = Field(default=30, gt=0)
