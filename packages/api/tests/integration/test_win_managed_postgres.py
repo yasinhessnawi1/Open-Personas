@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 def short_base_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     # run_migrations sets os.environ["DATABASE_URL"] (D-K10-8); keep it out of other tests.
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    # A machine with another Postgres often exports PGPASSWORD (the GitHub Windows runner
+    # sets postgres/root), and libpq sends it before reading the password file. Every
+    # test runs with one set, so the lifecycle must not depend on its absence.
+    monkeypatch.setenv("PGPASSWORD", "another-postgres-password")
     base = Path(tempfile.mkdtemp(prefix="wpg"))
     try:
         yield base

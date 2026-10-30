@@ -343,8 +343,20 @@ class CommunityDbManager:
         account, so on Windows the manager starts the bundled binaries itself; see
         :mod:`persona_api.db._managed_windows`.
         """
-        from persona_api.db._managed_windows import start_socket_only
+        from persona_api.db._managed_windows import (
+            ENVIRONMENT_PASSWORD,
+            drop_environment_password,
+            start_socket_only,
+        )
 
+        # libpq would send a PGPASSWORD from the environment instead of reading the
+        # password file this lifecycle's connection string names; drop it first.
+        if drop_environment_password():
+            _LOG.warning(
+                "community managed DB: ignoring {var} from the environment; the bundled "
+                "database authenticates only with its own password file",
+                var=ENVIRONMENT_PASSWORD,
+            )
         bin_dir = _pginstall_bin_dir()
         if bin_dir is None:
             raise CommunityDbError(

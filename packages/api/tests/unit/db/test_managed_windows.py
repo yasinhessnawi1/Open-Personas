@@ -9,6 +9,7 @@ file, the order of the tool calls, and the refusals.
 from __future__ import annotations
 
 import errno
+import os
 import shutil
 import sys
 import tempfile
@@ -389,6 +390,59 @@ class TestTheManagerRouting:
         with pytest.raises(CommunityDbError) as caught:
             manager.start()
         assert caught.value.context["reason"] == "socket_path_too_long"
+
+    def test_a_pgpassword_in_the_environment_cannot_shadow_the_password_file(
+        self, short_base: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """libpq sends PGPASSWORD before it reads the ``passfile`` the URL names.
+
+        A machine with another Postgres often sets one (the GitHub Windows runner sets
+        PGPASSWORD=root), and every connection then failed authentication. The Windows
+        lifecycle drops it before the first connection, so the password file decides.
+        """
+        seen_at_start: list[str | None] = []
+        seen_at_connect: list[str | None] = []
+
+        def fake_start(datadir: Path, _bin_dir: Path) -> mw.SocketTarget:
+            seen_at_start.append(os.environ.get("PGPASSWORD"))
+            return _target(datadir)
+
+        def fake_ensure(_self: object, _admin_url: str) -> None:
+            seen_at_connect.append(os.environ.get("PGPASSWORD"))
+
+        monkeypatch.setenv("PGPASSWORD", "root")
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(mw, "start_socket_only", fake_start)
+        monkeypatch.setattr(cm, "_pginstall_bin_dir", lambda: short_base / "bin")
+        monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", fake_ensure)
+        cm.CommunityDbManager(external_url=None, base_dir=short_base).start()
+        assert seen_at_start == [None]
+        assert seen_at_connect == [None]
+        assert "PGPASSWORD" not in os.environ
+
+    def test_the_posix_lifecycle_leaves_pgpassword_alone(
+        self, short_base: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the Windows lifecycle authenticates by password file; elsewhere the
+        embedded server trusts its 0700 socket, so the environment is not touched."""
+
+        class _Server:
+            def ensure_postgres_running(self) -> None:
+                return None
+
+            def get_uri(self, database: str) -> str:
+                return f"postgresql://postgres@/{database}?host={short_base}"
+
+        import pixeltable_pgserver
+
+        monkeypatch.setenv("PGPASSWORD", "root")
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            pixeltable_pgserver, "get_server", lambda *_a, **_k: _Server(), raising=False
+        )
+        monkeypatch.setattr(cm.CommunityDbManager, "_ensure_database", _recorder([]))
+        cm.CommunityDbManager(external_url=None, base_dir=short_base).start()
+        assert os.environ.get("PGPASSWORD") == "root"
 
 
 def _recorder(sink: list[str]) -> Callable[[object, str], None]:

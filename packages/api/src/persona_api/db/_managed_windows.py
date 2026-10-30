@@ -53,9 +53,11 @@ from persona_api.db._managed_files import (
 from persona_api.errors import CommunityDbError
 
 __all__ = [
+    "ENVIRONMENT_PASSWORD",
     "HBA_CONTENT",
     "SOCKET_PORT",
     "SocketTarget",
+    "drop_environment_password",
     "password_file_for",
     "pgpass_line",
     "start_socket_only",
@@ -104,6 +106,24 @@ class SocketTarget:
             },
         )
         return url.render_as_string(hide_password=False)
+
+
+#: libpq sends the password in this variable before it reads the ``passfile`` the
+#: connection string names, so a value left in the environment shadows the password file.
+ENVIRONMENT_PASSWORD = "PGPASSWORD"
+
+
+def drop_environment_password() -> bool:
+    """Remove ``PGPASSWORD`` from this process's environment; True when one was set.
+
+    libpq's order is: a ``password`` in the connection string, then ``PGPASSWORD``, then
+    the password file. The bundled database's connection string names only its password
+    file, so any ``PGPASSWORD`` (a machine with another Postgres often sets one; the
+    GitHub Windows runner sets ``postgres``/``root``) is sent instead and every
+    connection fails authentication. Dropping it also keeps that other password out of
+    the environment of every child process.
+    """
+    return os.environ.pop(ENVIRONMENT_PASSWORD, None) is not None
 
 
 def password_file_for(datadir: Path) -> Path:
