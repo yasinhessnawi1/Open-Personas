@@ -469,7 +469,7 @@ def test_the_b3_shape_is_discarded_by_the_real_pipeline(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v9",
+        prompt_version="a5-scan-v10",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)
@@ -508,7 +508,7 @@ def test_a_conversation_disclosed_after_the_hold_never_flushes(
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v9",
+        prompt_version="a5-scan-v10",
         scanned_at=_NOW,
     )
     pipeline = _pipeline(app_engine)

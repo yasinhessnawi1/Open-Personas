@@ -46,6 +46,12 @@ def test_each_family_is_a_time_word(family: str, text: str, word: str) -> None:
         "The sun was out and I sat down.",
         "Reply as soon as you can.",
         "The hearing entered the horizon.",
+        "You might want to compare offers.",
+        "It might be worth a look.",
+        "You may want to book a slot.",
+        "You could ask the garage.",
+        "You checked the price on Power.",
+        "You may be able to book online.",
     ],
 )
 def test_these_are_not_time_words(text: str) -> None:
@@ -96,3 +102,37 @@ def test_the_broad_time_words_are_re_judged(text: str, word: str) -> None:
 )
 def test_the_false_refusal_probes_are_still_not_refused(text: str) -> None:
     assert relative_day_words(text) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "word"),
+    [
+        (
+            "You noted the deadline might fall before Christmas but that you hadn't checked.",
+            "might fall",
+        ),
+        ("The grant deadline might be before Christmas.", "might be before"),
+        ("The form may be due in November.", "may be due"),
+        ("It could be sometime in spring.", "could be sometime"),
+        ("You have not checked the deadline yet.", "have not checked"),
+        ("You hadn't checked when it closes.", "hadn't checked"),
+        ("The deadline is probably before the holidays.", "probably before"),
+        ("The dues are maybe in spring.", "maybe"),
+        ("It is possibly due in spring.", "possibly"),
+        ("It falls due perhaps in spring.", "perhaps"),
+        ("You are not sure when the dues fall due.", "not sure when"),
+        ("You are not sure if it is spring.", "not sure if"),
+        ("I think the dues fall in spring.", "I think the"),
+        ("I think it is in spring.", "I think it"),
+        ("The date is unconfirmed.", "unconfirmed"),
+        ("You have not confirmed the date.", "have not confirmed"),
+        ("The club hasn't verified the date.", "hasn't verified"),
+        ("The date is not yet checked.", "not yet checked"),
+    ],
+)
+def test_a_speculated_date_is_re_judged(text: str, word: str) -> None:
+    """B11 (ruling after the second MID set): a message resting on a date the material
+    only guesses at is never kept at the flush; the v5 judge is asked again. It is not
+    refused mechanically: the judge decides."""
+    assert word in time_words(text), text
+    assert relative_day_words(text, dated=True) == []

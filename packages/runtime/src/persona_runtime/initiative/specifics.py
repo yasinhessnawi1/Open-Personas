@@ -176,6 +176,21 @@ _BROAD_TIME_RE = re.compile(
     r"|['\u2019]til\b",
     re.IGNORECASE,
 )
+#: A date the message only guesses at (B11, rulings after the second MID set): never
+#: refused here, the judge decides (entailment rule 9), but never kept at the flush
+#: either, so a YES on it is asked again on the new day. Narrow on purpose: "you might
+#: want to", "it might be worth" and "you may be able to" are not time words.
+_SPECULATIVE_DATE_RE = re.compile(
+    r"\b(?:might|may|could)\s+(?:be\s+)?(?:due|fall|land)\b"
+    r"|\b(?:might|may|could)\s+be\s+(?:before|after|by|around|sometime|soon)\b"
+    r"|\bprobably\s+(?:due|before|after|by|around)\b"
+    r"|\b(?:maybe|possibly|perhaps|unconfirmed)\b"
+    r"|\bnot\s+sure\s+(?:when|if)\b"
+    r"|\bI\s+think\s+(?:the|it)\b"
+    r"|\bnot\s+yet\s+checked\b"
+    r"|\b(?:has|have|had)(?:\s+not|n['\u2019]t)\s+(?:yet\s+)?(?:checked|confirmed|verified)\b",
+    re.IGNORECASE,
+)
 #: Exempt from the refusal (still time words): a possessive period, "in a day or two".
 _POSSESSIVE_PERIOD_RE = re.compile(r"(?:this|next)\s+(?:coming\s+)?(?:month|year)", re.I)
 _POSSESSIVE_RE = re.compile(r"['\u2019]s\b")
@@ -463,6 +478,7 @@ def time_words(text: str) -> list[str]:
         _ORDINAL_DAY_RE,
         _COUNTED_SPAN_RE,
         _BROAD_TIME_RE,
+        _SPECULATIVE_DATE_RE,
     )
     found = [match[0] for pattern in tokens for match in pattern.finditer(text)]
     found += [text[start:end] for start, end in _date_spans(text)]

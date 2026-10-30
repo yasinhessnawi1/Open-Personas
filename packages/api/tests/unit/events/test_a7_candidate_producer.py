@@ -130,7 +130,7 @@ def test_the_event_prompt_version_and_voice_rule() -> None:
     in the pipeline, for events and scans alike (tested there)."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
-    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v7"
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v8"
     assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
         "\n", " "
     )
@@ -149,9 +149,9 @@ def test_the_event_floor_is_the_version_in_force() -> None:
     """Third review LOW 5: the deliverable floor is A7's prompt in force."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
 
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 7
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 8
     assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a7-event-candidate-v6")
+    assert not prompt_version_deliverable("a7-event-candidate-v7")
 
 
 def test_the_v7_event_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
@@ -191,3 +191,22 @@ async def test_the_output_cap_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> N
     backend = _FakeBackend('{"candidate": null}')
     await _producer(backend, _FakeGrounding(conversation="some content")).produce(_PAYLOAD, _CTX)  # type: ignore[arg-type]
     assert backend.max_tokens == [777]
+
+
+def test_the_v8_event_prompt_writes_the_day_after_today_as_its_date() -> None:
+    """B9 (ruling after the second MID set): the same worked example as a5-scan-v10."""
+    from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
+
+    flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
+    assert (
+        "Worked example: TODAY is day D and the choir concert is on day D+1. Write "
+        '"your choir concert on" followed by the weekday and date the material gives, never '
+        '"tomorrow" and never "tomorrow" next to the date.'
+    ) in flat
+    for fixture_term in ("Bergen", "flight", "September 2026", "Christmas", "grant"):
+        assert fixture_term not in flat, fixture_term
+    assert (
+        'A date the material only guesses at (with words like "might", "perhaps", "I think", '
+        '"probably", "maybe", "not sure", "unconfirmed") is never grounds to raise anything, '
+        "not even an offer to look it up or confirm it."
+    ) in flat

@@ -1,7 +1,7 @@
 """Which prompt versions a held notice may still be delivered under (R9-249/R9-256 review).
 
 A notice stores the candidate that was held, text and citations included. Candidates from
-before ``a5-scan-v9`` (the scan) and ``a7-event-candidate-v7`` (A7's events) may cite a
+before ``a5-scan-v10`` (the scan) and ``a7-event-candidate-v8`` (A7's events) may cite a
 conversation summary the scan no longer reads, speak of "the user" to the user, or carry an
 offer the template used to re-case (third review LOW 5: the floors are the versions in
 force, raised with every user-facing prompt change).
@@ -26,7 +26,7 @@ __all__ = [
 MAX_CITED_NODE_READS = 3
 
 #: The oldest deliverable version number per prompt family.
-MIN_DELIVERABLE_PROMPT_VERSIONS = MappingProxyType({"a5-scan": 9, "a7-event-candidate": 7})
+MIN_DELIVERABLE_PROMPT_VERSIONS = MappingProxyType({"a5-scan": 10, "a7-event-candidate": 8})
 
 _VERSION_RE = re.compile(r"(?P<family>[a-z0-9]+(?:-[a-z0-9]+)*?)-v(?P<number>[0-9]+)")
 

@@ -80,6 +80,8 @@ _logger = get_logger("runtime.initiative.grounding")
 
 #: Bumped on any rule/prompt change; recorded with every verdict for traceability
 #: (the Spec-10 versioned-artifact discipline; the A5-R-1 suite re-runs per version).
+#: v5 (rulings after the second MID set, B11): rule 9, a date the excerpts only
+#: speculate about supports raising nothing, an offer to confirm it included.
 #: v4 (owner ruling 2026-10-30, F3): an advisory clause after a stated deadline, a weekday
 #: matching a stated date, and a comparison across excerpts are support; (F2) the judge also
 #: sees CONTEXT, the newest notes linked to
@@ -89,7 +91,7 @@ _logger = get_logger("runtime.initiative.grounding")
 #: timezone) and refuses a relative claim it cannot verify against it; it sees the PLAN.
 #: v2 (R9-249 re-review HIGH-B): one call judges the observation AND the message the user
 #: reads (``why_now``) AND the offer (``next_step``), with a precise rule for hedged clauses.
-ENTAILMENT_PROMPT_VERSION = "a5-entailment-v4"
+ENTAILMENT_PROMPT_VERSION = "a5-entailment-v5"
 
 _SYSTEM_PROMPT = """\
 You verify whether cited excerpts GROUND an observation an assistant wants to raise, \
@@ -117,7 +119,7 @@ short clause such as "so you may want to start soon", "there is still time to co
 offers", "you still have a few days" or "paying it now avoids the reminder fee". It holds \
 when the deadline or consequence it relies on is stated in the excerpts and the clause is \
 TRUE on TODAY. It may NOT add a deadline, amount, consequence or requirement the excerpts do \
-not state, and a date the excerpts only guess at ("might be before Christmas") stays a claim.
+not state, and a date the excerpts only guess at ("perhaps in the spring") stays a claim.
 5. Arithmetic on stated facts is support, not inference: a weekday that matches a stated date \
 (the date fixes the weekday), and a comparison of stated dates or times across excerpts (they \
 overlap, one comes before the other, the gap between them). For a comparison, quote one line \
@@ -130,6 +132,11 @@ excerpts state. If you cannot verify it from TODAY and the excerpts, rule 7 fail
 8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no longer hold \
 (the person has left that job or role, moved, cancelled it, already done or finished it, or \
 a newer note contradicts an excerpt), rule 8 fails.
+9. A date or deadline the excerpts only speculate about (with words like "might", \
+"perhaps", "I think", "probably", "maybe", "not sure", "unconfirmed") supports raising \
+nothing: not a reminder, and not an offer to confirm it or look it up, which raises it \
+all the same. If the OBSERVATION, the MESSAGE or the OFFER rests on such a date, rule 9 \
+fails.
 
 Reply with ONLY a JSON object, no prose:
 {"entailed": true|false, "quote": "<a VERBATIM span copied exactly from the excerpts that \

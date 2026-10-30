@@ -113,7 +113,7 @@ def _candidate() -> InitiativeCandidate:
         source=CandidateSource.SCAN,
         owner_id="u1",
         persona_id="p1",
-        prompt_version="a5-scan-v9",
+        prompt_version="a5-scan-v10",
         scanned_at=datetime(2026, 9, 26, 5, 0, tzinfo=UTC),
     )
 

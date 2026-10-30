@@ -410,7 +410,7 @@ class TestTheJudgeChecksWhatTheUserReads:
     def test_the_judge_prompt_defines_the_hedge_and_the_offer_rules(self) -> None:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
 
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v4"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v5"
         flat = " ".join(_SYSTEM_PROMPT.split())
         assert 'introduced by "if", "unless" or "in case"' in flat
         assert '"if the form is due Friday" is a claim, not a hedge' in flat
@@ -777,12 +777,53 @@ class TestTheJudgeSeesTheLinkedContext:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT, ENTAILMENT_PROMPT_VERSION
 
         flat = " ".join(_SYSTEM_PROMPT.split())
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v4"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v5"
         assert (
             "8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no "
             "longer hold (the person has left that job or role, moved, cancelled it, already "
             "done or finished it, or a newer note contradicts an excerpt), rule 8 fails."
         ) in flat
+
+
+class TestTheSpeculatedDateOfV5:
+    """B11 (ruling after the second MID set): a date the excerpts only guess at is never
+    grounds to raise anything, an offer to confirm it included."""
+
+    def test_rule_9_refuses_a_speculated_date_and_an_offer_to_confirm_it(self) -> None:
+        from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
+
+        flat = " ".join(_SYSTEM_PROMPT.split())
+        assert (
+            "9. A date or deadline the excerpts only speculate about (with words like "
+            '"might", "perhaps", "I think", "probably", "maybe", "not sure", "unconfirmed") '
+            "supports raising nothing: not a reminder, and not an offer to confirm it or look it "
+            "up, which raises it all the same. If the OBSERVATION, the MESSAGE or the OFFER rests "
+            "on such a date, rule 9 fails."
+        ) in flat
+
+    @pytest.mark.asyncio
+    async def test_a_kept_yes_on_a_speculated_date_is_judged_again(self) -> None:
+        """A YES on B11's text is never kept at the flush: its speculation markers read
+        as time words, so the judge (v5) is asked again on the new day."""
+        from persona_runtime.initiative.grounding import excerpts_fingerprint
+
+        judge = _StubJudge('{"entailed": false}')
+        checker = GroundingChecker(source=_FakeSource(), backend=judge)
+        b11 = _candidate().model_copy(
+            update={
+                "why_now": (
+                    "You noted that the grant deadline might fall before Christmas but that "
+                    "you hadn't checked, so confirming the date would help."
+                )
+            }
+        )
+        verdict = await checker.check(
+            b11,
+            admitted_fingerprint=excerpts_fingerprint([_HEARING_CONTENT]),
+            admitted_served_model=_HEAD,
+        )
+        assert judge.calls == 1
+        assert verdict.admitted is False
 
 
 class TestTheJudgeRulesOfV4:
@@ -810,10 +851,24 @@ class TestTheJudgeRulesOfV4:
         flat = self._flat()
         assert (
             "It may NOT add a deadline, amount, consequence or requirement the excerpts do not "
-            'state, and a date the excerpts only guess at ("might be before Christmas") stays a '
+            'state, and a date the excerpts only guess at ("perhaps in the spring") stays a '
             "claim."
         ) in flat
         assert "Inference, speculation, plausibility" in flat
+
+    def test_the_judge_prompt_echoes_no_measuring_fixture(self) -> None:
+        """Review of fix/initiative-mid-tier-3: an example that restates an A5-R-1 fixture
+        would make the measuring set test recall, not judgement."""
+        flat = self._flat()
+        for fixture_term in (
+            "Christmas",
+            "Bergen",
+            "flight",
+            "grant",
+            "September 2026",
+            "has not checked",
+        ):
+            assert fixture_term not in flat, fixture_term
         assert "2. Every factual claim in the MESSAGE is stated or directly supported" in flat
 
     def test_a_weekday_and_a_comparison_are_arithmetic_on_stated_facts(self) -> None:

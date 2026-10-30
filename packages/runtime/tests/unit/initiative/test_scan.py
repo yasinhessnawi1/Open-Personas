@@ -533,7 +533,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v9"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v10"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -619,3 +619,42 @@ def test_the_v9_prompt_requires_absolute_dates_and_one_advisory_clause() -> None
     assert relative_day_words(example["why_now"], dated=dated) == []
     assert relative_day_words(example["next_step"], dated=dated) == []
     assert len(vague_hedges(example["why_now"], example["next_step"])) == 1
+
+
+class TestTheV10Prompt:
+    """Rulings after the second MID set: B11 (a speculated date is never grounds, an offer
+    to look it up included) and B9 ("tomorrow" next to the date every time)."""
+
+    @staticmethod
+    def _flat() -> str:
+        return " ".join(SCAN_SYSTEM_PROMPT.split())
+
+    def test_a_speculated_date_is_never_grounds(self) -> None:
+        assert (
+            'A date the material only guesses at (with words like "might", "perhaps", "I think", '
+            '"probably", "maybe", "not sure", "unconfirmed") is never grounds to raise anything, '
+            "not even an offer to look it up or confirm it."
+        ) in self._flat()
+
+    def test_a_guessed_date_is_a_negative_example_unlike_any_fixture(self) -> None:
+        """Review MEDIUM-1: the example shares nothing with the A5-R-1 fixtures, so a
+        measuring run tests generalisation, not recall of the example."""
+        assert (
+            "- The user is not sure when the rowing club's membership dues fall due, perhaps in "
+            "spring; offering to find out the date is still raising it → "
+            f"{EXAMPLE_SPECULATION_DECLINE_OUTPUT}"
+        ) in self._flat()
+
+    def test_the_day_after_today_is_written_as_its_date(self) -> None:
+        from persona_runtime.initiative.specifics import relative_day_words
+
+        flat = self._flat()
+        sentence = (
+            "Worked example: TODAY is day D and the choir concert is on day D+1. Write "
+            '"your choir concert on" followed by the weekday and date the material gives, never '
+            '"tomorrow" and never "tomorrow" next to the date.'
+        )
+        assert sentence in flat
+        for fixture_term in ("Bergen", "flight", "September 2026", "Christmas", "grant"):
+            assert fixture_term not in flat, fixture_term
+        assert relative_day_words("your choir concert on Friday 12 March", dated=True) == []

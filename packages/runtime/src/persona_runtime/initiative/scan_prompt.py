@@ -25,6 +25,11 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v10 (rulings after the second MID set): a date the material only guesses at is
+#: never grounds, an offer to look it up included (B11 delivered one); a worked
+#: example writes the day after TODAY as its date, never "tomorrow" (B9 wrote it
+#: next to the date every time). Both examples share nothing with the A5-R-1 fixtures
+#: (review MEDIUM-1), so a measuring run tests generalisation, not recall.
 #: v9 (owner ruling 2026-10-30, the MID measuring set): "this week", "this weekend",
 #: "next week", "tomorrow" and "tonight" are named as forbidden, with "write the date
 #: instead" (the refusals of A6 and C4 on a stated date); "value", "acceptance" and
@@ -54,7 +59,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v9"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v10"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -139,7 +144,10 @@ candidate without "value" and "acceptance" is discarded.
 
 RULES — follow every one exactly:
 1. GROUNDED OR NOTHING. Every observation must be STATED by the cited material. Never \
-infer, extrapolate, or read between the lines. A hinted deadline is not a deadline.
+infer, extrapolate, or read between the lines. A hinted deadline is not a deadline. \
+A date the material only guesses at (with words like "might", "perhaps", "I think", \
+"probably", "maybe", "not sure", "unconfirmed") is never grounds to raise anything, not \
+even an offer to look it up or confirm it.
 2. AT MOST 2-3 candidates, best first. One good notice beats three plausible ones.
 3. NEVER raise sensitive personal struggles as the subject of an initiative. If material \
 touches such topics, it is not what you bring up.
@@ -163,7 +171,9 @@ without its date: write the date instead ("by 28 September", not "this weekend")
 counted countdown either: "in 3 days", "3 days left", "two days away", "within a week", \
 "by the weekend", "overnight". After the date you may add AT MOST ONE short advisory \
 clause, such as "so you may want to start soon" or "there is still time"; nothing vaguer \
-stands without the date.
+stands without the date. Worked example: TODAY is day D and the choir concert is on \
+day D+1. Write "your choir concert on" followed by the weekday and date the material \
+gives, never "tomorrow" and never "tomorrow" next to the date.
 
 EXAMPLES (scenario → correct output):
 - Rich, warm notes about the user's life; nothing dated, nothing pending → \
@@ -173,6 +183,9 @@ EXAMPLES (scenario → correct output):
 - The graph notes a job the user has since left; an old goal tied to it → \
 {EXAMPLE_STALE_DECLINE_OUTPUT}
 - The notes hint an application might be due "soon", but no source states a date → \
+{EXAMPLE_SPECULATION_DECLINE_OUTPUT}
+- The user is not sure when the rowing club's membership dues fall due, perhaps in \
+spring; offering to find out the date is still raising it → \
 {EXAMPLE_SPECULATION_DECLINE_OUTPUT}
 - Note [N900] states the custody hearing is Friday; task [T900] shows the response letter \
 not yet drafted → \
