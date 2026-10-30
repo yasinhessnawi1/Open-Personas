@@ -194,7 +194,7 @@ async def test_the_output_cap_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_the_v8_event_prompt_writes_the_day_after_today_as_its_date() -> None:
-    """B9 (ruling after the second MID set): the same worked example as a5-scan-v10."""
+    """B9 (ruling after the second MID set): the same worked example as a5-scan-v11."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
     flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())

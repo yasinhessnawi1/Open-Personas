@@ -80,6 +80,8 @@ _logger = get_logger("runtime.initiative.grounding")
 
 #: Bumped on any rule/prompt change; recorded with every verdict for traceability
 #: (the Spec-10 versioned-artifact discipline; the A5-R-1 suite re-runs per version).
+#: v6 (rulings after the third MID set, B7): rule 10, grounds that a cited excerpt or
+#: the CONTEXT shows are superseded support nothing, a hand-off offer included.
 #: v5 (rulings after the second MID set, B11): rule 9, a date the excerpts only
 #: speculate about supports raising nothing, an offer to confirm it included.
 #: v4 (owner ruling 2026-10-30, F3): an advisory clause after a stated deadline, a weekday
@@ -91,7 +93,7 @@ _logger = get_logger("runtime.initiative.grounding")
 #: timezone) and refuses a relative claim it cannot verify against it; it sees the PLAN.
 #: v2 (R9-249 re-review HIGH-B): one call judges the observation AND the message the user
 #: reads (``why_now``) AND the offer (``next_step``), with a precise rule for hedged clauses.
-ENTAILMENT_PROMPT_VERSION = "a5-entailment-v5"
+ENTAILMENT_PROMPT_VERSION = "a5-entailment-v6"
 
 _SYSTEM_PROMPT = """\
 You verify whether cited excerpts GROUND an observation an assistant wants to raise, \
@@ -137,6 +139,12 @@ a newer note contradicts an excerpt), rule 8 fails.
 nothing: not a reminder, and not an offer to confirm it or look it up, which raises it \
 all the same. If the OBSERVATION, the MESSAGE or the OFFER rests on such a date, rule 9 \
 fails.
+10. If a cited excerpt or the CONTEXT shows that another cited excerpt's state no longer \
+holds (a role given up, a move, a cancellation, something finished), that old state is \
+grounds for nothing. Setting the two side by side is still raising it, and so is an \
+offer to confirm it or hand it off: rule 10 fails. A newer note that only updates a detail \
+(a new date, time or place for the same thing) makes the new detail the grounds; only the \
+old detail is grounds for nothing.
 
 Reply with ONLY a JSON object, no prose:
 {"entailed": true|false, "quote": "<a VERBATIM span copied exactly from the excerpts that \

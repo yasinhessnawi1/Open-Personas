@@ -410,7 +410,7 @@ class TestTheJudgeChecksWhatTheUserReads:
     def test_the_judge_prompt_defines_the_hedge_and_the_offer_rules(self) -> None:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
 
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v5"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v6"
         flat = " ".join(_SYSTEM_PROMPT.split())
         assert 'introduced by "if", "unless" or "in case"' in flat
         assert '"if the form is due Friday" is a claim, not a hedge' in flat
@@ -777,7 +777,7 @@ class TestTheJudgeSeesTheLinkedContext:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT, ENTAILMENT_PROMPT_VERSION
 
         flat = " ".join(_SYSTEM_PROMPT.split())
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v5"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v6"
         assert (
             "8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no "
             "longer hold (the person has left that job or role, moved, cancelled it, already "
@@ -826,6 +826,24 @@ class TestTheSpeculatedDateOfV5:
         assert verdict.admitted is False
 
 
+class TestTheSupersededGroundsOfV6:
+    """B7 (ruling after the third MID set): grounds that a cited excerpt or the CONTEXT
+    shows are superseded support nothing about the old state, a hand-off offer included."""
+
+    def test_rule_10_refuses_superseded_grounds_and_a_hand_off(self) -> None:
+        from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
+
+        flat = " ".join(_SYSTEM_PROMPT.split())
+        assert (
+            "10. If a cited excerpt or the CONTEXT shows that another cited excerpt's state no "
+            "longer holds (a role given up, a move, a cancellation, something finished), that "
+            "old state is grounds for nothing. Setting the two side by side is still raising it, "
+            "and so is an offer to confirm it or hand it off: rule 10 fails. A newer note that "
+            "only updates a detail (a new date, time or place for the same thing) makes the new "
+            "detail the grounds; only the old detail is grounds for nothing."
+        ) in flat
+
+
 class TestTheJudgeRulesOfV4:
     """F3 (owner ruling 2026-10-30): the re-run's wrong NOs were an advisory or
     time-sufficiency clause after a stated deadline, a weekday computed from a stated date
@@ -867,6 +885,12 @@ class TestTheJudgeRulesOfV4:
             "grant",
             "September 2026",
             "has not checked",
+            "Nordlys",
+            "Fjord",
+            "slides",
+            "quarterly",
+            "client review",
+            "data analyst",
         ):
             assert fixture_term not in flat, fixture_term
         assert "2. Every factual claim in the MESSAGE is stated or directly supported" in flat

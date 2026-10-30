@@ -80,10 +80,11 @@ LOW-5). Other languages' forms stay the judge's.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 
 __all__ = [
     "earliest_upcoming_date",
+    "normalise_relative_days",
     "relative_day_words",
     "states_a_date",
     "vague_hedges",
@@ -497,3 +498,54 @@ def earliest_upcoming_date(*texts: str, written_on: date) -> date | None:
     dates = [d for text in texts for d in _stated_dates(_normalise(text), written_on)]
     upcoming = [d for d in dates if d >= written_on]
     return min(upcoming) if upcoming else None
+
+
+#: "tomorrow" directly before a FULL date (day, month and year, with or without its weekday)
+#: that it names (B9, ruling after the third MID set). Not "today": a notice about today is
+#: held to the next morning and lapses unseen, so it stays refused (review LOW-1). A form
+#: of "be" before it takes "on" in its place ("is tomorrow, Sunday 27 ..." reads "is on
+#: Sunday 27 ...").
+_RELATIVE_BEFORE_DATE_RE = re.compile(
+    r"(?P<lead>\b(?:is|are|was|were|be)\s+|['’]s\s+)?"
+    r"\b(?P<rel>tomorrow),?\s+"
+    rf"(?P<date>(?:(?P<weekday>{'|'.join(_WEEKDAYS)}),?\s+)?"
+    rf"(?:(?P<d1>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<m1>{_MONTH_NAMES})"
+    rf"|(?P<m2>{_MONTH_NAMES})\s+(?P<d2>\d{{1,2}})(?:st|nd|rd|th)?)\.?,?\s+(?P<year>\d{{4}})\b)",
+    re.IGNORECASE,
+)
+
+
+def _names_its_own_day(match: re.Match[str], today: date) -> bool:
+    """Whether the date after the word is the day the word means (and its weekday, if
+    written, is that date's)."""
+    month = _month_number(match["m1"] or match["m2"])
+    if month is None:
+        return False
+    stated = _safe_date(int(match["year"]), month, int(match["d1"] or match["d2"]))
+    if stated is None:
+        return False
+    meant = today + timedelta(days=1)
+    weekday = match["weekday"]
+    return stated == meant and (
+        weekday is None or _WEEKDAYS.index(weekday.lower()) == meant.weekday()
+    )
+
+
+def normalise_relative_days(text: str, *, today: date) -> tuple[str, list[str]]:
+    """The text with each "tomorrow" removed where it sits directly before the full date it
+    names (``today`` is the owner's local date at scan time), and the words removed.
+
+    The date stays; anything else ("today", another relative word, a different or yearless
+    date, a weekday that does not match, no adjacent date) is left alone for the refusal
+    (:func:`relative_day_words`).
+    """
+    removed: list[str] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        if not _names_its_own_day(match, today):
+            return match[0]
+        removed.append(match["rel"])
+        lead = match["lead"] or ""
+        return f"{lead}on {match['date']}" if lead else match["date"]
+
+    return _RELATIVE_BEFORE_DATE_RE.sub(_replace, text), removed

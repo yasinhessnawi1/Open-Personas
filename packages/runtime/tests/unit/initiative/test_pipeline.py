@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v10",
+        "prompt_version": "a5-scan-v11",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -770,6 +770,7 @@ class TestFlushReappliesTheSubjectRule:
             "a5-scan-v7",
             "a5-scan-v8",
             "a5-scan-v9",
+            "a5-scan-v10",
             "a7-event-candidate-v1",
             "a7-event-candidate-v2",
             "a7-event-candidate-v3",
@@ -792,7 +793,7 @@ class TestFlushReappliesTheSubjectRule:
         assert h.ledger.expired == [("n-held", "prompt_superseded")]
         assert delivery.calls == []
 
-    @pytest.mark.parametrize("version", ["a5-scan-v10", "a5-scan-v11", "a7-event-candidate-v8"])
+    @pytest.mark.parametrize("version", ["a5-scan-v11", "a5-scan-v12", "a7-event-candidate-v8"])
     @pytest.mark.asyncio
     async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
         current = _candidate().model_copy(update={"prompt_version": version})
@@ -949,14 +950,14 @@ class TestThirdReviewFlushOrderAndLocalDay:
 
 
 def test_the_scan_floor_is_the_version_in_force() -> None:
-    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v10)."""
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v11)."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
     from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
 
-    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v10"
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 10
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v11"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 11
     assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a5-scan-v9")
+    assert not prompt_version_deliverable("a5-scan-v10")
 
 
 class _FingerprintGrounding:
@@ -1258,3 +1259,93 @@ class TestEachTimeFamilyIsJudgedAgainAtTheFlush:
         assert judge.calls == 0
         assert h.ledger.expired == []
         assert "initiative.grounding_kept" in h.audit_events()
+
+
+class TestTheRelativeDayIsNormalised:
+    """B9 (ruling after the third MID set): "tomorrow" or "today" directly before the
+    full date it names, in the owner's zone at scan time, is removed before the judge, so
+    the judged, fingerprinted, stored and delivered text all carry the date alone; each
+    removal is audited (the word, never content). Anything else reaches the refusal."""
+
+    class _SeeingGrounding(_FakeGrounding):
+        def __init__(self, trace: _Trace) -> None:
+            super().__init__(trace)
+            self.seen: list[InitiativeCandidate] = []
+
+        async def check(self, candidate: InitiativeCandidate, **kwargs: object) -> GroundingVerdict:
+            self.seen.append(candidate)
+            return await super().check(candidate, **kwargs)
+
+    class _StoringLedger(_FakeLedger):
+        def __init__(self, trace: _Trace) -> None:
+            super().__init__(trace)
+            self.stored: list[InitiativeCandidate] = []
+
+        def try_claim_held(self, candidate: InitiativeCandidate, **kwargs: Any) -> _Claim | None:  # noqa: ANN401
+            self.stored.append(candidate)
+            return super().try_claim_held(candidate, **kwargs)
+
+    async def _submit(
+        self, why_now: str, *, zone: str, now: datetime
+    ) -> tuple[_Harness, TestTheRelativeDayIsNormalised._SeeingGrounding]:
+        trace = _Trace()
+        grounding = self._SeeingGrounding(trace)
+        h = _Harness(
+            grounding=grounding,
+            ledger=self._StoringLedger(trace),
+            users=_FakeUsers(trace, _Context(timezone=zone)),
+            clock=lambda: now,
+        )
+        await h.pipeline.submit((_candidate(why_now=why_now),))
+        return h, grounding
+
+    @pytest.mark.asyncio
+    async def test_the_matching_date_is_kept_and_the_word_removed(self) -> None:
+        now = datetime(2027, 3, 11, 6, 0, tzinfo=UTC)
+        text = "Your choir concert is tomorrow, Friday 12 March 2027, at the town hall."
+        h, grounding = await self._submit(text, zone="Europe/Oslo", now=now)
+        expected = "Your choir concert is on Friday 12 March 2027, at the town hall."
+        assert [c.why_now for c in grounding.seen] == [expected]
+        assert [c.why_now for c in h.ledger.stored] == [expected]  # type: ignore[attr-defined]
+        normalised = [e for e in h.auditor.events if e[0] == "initiative.relative_day_normalised"]
+        assert [e[2] for e in normalised] == ["tomorrow"]
+
+    @pytest.mark.asyncio
+    async def test_a_mismatching_date_is_left_for_the_refusal(self) -> None:
+        now = datetime(2027, 3, 11, 6, 0, tzinfo=UTC)
+        text = "Your choir concert is tomorrow, Saturday 13 March 2027."
+        h, grounding = await self._submit(text, zone="Europe/Oslo", now=now)
+        assert [c.why_now for c in grounding.seen] == [text]
+        assert not [e for e in h.auditor.events if e[0] == "initiative.relative_day_normalised"]
+
+    @pytest.mark.parametrize(
+        ("zone", "normalised"),
+        [("Europe/Oslo", True), ("UTC", False)],
+    )
+    @pytest.mark.asyncio
+    async def test_tomorrow_is_read_in_the_owners_zone(self, zone: str, normalised: bool) -> None:
+        """23:30 UTC on 11 March is already 12 March in Oslo, so there "tomorrow" is the
+        13th; in UTC it is still the 12th, which the text does not name."""
+        now = datetime(2027, 3, 11, 23, 30, tzinfo=UTC)
+        text = "Your choir concert is tomorrow, Saturday 13 March 2027."
+        h, grounding = await self._submit(text, zone=zone, now=now)
+        expected = "Your choir concert is on Saturday 13 March 2027." if normalised else text
+        assert [c.why_now for c in grounding.seen] == [expected]
+
+    @pytest.mark.asyncio
+    async def test_the_offer_is_normalised_too(self) -> None:
+        trace = _Trace()
+        grounding = self._SeeingGrounding(trace)
+        h = _Harness(
+            grounding=grounding,
+            ledger=self._StoringLedger(trace),
+            users=_FakeUsers(trace, _Context(timezone="UTC")),
+            clock=lambda: datetime(2027, 3, 11, 6, 0, tzinfo=UTC),
+        )
+        offer = "book seats for the concert tomorrow, Friday 12 March 2027"
+        await h.pipeline.submit((_candidate(next_step=offer),))
+        assert [c.next_step for c in grounding.seen] == [
+            "book seats for the concert Friday 12 March 2027"
+        ]
+        normalised = [e for e in h.auditor.events if e[0] == "initiative.relative_day_normalised"]
+        assert [e[2] for e in normalised] == ["tomorrow"]

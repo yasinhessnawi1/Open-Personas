@@ -533,7 +533,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v10"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v11"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -655,6 +655,44 @@ class TestTheV10Prompt:
             '"tomorrow" and never "tomorrow" next to the date.'
         )
         assert sentence in flat
-        for fixture_term in ("Bergen", "flight", "September 2026", "Christmas", "grant"):
+        for fixture_term in (
+            "Bergen",
+            "flight",
+            "September 2026",
+            "Christmas",
+            "grant",
+            "Nordlys",
+            "Fjord",
+            "slides",
+            "quarterly",
+            "client review",
+            "data analyst",
+            "a job",
+        ):
             assert fixture_term not in flat, fixture_term
         assert relative_day_words("your choir concert on Friday 12 March", dated=True) == []
+
+
+class TestTheV11Prompt:
+    """B7 (ruling after the third MID set): a note about a role, place or plan the material
+    shows has ended is not raised, not even as a hand-off; the example shares nothing with
+    the A5-R-1 fixtures."""
+
+    @staticmethod
+    def _flat() -> str:
+        return " ".join(SCAN_SYSTEM_PROMPT.split())
+
+    def test_an_ended_role_is_not_raised_even_as_a_hand_off(self) -> None:
+        assert (
+            "5. STALE STATE IS NOT GROUNDS. If the material shows a circumstance was "
+            "superseded, nothing about the old state is worth raising. Do not raise a note about "
+            "a role, place or plan the material shows has ended, not even to suggest handing it "
+            "off or confirming who is responsible now."
+        ) in self._flat()
+
+    def test_the_stale_example_shares_nothing_with_the_fixtures(self) -> None:
+        assert (
+            "- A note says the user coached at the chess club, and a newer note says they "
+            "stepped down in spring; an old note about the club's tournament, even as a "
+            "hand-off reminder → " + EXAMPLE_STALE_DECLINE_OUTPUT
+        ) in self._flat()

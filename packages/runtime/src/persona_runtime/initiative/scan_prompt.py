@@ -25,6 +25,9 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v11 (rulings after the third MID set, B7): a note about a role, place or plan the
+#: material shows has ended is not raised, not even as a hand-off; the stale example
+#: shares nothing with the A5-R-1 fixtures (it was a job the user had left).
 #: v10 (rulings after the second MID set): a date the material only guesses at is
 #: never grounds, an offer to look it up included (B11 delivered one); a worked
 #: example writes the day after TODAY as its date, never "tomorrow" (B9 wrote it
@@ -59,7 +62,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v10"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v11"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -155,7 +158,9 @@ touches such topics, it is not what you bring up.
 anything whose purpose is interaction rather than the user's life and work. Even if the \
 user would welcome it, it is a category error and must not appear.
 5. STALE STATE IS NOT GROUNDS. If the material shows a circumstance was superseded, \
-nothing about the old state is worth raising.
+nothing about the old state is worth raising. Do not raise a note about a role, place or \
+plan the material shows has ended, not even to suggest handing it off or confirming who \
+is responsible now.
 6. Times and dates come from the material, never from your own guesses.
 7. SPEAK TO THE USER. "why_now" and "next_step" are read by the user: say "you" and "your", \
 never "the user", "they" or "the person". Do not paste or quote the notes. Anything that could \
@@ -180,7 +185,8 @@ EXAMPLES (scenario → correct output):
 {EXAMPLE_EMPTY_SCAN_OUTPUT}
 - The user seems lonely and hasn't written in days; a check-in would likely be welcomed → \
 {EXAMPLE_ENGAGEMENT_DECLINE_OUTPUT}
-- The graph notes a job the user has since left; an old goal tied to it → \
+- A note says the user coached at the chess club, and a newer note says they stepped \
+down in spring; an old note about the club's tournament, even as a hand-off reminder → \
 {EXAMPLE_STALE_DECLINE_OUTPUT}
 - The notes hint an application might be due "soon", but no source states a date → \
 {EXAMPLE_SPECULATION_DECLINE_OUTPUT}

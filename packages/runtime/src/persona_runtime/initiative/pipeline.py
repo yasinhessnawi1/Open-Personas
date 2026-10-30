@@ -65,7 +65,7 @@ from persona.initiative.restraint import (
 from persona.logging import get_logger
 
 from persona_runtime.initiative.grounding import GroundingRejection
-from persona_runtime.initiative.specifics import earliest_upcoming_date
+from persona_runtime.initiative.specifics import earliest_upcoming_date, normalise_relative_days
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -391,9 +391,15 @@ class InitiativePipeline:
             return
         candidate = voiced
 
+        # (0b) B9 (ruling after the third MID set): "tomorrow" directly before the full
+        # date it names, in the owner's zone at scan time, is removed and the date
+        # kept, so the judged, fingerprinted, stored and delivered text carry the date alone.
+        # Any other relative word reaches the refusal unchanged.
+        today, zone = self._local_day(owner, now)
+        candidate = self._normalise_relative_days(candidate, today)
+
         # (1) grounding: T4's mechanical layers and the judge. No grounding, no candidate. The
         # judge is told the user's local date, so a relative claim can be verified.
-        today, zone = self._local_day(owner, now)
         verdict = await self._grounding.check(candidate, today=today, timezone=zone)
         if not verdict.admitted:
             self._audit(
@@ -660,6 +666,19 @@ class InitiativePipeline:
         except Exception:  # noqa: BLE001 (the judge is then told UTC, and says so)
             _logger.opt(exception=True).warning("user timezone read failed; judging in UTC")
             return now.astimezone(UTC).date(), "UTC"
+
+    def _normalise_relative_days(
+        self, candidate: InitiativeCandidate, today: date
+    ) -> InitiativeCandidate:
+        """The candidate with each self-dating "tomorrow" removed; each removal
+        is audited by the word alone (``initiative.relative_day_normalised``)."""
+        why_now, from_reason = normalise_relative_days(candidate.why_now, today=today)
+        next_step, from_offer = normalise_relative_days(candidate.next_step, today=today)
+        for word in (*from_reason, *from_offer):
+            self._audit(candidate, "initiative.relative_day_normalised", word.lower())
+        if not (from_reason or from_offer):
+            return candidate
+        return candidate.model_copy(update={"why_now": why_now, "next_step": next_step})
 
     def _claim_held(
         self,
