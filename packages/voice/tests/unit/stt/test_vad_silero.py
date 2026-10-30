@@ -30,9 +30,10 @@ from persona_voice.stt.vad_silero import (
     benchmark_onset_latency,
 )
 
-# Real speech for the tests that run the model lives in packages/voice/tests/_speech_audio.py.
-# The root conftest only adds packages/*/src to sys.path, so extend with the voice tests
-# dir for cross-test import (the V2 _mock_stt_backend pattern).
+# Rendered speech (Cartesia TTS) for the tests that run the model lives in
+# packages/voice/tests/_speech_audio.py. The root conftest only adds packages/*/src to
+# sys.path, so extend with the voice tests dir for cross-test import (the V2
+# _mock_stt_backend pattern).
 _VOICE_TESTS_DIR = Path(__file__).resolve().parents[2]
 if str(_VOICE_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_VOICE_TESTS_DIR))
@@ -192,7 +193,7 @@ async def test_silence_emits_no_events() -> None:
 
 @pytest.mark.asyncio
 async def test_speech_burst_emits_speech_started_with_correct_metadata() -> None:
-    # Real speech at the production threshold (0.5, the default).
+    # Rendered speech (Cartesia TTS) at the production threshold (0.5, the default).
     config = _make_config(
         silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
@@ -415,28 +416,60 @@ async def test_empty_push_skips_the_thread_hop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_benchmark_records_baseline_no_threshold_assert() -> None:
-    """T05 records baseline; T12 is the operator-pass gate.
+async def test_benchmark_captures_an_onset_for_every_speech_burst() -> None:
+    """Every burst of rendered speech yields one onset at the production threshold.
 
-    DO NOT assert any P50/P95 threshold here — per Phase-4 decisions.md
-    D-V2-2 + T12 measurement gate #3, the 150 ms P95 binding gate is
-    operator-passed at the external smoke (T12), NOT in unit tests.
+    The harness used to synthesise a 440 Hz sine, which silero-vad-lite 0.3 does not
+    score as speech, so it captured a handful of onsets and the T12 gate skipped. The
+    count is asserted; latency is not (D-V2-2 + T12 gate #3: the 150 ms P95 budget is
+    operator-passed at the external smoke, never in unit tests).
     """
-    config = _make_config(
-        silero_activation_threshold=0.05,
-        silero_min_speech_duration_ms=32,
-    )
+    config = _make_config(silero_min_speech_duration_ms=32)  # threshold 0.5, the default
     adapter = SileroVADAdapter(config)
     await adapter.load()
-    metrics = await benchmark_onset_latency(adapter, iterations=5, speech_burst_ms=200)
-    assert "p50_ms" in metrics
-    assert "p95_ms" in metrics
-    assert "p99_ms" in metrics
-    assert "iterations" in metrics
-    # Sanity: the harness ran SOME iterations (synthetic sine + low threshold).
-    # If iterations==0 the harness returned the empty sentinel — still valid
-    # output but the operator should investigate; we do not fail the test.
-    assert metrics["iterations"] >= 0
+    metrics = await benchmark_onset_latency(adapter, speech=speech_pcm(200), iterations=20)
+    await adapter.close()
+    assert metrics["iterations"] == 20, metrics
+    assert 0.0 < metrics["p50_ms"] <= metrics["p95_ms"] <= metrics["p99_ms"], metrics
+
+
+@pytest.mark.asyncio
+async def test_benchmark_resets_the_model_before_every_burst() -> None:
+    """Each burst starts from a fresh model state, so every sample is a real onset.
+
+    Without the reset the model carries the previous burst's speech in its recurrent
+    state and audio context, and the next burst is not a silence-to-speech transition.
+    """
+    calls: list[str] = []
+
+    class _RecordingVAD:
+        window_size_samples = SILERO_FRAME_SAMPLES
+        sample_rate = SILERO_SAMPLE_RATE_HZ
+
+        def reset(self) -> None:
+            calls.append("reset")
+
+        def process(self, frame: object) -> float:  # noqa: ARG002 - mirrors SileroVAD.process
+            calls.append("process")
+            return 0.9
+
+    config = _make_config(silero_min_speech_duration_ms=32)
+    adapter = SileroVADAdapter(config)
+    adapter._vad = _RecordingVAD()  # type: ignore[assignment]  # noqa: SLF001
+    # 200 ms is 3200 samples: six whole 512-sample frames (the remainder is dropped
+    # with the framer, which the harness also renews per burst).
+    metrics = await benchmark_onset_latency(adapter, speech=speech_pcm(200), iterations=3)
+    await adapter.close()
+    assert calls == (["reset"] + ["process"] * 6) * 3
+    assert metrics["iterations"] == 3
+
+
+@pytest.mark.asyncio
+async def test_benchmark_refuses_a_burst_shorter_than_one_frame() -> None:
+    adapter = SileroVADAdapter(_make_config())
+    await adapter.load()
+    with pytest.raises(ValueError, match="512-sample"):
+        await benchmark_onset_latency(adapter, speech=b"\x00\x00" * 100, iterations=1)
     await adapter.close()
 
 
@@ -445,4 +478,4 @@ async def test_benchmark_requires_loaded_adapter() -> None:
     config = _make_config()
     adapter = SileroVADAdapter(config)
     with pytest.raises(RuntimeError, match="load"):
-        await benchmark_onset_latency(adapter, iterations=1)
+        await benchmark_onset_latency(adapter, speech=speech_pcm(200), iterations=1)

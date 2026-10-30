@@ -231,12 +231,15 @@ async def test_gate_3_silero_wall_clock_onset_p95_with_reframer() -> None:
     """Phase-4 LOCK gate #3: Silero wall-clock onset INCLUDING SileroFramer
     on actual deployment CPU ≤150 ms P95.
 
-    Uses :func:`benchmark_onset_latency` (T05); runs 200 iterations of
-    synthetic speech-onset transitions; asserts P95 ≤150 ms. Below
-    threshold → green; above → fail surfacing the V4-overlay-tightening
-    falsification route. Records benchmark output for the operator-pass
-    audit trail.
+    Uses :func:`benchmark_onset_latency` (T05); runs 200 silence-to-speech
+    onsets of rendered speech (Cartesia TTS, the committed V8 corpus slice)
+    at the production threshold, the model reset before each; asserts P95
+    ≤150 ms. Below threshold → green; above → fail surfacing the
+    V4-overlay-tightening falsification route. Records benchmark output for
+    the operator-pass audit trail. Too few captured onsets is a failure, not
+    a skip: a gate that cannot measure has not passed.
     """
+    from _speech_audio import speech_pcm  # type: ignore[import-not-found]
     from persona_voice.stt.config import StreamingSTTConfig
     from persona_voice.stt.vad_silero import (
         SileroVADAdapter,
@@ -247,23 +250,23 @@ async def test_gate_3_silero_wall_clock_onset_p95_with_reframer() -> None:
         provider="deepgram",
         api_key="placeholder-for-vad-only-test",  # type: ignore[arg-type]
         vad_library="silero",
-        silero_activation_threshold=0.05,
+        silero_activation_threshold=0.5,
         silero_min_speech_duration_ms=32,
     )
     adapter = SileroVADAdapter(config)
     await adapter.load()
     metrics = await benchmark_onset_latency(
         adapter,
+        speech=speech_pcm(200),
         iterations=200,
-        speech_burst_ms=200,
     )
     await adapter.close()
 
-    if metrics["iterations"] < 50:
-        pytest.skip(
-            f"benchmark only captured {metrics['iterations']:.0f}/200 iterations — "
-            f"insufficient sample size; verify synthetic-signal threshold tuning"
-        )
+    assert metrics["iterations"] >= 50, (
+        f"GATE #3 UNMEASURED: the benchmark captured only {metrics['iterations']:.0f}/200 "
+        f"onsets, too few for a P95; the speech burst no longer crosses the activation "
+        f"threshold (check the silero-vad-lite version and the corpus slice)"
+    )
 
     p50 = metrics["p50_ms"]
     p95 = metrics["p95_ms"]

@@ -414,8 +414,8 @@ class SileroVADAdapter:
 async def benchmark_onset_latency(
     adapter: SileroVADAdapter,
     *,
+    speech: bytes,
     iterations: int = 100,
-    speech_burst_ms: int = 200,
 ) -> dict[str, float]:
     """Measure wall-clock onset latency INCLUDING `SileroFramer` overhead.
 
@@ -423,38 +423,52 @@ async def benchmark_onset_latency(
     time but UNIT TESTS MUST NOT ASSERT any threshold — the 150 ms P95
     binding gate is operator-passed at T12 external smoke.
 
-    Methodology: simulate a silence-to-speech transition by pushing a
-    short silence prefix + a synthetic speech burst (sine wave at 440 Hz);
-    measure the wall-clock interval from the last ``push_audio`` call to
-    the ``speech_started`` event arriving on the event queue. Repeat
-    ``iterations`` times; return percentiles.
+    Methodology: each iteration starts the model from a fresh state
+    (``SileroVAD.reset()`` clears its recurrent state and audio context, so the
+    burst is a true silence-to-speech transition and not a continuation of the
+    previous one), pushes the caller's speech burst, and measures the
+    wall-clock interval from the ``push_audio`` call to the ``speech_started``
+    event arriving on the event queue. Repeat ``iterations`` times; return
+    percentiles.
+
+    The burst must be speech the model scores as speech at the adapter's
+    threshold. A pure tone is not: silero-vad-lite 0.3 scores a 440 Hz sine
+    near 0.002, which is why this harness takes recorded or rendered speech
+    from the caller instead of synthesising one (the tests pass a slice of the
+    committed V8 corpus, ``tests/_speech_audio.py``).
 
     Args:
         adapter: Loaded (``load()`` called) :class:`SileroVADAdapter`.
+        speech: The speech burst pushed each iteration: 16 kHz mono PCM16
+            little-endian, at least one 512-sample Silero frame.
         iterations: Number of onset transitions to sample.
-        speech_burst_ms: Duration of synthetic speech burst per iteration.
 
     Returns:
-        Dict with keys ``p50_ms``, ``p95_ms``, ``p99_ms``, ``iterations``.
-        Empty if the adapter did not detect ANY onset (e.g.
-        threshold mis-configured for the synthetic signal — the harness
-        still returns gracefully).
+        Dict with keys ``p50_ms``, ``p95_ms``, ``p99_ms``, ``iterations``
+        (the number of onsets captured; an iteration whose burst raised no
+        onset within 500 ms is not counted). All zero if no onset was
+        captured; callers that gate on the result check ``iterations``.
+
+    Raises:
+        RuntimeError: :meth:`SileroVADAdapter.load` has not been called.
+        ValueError: ``speech`` is shorter than one frame or not whole samples.
     """
     if adapter._vad is None:
         msg = "benchmark_onset_latency requires adapter.load() called first"
         raise RuntimeError(msg)
+    frame_bytes = SILERO_FRAME_SAMPLES * 2
+    if len(speech) < frame_bytes or len(speech) % 2:
+        msg = (
+            f"benchmark_onset_latency needs a speech burst of whole PCM16 samples, "
+            f"at least one 512-sample frame ({frame_bytes} bytes); got {len(speech)} bytes"
+        )
+        raise ValueError(msg)
 
     latencies_ms: list[float] = []
-    burst_samples = int(SILERO_SAMPLE_RATE_HZ * speech_burst_ms / 1000.0)
-    # Sine wave at 440 Hz, amplitude 0.5 — synthesises VAD-detectable speech.
-    t = np.arange(burst_samples, dtype=np.float32) / SILERO_SAMPLE_RATE_HZ
-    sine_f32 = 0.5 * np.sin(2.0 * np.pi * 440.0 * t)
-    sine_pcm16 = (sine_f32 * 32767.0).astype(np.int16).tobytes()
-
     for _ in range(iterations):
         # Reset adapter state between iterations by draining queue + zeroing
-        # the state machine. We deliberately access internals here (the
-        # harness IS the benchmark — public API would over-constrain).
+        # the state machine and the model. We deliberately access internals
+        # here (the harness IS the benchmark; public API would over-constrain).
         while not adapter._event_queue.empty():
             try:
                 adapter._event_queue.get_nowait()
@@ -464,18 +478,18 @@ async def benchmark_onset_latency(
         adapter._consecutive_voiced_ms = 0.0
         adapter._consecutive_silent_ms = 0.0
         adapter._framer = SileroFramer()
+        adapter._vad.reset()
 
         t_start = time.perf_counter()
-        await adapter.push_audio(sine_pcm16, SILERO_SAMPLE_RATE_HZ)
+        await adapter.push_audio(speech, SILERO_SAMPLE_RATE_HZ)
         # Best-effort onset detection: drain queue with a short timeout.
         try:
             await asyncio.wait_for(adapter._event_queue.get(), timeout=0.5)
             elapsed_ms = (time.perf_counter() - t_start) * 1000.0
             latencies_ms.append(elapsed_ms)
         except TimeoutError:
-            # No onset detected within 500 ms — synthesised signal may not
-            # cross the activation_threshold. Skip iteration; the operator
-            # reads the iteration count to detect this.
+            # No onset within 500 ms: the burst did not cross the activation
+            # threshold. Not counted; callers gate on the ``iterations`` count.
             continue
 
     if not latencies_ms:

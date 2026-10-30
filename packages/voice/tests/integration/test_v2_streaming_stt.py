@@ -296,7 +296,7 @@ async def test_d_v2_x_echo_cancellation_mute_window_suppresses_speech_started() 
     )
     vad = SileroVADAdapter(config, session_state_provider=state_provider)
     await vad.load()
-    # 300 ms of real speech (a pure tone is not speech to the model).
+    # 300 ms of rendered speech (Cartesia TTS); a pure tone is not speech to the model.
     await vad.push_audio(speech_pcm(300), SILERO_SAMPLE_RATE_HZ)
     # The model did hear speech (else an empty queue would prove nothing) ...
     assert vad._in_speech  # noqa: SLF001
