@@ -424,13 +424,36 @@ def test_caddy_admin_api_is_off_and_bodies_are_capped(name: str) -> None:
 _CADDY_UNITS = {"KB": 1000, "MB": 1000**2, "KiB": 1024, "MiB": 1024**2}
 
 
-def _site_body_cap(caddyfile: str, host: str) -> int:
-    """The request_body max_size of one Caddy site, in bytes."""
+def _site_body_caps(caddyfile: str, host: str) -> dict[str, int]:
+    """Every request_body max_size of one Caddy site in bytes, keyed by the handle's matcher.
+
+    A cap set directly in the site is keyed ``"site"``; one inside ``handle /path {`` is keyed
+    by that path, and one inside a bare ``handle {`` (the fallback) by ``"*"``.
+    """
     site = re.search(rf"^{re.escape(host)} \{{\n(.*?)^\}}", caddyfile, re.M | re.S)
     assert site, f"no Caddy site for {host}"
-    cap = re.search(r"max_size (\d+)(KB|MB|KiB|MiB)", site.group(1))
-    assert cap, f"{host} has no request_body max_size"
-    return int(cap.group(1)) * _CADDY_UNITS[cap.group(2)]
+    body = site.group(1)
+    caps: dict[str, int] = {}
+    handle_block = r"^\thandle(?: ([^{]+?))? \{\n(.*?)^\t\}"
+    handles = list(re.finditer(handle_block, body, re.M | re.S))
+    for handle in handles:
+        cap = re.search(r"max_size (\d+)(KB|MB|KiB|MiB)", handle.group(2))
+        if cap:
+            caps[handle.group(1) or "*"] = int(cap.group(1)) * _CADDY_UNITS[cap.group(2)]
+    outside = body
+    for handle in reversed(handles):
+        outside = outside[: handle.start()] + outside[handle.end() :]
+    cap = re.search(r"max_size (\d+)(KB|MB|KiB|MiB)", outside)
+    if cap:
+        caps["site"] = int(cap.group(1)) * _CADDY_UNITS[cap.group(2)]
+    return caps
+
+
+def _voice_stt_limit() -> int:
+    app = (ROOT / "packages/voice/src/persona_voice/http/app.py").read_text(encoding="utf-8")
+    limit = re.search(r"^_STT_AUDIO_MAX_BYTES = (\d+) \* 1024 \* 1024$", app, re.M)
+    assert limit, "voice's STT upload limit moved; update this test"
+    return int(limit.group(1)) * 1024 * 1024
 
 
 def test_the_voice_edge_accepts_the_largest_dictation_voice_accepts() -> None:
@@ -442,13 +465,25 @@ def test_the_voice_edge_accepts_the_largest_dictation_voice_accepts() -> None:
     voice's own limit turns every long dictation into a 413 from Caddy. Allow multipart
     overhead on top.
     """
-    app = (ROOT / "packages/voice/src/persona_voice/http/app.py").read_text(encoding="utf-8")
-    limit = re.search(r"^_STT_AUDIO_MAX_BYTES = (\d+) \* 1024 \* 1024$", app, re.M)
-    assert limit, "voice's STT upload limit moved; update this test"
-    voice_limit = int(limit.group(1)) * 1024 * 1024
-    caddyfile = (KIT / "Caddyfile.voice").read_text(encoding="utf-8")
-    cap = _site_body_cap(caddyfile, "voice.openpersonas.si")
-    assert cap >= voice_limit + 1024 * 1024, (cap, voice_limit)
+    caps = _site_body_caps(
+        (KIT / "Caddyfile.voice").read_text(encoding="utf-8"), "voice.openpersonas.si"
+    )
+    assert caps.get("/v1/stt", 0) >= _voice_stt_limit() + 1024 * 1024, caps
+
+
+def test_only_dictation_gets_the_large_body_cap_on_the_voice_edge() -> None:
+    """Every other voice route keeps 1 MB, because FastAPI reads a body before it checks auth.
+
+    An anonymous 12 MB JSON body to /v1/voice/token or /v1/tts is parsed on the single voice
+    event loop before the 401, about 476 ms per request against about 34 ms at 1 MB, and the
+    voice service has no rate limit. Only POST /v1/stt carries audio.
+    """
+    caps = _site_body_caps(
+        (KIT / "Caddyfile.voice").read_text(encoding="utf-8"), "voice.openpersonas.si"
+    )
+    assert "site" not in caps, "a site-wide cap would also cover the token and tts routes"
+    assert set(caps) == {"/v1/stt", "*"}, caps
+    assert caps["*"] <= 1000**2, caps
 
 
 def test_the_connector_host_serves_exactly_the_provider_paths() -> None:
