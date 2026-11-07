@@ -420,11 +420,14 @@ test.describe("Spec 19 — Phase 2 integration hardening (16-journey live pass)"
     await page.goto("/personas");
     const token = await clerkToken(page);
 
-    const probe = await page.request.post(`${API}/v1/personas/persona_00000000000000000000000000000000/imagegen`, {
-      headers: { Authorization: `Bearer ${token}` },
-      data: { prompt: "test" },
-      failOnStatusCode: false,
-    });
+    const probe = await page.request.post(
+      `${API}/v1/personas/persona_00000000000000000000000000000000/imagegen`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        data: { prompt: "test" },
+        failOnStatusCode: false,
+      },
+    );
     if (probe.status() === 503 || probe.status() === 404) {
       test.skip(
         true,

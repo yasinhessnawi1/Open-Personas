@@ -141,22 +141,8 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
         "_cleanup_workspace_dirs",
         "rmdir",
     ): "removes the sandbox's own empty per-execution folder (rmdir never follows a link)",
-    (
-        "packages/core/src/persona/sandbox/local_docker.py",
-        "_seed_workspace",
-        "write_text",
-    ): "writes the code script into the sandbox's own in/ folder, which the container "
-    "mounts read-only, so no link in it can have been planted by the code",
-    (
-        "packages/core/src/persona/sandbox/local_docker.py",
-        "_seed_workspace",
-        "mkdir",
-    ): "creates folders for input files in the sandbox's own read-only-mounted in/ folder",
-    (
-        "packages/core/src/persona/sandbox/local_docker.py",
-        "_seed_workspace",
-        "write_bytes",
-    ): "writes server-chosen input files into the sandbox's own read-only-mounted in/ folder",
+    # _seed_workspace needs no entry: its writes go through the no-follow helpers
+    # (local_docker._write_inputs), so nothing there is a following call.
 }
 
 

@@ -44,7 +44,11 @@ def test_a_plain_input_path_is_written_where_it_says(tmp_path: Path) -> None:
     _sandbox(tmp_path)._seed_workspace(
         host_in,
         "print(1)",
-        [SandboxFile(path="uploads/report.md", content_bytes=b"# hi", size_bytes=4)],
+        [
+            SandboxFile(path="uploads/report.md", content_bytes=b"# hi", size_bytes=4),
+            SandboxFile(path="top.csv", content_bytes=b"a,b", size_bytes=3),
+        ],
     )
     assert (host_in / "uploads" / "report.md").read_bytes() == b"# hi"
+    assert (host_in / "top.csv").read_bytes() == b"a,b"
     assert (host_in / "__persona_main__.py").read_text(encoding="utf-8") == "print(1)"
