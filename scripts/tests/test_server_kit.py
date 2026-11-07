@@ -1,4 +1,4 @@
-"""The Hetzner deploy kit (deploy/hetzner): its env templates, compose file and scripts.
+"""The server deploy kit (deploy/server): its env templates, compose file and scripts.
 
 Production moved off Fly by restoring a backup onto one box. The ways that goes wrong
 quietly are the ones pinned here:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
-KIT = ROOT / "deploy" / "hetzner"
+KIT = ROOT / "deploy" / "server"
 ENV_DIR = KIT / "env"
 APP_TEMPLATES = ("common", "api", "voice")
 
@@ -443,7 +443,7 @@ def test_no_em_or_en_dashes_in_the_kit() -> None:
 
 
 def _load_render() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("hetzner_render_env", KIT / "render_env.py")
+    spec = importlib.util.spec_from_file_location("server_render_env", KIT / "render_env.py")
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -617,7 +617,7 @@ def test_provision_opens_exactly_the_public_ports() -> None:
 
 def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None:
     service = (KIT / "systemd" / "open-persona-backup.service").read_text(encoding="utf-8")
-    assert "ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh" in service
+    assert "ExecStart=/opt/open-persona/repo/deploy/server/bin/backup.sh" in service
     # Root: the data is owned by uid 1000 and the operator (uid 2000) does not own it.
     assert "User=" not in service
 
@@ -750,3 +750,41 @@ def test_cloud_init_creates_docker_as_a_system_group_before_the_user() -> None:
     config = yaml.safe_load((KIT / "cloud-init.yaml").read_text(encoding="utf-8"))
     assert "groups" not in config
     assert any("groupadd --system docker" in str(c) for c in config["bootcmd"])
+
+
+# --- the kit's name (2026-11-07: production moves to Oracle, voice to Azure) --------------
+
+
+# Spelled in two halves so this file does not match itself.
+OLD_KIT_PATH = "deploy/" + "hetzner"
+OLD_PROJECT = "open-persona-" + "hetzner"
+
+
+def test_nothing_tracked_still_points_at_the_old_kit_path() -> None:
+    """The kit moved from the Hetzner path to deploy/server; a stale path is a broken unit."""
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    stale = []
+    for name in tracked:
+        path = ROOT / name
+        if name == "CHANGELOG.md" or not path.is_file() or path.suffix in {".lock", ".png"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if OLD_KIT_PATH in text or OLD_PROJECT in text:
+            stale.append(name)
+    assert stale == []
+
+
+def test_the_compose_project_name_names_no_host() -> None:
+    assert _compose()["name"] == "open-persona"
+
+
+def test_every_unit_runs_the_kit_from_its_new_path() -> None:
+    for unit in (KIT / "systemd").iterdir():
+        text = unit.read_text(encoding="utf-8")
+        for path in re.findall(r"/opt/open-persona/repo/\S+", text):
+            assert path.startswith("/opt/open-persona/repo/deploy/server/bin/"), (unit.name, path)

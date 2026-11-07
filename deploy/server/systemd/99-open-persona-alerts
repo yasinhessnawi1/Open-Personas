@@ -6,6 +6,6 @@ if [ -s "$ALERTS" ]; then
   echo ""
   echo "  !!! OPEN PERSONA ALERTS: $(wc -l < "$ALERTS") unacknowledged !!!"
   tail -n 5 "$ALERTS" | sed 's/^/  /'
-  echo "  Handle them, then: /opt/open-persona/repo/deploy/hetzner/bin/alert.sh --ack"
+  echo "  Handle them, then: /opt/open-persona/repo/deploy/server/bin/alert.sh --ack"
   echo ""
 fi
