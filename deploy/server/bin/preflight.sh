@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open Persona: checks before (and after) bringing the stack up on the Hetzner box.
+# Open Persona: checks before (and after) bringing the stack up on the core host.
 #
 #   bin/preflight.sh --env-only   env files present, private, complete, roles separated
 #                                 (bin/deploy.sh runs this)
@@ -15,6 +15,8 @@ KIT_DIR="$(dirname "${SCRIPT_DIR}")"
 OP_ENV_DIR="${OP_ENV_DIR:-/opt/open-persona/env}"
 OP_ALERT_DIR="${OP_ALERT_DIR:-/var/lib/open-persona/alerts}"
 ENV_ONLY=0
+# shellcheck source=lib/compose.sh
+. "${SCRIPT_DIR}/lib/compose.sh"
 [ "${1:-}" = "--env-only" ] && ENV_ONLY=1
 
 fails=0
@@ -28,10 +30,8 @@ hasE() { grep -qE "$2" <<<"$1"; }
 dsn_user() { sed -n "s|^$2='\{0,1\}postgresql+psycopg://\([a-z_]*\):.*|\1|p" "${OP_ENV_DIR}/$1" 2>/dev/null; }
 
 # --- env files ------------------------------------------------------------------------
-selfhosted=0
-grep -q 'livekit\.openpersonasai\.com' "${OP_ENV_DIR}/voice.env" 2>/dev/null && selfhosted=1
-required="common api voice postgres migrate caddy alert"
-[ "${selfhosted}" = 1 ] && required="${required} livekit"
+# The core host runs no voice: voice.env and livekit.env belong to the voice host.
+required="common api postgres migrate caddy alert"
 for f in ${required}; do
   path="${OP_ENV_DIR}/${f}.env"
   if [ ! -f "${path}" ]; then bad "${f}.env missing"; continue; fi
@@ -47,13 +47,11 @@ for f in ${required}; do
 done
 
 # Database roles, by DSN: the superuser only in migrate.env (the one-shot migration),
-# the api's cross-tenant engines on persona_platform, every request path on persona_app.
+# the api's cross-tenant engines on persona_platform, its request path on persona_app.
 [ "$(dsn_user api.env DATABASE_URL)" = "persona_platform" ] \
   && ok "api DATABASE_URL is persona_platform" || bad "api.env DATABASE_URL must use persona_platform"
 [ "$(dsn_user api.env APP_DATABASE_URL)" = "persona_app" ] \
   && ok "api APP_DATABASE_URL is persona_app" || bad "api.env APP_DATABASE_URL must use persona_app"
-[ "$(dsn_user voice.env PERSONA_VOICE_DATABASE_URL)" = "persona_app" ] \
-  && ok "voice DSN is persona_app" || bad "voice.env PERSONA_VOICE_DATABASE_URL must use persona_app"
 [ "$(dsn_user migrate.env DATABASE_URL)" = "persona" ] \
   && ok "migrate.env holds the superuser DSN" || bad "migrate.env DATABASE_URL must use the superuser persona"
 superuser_files="$(grep -l 'postgresql+psycopg://persona:' "${OP_ENV_DIR}"/*.env 2>/dev/null | xargs -r -n1 basename | grep -vx migrate.env)"
@@ -84,13 +82,13 @@ else
 fi
 
 # --- database roles, live -----------------------------------------------------------------
-roles="$(docker compose -f "${KIT_DIR}/docker-compose.yml" exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' \
+roles="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' \
   -c "SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname IN ('persona_app', 'persona_platform')" 2>/dev/null)"
 has "${roles}" "persona_app|f|f" && ok "persona_app: not superuser, RLS enforced" || bad "persona_app is missing, a superuser, or bypasses RLS"
 has "${roles}" "persona_platform|f|t" && ok "persona_platform: not superuser" || bad "persona_platform is missing or a superuser"
 
 # --- firewall: exactly the allowed rules ---------------------------------------------------
-ALLOWED_UFW="22/tcp 80/tcp 443/tcp 7881/tcp 7882/udp"
+ALLOWED_UFW="22/tcp 80/tcp 443/tcp"
 ufw_out="$(sudo ufw status 2>&1 || true)"
 if has "${ufw_out}" "Status: active"; then
   ok "ufw active"
@@ -106,9 +104,9 @@ fi
 
 # --- listeners: nothing public that is not on the list ------------------------------------
 # Public (non-loopback) listeners allowed: ssh, caddy (80, 443 tcp; 443 udp is HTTP/3, which
-# ufw does not open), livekit (7880 behind ufw for Caddy, 7881, 7882) and DHCP clients.
-ALLOWED_TCP="22 80 443 7880 7881"
-ALLOWED_UDP="68 443 546 7882"
+# ufw does not open) and DHCP clients. Nothing else, rpcbind (111) included.
+ALLOWED_TCP="22 80 443"
+ALLOWED_UDP="68 443 546"
 public_ports() {  # public_ports <ss flags>
   ss -H "$1" | awk '{print $4}' \
     | grep -vE '^(127\.[0-9.]+(%lo)?|\[::1\](%lo)?|\[::ffff:127\.[0-9.]+\]):' \
@@ -124,19 +122,11 @@ for pair in "tcp:-ltn:${ALLOWED_TCP}" "udp:-lun:${ALLOWED_UDP}"; do
     || bad "public ${proto} listener(s) outside the allowlist:${unexpected}"
 done
 tcp_out="$(ss -ltn)"
-udp_out="$(ss -lun)"
 listening() {  # listening <output> <pattern> <label>
   if hasE "$1" "$2"; then ok "$3"; else bad "$3: not listening"; fi
 }
 listening "${tcp_out}" '127\.0\.0\.1:8000 ' "api on 127.0.0.1:8000"
-listening "${tcp_out}" '127\.0\.0\.1:8001 ' "voice on 127.0.0.1:8001"
 listening "${tcp_out}" ':443 ' "caddy on :443"
-if [ "${selfhosted}" = 1 ]; then
-  listening "${tcp_out}" ':7880 ' "livekit signaling :7880"
-  listening "${tcp_out}" ':7881 ' "livekit ICE/TCP :7881"
-  listening "${udp_out}" ':7882 ' "livekit ICE/UDP :7882"
-  warn "a listening UDP socket does not prove media flows: run the browser check in RUNBOOK.md step 9"
-fi
 
 # --- published ports -----------------------------------------------------------------------
 ports_out="$(docker ps --format '{{.Ports}}' 2>&1)" || bad "docker ps failed"

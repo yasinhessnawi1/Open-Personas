@@ -1,19 +1,24 @@
-# Open Persona production on ONE Hetzner box (replaces the deleted Fly apps).
+# Open Persona production: the CORE host (owner ruling 2026-11-07).
 #
-# Run from the checkout on the box, always through bin/deploy.sh or with this file named:
-#   docker compose -f deploy/server/docker-compose.yml ...
-# The build contexts are the repo root (../..), the same as the Fly builds.
+# Production runs on two hosts. This file is the core host's: an Oracle Cloud Always Free
+# arm64 server (2 OCPU, 12 GB) running postgres, the one-shot migrate step, the api (with
+# its in-process worker and the connector transports) and Caddy. Voice and LiveKit run on
+# the VOICE host (Azure) from docker-compose.voice.yml; nothing here waits for them, and
+# the api reaches voice only through PERSONA_VOICE_SERVICE_URL in api.env.
+#
+# Run it through the kit's scripts, which go through bin/lib/compose.sh: that helper
+# applies the host profile (hosts/<profile>.env, every ${OP_...} size below) the same way
+# for a restore, a backup and a deploy. The build context is the repo root (../..).
 #
 # Networking (the part that keeps the firewall honest):
 #   * Docker-PUBLISHED ports bypass ufw. So nothing is published on a public address:
-#     postgres publishes nothing, api and voice publish on 127.0.0.1 only.
-#   * caddy and livekit use the HOST network. Host-network listeners are ordinary host
-#     sockets, so ufw governs them: 80/443 (caddy) and 7881/tcp + 7882/udp (livekit media)
-#     are opened in ufw; livekit's 7880 signaling port is NOT, and is reached only through
-#     caddy on 127.0.0.1. Caddy on the host network also sees real client addresses.
+#     postgres publishes nothing, the api publishes on 127.0.0.1 only.
+#   * caddy uses the HOST network: its 80/443 listeners are ordinary host sockets that ufw
+#     governs, and it sees real client addresses.
 #
-# Networks: postgres sits ONLY on `db`, an internal network with no route out; api, voice
-# and migrate join `db` to reach it and `backend` for outbound calls (model providers).
+# Networks: postgres sits ONLY on `db`, an internal network with no route out; api and
+# migrate join `db` to reach it, and the api joins `backend` for outbound calls (model
+# providers, connectors).
 #
 # Hardening on every app container: all Linux capabilities dropped (caddy keeps only
 # NET_BIND_SERVICE), a pids limit, and the daemon-wide no-new-privileges (provision.sh,
@@ -25,14 +30,8 @@
 # Env files live OUTSIDE the checkout in ${OP_ENV_DIR} (default /opt/open-persona/env),
 # rendered by render_env.py and completed by bin/fill_generated.sh. Values that are not
 # secrets and never vary are pinned below in `environment:`, which wins over env_file, so
-# a stale env file cannot move a path or an internal URL.
-#
-# LiveKit: two modes, no edit to this file either way. bin/deploy.sh picks the profile
-# from voice.env's PERSONA_VOICE_LIVEKIT_URL.
-#   selfhosted (DEFAULT, owner ruling 2026-10-23): the `selfhosted-livekit` profile runs
-#                     and voice.env points at wss://livekit.openpersonasai.com.
-#   cloud (the fallback): voice.env points at the LiveKit Cloud free-plan project;
-#                     `livekit` never runs.
+# a stale env file cannot move a path or an internal URL. Where voice lives is NOT pinned:
+# it is the one setting that changes when voice comes up on Azure.
 
 name: open-persona
 
@@ -44,26 +43,30 @@ x-logging: &logging
 
 services:
   postgres:
-    # Pinned by digest: the exact image the 2026-10-23 restore rehearsal ran (16.15).
-    # The kit's other third-party image (caddy) is pinned by tag only; pin it by digest
-    # on the first pull (RUNBOOK.md step 6). The Dockerfiles' bases are not the kit's.
+    # Pinned by digest: the exact image the 2026-10-23 restore rehearsal ran (16.15). The
+    # digest is a multi-arch index (amd64 and arm64), so the arm64 core host pulls the same
+    # release. The Dockerfiles' bases are not the kit's.
     image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/postgres.env
-    # Sized for a 16 GB box shared with api, voice and livekit. Postgres gets about a
-    # quarter for its own cache; the kernel page cache does the rest.
+    # Sized by the host profile (hosts/<profile>.env). On the 12 GB Oracle host postgres
+    # gets 1 GB of shared buffers inside a 3 GB limit; the kernel page cache does the rest.
+    # The api's two engines hold 5 connections each (db_pool_size), the voice host adds a
+    # few in Phase B, so 60 connections is ample.
     command:
       - postgres
       - -c
-      - shared_buffers=2GB
+      - shared_buffers=${OP_PG_SHARED_BUFFERS:-1GB}
       - -c
-      - effective_cache_size=6GB
+      - effective_cache_size=${OP_PG_EFFECTIVE_CACHE_SIZE:-3GB}
       - -c
-      - maintenance_work_mem=512MB
+      - maintenance_work_mem=${OP_PG_MAINTENANCE_WORK_MEM:-256MB}
       - -c
-      - work_mem=16MB
+      - work_mem=${OP_PG_WORK_MEM:-8MB}
       - -c
-      - max_connections=100
+      - max_connections=${OP_PG_MAX_CONNECTIONS:-60}
+      - -c
+      - max_wal_size=${OP_PG_MAX_WAL_SIZE:-1GB}
       - -c
       - wal_compression=on
     volumes:
@@ -71,7 +74,10 @@ services:
     # No `ports:`, and only the internal `db` network: no route in, no route out.
     networks: [db]
     shm_size: 256mb
-    mem_limit: 5g
+    # memswap_limit equal to mem_limit: the database never swaps (latency), whatever swap
+    # the host has.
+    mem_limit: ${OP_PG_MEM_LIMIT:-3g}
+    memswap_limit: ${OP_PG_MEM_LIMIT:-3g}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U persona -d persona"]
@@ -141,8 +147,9 @@ services:
       PERSONA_SKILL_MIRROR_PATH: /var/lib/persona/skill-mirror
       # The connector transports run in this process (Spec I1).
       PERSONA_API_EMBED_CONNECTORS: "true"
-      # Server-to-server hops stay on the box. On Fly these were public https URLs.
-      PERSONA_VOICE_SERVICE_URL: http://voice:8001
+      # The connector service is this same process (the I1 fold). Where VOICE lives is
+      # deliberately not pinned here: PERSONA_VOICE_SERVICE_URL is in api.env, empty until
+      # voice runs on the voice host (the api then answers voice requests with a clean 503).
       PERSONA_CONNECTOR_SERVICE_URL: http://127.0.0.1:8000
     volumes:
       - ${OP_DATA_DIR:-/srv/open-persona}/persona:/var/lib/persona
@@ -158,7 +165,9 @@ services:
         condition: service_healthy
     stop_signal: SIGINT
     stop_grace_period: 30s
-    mem_limit: 4g
+    # The resident models (bge embedder, reranker, crisis encoder) and torch take about
+    # 2 to 2.5 GB; the limit leaves room for the worker and the built-in MCP children.
+    mem_limit: ${OP_API_MEM_LIMIT:-4g}
     restart: unless-stopped
     # Liveness only, DB-free, as on Fly (/livez). bin/deploy.sh also checks the deep
     # /healthz. The long start period covers the first boot's model download into HF_HOME.
@@ -167,54 +176,6 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 600s
-      retries: 3
-    logging: *logging
-
-  voice:
-    build:
-      context: ../..
-      dockerfile: packages/voice/Dockerfile
-    image: open-persona/voice:${OP_IMAGE_TAG:-current}
-    # Single instance: the in-process LiveKit agent owns per-call state.
-    container_name: open-persona-voice
-    deploy:
-      replicas: 1
-    env_file:
-      - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
-      - ${OP_ENV_DIR:-/opt/open-persona/env}/voice.env
-    environment:
-      # Carried over from packages/voice/fly.toml [env].
-      PERSONA_LOG_LEVEL: INFO
-      PERSONA_EDITION: cloud
-      PERSONA_VOICE_JWT_ALGORITHMS: RS256
-      PERSONA_VOICE_JWT_AUDIENCE: persona-api
-      PERSONA_VOICE_AGENT_INPROCESS: "true"
-      # R9-188: cloud refuses to boot with audit records going to the swept temp dir.
-      # Postgres joins them to the api's store_audit_events.
-      PERSONA_VOICE_AUDIT_BACKEND: postgres
-      # R9-027: the model cache gets a persistent home here (on Fly it lived in the
-      # container layer and re-downloaded on every machine replacement).
-      HF_HOME: /var/lib/persona-voice/hf
-    volumes:
-      - ${OP_DATA_DIR:-/srv/open-persona}/voice:/var/lib/persona-voice
-    ports:
-      - "127.0.0.1:8001:8001"
-    networks: [backend, db]
-    cap_drop: [ALL]
-    pids_limit: 1024
-    depends_on:
-      postgres:
-        condition: service_healthy
-    stop_signal: SIGINT
-    stop_grace_period: 30s
-    mem_limit: 4g
-    restart: unless-stopped
-    # Every HTTP route is auth-gated, so any HTTP answer (a 401) proves the listener.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s -o /dev/null --max-time 4 http://127.0.0.1:8001/v1/voices"]
-      interval: 30s
-      timeout: 5s
-      start_period: 300s
       retries: 3
     logging: *logging
 
@@ -234,31 +195,10 @@ services:
   # RUNBOOK.md, "Seam: per-tenant MCP", carries the same contract.
   # ---------------------------------------------------------------------------------
 
-  # Self-hosted LiveKit SFU, only with --profile selfhosted-livekit.
-  # The packages/livekit image unchanged: its entrypoint takes LIVEKIT_NODE_IP (the box's
-  # public IPv4, livekit.env) instead of the Fly-only `$FLY_APP_NAME.fly.dev` lookup, and
-  # its baked livekit.yaml already has the proven shape: signaling 7880, ICE/TCP 7881,
-  # single-port UDP mux 7882.
-  livekit:
-    build:
-      context: ../../packages/livekit
-    image: open-persona/livekit:${OP_IMAGE_TAG:-current}
-    profiles: [selfhosted-livekit]
-    network_mode: host
-    # Every port it binds is above 1024, so it runs as nobody with no capability.
-    user: "65534:65534"
-    cap_drop: [ALL]
-    pids_limit: 512
-    env_file:
-      - ${OP_ENV_DIR:-/opt/open-persona/env}/livekit.env
-    environment:
-      LIVEKIT_CONFIG_PATH: /etc/livekit/livekit.yaml
-    mem_limit: 1g
-    restart: unless-stopped
-    logging: *logging
-
   caddy:
-    image: caddy:2.10.2
+    # Pinned by the multi-arch index digest of 2.10.2 (amd64 and arm64 v8), read from
+    # Docker Hub on 2026-11-07.
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
     network_mode: host
     # Binding 80 and 443 is the only privilege it needs.
     cap_drop: [ALL]
@@ -270,7 +210,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    mem_limit: 256m
+    mem_limit: ${OP_CADDY_MEM_LIMIT:-256m}
     restart: unless-stopped
     logging: *logging
 

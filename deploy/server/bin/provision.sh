@@ -14,7 +14,8 @@
 #   * /etc/docker/daemon.json: log rotation, live-restore (containers survive a daemon
 #     upgrade), no-new-privileges for every container
 #   * the cloud metadata address (169.254.169.254) dropped for bridged containers
-#   * ufw rules for the app: 80/tcp, 443/tcp (Caddy), 7881/tcp + 7882/udp (LiveKit media)
+#   * ufw rules for the app: 80/tcp, 443/tcp (Caddy). LiveKit's media ports belong to the
+#     voice host, not this one
 #   * the directory layout (below)
 #   * the nightly backup, the daily disk check, the failure alert and the login banner
 #
@@ -194,8 +195,6 @@ ufw default allow outgoing
 ufw limit 22/tcp comment 'ssh'
 ufw allow 80/tcp comment 'caddy: http, ACME challenge, redirect'
 ufw allow 443/tcp comment 'caddy: https'
-ufw allow 7881/tcp comment 'livekit: ICE over TCP fallback'
-ufw allow 7882/udp comment 'livekit: ICE over UDP, single-port mux'
 ufw --force enable
 
 # --- directories ------------------------------------------------------------------------

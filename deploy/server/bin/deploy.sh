@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open Persona: build and roll out the checked-out commit on the Hetzner box.
+# Open Persona: build and roll out the checked-out commit on the core host.
 #
 # Order, each step stopping the deploy on failure:
 #   1. preflight (env files complete, no token left)
@@ -7,15 +7,15 @@
 #      migrating an empty database would create a fresh schema that the restore then
 #      refuses to overwrite
 #   3. keep the images the running containers use as :previous (the rollback)
-#   4. build natively on the box (it competes with live calls: deploy off-hours)
+#   4. build natively on the host (it competes with live traffic: deploy off-hours)
 #   5. a pg_dump BEFORE migrating (migrations are not reversible by image rollback)
 #   6. migrate: the `migrate` service runs packages/api/release.py once
-#   7. up -d, then wait for api /livez and /healthz and the voice listener
+#   7. up -d, then wait for api /livez and /healthz
 #   8. smoke through Caddy
 #
-# The LiveKit mode is read from voice.env, so there is one source of truth: a
-# PERSONA_VOICE_LIVEKIT_URL on livekit.openpersonasai.com means selfhosted (the
-# `selfhosted-livekit` profile runs); anything else means LiveKit Cloud.
+# Voice and LiveKit run on the voice host (docker-compose.voice.yml), not here: this
+# script neither builds, starts nor waits for them. Compose is reached through
+# bin/lib/compose.sh, which applies the host profile (hosts/<profile>.env).
 #
 # Usage: bin/deploy.sh [--skip-build]
 
@@ -32,17 +32,12 @@ SKIP_BUILD=0
 die() { echo "deploy: FAILED: $*" >&2; exit 1; }
 say() { echo "deploy: $*" >&2; }
 
-if grep -q 'livekit\.openpersonasai\.com' "${OP_ENV_DIR}/voice.env" 2>/dev/null; then
-  LIVEKIT_MODE=selfhosted
-  export COMPOSE_PROFILES=selfhosted-livekit
-else
-  LIVEKIT_MODE=cloud
-fi
-compose() { docker compose -f "${KIT_DIR}/docker-compose.yml" "$@"; }
+# shellcheck source=lib/compose.sh
+. "${SCRIPT_DIR}/lib/compose.sh"
 
 # --- 1 ------------------------------------------------------------------------------
 "${SCRIPT_DIR}/preflight.sh" --env-only || die "preflight"
-say "LiveKit mode: ${LIVEKIT_MODE}"
+say "host profile: ${OP_HOST_PROFILE}"
 
 # --- 2 ------------------------------------------------------------------------------
 compose up -d postgres
@@ -69,7 +64,7 @@ platform_super="$(compose exec -T postgres psql -U persona -d persona -X -q -t -
 # after a failed migrate, :current is already the new build while the old containers
 # still serve. Only a build replaces :current, so --skip-build leaves :previous alone.
 if [ "${SKIP_BUILD}" = 0 ]; then
-  for svc in api voice livekit; do
+  for svc in api; do
     cid="$(compose ps -q "${svc}" 2>/dev/null || true)"
     [ -n "${cid}" ] || continue
     running="$(docker inspect --format '{{.Image}}' "${cid}")"
@@ -116,7 +111,6 @@ wait_for() {
 }
 wait_for "api /livez" 900 curl -fsS --max-time 4 http://127.0.0.1:8000/livez || die "api /livez"
 wait_for "api /healthz (database)" 120 curl -fsS --max-time 4 http://127.0.0.1:8000/healthz || die "api /healthz"
-wait_for "voice listener" 600 curl -s -o /dev/null --max-time 4 http://127.0.0.1:8001/v1/voices || die "voice listener"
 
 # --- 8 ------------------------------------------------------------------------------
 insecure=""

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open Persona: nightly backup on the Hetzner box (systemd timer open-persona-backup).
+# Open Persona: nightly backup on the core host (systemd timer open-persona-backup).
 #
 # Writes, into ${OP_DATA_DIR}/backups/nightly/<UTC date>/:
 #   persona.dump         pg_dump -Fc of the `persona` database (the same shape as the Fly
@@ -28,7 +28,8 @@ OFFSITE_CMD="${OFFSITE_CMD:-}"
 # database lives on. Any failure exits non-zero, and the unit's OnFailure= raises an alert.
 MIN_FREE_GB="${OP_BACKUP_MIN_FREE_GB:-20}"
 
-compose() { docker compose -f "${KIT_DIR}/docker-compose.yml" "$@"; }
+# shellcheck source=lib/compose.sh
+. "${SCRIPT_DIR}/lib/compose.sh"
 
 mkdir -p "${OP_DATA_DIR}/backups/nightly"
 free_gb="$(df --output=avail -BG "${OP_DATA_DIR}/backups" | tail -n 1 | tr -dc '0-9')"

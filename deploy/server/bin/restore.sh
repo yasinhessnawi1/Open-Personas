@@ -83,7 +83,8 @@ done
 
 # --- how SQL reaches the database ---------------------------------------------------
 # On the box: the compose `postgres` service. In a rehearsal: a named container.
-compose() { docker compose -f "${KIT_DIR}/docker-compose.yml" "$@"; }
+# shellcheck source=lib/compose.sh
+. "${SCRIPT_DIR}/lib/compose.sh"
 pg_exec() {
   if [ -n "${CONTAINER}" ]; then
     docker exec -i "${CONTAINER}" "$@"

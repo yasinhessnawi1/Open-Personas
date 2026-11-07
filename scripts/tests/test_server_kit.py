@@ -253,7 +253,22 @@ def test_livekit_key_pair_is_the_same_for_the_sfu_and_voice() -> None:
 
 
 def _compose() -> dict[str, Any]:
+    """The core host's compose file: postgres, migrate, api, caddy. No voice."""
     return yaml.safe_load((KIT / "docker-compose.yml").read_text(encoding="utf-8"))
+
+
+def _voice_compose() -> dict[str, Any]:
+    """The voice host's compose file (Azure, Phase B): voice and livekit."""
+    return yaml.safe_load((KIT / "docker-compose.voice.yml").read_text(encoding="utf-8"))
+
+
+def _all_services() -> dict[str, tuple[str, dict[str, Any]]]:
+    """Every service of both files as ``"<file>:<service>" -> (service, definition)``."""
+    out: dict[str, tuple[str, dict[str, Any]]] = {}
+    for label, compose in (("core", _compose()), ("voice", _voice_compose())):
+        for name, service in compose["services"].items():
+            out[f"{label}:{name}"] = (name, service)
+    return out
 
 
 def test_postgres_is_never_published() -> None:
@@ -268,14 +283,16 @@ def test_postgres_sits_only_on_an_internal_network() -> None:
 
 
 def test_app_containers_drop_every_capability_and_cap_pids() -> None:
-    services = _compose()["services"]
-    for name in ("api", "voice", "migrate", "livekit", "caddy"):
-        assert services[name]["cap_drop"] == ["ALL"], name
-        assert services[name]["pids_limit"] <= 1024, name
-    assert services["caddy"]["cap_add"] == ["NET_BIND_SERVICE"]
-    for name in ("api", "voice", "migrate", "livekit"):
-        assert "cap_add" not in services[name], name
-    assert services["livekit"]["user"] == "65534:65534"
+    for key, (name, service) in _all_services().items():
+        if name == "postgres":
+            continue
+        assert service["cap_drop"] == ["ALL"], key
+        assert service["pids_limit"] <= 1024, key
+        if name == "caddy":
+            assert service["cap_add"] == ["NET_BIND_SERVICE"], key
+        else:
+            assert "cap_add" not in service, key
+    assert _voice_compose()["services"]["livekit"]["user"] == "65534:65534"
 
 
 def test_the_daemon_forbids_new_privileges_and_keeps_containers_across_upgrades() -> None:
@@ -287,7 +304,7 @@ def test_the_daemon_forbids_new_privileges_and_keeps_containers_across_upgrades(
 
 
 def test_app_ports_are_published_on_loopback_only() -> None:
-    for name, service in _compose()["services"].items():
+    for name, (_, service) in _all_services().items():
         for port in service.get("ports", []):
             assert str(port).startswith("127.0.0.1:"), f"{name} publishes {port} past ufw"
 
@@ -300,18 +317,20 @@ def test_the_api_cannot_be_scaled_out() -> None:
 
 def test_host_network_only_for_caddy_and_livekit() -> None:
     host = {n for n, s in _compose()["services"].items() if s.get("network_mode") == "host"}
-    assert host == {"caddy", "livekit"}
+    assert host == {"caddy"}
+    voice = _voice_compose()["services"]
+    assert {n for n, s in voice.items() if s.get("network_mode") == "host"} == {"livekit"}
 
 
 def test_livekit_and_migrate_only_run_when_asked() -> None:
     services = _compose()["services"]
-    assert services["livekit"]["profiles"] == ["selfhosted-livekit"]
+    assert _voice_compose()["services"]["livekit"]["profiles"] == ["selfhosted-livekit"]
     assert services["migrate"]["profiles"] == ["tools"]
     assert services["migrate"]["command"] == ["python", "packages/api/release.py"]
 
 
 def test_env_files_live_outside_the_checkout() -> None:
-    for name, service in _compose()["services"].items():
+    for name, (_, service) in _all_services().items():
         for env_file in service.get("env_file", []):
             assert env_file.startswith("${OP_ENV_DIR:-/opt/open-persona/env}/"), name
 
@@ -322,26 +341,39 @@ def _fly_env(package: str) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    ("package", "service", "changed"),
+    ("package", "service", "moved"),
     [
-        # On Fly voice was reached over its public https URL; on one box it is internal.
+        # Voice runs on another host, so where the api reaches it is configuration
+        # (api.env), not a pinned value: see test_the_voice_service_url_is_configuration.
         ("api", "api", {"PERSONA_VOICE_SERVICE_URL"}),
         ("voice", "voice", set()),
     ],
 )
 def test_compose_carries_the_fly_env_it_replaces(
-    package: str, service: str, changed: set[str]
+    package: str, service: str, moved: set[str]
 ) -> None:
-    environment = {k: str(v) for k, v in _compose()["services"][service]["environment"].items()}
+    compose = _compose() if service == "api" else _voice_compose()
+    environment = {k: str(v) for k, v in compose["services"][service]["environment"].items()}
     for key, value in _fly_env(package).items():
+        if key in moved:
+            assert key not in environment, f"{service} still pins {key}"
+            continue
         assert key in environment, f"{service} lost {key} from {package}/fly.toml"
-        if key not in changed:
-            assert environment[key] == value, f"{service} {key} differs from fly.toml"
-    assert environment.get("PERSONA_VOICE_SERVICE_URL", "http://voice:8001") == "http://voice:8001"
+        assert environment[key] == value, f"{service} {key} differs from fly.toml"
+
+
+def test_the_voice_service_url_is_configuration() -> None:
+    """Empty until voice runs on Azure; then api.env names it, and Oracle changes nothing else.
+
+    A value pinned in compose `environment:` would win over api.env, so adding voice would
+    need a compose change on the core host.
+    """
+    assert dict(_template("api"))["PERSONA_VOICE_SERVICE_URL"] == ""
+    assert "PERSONA_VOICE_SERVICE_URL" not in _compose()["services"]["api"]["environment"]
 
 
 def test_voice_audit_goes_to_postgres_in_cloud() -> None:
-    environment = _compose()["services"]["voice"]["environment"]
+    environment = _voice_compose()["services"]["voice"]["environment"]
     assert environment["PERSONA_EDITION"] == "cloud"
     assert environment["PERSONA_VOICE_AUDIT_BACKEND"] == "postgres"
 
@@ -610,9 +642,10 @@ def test_the_key_placeholder_never_passes_for_a_key() -> None:
 
 
 def test_provision_opens_exactly_the_public_ports() -> None:
+    """The core host serves ssh and Caddy only; LiveKit's media ports belong to the voice host."""
     provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
     opened = set(re.findall(r"^ufw (?:allow|limit) (\S+)", provision, re.M))
-    assert opened == {"22/tcp", "80/tcp", "443/tcp", "7881/tcp", "7882/udp"}
+    assert opened == {"22/tcp", "80/tcp", "443/tcp"}
 
 
 def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None:
@@ -703,8 +736,7 @@ def test_the_mcp_seam_is_named_and_the_app_never_gets_the_docker_socket() -> Non
     text = (KIT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "SEAM: per-tenant MCP runtime" in text
     assert "SEAM: per-tenant MCP runtime" in (KIT / "RUNBOOK.md").read_text(encoding="utf-8")
-    services = _compose()["services"]
-    for name, service in services.items():
+    for name, (_, service) in _all_services().items():
         for mount in (str(v) for v in service.get("volumes", [])):
             source = mount.split(":", 1)[0]
             assert "docker.sock" not in mount, f"{name} mounts the Docker socket"
