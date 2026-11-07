@@ -64,7 +64,7 @@ anything there, and no step below may either.
 | `docker-compose.yml` | the CORE host: postgres (pgvector pg16, unpublished, internal network only), migrate (one-shot), api (single instance, uid 2001), caddy |
 | `docker-compose.voice.yml`, `Caddyfile.voice` | the VOICE host (Phase B): voice, livekit, its own Caddy. No profile deploys them yet |
 | `hosts/oracle.env` | the core host's profile: memory budget, Postgres sizes, data uid, block volume, SSH allow list, Oracle specifics. Plain, non-secret, tracked |
-| `Caddyfile` | TLS for the three core hostnames, Let's Encrypt, HTTP to HTTPS, admin API off |
+| `Caddyfile` | TLS for the two core hostnames (from the profile), Let's Encrypt, HTTP to HTTPS, admin API off |
 | `bin/provision.sh` | provisions and hardens the host from its profile. Idempotent |
 | `bin/lib/profile.sh`, `bin/lib/compose.sh`, `bin/lib/oracle_firewall.sh` | the profile loader, the one way scripts reach compose, Oracle's firewall handed to ufw |
 | `bin/compose.sh` | Compose for this host with the profile applied: every manual compose command below goes through it |
@@ -100,9 +100,12 @@ every other script test).
   MCP".
 - **Initiative: OFF** until the A5-R-1 re-run is green and the owner says so. The api
   template pins `PERSONA_INITIATIVE_ENABLED=false` whatever `.env` says.
-- **Hostnames are kept**, so no provider registration changes: Stripe webhook, Discord,
-  Slack and GitHub OAuth redirects, Twilio and Postmark webhooks, Vercel's api and voice
-  base URLs. Only DNS records change.
+- **The domain is openpersonas.si** (owner, 2026-11-07), DNS at Namecheap. The web is on
+  Vercel at `openpersonas.si`, `app.` and `www.`; this host serves `api.openpersonas.si`
+  and `connectors.openpersonas.si` (named once, in `hosts/oracle.env`); the voice host will
+  serve `voice.` and `livekit.`. The old domains are dropped, with no alias: nothing was
+  ever deployed on them. So **every provider registration moves** (see "New hostnames:
+  what moves with them").
 - **Stripe stays in test mode**, as production ran. Going live is a separate decision.
 
 ## Blockers before go-live
@@ -111,7 +114,9 @@ every other script test).
   (`fix/persona-id-traversal`) must be merged to main, and this kit's branch rebased on it,
   before any deploy. No deploy without it.
 - The **production Clerk** values (step 4).
-- **DNS** for the three core hostnames (step 8), **CORS** origins and the **ACME email**.
+- **DNS** for the two core hostnames (step 8) and the **ACME email**.
+- Every **provider registration** moved to the new hostnames (see "New hostnames: what
+  moves with them"), and the **web's** api and voice base URLs on Vercel.
 - The seven **model chain** settings and the production **`MCP_CREDENTIAL_KEY`** (step 4).
 - Not a blocker: the off-site backup target. Go-live may happen with it PENDING; the
   nightly backup says so every night until it exists.
@@ -121,7 +126,7 @@ every other script test).
 
 - [ ] SSH access to the instance as `ubuntu` from this PC (the coordinator has it).
 - [ ] The instance's **public IPv4** (for `--public-ipv4` and DNS).
-- [ ] DNS access to `openpersonasai.com` and `openpersona.online`.
+- [ ] DNS access to `openpersonas.si` (Namecheap).
 - [ ] The `render_env.py --inventory` checklist (step 4) marked `[p]` or `[d]` per name, and
       the production value for every `[d]`. Look hardest at `PERSONA_API_JWT_PUBLIC_KEY` and
       `PERSONA_CONNECTORS_JWT_*` (the production Clerk instance, not a
@@ -132,8 +137,9 @@ every other script test).
 - [ ] The seven shared settings (`PERSONA_*_MODELS` and
       `PERSONA_OPENROUTER_SUBSCRIPTION_MODE`). GitHub cannot read a secret back, so either
       supply the Production environment's values or confirm `.env` holds them.
-- [ ] The web origin(s) for `PERSONA_API_CORS_ORIGINS` (expected
-      `https://app.openpersonasai.com`, plus any `openpersona.online` origin).
+- [ ] The CORS origins are already set to the web's three (`https://openpersonas.si`,
+      `https://app.openpersonas.si`, `https://www.openpersonas.si`); change them only if the
+      web moves.
 - [ ] An email address for Let's Encrypt notices (`ACME_EMAIL`).
 - [ ] Later: the off-site backup command once the Terraform session has the Azure Blob
       container and its write-only SAS (see "Backups off the host").
@@ -262,16 +268,17 @@ uv run python -I deploy/server/render_env.py --dotenv .env --out ~/op-env
 
 Edit the files in `~/op-env`:
 
-- `__OWNER__`: fill in (CORS origins, ACME email).
+- `__OWNER__`: fill in (the ACME email).
 - `__GITHUB_PRODUCTION__`: the Production environment's value.
 - `__MISSING_FROM_DOTENV__`: supply the value, or **delete the line** if production never
   set it (the code default then applies, exactly as on Fly).
 - Every name marked `[d]`: replace the copied dev value with production's.
 - `__OWNER_CLERK_PROD__`: every Clerk-derived value, from the **production** instance
-  (Frontend API `clerk.openpersona.online`):
+  (Frontend API `clerk.openpersonas.si`; Clerk ties a production instance to its domain,
+  so it must be the instance set up for openpersonas.si):
   - `PERSONA_API_JWT_PUBLIC_KEY` and `PERSONA_CONNECTORS_JWT_PUBLIC_KEY`: Configure > API
     keys > the JWT public key, PEM format. The same PEM in both.
-  - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersona.online/.well-known/jwks.json`.
+  - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersonas.si/.well-known/jwks.json`.
   - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line.
   - Check under Configure > JWT templates that the `persona-api` template has
     `aud` = `persona-api`.
@@ -435,20 +442,19 @@ rollback point.
 
 ## Step 8: DNS and certificates
 
-Create A records, **DNS only** (on Cloudflare: grey cloud), TTL 300, for the core host's
-three names:
+At Namecheap (Advanced DNS for openpersonas.si), create A records, TTL 5 min, for the
+core host's two names (the names `hosts/oracle.env` holds):
 
 ```
-api.openpersonasai.com           A  <ipv4>
-api.openpersona.online           A  <ipv4>
-connectors.openpersonasai.com    A  <ipv4>
+api.openpersonas.si           A  <ipv4>
+connectors.openpersonas.si    A  <ipv4>
 ```
 
 AAAA records only if the VCN and the instance have IPv6 configured. **No record for the
 voice and livekit names yet**: they will point at the voice host (Phase B), and the core
 host's Caddy does not serve them.
 
-Then on the host: `bin/preflight.sh` (the three names should resolve to the recorded public
+Then on the host: `bin/preflight.sh` (the two names should resolve to the recorded public
 address) and watch Caddy obtain STAGING certificates: `bin/compose.sh logs -f caddy`. When
 every name has one, switch to production certificates:
 
@@ -456,7 +462,7 @@ every name has one, switch to production certificates:
 # on the host, as deploy, in /opt/open-persona/repo/deploy/server (the curl from anywhere)
 sed -i 's|^ACME_CA=.*|ACME_CA=https://acme-v02.api.letsencrypt.org/directory|' /opt/open-persona/env/caddy.env
 bin/compose.sh up -d --force-recreate caddy
-curl -fsS https://api.openpersonasai.com/healthz      # from anywhere
+curl -fsS https://api.openpersonas.si/healthz      # from anywhere
 ```
 
 Once stable for a day, raise the TTLs to 3600.
@@ -468,7 +474,7 @@ Once stable for a day, raise the TTLs to 3600.
 - An uploaded image or document from before the move opens (the workspace volume).
 - Telegram (and any other linked channel): a message round trip.
 - Stripe dashboard (test mode): send a test event to
-  `https://api.openpersonasai.com/v1/billing/webhook`; it returns 200.
+  `https://api.openpersonas.si/v1/billing/webhook`; it returns 200.
 - MCP: an existing GitHub OAuth connection still works (proves `MCP_CREDENTIAL_KEY`).
 - Voice is expected to be unavailable: the api's voice routes answer 503 until Phase B.
 - `bin/preflight.sh` passes in full.
@@ -490,6 +496,26 @@ R9-216 latency sign-off move to Phase B.
   `off-site copy PENDING` until the off-site target exists.
 - A manual volume backup, "live".
 - Initiative stays OFF until the A5-R-1 re-run.
+
+## New hostnames: what moves with them
+
+The production hostnames changed with the domain (2026-11-07), so every place outside this
+host that names them must be updated before go-live, by the owner, in each provider's
+dashboard. And the values copied from `.env` in step 4 may still carry an old domain:
+check each of these in the rendered files.
+
+| where | the new value |
+|---|---|
+| Stripe (test mode): webhook endpoint | `https://api.openpersonas.si/v1/billing/webhook` (then the new signing secret into `PERSONA_STRIPE_WEBHOOK_SECRET`) |
+| Stripe checkout and portal return URLs (`PERSONA_STRIPE_CHECKOUT_*_URL`, `PERSONA_STRIPE_PORTAL_RETURN_URL`) | on `https://app.openpersonas.si` |
+| Discord and Slack OAuth redirect URIs (their developer portals, and `PERSONA_CONNECTORS_*_OAUTH_REDIRECT_URI`) | `https://connectors.openpersonas.si/discord/oauth/callback`, `.../slack/oauth/callback` |
+| Slack events URL | `https://connectors.openpersonas.si/slack/events` |
+| Telegram webhook | `https://connectors.openpersonas.si/telegram/webhook` |
+| Twilio SMS and WhatsApp webhooks and status callbacks | `https://connectors.openpersonas.si/{sms,whatsapp}/{webhook,status}` |
+| Postmark inbound webhook | `https://connectors.openpersonas.si/email/webhook` |
+| GitHub OAuth app for MCP (`PERSONA_MCP_OAUTH_REDIRECT_BASE_URL`) | on `https://api.openpersonas.si` |
+| Clerk production instance | its domain `openpersonas.si` (Frontend API `clerk.openpersonas.si`), the `persona-api` JWT template |
+| Vercel (the web's env) | the api base URL `https://api.openpersonas.si`; the voice base URL `https://voice.openpersonas.si` (Phase B) |
 
 ## Seam: per-tenant MCP
 
@@ -594,7 +620,7 @@ Expect chat latency to be the model provider's plus about 0.2 to 0.4 s of local 
 Voice and LiveKit come up on the Azure host (the Terraform session provisions it; task T13
 gives this kit its voice profile). On the core host the only change is one env line:
 
-- `PERSONA_VOICE_SERVICE_URL=https://voice.openpersonasai.com` in `api.env`, then
+- `PERSONA_VOICE_SERVICE_URL=https://voice.openpersonas.si` in `api.env`, then
   `bin/compose.sh up -d api`. The api forwards the caller's Clerk token to voice; there is
   no service credential between them.
 
@@ -607,7 +633,7 @@ What T13 builds (ruling D6), so that nothing else on Oracle changes by hand:
   `persona_app`, RLS enforced), so its credential rotates on its own.
 - The Azure host should be in **germanywestcentral** (Frankfurt), next to eu-frankfurt-1:
   a voice turn makes several database round trips.
-- DNS: `voice.openpersonasai.com` and `livekit.openpersonasai.com` as A records to the Azure
+- DNS: `voice.openpersonas.si` and `livekit.openpersonas.si` as A records to the Azure
   host's static public IP (never a CNAME to a claimable Azure name). The voice host opens
   80/443 and LiveKit's 7881/tcp and 7882/udp; `Caddyfile.voice` serves both names.
 - Before the first voice deploy: the R9-265 VAD threshold check. Voice is done when the

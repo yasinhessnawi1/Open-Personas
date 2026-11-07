@@ -1,6 +1,6 @@
 """The connectors' HTTP surface, served by the api, must behave as it did standalone.
 
-Spec I1 T3. Five provider registrations pin ``https://connectors.openpersonasai.com/...``
+Spec I1 T3. Five provider registrations pin ``https://connectors.openpersonas.si/...``
 paths: the Discord and Slack OAuth redirects, the Slack events URL, the Postmark inbound
 webhook and the Twilio webhooks. Option A moves the hostname rather than the paths, so the
 cutover is one DNS record and not five re-registrations at four providers. That only holds

@@ -6,8 +6,8 @@
 # host needs and this file does not have yet:
 #   * the database link: voice reads and writes Postgres directly (D-V1-4) as an
 #     RLS-enforced role, over a WireGuard tunnel to the core host, never a public port;
-#   * its own Caddy (below, loading Caddyfile.voice) for voice.openpersonasai.com and
-#     livekit.openpersonasai.com, which the core host's Caddy does not serve;
+#   * its own Caddy (below, loading Caddyfile.voice) for voice.openpersonas.si and
+#     livekit.openpersonas.si, which the core host's Caddy does not serve;
 #   * its own firewall: 80/443, LiveKit's 7881/tcp and 7882/udp, the tunnel's port.
 #
 # The voice and livekit definitions below are unchanged from the single-box kit: single
@@ -17,7 +17,7 @@
 # LiveKit: two modes, no edit to this file either way, chosen by voice.env's
 # PERSONA_VOICE_LIVEKIT_URL.
 #   selfhosted (DEFAULT, owner ruling 2026-10-23): the `selfhosted-livekit` profile runs
-#                     and voice.env points at wss://livekit.openpersonasai.com.
+#                     and voice.env points at wss://livekit.openpersonas.si.
 #   cloud (the fallback): voice.env points at the LiveKit Cloud free-plan project;
 #                     `livekit` never runs.
 

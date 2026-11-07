@@ -215,8 +215,8 @@ if [ -z "${ip4}" ]; then
   ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
   warn "no /etc/open-persona/public-ipv4 (provision.sh --public-ipv4): comparing DNS with ${ip4:-nothing}, which may be a private address"
 fi
-# The core host's names only: voice.* and livekit.* point at the voice host.
-for host in api.openpersonasai.com api.openpersona.online connectors.openpersonasai.com; do
+# The core host's names only (the host profile): voice. and livekit. point at the voice host.
+for host in "${OP_API_HOST}" "${OP_CONNECTORS_HOST}"; do
   resolved="$(getent ahostsv4 "${host}" | awk 'NR==1 {print $1}' || true)"
   if [ "${resolved}" = "${ip4}" ]; then ok "${host} -> this host"
   else warn "${host} resolves to '${resolved:-nothing}', not this host (${ip4})"; fi
