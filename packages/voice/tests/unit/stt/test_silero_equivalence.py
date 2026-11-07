@@ -46,6 +46,9 @@ def _load(path: Path) -> dict[str, Any]:
 def assert_equivalent(name: str, got: list[float], want: list[float]) -> None:
     """The gate: same length, every score within TOLERANCE, the same decision per threshold."""
     assert len(got) == len(want), f"{name}: {len(got)} windows scored, reference has {len(want)}"
+    for label, scores in (("scored", got), ("reference", want)):
+        bad = [i for i, s in enumerate(scores) if not np.isfinite(s)]
+        assert not bad, f"{name}: {label} windows {bad} are not finite"
     worst = max(abs(g - w) for g, w in zip(got, want, strict=True))
     assert worst <= TOLERANCE, f"{name}: largest difference {worst:.3g} exceeds {TOLERANCE}"
     for threshold in THRESHOLDS:
@@ -135,3 +138,14 @@ def test_the_gate_catches_a_missing_window() -> None:
 def test_the_gate_catches_a_flipped_decision_inside_the_tolerance() -> None:
     with pytest.raises(AssertionError, match="threshold 0.5"):
         assert_equivalent("flip", [0.50001], [0.49999])
+
+
+@pytest.mark.parametrize(
+    ("got", "want"),
+    [([float("nan")], [0.1]), ([0.1, float("nan")], [0.1, 0.1]), ([0.1, 0.1], [0.1, float("inf")])],
+)
+def test_the_gate_catches_a_score_that_is_not_a_number(got: list[float], want: list[float]) -> None:
+    # A NaN compares False against everything, so a max() of differences or a threshold
+    # check can let it through silently; the gate must name it.
+    with pytest.raises(AssertionError, match="not finite"):
+        assert_equivalent("nan", got, want)
