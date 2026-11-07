@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     from docker.types import LogConfig as _DockerLogConfig
     from docker.types import Ulimit as _DockerUlimit
 
+from persona.errors import SandboxViolationError
 from persona.logging import get_logger
 from persona.sandbox.errors import (
     CodeSandboxError,
@@ -643,11 +644,30 @@ class LocalDockerSandbox:
         code: str,
         input_files: list[SandboxFile],
     ) -> None:
-        """Write the code script + any input files into the read-only mount."""
+        """Write the code script + any input files into the read-only mount.
+
+        Every input path is resolved like any workspace path before anything is written, and
+        one that would leave ``host_in`` refuses the whole execution: the api builds these
+        paths itself, but a ``SandboxFile`` path is a plain string and this writes to the host.
+        """
+        # Imported here: ``persona.tools`` builds the toolbox, which imports this package.
+        from persona.tools._sandbox import resolve_sandbox_path  # noqa: PLC0415
+
+        targets: list[tuple[Path, SandboxFile]] = []
+        for f in input_files:
+            try:
+                targets.append((resolve_sandbox_path(host_in, f.path), f))
+            except SandboxViolationError as exc:
+                raise CodeSandboxError(
+                    "input file path refused",
+                    context={
+                        "reason": str(exc.context.get("reason", "invalid")),
+                        "path": f.path[:80],
+                    },
+                ) from exc
         code_path = host_in / "__persona_main__.py"
         code_path.write_text(code, encoding="utf-8")
-        for f in input_files:
-            target = host_in / f.path
+        for target, f in targets:
             target.parent.mkdir(parents=True, exist_ok=True)
             if f.content_bytes is not None:
                 target.write_bytes(f.content_bytes)

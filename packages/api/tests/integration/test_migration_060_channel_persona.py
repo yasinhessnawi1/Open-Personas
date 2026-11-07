@@ -147,3 +147,27 @@ def test_downgrade_restores_the_previous_definition_and_upgrade_returns(clean_db
 
     command.upgrade(cfg, _HEAD)
     assert "SET NULL (active_persona_id)" in _fk_definition(clean_db)
+
+
+def test_a_held_lock_fails_the_migration_fast_instead_of_queueing(clean_db: str) -> None:
+    """With the table locked by someone else, the upgrade gives up in seconds, not never."""
+    import time
+
+    from sqlalchemy.exc import OperationalError
+
+    cfg = _alembic_config(clean_db)
+    command.upgrade(cfg, _PRED)
+    holder = create_engine(clean_db)
+    try:
+        with holder.connect() as conn:
+            tx = conn.begin()
+            conn.execute(text("LOCK TABLE connector_channels IN ACCESS EXCLUSIVE MODE"))
+            started = time.monotonic()
+            with pytest.raises(OperationalError, match="lock timeout"):
+                command.upgrade(cfg, _HEAD)
+            assert time.monotonic() - started < 30
+            tx.rollback()
+    finally:
+        holder.dispose()
+    command.upgrade(cfg, _HEAD)
+    assert "SET NULL (active_persona_id)" in _fk_definition(clean_db)

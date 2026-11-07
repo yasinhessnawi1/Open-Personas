@@ -111,3 +111,26 @@ def test_a_stored_name_that_is_no_name_is_not_staged(tmp_path: Path, filename: s
         conversation_id=_CONV,
     )
     assert staged == []
+
+
+def test_a_long_name_keeps_its_extension() -> None:
+    """Truncation shortens the stem: a 200-character name ending .pdf is still a .pdf."""
+    long_name = "a" * 196 + ".pdf"
+    kept = document_service.upload_name(long_name)
+    assert kept is not None
+    assert kept.endswith(".pdf")
+    assert len(kept) <= 120
+
+
+def test_a_long_document_name_still_uploads(tmp_path: Path) -> None:
+    ref = document_service.upload(
+        file_storage=LocalFileStorage(tmp_path),
+        owner_id=_OWNER,
+        persona_id=_PERSONA,
+        conversation_id=_CONV,
+        file_bytes=b"hello",
+        filename="n" * 196 + ".txt",
+        document_store=DocumentStore(backend=_Backend()),  # type: ignore[arg-type]
+    )
+    assert ref.filename.endswith(".txt")
+    assert ref.format == "txt"

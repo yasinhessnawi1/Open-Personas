@@ -45,15 +45,29 @@ def _supports_column_list() -> bool:
     return int(version) >= _COLUMN_LIST_SINCE
 
 
+# Locking, the 057 shape: a 5 second ``lock_timeout``, so behind a long transaction the deploy
+# fails and can be re-run instead of queueing every later query behind it; the constraint is
+# added ``NOT VALID`` (a short lock, no scan) and validated after that commits, under a lock
+# that lets reads and writes through.
+
+
 def upgrade() -> None:
     if not _supports_column_list():
         return
+    op.execute("SET lock_timeout = '5s'")
     op.execute(f"ALTER TABLE connector_channels DROP CONSTRAINT IF EXISTS {_FK}")
-    op.execute(_REFERENCE + "ON DELETE SET NULL (active_persona_id)")
+    op.execute(_REFERENCE + "ON DELETE SET NULL (active_persona_id) NOT VALID")
+    with op.get_context().autocommit_block():
+        op.execute(f"ALTER TABLE connector_channels VALIDATE CONSTRAINT {_FK}")
+    op.execute("RESET lock_timeout")
 
 
 def downgrade() -> None:
     if not _supports_column_list():
         return
+    op.execute("SET lock_timeout = '5s'")
     op.execute(f"ALTER TABLE connector_channels DROP CONSTRAINT IF EXISTS {_FK}")
-    op.execute(_REFERENCE + "ON DELETE SET NULL")
+    op.execute(_REFERENCE + "ON DELETE SET NULL NOT VALID")
+    with op.get_context().autocommit_block():
+        op.execute(f"ALTER TABLE connector_channels VALIDATE CONSTRAINT {_FK}")
+    op.execute("RESET lock_timeout")

@@ -97,7 +97,11 @@ Per-spec entries are added by the close-out phase of each spec.
   and a name such as `../conversations/<another chat>/documents/x.md` put it in that
   other place inside the persona's folder. Only the last part of the name is kept now,
   for new uploads and for documents uploaded before, and a name that is no name
-  (empty, `.` or `..`) is refused.
+  (empty, `.` or `..`) is refused. A name longer than 120 characters is shortened
+  before its extension, so it is still recognised as the format it is.
+- **The local code sandbox writes input files only inside the run's own folder.** A
+  file handed to a run with a path that would leave that folder now stops the run
+  with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
 - **A persona that a chat channel had in front can be deleted again.** A Telegram,

@@ -65,7 +65,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from persona.documents.ingest import IngestStrategy, ingest_document
@@ -796,20 +796,34 @@ def upload_name(filename: str) -> str | None:
     Only the last part of what the client sent is kept, with either slash as a separator, so
     ``../../conversations/c2/documents/x.md`` is ``x.md``: the name is staged at
     ``uploads/<name>`` (chat_service), where a path would land somewhere else inside the
-    persona's folder. Control characters are stripped and the result is truncated like
-    :func:`_safe_filename`. Empty, ``.`` and ``..`` are not names.
+    persona's folder. Control characters are stripped, and a name longer than 120 characters
+    is shortened in its stem, so it keeps its extension (the format check reads it). Empty,
+    ``.`` and ``..`` are not names.
     """
     last = filename.replace("\\", "/").rsplit("/", 1)[-1]
-    cleaned = _safe_filename(last)
+    cleaned = _strip_control(last)
     if cleaned in ("", ".", ".."):
         return None
-    return cleaned
+    if len(cleaned) <= _MAX_NAME_LENGTH:
+        return cleaned
+    extension = PurePosixPath(cleaned).suffix
+    if not extension or len(extension) >= _MAX_NAME_LENGTH // 2:
+        return cleaned[:_MAX_NAME_LENGTH]
+    return cleaned[: _MAX_NAME_LENGTH - len(extension)] + extension
+
+
+#: The longest name an upload is recorded under (also the audit-log preview length).
+_MAX_NAME_LENGTH = 120
+
+
+def _strip_control(text: str) -> str:
+    """``text`` without control characters (a tab is kept)."""
+    return "".join(c for c in text if c == "\t" or ord(c) >= 32)
 
 
 def _safe_filename(filename: str) -> str:
     """Strip control chars + truncate filenames for audit-log + ref safety."""
-    cleaned = "".join(c for c in filename if c == "\t" or ord(c) >= 32)
-    return cleaned[:120]
+    return _strip_control(filename)[:_MAX_NAME_LENGTH]
 
 
 def _format_for_extension(extension: str) -> str:
