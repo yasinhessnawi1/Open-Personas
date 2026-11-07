@@ -3,8 +3,11 @@
 #
 #   bin/preflight.sh --env-only   env files present, private, complete, roles separated
 #                                 (bin/deploy.sh runs this)
-#   bin/preflight.sh              also: alerts, database roles, firewall and listener
-#                                 allowlists, published ports, DNS
+#   bin/preflight.sh              also: the host as provision.sh left it (architecture,
+#                                 block volume, Docker's data root, the data uid, Oracle's
+#                                 firewall handed to ufw, masked units, swap, clock),
+#                                 alerts, database roles, firewall and listener allowlists,
+#                                 published ports, DNS
 #
 # Prints names and states only, never a value. Exit 1 on any failed check.
 
@@ -81,6 +84,46 @@ else
   ok "no unacknowledged alerts"
 fi
 
+# --- the host, as provision.sh left it (the host profile) ---------------------------------
+[ "$(uname -m)" = "${OP_EXPECT_ARCH:-$(uname -m)}" ] \
+  && ok "architecture $(uname -m) (profile ${OP_HOST_PROFILE})" \
+  || bad "profile ${OP_HOST_PROFILE} expects ${OP_EXPECT_ARCH}, this host is $(uname -m)"
+if [ -n "${OP_DATA_MOUNT:-}" ]; then
+  if mountpoint -q "${OP_DATA_MOUNT}"; then ok "block volume mounted at ${OP_DATA_MOUNT}"
+  else bad "${OP_DATA_MOUNT} is not mounted: the block volume is missing"; fi
+fi
+docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+[ "${docker_root}" = "${OP_DOCKER_DATA_ROOT:-/var/lib/docker}" ] \
+  && ok "Docker's data root is ${docker_root}" \
+  || bad "Docker's data root is '${docker_root}', the profile says ${OP_DOCKER_DATA_ROOT:-/var/lib/docker}"
+data_owner="$(stat -c '%u' "${OP_DATA_DIR:-/srv/open-persona}/persona" 2>/dev/null || true)"
+[ "${data_owner}" = "${OP_DATA_UID:-}" ] \
+  && ok "api data owned by the data uid ${OP_DATA_UID}" \
+  || bad "api data is owned by uid '${data_owner}', the profile's OP_DATA_UID is ${OP_DATA_UID:-unset}"
+if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
+  # Oracle's image REJECTs every inbound port but 22 ahead of ufw; provision removes it.
+  input_rules="$(sudo iptables -S INPUT 2>&1 || true)"
+  if has "${input_rules}" "icmp-host-prohibited"; then
+    bad "Oracle's INPUT REJECT (icmp-host-prohibited) is loaded: 80 and 443 stay closed (re-run provision.sh)"
+  else
+    ok "no Oracle INPUT REJECT ahead of ufw"
+  fi
+  if sudo iptables -S InstanceServices >/dev/null 2>&1; then
+    ok "InstanceServices chain present (non-root kept off iSCSI and metadata)"
+  else
+    bad "the InstanceServices chain is missing from the running firewall (/etc/ufw/before.rules)"
+  fi
+fi
+for prefix in ${OP_DISABLE_UNIT_PREFIXES//,/ }; do
+  active="$(systemctl list-units --no-legend --state=active "${prefix}*" 2>/dev/null | awk '{print $1}')"
+  [ -z "${active}" ] && ok "no ${prefix} unit running" || bad "masked unit(s) running: $(echo ${active})"
+done
+if [ "${OP_SWAP_GB:-0}" -gt 0 ]; then
+  [ -n "$(swapon --show=NAME --noheadings 2>/dev/null)" ] && ok "swap active" || warn "no swap active"
+fi
+[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] \
+  && ok "clock synchronised" || warn "the clock is not NTP-synchronised (chronyc sources)"
+
 # --- database roles, live -----------------------------------------------------------------
 roles="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' \
   -c "SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname IN ('persona_app', 'persona_platform')" 2>/dev/null)"
@@ -137,12 +180,18 @@ else
 fi
 
 # --- DNS points here --------------------------------------------------------------------
-ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+# OCI NATs the public address to a private one on the interface, so the routing table
+# cannot give it: provision.sh --public-ipv4 records it in /etc/open-persona/public-ipv4.
+ip4="$(tr -d '[:space:]' < /etc/open-persona/public-ipv4 2>/dev/null || true)"
+if [ -z "${ip4}" ]; then
+  ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+  warn "no /etc/open-persona/public-ipv4 (provision.sh --public-ipv4): comparing DNS with ${ip4:-nothing}, which may be a private address"
+fi
 # The core host's names only: voice.* and livekit.* point at the voice host.
 for host in api.openpersonasai.com api.openpersona.online connectors.openpersonasai.com; do
   resolved="$(getent ahostsv4 "${host}" | awk 'NR==1 {print $1}' || true)"
-  if [ "${resolved}" = "${ip4}" ]; then ok "${host} -> this box"
-  else warn "${host} resolves to '${resolved:-nothing}', not this box (${ip4})"; fi
+  if [ "${resolved}" = "${ip4}" ]; then ok "${host} -> this host"
+  else warn "${host} resolves to '${resolved:-nothing}', not this host (${ip4})"; fi
 done
 
 [ "${fails}" = 0 ] && { echo "preflight: all checks passed"; exit 0; }

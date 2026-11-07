@@ -99,6 +99,8 @@ def test_it_builds_the_api_image_and_smoke_tests_it() -> None:
     ):
         assert needle in run, f"the smoke test does not check {needle}"
     assert "MAX_IMAGE_BYTES" in run
+    # The server kit runs the image as the data uid, not the image's own user.
+    assert "--user 2001:2001" in run
 
 
 def test_the_build_check_is_not_the_deploy_workflow() -> None:

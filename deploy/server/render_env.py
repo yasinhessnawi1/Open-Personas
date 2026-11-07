@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Render the Hetzner env files from the templates and the owner's local .env.
+"""Render the server kit's env files from the templates and the owner's local .env.
 
-Runs on the OWNER'S PC, never on the box and never in CI. First, the inventory, which
+Runs on the OWNER'S PC, never on the host and never in CI. First, the inventory, which
 writes nothing and lists every name the render would take from .env, whether .env has a
 value for it, and where it goes, so the owner can mark which values are dev:
 
@@ -10,17 +10,21 @@ value for it, and where it goes, so the owner can mark which values are dev:
 Then the render:
 
     uv run python -I deploy/server/render_env.py --dotenv .env --out <dir outside the repo> \\
-        [--livekit selfhosted|cloud] [--chains-from-dotenv]
+        [--host core|all] [--livekit selfhosted|cloud] [--chains-from-dotenv]
+
+``--host`` defaults to ``core``: only the files the core host (Oracle) reads, so no voice or
+LiveKit secret is written for, or copied to, a host that runs no voice (owner ruling
+2026-11-07). ``all`` renders every template (the voice host's set comes with task T13).
 
 ``--livekit`` defaults to ``selfhosted`` (owner ruling 2026-10-23: LiveKit runs on the box;
 LiveKit Cloud's free plan is the one-setting fallback, ``--livekit cloud``).
 
-For every ``deploy/server/env/<name>.env.example`` it writes ``<out>/<name>.env`` (mode
-0600 where the OS supports it). Values are resolved by the template tokens documented in
-``env/common.env.example``. Tokens it cannot resolve stay in the file, and
-``bin/preflight.sh`` on the box refuses to start while any remain:
+For every ``deploy/server/env/<name>.env.example`` the host reads, it writes
+``<out>/<name>.env`` (mode 0600 where the OS supports it). Values are resolved by the
+template tokens documented in ``env/common.env.example``. Tokens it cannot resolve stay
+in the file, and ``bin/preflight.sh`` on the host refuses to start while any remain:
 
-* ``__GEN_<NAME>__`` stays for ``bin/fill_generated.sh`` on the box (by design).
+* ``__GEN_<NAME>__`` stays for ``bin/fill_generated.sh`` on the host (by design).
 * ``__OWNER__``, ``__OWNER_CLERK_PROD__`` (Clerk values: .env holds the development
   instance's, so they are never copied) and an unconfirmed ``__GITHUB_PRODUCTION__`` stay for
   the owner to fill in.
@@ -47,6 +51,11 @@ from pathlib import Path
 KIT_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = KIT_DIR / "env"
 TEMPLATE_SUFFIX = ".env.example"
+#: The env files each host reads. ``None`` means every template.
+HOST_TEMPLATES: dict[str, frozenset[str] | None] = {
+    "core": frozenset({"common", "api", "postgres", "migrate", "caddy", "alert", "offsite"}),
+    "all": None,
+}
 
 FROM_ENV = "__FROM_ENV__"
 FROM_ENV_OTHER = re.compile(r"^__FROM_ENV:([A-Z][A-Z0-9_]*)__$")
@@ -170,13 +179,28 @@ def inside_checkout(path: Path) -> bool:
     return path.resolve().is_relative_to(repo_root())
 
 
+def templates(host: str) -> list[Path]:
+    """The templates of the env files ``host`` reads, sorted."""
+    wanted = HOST_TEMPLATES[host]
+    return [
+        template
+        for template in sorted(TEMPLATE_DIR.glob(f"*{TEMPLATE_SUFFIX}"))
+        if wanted is None or template.name.removesuffix(TEMPLATE_SUFFIX) in wanted
+    ]
+
+
 def render(
-    dotenv: dict[str, str], out: Path, *, livekit: str, chains_from_dotenv: bool
+    dotenv: dict[str, str],
+    out: Path,
+    *,
+    livekit: str,
+    chains_from_dotenv: bool,
+    host: str = "core",
 ) -> list[tuple[str, str, str]]:
-    """Write every env file. Returns ``(file, name, state)`` rows for the report."""
+    """Write the host's env files. Returns ``(file, name, state)`` rows for the report."""
     report: list[tuple[str, str, str]] = []
     out.mkdir(parents=True, exist_ok=True)
-    for template in sorted(TEMPLATE_DIR.glob(f"*{TEMPLATE_SUFFIX}")):
+    for template in templates(host):
         target = out / template.name.removesuffix(".example")
         lines = [f"# Rendered from deploy/server/env/{template.name}. Secret: mode 0600."]
         for name, template_value in parse_template(template):
@@ -198,7 +222,7 @@ def _presence(source: str, dotenv: dict[str, str]) -> str:
     return "set" if dotenv[source].strip() else "empty"
 
 
-def inventory(dotenv: dict[str, str]) -> list[tuple[str, str, str, str]]:
+def inventory(dotenv: dict[str, str], host: str = "core") -> list[tuple[str, str, str, str]]:
     """Every name the render would take from .env, BEFORE anything is written.
 
     Returns ``(source name in .env, presence, destination file, destination name)`` rows.
@@ -207,7 +231,7 @@ def inventory(dotenv: dict[str, str]) -> list[tuple[str, str, str, str]]:
     ``--livekit cloud`` would copy them.
     """
     rows: list[tuple[str, str, str, str]] = []
-    for template in sorted(TEMPLATE_DIR.glob(f"*{TEMPLATE_SUFFIX}")):
+    for template in templates(host):
         target = template.name.removesuffix(".example")
         for name, template_value in parse_template(template):
             other = FROM_ENV_OTHER.match(template_value)
@@ -248,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         "has a value for it, and its destination file (names only, never values)",
     )
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--host", choices=sorted(HOST_TEMPLATES), default="core")
     parser.add_argument("--livekit", choices=("cloud", "selfhosted"), default="selfhosted")
     parser.add_argument("--chains-from-dotenv", action="store_true")
     args = parser.parse_args(argv)
@@ -256,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"render_env: no such file: {args.dotenv}", file=sys.stderr)
         return 1
     if args.inventory:
-        print_inventory(inventory(load_dotenv(args.dotenv)))
+        print_inventory(inventory(load_dotenv(args.dotenv), args.host))
         return 0
     if args.out is None:
         print("render_env: --out is required to render", file=sys.stderr)
@@ -274,13 +299,14 @@ def main(argv: list[str] | None = None) -> int:
         args.out,
         livekit=args.livekit,
         chains_from_dotenv=args.chains_from_dotenv,
+        host=args.host,
     )
     width = max(len(name) for _, name, _ in report)
     for file_name, name, state in report:
         print(f"{file_name:<13} {name:<{width}}  {state}")
     pending = sum(1 for *_, state in report if state.startswith(("owner", "MISSING")))
     print(f"\n{len(report)} settings rendered into {args.out}; {pending} still need the owner.")
-    print("Next: copy the files to the box (scp), then run bin/fill_generated.sh there.")
+    print("Next: copy the files to the host (scp), then run bin/fill_generated.sh there.")
     return 0
 
 

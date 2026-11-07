@@ -9,10 +9,11 @@
 #   facts.txt            schema shape and row counts (bin/restore.sh checks against it)
 #   SHA256SUMS
 # and keeps the newest ${KEEP_DAYS} days. A backup on the same disk is not a backup of the
-# disk: copy each night's directory OFF the box too (RUNBOOK.md step 12). The off-site
-# target is the owner's to choose; set OFFSITE_CMD to a command that receives the
-# directory path as its argument (for example an rsync to a Storage Box) to have this
-# script run it.
+# disk: each night's directory must also leave the host. The target is configuration, not
+# code (ruling D4: Azure Blob with an immutability policy, a write-only SAS and age
+# encryption, provisioned by the Terraform session): OFFSITE_CMD, set in
+# /opt/open-persona/env/offsite.env, is a command that receives the directory path as its
+# argument. Until it is set the backup runs locally and says the off-site copy is PENDING.
 
 set -euo pipefail
 umask 077
@@ -24,12 +25,14 @@ OP_DATA_DIR="${OP_DATA_DIR:-/srv/open-persona}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
 OFFSITE_CMD="${OFFSITE_CMD:-}"
 
-# Below this much free space the backup refuses to start rather than fill the disk the
-# database lives on. Any failure exits non-zero, and the unit's OnFailure= raises an alert.
-MIN_FREE_GB="${OP_BACKUP_MIN_FREE_GB:-20}"
-
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
+require_data_mount
+
+# Below this much free space the backup refuses to start rather than fill the disk the
+# database lives on (the host profile sets it). Any failure exits non-zero, and the unit's
+# OnFailure= raises an alert.
+MIN_FREE_GB="${OP_BACKUP_MIN_FREE_GB:-20}"
 
 mkdir -p "${OP_DATA_DIR}/backups/nightly"
 free_gb="$(df --output=avail -BG "${OP_DATA_DIR}/backups" | tail -n 1 | tr -dc '0-9')"
@@ -62,7 +65,12 @@ find "${OP_DATA_DIR}/backups/nightly" -mindepth 1 -maxdepth 1 -type d -mtime "+$
   -exec rm -rf {} +
 find "${OP_DATA_DIR}/backups" -maxdepth 1 -name 'pre-deploy-*.dump' -mtime "+${KEEP_DAYS}" -delete
 
+# The off-site target is configuration (OFFSITE_CMD from /opt/open-persona/env/offsite.env,
+# read by the systemd unit). Until it exists the backup still runs, locally, and says so on
+# every run; RUNBOOK.md, "Backups off the host", tracks it.
 if [ -n "${OFFSITE_CMD}" ]; then
   ${OFFSITE_CMD} "${dest}"
+else
+  echo "backup: off-site copy PENDING: no OFFSITE_CMD is configured; this set exists only on this host" >&2
 fi
 echo "backup: wrote ${dest} ($(du -sh "${dest}" | cut -f1))"
