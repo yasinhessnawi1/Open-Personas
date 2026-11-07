@@ -1,9 +1,18 @@
-# Open Persona on Hetzner: restore runbook
+# Open Persona on the Oracle core host: restore runbook
 
-Production has had no host since 2026-10-02, when all six Fly apps were deleted. This
-runbook brings it back on one Hetzner box by **restoring from backup**. There is no live
-cutover and nothing to switch back to: the Fly apps, their volumes and their secrets are
-gone. What exists is the backup set in `~/Backups/fly-2026-10-02` on the owner's PC:
+Production has had no host since 2026-10-02, when all six Fly apps were deleted. The owner
+ruled on 2026-11-07 that it comes back on **two hosts**:
+
+- the **core host**, an Oracle Cloud Always Free server (VM.Standard.A1.Flex, Ampere arm64,
+  2 OCPU, 12 GB RAM, eu-frankfurt-1, Ubuntu 24.04), runs everything except voice: Postgres
+  with pgvector, the api (with its in-process worker and the connector transports), Caddy,
+  the migrate step, backups and alerts;
+- the **voice host**, on Azure (provisioned by the Terraform session), runs voice and its
+  LiveKit SFU later. See "Phase B" at the end.
+
+This runbook brings the core host up by **restoring from backup**. There is no live
+cutover and nothing to switch back to. What exists is the backup set in
+`~/Backups/fly-2026-10-02` on the owner's PC:
 
 | file | what it is |
 |---|---|
@@ -13,245 +22,267 @@ gone. What exists is the backup set in `~/Backups/fly-2026-10-02` on the owner's
 | `secret_names.txt` | Fly secret NAMES (api only; voice and livekit came out as `*`) |
 
 Treat the first three as production user data: never paste their contents anywhere, never
-commit them, delete the copy on the box once the move is signed off.
+commit them, delete the copy on the host once the move is signed off.
 
-**Never paste the output of `docker compose config`, `printenv`, `env` or
-`docker inspect` anywhere** (a chat, an issue, a log paste): each prints every secret the
-service holds. The same goes for `pg_restore` error output, which can echo row data.
+**Never paste the output of `bin/compose.sh config`, `printenv`, `env` or `docker inspect`
+anywhere** (a chat, an issue, a log paste): each prints every secret the service holds.
+The same goes for `pg_restore` error output, which can echo row data.
+
+**The host is shared with the owner's other work**, about 21 GB under `/home/ubuntu`
+(runs, review-scratch, pinned, .cache). Nothing in this kit reads, moves or deletes
+anything there, and no step below may either.
 
 ## Who can do what
 
-- **`deploy` is root-equivalent**: it has passwordless sudo and is in the `docker` group,
-  either of which is root on the box. Its SSH key IS the key to production. Use a hardware
-  key (`ssh-keygen -t ed25519-sk`, FIDO2) or at least a passphrase-protected key that never
-  leaves the owner's machine.
-- `deploy` is uid 2000. The app's data is owned by uid 1000 (the images' `persona` user),
-  so the operator's login does not own it; the nightly backup runs as root.
+- **`ubuntu`** (uid 1000) is the owner's login and keeps passwordless sudo. The kit does
+  not lock it out: it stays in the SSH allow list.
+- **`deploy`** (uid 2000) is the operator `provision.sh` creates, with ubuntu's SSH key. It
+  is **root-equivalent** (passwordless sudo and the `docker` group): its key IS the key to
+  production. Use a hardware key (`ssh-keygen -t ed25519-sk`) or at least a
+  passphrase-protected key that never leaves the owner's machine.
+- **The app's data belongs to uid 2001**, the data uid: the api and migrate containers run
+  as it and `/srv/open-persona/persona` is owned by it. Not 1000: on this host that is
+  `ubuntu`, whose processes (the owner's other work) must not read tenant files. Not 2000:
+  that is the operator. The nightly backup runs as root.
 - **Database roles.** `persona` (superuser) is used only by the one-shot `migrate` service
   (`migrate.env`, read by nothing else) and by the restore scripts. The api's cross-tenant
   engines use `persona_platform` (bypasses RLS, NOT a superuser, DML only: it cannot
-  `COPY ... TO PROGRAM`, alter roles or create tables). Every request path, api and voice,
-  uses `persona_app` (RLS enforced). `bin/preflight.sh` checks all three.
-- Turn on two-factor authentication on the Hetzner account and the DNS account before
+  `COPY ... TO PROGRAM`, alter roles or create tables). The api's request path uses
+  `persona_app` (RLS enforced). `bin/preflight.sh` checks all three.
+- Turn on two-factor authentication on the Oracle Cloud account and the DNS account before
   any production data is uploaded (step 5).
 
 ## What is in this directory
 
 | file | role |
 |---|---|
-| `docker-compose.yml` | postgres (pgvector pg16, unpublished), migrate (one-shot), api (single instance), voice, livekit (profile `selfhosted-livekit`), caddy |
-| `Caddyfile` | TLS for the five hostnames, Let's Encrypt, HTTP to HTTPS |
-| `bin/provision.sh` | THE provisioning path: run once as root over SSH; creates `deploy` with root's key, then SSH lockdown, ufw, fail2ban, upgrades, Docker, directories, timers. Idempotent |
-| `cloud-init.yaml` | the alternative path: the same baseline at first boot, then `provision.sh` as usual |
+| `docker-compose.yml` | the CORE host: postgres (pgvector pg16, unpublished, internal network only), migrate (one-shot), api (single instance, uid 2001), caddy |
+| `docker-compose.voice.yml`, `Caddyfile.voice` | the VOICE host (Phase B): voice, livekit, its own Caddy. No profile deploys them yet |
+| `hosts/oracle.env` | the core host's profile: memory budget, Postgres sizes, data uid, block volume, SSH allow list, Oracle specifics. Plain, non-secret, tracked |
+| `Caddyfile` | TLS for the three core hostnames, Let's Encrypt, HTTP to HTTPS, admin API off |
+| `bin/provision.sh` | provisions and hardens the host from its profile. Idempotent |
+| `bin/lib/profile.sh`, `bin/lib/compose.sh`, `bin/lib/oracle_firewall.sh` | the profile loader, the one way scripts reach compose, Oracle's firewall handed to ufw |
+| `bin/compose.sh` | Compose for this host with the profile applied: every manual compose command below goes through it |
 | `render_env.py` | owner's PC: turns `env/*.env.example` + the local `.env` into the env files, printing names only |
 | `env/*.env.example` | every variable each service needs, with its source |
-| `bin/fill_generated.sh` | on the box: generates the new database passwords, the LiveKit key pair, the node IP |
-| `bin/restore.sh` | on the box: roles, pgvector, `pg_restore`, verification, the api volume |
-| `bin/deploy.sh` | on the box: build, pre-migrate dump, migrate, start, health checks |
-| `bin/preflight.sh` | on the box: env completeness, firewall, DNS, listeners |
-| `bin/backup.sh` + `systemd/` | nightly dump, roles, api data, facts, checksums; refuses below a free-space floor |
+| `bin/fill_generated.sh` | on the host: generates the new database passwords |
+| `bin/restore.sh` | on the host: roles, pgvector, `pg_restore`, verification, the api volume |
+| `bin/deploy.sh` | on the host: build, pre-migrate dump, migrate, start, health checks |
+| `bin/preflight.sh` | on the host: env completeness, the host as provisioned, firewall, listeners, DNS |
+| `bin/backup.sh` + `systemd/` | nightly dump, roles, api data, facts, checksums; refuses below a free-space floor; off-site copy when configured |
 | `bin/alert.sh`, `bin/diskcheck.sh` | a failed backup or a full disk raises an alert (marker, login banner, optional notifier) |
 | `sql/verify.sql` | the post-restore facts (counts and schema facts only) |
+| `cloud-init.yaml` | first-boot baseline for a NEW host only; the Oracle instance already exists |
 
-Tests: `scripts/tests/test_server_kit.py` (runs in CI with every other script test).
+Tests: `scripts/tests/test_server_kit*.py` and `test_server_runbook.py` (CI runs them with
+every other script test).
 
 ## Rulings already made
 
-- **Per-tenant MCP runtime: OFF at launch** (`PERSONA_ALLOW_PER_TENANT_MCP=0`, no
-  `FLY_API_TOKEN`, no `PERSONA_MCP_RUNTIME_FLY_APP`). It booted one Fly Machine per
-  (tenant, server) through the Fly Machines API, and its Fly app is deleted. Users keep
-  the built-in MCP surface; the boot line says `off (reason: unconfigured)`. The owner's
-  direction: a new spec uses provider-hosted MCP (the model providers call remote MCP
-  servers), so no container runtime is planned on this box. See "Seam: per-tenant MCP".
+- **Two hosts** (2026-11-07): core on Oracle, voice on Azure later. The core host runs no
+  voice and no LiveKit, and opens only 22, 80 and 443.
+- **CPU torch** on Linux (D1): the api image carries no CUDA libraries and builds on arm64.
+- **Build on the host** for go-live, Docker's data root on the block volume (D2); images
+  built in CI and pulled from GHCR by digest are a follow-up.
+- **A separate 100 GB block volume** for `/srv` (D3): data, backups, Docker, swap.
+- **Off-site backups to Azure Blob** with an immutability policy, a write-only SAS and age
+  encryption, provisioned by the Terraform session (D4). Until then the backup runs locally
+  and says so.
+- **unified-monitoring-agent masked, oracle-cloud-agent kept** (D5); rpcbind masked.
+- **Voice reaches Postgres over WireGuard** through a `pglink` proxy with its own
+  `persona_voice` role (D6): Phase B, task T13.
+- **Per-tenant MCP runtime: OFF** (`PERSONA_ALLOW_PER_TENANT_MCP=0`). See "Seam: per-tenant
+  MCP".
 - **Initiative: OFF** until the A5-R-1 re-run is green and the owner says so. The api
   template pins `PERSONA_INITIATIVE_ENABLED=false` whatever `.env` says.
 - **Hostnames are kept**, so no provider registration changes: Stripe webhook, Discord,
-  Slack and GitHub OAuth redirects, Twilio and Postmark webhooks, Vercel's API and voice
+  Slack and GitHub OAuth redirects, Twilio and Postmark webhooks, Vercel's api and voice
   base URLs. Only DNS records change.
-- **LiveKit UDP: single port 7882** (the proven config), with the TCP 7881 fallback.
-- **LiveKit is SELF-HOSTED on the box** (owner ruling 2026-10-23), with LiveKit Cloud's
-  free plan as a one-setting fallback (step 9). `render_env.py` defaults to it. The box is
-  sized with a core's headroom for it, and the R9-216 latency test is the move's sign-off.
-- **Backups:** Hetzner Backups ON (step 1, mandatory), the nightly on-box backups, and an
-  encrypted append-only off-site copy soon after go-live (owner-provided).
 - **Stripe stays in test mode**, as production ran. Going live is a separate decision.
+
+## Blockers before go-live
+
+- **R9-285** (CRITICAL, path traversal in persona delete): its fix
+  (`fix/persona-id-traversal`) must be merged to main, and this kit's branch rebased on it,
+  before any deploy. No deploy without it.
+- The **production Clerk** values (step 4).
+- **DNS** for the three core hostnames (step 8), **CORS** origins and the **ACME email**.
+- The seven **model chain** settings and the production **`MCP_CREDENTIAL_KEY`** (step 4).
+- Not a blocker: the off-site backup target. Go-live may happen with it PENDING; the
+  nightly backup says so every night until it exists.
+- Voice blockers (R9-265 VAD threshold check, R9-216 latency sign-off) belong to Phase B.
 
 ## Owner inputs (checklist)
 
-- [ ] A Hetzner server (step 1), created with only the owner's SSH key on root and
-      Hetzner Backups ON. No API token is needed: nothing here calls Hetzner.
-- [ ] Its IPv4 address and IPv6 /64, and SSH access as root from this PC with that key
-      (the key loaded in the ssh agent, or its file path).
-- [ ] DNS access to `openpersonasai.com` and `openpersona.online`, and the full record list.
+- [ ] SSH access to the instance as `ubuntu` from this PC (the coordinator has it).
+- [ ] The instance's **public IPv4** (for `--public-ipv4` and DNS).
+- [ ] DNS access to `openpersonasai.com` and `openpersona.online`.
 - [ ] The `render_env.py --inventory` checklist (step 4) marked `[p]` or `[d]` per name, and
-      the production value for every `[d]`. `.env` holds production values for only some
-      names. Look hardest at:
-      `PERSONA_API_JWT_PUBLIC_KEY` and `PERSONA_CONNECTORS_JWT_*` (the production Clerk
-      instance, not a `*.clerk.accounts.dev` key), `MCP_CREDENTIAL_KEY` (must be the exact
-      production key or stored MCP credentials become unreadable), the Stripe test keys and
-      webhook secret, every connector bot token (a dev process polling the production
-      Telegram bot steals its updates), and the behaviour flags marked "confirm".
+      the production value for every `[d]`. Look hardest at `PERSONA_API_JWT_PUBLIC_KEY` and
+      `PERSONA_CONNECTORS_JWT_*` (the production Clerk instance, not a
+      `*.clerk.accounts.dev` key), `MCP_CREDENTIAL_KEY` (must be the exact production key or
+      stored MCP credentials become unreadable), the Stripe test keys and webhook secret,
+      every connector bot token (a dev process polling the production Telegram bot steals
+      its updates), and the behaviour flags marked "confirm".
 - [ ] The seven shared settings (`PERSONA_*_MODELS` and
       `PERSONA_OPENROUTER_SUBSCRIPTION_MODE`). GitHub cannot read a secret back, so either
       supply the Production environment's values or confirm `.env` holds them.
-- [ ] The web origin(s) for `PERSONA_API_CORS_ORIGINS` and `PERSONA_VOICE_CORS_ORIGINS`
-      (expected `https://app.openpersonasai.com`, plus any `openpersona.online` origin).
+- [ ] The web origin(s) for `PERSONA_API_CORS_ORIGINS` (expected
+      `https://app.openpersonasai.com`, plus any `openpersona.online` origin).
 - [ ] An email address for Let's Encrypt notices (`ACME_EMAIL`).
-- [ ] Only if the LiveKit fallback is ever used: the LiveKit Cloud free-plan project's URL,
-      key and secret (kept in the owner's password manager, not on the box).
-- [ ] Soon after go-live: the off-site backup target (a Hetzner Storage Box sub-account
-      is the suggestion; see "Backups off the box").
+- [ ] Later: the off-site backup command once the Terraform session has the Azure Blob
+      container and its write-only SAS (see "Backups off the host").
 
 ## Step 0: close the subdomain takeover (DONE 2026-10-23)
 
-**Done by the owner on 2026-10-23: the dangling records are removed.** Kept for the
-record and for any record found later. The production records were CNAMEs to `*.fly.dev`
-names (`open-persona-api.fly.dev` and siblings) whose apps were deleted. Those names are
-free: anyone can create a Fly app with that name, add a certificate for our hostname and
-serve content on it. Any record that still names `*.fly.dev` must go:
+Done by the owner on 2026-10-23: every record naming a deleted `*.fly.dev` app is gone.
+Kept as the rule for later: **never point a record at a name someone else can claim** (a
+`*.fly.dev` app name, an Azure `*.cloudapp.azure.com` label). Use A records to static
+addresses.
 
-```
-api.openpersonasai.com         connectors.openpersonasai.com
-voice.openpersonasai.com       livekit.openpersonasai.com
-api.openpersona.online         (and any other record that names *.fly.dev)
-```
+## Step 1: the Oracle console (owner)
 
-At step 8 the records come back as A/AAAA records pointing at the box; create them with
-a TTL of 300 seconds and raise it once stable.
+Already done on 2026-11-07:
 
-## Step 1: create the server (Hetzner console, the owner)
+- the instance (VM.Standard.A1.Flex, 2 OCPU, 12 GB, Ubuntu 24.04, 45 GB boot volume);
+- the **block volume**: 100 GB, Balanced, attached **paravirtualized**, read/write, at
+  `/dev/oracleoci/oraclevdb`, still unformatted (provision formats it);
+- the instance metadata service set to **IMDSv2** only;
+- the security list admits **TCP 22, 80 and 443**. Nothing else is needed: the core host
+  runs no LiveKit. (Phase B adds UDP 51820 from the Azure host's address only.)
 
-In Hetzner Cloud console > the project > Add Server:
+Still to decide or do:
 
-| setting | choose |
-|---|---|
-| Location | **Helsinki (hel1)**: the closest to Norway. Falkenstein or Nuremberg also work |
-| Image | **Ubuntu 24.04** |
-| Type | **Shared vCPU, x86 (Intel/AMD), the CX42 class: 8 vCPU, 16 GB RAM, 160 GB disk** (or its current successor with the same shape). NOT the Arm (CAX) line: `silero-vad-lite` has no arm64 wheel. Not below 16 GB. If the R9-216 test shows CPU steal, resize in place to the dedicated CCX line |
-| Networking | **Public IPv4 ON** (billed separately) and **Public IPv6 ON** |
-| SSH keys | **only the owner's public key** (it lands on root) |
-| Volumes | none |
-| Firewalls | optional second layer; if used, inbound only 22/tcp, 80/tcp, 443/tcp, 7881/tcp, 7882/udp (a TCP-only set looks healthy until no audio flows) |
-| **Backups** | **ON (mandatory)**: Hetzner's daily server backups, about 20 % on top of the server price. The rollback for the whole box |
-| Placement groups, Labels | none needed |
-| Cloud config | **leave empty** (the primary path is `provision.sh`; `cloud-init.yaml` is the alternative) |
-| Name | e.g. `open-persona-prod` |
+- **Reserved public IP**: if the console offers one free in this tenancy, convert the
+  ephemeral address to reserved, so the DNS records survive an instance replacement.
+- **Idle reclamation**: Oracle may reclaim an Always Free instance that is idle for 7 days
+  (CPU p95, network AND memory under 20 %). With the api's resident models and Postgres
+  the memory stays well above that. Upgrading the tenancy to Pay As You Go with a budget
+  alert is the extra safety; Always Free resources stay free after the upgrade.
+- **Volume backups**: manual ones only, at the milestones below (at most five Always Free
+  backups in total, boot and block together). Do NOT attach a Bronze, Silver or Gold
+  policy: they keep more than five. A boot volume backup includes the owner's other work.
 
-Prices and type names can change; check on the day. Then send: the **IPv4**, the **IPv6
-/64** (the box uses `<prefix>::1`), and confirm `ssh root@<ipv4>` works from this PC.
+## Step 2: put the code on the host (as ubuntu)
 
-**Host key check, before anything is uploaded:** in the console, "Rescue > Reset root
-password", open the web console (">_"), log in as root and run
-`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`; the first `ssh root@<ipv4>` must show
-the same fingerprint.
-
-## Step 2: put the code on the box (as root)
-
-The box needs no GitHub credential. From the owner's PC, in the repo, with a LOCAL branch
-that holds this kit (`main` once merged, until then `feat/hetzner-move`). A bundle of
-`origin/main` would not work: it carries a remote ref, no branch, and clones empty.
+The repository is public, so the host needs no GitHub credential:
 
 ```bash
-BRANCH=main                                   # or feat/hetzner-move before the merge
-git bundle create /tmp/open-persona.bundle "$BRANCH"
-scp /tmp/open-persona.bundle root@<ipv4>:/tmp/
-ssh root@<ipv4> "apt-get update -q && apt-get install -y -q git \
-  && mkdir -p /opt/open-persona \
-  && git clone -b $BRANCH /tmp/open-persona.bundle /opt/open-persona/repo \
-  && rm /tmp/open-persona.bundle"
-rm /tmp/open-persona.bundle
+sudo git clone https://github.com/<owner>/<repo>.git /opt/open-persona/repo
+sudo git -C /opt/open-persona/repo checkout main     # the branch carrying this kit
 ```
 
-## Step 3: provision (as root, once)
+`provision.sh` hands the checkout to `deploy` (step 3).
+
+## Step 3: provision (as ubuntu, with sudo)
 
 ```bash
-ssh root@<ipv4> /opt/open-persona/repo/deploy/server/bin/provision.sh
+sudo /opt/open-persona/repo/deploy/server/bin/provision.sh --profile oracle \
+     --public-ipv4 <the instance's public IPv4>
 ```
 
-It creates `deploy` (uid 2000) with root's SSH key, writes the SSH lockdown (no root
-login, keys only, only `deploy`), then ufw (22 limited, 80, 443, 7881/tcp, 7882/udp),
-fail2ban, unattended upgrades, Docker (signing key fingerprint checked), the directories,
-the backup, disk-check and alert units. The root session that ran it stays open: **before
-closing it, check from a second terminal** that `ssh deploy@<ipv4>` works and
-`sudo -n true` succeeds. From then on everything runs as `deploy`; a later re-run is
-`sudo /opt/open-persona/repo/deploy/server/bin/provision.sh`.
+From `hosts/oracle.env` it:
 
-Point the checkout at GitHub for later pulls (its `origin` is the deleted bundle):
+- creates `deploy` (uid 2000) with ubuntu's SSH key, writes the SSH lockdown (no root
+  login, keys only, `AllowUsers deploy ubuntu`), fail2ban, unattended upgrades;
+- formats the block volume ext4 (label `op-data`) **only if it carries no signature at
+  all**, mounts it by UUID at `/srv` with `nofail`, and puts Docker's data root
+  (`/srv/docker`), a 4 GB swapfile and all data under it (see "The block volume");
+- hands Oracle's image firewall to ufw: a copy of the image's rules goes to
+  `/root/open-persona-firewall-backup`, the `InstanceServices` chain (it keeps non-root
+  processes off the iSCSI and metadata endpoints) is carried verbatim into
+  `/etc/ufw/before.rules`, `netfilter-persistent` is masked, the image's live REJECT rules
+  are removed, and ufw allows 22 (limited), 80 and 443 only;
+- masks rpcbind and the unified-monitoring-agent (oracle-cloud-agent stays);
+- installs Docker for arm64 (signing key fingerprint checked), the backup, disk-check and
+  alert units, and records the profile and the public address in `/etc/open-persona/`.
+
+The ubuntu session that ran it stays open: **before closing it, check from a second
+terminal** that `ssh deploy@<ipv4>` works and `sudo -n true` succeeds, and that
+`ssh ubuntu@<ipv4>` still works. From then on the kit runs as `deploy`; a re-run is the
+same command with `sudo`.
+
+**Reboot once now** (`sudo reboot`), then as deploy:
 
 ```bash
-ssh deploy@<ipv4> "git -C /opt/open-persona/repo remote set-url origin https://github.com/<owner>/<repo>.git"
+cd /opt/open-persona/repo/deploy/server
+bin/preflight.sh          # the host section must pass; env and database checks fail until steps 4 to 6
 ```
 
-If it says a reboot is required, reboot now. Then take a console **snapshot**
-("provisioned, empty").
+It checks the architecture, the mounted block volume, Docker's data root, the data owner
+(uid 2001), that Oracle's INPUT REJECT is gone and the `InstanceServices` chain is live
+after the reboot, that no masked unit runs, swap and the clock. Then take a manual volume
+backup of the block volume, "provisioned, empty".
 
-**Alternative path:** paste `cloud-init.yaml` (with `__OWNER_SSH_PUBLIC_KEY__` replaced)
-into "Cloud config" at step 1. It creates `deploy` and the same baseline at first boot;
-then steps 2 and 3 run as `deploy` with `sudo`.
+## The block volume
+
+`/srv` is the 100 GB block volume (`/dev/oracleoci/oraclevdb`). If it is ever missing
+(detached, or the mount failed at boot), `nofail` lets the host boot, and then:
+
+- Docker does not start (`RequiresMountsFor=/srv`), so no container comes up on an empty
+  data root on the boot disk;
+- `bin/deploy.sh`, `bin/backup.sh` and `bin/restore.sh` stop with "the block volume is
+  missing".
+
+Reattach it in the console (paravirtualized), then `sudo mount /srv` and
+`sudo systemctl start docker`. `provision.sh` refuses to format a device that already holds
+anything but its own `op-data` filesystem, and refuses to mount over a non-empty `/srv`.
 
 ## Step 4: the env files
 
-On the **owner's PC**, from the repo. First the inventory: it writes nothing and lists,
-for every name the render would take from `.env`, whether `.env` has a value (`set`,
-`empty` or `absent`, never the value) and which env file it goes to. `.env` holds
-production values for only some names, so mark each line `[p]` or `[d]` and have the
-production value ready for every `[d]` before rendering:
+On the **owner's PC**, from the repo. First the inventory (it writes nothing and shows
+presence only, never a value), then mark each line `[p]` or `[d]`:
 
 ```bash
 uv run python -I deploy/server/render_env.py --dotenv .env --inventory > ~/op-inventory.txt
 ```
 
-Then render, into a directory OUTSIDE the repo:
+Then render, into a directory OUTSIDE the repo. The default `--host core` renders only the
+files the core host reads, so no voice or LiveKit secret is written for it:
 
 ```bash
 uv run python -I deploy/server/render_env.py --dotenv .env --out ~/op-env
-# LiveKit defaults to selfhosted (owner ruling); add --livekit cloud only for the fallback
-# (step 9). Add --chains-from-dotenv only after confirming .env holds the production chains.
+# Add --chains-from-dotenv only after confirming .env holds the production chains.
 ```
 
-It prints every name with its state, never a value. Then edit the files in `~/op-env`:
+Edit the files in `~/op-env`:
 
-- `__OWNER__`: fill in.
-- `__GITHUB_PRODUCTION__`: fill in the Production environment's value.
+- `__OWNER__`: fill in (CORS origins, ACME email).
+- `__GITHUB_PRODUCTION__`: the Production environment's value.
 - `__MISSING_FROM_DOTENV__`: supply the value, or **delete the line** if production never
   set it (the code default then applies, exactly as on Fly).
-- Every name marked `[d]` in the inventory: replace the copied dev value with production's.
-- `__OWNER_CLERK_PROD__`: every Clerk-derived value. `.env` holds the DEVELOPMENT Clerk
-  instance's, so none is copied (owner ruling 2026-10-23). In the Clerk dashboard, switch to
-  the **production** instance (Frontend API `clerk.openpersona.online`), then:
-  - `PERSONA_API_JWT_PUBLIC_KEY`, `PERSONA_VOICE_JWT_PUBLIC_KEY` and
-    `PERSONA_CONNECTORS_JWT_PUBLIC_KEY`: Configure > API keys > the JWT public key, PEM
-    format. The same PEM in all three.
-  - `PERSONA_CONNECTORS_JWT_JWKS_URL`: the JWKS URL on the same page
-    (`https://clerk.openpersona.online/.well-known/jwks.json`).
-  - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line in
-    production (the connectors verify RS256 with the PEM above).
-  - Check under Configure > JWT templates that the production instance has the
-    `persona-api` template with `aud` = `persona-api` (the audience the compose file pins).
-  `bin/preflight.sh` blocks until every one is pasted, and refuses any value naming
-  `*.clerk.accounts.dev`.
+- Every name marked `[d]`: replace the copied dev value with production's.
+- `__OWNER_CLERK_PROD__`: every Clerk-derived value, from the **production** instance
+  (Frontend API `clerk.openpersona.online`):
+  - `PERSONA_API_JWT_PUBLIC_KEY` and `PERSONA_CONNECTORS_JWT_PUBLIC_KEY`: Configure > API
+    keys > the JWT public key, PEM format. The same PEM in both.
+  - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersona.online/.well-known/jwks.json`.
+  - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line.
+  - Check under Configure > JWT templates that the `persona-api` template has
+    `aud` = `persona-api`.
+- `PERSONA_VOICE_SERVICE_URL` stays **empty**: voice is not up yet, and the api answers its
+  voice routes with a clean 503 until Phase B sets it.
+- `offsite.env` stays empty until the off-site target exists.
 
-Copy them to the box over SSH only (scp; never a chat, mail or shared drive), and finish
-them there:
+Copy them to the host over SSH only (never a chat, mail or shared drive), and finish them
+there:
 
 ```bash
 scp ~/op-env/*.env deploy@<ipv4>:/opt/open-persona/env/
 ssh deploy@<ipv4>
 cd /opt/open-persona/repo/deploy/server
-bin/fill_generated.sh          # new DB passwords (3 roles), LiveKit key pair, node IP
+bin/fill_generated.sh          # new passwords for the three database roles
 bin/preflight.sh --env-only    # must pass: roles separated, no dev Clerk instance
 ```
 
 `/opt/open-persona/env/.generated` now holds the only copy of the new database passwords.
 Put the whole `/opt/open-persona/env` directory in the owner's password manager. Delete
-`~/op-env` from the PC afterwards (`shred -u ~/op-env/*.env` where available).
-
-`alert.env` decides where alerts go besides the on-box marker (see "Alerts" below).
+`~/op-env` from the PC afterwards.
 
 ## Step 5: restore
 
-On the owner's PC, checksum a COPY of the set (never write into the original directory),
-then upload:
+**R9-285 must be merged first** (see "Blockers"). On the owner's PC, checksum a COPY of the
+set (never write into the original directory), then upload:
 
 ```bash
 mkdir -p ~/op-restore && cp ~/Backups/fly-2026-10-02/{persona.dump,globals.sql,persona_volume.tgz} ~/op-restore/
@@ -260,14 +291,16 @@ scp ~/op-restore/* deploy@<ipv4>:/srv/open-persona/restore/
 rm -rf ~/op-restore
 ```
 
-On the box:
+On the host:
 
 ```bash
 cd /opt/open-persona/repo/deploy/server
 bin/restore.sh --backup-dir /srv/open-persona/restore
 ```
 
-What a correct restore prints (from the 2026-10-23 rehearsal against this exact set):
+The dump is the custom format, which does not depend on the architecture: an x86 dump
+restores on arm64. What a correct restore prints (from the 2026-10-23 rehearsal against
+this exact set):
 
 ```
 tables|54   forced_rls_tables|45   policies|46
@@ -283,27 +316,25 @@ volume entries: 214 (the backup listed 214)
 ```
 
 Anything else stops the script. `pg_restore` runs in one transaction, so a failed restore
-leaves no tables behind, and the role and extension steps are idempotent: fix the cause
-and run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification
-check), the tables are there and the script refuses to restore over them; start clean with
-`docker compose -f docker-compose.yml down` then `docker volume rm open-persona_pgdata`.
-**Only before go-live:** once real users write to this database, that command destroys
-production. After go-live a failed step is fixed in place, never by dropping the volume.
+leaves no tables behind, and the role and extension steps are idempotent: fix the cause and
+run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification check),
+the tables are there and the script refuses to restore over them; start clean with
+`bin/compose.sh down` then `docker volume rm open-persona_pgdata`. **Only before
+go-live:** once real users write to this database, that command destroys production.
 
-The volume is unpacked as uid 1000, never as root, after a scan that refuses any symlink,
-hardlink, device node, absolute path or `..` path; no owners or modes come from the
-archive. `bin/restore.sh --roles-only` re-applies the roles and grants to an existing
+The volume is unpacked as uid 2001 (the data uid), never as root, after a scan that refuses
+any symlink, hardlink, device node, absolute path or `..` path; no owners or modes come from
+the archive. `bin/restore.sh --roles-only` re-applies the roles and grants to an existing
 database (a password rotation), touching no data.
 
 ### Check the memory chains
 
 The first deploy runs migration 059, which builds the index that allows one current version
-per memory chain (R9-205). It cannot be built while any chain has two, and the data was last
-checked on 2026-09-20, twelve days before the backup was taken. So look before deploying.
-`restore.sh` already printed this as `memory_chains_two_heads`; this is the same count by kind:
+per memory chain (R9-205). It cannot be built while any chain has two. `restore.sh` printed
+the count as `memory_chains_two_heads`; this is the same count by kind:
 
 ```bash
-docker compose -f docker-compose.yml exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' <<'SQL'
+bin/compose.sh exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' <<'SQL'
 SELECT kind, count(*) FROM (
   SELECT kind FROM memory_chunks
    WHERE logical_id IS NOT NULL AND superseded_by IS NULL
@@ -312,44 +343,34 @@ SELECT kind, count(*) FROM (
 SQL
 ```
 
-- **No rows** is the expected answer: no chain has two current versions and the migration will
-  go through. Carry on to step 6.
-- **Any rows** mean two saves of one memory ran at the same moment before this index existed,
-  or an older bug left two current versions. Nothing is lost: both versions are on disk. The
-  migration will refuse, changing nothing, until this is settled. See what is there, from the
-  `deploy/server` directory, as the migrate service (it holds the superuser connection):
+- **No rows** is the expected answer. Carry on to step 6.
+- **Any rows**: nothing is lost, both versions are on disk, and the migration will refuse,
+  changing nothing, until this is settled. See what is there, as the migrate service (it
+  holds the superuser connection):
 
   ```bash
-  docker compose -f docker-compose.yml run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL"'
+  bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL"'
   ```
 
-  That changes nothing and prints each chain and what can be done with it. A chain two saves
-  raced says it can be resolved. Settle those by adding `--resolve-raced --apply` to the same
-  command: every version is kept, in the order they were saved, the later one stays current, and
-  each chain gets an audit row in `store_audit_events`. Run the first command again to confirm.
-
-  A chain it reports as "left alone" is one it will not guess about, and the migration stays
-  blocked until a person has looked at it. Stop there and bring the output to the owner.
+  That changes nothing and prints each chain and what can be done with it. Settle the
+  chains two saves raced by adding `--resolve-raced --apply` to the same command: every
+  version is kept, the later one stays current, and each chain gets an audit row. A chain
+  it reports as "left alone" needs a person: stop and bring the output to the owner.
 
 ### Sweep the memory summaries
 
-Forgetting something now also deletes every version of the persona's memory summary that was
-written from it. The dump predates that, so it can hold summaries of evidence a person had already
-asked to forget (R9-209). This looks for them. It uses no model and costs nothing:
+Forgetting something now also deletes every memory summary written from it. The dump
+predates that, so it can hold summaries of evidence a person had already asked to forget
+(R9-209). This looks for them, with no model and no cost:
 
 ```bash
-docker compose -f docker-compose.yml run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL" --forgotten-evidence'
+bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL" --forgotten-evidence'
 ```
 
 - **"No memory summary ... cites anything forgotten"**, exit 0: nothing to do.
-- **A count per persona**, exit 1: those personas have summaries citing something that is no
-  longer on disk. Nothing has been changed. Add `--apply` to delete those versions: each deletion
-  is audited in `store_audit_events` with ids and counts only, and the chain is closed up around
-  it. Run it again to confirm.
-
-Until the next consolidation pass rebuilds them, those personas show their newest summary that
-cites nothing forgotten, or no summary at all if none survives. They may briefly know less. That
-is expected, and it is not a fault to chase.
+- **A count per persona**, exit 1: add `--apply` to delete those versions (each deletion is
+  audited with ids and counts only), then run it again to confirm. Those personas may
+  briefly know less until the next consolidation pass. That is expected.
 
 ## Step 6: deploy
 
@@ -357,97 +378,58 @@ is expected, and it is not a fault to chase.
 bin/deploy.sh
 ```
 
-Before the first `deploy.sh`, pin Caddy by digest (the kit could not fetch it offline):
-`docker pull caddy:2.10.2 && docker image inspect caddy:2.10.2 --format '{{index .RepoDigests 0}}'`,
-then commit that digest into `docker-compose.yml` as `caddy:2.10.2@sha256:...`.
-`deploy.sh` validates the Caddyfile before every start (Caddy's admin API is off, so a
-config change only ever lands through a restart).
-
-The first build takes a while (both images carry CUDA torch wheels, several GB each). The
-migrate step takes the restored dump from `058` to `059`, which builds one index on a table of
-a few hundred rows and takes under a second. If a chain has two current versions it stops with a
-message and `deploy.sh` restarts nothing: settle them as in step 5 and run `bin/deploy.sh` again.
-The first boot downloads the HF models (about 2 GB) into the volumes, hence the
-long health timeouts. `deploy.sh` ends with `api /livez: ok`, `api /healthz (database):
-ok` and `voice listener: ok`. The Caddy smoke test warns until DNS points here.
+The first build runs on the host's 2 cores: expect 10 to 20 minutes (the image carries CPU
+torch, no CUDA). It competes with nothing yet; later deploys run off-hours. The migrate step
+takes the restored dump from `058` to head. The first boot downloads the HF models (the bge
+embedder, the reranker and the crisis encoder, about 1 to 2 GB) into the data volume and
+loads them in 1 to 2 minutes on Ampere, hence the long health timeouts. `deploy.sh` ends with
+`api /livez: ok` and `api /healthz (database): ok`. The Caddy smoke test warns until DNS
+points here.
 
 Before DNS, check through an SSH tunnel from the PC:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 deploy@<ipv4>
+ssh -L 8000:127.0.0.1:8000 deploy@<ipv4>
 curl -fsS http://127.0.0.1:8000/healthz
-docker compose -f /opt/open-persona/repo/deploy/server/docker-compose.yml logs api | grep -iE "model chain|mcp runtime|connectors"
+bin/compose.sh logs api | grep -iE "model chain|mcp runtime|connectors"
 ```
 
-The api boot log should show the model chains, the MCP startup summary with the
-per-tenant runtime `off (reason: unconfigured)`, and the connector transports starting.
+The api boot log should show the model chains, the MCP startup summary with the per-tenant
+runtime `off (reason: unconfigured)`, and the connector transports starting.
 
-## Step 7: snapshot
+## Step 7: volume backup
 
-Console snapshot "restored, not yet public". This is the move's rollback point.
+A manual backup of the block volume: "restored, not yet public". This is the move's
+rollback point.
 
 ## Step 8: DNS and certificates
 
-Create A (and AAAA) records, **DNS only** (if the zone is on Cloudflare, grey cloud: a
-proxied record cannot carry LiveKit's UDP and hides client addresses):
+Create A records, **DNS only** (on Cloudflare: grey cloud), TTL 300, for the core host's
+three names:
 
 ```
-api.openpersonasai.com           A  <ipv4>   AAAA <ipv6>
-api.openpersona.online           A  <ipv4>   AAAA <ipv6>
-connectors.openpersonasai.com    A  <ipv4>   AAAA <ipv6>
-voice.openpersonasai.com         A  <ipv4>   AAAA <ipv6>
-livekit.openpersonasai.com       A  <ipv4>   (keep it in both LiveKit modes)
+api.openpersonasai.com           A  <ipv4>
+api.openpersona.online           A  <ipv4>
+connectors.openpersonasai.com    A  <ipv4>
 ```
 
-Then on the box: `bin/preflight.sh` (all five names should resolve here) and watch Caddy
-obtain STAGING certificates: `docker compose -f docker-compose.yml logs -f caddy`. When
+AAAA records only if the VCN and the instance have IPv6 configured. **No record for the
+voice and livekit names yet**: they will point at the voice host (Phase B), and the core
+host's Caddy does not serve them.
+
+Then on the host: `bin/preflight.sh` (the three names should resolve to the recorded public
+address) and watch Caddy obtain STAGING certificates: `bin/compose.sh logs -f caddy`. When
 every name has one, switch to production certificates:
 
 ```bash
 sed -i 's|^ACME_CA=.*|ACME_CA=https://acme-v02.api.letsencrypt.org/directory|' /opt/open-persona/env/caddy.env
-docker compose -f docker-compose.yml up -d --force-recreate caddy
+bin/compose.sh up -d --force-recreate caddy
 curl -fsS https://api.openpersonasai.com/healthz      # from anywhere
 ```
 
-Once stable for a day, raise the TTLs back to 3600.
+Once stable for a day, raise the TTLs to 3600.
 
-## Step 9: LiveKit
-
-**Self-hosted on this box is the owner's ruling (2026-10-23)**; LiveKit Cloud's free plan
-is the one-setting fallback. History to keep in mind while testing: the self-hosted SFU on
-Fly was retired on 2026-09-03 after the first good call on Cloud, and the greeting
-timeouts of that era (R9-116) were never isolated to one cause. If a call misbehaves,
-switching to the fallback for one test call separates the SFU from the rest.
-
-**Fallback: Cloud.** `render_env.py --livekit cloud` copies `.env`'s `PERSONA_LIVEKIT_URL/_API_KEY/
-_API_SECRET` into voice.env's `PERSONA_VOICE_LIVEKIT_*`. Nothing runs on the box for it.
-Check a call in the LiveKit Cloud dashboard.
-
-**Self-hosted (the default).** `render_env.py` already rendered it; to return to it from
-the fallback, in `/opt/open-persona/env/voice.env` set
-`PERSONA_VOICE_LIVEKIT_URL='wss://livekit.openpersonasai.com'`,
-`PERSONA_VOICE_LIVEKIT_API_KEY='__GEN_LIVEKIT_API_KEY__'` and
-`PERSONA_VOICE_LIVEKIT_API_SECRET='__GEN_LIVEKIT_API_SECRET__'` (or re-render with
-`--livekit selfhosted`), make sure `livekit.env` is present, then
-`bin/fill_generated.sh && bin/deploy.sh --skip-build`. `deploy.sh` sees the URL and starts
-the `selfhosted-livekit` profile. Then the UDP checks, in order:
-
-1. `sudo ss -ulpn | grep 7882` and `sudo ss -ltnp | grep -E '7880|7881'`: listening.
-2. `sudo ufw status`: 7881/tcp and 7882/udp allowed, 7880 NOT allowed.
-3. `docker compose -f docker-compose.yml logs livekit | head`: `advertising node_ip=<the box IPv4>`.
-4. A real call in Chrome with `chrome://webrtc-internals` open: the selected candidate
-   pair's remote candidate is the box IPv4, port 7882, protocol **udp**. A listening
-   socket proves nothing; this is the check.
-5. TCP fallback: `sudo ufw delete allow 7882/udp`, call again, the pair is now tcp 7881
-   and audio still flows; then `sudo ufw allow 7882/udp`.
-
-Known limit, unchanged from Fly: no TURN, so a network that allows only outbound 443 TLS
-cannot carry media.
-
-Switching back to Cloud is the same three lines in voice.env and
-`bin/deploy.sh --skip-build`.
-
-## Step 10: verify the product
+## Step 9: verify the product
 
 - Sign in on the web app; open a conversation (history from the restore is there); send a
   message and watch it stream (SSE through Caddy).
@@ -456,43 +438,39 @@ Switching back to Cloud is the same three lines in voice.env and
 - Stripe dashboard (test mode): send a test event to
   `https://api.openpersonasai.com/v1/billing/webhook`; it returns 200.
 - MCP: an existing GitHub OAuth connection still works (proves `MCP_CREDENTIAL_KEY`).
+- Voice is expected to be unavailable: the api's voice routes answer 503 until Phase B.
 - `bin/preflight.sh` passes in full.
 
-## Step 11: the operator passes (owner ruling 2026-09-26)
+## Step 10: the operator passes that need no voice
 
-1. **V6 formal voice pass** (`specs/phase2/spec_V6/operator_pass_script_2026_09.md` in the
-   docs repo), re-cut for this host's voice service and the chosen LiveKit mode.
-2. **Stripe test-mode pass** for the auto top-up invoice chain (R9-177): a card crossing the
-   $2 line, a retry within the hour, a 3DS card, a decline card.
-3. **R9-216:** one real call measured against the 800 ms P50 voice budget. **The move is
-   not done until it passes.** During the call, watch CPU steal on the box
-   (`vmstat 1`, column `st`); sustained steal is the case for the dedicated CCX line.
+The **Stripe test-mode pass** for the auto top-up invoice chain (R9-177): a card crossing the
+$2 line, a retry within the hour, a 3DS card, a decline card. The V6 voice pass and the
+R9-216 latency sign-off move to Phase B.
 
-## Step 12: sign-off
+## Step 11: sign-off
 
-- Delete `/srv/open-persona/restore` on the box (production data, no longer needed there).
-- Delete the "restored, not yet public" snapshot from step 7: it holds the database and
-  secrets as they were before go-live, and is no longer the rollback once users write.
-- Optional: CAA records (`0 issue "letsencrypt.org"`) on both domains, so no other CA can
-  issue for our hostnames.
+- Delete `/srv/open-persona/restore` on the host (production data, no longer needed there).
+- Delete the "restored, not yet public" volume backup from step 7 once users write: it
+  holds the database and secrets as they were before go-live.
+- Optional: CAA records (`0 issue "letsencrypt.org"`) on both domains.
 - Confirm the nightly backup ran (`systemctl list-timers open-persona-backup.timer`,
-  `ls /srv/open-persona/backups/nightly`) and set up the off-site copy (`OFFSITE_CMD` in
-  `systemd/open-persona-backup.service`).
-- Snapshot "live".
+  `ls /srv/open-persona/backups/nightly`, `journalctl -u open-persona-backup`). Its log says
+  `off-site copy PENDING` until the off-site target exists.
+- A manual volume backup, "live".
 - Initiative stays OFF until the A5-R-1 re-run.
 
 ## Seam: per-tenant MCP
 
 Per-tenant MCP is OFF at launch. The coming spec uses **provider-hosted MCP**: the model
-providers call remote MCP servers themselves, so nothing new needs to run on this box and
+providers call remote MCP servers themselves, so nothing new needs to run on this host and
 no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtime` in
 `docker-compose.yml`, and whatever mechanism comes is held to this, nothing more:
 
 - It reaches the api only through settings in `api.env` (`PERSONA_ALLOW_PER_TENANT_MCP`
   plus its own), added to the templates, `render_env.py` and preflight in the same change.
 - **The api never gets the Docker socket**, `/run` or `/var/run` mounts, `privileged` or
-  `DOCKER_HOST`. The api holds every tenant's data and credentials.
-  `scripts/tests/test_server_kit.py` fails on any of these, for every service.
+  `DOCKER_HOST`. The api holds every tenant's data and credentials. The kit's tests fail on
+  any of these, for every service.
 - If it ever needs an endpoint WE host for providers to call, that is a new public route
   through Caddy with its own auth and request limits, and a firewall review. None is
   planned.
@@ -500,105 +478,122 @@ no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtim
 ## Alerts
 
 A failed nightly backup, a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
-backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB`, default 20) is never
-silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
+backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB` in the profile, 20 on
+Oracle) is never silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
 
 1. appends a line to `/var/lib/open-persona/alerts/ALERTS`, shown on every SSH login (the
    banner) and failed by `bin/preflight.sh` until acknowledged with `bin/alert.sh --ack`;
-2. runs `OP_ALERT_CMD` from `alert.env` if the owner set one (a webhook or a mail
-   command; examples in `env/alert.env.example`). The marker never depends on it.
+2. runs `OP_ALERT_CMD` from `alert.env` if the owner set one (a webhook or a mail command;
+   examples in `env/alert.env.example`). The marker never depends on it.
 
-## Backups off the box (owner-provided, soon after go-live; not built here)
+## Backups off the host
 
-Hetzner Backups (step 1) restore the whole server but live in the same provider account.
-A backup on the box's own disk does not survive the disk. The minimum off-site design,
-with a **Hetzner Storage Box** as the suggested target:
+A backup on the host's own disk does not survive the disk, and Oracle's volume backups live
+in the same account. Ruling D4: **Azure Blob**, provisioned by the Terraform session:
 
-- A dedicated Storage Box **sub-account** for this box, limited to its own directory and
-  reached over SFTP/rsync with its own SSH key.
-- **Storage Box snapshots** taken on a schedule by the MAIN account (14 to 30 kept). The
-  sub-account cannot delete them, so a compromised box that deletes its copies cannot
-  erase history: that is the append-only property.
+- a container with a **time-based immutability policy** (14 to 30 days), so a compromised
+  host cannot delete or overwrite history;
+- a **write-only SAS** scoped to that container: the only credential this host holds;
+- each night's directory **encrypted with `age`** to a public key before it leaves; the
+  decryption key stays OFF the host (the owner's password manager and one offline copy).
 
-- **Encrypted on the box** before it leaves (`age` or `gpg` to a public key), with the
-  decryption key kept OFF the box (the owner's password manager and one offline copy).
-- The box's credential is the sub-account key only; it never holds the main account's.
-- **14 to 30 days** of nightly sets (`persona.dump`, `globals.sql`, `persona_volume.tgz`,
-  `facts.txt`, `SHA256SUMS`).
-- **One test restore** into a throwaway database (`bin/restore.sh --container ...
-  --db-only`) after setup, and again after any change to the pipeline.
-- Wired through `OFFSITE_CMD` in `systemd/open-persona-backup.service`; a failing copy
-  fails the unit and raises an alert.
+Wiring: `/opt/open-persona/env/offsite.env` sets `OFFSITE_CMD`, a command that receives the
+night's directory as its argument (for example a script under `/opt/open-persona/bin` that
+encrypts and uploads). A failing copy fails the unit and raises an alert. Until it is set
+the backup runs locally and logs `off-site copy PENDING` every night. After setup, do one
+test restore into a throwaway database (`bin/restore.sh --container ... --db-only`).
 
 ## Rolling back
 
-**The move:** there is no Fly to go back to. The rollback is the console snapshot from
-step 7 (or step 3 for a clean box) plus the untouched backup set on the PC.
+**The move:** there is no Fly to go back to. The rollback is the "restored, not yet public"
+volume backup from step 7 plus the untouched backup set on the PC.
 
-**A deploy:** `deploy.sh` tags the images it replaces as `:previous` and dumps the
-database before migrating (`/srv/open-persona/backups/pre-deploy-*.dump`).
+**A deploy:** `deploy.sh` tags the api image it replaces as `:previous` and dumps the
+database before migrating (`/srv/open-persona/backups/pre-deploy-*.dump`):
 
 ```bash
-for i in api voice livekit; do docker image tag open-persona/$i:previous open-persona/$i:current 2>/dev/null; done
-docker compose -f docker-compose.yml up -d
+docker image tag open-persona/api:previous open-persona/api:current
+bin/compose.sh up -d
 ```
 
 If that deploy ran a migration the old code cannot live with, restore the pre-deploy dump
 into an emptied database with `pg_restore` (the same commands `bin/restore.sh` uses) before
-starting the old images.
+starting the old image.
 
-**Losing the box:** a new box, steps 1 to 6, with the newest off-site nightly backup as
-`--backup-dir`. A nightly backup carries `facts.txt`, so `restore.sh` checks the schema
-shape against that night's own facts and warns on any table whose row count moved.
+**Losing the host:** a new instance, the block volume reattached (or a new one), steps 2 to
+6 with the newest off-site nightly backup as `--backup-dir`. A nightly backup carries
+`facts.txt`, so `restore.sh` checks the schema shape against that night's own facts.
 
 ## Routine operations
 
-| on Fly | here (from `/opt/open-persona/repo/deploy/server`) |
+| on Fly | here (as deploy, from `/opt/open-persona/repo/deploy/server`) |
 |---|---|
-| `flyctl ssh console -a open-persona-api` | `docker compose -f docker-compose.yml exec api bash` |
-| `flyctl ssh console -C "printenv NAME"` | `docker compose -f docker-compose.yml exec api printenv NAME` (prints a secret: never paste it) |
-| `flyctl logs -a open-persona-voice` | `docker compose -f docker-compose.yml logs -f voice` |
-| `flyctl status` | `docker compose -f docker-compose.yml ps` |
-| release_command | `docker compose -f docker-compose.yml run --rm migrate` |
-| `flyctl secrets set` | edit `/opt/open-persona/env/<service>.env`, then `docker compose -f docker-compose.yml up -d <service>` |
-| `fly scale count` | not applicable: one api, one voice, by design |
+| `flyctl ssh console -a open-persona-api` | `bin/compose.sh exec api bash` |
+| `flyctl ssh console -C "printenv NAME"` | `bin/compose.sh exec api printenv NAME` (prints a secret: never paste it) |
+| `flyctl logs -a open-persona-api` | `bin/compose.sh logs -f api` |
+| `flyctl status` | `bin/compose.sh ps` |
+| release_command | `bin/compose.sh run --rm migrate` |
+| `flyctl secrets set` | edit `/opt/open-persona/env/<service>.env`, then `bin/compose.sh up -d <service>` |
+| `fly scale count` | not applicable: one api, by design |
 
-- **Updates:** security updates install by themselves; the box never reboots by itself.
+- **Updates:** security updates install by themselves; the host never reboots by itself.
   When `/var/run/reboot-required` exists, reboot in a quiet hour (`sudo reboot`; every
-  service has `restart: unless-stopped`).
+  service has `restart: unless-stopped`, and Docker waits for `/srv`).
 - **Disk:** `docker system df`; old images: `docker image prune` (keeps `:current` and
-  `:previous` because they are tagged).
-- **A new release:** `cd /opt/open-persona/repo && git pull` (or a new bundle), then
-  `deploy/server/bin/deploy.sh`.
+  `:previous`); build cache: `docker builder prune` after a build.
+- **A new release:** `git -C /opt/open-persona/repo pull`, then `bin/deploy.sh`.
 
-## Later: CI/CD to this box (sketch, not wired)
+## Sizing and the host profile
 
-`.github/workflows/deploy.yml` still targets Fly and is manual-only since b53fed43. The
-recommended replacement:
+`hosts/oracle.env` holds every size: the memory budget (12 GB with 3.5 GB kept free of
+container limits), postgres (3 GB limit, never swapping, 1 GB shared buffers, 60
+connections), the api (4 GB: the resident models take about 2 to 2.5 GB) and Caddy. The
+owner's other work is assumed idle (2026-11-07). If it starts using real memory or CPU,
+raise `OP_HOST_RESERVED_GB` and lower the limits until the kit's budget test passes, then
+`bin/deploy.sh --skip-build`. The api stays one uvicorn process, always.
 
-- **Trigger:** `workflow_dispatch` from `main` only, `environment: production`, the same
-  fork and branch gates the current workflow and `scripts/check_deploy_wiring.py` enforce.
-- **Job 1** is the existing `validate-model-chains` (holds the seven settings, no box key).
-- **Job 2, `deploy-hetzner`**, holds three Production environment secrets:
-  `HETZNER_SSH_KEY` (a dedicated ed25519 key), `HETZNER_KNOWN_HOSTS` (the box's pinned host
-  key) and `HETZNER_HOST`. It writes the key to a 0600 file and runs
-  `ssh deploy@$HETZNER_HOST <commit sha>` with the seven settings on stdin. Nothing else.
-- **On the box**, that key's `authorized_keys` line is
-  `command="/opt/open-persona/bin/ci-deploy",restrict ssh-ed25519 ...`: the key can run
-  exactly one script. `ci-deploy` validates the SHA (40 hex), fetches and checks it out
-  (a read-only GitHub deploy key on the box if the repository is private), writes the seven
-  settings into `common.env`, and runs `deploy.sh`. It reads exactly seven `NAME=value`
-  lines from stdin, accepts only the seven known names, rejects any value containing a
-  newline, a carriage return, a quote or a `$`, and checks each value against a strict
-  per-name pattern (a comma list of `provider/model` slugs; `free` or `paid` for the
-  mode) before writing anything.
-- **Build on the box, not in GitHub Actions + GHCR, for now.** The images carry CUDA torch
-  (15 `nvidia-*` packages in `uv.lock`) and are several GB each: GHCR storage for a private
-  repository beyond the free quota costs money and every deploy would push and pull GBs.
-  A native build on 8 vCPU takes minutes, and the only new secret class is one SSH key.
-  The cost is build CPU on the live box: the build runs inside dockerd, so nothing in
-  `deploy.sh` can lower its priority, and deploys must run outside call hours. (If that
-  ever bites, `systemctl set-property docker.service CPUWeight=...` is the lever to test.)
-- **Revisit GHCR** when the images shrink (a CPU-only torch index) or a second box
-  (staging) exists; then build once in Actions, push by digest, and `docker compose pull`
-  on the box.
+Expect chat latency to be the model provider's plus about 0.2 to 0.4 s of local inference
+(embedding, the crisis check and reranking) on the two Ampere cores. If that hurts,
+`PERSONA_RECALL_RERANK_ENABLED` is the first lever.
+
+## Phase B: voice on Azure
+
+Voice and LiveKit come up on the Azure host (the Terraform session provisions it; task T13
+gives this kit its voice profile). On the core host the only change is one env line:
+
+- `PERSONA_VOICE_SERVICE_URL=https://voice.openpersonasai.com` in `api.env`, then
+  `bin/compose.sh up -d api`. The api forwards the caller's Clerk token to voice; there is
+  no service credential between them.
+
+What T13 builds (ruling D6), so that nothing else on Oracle changes by hand:
+
+- Voice reads and writes Postgres directly (D-V1-4). It reaches it over a **WireGuard**
+  tunnel (UDP 51820 open only to the Azure host's address, in the OCI security list and in
+  ufw), through a `pglink` proxy published only on the tunnel address, so postgres stays on
+  its internal network. Voice logs in as its own `persona_voice` role (a member of
+  `persona_app`, RLS enforced), so its credential rotates on its own.
+- The Azure host should be in **germanywestcentral** (Frankfurt), next to eu-frankfurt-1:
+  a voice turn makes several database round trips.
+- DNS: `voice.openpersonasai.com` and `livekit.openpersonasai.com` as A records to the Azure
+  host's static public IP (never a CNAME to a claimable Azure name). The voice host opens
+  80/443 and LiveKit's 7881/tcp and 7882/udp; `Caddyfile.voice` serves both names.
+- Before the first voice deploy: the R9-265 VAD threshold check. Voice is done when the
+  R9-216 call meets the 800 ms P50 budget.
+
+## Later: CI/CD and images
+
+`.github/workflows/deploy.yml` still targets Fly and is manual-only. `images.yml` already
+builds and smoke-tests the api image for amd64 and arm64 on every relevant pull request,
+pushing nothing. The follow-up after go-live (ruling D2):
+
+- **Images:** the repository is public, so GHCR storage and pulls of public images cost
+  nothing. Build once in Actions, push by digest, and `bin/compose.sh pull` on the host
+  instead of building on its two cores.
+- **Deploys:** `workflow_dispatch` from `main` only, `environment: production`, the same
+  fork and branch gates `scripts/check_deploy_wiring.py` enforces. Job 1 is the existing
+  `validate-model-chains`. Job 2 holds three Production secrets, `ORACLE_SSH_KEY` (a
+  dedicated ed25519 key), `ORACLE_KNOWN_HOSTS` (the host's pinned key) and `ORACLE_HOST`, and
+  runs `ssh deploy@$ORACLE_HOST <commit sha>` with the seven settings on stdin. On the host
+  that key's line is `command="/opt/open-persona/bin/ci-deploy",restrict ssh-ed25519 ...`:
+  the key can run exactly one script, which validates the SHA, checks it out, writes the
+  seven settings (each checked against a strict per-name pattern) and runs `deploy.sh`.

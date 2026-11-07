@@ -1,7 +1,8 @@
 #cloud-config
-# Open Persona: first-boot baseline for the Hetzner box (Ubuntu 24.04 x86_64).
+# Open Persona: first-boot baseline for a NEW host (Ubuntu 24.04). The Oracle core host
+# already exists and is provisioned with bin/provision.sh alone (RUNBOOK.md step 3).
 #
-# Paste this into "Cloud config" when creating the server in the Hetzner console, after
+# Paste this into the provider's cloud-init / user-data field when creating a server, after
 # replacing the one placeholder below with the owner's SSH PUBLIC key. It makes the box
 # safe from its first minute: one non-root admin user with key-only SSH, root login off,
 # (unless the deploy key is missing, see the lockout guard in runcmd),
