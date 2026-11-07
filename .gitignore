@@ -77,6 +77,8 @@ deploy/*
 # *.env.example template, and the real env files live on the host outside the checkout.
 !deploy/server/
 deploy/server/**/*.env
+# Host profiles are plain, non-secret sizes and names (scripts/tests/test_server_kit_hosts.py).
+!deploy/server/hosts/*.env
 CLAUDE.md
 
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.
