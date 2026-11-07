@@ -1,17 +1,34 @@
 # Open Persona: bridged containers cannot reach the link-local range (cloud metadata, and on
-# Oracle the iSCSI and other instance services, all on 169.254.0.0/16). Installed by
-# bin/provision.sh. Re-applied whenever Docker (re)starts, because the rule lives in
-# Docker's DOCKER-USER chain, which does not survive a reboot.
+# Oracle the iSCSI and other instance services, all on 169.254.0.0/16), EXCEPT DNS to
+# 169.254.169.254. Installed by bin/provision.sh. Re-applied whenever Docker (re)starts,
+# because the rules live in Docker's DOCKER-USER chain, which does not survive a reboot.
+#
+# Why DNS stays open: on Oracle the host's resolver IS 169.254.169.254, and Docker's
+# embedded DNS forwards to it from each container's own namespace, so those packets cross
+# DOCKER-USER. Without the two RETURN rules above the drop, every container and every
+# BuildKit RUN step loses DNS. The metadata service (port 80) and everything else in the
+# range stay dropped.
+#
+# Each start deletes all three rules, then inserts the drop and then the RETURNs at the
+# top, so the order is always: udp 53 RETURN, tcp 53 RETURN, DROP
+# (scripts/tests/test_server_kit_dns.py runs these exact commands against a fake iptables).
 [Unit]
-Description=Drop container traffic to 169.254.0.0/16
+Description=Drop container traffic to 169.254.0.0/16, DNS to 169.254.169.254 excepted
 After=docker.service
 PartOf=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'iptables -C DOCKER-USER -d 169.254.0.0/16 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.0.0/16 -j DROP'
-ExecStop=/bin/sh -c 'iptables -D DOCKER-USER -d 169.254.0.0/16 -j DROP 2>/dev/null || true'
+ExecStart=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.169.254/32 -p udp --dport 53 -j RETURN 2>/dev/null; do :; done'
+ExecStart=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN 2>/dev/null; do :; done'
+ExecStart=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.0.0/16 -j DROP 2>/dev/null; do :; done'
+ExecStart=/bin/sh -c 'iptables -I DOCKER-USER 1 -d 169.254.0.0/16 -j DROP'
+ExecStart=/bin/sh -c 'iptables -I DOCKER-USER 1 -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN'
+ExecStart=/bin/sh -c 'iptables -I DOCKER-USER 1 -d 169.254.169.254/32 -p udp --dport 53 -j RETURN'
+ExecStop=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.169.254/32 -p udp --dport 53 -j RETURN 2>/dev/null; do :; done'
+ExecStop=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN 2>/dev/null; do :; done'
+ExecStop=/bin/sh -c 'while iptables -D DOCKER-USER -d 169.254.0.0/16 -j DROP 2>/dev/null; do :; done'
 
 [Install]
 WantedBy=docker.service

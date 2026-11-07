@@ -31,7 +31,8 @@
 #     key checked against the published fingerprint, Docker in unattended upgrades), its
 #     data root on the block volume, and docker.service ordered after that mount
 #   * /etc/docker/daemon.json: log rotation, live-restore, no-new-privileges everywhere
-#   * the link-local range (169.254.0.0/16: metadata, iSCSI) dropped for bridged containers
+#   * the link-local range (169.254.0.0/16: metadata, iSCSI) dropped for bridged containers,
+#     DNS to 169.254.169.254 excepted (Oracle's resolver)
 #   * the profile's units masked (rpcbind, the unified-monitoring-agent)
 #   * the directory layout (below), the nightly backup, the daily disk check, the
 #     failure alert and the login banner
@@ -173,7 +174,8 @@ setup_operator_user
 #      run (and this one, after apt) merges the same rules whatever apt removed;
 #   3. SSH held open by an explicit ACCEPT at the top of INPUT for the length of the
 #      install, whatever the package scripts do to the live rules. It is removed once ufw
-#      (which limits 22) owns INPUT.
+#      (which limits 22) owns INPUT; Oracle's own 22 ACCEPT stays ahead of ufw's chains
+#      until the reboot.
 FW_BACKUP=/root/open-persona-firewall-backup
 instance_rules=""
 if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
@@ -204,8 +206,8 @@ fi
 apt-get update -q
 apt-get install -y -q ufw fail2ban unattended-upgrades ca-certificates curl git jq gnupg
 
-# The allow list, from the profile (comma separated). It must hold the operator; the
-# invoking user is warned about if it is left out (its session stays, its next login not).
+# The allow list, from the profile (comma separated). It must hold the operator and the
+# user running this: leaving that user out would lock it out at its next login.
 allow_users="${OP_SSH_ALLOW_USERS//,/ }"
 for u in ${allow_users}; do
   printf '%s' "${u}" | grep -Eq '^[a-z_][a-z0-9_-]*$' || die "OP_SSH_ALLOW_USERS: bad user name '${u}'"
@@ -218,7 +220,7 @@ esac
 if [ -n "${SUDO_USER:-}" ]; then
   case " ${allow_users} " in
     *" ${SUDO_USER} "*) ;;
-    *) say "WARNING: ${SUDO_USER} (running this) is not in OP_SSH_ALLOW_USERS: its next SSH login will be refused" ;;
+    *) die "${SUDO_USER} (running this) is not in OP_SSH_ALLOW_USERS: its next SSH login would be refused" ;;
   esac
 fi
 
@@ -276,27 +278,41 @@ systemctl enable --now unattended-upgrades
 # does not start (RequiresMountsFor, below).
 setup_data_volume() {
   [ -n "${OP_DATA_MOUNT:-}" ] || return 0
+  [ -n "${OP_DATA_DEVICE:-}" ] || die "the profile sets OP_DATA_MOUNT but no OP_DATA_DEVICE"
+  local dev root_disk fstype label uuid blkid_rc source
   if mountpoint -q "${OP_DATA_MOUNT}"; then
-    say "block volume: ${OP_DATA_MOUNT} already mounted"
+    # Already mounted: accepted only as OUR volume, the profile's device carrying the
+    # op-data filesystem. Anything else mounted there is refused, not written into.
+    source="$(readlink -f "$(findmnt -no SOURCE "${OP_DATA_MOUNT}")")"
+    label="$(blkid -p -o value -s LABEL "${source}" 2>/dev/null || true)"
+    [ "${source}" = "$(readlink -f "${OP_DATA_DEVICE}")" ] && [ "${label}" = op-data ] \
+      || die "${OP_DATA_MOUNT} is mounted from ${source} (LABEL '${label}'), not ${OP_DATA_DEVICE} with LABEL op-data"
+    say "block volume: ${OP_DATA_MOUNT} already mounted from ${OP_DATA_DEVICE} (op-data)"
     return 0
   fi
-  [ -n "${OP_DATA_DEVICE:-}" ] || die "the profile sets OP_DATA_MOUNT but no OP_DATA_DEVICE"
-  local dev root_disk fstype label uuid
   dev="$(readlink -f "${OP_DATA_DEVICE}")"
   [ -b "${dev}" ] || die "${OP_DATA_DEVICE} is not attached (OCI console: attach the block volume, paravirtualized)"
   root_disk="$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" 2>/dev/null || true)"
   [ "$(basename "${dev}")" != "${root_disk}" ] || die "${OP_DATA_DEVICE} is the boot disk"
   ! findmnt -rn -S "${dev}" >/dev/null || die "${OP_DATA_DEVICE} is already mounted elsewhere"
-  if blkid -p "${dev}" >/dev/null 2>&1; then
-    fstype="$(blkid -p -o value -s TYPE "${dev}" 2>/dev/null || true)"
-    label="$(blkid -p -o value -s LABEL "${dev}" 2>/dev/null || true)"
-    [ "${fstype}" = ext4 ] && [ "${label}" = op-data ] \
-      || die "${OP_DATA_DEVICE} already holds '${fstype:-a partition table}' (label '${label}'); refusing to format or mount it"
-  else
-    [ -z "$(lsblk -nro NAME "${dev}" | tail -n +2)" ] || die "${OP_DATA_DEVICE} has partitions; refusing to format it"
-    say "formatting the blank ${OP_DATA_DEVICE} as ext4 (label op-data)"
-    mkfs.ext4 -q -L op-data -m 1 "${dev}"
-  fi
+  # blkid -p exits 0 when it finds a signature and 2 when it finds none. Only 2 means
+  # blank; any other failure (a read error, a permission problem) refuses, never formats.
+  blkid_rc=0
+  blkid -p "${dev}" >/dev/null 2>&1 || blkid_rc=$?
+  case "${blkid_rc}" in
+    0)
+      fstype="$(blkid -p -o value -s TYPE "${dev}" 2>/dev/null || true)"
+      label="$(blkid -p -o value -s LABEL "${dev}" 2>/dev/null || true)"
+      [ "${fstype}" = ext4 ] && [ "${label}" = op-data ] \
+        || die "${OP_DATA_DEVICE} already holds '${fstype:-a partition table}' (label '${label}'); refusing to format or mount it"
+      ;;
+    2)
+      [ -z "$(lsblk -nro NAME "${dev}" | tail -n +2)" ] || die "${OP_DATA_DEVICE} has partitions; refusing to format it"
+      say "formatting the blank ${OP_DATA_DEVICE} as ext4 (label op-data)"
+      mkfs.ext4 -q -L op-data -m 1 "${dev}"
+      ;;
+    *) die "blkid could not read ${OP_DATA_DEVICE} (exit ${blkid_rc}); refusing to format it" ;;
+  esac
   uuid="$(blkid -p -o value -s UUID "${dev}")"
   [ -n "${uuid}" ] || die "${OP_DATA_DEVICE} has no filesystem UUID"
   install -d -m 0755 "${OP_DATA_MOUNT}"
@@ -380,7 +396,9 @@ if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
       ip6tables -D "${chain}" -j REJECT --reject-with icmp6-adm-prohibited
     done
   done
-  # ufw owns INPUT and allows (limits) 22: the hold taken before apt goes.
+  # ufw owns INPUT and allows (limits) 22: the hold taken before apt goes. Oracle's own 22
+  # ACCEPT stays ahead of ufw's chains until the reboot (the image's rule files are moved
+  # aside, so it does not come back): ufw's limit on 22 takes effect after that reboot.
   while iptables -C INPUT -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT 2>/dev/null; do
     iptables -D INPUT -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT
   done
@@ -444,7 +462,9 @@ systemctl restart docker
 
 # --- the link-local range, out of reach of bridged containers ------------------------------
 # The cloud serves instance metadata (including user data) and, on Oracle, iSCSI and other
-# instance services on 169.254.0.0/16. No container needs any of it. Host-network
+# instance services on 169.254.0.0/16. No container needs any of it but DNS: on Oracle the
+# host's resolver is 169.254.169.254 and Docker forwards to it from each container, so the
+# unit lets udp and tcp 53 to that one address through, above the drop. Host-network
 # containers (caddy) are not covered by DOCKER-USER; they hold nothing worth trading for it.
 install -m 0644 "${KIT_DIR}/systemd/open-persona-metadata-block.service" /etc/systemd/system/
 

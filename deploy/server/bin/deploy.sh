@@ -100,6 +100,10 @@ compose run --rm migrate || die "migration failed; nothing was restarted (the ol
 # first, with the same image and env file.
 compose run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
   >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
+# The api's HOME (/var/lib/persona/home in the container) must exist and belong to the data
+# uid: the image's own home belongs to uid 1000. Made here rather than by provision.sh,
+# because restore.sh refuses to unpack into a data directory that is not empty.
+sudo install -d -o "${OP_DATA_UID}" -g "${OP_DATA_UID}" -m 0700 "${OP_DATA_DIR}/persona/home"
 say "starting"
 compose up -d --remove-orphans
 

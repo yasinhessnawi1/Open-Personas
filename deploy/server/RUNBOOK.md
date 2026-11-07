@@ -42,8 +42,13 @@ anything there, and no step below may either.
   passphrase-protected key that never leaves the owner's machine.
 - **The app's data belongs to uid 2001**, the data uid: the api and migrate containers run
   as it and `/srv/open-persona/persona` is owned by it. Not 1000: on this host that is
-  `ubuntu`, whose processes (the owner's other work) must not read tenant files. Not 2000:
-  that is the operator. The nightly backup runs as root.
+  `ubuntu`. Not 2000: that is the operator. The nightly backup runs as root.
+  **What this separation does and does not do:** it guards against accidents (a script of
+  the owner's other work, running as ubuntu, cannot read or overwrite tenant files by
+  mistake). It does NOT guard against anything that runs as ubuntu on purpose: ubuntu has
+  passwordless sudo, so ubuntu, and every process running as it, is root-equivalent and can
+  read everything on this host. Treat the owner's other work as trusted code, or move it
+  off this host (the owner is deciding, 2026-11-07).
 - **Database roles.** `persona` (superuser) is used only by the one-shot `migrate` service
   (`migrate.env`, read by nothing else) and by the restore scripts. The api's cross-tenant
   engines use `persona_platform` (bypasses RLS, NOT a superuser, DML only: it cannot
@@ -168,6 +173,7 @@ Still to decide or do:
 The repository is public, so the host needs no GitHub credential:
 
 ```bash
+# on the host, as ubuntu
 sudo git clone https://github.com/<owner>/<repo>.git /opt/open-persona/repo
 sudo git -C /opt/open-persona/repo checkout main     # the branch carrying this kit
 ```
@@ -177,6 +183,7 @@ sudo git -C /opt/open-persona/repo checkout main     # the branch carrying this 
 ## Step 3: provision (as ubuntu, with sudo)
 
 ```bash
+# on the host, as ubuntu
 sudo /opt/open-persona/repo/deploy/server/bin/provision.sh --profile oracle \
      --public-ipv4 <the instance's public IPv4>
 ```
@@ -184,9 +191,11 @@ sudo /opt/open-persona/repo/deploy/server/bin/provision.sh --profile oracle \
 From `hosts/oracle.env` it:
 
 - creates `deploy` (uid 2000) with ubuntu's SSH key, writes the SSH lockdown (no root
-  login, keys only, `AllowUsers deploy ubuntu`), fail2ban, unattended upgrades;
-- formats the block volume ext4 (label `op-data`) **only if it carries no signature at
-  all**, mounts it by UUID at `/srv` with `nofail`, and puts Docker's data root
+  login, keys only, `AllowUsers deploy ubuntu`; it refuses to run if the allow list leaves
+  out the user running it), fail2ban, unattended upgrades;
+- formats the block volume ext4 (label `op-data`) **only if blkid finds no signature at
+  all** (any blkid error refuses), mounts it by UUID at `/srv` with `nofail` (an existing
+  mount there is accepted only if it is this device with the op-data label), and puts Docker's data root
   (`/srv/docker`), a 4 GB swapfile and all data under it (see "The block volume");
 - hands Oracle's image firewall to ufw: a copy of the image's rules goes to
   `/root/open-persona-firewall-backup`, the `InstanceServices` chain (it keeps non-root
@@ -205,13 +214,17 @@ same command with `sudo`.
 **Reboot once now** (`sudo reboot`), then as deploy:
 
 ```bash
+# on the host, as deploy
 cd /opt/open-persona/repo/deploy/server
 bin/preflight.sh          # the host section must pass; env and database checks fail until steps 4 to 6
 ```
 
 It checks the architecture, the mounted block volume, Docker's data root, the data owner
 (uid 2001), that Oracle's INPUT REJECT is gone and the `InstanceServices` chain is live
-after the reboot, that no masked unit runs, swap and the clock. Then take a manual volume
+after the reboot, that no masked unit runs, swap and the clock. Once the api image exists
+(step 6) it also starts a throwaway container that must resolve a public name (Docker
+forwards DNS to Oracle's resolver, 169.254.169.254, which the metadata block lets through)
+and must NOT reach the metadata service on 169.254.169.254:80. Then take a manual volume
 backup of the block volume, "provisioned, empty".
 
 ## The block volume
@@ -234,6 +247,7 @@ On the **owner's PC**, from the repo. First the inventory (it writes nothing and
 presence only, never a value), then mark each line `[p]` or `[d]`:
 
 ```bash
+# on the PC, in the repo
 uv run python -I deploy/server/render_env.py --dotenv .env --inventory > ~/op-inventory.txt
 ```
 
@@ -241,6 +255,7 @@ Then render, into a directory OUTSIDE the repo. The default `--host core` render
 files the core host reads, so no voice or LiveKit secret is written for it:
 
 ```bash
+# on the PC, in the repo
 uv run python -I deploy/server/render_env.py --dotenv .env --out ~/op-env
 # Add --chains-from-dotenv only after confirming .env holds the production chains.
 ```
@@ -268,8 +283,13 @@ Copy them to the host over SSH only (never a chat, mail or shared drive), and fi
 there:
 
 ```bash
+# on the PC
 scp ~/op-env/*.env deploy@<ipv4>:/opt/open-persona/env/
 ssh deploy@<ipv4>
+```
+
+```bash
+# on the host, as deploy
 cd /opt/open-persona/repo/deploy/server
 bin/fill_generated.sh          # new passwords for the three database roles
 bin/preflight.sh --env-only    # must pass: roles separated, no dev Clerk instance
@@ -285,6 +305,7 @@ Put the whole `/opt/open-persona/env` directory in the owner's password manager.
 set (never write into the original directory), then upload:
 
 ```bash
+# on the PC
 mkdir -p ~/op-restore && cp ~/Backups/fly-2026-10-02/{persona.dump,globals.sql,persona_volume.tgz} ~/op-restore/
 (cd ~/op-restore && sha256sum persona.dump globals.sql persona_volume.tgz > SHA256SUMS)
 scp ~/op-restore/* deploy@<ipv4>:/srv/open-persona/restore/
@@ -294,6 +315,7 @@ rm -rf ~/op-restore
 On the host:
 
 ```bash
+# on the host, as deploy
 cd /opt/open-persona/repo/deploy/server
 bin/restore.sh --backup-dir /srv/open-persona/restore
 ```
@@ -334,6 +356,7 @@ per memory chain (R9-205). It cannot be built while any chain has two. `restore.
 the count as `memory_chains_two_heads`; this is the same count by kind:
 
 ```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
 bin/compose.sh exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' <<'SQL'
 SELECT kind, count(*) FROM (
   SELECT kind FROM memory_chunks
@@ -349,6 +372,7 @@ SQL
   holds the superuser connection):
 
   ```bash
+  # on the host, as deploy, in /opt/open-persona/repo/deploy/server
   bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL"'
   ```
 
@@ -364,6 +388,7 @@ predates that, so it can hold summaries of evidence a person had already asked t
 (R9-209). This looks for them, with no model and no cost:
 
 ```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
 bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL" --forgotten-evidence'
 ```
 
@@ -375,6 +400,7 @@ bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-
 ## Step 6: deploy
 
 ```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
 bin/deploy.sh
 ```
 
@@ -389,8 +415,13 @@ points here.
 Before DNS, check through an SSH tunnel from the PC:
 
 ```bash
+# on the PC: a tunnel, then the api through it (from a second PC terminal)
 ssh -L 8000:127.0.0.1:8000 deploy@<ipv4>
 curl -fsS http://127.0.0.1:8000/healthz
+```
+
+```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
 bin/compose.sh logs api | grep -iE "model chain|mcp runtime|connectors"
 ```
 
@@ -422,6 +453,7 @@ address) and watch Caddy obtain STAGING certificates: `bin/compose.sh logs -f ca
 every name has one, switch to production certificates:
 
 ```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server (the curl from anywhere)
 sed -i 's|^ACME_CA=.*|ACME_CA=https://acme-v02.api.letsencrypt.org/directory|' /opt/open-persona/env/caddy.env
 bin/compose.sh up -d --force-recreate caddy
 curl -fsS https://api.openpersonasai.com/healthz      # from anywhere
@@ -512,6 +544,7 @@ volume backup from step 7 plus the untouched backup set on the PC.
 database before migrating (`/srv/open-persona/backups/pre-deploy-*.dump`):
 
 ```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
 docker image tag open-persona/api:previous open-persona/api:current
 bin/compose.sh up -d
 ```
