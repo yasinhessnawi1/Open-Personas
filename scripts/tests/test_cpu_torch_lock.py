@@ -148,3 +148,34 @@ def test_every_dockerfile_pins_a_uv_that_reads_this_lock() -> None:
         match = UV_IMAGE.search(text)
         assert match, f"{dockerfile.parent.name}/Dockerfile must pin uv by version and digest"
         assert tuple(int(g) for g in match.groups()) >= (0, 12, 0), match.group(0)
+
+
+def _core_entry(lock: dict[str, Any]) -> dict[str, Any]:
+    return next(p for p in lock["package"] if p["name"] == "persona-core")
+
+
+def test_the_lock_records_torch_as_a_direct_core_dependency() -> None:
+    """Review of T1: the lock kept torch under the `local` extra only, so `uv lock --check`
+    failed. persona-core's own edges and its recorded requires-dist must both carry it."""
+    core = _core_entry(_lock())
+    edges = [d for d in core.get("dependencies", []) if d["name"] == "torch"]
+    assert edges, "persona-core has no torch edge in uv.lock"
+    assert {"sys_platform == 'linux'", "sys_platform != 'linux'"} <= {
+        d.get("marker", "") for d in edges
+    }
+    required = [d for d in core["metadata"]["requires-dist"] if d["name"] == "torch"]
+    unconditional = [d for d in required if "extra ==" not in d.get("marker", "")]
+    linux = [d for d in unconditional if d.get("marker") == LINUX]
+    assert linux, "the lock does not record torch as a base dependency on Linux"
+    assert linux[0].get("index") == CPU_INDEX_URL
+
+
+def test_ci_fails_on_a_stale_lock_before_it_syncs() -> None:
+    """Review of T1: a stale lock passed every check. CI's first job now refuses one."""
+    import yaml
+
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    runs = [str(s.get("run", "")) for s in ci["jobs"]["lint-and-type-check"]["steps"]]
+    assert "uv lock --check" in runs, "the lint job does not check the lock"
+    first_sync = next(i for i, r in enumerate(runs) if r.startswith("uv sync"))
+    assert runs.index("uv lock --check") < first_sync
