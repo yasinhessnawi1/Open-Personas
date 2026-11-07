@@ -22,8 +22,8 @@ Parameters still open:
 
 | Parameter | Meaning | Who decides |
 |---|---|---|
-| `VOICE_HOST` | Public name of the voice HTTP service. Production used `voice.openpersonasai.com` (`deploy/hetzner/Caddyfile:75`). | owner |
-| `LIVEKIT_HOST` | Public name of LiveKit signaling. Production used `livekit.openpersonasai.com` (`deploy/hetzner/Caddyfile:86`). | owner |
+| `VOICE_HOST` | Public name of the voice HTTP service. Production used `voice.openpersonasai.com` (`deploy/hetzner/Caddyfile:83`). | owner |
+| `LIVEKIT_HOST` | Public name of LiveKit signaling. Production used `livekit.openpersonasai.com` (`deploy/hetzner/Caddyfile:102`). | owner |
 | `WEB_ORIGINS` | Origin(s) of the web app, for CORS (`packages/voice/src/persona_voice/config.py:143`). | owner |
 | `ADMIN_CIDRS` | Addresses allowed to reach SSH. | owner |
 | `N_CALLS` | Design point for concurrent calls. This brief sizes for 5 and requires a measurement (section 2.4). | owner |
@@ -40,7 +40,7 @@ Three containers on the Azure VM, the same shape as the single-box kit in
 
 | Container | Image | Role |
 |---|---|---|
-| `voice` | built from `packages/voice/Dockerfile` | FastAPI on port 8001 (token issue, voice catalogue, one-shot TTS and STT) plus the in-process LiveKit agent that becomes the persona on each call (`packages/voice/Dockerfile:3-9`, `packages/voice/src/persona_voice/http/app.py:596-631`). One process, one uvicorn worker, never more than one replica (`packages/voice/Dockerfile:8-9,82-86`, `deploy/hetzner/docker-compose.yml:178-181`). |
+| `voice` | built from `packages/voice/Dockerfile` | FastAPI on port 8001 (token issue, voice catalogue, one-shot TTS and STT) plus the in-process LiveKit agent that becomes the persona on each call (`packages/voice/Dockerfile:3-13`, `packages/voice/src/persona_voice/http/app.py:596-631`). One process, one uvicorn worker, never more than one replica (`packages/voice/Dockerfile:12-13,88-92`, `deploy/hetzner/docker-compose.yml:178-181`). |
 | `livekit` | `livekit/livekit-server:v1.13.1` plus the repo's config and entrypoint (`packages/livekit/Dockerfile:14-26`) | WebRTC SFU, audio only, single node, no Redis (`packages/livekit/livekit.yaml:17-18`). |
 | `caddy` | `caddy:2.10.2` | TLS edge for both public names, Let's Encrypt via HTTP-01 (`deploy/hetzner/Caddyfile:1-32`, `deploy/hetzner/docker-compose.yml:260-275`). |
 
@@ -90,11 +90,11 @@ Budget on this VM: 4 GB voice + 1 GB LiveKit + 0.25 GB Caddy + about 1 GB OS and
 
 ### 2.2 What the code does per call (CPU)
 
-* One process, one event loop, one uvicorn worker for every call (`packages/voice/Dockerfile:82-86`).
+* One process, one event loop, one uvicorn worker for every call (`packages/voice/Dockerfile:88-92`).
   The per-user cap is one call at a time (`packages/voice/src/persona_voice/concurrency.py:1-25`);
   **there is no global cap on concurrent calls in the code.**
 * Per call: Opus decode and encode in LiveKit's native library, VAD every 32 ms on a worker
-  thread (`stt/vad_silero.py:296-349`), streaming STT and TTS sockets, and per turn the
+  thread (`stt/vad_silero.py:299-352`), streaming STT and TTS sockets, and per turn the
   embedder, the crisis encoder and (if on) the reranker on worker threads.
 * LiveKit forwards two audio tracks per call (user and agent). Audio only SFU work is
   latency sensitive, not heavy (`packages/livekit/fly.toml:95-105`).
@@ -128,8 +128,9 @@ of headroom. If cost forces it, it must pass the same R9-216 measured call (acce
 with the same load, and the owner should accept that it will not hold N_CALLS above 1 or 2.
 
 Do not use: burstable B-series (CPU credits are the shared-core shape again); any Arm64
-Azure size for this VM (the voice package does not install on Linux arm64 today, see the
-voice-arm plan; production voice is x86 by ruling). Worth checking but not verified here: a
+Azure size for this VM. Voice does run on Linux arm64 (community edition, tested in CI by
+`.github/workflows/voice-platforms.yml`), but production voice is x86 by ruling, and the
+sizing and the R9-216 measurement here are for x86. Worth checking but not verified here: a
 compute optimized size without SMT (for example the Fasv6 family) in `AZURE_REGION`, which
 would give 2 full cores in 2 vCPU; confirm availability and core topology before choosing it.
 
@@ -143,7 +144,7 @@ embedder and encoders run. The ceiling is the single Python process (one event l
 GIL for everything that is not inside torch or native code), not the core count. Plan for
 **N_CALLS = 5** concurrent calls on D4as_v5 within the 800 ms P50 budget, and treat 10 as the
 point where one process is likely to saturate. Acceptance item A12 measures it. Scaling past
-one voice process is not designed today (single worker by design, `packages/voice/Dockerfile:8-9`).
+one voice process is not designed today (single worker by design, `packages/voice/Dockerfile:12-13`).
 
 ## 3. OS, Docker and host settings
 
@@ -179,7 +180,7 @@ it targets the same needs.
 
 | Port | Proto | Source | Purpose | Evidence |
 |---|---|---|---|---|
-| 443 | TCP | Internet | Caddy: HTTPS for `VOICE_HOST`, WSS signaling for `LIVEKIT_HOST` | `deploy/hetzner/Caddyfile:74-92` |
+| 443 | TCP | Internet | Caddy: HTTPS for `VOICE_HOST`, WSS signaling for `LIVEKIT_HOST` | `deploy/hetzner/Caddyfile:74-108` |
 | 80 | TCP | Internet | Caddy: ACME HTTP-01 challenge and redirect to HTTPS | `deploy/hetzner/Caddyfile:3-7`, `provision.sh:195` |
 | 7881 | TCP | Internet | LiveKit ICE over TCP (media fallback for networks without UDP) | `packages/livekit/livekit.yaml:30-31`, `provision.sh:197` |
 | 7882 | UDP | Internet | LiveKit ICE over UDP, single-port mux: **the primary media path** | `packages/livekit/livekit.yaml:32-35`, `provision.sh:198` |
@@ -208,7 +209,7 @@ Requirements on the public address:
 
 | Port | Why it must stay closed |
 |---|---|
-| 8001/tcp (voice uvicorn) | Runs with `--proxy-headers --forwarded-allow-ips=*` (`packages/voice/Dockerfile:84-86`): it trusts forwarded headers from any client, which is safe only behind Caddy on loopback. Publish on 127.0.0.1 only (`deploy/hetzner/docker-compose.yml:200-201`). |
+| 8001/tcp (voice uvicorn) | Runs with `--proxy-headers --forwarded-allow-ips=*` (`packages/voice/Dockerfile:90-92`): it trusts forwarded headers from any client, which is safe only behind Caddy on loopback. Publish on 127.0.0.1 only (`deploy/hetzner/docker-compose.yml:200-201`). |
 | 7880/tcp (LiveKit HTTP and signaling, plaintext) | Tokens travel in the query string; only Caddy on 127.0.0.1 may reach it (`deploy/hetzner/docker-compose.yml:10-13`, `deploy/hetzner/RUNBOOK.md` UDP check 2). |
 | 2375, 2376 (Docker API) | No container mounts the Docker socket; the daemon is never on TCP (`deploy/hetzner/docker-compose.yml:18-20`). |
 | 5432 | There is no Postgres on this VM. Do not open an inbound DB port here. |
@@ -231,7 +232,7 @@ egress allowlist would break calls silently. For reference, the hosts the code n
 | `huggingface.co` and the storage hosts it redirects to | 443 | first-boot download of the three models in 2.1 into the persistent cache | `deploy/hetzner/docker-compose.yml:195-199`, `packages/voice/fly.toml:82-89` |
 | `LIVEKIT_HOST` (this VM's own public IP) | 443, 7881, 7882/UDP | the agent joins calls | section 1 |
 | Let's Encrypt ACME | 443 | Caddy certificates | `deploy/hetzner/Caddyfile:20-23` |
-| Docker Hub, ghcr.io, PyPI, github.com (patchelf), Ubuntu and Docker apt | 443 | image builds and OS updates | `packages/voice/Dockerfile:30,55-56`, `provision.sh:160-171` |
+| Docker Hub, ghcr.io, PyPI, github.com (patchelf), Ubuntu and Docker apt | 443 | image builds and OS updates | `packages/voice/Dockerfile:34,60`, `packages/voice/docker/patchelf.sh`, `provision.sh:160-171` |
 
 Clerk: **no outbound call.** Voice verifies Clerk tokens against a static PEM public key
 (`config.py:107-110`, `http/app.py:302-325`), not a JWKS URL.
@@ -290,18 +291,22 @@ unchanged", first paragraph). The split ruled on 2026-11-07 does exactly that fo
 
 * Two A records to the VM's static public IPv4: `VOICE_HOST` and `LIVEKIT_HOST`
   (`deploy/hetzner/RUNBOOK.md`, DNS table: `voice.openpersonasai.com` and `livekit.openpersonasai.com`).
-  Keep `LIVEKIT_HOST` even if LiveKit Cloud is ever used as the fallback (`deploy/hetzner/Caddyfile:83-85`).
+  Keep `LIVEKIT_HOST` even if LiveKit Cloud is ever used as the fallback (`deploy/hetzner/Caddyfile:99-101`).
   Lower the TTL to 60 s a day before cutover (docs repo, `ops/hetzner_migration.md`, cutover order).
 * **Caddy on the VM terminates TLS** for both names with Let's Encrypt HTTP-01, so port 80 must
   be open and DNS must already point at the VM. Start on the staging CA, switch to production
   once both names answer (`deploy/hetzner/env/caddy.env.example:4-9`). Secret names: `ACME_EMAIL`, `ACME_CA`.
-* Request bodies: the single-box Caddyfile capped `VOICE_HOST` at 1 MB (`deploy/hetzner/Caddyfile`,
-  the `voice.openpersonasai.com` site). That was safe only because the api reached voice
-  internally. With the api on Oracle, the api's dictation proxy sends up to 10 MiB of audio to
-  `POST /v1/stt` through this edge (`packages/voice/src/persona_voice/http/app.py:113,852`,
+* Request bodies: the single-box Caddyfile capped `VOICE_HOST` at 1 MB. That was safe only
+  because the api reached voice internally. With the api on Oracle, the api's dictation proxy
+  sends up to 10 MiB of audio to `POST /v1/stt` through this edge
+  (`packages/voice/src/persona_voice/http/app.py:113,852`,
   `packages/api/src/persona_api/routes/voice.py:293`). **The `VOICE_HOST` body limit must be at
-  least 12 MB.** The code side raises it to 12 MB on `feat/voice-arm`, with a test that keeps it
-  above voice's own upload ceiling; whatever edge config runs on this VM must carry the same limit.
+  least 12 MB on `/v1/stt`, and stay 1 MB on every other path.** Not site-wide: FastAPI reads a
+  body before it checks auth and voice has no rate limit, so a large anonymous body to the token
+  or TTS route stalls the one voice event loop (about 476 ms per 12 MB request). The code side
+  does exactly this on `feat/voice-arm` (`deploy/hetzner/Caddyfile:83-97`, two `handle` blocks),
+  with a kit test that keeps the `/v1/stt` cap above voice's own upload ceiling and every other
+  path at 1 MB; whatever edge config runs on this VM must carry the same split.
 * Timeouts: the api's proxy waits up to 60 s (`packages/api/src/persona_api/routes/voice.py:82`);
   LiveKit WebSockets live as long as a call (token TTL 1 h, `config.py:101`; billing ceiling 2 h,
   `config.py:67`). The edge must not impose shorter read or idle timeouts. Caddy's defaults do not.
@@ -498,10 +503,10 @@ infrastructure is not accepted until they pass.
 1. Decided: `eu-frankfurt-1` and `germanywestcentral` (section 10); WireGuard plus `pglink` plus
    `persona_voice` (4.4). Open: which session owns the WireGuard peer on each side and the
    `persona_voice` role creation (the Oracle side, per the Oracle plan).
-3. Where images are built: on the VM (needs 128 GB disk) or in CI with a registry (GHCR or ACR).
-4. Code side, not Terraform: the `VOICE_HOST` body limit is raised to 12 MB on `feat/voice-arm` (section 5); add a
+2. Where images are built: on the VM (needs 128 GB disk) or in CI with a registry (GHCR or ACR).
+3. Code side, not Terraform: the `VOICE_HOST` body limit is 12 MB on `/v1/stt` only, on `feat/voice-arm` (section 5); add a
    voice and LiveKit only compose file and env templates for this VM (the single-box kit
    includes postgres and the api); consider moving torch to the CPU-only build to drop about
    2.2 GB (compressed) of unused CUDA libraries from the image (7.2).
-5. Scale past one voice process is not designed; if N_CALLS must exceed what A12 shows, that is
+4. Scale past one voice process is not designed; if N_CALLS must exceed what A12 shows, that is
    a code spec, not a bigger VM.

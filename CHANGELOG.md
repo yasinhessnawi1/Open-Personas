@@ -132,8 +132,9 @@ Per-spec entries are added by the close-out phase of each spec.
 - **Long dictation clips reach voice when voice runs on its own host.** The deploy kit's
   edge capped requests to the voice host at 1 MB, below the 10 MiB voice accepts for
   speech to text. It never mattered while the api reached voice inside one box; with
-  voice on a separate host the api's dictation proxy goes through that edge, so the cap
-  is now 12 MB.
+  voice on a separate host the api's dictation proxy goes through that edge, so the
+  dictation route (`/v1/stt`) now allows 12 MB. Every other voice route stays at 1 MB,
+  because a large unauthenticated body would stall the voice service while it is read.
 - **Forgetting something now also forgets the summary written from it.** A persona
   keeps a short summary of what it knows about you, rebuilt in the background from
   its memories. When you deleted a conversation and asked it to forget, the
