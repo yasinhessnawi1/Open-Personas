@@ -12,6 +12,11 @@ Carries forward the Persona-RAG patterns documented in ``research.md`` §2.1:
 This module is the transport layer only. Policy, versioning, and audit
 emission live in :class:`persona.stores.base.TypedStore`. The transport
 exposes a narrow ``ChromaBackend`` that the typed stores compose with.
+
+Two writers racing on one version chain both win here: there is no head index, so
+``ChainConflictError`` never fires and the store never retries. The chain then needs
+``persona repair --resolve-raced``. This is the local, single-process transport, so the race
+needs two processes on one folder. See :mod:`persona.stores.backend` for the full list.
 """
 
 from __future__ import annotations
@@ -21,8 +26,14 @@ from datetime import datetime  # noqa: TC003 — reinforce() takes a runtime dat
 from pathlib import Path  # noqa: TC003 — used at runtime by ChromaBackend.__init__
 from typing import TYPE_CHECKING, Any
 
+from persona.errors import ChainConflictError
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.schema.chunks import (
+    ChunkProvenance,
+    PersonaChunk,
+    WriteSource,
+    verify_content_hash,
+)
 
 if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
@@ -95,6 +106,9 @@ class ChromaBackend:
     ) -> None:
         if not chunks:
             return
+        # Before the embedder: a stale chunk must not be paid for, and must not land (R9-210).
+        for chunk in chunks:
+            verify_content_hash(chunk)
         collection = self._collection(persona_id, store_kind)
         embeddings = self.embedder.encode([c.text for c in chunks])
         collection.upsert(
@@ -185,6 +199,7 @@ class ChromaBackend:
         persona_id: str,
         store_kind: str,
         links: dict[str, str | None],
+        versions: dict[str, int] | None = None,
     ) -> None:
         """Repair primitive (Spec K13, D-K13-6): rewrite ``prov_superseded_by``, nothing else.
 
@@ -199,10 +214,11 @@ class ChromaBackend:
         the key entirely, and the read side treats absent as "current"). Measured against
         chromadb 1.5.9, not assumed. Unknown ids are skipped.
         """
-        if not links:
+        touched = [*links, *(i for i in (versions or {}) if i not in links)]
+        if not touched:
             return
         collection = self._collection(persona_id, store_kind)
-        raw = collection.get(ids=list(links.keys()), include=["metadatas"])
+        raw = collection.get(ids=touched, include=["metadatas"])
         got_ids = [str(i) for i in (raw.get("ids") or [])]
         metas = raw.get("metadatas") or []
         if not got_ids:
@@ -211,9 +227,45 @@ class ChromaBackend:
         for chunk_id, meta in zip(got_ids, metas, strict=False):
             md = dict(meta or {})
             # Explicit None deletes the key; omitting it would leave the old link in place.
-            md["prov_superseded_by"] = links[chunk_id]
+            if chunk_id in links:
+                md["prov_superseded_by"] = links[chunk_id]
+            if versions and chunk_id in versions:
+                md["prov_version"] = versions[chunk_id]
             updated.append(md)
         collection.update(ids=got_ids, metadatas=updated)
+
+    def excise_versions(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_id: str,
+        expected: dict[str, tuple[int, str | None]],
+        doomed_ids: list[str],
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        """Delete these versions and close the chain, in that order (R9-209).
+
+        Two calls, because Chroma has no transaction (documented Liskov, see ``backend.py``).
+        The delete goes first so a killed process cannot leave the forgotten text on disk. The
+        chain is compared with ``expected`` just before, which catches a writer that landed
+        after the plan was read, though not one landing between this check and the calls.
+        """
+        if not doomed_ids:
+            return
+        found = {
+            c.id: (c.provenance.version, c.provenance.superseded_by)
+            for c in self.get_by_logical_ids(
+                persona_id=persona_id, store_kind=store_kind, logical_ids=[logical_id]
+            )
+            if c.provenance is not None
+        }
+        if found != expected:
+            msg = "the chain moved since the plan was made"
+            raise ChainConflictError(msg, context={"persona_id": persona_id, "store": store_kind})
+        self.delete_documents(persona_id=persona_id, store_kind=store_kind, ids=doomed_ids)
+        self.relink(persona_id=persona_id, store_kind=store_kind, links=links, versions=versions)
 
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         if not ids:

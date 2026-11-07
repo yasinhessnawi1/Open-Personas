@@ -30,8 +30,13 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from persona.errors import AutonomyCooldownError, InvalidAutonomyLevelError
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.errors import (
+    AutonomyCooldownError,
+    ChainConflictError,
+    InvalidAutonomyLevelError,
+)
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
+from persona.stores.self_facts import SelfFactsStore
 from persona.stores.versioning import current_version
 
 if TYPE_CHECKING:
@@ -291,11 +296,36 @@ def record_autonomy_update(
             },
         )
 
+    # The cooldown is a decision made from the chain, so a store level retry would walk past it:
+    # the loser of a race would land a second update on a day that allows one (D-21-4). So this
+    # takes the conflict itself and goes back through the gate, where it normally stops, because
+    # what beat it is now the head. A second conflict means the chain is genuinely busy, and
+    # that reaches the caller.
+    try:
+        _gate_and_append(
+            store, persona_id, new_level, now, written_by, reason, confidence, session_id
+        )
+    except ChainConflictError:
+        _gate_and_append(
+            store, persona_id, new_level, now, written_by, reason, confidence, session_id
+        )
+
+
+def _gate_and_append(
+    store: MemoryStore,
+    persona_id: str,
+    new_level: AutonomyLevel,
+    now: datetime,
+    written_by: str,
+    reason: str,
+    confidence: float,
+    session_id: str | None,
+) -> None:
+    """Read the chain, enforce the cooldown against its head, and append the new version."""
     chain = store.history(persona_id, AUTONOMY_LOGICAL_ID)
     if chain:
         head = chain[-1]
         _enforce_cooldown(head, persona_id=persona_id, now=now, session_id=session_id)
-    next_version = len(chain) + 1
 
     metadata = {
         AUTONOMY_METADATA_KEY: new_level,
@@ -305,7 +335,10 @@ def record_autonomy_update(
         metadata[AUTONOMY_SESSION_METADATA_KEY] = session_id
 
     chunk = PersonaChunk(
-        id=f"{persona_id}::self_facts::autonomy::{next_version:04d}",
+        # Minted, never numbered from the chain: two writers that read the same chain would
+        # build the same id and the second would overwrite the first in place, which nothing
+        # can see (R9-205).
+        id=mint_chunk_id(persona_id, SelfFactsStore.STORE_KIND),
         text=f"Autonomy preference set to {new_level}.",
         metadata=metadata,
         created_at=now,
@@ -326,6 +359,7 @@ def record_autonomy_update(
         written_by=written_by,
         reason=reason,
         force=True,
+        retry_on_conflict=False,
     )
 
 

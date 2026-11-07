@@ -45,22 +45,34 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
+from sqlalchemy.exc import IntegrityError
 
+from persona.errors import ChainConflictError
 from persona.logging import get_logger
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.schema.chunks import (
+    ChunkProvenance,
+    PersonaChunk,
+    WriteSource,
+    verify_content_hash,
+)
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
     from persona.stores.embedder import Embedder
 
 _log = get_logger("stores.postgres")
 
-__all__ = ["EMBEDDING_DIM", "PostgresBackend"]
+__all__ = ["CHAIN_HEAD_INDEX", "EMBEDDING_DIM", "PostgresBackend"]
 
 # bge-small-en-v1.5. Must match the api migration's vector(384). A contract
 # test (T07) asserts both ends agree.
 EMBEDDING_DIM: int = 384
+
+# The partial unique index that allows one current version per chain (R9-205). Named here
+# because ``upsert`` has to recognise it; the api owns the DDL, and a contract test asserts
+# that this is the name the api declares.
+CHAIN_HEAD_INDEX: str = "uq_memory_chain_head"
 
 # This module's OWN minimal view of memory_chunks (core cannot import the api
 # schema). Column names/types mirror persona_api.db.models.memory_chunks; the
@@ -133,6 +145,9 @@ class PostgresBackend:
     ) -> None:
         if not chunks:
             return
+        # Before the embedder: a stale chunk must not be paid for, and must not land (R9-210).
+        for chunk in chunks:
+            verify_content_hash(chunk)
         embeddings = self._embedder.encode([c.text for c in chunks])
         rows: list[dict[str, Any]] = []
         for chunk, embedding in zip(chunks, embeddings, strict=True):
@@ -148,8 +163,14 @@ class PostgresBackend:
         stmt = insert(_memory_chunks)
         update_cols = {c.name: stmt.excluded[c.name] for c in _memory_chunks.c if c.name != "id"}
         stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols)
-        with self._engine.begin() as conn:
-            conn.execute(stmt, rows)
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(stmt, rows)
+        except IntegrityError as exc:
+            if not _is_chain_head_conflict(exc):
+                raise
+            # The whole statement list rolled back, so nothing landed.
+            raise _chain_conflict(persona_id, store_kind) from None
 
     def reinforce(
         self,
@@ -232,6 +253,7 @@ class PostgresBackend:
         persona_id: str,
         store_kind: str,
         links: dict[str, str | None],
+        versions: dict[str, int] | None = None,
     ) -> None:
         """Repair primitive (Spec K13, D-K13-6): rewrite ``superseded_by``, nothing else.
 
@@ -239,23 +261,121 @@ class PostgresBackend:
         The embedding, the text and the metadata are never touched, so no embedder is needed
         and the stored vector cannot drift; ``content_hash`` excludes provenance, so chunk
         identity is stable too. Unknown ids match zero rows, which is the intended no-op.
+        ``versions`` renumbers provenance in the same transaction (R9-205).
         """
-        if not links:
+        if not links and not versions:
             return
+        with self._engine.begin() as conn:
+            self._relink_in(conn, persona_id, store_kind, links, versions or {})
+
+    def _relink_in(
+        self,
+        conn: Connection,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        """Move version pointers inside the caller's transaction."""
         by_target: dict[str | None, list[str]] = {}
         for chunk_id, target in links.items():
             by_target.setdefault(target, []).append(chunk_id)
-        with self._engine.begin() as conn:
-            for target, ids in by_target.items():
-                conn.execute(
-                    _memory_chunks.update()
+        for target, ids in by_target.items():
+            conn.execute(
+                _memory_chunks.update()
+                .where(
+                    _memory_chunks.c.persona_id == persona_id,
+                    _memory_chunks.c.kind == store_kind,
+                    _memory_chunks.c.id.in_(ids),
+                )
+                .values(superseded_by=target)
+            )
+        for chunk_id, version in versions.items():
+            conn.execute(
+                _memory_chunks.update()
+                .where(
+                    _memory_chunks.c.persona_id == persona_id,
+                    _memory_chunks.c.kind == store_kind,
+                    _memory_chunks.c.id == chunk_id,
+                )
+                .values(version=version)
+            )
+
+    def excise_versions(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_id: str,
+        expected: dict[str, tuple[int, str | None]],
+        doomed_ids: list[str],
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        """Delete these versions and close the chain, in one transaction (R9-209).
+
+        The chain is locked and compared with ``expected`` first, so a plan made from a read
+        another writer has moved past never lands; the lock holds a writer updating any of
+        these rows until this commits. Then the delete, because a doomed head has to lose its
+        NULL before a survivor gains one, or the head index would see two for a statement.
+        """
+        if not doomed_ids and not links and not versions:
+            return
+        try:
+            with self._engine.begin() as conn:
+                found = conn.execute(
+                    select(
+                        _memory_chunks.c.id,
+                        _memory_chunks.c.version,
+                        _memory_chunks.c.superseded_by,
+                    )
                     .where(
                         _memory_chunks.c.persona_id == persona_id,
                         _memory_chunks.c.kind == store_kind,
-                        _memory_chunks.c.id.in_(ids),
+                        _memory_chunks.c.logical_id == logical_id,
                     )
-                    .values(superseded_by=target)
+                    .with_for_update()
+                ).all()
+                if {str(i): (int(v), s) for i, v, s in found} != expected:
+                    raise _chain_conflict(persona_id, store_kind)
+                conn.execute(
+                    delete(_memory_chunks).where(
+                        _memory_chunks.c.persona_id == persona_id,
+                        _memory_chunks.c.kind == store_kind,
+                        _memory_chunks.c.id.in_(doomed_ids),
+                    )
                 )
+                self._relink_in(conn, persona_id, store_kind, links, versions)
+        except IntegrityError as exc:
+            if not _is_chain_head_conflict(exc):
+                raise
+            # A plan made from a read another writer has since moved past. Rolled back whole.
+            raise _chain_conflict(persona_id, store_kind) from None
+
+    def persona_ids(self, store_kinds: tuple[str, ...]) -> list[str]:
+        """Every persona with rows of these kinds, for an operator's sweep (R9-211).
+
+        On this transport and not the protocol: the sweep needs the whole database in one
+        place, which is what a Chroma folder per deployment is not.
+        """
+        stmt = (
+            select(_memory_chunks.c.persona_id)
+            .where(_memory_chunks.c.kind.in_(store_kinds))
+            .distinct()
+            .order_by(_memory_chunks.c.persona_id)
+        )
+        with self._engine.connect() as conn:
+            return [str(row) for row in conn.execute(stmt).scalars().all()]
+
+    def sees_every_tenant(self) -> bool:
+        """Whether this connection's role can read past row level security.
+
+        A sweep as ``persona_app`` reads zero rows and would report a healthy database, which
+        is the worst possible answer from a check run during a restore.
+        """
+        stmt = text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        with self._engine.connect() as conn:
+            return bool(conn.execute(stmt).scalar())
 
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         stmt = delete(_memory_chunks).where(
@@ -489,6 +609,27 @@ class PostgresBackend:
             pinned=bool(row.get("pinned") or False),
             member_ids=tuple(member_ids) if member_ids else (),
         )
+
+
+def _chain_conflict(persona_id: str, store_kind: str) -> ChainConflictError:
+    """The domain error for a head index violation, with the driver's error left behind.
+
+    Raised ``from None`` on purpose (round 2 review, LOW-4). The driver's error quotes the
+    statement's parameters, which are the rows being written, so chaining it would put a
+    person's memory into any log that prints the traceback, and the core refresh does. The
+    constraint name is all a reader needs, and it is in the context.
+    """
+    msg = "another writer landed on this version chain first"
+    return ChainConflictError(
+        msg,
+        context={"persona_id": persona_id, "store": store_kind, "constraint": CHAIN_HEAD_INDEX},
+    )
+
+
+def _is_chain_head_conflict(exc: IntegrityError) -> bool:
+    """Whether this violation is the head index and not some other constraint on the table."""
+    diag = getattr(exc.orig, "diag", None)
+    return getattr(diag, "constraint_name", None) == CHAIN_HEAD_INDEX
 
 
 def _as_utc(value: datetime) -> datetime:

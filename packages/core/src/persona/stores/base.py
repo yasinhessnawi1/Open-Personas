@@ -21,12 +21,15 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import BaseModel, ConfigDict
 
 from persona.audit import AuditAction, AuditEvent
+from persona.errors import ChainConflictError
 from persona.logging import get_logger
 from persona.schema.chunks import (
     BOOKKEEPING_METADATA_KEYS,
     ChunkProvenance,
     PersonaChunk,
     WriteSource,
+    mint_chunk_id,
+    version_chunk_id,
 )
 from persona.stores.policy import PolicyTable, evaluate_write_policy
 from persona.stores.versioning import (
@@ -37,6 +40,7 @@ from persona.stores.versioning import (
     current_view,
     diagnose_chain,
     link_supersedes,
+    plan_raced_resolution,
     plan_relink,
     validate_chain,
 )
@@ -53,6 +57,22 @@ __all__ = ["StoreDiagnosis", "TypedStore"]
 #: store already used for its retention rerank; the bound stays small because the filtered
 #: answer is truncated back to ``top_k`` immediately.
 _SUPERSEDED_OVERFETCH = 3
+
+#: How many times a versioned write tries before a chain conflict reaches the caller (R9-205).
+#: The first attempt, plus two re-reads. A loser only has to land on top of what beat it, so
+#: running out takes a third writer arriving inside the second retry.
+_CHAIN_APPEND_ATTEMPTS = 3
+
+
+def _renumbered(chain: list[PersonaChunk], versions: dict[str, int]) -> int:
+    """How many rows in ``chain`` a resolution really gives a new version number."""
+    return sum(
+        1
+        for chunk in chain
+        if chunk.provenance is not None
+        and chunk.id in versions
+        and versions[chunk.id] != chunk.provenance.version
+    )
 
 
 class StoreDiagnosis(BaseModel):
@@ -111,6 +131,7 @@ class TypedStore:
         written_by: str | None = None,
         reason: str | None = None,
         force: bool = False,
+        retry_on_conflict: bool = True,
     ) -> None:
         if not chunks:
             return
@@ -125,27 +146,123 @@ class TypedStore:
             persona_id=persona_id,
         )
 
-        # Scoped versioning fetch (Spec K8, K8-D-12): version computation only
-        # reads a chunk's own logical chain, so fetch exactly the batch's
-        # chains — never the whole store (the former ``get_all`` here was an
-        # O(N) read on EVERY write). Non-versioning stores fetch nothing.
-        existing: list[PersonaChunk] = []
-        if self.SUPPORTS_VERSIONING:
-            batch_logical_ids = [
-                c.provenance.logical_id if c.provenance is not None else c.id for c in chunks
-            ]
-            existing = self._backend.get_by_logical_ids(
-                persona_id=persona_id,
-                store_kind=self.STORE_KIND,
-                logical_ids=batch_logical_ids,
-            )
+        prepared = self._append_with_retry(
+            persona_id,
+            chunks,
+            existing=self._read_chains(persona_id, chunks),
+            source=source,
+            written_by=written_by,
+            reason=reason,
+            retry_on_conflict=retry_on_conflict,
+        )
+        if not prepared:
+            return  # what this asked for had already landed, so nothing happened to record
 
+        self._emit_audit(
+            persona_id=persona_id,
+            action=AuditAction.WRITE,
+            source=source,
+            written_by=written_by,
+            reason=reason,
+            chunk_ids=[c.id for c in prepared],
+            logical_ids=[c.provenance.logical_id for c in prepared if c.provenance is not None],
+        )
+
+    def _read_chains(self, persona_id: str, chunks: list[PersonaChunk]) -> list[PersonaChunk]:
+        """Every version of the chains ``chunks`` belong to, for the versioned append.
+
+        Scoped versioning fetch (Spec K8, K8-D-12): version computation only reads a chunk's own
+        logical chain, so fetch exactly the batch's chains and never the whole store (the former
+        ``get_all`` here was an O(N) read on EVERY write). Non-versioning stores fetch nothing.
+        """
+        if not self.SUPPORTS_VERSIONING:
+            return []
+        return self._backend.get_by_logical_ids(
+            persona_id=persona_id,
+            store_kind=self.STORE_KIND,
+            logical_ids=[
+                c.provenance.logical_id if c.provenance is not None else c.id for c in chunks
+            ],
+        )
+
+    def _append_with_retry(
+        self,
+        persona_id: str,
+        chunks: list[PersonaChunk],
+        *,
+        existing: list[PersonaChunk],
+        source: WriteSource,
+        written_by: str | None,
+        reason: str | None,
+        retry_on_conflict: bool = True,
+    ) -> list[PersonaChunk]:
+        """Append ``chunks``, and if another writer won the chain, append on top of what won.
+
+        A chain conflict means nothing landed (R9-205). So the loser reads the chain again and
+        goes round, a bounded number of times. Returns what was written, which is empty when
+        the winner already wrote everything this asked for: appending it again would put an
+        identical version in the history for two callers who wanted the same thing.
+
+        The policy is not re-run. It decided on the chunks and the caller, and neither changed.
+        A decision made from the chain itself is the caller's to re-make, which is what
+        ``retry_on_conflict=False`` is for.
+        """
+        pending = chunks
+        for attempt in range(1, _CHAIN_APPEND_ATTEMPTS + 1):
+            try:
+                return self._append_versions(
+                    persona_id,
+                    pending,
+                    existing=existing,
+                    source=source,
+                    written_by=written_by,
+                    reason=reason,
+                )
+            except ChainConflictError:
+                if not retry_on_conflict or attempt == _CHAIN_APPEND_ATTEMPTS:
+                    raise
+                self._log.info(
+                    "chain conflict, re-reading persona={persona} attempt={attempt}",
+                    persona=persona_id,
+                    attempt=attempt,
+                )
+            existing = self._read_chains(persona_id, pending)
+            pending = [c for c in pending if not self._already_current(c, existing)]
+            if not pending:
+                return []
+        return []  # pragma: no cover - the loop returns or raises on its last attempt
+
+    @staticmethod
+    def _already_current(chunk: PersonaChunk, existing: list[PersonaChunk]) -> bool:
+        """Whether the chain this chunk belongs to already has this exact content as its head."""
+        logical_id = chunk.provenance.logical_id if chunk.provenance is not None else chunk.id
+        head = current_version(existing, logical_id)
+        return head is not None and head.content_hash == chunk.content_hash
+
+    def _append_versions(
+        self,
+        persona_id: str,
+        chunks: list[PersonaChunk],
+        *,
+        existing: list[PersonaChunk],
+        source: WriteSource,
+        written_by: str | None,
+        reason: str | None,
+    ) -> list[PersonaChunk]:
+        """Commit ``chunks`` as new versions, in one transport call, and return what was written.
+
+        The one path every versioned mutation takes, ``write`` and ``rollback`` alike, so the
+        supersede links and the atomicity below cannot differ between them. It decides nothing:
+        the caller has already run the policy, and emits its own audit event. ``existing`` is
+        passed in because ``rollback`` already holds its chain (Spec K13, D-K13-13: one read).
+        """
         prepared: list[PersonaChunk] = []
         supersede_updates: list[PersonaChunk] = []
         for chunk in chunks:
             if self.SUPPORTS_VERSIONING:
                 prepared_chunk, supersedes = self._prepare_versioned(
                     chunk,
+                    persona_id=persona_id,
                     existing=existing,
                     source=source,
                     written_by=written_by,
@@ -184,10 +301,9 @@ class TypedStore:
         # executemany, Chroma raises DuplicateIDError and refuses the whole call. So the
         # duplicate never reaches a transport, and the LINKED copy is the one that survives.
         #
-        # Links before heads is for a constraint that does not exist yet: the partial unique
-        # index on current heads (R9-205) is checked per statement, so a batch that wrote a new
-        # head before the old one lost its NULL would trip it. Ordering costs nothing today and
-        # keeps that index addable without reopening this method.
+        # Links before heads is for the partial unique index on current heads (R9-205). It is
+        # checked per statement, so a batch that wrote a new head before the old one lost its
+        # NULL would trip it against its own chain.
         superseded_ids = {c.id for c in supersede_updates}
         batch = [*supersede_updates, *(c for c in prepared if c.id not in superseded_ids)]
         self._backend.upsert(
@@ -195,21 +311,13 @@ class TypedStore:
             store_kind=self.STORE_KIND,
             chunks=batch,
         )
-
-        self._emit_audit(
-            persona_id=persona_id,
-            action=AuditAction.WRITE,
-            source=source,
-            written_by=written_by,
-            reason=reason,
-            chunk_ids=[c.id for c in prepared],
-            logical_ids=[c.provenance.logical_id for c in prepared if c.provenance is not None],
-        )
+        return prepared
 
     def _prepare_versioned(
         self,
         chunk: PersonaChunk,
         *,
+        persona_id: str,
         existing: list[PersonaChunk],
         source: WriteSource,
         written_by: str | None,
@@ -246,15 +354,29 @@ class TypedStore:
             # row carrying ``version=2``, and ``history()`` then raised BrokenVersionChainError
             # on the chain it was asked to read. Minting here, rather than trusting the caller,
             # makes append-only a property of the STORE instead of a rule every writer has to
-            # remember. Callers that already mint distinct ids (``persona.autonomy`` puts the
-            # version in its own id) are untouched: the id changes only when it would collide.
+            # remember. Callers that already mint distinct ids are untouched: the id changes only
+            # when it would collide.
+            #
+            # Deterministic on what is being saved, not random: two racing identical saves of a
+            # persona land here and must collapse into one version, and two different ones must
+            # stay visible. See ``version_chunk_id``, which also says why it carries the persona.
             chain_ids = {
                 c.id
                 for c in existing
                 if (c.provenance.logical_id if c.provenance is not None else c.id) == logical_id
             }
             if prepared.id in chain_ids:
-                prepared = prepared.model_copy(update={"id": f"{logical_id}::v{next_version:04d}"})
+                prepared = prepared.model_copy(
+                    update={
+                        "id": version_chunk_id(
+                            persona_id,
+                            self.STORE_KIND,
+                            logical_id,
+                            next_version,
+                            chunk.content_hash,
+                        )
+                    }
+                )
             head = current_version(existing, logical_id)
             if head is not None:
                 supersedes = link_supersedes(head, prepared.id)
@@ -397,8 +519,8 @@ class TypedStore:
         # ``get_by_logical_ids`` never returns, on both transports. Measured on 3,000 rows
         # with real 384 dimension vectors: the ``get_all`` shape took 216 ms because
         # ``SELECT *`` ships every embedding for ``_row_to_chunk`` to throw away, and one
-        # chain by logical id takes 1 ms. ``rollback`` calls this, and so do
-        # ``persona.autonomy`` and the tool-consent path on every write they make.
+        # chain by logical id takes 1 ms. ``rollback`` calls this, and so does
+        # ``persona.autonomy`` on every write it makes.
         chain = [
             c
             for c in self._backend.get_by_logical_ids(
@@ -421,6 +543,7 @@ class TypedStore:
         source: WriteSource,
         written_by: str | None = None,
         reason: str | None = None,
+        force: bool = False,
     ) -> None:
         if not self.SUPPORTS_VERSIONING:
             from persona.errors import RuntimeWriteForbiddenError
@@ -460,17 +583,10 @@ class TypedStore:
                 },
             )
 
+        self._check_rollback_target(persona_id, target)
+
         # Build a new head whose text+metadata mirror the target.
-        new_version_no = chain[-1].provenance.version + 1 if chain[-1].provenance else 1
-        new_id = f"{logical_id}::v{new_version_no:04d}"
-        new_provenance = ChunkProvenance(
-            source=source,
-            logical_id=logical_id,
-            version=new_version_no,
-            written_at=datetime.now(UTC),
-            written_by=written_by,
-            reason=reason or f"rollback to version {to_version}",
-        )
+        recorded_reason = reason or f"rollback to version {to_version}"
         # The target's text comes forward; its BOOKKEEPING does not (Spec K13, D-K13-12).
         # Metadata holds two different things, and only one of them belongs to the text. A
         # conversation id is how the conversation-delete cascade FINDS a chunk, and a session
@@ -479,7 +595,7 @@ class TypedStore:
         # and both are then read as current by code that has no way to know they time
         # travelled. Everything that describes the text itself rides along with it.
         new_head = PersonaChunk(
-            id=new_id,
+            id=mint_chunk_id(persona_id, self.STORE_KIND),
             text=target.text,
             metadata={
                 key: value
@@ -487,28 +603,51 @@ class TypedStore:
                 if key not in BOOKKEEPING_METADATA_KEYS
             },
             created_at=datetime.now(UTC),
-            provenance=new_provenance,
+            provenance=ChunkProvenance(
+                source=source,
+                logical_id=logical_id,
+                written_at=datetime.now(UTC),
+            ),
         )
 
-        # Link the previous head to the new head, then upsert both.
-        prev_head = chain[-1]
-        supersedes = link_supersedes(prev_head, new_head.id)
-        self._backend.upsert(
-            persona_id=persona_id,
+        # A rollback is a write, so the write policy decides it (R9-207). It judges ``new_head``
+        # because that is what lands: the target's metadata, not the current head's. And it gets
+        # the caller's own ``reason``, never ``recorded_reason``, or the default label would
+        # satisfy ``requires_reason`` for everyone.
+        evaluate_write_policy(
+            policy=self._POLICY,
+            source=source,
+            force=force,
+            chunks=[new_head],
+            reason=reason,
             store_kind=self.STORE_KIND,
-            chunks=[supersedes, new_head],
+            persona_id=persona_id,
         )
+
+        prepared = self._append_with_retry(
+            persona_id,
+            [new_head],
+            existing=chain,
+            source=source,
+            written_by=written_by,
+            reason=recorded_reason,
+        )
+        if not prepared:
+            return  # another writer already made this text current, so nothing happened
 
         self._emit_audit(
             persona_id=persona_id,
             action=AuditAction.ROLLBACK,
             source=source,
             written_by=written_by,
-            reason=reason or f"rollback to version {to_version}",
-            chunk_ids=[new_head.id],
+            reason=recorded_reason,
+            chunk_ids=[c.id for c in prepared],
             logical_ids=[logical_id],
             metadata={"to_version": str(to_version)},
         )
+
+    def _check_rollback_target(self, persona_id: str, target: PersonaChunk) -> None:
+        """A store's own reason to refuse this rollback target. Nothing, by default."""
 
     # ----- diagnose / repair (Spec K13, T3) ---------------------------------
 
@@ -543,7 +682,13 @@ class TypedStore:
             findings=tuple(findings),
         )
 
-    def repair(self, persona_id: str, *, written_by: str = "stores.repair") -> int:
+    def repair(
+        self,
+        persona_id: str,
+        *,
+        written_by: str = "stores.repair",
+        resolve_raced: bool = False,
+    ) -> int:
         """Put the repairable chains right, and return how many were repaired.
 
         Only the chains :func:`persona.stores.versioning.diagnose_chain` calls repairable are
@@ -552,18 +697,34 @@ class TypedStore:
         write goes through the transport's ``relink``, which moves version pointers and
         nothing else: no text, no metadata, no embedding, so no model is loaded and no vector
         moves. One audit event per repaired chain.
+
+        ``resolve_raced`` also settles the one shape that needs renumbering, a chain two
+        writers raced (:func:`persona.stores.versioning.plan_raced_resolution`). Off by default
+        because it is an operator's decision: nothing else in the store renumbers a version.
         """
         if not self.SUPPORTS_VERSIONING:
             return 0
         repaired = 0
         for logical_id, chain in self._chains(persona_id).items():
             diagnosis = diagnose_chain(chain)
-            if diagnosis.defect is ChainDefect.NONE or not diagnosis.repairable:
+            if diagnosis.resolvable and resolve_raced:
+                plan = plan_raced_resolution(chain)
+                links, versions = plan.links, plan.versions
+            elif diagnosis.defect is not ChainDefect.NONE and diagnosis.repairable:
+                links, versions = plan_relink(chain), {}
+            else:
                 continue
-            links = plan_relink(chain)
             if not links:
                 continue
-            self._backend.relink(persona_id=persona_id, store_kind=self.STORE_KIND, links=links)
+            self._backend.relink(
+                persona_id=persona_id,
+                store_kind=self.STORE_KIND,
+                links=links,
+                versions=versions,
+            )
+            metadata = {"defect": str(diagnosis.defect)}
+            if diagnosis.resolvable:
+                metadata["renumbered"] = str(_renumbered(chain, versions))
             self._emit_audit(
                 persona_id=persona_id,
                 action=AuditAction.REPAIR,
@@ -572,7 +733,7 @@ class TypedStore:
                 reason=f"repaired a {diagnosis.defect} version chain",
                 chunk_ids=sorted(links),
                 logical_ids=[logical_id],
-                metadata={"defect": str(diagnosis.defect)},
+                metadata=metadata,
             )
             repaired += 1
         return repaired

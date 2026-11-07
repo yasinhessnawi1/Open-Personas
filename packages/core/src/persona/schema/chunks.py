@@ -21,6 +21,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from persona.errors import ChunkIntegrityError
+
 __all__ = [
     "BOOKKEEPING_METADATA_KEYS",
     "CHUNK_ID_INDEX_WIDTH",
@@ -30,11 +32,17 @@ __all__ = [
     "WriteSource",
     "make_chunk_id",
     "mint_chunk_id",
+    "verify_content_hash",
+    "version_chunk_id",
 ]
 
 # Persona-RAG convention (D-01-2): 4-digit zero-padded index per store.
 # Lexicographic sort matches insertion order up to 10,000 chunks per store.
 CHUNK_ID_INDEX_WIDTH: int = 4
+
+# How much of the sha256 a version id carries (64 bits). It only has to separate two saves of
+# one version of one chain, and the id is read in logs.
+_VERSION_ID_HASH_CHARS: int = 16
 
 # --- what a chunk's metadata means (Spec K13, T4, D-K13-12) ------------------------------
 #
@@ -180,6 +188,26 @@ def mint_chunk_id(persona_id: str, store_kind: str) -> str:
     return f"{persona_id}::{store_kind}::{_uuid7()}"
 
 
+def version_chunk_id(
+    persona_id: str, store_kind: str, logical_id: str, version: int, content_hash: str
+) -> str:
+    """The physical id of version ``version`` of a chain, when a caller reused an older id.
+
+    Deterministic on purpose, where :func:`mint_chunk_id` is random on purpose. A persona save
+    writes every changed chunk under its stable id, so the store has to give that update a new
+    one. Two racing identical saves must collapse through ``ON CONFLICT (id)``, because neither
+    of them is wrong and a chain with two heads at one version refuses every later save. Two
+    racing DIFFERENT saves must not, because that would be an update nobody could ever see, so
+    the content is in the id and they reach the head index as two rows.
+
+    Every part is load-bearing. ``id`` is the primary key of the whole table, and a logical id
+    is only unique inside one persona, so the persona and kind are here. Content repeats (a fact
+    edited from A to B and back), so the version is here, or the new row would land on the old.
+    """
+    digest = content_hash[:_VERSION_ID_HASH_CHARS]
+    return f"{persona_id}::{store_kind}::{logical_id}::v{version:04d}::{digest}"
+
+
 def _ensure_utc(value: datetime) -> datetime:
     """Reject naive datetimes; pass tz-aware datetimes through.
 
@@ -261,6 +289,11 @@ class PersonaChunk(BaseModel):
     compute ``content_hash`` via a model validator and enforce tz-aware
     datetimes at the boundary. D-01-12.
 
+    To change a chunk's ``text`` or ``metadata``, build a new one. ``model_copy`` does not run
+    the validator below, so a copy keeps the hash of the text it no longer holds, and both
+    transports refuse that at write time (:func:`verify_content_hash`). Copying ``id``,
+    ``provenance`` and the lifecycle fields is fine: the hash does not cover them.
+
     Attributes:
         id: Stable identifier. Conventionally produced by :func:`make_chunk_id`,
             though arbitrary strings are accepted to support migrations.
@@ -329,3 +362,23 @@ class PersonaChunk(BaseModel):
             msg = f"content_hash mismatch: expected {expected!r}, got {self.content_hash!r}"
             raise ValueError(msg)
         return self
+
+
+def verify_content_hash(chunk: PersonaChunk) -> None:
+    """Refuse a chunk whose ``content_hash`` does not match its text and metadata (R9-210).
+
+    The constructor checks this, but ``model_copy`` skips the constructor, so a stale chunk can
+    exist. The transports call this first in ``upsert``: every writer goes through one of them,
+    and refusing here is the difference between a bad row that cannot land and a good-looking
+    row that raises on some later read.
+
+    Raises:
+        ChunkIntegrityError: The hash does not match. The chunk's id is in the error; its text
+            is not, because this reaches logs.
+    """
+    if chunk.content_hash != _compute_content_hash(chunk.text, chunk.metadata):
+        msg = (
+            "chunk does not match its content_hash; it was probably edited with model_copy, "
+            "which does not recompute the hash, so build a new PersonaChunk instead"
+        )
+        raise ChunkIntegrityError(msg, context={"chunk_id": chunk.id})

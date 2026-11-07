@@ -35,12 +35,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from persona.errors import ChainConflictError
 from persona.logging import get_logger
+from persona.stores.versioning import settled_chains
 from sqlalchemy import Table, create_engine, select, text
 from sqlalchemy import inspect as sa_inspect
 
 from persona_api.db.community import build_community_metadata, make_community_engine
 from persona_api.db.models import metadata as _canonical_metadata
+from persona_api.errors import CommunityDbError
 
 if TYPE_CHECKING:
     from persona.stores.embedder import Embedder
@@ -51,6 +54,9 @@ __all__ = ["CommunityImporter", "ImportReport", "maybe_run_community_import"]
 _LOG = get_logger("api.db.community_import")
 
 _JOURNAL_TABLE = "k10_import_journal"
+
+#: Where a person reports what the import could not settle (``packages/core/pyproject.toml``).
+_ISSUES_URL = "https://github.com/yasinhessnawi1/Open-Personas-ai/issues"
 
 #: Vector store kinds keyed by ``persona_id`` (the 4 typed stores + the K8 gist tier).
 _PERSONA_VECTOR_KINDS = ("identity", "worldview", "self_facts", "episodic", "episodic_gist")
@@ -205,7 +211,12 @@ class CommunityImporter:
                     continue
                 # Re-embed via the SAME write path the app uses (ON CONFLICT (id) DO
                 # UPDATE → idempotent; re-running after a crash is a safe no-op).
-                target_backend.upsert(persona_id=owner_id, store_kind=kind, chunks=chunks)
+                try:
+                    target_backend.upsert(
+                        persona_id=owner_id, store_kind=kind, chunks=settled_chains(chunks)
+                    )
+                except ChainConflictError:
+                    raise self._unsettled(unit_id) from None
                 with self._target.begin() as conn:
                     self._mark(conn, unit_id)
                 report.vector_chunks[unit_id] = len(chunks)
@@ -215,6 +226,27 @@ class CommunityImporter:
             # Spec WIN T2: release Chroma's open files, or Windows refuses the rename of
             # the Chroma folder that follows a complete import.
             chroma.close()
+
+    def _unsettled(self, unit_id: str) -> CommunityDbError:
+        """The refusal for a chain nobody can settle, written for the person who has to act.
+
+        Everything ``persona repair`` can settle was settled on the copy already, so what is
+        left is a shape it refuses too. Naming that command would send them to an answer of
+        "nothing to repair". They also have no persona YAML: their personas are in the SQLite
+        file. So this says what is true and what they can do instead.
+        """
+        folder = str(self._chroma_path)
+        msg = (
+            f"One memory in your old local store, in the folder {folder}, has two current "
+            "versions in a shape that cannot be settled without guessing which is right, so "
+            "it was not imported, and nothing in that folder has been changed. To start now "
+            f"without the old store's saved memories, move the folder {folder} somewhere else "
+            "and start Open Persona again: your personas and conversations still come across, "
+            "and the folder stays as a copy. To keep those memories instead, leave the folder "
+            "where it is and report this, with the line below, at "
+            f"{_ISSUES_URL}. Not imported: {unit_id}."
+        )
+        return CommunityDbError(msg, context={"reason": "unsettled_chain", "unit": unit_id})
 
     def _vector_units(self, source: Engine) -> list[tuple[str, str]]:
         """(``id``, ``store_kind``) pairs, ids taken from SQLite (never name-parsed).

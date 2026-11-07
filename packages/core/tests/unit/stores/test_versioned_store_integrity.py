@@ -62,7 +62,14 @@ class _IdKeyedBackend:
         bucket = self._bucket(persona_id, store_kind)
         return [bucket[i] for i in ids if i in bucket]
 
-    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+        versions: dict[str, int] | None = None,  # noqa: ARG002
+    ) -> None:
         """Spec K13's repair primitive: move version pointers, touch nothing else.
 
         Faithful to both transports in the way that matters here: it rewrites

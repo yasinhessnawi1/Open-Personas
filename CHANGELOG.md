@@ -74,6 +74,34 @@ Per-spec entries are added by the close-out phase of each spec.
   Public keys and certificates are left alone, since they are not secrets.
 
 ### Fixed
+- **Forgetting something now also forgets the summary written from it.** A persona
+  keeps a short summary of what it knows about you, rebuilt in the background from
+  its memories. When you deleted a conversation and asked it to forget, the
+  memories went and the summary stayed, so the persona could still bring up what you
+  asked it to forget. Every version of the summary written from it now goes too,
+  including one a background rebuild was writing at that moment, and the summary is
+  rebuilt from what is left. Until then the persona may briefly know a little less.
+  Restoring an older backup? `persona repair --forgotten-evidence` finds summaries it
+  still holds; on the community edition run
+  `uv run python -m persona_api.db.community_repair --forgotten-evidence`.
+- **Two saves of one memory at the same moment no longer break it.** Two things
+  writing the same memory at once, two background passes or two saves of a persona,
+  could both land as the newest version, and from then on that memory refused every
+  change and editing the persona failed. The database now allows one current version
+  per memory, and the second save lands on top of the first. A memory already in
+  that state is settled by `persona repair --resolve-raced`, which keeps both
+  versions in the order they were saved. If an update finds one, it stops before
+  changing anything and names the command; on the community edition it names a
+  command that works without the app running.
+- **Rolling a memory back follows the same rules as changing it.** A rollback skipped
+  the checks every other change goes through, so a persona could undo a fact without
+  the confidence and reason a change of its own needs.
+- **Two personas can no longer overwrite each other's memory.** The id a memory's
+  new version got was shared between personas for some memories, so one persona's
+  rollback could take over another's row. Every new version now gets an id of its
+  own.
+- **A memory edited the wrong way is refused when it is saved,** not discovered
+  months later when something tries to read it.
 - **A task you set up over Telegram now actually gets set up.** Confirming a piece
   of work in a chat app got you "Done, I've set that up" and created nothing. The
   reply was written before the part that does the work, so nothing ever went red

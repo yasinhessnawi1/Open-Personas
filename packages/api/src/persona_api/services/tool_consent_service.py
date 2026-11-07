@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import yaml
 from persona.audit import AuditLogger, JSONLAuditLogger
 from persona.errors import PersonaNotFoundError, ToolNotAllowedError
-from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.stores import SelfFactsStore
 from persona.stores.postgres import PostgresBackend
 from persona.tools import known_tool_names
@@ -166,12 +166,14 @@ def grant_tool_consent(
         audit_logger=audit_logger or JSONLAuditLogger(audit_root),
     )
     logical_id = _logical_id(tool_name)
-    next_version = len(store.history(persona_id, logical_id)) + 1
     reason = f"user granted '{tool_name}' via runtime tool-gap consent" + (
         f", turn {turn_index}" if turn_index is not None else ""
     )
     chunk = PersonaChunk(
-        id=f"{persona_id}::self_facts::tool_consent::{tool_name}::{next_version:04d}",
+        # Minted, never numbered from the chain: two writers that read the same chain would
+        # build the same id and the second would overwrite the first in place, which nothing
+        # can see (R9-205).
+        id=mint_chunk_id(persona_id, SelfFactsStore.STORE_KIND),
         text=f"Enabled the '{tool_name}' tool via user consent.",
         metadata={"tool": tool_name, "confidence": f"{_CONSENT_CONFIDENCE}"},
         created_at=now,

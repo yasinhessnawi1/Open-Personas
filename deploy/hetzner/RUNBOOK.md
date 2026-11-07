@@ -295,6 +295,62 @@ hardlink, device node, absolute path or `..` path; no owners or modes come from 
 archive. `bin/restore.sh --roles-only` re-applies the roles and grants to an existing
 database (a password rotation), touching no data.
 
+### Check the memory chains
+
+The first deploy runs migration 059, which builds the index that allows one current version
+per memory chain (R9-205). It cannot be built while any chain has two, and the data was last
+checked on 2026-09-20, twelve days before the backup was taken. So look before deploying.
+`restore.sh` already printed this as `memory_chains_two_heads`; this is the same count by kind:
+
+```bash
+docker compose -f docker-compose.yml exec -T postgres psql -U persona -d persona -X -q -t -A -F '|' <<'SQL'
+SELECT kind, count(*) FROM (
+  SELECT kind FROM memory_chunks
+   WHERE logical_id IS NOT NULL AND superseded_by IS NULL
+   GROUP BY persona_id, kind, logical_id HAVING count(*) > 1) AS two_heads
+ GROUP BY kind ORDER BY kind;
+SQL
+```
+
+- **No rows** is the expected answer: no chain has two current versions and the migration will
+  go through. Carry on to step 6.
+- **Any rows** mean two saves of one memory ran at the same moment before this index existed,
+  or an older bug left two current versions. Nothing is lost: both versions are on disk. The
+  migration will refuse, changing nothing, until this is settled. See what is there, from the
+  `deploy/hetzner` directory, as the migrate service (it holds the superuser connection):
+
+  ```bash
+  docker compose -f docker-compose.yml run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL"'
+  ```
+
+  That changes nothing and prints each chain and what can be done with it. A chain two saves
+  raced says it can be resolved. Settle those by adding `--resolve-raced --apply` to the same
+  command: every version is kept, in the order they were saved, the later one stays current, and
+  each chain gets an audit row in `store_audit_events`. Run the first command again to confirm.
+
+  A chain it reports as "left alone" is one it will not guess about, and the migration stays
+  blocked until a person has looked at it. Stop there and bring the output to the owner.
+
+### Sweep the memory summaries
+
+Forgetting something now also deletes every version of the persona's memory summary that was
+written from it. The dump predates that, so it can hold summaries of evidence a person had already
+asked to forget (R9-209). This looks for them. It uses no model and costs nothing:
+
+```bash
+docker compose -f docker-compose.yml run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL" --forgotten-evidence'
+```
+
+- **"No memory summary ... cites anything forgotten"**, exit 0: nothing to do.
+- **A count per persona**, exit 1: those personas have summaries citing something that is no
+  longer on disk. Nothing has been changed. Add `--apply` to delete those versions: each deletion
+  is audited in `store_audit_events` with ids and counts only, and the chain is closed up around
+  it. Run it again to confirm.
+
+Until the next consolidation pass rebuilds them, those personas show their newest summary that
+cites nothing forgotten, or no summary at all if none survives. They may briefly know less. That
+is expected, and it is not a fault to chase.
+
 ## Step 6: deploy
 
 ```bash
@@ -308,8 +364,10 @@ then commit that digest into `docker-compose.yml` as `caddy:2.10.2@sha256:...`.
 config change only ever lands through a restart).
 
 The first build takes a while (both images carry CUDA torch wheels, several GB each). The
-migrate step is expected to be a **no-op** on today's main: the dump is already at head
-(`058`). The first boot downloads the HF models (about 2 GB) into the volumes, hence the
+migrate step takes the restored dump from `058` to `059`, which builds one index on a table of
+a few hundred rows and takes under a second. If a chain has two current versions it stops with a
+message and `deploy.sh` restarts nothing: settle them as in step 5 and run `bin/deploy.sh` again.
+The first boot downloads the HF models (about 2 GB) into the volumes, hence the
 long health timeouts. `deploy.sh` ends with `api /livez: ok`, `api /healthz (database):
 ok` and `voice listener: ok`. The Caddy smoke test warns until DNS points here.
 

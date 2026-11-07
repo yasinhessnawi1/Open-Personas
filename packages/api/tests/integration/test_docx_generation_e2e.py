@@ -214,6 +214,7 @@ class _FakeStore:
         written_by: str | None = None,  # noqa: ARG002
         reason: str | None = None,  # noqa: ARG002
         force: bool = False,  # noqa: ARG002
+        retry_on_conflict: bool = True,  # noqa: ARG002
     ) -> None:
         self.writes.append(list(chunks))
         self._all.extend(chunks)
@@ -259,6 +260,7 @@ class _FakeStore:
         source: Any,  # noqa: ARG002
         written_by: str | None = None,  # noqa: ARG002
         reason: str | None = None,  # noqa: ARG002
+        force: bool = False,  # noqa: ARG002
     ) -> None: ...
 
 

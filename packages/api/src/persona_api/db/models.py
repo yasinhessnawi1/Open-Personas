@@ -661,6 +661,16 @@ memory_chunks = Table(
         "kind",
         postgresql_where=text("superseded_by IS NULL"),
     ),
+    # One current version per chain (R9-205, migration 059). Named again in
+    # persona.stores.postgres.CHAIN_HEAD_INDEX, which recognises its violation.
+    Index(
+        "uq_memory_chain_head",
+        "persona_id",
+        "kind",
+        "logical_id",
+        unique=True,
+        postgresql_where=text("superseded_by IS NULL AND logical_id IS NOT NULL"),
+    ),
     # Spec K8: the recent() pushdown index — ORDER BY (created_at, id) DESC
     # LIMIT is index-served (K8-D-6: created_at is the insertion-order key;
     # ids mix count-era and uuidv7-era formats and must never be sorted bare).

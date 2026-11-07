@@ -288,6 +288,13 @@ fact() { printf '%s\n' "${facts}" | awk -F'|' -v k="$1" '$1==k {print $2}'; }
 [ "$(fact persona_platform_tables_without_dml)" = "0" ] || die "persona_platform lacks DML on some tables"
 [ "$(fact vector_extension)" != "" ] || die "vector extension missing"
 [ -n "$(fact alembic_revision)" ] || die "alembic_version is empty"
+# A warning, not a stop: the data restored correctly, and this is settled on the data. The
+# migration refuses until it is, so an operator who misses this hears about it at deploy.
+two_heads="$(fact memory_chains_two_heads)"
+[ -n "${two_heads}" ] || die "sql/verify.sql did not report memory_chains_two_heads"
+if [ "${two_heads}" != "0" ]; then
+  say "WARNING: ${two_heads} memory chains have two current versions; settle them before bin/deploy.sh (RUNBOOK.md step 5)"
+fi
 if [ -f "${FACTS_FILE}" ]; then
   # facts.txt is taken moments before the dump while the box keeps writing, so small
   # drift is normal and only warned about; read the diff, an emptied table is not drift.

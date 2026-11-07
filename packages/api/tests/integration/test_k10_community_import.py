@@ -31,6 +31,7 @@ from persona_api.db.community_import import (
     maybe_run_community_import,
 )
 from persona_api.db.community_managed import CommunityDbManager, run_migrations
+from persona_api.errors import CommunityDbError
 from sqlalchemy import create_engine, text
 
 pytestmark = pytest.mark.integration
@@ -362,6 +363,119 @@ def test_clean_run_imports_and_renames(
     assert not sqlite_path.exists()  # renamed away
     assert not chroma_path.exists()
     target.dispose()
+
+
+def _legacy_persona_id(sqlite_path: Path) -> str:
+    engine = make_community_engine(sqlite_path)
+    try:
+        with engine.connect() as conn:
+            return str(conn.execute(text("SELECT id FROM personas")).scalar())
+    finally:
+        engine.dispose()
+
+
+def _add_to_legacy_chroma(
+    chroma_path: Path,
+    embedder: HashEmbedder384,
+    persona_id: str,
+    rows: list[tuple[str, int, str | None]],
+) -> None:
+    """Rows of one chain in the old store, which has no head index, as (id, version, link)."""
+    from persona.stores.chroma import ChromaBackend
+
+    now = datetime.now(UTC)
+    chroma = ChromaBackend(persist_path=chroma_path, embedder=embedder)
+    chroma.upsert(
+        persona_id=persona_id,
+        store_kind="self_facts",
+        chunks=[
+            PersonaChunk(
+                id=chunk_id,
+                text=f"text of {chunk_id}",
+                created_at=now,
+                provenance=ChunkProvenance(
+                    source=WriteSource.USER,
+                    logical_id="raced",
+                    version=version,
+                    superseded_by=link,
+                    written_at=now,
+                ),
+            )
+            for chunk_id, version, link in rows
+        ],
+    )
+    chroma.close()
+
+
+def test_a_chain_two_saves_raced_in_the_old_store_imports_settled(
+    tmp_path: Path, target_url: str, embedder: HashEmbedder384
+) -> None:
+    """The old store has no index, and the new one has. This used to stop every boot."""
+    sqlite_path, chroma_path, _ = _build_legacy_store(tmp_path, embedder)
+    persona_id = _legacy_persona_id(sqlite_path)
+    _add_to_legacy_chroma(
+        chroma_path, embedder, persona_id, [("v1", 1, "b"), ("a", 2, None), ("b", 2, None)]
+    )
+
+    target = create_engine(target_url)
+    report = maybe_run_community_import(
+        sqlite_path=sqlite_path, chroma_path=chroma_path, target_engine=target, embedder=embedder
+    )
+
+    assert report is not None
+    assert report.journal_complete is True
+    with target.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id, version, superseded_by FROM memory_chunks "
+                "WHERE logical_id = 'raced' ORDER BY version"
+            )
+        ).all()
+    target.dispose()
+    assert [tuple(r) for r in rows] == [("v1", 1, "a"), ("a", 2, "b"), ("b", 3, None)]
+
+
+def test_a_chain_nobody_can_settle_stops_with_a_sentence(
+    tmp_path: Path, target_url: str, embedder: HashEmbedder384
+) -> None:
+    sqlite_path, chroma_path, _ = _build_legacy_store(tmp_path, embedder)
+    persona_id = _legacy_persona_id(sqlite_path)
+    _add_to_legacy_chroma(
+        chroma_path,
+        embedder,
+        persona_id,
+        [("v1", 1, "b"), ("v2", 2, "b"), ("a", 3, None), ("b", 3, None)],
+    )
+
+    target = create_engine(target_url)
+    with pytest.raises(CommunityDbError) as caught:
+        maybe_run_community_import(
+            sqlite_path=sqlite_path,
+            chroma_path=chroma_path,
+            target_engine=target,
+            embedder=embedder,
+        )
+    assert caught.value.context["reason"] == "unsettled_chain"
+    assert chroma_path.exists(), "the old store must survive an import that did not finish"
+
+    # The message has to be something this person can act on (round 2 review, LOW-1). They
+    # have no persona YAML, and `persona repair` would refuse this shape anyway.
+    message = str(caught.value)
+    assert str(chroma_path) in message, "it has to name the folder the old store is really in"
+    assert "persona.yaml" not in message
+    assert "persona repair" not in message
+    assert "cannot be settled" in message
+    assert "github.com/yasinhessnawi1/Open-Personas-ai/issues" in message
+    assert "text of" not in message, "never a word of a memory"
+
+    # And the way out it names works: with the folder moved aside the import completes.
+    chroma_path.rename(chroma_path.with_name("moved-aside"))
+    report = maybe_run_community_import(
+        sqlite_path=sqlite_path, chroma_path=chroma_path, target_engine=target, embedder=embedder
+    )
+    target.dispose()
+    assert report is not None
+    assert report.journal_complete is True
 
 
 def test_fresh_install_has_nothing_to_import(

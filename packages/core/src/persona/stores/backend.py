@@ -12,6 +12,28 @@ The surface is exactly ``ChromaBackend``'s — this protocol is reverse-engineer
 from what that class already does, so adding a second backend is purely
 additive. The method names are storage-neutral on purpose: ``delete_persona``
 rather than Chroma's ``delete_collection`` (Postgres has rows, not collections).
+
+Where the two transports are NOT equivalent, written down so nobody mistakes it for an
+oversight (``recent`` and ``band_histogram`` are noted on their methods):
+
+- **One current version per chain** (R9-205). Postgres enforces it with the partial unique
+  index ``uq_memory_chain_head``: when two writers race on one chain, the second ``upsert``
+  raises ``ChainConflictError`` and the typed store re-reads and appends on top. Chroma has no
+  index and no retry, so two concurrent writers to one chain both land at the same version and
+  the chain refuses every later write until an operator runs ``persona repair
+  --resolve-raced``, the only remedy there. That covers every versioned writer: a persona save
+  through ``PersonaRegistry``, the core block refresh, autonomy and tool consent. Two identical
+  persona saves still collapse into one version on both, because the id the store mints for an
+  update is deterministic on what is being saved.
+- **Forgetting a version of a chain** (``excise_versions``, R9-209) is one transaction on
+  Postgres and two calls on Chroma, delete first, so the forgotten text goes on both. The
+  rewrite is planned from a read, and another writer can land in between. Postgres locks the
+  chain and compares it with that read inside the transaction, so a stale plan never lands:
+  the forget reads again and plans again. Chroma makes the same comparison just before it
+  acts, which catches a writer that landed after the read but not one landing inside the
+  excise itself. A stale plan that lands there leaves a chain with a version missing, which
+  ``persona repair`` refuses and will not settle, so that memory's history raises until a
+  person looks at it. Its current version still reads.
 """
 
 from __future__ import annotations
@@ -45,6 +67,11 @@ class Backend(Protocol):
 
         Empty ``chunks`` is a no-op. The transport embeds each chunk's text
         via its injected embedder and stores the vector alongside the chunk.
+
+        Every chunk is checked against its own ``content_hash`` first, and one bad chunk
+        refuses the whole call with :class:`persona.errors.ChunkIntegrityError` before
+        anything is embedded or stored (R9-210). The check belongs here because every writer
+        passes through this method, and a bad row that lands only fails on some later read.
         """
         ...
 
@@ -208,6 +235,7 @@ class Backend(Protocol):
         persona_id: str,
         store_kind: str,
         links: dict[str, str | None],
+        versions: dict[str, int] | None = None,
     ) -> None:
         """Set ``superseded_by`` on the listed chunk ids and touch nothing else (Spec K13).
 
@@ -221,6 +249,41 @@ class Backend(Protocol):
         is what lets ``persona repair`` run without loading a model. ``content_hash`` covers
         text plus metadata and NOT provenance, so a relink also cannot change chunk identity
         or trip the tamper check.
+
+        ``versions`` renumbers the listed chunks in the same operation, for the one repair that
+        needs it, settling a raced chain (R9-205). Provenance as well, so the same holds.
+        """
+        ...
+
+    def excise_versions(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_id: str,
+        expected: dict[str, tuple[int, str | None]],
+        doomed_ids: list[str],
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        """Delete these versions of a chain and close it up around them (R9-209).
+
+        ``links`` and ``versions`` move the survivors, exactly as :meth:`relink` does, so no text
+        is rewritten and nothing is embedded. The deletes come first on both transports, so a
+        forget never leaves the row it was asked to remove.
+
+        ``expected`` is the chain the plan was made from, every row of ``logical_id`` as
+        ``{id: (version, superseded_by)}``. If the chain on disk no longer matches, another
+        writer moved it since that read, the plan is stale, and this raises
+        :class:`persona.errors.ChainConflictError` without changing anything, so the caller
+        reads again and plans again. A stale plan that leaves the head alone would otherwise
+        land without complaint and leave a hole no repair will touch.
+
+        The transports differ here, and the difference is the documented Liskov one. Postgres
+        locks the chain, checks it and rewrites it in one transaction. Chroma has no transaction,
+        so it checks just before acting and then makes two calls: a writer landing between the
+        check and the calls is not seen, and a process killed between the calls leaves the rows
+        gone and the chain unclosed. Either way the text is forgotten and reads still work.
         """
         ...
 

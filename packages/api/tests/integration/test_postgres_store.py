@@ -173,6 +173,47 @@ def test_rollback_appends_new_head(backend: PostgresBackend, audit: MemoryAuditL
     assert head[0].text == "first"  # rolled back to v1's content
 
 
+def test_a_rollback_on_a_shared_logical_id_stays_in_its_own_persona(
+    backend: PostgresBackend, pg_engine: Engine, audit: MemoryAuditLogger
+) -> None:
+    """The primary key is ``id`` alone, and ``autonomy`` is the same logical id for everyone.
+
+    A rollback id built from the logical id alone made two personas one row, and ``upsert``
+    updates every column on conflict, so the second rollback took the first persona's row.
+    """
+    from sqlalchemy import text
+
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES ('p2', 'u1', 'name: p2')")
+        )
+    store = SelfFactsStore(backend=backend, audit_logger=audit)
+    for persona_id in ("p1", "p2"):
+        for n in (1, 2):
+            store.write(
+                persona_id,
+                [
+                    PersonaChunk(
+                        id=f"{persona_id}::autonomy::{n}",
+                        text=f"{persona_id} v{n}",
+                        created_at=UTC_NOW,
+                        provenance=ChunkProvenance(
+                            source=WriteSource.USER, logical_id="autonomy", written_at=UTC_NOW
+                        ),
+                    )
+                ],
+                source=WriteSource.USER,
+            )
+        store.rollback(persona_id, "autonomy", to_version=1, source=WriteSource.USER)
+
+    for persona_id in ("p1", "p2"):
+        assert [c.text for c in store.history(persona_id, "autonomy")] == [
+            f"{persona_id} v1",
+            f"{persona_id} v2",
+            f"{persona_id} v1",
+        ]
+
+
 # --- episodic decay ordering (acceptance #3) --------------------------------
 
 

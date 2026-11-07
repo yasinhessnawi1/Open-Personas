@@ -14,16 +14,19 @@ repair that reached for a model would fail loudly instead of passing slowly.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.audit import AuditAction, MemoryAuditLogger
+from persona.cli.main import app
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.postgres import PostgresBackend
 from persona.stores.self_facts import SelfFactsStore
 from persona.stores.versioning import ChainDefect
 from sqlalchemy import text
+from typer.testing import CliRunner
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -158,3 +161,129 @@ def test_a_chain_with_no_current_version_is_readable_before_any_repair(
     )
 
     assert [c.id for c in store.get_all(_PERSONA)] == [_LOGICAL]
+
+
+# --- settling a raced chain, and sweeping every persona (R9-205, R9-211) --------
+#
+# Restored data is what these model: rows that were written before the head index existed. The
+# index would refuse to seed them, so it is dropped first, which is the state an operator is in
+# when the migration has refused.
+
+
+def _seed_raced(engine: Engine, embedder: HashEmbedder384, persona_id: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS uq_memory_chain_head"))
+    prefix = f"{persona_id}::"
+    PostgresBackend(engine=engine, embedder=embedder).upsert(
+        persona_id=persona_id,
+        store_kind="self_facts",
+        chunks=[
+            _chunk(1, superseded_by=f"{prefix}b", chunk_id=f"{prefix}{_LOGICAL}"),
+            _chunk(2, superseded_by=None, chunk_id=f"{prefix}a"),
+            _chunk(2, superseded_by=None, chunk_id=f"{prefix}b"),
+        ],
+    )
+
+
+def _second_persona(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES ('p2', 'u1', 'name: p2')")
+        )
+
+
+def _version_of(engine: Engine, chunk_id: str) -> int:
+    return int(_row(engine, chunk_id)["version"])
+
+
+def test_a_renumbering_relink_moves_the_version_and_nothing_else(
+    seeded: Engine, embedder: HashEmbedder384
+) -> None:
+    _seed_raced(seeded, embedder, _PERSONA)
+    before = _row(seeded, f"{_PERSONA}::b")
+
+    PostgresBackend(engine=seeded, embedder=_RefusingEmbedder()).relink(
+        persona_id=_PERSONA,
+        store_kind="self_facts",
+        links={f"{_PERSONA}::b": None},
+        versions={f"{_PERSONA}::b": 3},
+    )
+
+    after = _row(seeded, f"{_PERSONA}::b")
+    assert after["version"] == 3
+    for column in ("text", "metadata", "content_hash", "superseded_by", "embedding"):
+        assert after[column] == before[column], f"the renumbering changed {column}"
+
+
+def _repair_cli(*args: str) -> Any:  # noqa: ANN401 - typer's Result
+    return CliRunner().invoke(
+        app, ["repair", "--all-personas", "--database-url", os.environ["DATABASE_URL"], *args]
+    )
+
+
+def test_the_sweep_finds_a_raced_chain_in_every_persona_and_changes_nothing_by_default(
+    seeded: Engine, embedder: HashEmbedder384
+) -> None:
+    _second_persona(seeded)
+    _seed_raced(seeded, embedder, "p1")
+    _seed_raced(seeded, embedder, "p2")
+
+    result = _repair_cli()
+
+    assert result.exit_code == 1, result.output
+    assert "Checking 2 personas" in result.output
+    assert "--resolve-raced" in result.output
+    assert _version_of(seeded, "p1::b") == 2
+    assert _version_of(seeded, "p2::b") == 2
+
+
+def test_the_sweep_settles_every_persona_and_records_it_in_the_database(
+    seeded: Engine, embedder: HashEmbedder384
+) -> None:
+    _second_persona(seeded)
+    _seed_raced(seeded, embedder, "p1")
+    _seed_raced(seeded, embedder, "p2")
+
+    result = _repair_cli("--apply", "--resolve-raced")
+
+    assert result.exit_code == 0, result.output
+    assert "now intact" in result.output
+    assert _version_of(seeded, "p1::b") == 3
+    assert _version_of(seeded, "p2::b") == 3
+    with seeded.connect() as conn:
+        audited = conn.execute(
+            text(
+                "SELECT persona_id FROM store_audit_events WHERE action = 'repair' "
+                "ORDER BY persona_id"
+            )
+        ).scalars()
+        assert list(audited) == ["p1", "p2"], "the record must outlive a one-shot container"
+    assert _repair_cli().exit_code == 0, "a second sweep must be clean"
+
+
+def test_the_sweep_refuses_a_role_that_cannot_see_every_tenant(seeded: Engine) -> None:
+    """``persona_app`` reads zero rows, so a sweep would report a healthy database."""
+    _ = seeded
+    result = CliRunner().invoke(
+        app,
+        ["repair", "--all-personas", "--database-url", os.environ["APP_DATABASE_URL"]],
+    )
+    assert result.exit_code == 2, result.output
+    assert "row level security" in result.output
+
+
+def test_a_versions_only_relink_is_applied_as_on_chroma(
+    seeded: Engine, embedder: HashEmbedder384
+) -> None:
+    """Round 2 review, LOW-3: Postgres returned early when ``links`` was empty."""
+    PostgresBackend(engine=seeded, embedder=embedder).upsert(
+        persona_id=_PERSONA,
+        store_kind="self_facts",
+        chunks=[_chunk(5, superseded_by=None, chunk_id=_LOGICAL)],
+    )
+
+    PostgresBackend(engine=seeded, embedder=_RefusingEmbedder()).relink(
+        persona_id=_PERSONA, store_kind="self_facts", links={}, versions={_LOGICAL: 1}
+    )
+
+    assert _row(seeded, _LOGICAL)["version"] == 1

@@ -47,7 +47,7 @@ from typing import Protocol
 from persona.logging import get_logger
 from sqlalchemy import create_engine, text
 
-from persona_api.errors import CommunityDbError
+from persona_api.errors import ChainHeadsConflictError, CommunityDbError
 
 
 class _EmbeddedServer(Protocol):
@@ -248,7 +248,25 @@ def run_migrations(database_url: str) -> None:
     # The ini value goes through configparser interpolation, where "%" is special: a
     # percent-encoded DSN (a Windows socket folder, a password with "%") must be escaped.
     cfg.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-    command.upgrade(cfg, "head")
+    try:
+        command.upgrade(cfg, "head")
+    except ChainHeadsConflictError as exc:
+        # The migration's own message names ``persona repair --database-url``, for an operator.
+        # This database is invisible and has no URL anyone could type, so name what works here.
+        from persona_api.db.community_repair import repair_command
+
+        look = repair_command()
+        fix = repair_command("--resolve-raced", "--apply")
+        chains = exc.context.get("chains", "some")
+        msg = (
+            f"Open Persona did not start, because {chains} of its saved memories have two "
+            f"current versions, and this update needs that settled first. Nothing has been "
+            f"changed. From the folder you start Open Persona in, run `{look}` to see them, then "
+            f"`{fix}` to settle them. Every version is kept. Then start Open Persona again."
+        )
+        raise CommunityDbError(
+            msg, context={"reason": "chain_heads_conflict", "chains": str(chains)}
+        ) from exc
 
 
 class CommunityDbManager:

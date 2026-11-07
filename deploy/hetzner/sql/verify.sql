@@ -52,6 +52,13 @@ SELECT 'hnsw_indexes', count(*)::text
 
 SELECT 'alembic_revision', string_agg(version_num, ',') FROM alembic_version;
 
+-- Memory version chains with two current versions. Must be 0: migration 059 refuses to run
+-- otherwise, and RUNBOOK.md step 5 says what to do. A count, never row content.
+SELECT 'memory_chains_two_heads', count(*)::text FROM (
+  SELECT 1 FROM memory_chunks
+   WHERE logical_id IS NOT NULL AND superseded_by IS NULL
+   GROUP BY persona_id, kind, logical_id HAVING count(*) > 1) AS two_heads;
+
 SELECT 'server_version', current_setting('server_version');
 
 -- Per-table row counts (counts only).

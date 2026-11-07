@@ -8,6 +8,8 @@ by construction; the read side does no summarisation (acceptance-7).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from persona.audit import MemoryAuditLogger
 from persona.recall.core_memory import (
@@ -25,6 +27,9 @@ from persona.stores.summarizer import StubSummarizer, SummarizerError
 
 from tests.unit.recall._fixtures import NOW, chunk, gist
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
 
 class _FakeStore:
     """A duck-typed CoreMemoryWriter — append-only (latest write is the current head)."""
@@ -32,6 +37,7 @@ class _FakeStore:
     def __init__(self) -> None:
         self._head: dict[str, PersonaChunk] = {}
         self.writes = 0
+        self.retired = 0
 
     def write(self, persona_id: str, chunks: list[PersonaChunk], **_kwargs: object) -> None:
         self.writes += 1
@@ -39,6 +45,26 @@ class _FakeStore:
 
     def current(self, persona_id: str) -> PersonaChunk | None:
         return self._head.get(persona_id)
+
+    def missing_sources(self, persona_id: str, source_ids: Iterable[str]) -> list[str]:
+        _ = (persona_id, source_ids)
+        return []
+
+    def forget_cited(
+        self, persona_id: str, forgotten_ids: Sequence[str], *, written_by: str = "test"
+    ) -> int:
+        _ = (persona_id, forgotten_ids, written_by)
+        return 0
+
+    def orphaned_citations(self, persona_id: str) -> list[str]:
+        _ = persona_id
+        return []
+
+    def retire(self, persona_id: str, *, written_by: str = "test") -> int:
+        _ = written_by
+        self.retired += 1
+        self._head.pop(persona_id, None)
+        return 1
 
 
 # ---- build_core_block -----------------------------------------------------
@@ -114,13 +140,15 @@ async def test_refresh_builds_and_appends_a_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_with_no_sources_writes_nothing() -> None:
+async def test_refresh_with_no_sources_retires_the_block() -> None:
+    """No evidence means no summary of it (K8-D-14, R9-209). This used to keep the block."""
     store = _FakeStore()
     block = await refresh_core_block(
         "p", summarizer=StubSummarizer(), sources=[], store=store, target_tokens=200, now=NOW
     )
     assert block is None
-    assert store.writes == 0  # the prior block stays intact
+    assert store.writes == 0
+    assert store.retired == 1
 
 
 def test_read_before_any_refresh_is_none() -> None:
@@ -138,8 +166,19 @@ class _FakeBackend:
     ``_emit_audit`` — mirrors ``test_stores_backend.py``'s ``_FakeBackend``
     shape, scoped to just what this file's tests exercise."""
 
-    def __init__(self, rows: list[PersonaChunk] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[PersonaChunk] | None = None,
+        *,
+        evidence: list[PersonaChunk] | None = None,
+    ) -> None:
         self._rows = list(rows or [])
+        self._evidence = list(evidence or [])
+
+    def get_by_ids(self, *, persona_id: str, store_kind: str, ids: list[str]) -> list[PersonaChunk]:
+        """Evidence the block cites, which lives in another kind than ``_rows``."""
+        _ = (persona_id, store_kind)
+        return [c for c in self._evidence if c.id in ids]
 
     def get_all(self, *, persona_id: str, store_kind: str) -> list[PersonaChunk]:  # noqa: ARG002
         return list(self._rows)
@@ -236,12 +275,13 @@ async def test_refresh_core_block_round_trips_through_a_real_core_memory_store()
     ``CoreMemoryStore`` — not ``_FakeStore`` — so it actually reaches
     ``TypedStore._emit_audit`` -> ``AuditEvent(store="core_memory")``."""
     audit = MemoryAuditLogger()
-    store = CoreMemoryStore(backend=_FakeBackend(), audit_logger=audit)
+    source = chunk("c0", text="Yasin moved to Oslo in 2023.")
+    store = CoreMemoryStore(backend=_FakeBackend(evidence=[source]), audit_logger=audit)
 
     block = await refresh_core_block(
         "p",
         summarizer=StubSummarizer(),
-        sources=[chunk("c0", text="Yasin moved to Oslo in 2023.")],
+        sources=[source],
         store=store,
         target_tokens=200,
         now=NOW,

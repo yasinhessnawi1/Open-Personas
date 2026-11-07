@@ -92,9 +92,29 @@ class _InMemoryBackend:
             c for c in self.get_all(persona_id=persona_id, store_kind=store_kind) if c.id in wanted
         ]
 
-    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+        versions: dict[str, int] | None = None,
+    ) -> None:
         """Spec K13's repair primitive. Documents are unversioned, so this is never used on
         this store; the fake implements it because the ``Backend`` protocol now requires it."""
+
+    def excise_versions(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_id: str,
+        expected: dict[str, tuple[int, str | None]],
+        doomed_ids: list[str],
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        """R9-209's primitive, here for the same reason as ``relink``."""
 
     def delete_documents(
         self,

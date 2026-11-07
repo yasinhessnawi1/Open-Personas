@@ -45,6 +45,8 @@ __all__ = [
     "BillingProviderUnavailableError",
     "CloudConfigRefusedError",
     "CommunityDbError",
+    "ChainHeadIndexInvalidError",
+    "ChainHeadsConflictError",
     "CommunitySchemaUpgradeError",
     "DocumentReadError",
     "ApprovalPendingError",
@@ -174,6 +176,25 @@ class CommunityDbError(PersonaError):
     ``reason`` (+ the ``mode`` / ``path`` / ``major`` at fault). Like the sibling
     startup guards this crashes the boot rather than degrading to an unusable
     store.
+    """
+
+
+class ChainHeadIndexInvalidError(PersonaError):
+    """Raised by migration 059 when an INVALID index already has the head index's name.
+
+    A failed ``CREATE INDEX CONCURRENTLY`` leaves one. It enforces nothing, and
+    ``IF NOT EXISTS`` would take it for the finished index, so the upgrade refuses instead and
+    says to drop it. ``context`` carries the ``index`` name.
+    """
+
+
+class ChainHeadsConflictError(PersonaError):
+    """Raised by migration 059 when a memory version chain has two current versions (R9-205).
+
+    The index that prevents this cannot be built over rows that already break it. A schema step
+    has no dry run and no audit trail, so it refuses rather than repairs, and refusing changes
+    nothing: it runs in the migration's one transaction. ``context`` carries the ``chains``
+    count and ``by_kind``, and never row content, because this reaches deploy logs.
     """
 
 

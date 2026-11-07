@@ -242,6 +242,7 @@ class FakeStore:
         written_by: str | None = None,
         reason: str | None = None,
         force: bool = False,
+        retry_on_conflict: bool = True,
     ) -> None:
         self.writes.append(list(chunks))
         self._all.extend(chunks)
@@ -274,4 +275,5 @@ class FakeStore:
         source: WriteSource,
         written_by: str | None = None,
         reason: str | None = None,
+        force: bool = False,
     ) -> None: ...

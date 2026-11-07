@@ -21,11 +21,11 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
-from persona.stores.core_memory import CORE_MEMORY_KIND, core_logical_id
+from persona.stores.core_memory import CORE_MEMORY_KIND, CORE_SOURCE_IDS_KEY, core_logical_id
 from persona.stores.summarizer import assemble_summarizer_input
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from datetime import datetime
 
     from persona.stores.summarizer import Summarizer
@@ -39,9 +39,6 @@ __all__ = [
     "read_core_block",
     "refresh_core_block",
 ]
-
-#: Metadata key under which the block cites its source chunk ids (provenance — §0).
-CORE_SOURCE_IDS_KEY = "source_ids"
 
 
 class CoreBlock(BaseModel):
@@ -74,6 +71,16 @@ class CoreMemoryWriter(Protocol):
     ) -> None: ...
 
     def current(self, persona_id: str) -> PersonaChunk | None: ...
+
+    def missing_sources(self, persona_id: str, source_ids: Iterable[str]) -> list[str]: ...
+
+    def forget_cited(
+        self, persona_id: str, forgotten_ids: Sequence[str], *, written_by: str = ...
+    ) -> int: ...
+
+    def retire(self, persona_id: str, *, written_by: str = ...) -> int: ...
+
+    def orphaned_citations(self, persona_id: str) -> list[str]: ...
 
 
 async def build_core_block(
@@ -152,14 +159,38 @@ async def refresh_core_block(
 
     Rides K8's engine cadence: build the block from the selected raw sources and, if non-empty,
     append a new version to the store (superseding the prior head). Returns the new block, or
-    ``None`` when there was nothing to summarise (the prior block stays). This coroutine is only
-    ever awaited off the turn path (acceptance-7) — the read path calls :func:`read_core_block`.
+    ``None`` when nothing landed. This coroutine is only ever awaited off the turn path
+    (acceptance-7); the read path calls :func:`read_core_block`.
+
+    With no sources there is no evidence left, so the block goes too: a summary must not
+    outlive what it summarises (K8-D-14, R9-209).
+
+    The sources are checked twice, because they were selected before a model call that takes
+    seconds and a forget can land at any point in it. Before the write, so a block that is
+    already stale is not written. After it, because a forget can also land between that check
+    and the write, and then this write can put back what the forget took.
+
+    The second check covers the whole chain, not only this block's sources. The write links the
+    prior head to the new one by writing the prior head again, text and all, so a forget that
+    deleted the prior head in that window gets it back as a superseded version, citing what the
+    person asked to forget, while this block cites none of it (round 2 review, R2-M1).
+    ``EpisodicStore.remove_documents`` deletes the evidence before the blocks, so whatever this
+    write puts back is citing evidence that is already gone, which is exactly what the sweep
+    finds.
     """
     block = await build_core_block(
         summarizer=summarizer, sources=sources, target_tokens=target_tokens
     )
     if block is None:
+        store.retire(persona_id, written_by=written_by)
         return None
+    if store.missing_sources(persona_id, block.source_ids):
+        return None  # the next pass rebuilds from what remains
     chunk = core_block_to_chunk(block, persona_id, now=now)
     store.write(persona_id, [chunk], source=WriteSource.SYSTEM, written_by=written_by)
+    gone = store.orphaned_citations(persona_id)
+    if gone:
+        store.forget_cited(persona_id, gone, written_by=written_by)
+    if set(gone).intersection(block.source_ids):
+        return None
     return block

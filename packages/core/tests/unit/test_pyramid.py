@@ -410,13 +410,13 @@ def test_no_gist_row_is_ever_versioned() -> None:
 
 def test_the_repair_scanner_covers_every_kind_that_can_hold_a_chain() -> None:
     """The other half of the same guard, from the scanner's side."""
-    from persona.cli.repair_cmd import _VERSIONED_KINDS
+    from persona.cli.repair_cmd import VERSIONED_KINDS
 
-    assert GIST_KIND not in _VERSIONED_KINDS, (
+    assert GIST_KIND not in VERSIONED_KINDS, (
         "the scanner claims to check gists but there is no versioned gist store to check"
     )
-    assert "identity" not in _VERSIONED_KINDS, "identity is immutable at runtime"
-    assert set(_VERSIONED_KINDS) == {"self_facts", "worldview", "episodic", "core_memory"}
+    assert "identity" not in VERSIONED_KINDS, "identity is immutable at runtime"
+    assert set(VERSIONED_KINDS) == {"self_facts", "worldview", "episodic", "core_memory"}
 
 
 def test_the_cascade_reaches_a_gist_built_over_a_superseded_version() -> None:

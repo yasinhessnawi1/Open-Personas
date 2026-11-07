@@ -43,6 +43,7 @@ class MemoryStore(Protocol):
         written_by: str | None = None,
         reason: str | None = None,
         force: bool = False,
+        retry_on_conflict: bool = True,
     ) -> None:
         """Append the chunks to the store, enforcing per-source policy.
 
@@ -51,11 +52,20 @@ class MemoryStore(Protocol):
         version N+1 and the previous head's ``superseded_by`` is updated.
         First-time logical ids become version 1.
 
+        If another writer lands on the same chain first, the store reads the
+        chain again and appends on top of it, unless the winner already wrote
+        this exact content, in which case nothing is written or audited. A
+        caller whose decision came from the chain it read passes
+        ``retry_on_conflict=False`` and handles the conflict itself. Postgres
+        only: Chroma cannot detect the race (see ``backend.py``).
+
         Raises:
             RuntimeWriteForbiddenError: System/user write violates policy.
             PersonaSelfWriteForbiddenError: Persona_self write violates
                 policy (subclass of RuntimeWriteForbiddenError; callers can
                 catch either).
+            ChainConflictError: The chain stayed busy past the store's retries,
+                or at once with ``retry_on_conflict=False``.
             AuditWriteError: The audit event could not be persisted.
         """
         ...
@@ -123,14 +133,22 @@ class MemoryStore(Protocol):
         source: WriteSource,
         written_by: str | None = None,
         reason: str | None = None,
+        force: bool = False,
     ) -> None:
         """Append a new head identical to the targeted version.
 
         Append-only — never deletes. Marks intermediate versions as
         superseded by the new head. Rolling forward again is symmetric.
 
+        A rollback is a write: the store's write policy decides it exactly as
+        it decides :meth:`write`, over the targeted version's metadata and the
+        caller's own ``reason`` (R9-207). ``force`` means what it means there.
+
         Raises:
             BrokenVersionChainError: ``logical_id`` or ``to_version`` does
                 not exist.
+            RuntimeWriteForbiddenError: The store's policy refused ``source``.
+            PersonaSelfWriteForbiddenError: The store's policy refused this
+                ``persona_self`` rollback.
         """
         ...

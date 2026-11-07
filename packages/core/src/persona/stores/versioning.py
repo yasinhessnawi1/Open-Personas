@@ -30,12 +30,16 @@ if TYPE_CHECKING:
 __all__ = [
     "ChainDefect",
     "ChainDiagnosis",
+    "ChainRewrite",
     "compute_next_version",
     "current_version",
     "current_view",
     "diagnose_chain",
     "link_supersedes",
+    "plan_excision",
+    "plan_raced_resolution",
     "plan_relink",
+    "settled_chains",
     "validate_chain",
 ]
 
@@ -148,13 +152,17 @@ def validate_chain(chain: list[PersonaChunk]) -> None:
                 "defect": str(diagnosis.defect),
                 "repairable": "yes" if diagnosis.repairable else "no",
                 "affected": ",".join(diagnosis.offending_ids),
-                "what_to_do": (
-                    "run `persona repair` on this persona"
-                    if diagnosis.repairable
-                    else "this one needs a person to look; `persona repair` will not touch it"
-                ),
+                "what_to_do": _what_to_do(diagnosis),
             },
         )
+
+
+def _what_to_do(diagnosis: ChainDiagnosis) -> str:
+    if diagnosis.repairable:
+        return "run `persona repair` on this persona"
+    if diagnosis.resolvable:
+        return "run `persona repair --resolve-raced` on this persona"
+    return "this one needs a person to look; `persona repair` will not touch it"
 
 
 # ----- diagnosis and repair (Spec K13, T3) ----------------------------------
@@ -186,6 +194,9 @@ class ChainDefect(StrEnum):
     MISSING_VERSION = "missing_version"
     #: Two rows claim the same version number.
     DUPLICATE_VERSION = "duplicate_version"
+    #: Two writers read the chain and both wrote the next version (R9-205). The one duplicate
+    #: shape that can be resolved: see :func:`plan_raced_resolution`.
+    RACED_HEADS = "raced_heads"
     #: A version points at a chunk that IS in the chain, but not the one that follows it.
     CROSSED_LINK = "crossed_link"
 
@@ -203,6 +214,9 @@ class ChainDiagnosis(BaseModel):
     defect: ChainDefect
     repairable: bool
     detail: str
+    #: Can be put right, but only when an operator asks for it by name (``--resolve-raced``).
+    #: Kept apart from ``repairable`` so a plain ``--apply`` can never renumber a chain.
+    resolvable: bool = False
     #: The ids whose ``superseded_by`` is part of the problem (empty for a healthy chain).
     offending_ids: tuple[str, ...] = ()
     #: How many versions the chain holds right now.
@@ -232,6 +246,24 @@ def diagnose_chain(chain: list[PersonaChunk]) -> ChainDiagnosis:
     present = {c.id for c in ordered}
     versions = [c.provenance.version for c in ordered if c.provenance is not None]
     count = len(ordered)
+
+    # The one exception to the refusal below, checked first because it is a strict subset of it.
+    raced = _raced_rows(ordered)
+    if raced:
+        return ChainDiagnosis(
+            logical_id=logical_id,
+            defect=ChainDefect.RACED_HEADS,
+            repairable=False,
+            resolvable=True,
+            detail=(
+                "Two saves of this memory ran at the same moment, so two versions both call "
+                "themselves the newest one. Both are on disk and both are readable, and the "
+                "chain refuses new saves until this is settled. Resolving keeps both, in the "
+                "order they were saved, and leaves the later one current."
+            ),
+            offending_ids=tuple(c.id for c in raced),
+            version_count=count,
+        )
 
     # Worst first: a chain missing a version, or holding the same version twice, cannot be
     # rebuilt from its version order, because its version order is not trustworthy.
@@ -341,6 +373,115 @@ def diagnose_chain(chain: list[PersonaChunk]) -> ChainDiagnosis:
     )
 
 
+def _raced_rows(ordered: list[PersonaChunk]) -> list[PersonaChunk]:
+    """The rows that raced, when ``ordered`` is EXACTLY the raced shape, else nothing.
+
+    Exactly: every duplicate is at the top version, every top row is unsuperseded, and
+    everything below is a complete, correctly linked chain whose last row points at one of the
+    top rows. Each clause is what makes the version order the truth up to the race, so a chain
+    that fails any of them stays a refused ``DUPLICATE_VERSION`` for a person to look at.
+    """
+    provenances = [c.provenance for c in ordered]
+    if any(p is None for p in provenances):
+        return []
+    top = max(c.provenance.version for c in ordered if c.provenance is not None)
+    rows = [c for c in ordered if c.provenance is not None and c.provenance.version == top]
+    below = [c for c in ordered if c.provenance is not None and c.provenance.version != top]
+    if len(rows) < 2 or any(_link(c) is not None for c in rows):
+        return []
+    if [c.provenance.version for c in below if c.provenance is not None] != list(range(1, top)):
+        return []
+    if any(_link(c) != following.id for c, following in zip(below, below[1:], strict=False)):
+        return []
+    if below and _link(below[-1]) not in {c.id for c in rows}:
+        return []
+    return rows
+
+
+def _link(chunk: PersonaChunk) -> str | None:
+    return chunk.provenance.superseded_by if chunk.provenance is not None else None
+
+
+class ChainRewrite(BaseModel):
+    """A chain's new shape: the links to write and the versions to renumber."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    links: dict[str, str | None]
+    versions: dict[str, int]
+
+
+def plan_raced_resolution(chain: list[PersonaChunk]) -> ChainRewrite:
+    """The order a raced chain's top rows go in, and what that makes of its links and versions.
+
+    The prior head's ``superseded_by`` was overwritten by each writer in turn, so the row it
+    names committed last, and that is a fact the database recorded rather than a clock reading.
+    The others go by ``written_at``, then id so the answer is the same on every run. The first
+    row keeps the contested version and the rest take the numbers after it.
+
+    Raises:
+        BrokenVersionChainError: ``chain`` is not exactly the raced shape.
+    """
+    ordered = _sorted_by_version(chain)
+    raced = _raced_rows(ordered)
+    if not raced:
+        msg = "this chain is not the raced shape, so it has no raced resolution"
+        raise BrokenVersionChainError(msg, context={"chunks": str(len(chain))})
+
+    raced_ids = {c.id for c in raced}
+    below = [c for c in ordered if c.id not in raced_ids]
+    prior = below[-1] if below else None
+    committed_last = _link(prior) if prior is not None else None
+
+    def written_key(chunk: PersonaChunk) -> tuple[object, str]:
+        assert chunk.provenance is not None  # _raced_rows checked every row has provenance
+        return (chunk.provenance.written_at, chunk.id)
+
+    earlier = sorted((c for c in raced if c.id != committed_last), key=written_key)
+    settled = [*earlier, *(c for c in raced if c.id == committed_last)]
+
+    assert settled[0].provenance is not None
+    first_version = settled[0].provenance.version
+    links: dict[str, str | None] = {}
+    if prior is not None:
+        links[prior.id] = settled[0].id
+    for chunk, following in zip(settled, [*settled[1:], None], strict=True):
+        links[chunk.id] = following.id if following is not None else None
+    return ChainRewrite(
+        links=links,
+        versions={c.id: first_version + i for i, c in enumerate(settled)},
+    )
+
+
+def plan_excision(chain: list[PersonaChunk], doomed_ids: Iterable[str]) -> ChainRewrite:
+    """What the rest of a chain has to become once ``doomed_ids`` are gone.
+
+    Taking a version out of a chain leaves a hole and a link to a row that is not there, which
+    :func:`diagnose_chain` calls ``MISSING_VERSION`` and refuses for good. So the survivors are
+    closed up: renumbered from 1 in version order, each linked to the next, the newest current.
+    Only rows that would change appear in the result.
+
+    The chain does not have to be healthy going in. Two heads on a transport with no index come
+    out as one, in version order, then ``written_at``, then id.
+    """
+    doomed = set(doomed_ids)
+
+    def order(chunk: PersonaChunk) -> tuple[int, object, str]:
+        assert chunk.provenance is not None  # every row of a chain has provenance
+        return (chunk.provenance.version, chunk.provenance.written_at, chunk.id)
+
+    survivors = sorted((c for c in chain if c.id not in doomed), key=order)
+    links: dict[str, str | None] = {}
+    versions: dict[str, int] = {}
+    for position, chunk in enumerate(survivors):
+        following = survivors[position + 1].id if position + 1 < len(survivors) else None
+        if _link(chunk) != following:
+            links[chunk.id] = following
+        if chunk.provenance is not None and chunk.provenance.version != position + 1:
+            versions[chunk.id] = position + 1
+    return ChainRewrite(links=links, versions=versions)
+
+
 def plan_relink(chain: list[PersonaChunk]) -> dict[str, str | None]:
     """The links a repairable chain SHOULD have, for the rows that do not have them.
 
@@ -360,6 +501,41 @@ def plan_relink(chain: list[PersonaChunk]) -> dict[str, str | None]:
         if actual != correct:
             wanted[chunk.id] = correct
     return wanted
+
+
+def settled_chains(chunks: Iterable[PersonaChunk]) -> list[PersonaChunk]:
+    """The same chunks, with every settleable chain that has two heads settled.
+
+    For copying a store with no head index into one that has it (the community import). The
+    source may hold a chain two saves raced, nobody can run a repair inside an import, and the
+    index would refuse the copy. This changes pointers on the copies only, and only for the
+    shapes ``persona repair`` itself would settle. Anything else comes back as it was, and the
+    index refuses it, which is the honest outcome for a shape nobody can settle without guessing.
+    """
+    materialised = list(chunks)
+    chains: dict[str, list[PersonaChunk]] = {}
+    for chunk in materialised:
+        if chunk.provenance is not None:
+            chains.setdefault(chunk.provenance.logical_id, []).append(chunk)
+
+    settled: dict[str, PersonaChunk] = {}
+    for chain in chains.values():
+        diagnosis = diagnose_chain(chain)
+        if diagnosis.resolvable:
+            plan = plan_raced_resolution(chain)
+            links, versions = plan.links, plan.versions
+        elif diagnosis.defect is ChainDefect.MULTIPLE_HEADS:
+            links, versions = plan_relink(chain), {}
+        else:
+            continue
+        for chunk in chain:
+            if chunk.id in links and chunk.provenance is not None:
+                update: dict[str, object] = {"superseded_by": links[chunk.id]}
+                if chunk.id in versions:
+                    update["version"] = versions[chunk.id]
+                provenance = chunk.provenance.model_copy(update=update)
+                settled[chunk.id] = chunk.model_copy(update={"provenance": provenance})
+    return [settled.get(c.id, c) for c in materialised]
 
 
 def current_view(chunks: Iterable[PersonaChunk]) -> list[PersonaChunk]:

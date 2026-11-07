@@ -12,16 +12,40 @@ this kind.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from persona.audit import AuditAction
+from persona.errors import ChainConflictError, ForgottenEvidenceError
 from persona.schema.chunks import PersonaChunk, WriteSource
 from persona.stores.base import TypedStore
 from persona.stores.policy import PolicyDecision, PolicyRule, PolicyTable
+from persona.stores.versioning import plan_excision
 
-__all__ = ["CORE_MEMORY_KIND", "CoreMemoryStore", "core_logical_id"]
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+__all__ = ["CORE_MEMORY_KIND", "CORE_SOURCE_IDS_KEY", "CoreMemoryStore", "core_logical_id"]
 
 #: The chunk kind the core block lives under (migration ``0NN_core_memory_kind``).
 CORE_MEMORY_KIND = "core_memory"
+
+#: Metadata key under which the block cites its source chunk ids (provenance, §0).
+CORE_SOURCE_IDS_KEY = "source_ids"
+
+#: Where a cited source can be. The refresh selects raw episodic chunks today, and the first
+#: place looked. The others are here because a block predating that choice could cite them, and
+#: taking a row that exists for a forgotten one would delete a summary nobody asked to forget.
+_EVIDENCE_KINDS: tuple[str, ...] = ("episodic", "identity", "self_facts", "worldview")
+
+#: How many times a forget plans its rewrite before a busy chain reaches the caller. The same
+#: bound as a versioned write, for the same reason: a refresh can commit between the read the
+#: plan came from and the rewrite, and the head index then refuses the stale plan whole.
+_EXCISE_ATTEMPTS = 3
+
+
+def cited_sources(chunk: PersonaChunk) -> tuple[str, ...]:
+    """The source ids a stored block cites."""
+    return tuple(s for s in chunk.metadata.get(CORE_SOURCE_IDS_KEY, "").split(",") if s)
 
 
 def core_logical_id(persona_id: str) -> str:
@@ -65,3 +89,131 @@ class CoreMemoryStore(TypedStore):
             return None
         # Deterministic: newest version wins if a backend ever returns siblings.
         return max(current, key=lambda c: (c.provenance.version if c.provenance else 1, c.id))
+
+    # ----- derived text must not outlive its evidence (K8-D-14, R9-209) ----
+
+    def _chain(self, persona_id: str) -> list[PersonaChunk]:
+        return self._backend.get_by_logical_ids(
+            persona_id=persona_id,
+            store_kind=self.STORE_KIND,
+            logical_ids=[core_logical_id(persona_id)],
+        )
+
+    def missing_sources(self, persona_id: str, source_ids: Iterable[str]) -> list[str]:
+        """The cited ids no longer on disk anywhere, in the order given. Reads only."""
+        wanted = list(dict.fromkeys(source_ids))
+        unfound = set(wanted)
+        for kind in _EVIDENCE_KINDS:
+            if not unfound:
+                break
+            found = self._backend.get_by_ids(
+                persona_id=persona_id, store_kind=kind, ids=sorted(unfound)
+            )
+            unfound -= {c.id for c in found}
+        return [s for s in wanted if s in unfound]
+
+    def forget_cited(
+        self,
+        persona_id: str,
+        forgotten_ids: Sequence[str],
+        *,
+        written_by: str = "stores.forget",
+    ) -> int:
+        """Delete every version citing a forgotten id, and return how many went.
+
+        The chain is closed up around them in the same operation, so it comes out valid and
+        with one head. If the head went, the newest survivor is current until the next refresh,
+        and if nothing survives there is no block. Moves pointers and deletes rows, so it reads
+        no text beyond the citations and embeds nothing. Audited with ids and counts only.
+
+        The plan comes from a read, and a refresh can commit between that read and the rewrite.
+        The transport compares the chain with that read before it rewrites anything, and refuses
+        a plan the chain has moved past, so this reads again and plans afresh, a bounded number
+        of times. On Postgres the comparison is inside the transaction, so it is exact. On
+        Chroma it is just before, so a writer landing inside the rewrite can still leave a hole
+        (documented in ``backend.py``).
+        """
+        forgotten = set(forgotten_ids)
+        for attempt in range(1, _EXCISE_ATTEMPTS + 1):
+            chain = self._chain(persona_id)
+            doomed = [c.id for c in chain if forgotten.intersection(cited_sources(c))]
+            if not doomed:
+                return 0
+            try:
+                self._excise(persona_id, chain, doomed, written_by=written_by, cited=len(forgotten))
+            except ChainConflictError:
+                if attempt == _EXCISE_ATTEMPTS:
+                    raise
+                self._log.info(
+                    "chain conflict during a forget, re-reading persona={persona} attempt={n}",
+                    persona=persona_id,
+                    n=attempt,
+                )
+                continue
+            return len(doomed)
+        return 0  # pragma: no cover - the loop returns or raises on its last attempt
+
+    def retire(self, persona_id: str, *, written_by: str = "stores.forget") -> int:
+        """Delete the whole chain, because the evidence behind it is gone, and return the count."""
+        chain = self._chain(persona_id)
+        if not chain:
+            return 0
+        doomed = [c.id for c in chain]
+        self._excise(persona_id, chain, doomed, written_by=written_by, cited=0)
+        return len(doomed)
+
+    def _excise(
+        self,
+        persona_id: str,
+        chain: list[PersonaChunk],
+        doomed: list[str],
+        *,
+        written_by: str,
+        cited: int,
+    ) -> None:
+        rewrite = plan_excision(chain, doomed)
+        self._backend.excise_versions(
+            persona_id=persona_id,
+            store_kind=self.STORE_KIND,
+            logical_id=core_logical_id(persona_id),
+            expected={
+                c.id: (c.provenance.version, c.provenance.superseded_by)
+                for c in chain
+                if c.provenance is not None
+            },
+            doomed_ids=doomed,
+            links=rewrite.links,
+            versions=rewrite.versions,
+        )
+        self._emit_audit(
+            persona_id=persona_id,
+            action=AuditAction.REMOVE_DOCUMENTS,
+            source=WriteSource.USER,
+            written_by=written_by,
+            chunk_ids=doomed,
+            logical_ids=[core_logical_id(persona_id)],
+            metadata={
+                "forgotten_cited": str(cited),
+                "versions_left": str(len(chain) - len(doomed)),
+            },
+        )
+
+    def orphaned_citations(self, persona_id: str) -> list[str]:
+        """Every id some version cites that is no longer on disk, sorted. Reads only.
+
+        What a sweep of restored rows looks for: blocks written before a forget reached them.
+        """
+        cited = sorted({s for c in self._chain(persona_id) for s in cited_sources(c)})
+        return self.missing_sources(persona_id, cited)
+
+    def _check_rollback_target(self, persona_id: str, target: PersonaChunk) -> None:
+        """Refuse to bring back a summary of evidence that has been forgotten."""
+        missing = self.missing_sources(persona_id, cited_sources(target))
+        if missing:
+            msg = (
+                "This version of the memory summary was written from something that has since "
+                "been forgotten, so it cannot be restored."
+            )
+            raise ForgottenEvidenceError(
+                msg, context={"persona_id": persona_id, "missing": str(len(missing))}
+            )

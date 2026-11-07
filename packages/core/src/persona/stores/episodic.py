@@ -24,6 +24,7 @@ from typing import Any, ClassVar
 from persona.audit import AuditAction
 from persona.schema.chunks import PersonaChunk, WriteSource
 from persona.stores.base import TypedStore
+from persona.stores.core_memory import CoreMemoryStore
 from persona.stores.lifecycle import EpisodicSettings, retention
 from persona.stores.policy import PolicyDecision, PolicyRule, PolicyTable
 from persona.stores.pyramid import EpisodicPyramid, resolve_display
@@ -53,6 +54,8 @@ class EpisodicStore(TypedStore):
         # The pyramid surface over the SAME transport (Spec K8 T4): gist rows,
         # drill-down, the privacy cascade, and band-resolved display.
         self._pyramid = EpisodicPyramid(backend=backend, audit_logger=audit_logger)
+        # The summary of this store (K9-D-10), which a forget has to reach (K8-D-14, R9-209).
+        self._core = CoreMemoryStore(backend=backend, audit_logger=audit_logger)
 
     @property
     def settings(self) -> EpisodicSettings:
@@ -119,17 +122,28 @@ class EpisodicStore(TypedStore):
         at the superseded version: cascading on the requested ids alone would delete the
         gist covering the version the user saw and leave the older gist, which still carries
         the text, sitting on top of evidence that has just been deleted.
+
+        The core block is derived text too, so it goes the same way, and it goes LAST, after the
+        evidence. That order is what a refresh in flight relies on. If its write commits first,
+        this sees the block and removes it. If this commits first, the refresh's write can put a
+        version back (it rewrites the prior head to link it), but every version it could put
+        back cites evidence that is already gone, and the refresh sweeps the whole chain for
+        exactly that after it writes (``refresh_core_block``). Another writer to the core chain
+        doing the same would not sweep: only the refresh and a rollback write it, and a rollback
+        has no production caller yet.
         """
         if not doc_ids:
             return
         doomed = self.chain_ids(persona_id, doc_ids)
         super().remove_documents(persona_id, doomed)
         self._pyramid.remove_gists_for_members(persona_id, doomed)
+        self._core.forget_cited(persona_id, doomed)
 
     def delete(self, persona_id: str) -> None:
-        """Wipe the persona's episodic store AND its gist layer (K8-D-14)."""
+        """Wipe the persona's episodic store, its gist layer and its core block (K8-D-14)."""
         super().delete(persona_id)
         self._pyramid.delete_all(persona_id)
+        self._core.retire(persona_id)
 
     def reinforce(self, persona_id: str, chunk_ids: list[str]) -> None:
         """Reinforce recalled chunks: ``strength += 1``, decay clock reset (K8-D-5).

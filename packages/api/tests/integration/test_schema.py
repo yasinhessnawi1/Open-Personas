@@ -80,6 +80,7 @@ def test_memory_chunks_indexes(pg_engine: Engine) -> None:
         "idx_memory_persona_kind",
         "idx_memory_persona_kind_logical",
         "idx_memory_current_heads",
+        "uq_memory_chain_head",
         "idx_memory_embedding",
         "idx_memory_persona_kind_created",  # Spec K8: the recent() pushdown index
     }.issubset(names)

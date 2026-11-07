@@ -110,7 +110,17 @@ def test_a_deleted_middle_version_is_refused() -> None:
 
 
 def test_two_rows_claiming_one_version_are_refused() -> None:
-    chain = [_v(1, superseded_by=None), _v(1, superseded_by=None, chunk_id="twin")]
+    """Below the top, where the version order really is not the truth.
+
+    Two unsuperseded rows at the TOP are the raced shape, which ``--resolve-raced`` settles
+    (R9-205, test_raced_chain_resolution.py). This is the general refusal.
+    """
+    second = f"{_LOGICAL}::v0002"
+    chain = [
+        _v(1, superseded_by=second),
+        _v(1, superseded_by=second, chunk_id="twin"),
+        _v(2, superseded_by=None),
+    ]
     diagnosis = diagnose_chain(chain)
     assert diagnosis.defect is ChainDefect.DUPLICATE_VERSION
     assert not diagnosis.repairable

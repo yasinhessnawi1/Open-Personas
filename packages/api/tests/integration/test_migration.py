@@ -67,6 +67,7 @@ def test_migration_upgrade_creates_everything(database_url: str) -> None:
     idx = {i["name"] for i in insp.get_indexes("memory_chunks")}
     assert "idx_memory_embedding" in idx
     assert "idx_memory_current_heads" in idx
+    assert "uq_memory_chain_head" in idx
 
     # RLS: every tenant table is enabled + forced and has the policy.
     with engine.connect() as conn:

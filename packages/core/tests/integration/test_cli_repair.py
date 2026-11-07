@@ -25,8 +25,10 @@ import pytest
 import yaml
 from persona.audit import MemoryAuditLogger
 from persona.cli.main import app
+from persona.recall.core_memory import CoreBlock, core_block_to_chunk
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.chroma import ChromaBackend
+from persona.stores.core_memory import CoreMemoryStore
 from persona.stores.self_facts import SelfFactsStore
 from typer.testing import CliRunner
 
@@ -194,6 +196,140 @@ def test_an_unknown_store_name_is_refused_before_anything_is_touched(
     # runs, which is the point: an unknown store name never reaches a transport.
     assert result.exit_code == 2
     assert not chroma_home.exists(), "the command opened a store before validating its input"
+
+
+def _seed_raced_chain(home: Path) -> None:
+    """Two writers read version 1 and both wrote version 2. The first link names ``b``."""
+    backend = _backend(home)
+    backend.upsert(
+        persona_id=_PERSONA_ID,
+        store_kind="self_facts",
+        chunks=[
+            _chunk(1, superseded_by="b", chunk_id=_LOGICAL),
+            _chunk(2, superseded_by=None, chunk_id="a"),
+            _chunk(2, superseded_by=None, chunk_id="b"),
+        ],
+    )
+
+
+def _versions(home: Path) -> dict[str, int]:
+    rows = _backend(home).get_all(persona_id=_PERSONA_ID, store_kind="self_facts")
+    return {c.id: c.provenance.version for c in rows if c.provenance is not None}
+
+
+def test_a_raced_chain_is_reported_and_a_plain_apply_leaves_it(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    _seed_raced_chain(chroma_home)
+
+    result = runner.invoke(app, ["repair", str(persona_file), "--apply"])
+
+    assert result.exit_code == 1
+    assert "--resolve-raced" in result.output, "the output has to say what the way out is"
+    assert _versions(chroma_home) == {_LOGICAL: 1, "a": 2, "b": 2}
+
+
+def test_the_flag_without_apply_changes_nothing(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    """Dry run stays the default, and the flag only widens what ``--apply`` may do."""
+    _seed_raced_chain(chroma_home)
+
+    result = runner.invoke(app, ["repair", str(persona_file), "--resolve-raced"])
+
+    assert result.exit_code == 1
+    assert _versions(chroma_home) == {_LOGICAL: 1, "a": 2, "b": 2}
+
+
+def test_the_flag_with_apply_settles_the_chain_on_the_real_transport(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    _seed_raced_chain(chroma_home)
+
+    result = runner.invoke(app, ["repair", str(persona_file), "--apply", "--resolve-raced"])
+
+    assert result.exit_code == 0, result.output
+    assert "now intact" in result.output
+    assert _versions(chroma_home) == {_LOGICAL: 1, "a": 2, "b": 3}
+    store = SelfFactsStore(backend=_backend(chroma_home), audit_logger=MemoryAuditLogger())
+    assert [c.id for c in store.history(_PERSONA_ID, _LOGICAL)] == [_LOGICAL, "a", "b"]
+
+
+def test_the_command_needs_to_know_what_to_check(runner: CliRunner, chroma_home: Path) -> None:
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code != 0
+    assert not chroma_home.exists(), "refused before anything was opened"
+
+
+def test_a_persona_and_all_personas_are_refused_together(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    result = runner.invoke(
+        app, ["repair", str(persona_file), "--all-personas", "--database-url", "postgresql://x"]
+    )
+    assert result.exit_code == 2, "a usage error, not a failed connection to that url"
+    assert not chroma_home.exists()
+
+
+def test_all_personas_needs_a_database(runner: CliRunner, chroma_home: Path) -> None:
+    """A Chroma folder has no list of personas to sweep, and it must say so rather than guess."""
+    result = runner.invoke(app, ["repair", "--all-personas"])
+    assert result.exit_code != 0
+    assert "--database-url" in result.output
+    assert not chroma_home.exists()
+
+
+def _seed_block_citing_nothing(home: Path) -> None:
+    """A summary restored from before a forget reached it: its evidence is not on disk."""
+    store = CoreMemoryStore(backend=_backend(home), audit_logger=MemoryAuditLogger())
+    block = CoreBlock(text="a summary of something forgotten", source_ids=("gone",))
+    store.write(
+        _PERSONA_ID,
+        [core_block_to_chunk(block, _PERSONA_ID, now=datetime.now(UTC))],
+        source=WriteSource.SYSTEM,
+    )
+
+
+def _block_rows(home: Path) -> int:
+    return len(_backend(home).get_all(persona_id=_PERSONA_ID, store_kind="core_memory"))
+
+
+def test_the_sweep_is_a_dry_run_by_default(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    _seed_block_citing_nothing(chroma_home)
+
+    result = runner.invoke(app, ["repair", str(persona_file), "--forgotten-evidence"])
+
+    assert result.exit_code == 1
+    assert "--apply" in result.output
+    assert "forgotten" not in result.output.split("Nothing has been changed")[1].split("--apply")[0]
+    assert "a summary of" not in result.output, "ids and counts, never a word of the text"
+    assert _block_rows(chroma_home) == 1
+
+
+def test_the_sweep_with_apply_deletes_it_and_then_finds_nothing(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    _seed_block_citing_nothing(chroma_home)
+
+    result = runner.invoke(app, ["repair", str(persona_file), "--forgotten-evidence", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert _block_rows(chroma_home) == 0
+    again = runner.invoke(app, ["repair", str(persona_file), "--forgotten-evidence"])
+    assert again.exit_code == 0
+    assert "cites anything forgotten" in again.output
+
+
+def test_the_sweep_runs_on_its_own(
+    runner: CliRunner, persona_file: Path, chroma_home: Path
+) -> None:
+    result = runner.invoke(
+        app, ["repair", str(persona_file), "--forgotten-evidence", "--resolve-raced"]
+    )
+    assert result.exit_code == 2
+    assert not chroma_home.exists()
 
 
 def test_the_command_loads_no_embedding_model(persona_file: Path, chroma_home: Path) -> None:

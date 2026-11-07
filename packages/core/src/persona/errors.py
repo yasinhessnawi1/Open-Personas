@@ -23,13 +23,16 @@ __all__ = [
     "AuthenticationError",
     "BrokenVersionChainError",
     "CalculatorError",
+    "ChainConflictError",
     "ChannelUnreachableError",
     "CheckpointTooLargeError",
+    "ChunkIntegrityError",
     "CreditsExhaustedError",
     "DailySpendCapExceededError",
     "ApprovalNotFoundError",
     "DuplicateJobTypeError",
     "FileExtractionError",
+    "ForgottenEvidenceError",
     "GatedActionProposedError",
     "InvalidRecurrenceRuleError",
     "InvalidScheduleScopeError",
@@ -156,6 +159,42 @@ class BrokenVersionChainError(PersonaError):
     Common causes: duplicate version numbers within one ``logical_id``,
     a ``superseded_by`` pointer that does not match the next version's id,
     or a rollback target that does not exist.
+    """
+
+
+class ForgottenEvidenceError(PersonaError):
+    """Raised when a rollback would restore a summary of evidence the person had forgotten.
+
+    A forget deletes every core block version citing what it deleted, so this is rare. Data
+    restored from before that rule can still hold such a version (R9-209). Rolling back to it
+    would put the summary of deleted evidence back in the prompt, so it is refused. ``context``
+    carries counts and never the text.
+    """
+
+
+class ChainConflictError(PersonaError):
+    """Raised when another writer landed on a version chain first (R9-205).
+
+    A versioned write reads the chain, computes the next version and writes it. Two writers
+    that read the same chain both compute the same next version, and the partial unique index
+    on chain heads makes the second one fail rather than leave a chain with two current
+    versions. :class:`persona.stores.base.TypedStore` handles this by reading the chain again
+    and appending on top of what won, so a caller sees it only once those attempts run out, or
+    when it asked to decide for itself (``retry_on_conflict=False``).
+
+    Postgres only: Chroma has no such index, so nothing raises this there.
+    """
+
+
+class ChunkIntegrityError(PersonaError):
+    """Raised when a chunk about to be written does not match its own ``content_hash`` (R9-210).
+
+    The usual cause is ``chunk.model_copy(update={"text": ...})``, which does not re-run
+    validation and so keeps the hash of the text it no longer holds. Refused at the transport,
+    before anything is embedded or stored, because the alternative is the tamper check firing
+    on some later read, about a row written long ago, from a call site that did nothing wrong.
+
+    ``context`` carries the ``chunk_id`` and never the text: this message reaches logs.
     """
 
 

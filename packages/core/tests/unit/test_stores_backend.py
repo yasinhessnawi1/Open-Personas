@@ -76,8 +76,28 @@ class _FakeBackend:
         self.calls.append("get_by_ids")
         return []
 
-    def relink(self, *, persona_id: str, store_kind: str, links: dict[str, str | None]) -> None:
+    def relink(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        links: dict[str, str | None],
+        versions: dict[str, int] | None = None,
+    ) -> None:
         self.calls.append("relink")
+
+    def excise_versions(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        logical_id: str,
+        expected: dict[str, tuple[int, str | None]],
+        doomed_ids: list[str],
+        links: dict[str, str | None],
+        versions: dict[str, int],
+    ) -> None:
+        pass
 
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         self.calls.append("delete_documents")

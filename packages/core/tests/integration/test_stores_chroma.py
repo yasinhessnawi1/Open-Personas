@@ -12,6 +12,7 @@ layer expects.
 
 from __future__ import annotations
 
+from collections.abc import Sequence  # noqa: TC003 - in a runtime signature
 from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 — used at runtime by pytest tmp_path
 
@@ -19,10 +20,14 @@ import pytest
 from persona.audit import AuditAction, MemoryAuditLogger
 from persona.errors import (
     BrokenVersionChainError,
+    ChunkIntegrityError,
     PersonaSelfWriteForbiddenError,
     RuntimeWriteForbiddenError,
 )
+from persona.recall.core_memory import CoreBlock, core_block_to_chunk
+from persona.registry import PersonaRegistry
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.schema.persona import Persona
 from persona.stores import (
     ChromaBackend,
     EpisodicStore,
@@ -30,6 +35,8 @@ from persona.stores import (
     SelfFactsStore,
     WorldviewStore,
 )
+from persona.stores.core_memory import CoreMemoryStore, core_logical_id
+from persona.stores.versioning import ChainDefect
 
 from tests._embedder import HashEmbedder
 
@@ -368,6 +375,295 @@ class TestVersioning:
             )
 
 
+# --- The hash is checked at the write, not on some later read (R9-210) -------
+
+
+class _CountingEmbedder(HashEmbedder):
+    """Counts encodes. A refused chunk must not pay for an embedding."""
+
+    def __init__(self) -> None:
+        self.encoded = 0
+
+    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        self.encoded += 1
+        return super().encode(texts)
+
+
+class TestStaleHashRefusedAtWrite:
+    def test_the_refusal_comes_before_the_embedder(self, tmp_path: Path) -> None:
+        embedder = _CountingEmbedder()
+        backend = ChromaBackend(persist_path=tmp_path / "counted", embedder=embedder)
+        stale = _chunk().model_copy(update={"text": "changed"})
+        with pytest.raises(ChunkIntegrityError):
+            backend.upsert(persona_id="p1", store_kind="self_facts", chunks=[stale])
+        assert embedder.encoded == 0, "a refused chunk must not pay for an embedding"
+
+    def test_a_model_copy_edit_is_refused_and_nothing_lands(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        store = SelfFactsStore(backend=backend, audit_logger=audit)
+        stale = _chunk().model_copy(update={"text": "changed"})
+        with pytest.raises(ChunkIntegrityError):
+            store.write("p1", [stale], source=WriteSource.USER)
+        assert backend.get_all(persona_id="p1", store_kind="self_facts") == []
+        assert audit.events == [], "a refused write must not be audited as a write"
+
+    def test_a_batch_with_one_stale_chunk_lands_nothing(self, backend: ChromaBackend) -> None:
+        good = _chunk(chunk_id="p1::self_facts::0001")
+        stale = _chunk(chunk_id="p1::self_facts::0002").model_copy(update={"text": "changed"})
+        with pytest.raises(ChunkIntegrityError):
+            backend.upsert(persona_id="p1", store_kind="self_facts", chunks=[good, stale])
+        assert backend.get_all(persona_id="p1", store_kind="self_facts") == []
+
+
+# --- Two racing saves of one persona, on the real transport (review finding M1) --
+
+
+class _RaceAtNextUpsert:
+    """Forwards to the transport, and runs ``hook`` inside the next self_facts upsert."""
+
+    def __init__(self, inner: ChromaBackend) -> None:
+        self._inner = inner
+        self.hook: object = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+        if store_kind == "self_facts":
+            hook, self.hook = self.hook, None
+            if callable(hook):
+                hook()
+        self._inner.upsert(persona_id=persona_id, store_kind=store_kind, chunks=chunks)
+
+
+class TestRacingPersonaSaves:
+    _YAML = Path(__file__).parents[1] / "fixtures/personas/valid/03_legal_assistant_full.yaml"
+
+    def _setup(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> tuple[PersonaRegistry, _RaceAtNextUpsert, SelfFactsStore, Persona]:
+        racing = _RaceAtNextUpsert(backend)
+        stores = {
+            "identity": IdentityStore(backend=racing, audit_logger=audit),
+            "self_facts": SelfFactsStore(backend=racing, audit_logger=audit),
+            "worldview": WorldviewStore(backend=racing, audit_logger=audit),
+            "episodic": EpisodicStore(backend=racing, audit_logger=audit),
+        }
+        registry = PersonaRegistry(stores=stores, audit_logger=audit)
+        persona = Persona.from_yaml(self._YAML).model_copy(update={"persona_id": "pA"})
+        registry.load_persona(persona)
+        return registry, racing, stores["self_facts"], persona
+
+    def test_two_identical_saves_leave_a_chain_that_can_still_be_saved(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        registry, racing, store, base = self._setup(backend, audit)
+        fact = base.self_facts[0].model_copy(update={"fact": "An edited fact"})
+        edited = base.model_copy(update={"self_facts": [fact, *base.self_facts[1:]]})
+
+        racing.hook = lambda: registry.load_persona(edited)
+        registry.load_persona(edited)
+
+        assert store.diagnose("pA").healthy
+        later = base.self_facts[0].model_copy(update={"fact": "A later edit"})
+        registry.load_persona(base.model_copy(update={"self_facts": [later, *base.self_facts[1:]]}))
+        assert store.diagnose("pA").healthy
+
+
+# --- A forget reaches the summary, on the real transport (R9-209) ----------------
+
+
+class TestForgetReachesTheCoreBlock:
+    def _setup(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> tuple[CoreMemoryStore, EpisodicStore]:
+        core = CoreMemoryStore(backend=backend, audit_logger=audit)
+        episodic = EpisodicStore(backend=backend, audit_logger=audit)
+        for name, cited in (("first", "a"), ("second", "b"), ("third", "c")):
+            core.write(
+                "p1",
+                [core_block_to_chunk(CoreBlock(text=name, source_ids=(cited,)), "p1", now=UTC_NOW)],
+                source=WriteSource.SYSTEM,
+            )
+        for chunk_id in ("a", "b", "c"):
+            episodic.write(
+                "p1",
+                [_chunk(chunk_id=chunk_id, text=f"evidence {chunk_id}")],
+                source=WriteSource.SYSTEM,
+            )
+        return core, episodic
+
+    @pytest.mark.parametrize(
+        ("forgotten", "left"),
+        [("a", ["second", "third"]), ("b", ["first", "third"]), ("c", ["first", "second"])],
+        ids=["oldest", "middle", "head"],
+    )
+    def test_the_chain_is_valid_after_any_version_goes(
+        self,
+        backend: ChromaBackend,
+        audit: MemoryAuditLogger,
+        forgotten: str,
+        left: list[str],
+    ) -> None:
+        core, episodic = self._setup(backend, audit)
+
+        episodic.remove_documents("p1", [forgotten])
+
+        chain = core.history("p1", core_logical_id("p1"))  # raises on a hole or a bad link
+        assert [c.text for c in chain] == left
+        assert [c.provenance.version for c in chain if c.provenance] == [1, 2]
+        assert core.current("p1").text == left[-1]  # type: ignore[union-attr]
+        assert core.diagnose("p1").healthy
+
+    def test_the_forgotten_text_is_gone_from_every_version(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        core, episodic = self._setup(backend, audit)
+        episodic.remove_documents("p1", ["b"])
+        rows = backend.get_all(persona_id="p1", store_kind="core_memory")
+        assert "second" not in {c.text for c in rows}
+        assert core.orphaned_citations("p1") == []
+
+    def test_the_delete_comes_before_the_relink(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No transaction here, so a killed process stops between the two. The text goes first."""
+        core, episodic = self._setup(backend, audit)
+        calls: list[str] = []
+        real_delete, real_relink = backend.delete_documents, backend.relink
+
+        def delete(**kwargs: object) -> None:
+            calls.append("delete")
+            real_delete(**kwargs)  # type: ignore[arg-type]
+
+        def relink(**kwargs: object) -> None:
+            calls.append("relink")
+            real_relink(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(backend, "delete_documents", delete)
+        monkeypatch.setattr(backend, "relink", relink)
+
+        core.forget_cited("p1", ["b"])
+
+        assert calls == ["delete", "relink"]
+        assert core.diagnose("p1").healthy
+        _ = episodic
+
+    def test_a_writer_that_landed_after_the_forget_read_makes_it_replan(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chroma checks the chain just before it acts, which catches this much."""
+        core, episodic = self._setup(backend, audit)
+        real = backend.excise_versions
+        armed = [True]
+
+        def refresh_first(**kwargs: object) -> None:
+            if armed.pop() if armed else False:
+                core.write(
+                    "p1",
+                    [
+                        core_block_to_chunk(
+                            CoreBlock(text="fourth", source_ids=("c",)), "p1", now=UTC_NOW
+                        )
+                    ],
+                    source=WriteSource.SYSTEM,
+                )
+            real(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(backend, "excise_versions", refresh_first)
+
+        core.forget_cited("p1", ["b"])
+
+        chain = core.history("p1", core_logical_id("p1"))
+        assert [c.text for c in chain] == ["first", "third", "fourth"]
+        assert core.diagnose("p1").healthy
+        _ = episodic
+
+    def test_no_survivor_means_no_block(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        core, episodic = self._setup(backend, audit)
+        episodic.remove_documents("p1", ["a", "b", "c"])
+        assert core.current("p1") is None
+        assert core.diagnose("p1").healthy
+
+    def test_a_chain_racing_writers_broke_comes_out_healthy(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        """No index here, so two heads are possible when a forget arrives."""
+        core, episodic = self._setup(backend, audit)
+        head = core.current("p1")
+        assert head is not None
+        assert head.provenance is not None
+        racer = PersonaChunk(
+            id="racer",
+            text="racer",
+            metadata={"source_ids": "c"},
+            created_at=UTC_NOW,
+            provenance=head.provenance,
+        )
+        backend.upsert(persona_id="p1", store_kind="core_memory", chunks=[racer])
+
+        episodic.remove_documents("p1", ["a"])
+
+        assert core.diagnose("p1").healthy
+
+
+# --- What Chroma does NOT do, pinned so it is never mistaken for a bug (R9-205) --
+
+
+class TestChromaHasNoHeadIndex:
+    """The documented Liskov difference in ``persona.stores.backend``. Postgres raises
+    ``ChainConflictError`` and retries; here both racers land, and repair is the remedy."""
+
+    def test_two_racing_writers_both_land_and_repair_settles_them(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        racing = _RaceAtNextUpsert(backend)
+        store = SelfFactsStore(backend=racing, audit_logger=audit)
+        store.write("p1", [_chunk(chunk_id="base", text="v1")], source=WriteSource.USER)
+
+        def chained(chunk_id: str, body: str) -> PersonaChunk:
+            return PersonaChunk(
+                id=chunk_id,
+                text=body,
+                created_at=UTC_NOW,
+                provenance=ChunkProvenance(
+                    source=WriteSource.USER, logical_id="base", written_at=UTC_NOW
+                ),
+            )
+
+        racing.hook = lambda: store.write("p1", [chained("b", "from b")], source=WriteSource.USER)
+        store.write("p1", [chained("a", "from a")], source=WriteSource.USER)  # no error here
+
+        found = store.diagnose("p1").findings
+        assert [f.defect for f in found] == [ChainDefect.RACED_HEADS]
+        assert store.repair("p1") == 0, "a plain repair must leave it"
+        assert store.repair("p1", resolve_raced=True) == 1
+        # ``b`` landed first, inside the hook. ``a`` committed last, so its link is the one the
+        # prior head kept, and the resolution puts it last.
+        assert [c.text for c in store.history("p1", "base")] == ["v1", "from b", "from a"]
+
+
+class TestRelinkWithVersionsOnly:
+    def test_a_versions_only_relink_is_applied(self, backend: ChromaBackend) -> None:
+        """The Liskov twin of the Postgres test: both transports apply it."""
+        chunk = PersonaChunk(
+            id="x",
+            text="t",
+            created_at=UTC_NOW,
+            provenance=ChunkProvenance(
+                source=WriteSource.USER, logical_id="x", version=5, written_at=UTC_NOW
+            ),
+        )
+        backend.upsert(persona_id="p1", store_kind="self_facts", chunks=[chunk])
+        backend.relink(persona_id="p1", store_kind="self_facts", links={}, versions={"x": 1})
+        got = backend.get_all(persona_id="p1", store_kind="self_facts")[0]
+        assert got.provenance is not None
+        assert got.provenance.version == 1
+
+
 # --- Persistence ------------------------------------------------------------
 
 
@@ -550,7 +846,7 @@ class TestForgetWholeChain:
         assert recalled, "nothing was recallable to begin with"
 
         # The head of the edited chain, which is NOT the id the caller first wrote: the store
-        # mints ``{logical_id}::v0002`` so an update cannot overwrite the version it supersedes.
+        # mints a fresh id so an update cannot overwrite the version it supersedes.
         head = next(
             c
             for c in store.get_all("p1")
