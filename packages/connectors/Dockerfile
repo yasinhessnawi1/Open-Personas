@@ -12,7 +12,9 @@
 # no volume, no HF models.
 
 # ---------- builder ----------
-FROM python:3.12-slim AS builder
+# python:3.12-slim pinned by its multi-arch index digest (amd64, arm64; read 2026-11-07),
+# in both stages: bump it deliberately, for security updates (scripts/tests/test_api_image.py).
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS builder
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
@@ -40,7 +42,7 @@ COPY packages/ packages/
 RUN uv sync --frozen --all-packages --no-dev
 
 # ---------- runtime ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}"

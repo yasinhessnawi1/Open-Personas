@@ -127,3 +127,27 @@ def test_no_env_file_anywhere_reaches_a_build() -> None:
         if line.strip() and not line.startswith("#")
     }
     assert {"**/.env", "**/.env.*"} <= patterns
+
+
+#: Review of T1 to T6 (LOW): the Python base is pinned by its multi-arch index digest in
+#: every Dockerfile, so amd64 and arm64 build from the same release and a re-tag upstream
+#: cannot change a production build. Bump the digest deliberately, for security updates.
+BASE = re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64} AS (builder|runtime)$")
+
+
+def test_every_python_base_is_pinned_by_digest() -> None:
+    checked = set()
+    for dockerfile in sorted((ROOT / "packages").glob("*/Dockerfile")):
+        for line in dockerfile.read_text(encoding="utf-8").splitlines():
+            if line.startswith("FROM python"):
+                assert BASE.match(line), f"{dockerfile.parent.name}: {line}"
+                checked.add(dockerfile.parent.name)
+    assert {"api", "connectors", "voice"} <= checked
+
+
+def test_the_cache_mount_copies_out_of_the_cache() -> None:
+    """With the cache on a mount, uv must COPY into the venv: a hardlink or reflink into a
+    cache that is not part of the image would leave the venv's files behind."""
+    builder = DOCKERFILE.read_text(encoding="utf-8").split("AS runtime", 1)[0]
+    assert re.search(r"^\s*UV_LINK_MODE=copy\b", builder, re.M)
+    assert "--mount=type=cache,target=/root/.cache/uv" in builder
