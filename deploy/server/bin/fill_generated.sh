@@ -26,8 +26,9 @@ chmod 600 "${STORE}"
 hex() { openssl rand -hex "$1"; }
 
 public_ipv4() {
-  # The source address the kernel uses for the internet. On a Hetzner Cloud server the
-  # primary IPv4 sits on the interface itself (no NAT), so this is the public address.
+  # Only the voice host's LiveKit needs it (NODE_IP). The source address the kernel uses
+  # for the internet is the public one where it sits on the interface itself (no NAT); on
+  # OCI it is a private address (the public one is NAT'd), refused below: set NODE_IP by hand.
   local ip
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
   printf '%s' "${ip}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || return 1

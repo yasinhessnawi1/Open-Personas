@@ -79,7 +79,7 @@ _PLATFORM_GRANTS = (
 def _grant_persona_platform(dsn: str) -> None:
     """Grant the api's long-running cross-tenant role on every current and future table.
 
-    On the Hetzner box the api process no longer holds the superuser DSN: its
+    On the server kit's core host the api process no longer holds the superuser DSN: its
     ``DATABASE_URL`` (the admin, dispatch and JIT-provisioning engines) is the
     ``persona_platform`` role, which bypasses RLS but is NOT a superuser and runs no DDL,
     so a compromised api cannot ``COPY ... TO PROGRAM``, alter roles or read server files.
