@@ -95,6 +95,8 @@ Connect the apps you already live in and message a persona by name. **Telegram, 
 
 Any persona can run on a model you pick from a live catalog, USD price tags included, with the readable tier router (rules, not vibes: frontier / mid / small, with fallback across providers) as the default and the safety net. Ten providers out of the box: Anthropic, OpenAI, DeepSeek, Groq, Together, NVIDIA, Cloudflare, OpenRouter, Ollama, and local HuggingFace. Costs are recorded per turn as **what actually ran**, not what was guessed.
 
+Local HuggingFace models in a clone run on the CPU on Linux: the lock installs PyTorch's CPU build there (production has no GPU). For an NVIDIA GPU, install a CUDA build of torch into the environment yourself; a later `uv sync` restores the CPU build. Installs from PyPI are not affected.
+
 ![Model selection per persona, with live price tags](assets/readme/model-picker.png)
 
 ### 🛡️ Safety that's engineered, not promised

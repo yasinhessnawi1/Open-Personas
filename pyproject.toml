@@ -23,6 +23,18 @@ persona-runtime = { workspace = true }
 persona-api = { workspace = true }
 persona-voice = { workspace = true }
 persona-connectors = { workspace = true }
+# Linux takes the CPU build of PyTorch (ruling D1, 2026-11-07). PyPI's Linux wheels pull
+# about 2.3 GB of compressed CUDA wheels on x86_64 and aarch64 alike; production never had
+# a GPU, and the api image has to build on a 2-core ARM box with a tight disk. Windows and
+# macOS keep PyPI's wheels. A source applies only to a direct dependency, which is why
+# persona-core lists torch itself. scripts/tests/test_cpu_torch_lock.py pins all of this.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+# explicit: this index serves only the packages pinned to it above, nothing else.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [
