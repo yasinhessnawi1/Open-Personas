@@ -128,9 +128,10 @@ def test_the_lock_holds_no_cuda_package() -> None:
     assert cuda_packages(_lock()) == []
 
 
-# The re-lock wrote lock revision 3 (upload-time fields), which the floating `uv:0.6`
-# image the Dockerfiles used predates. Every image build therefore pins the uv that can
-# read this lock, by digest, so a re-tag upstream cannot change what builds production.
+# Every image build pins uv by version AND digest, at the uv that wrote this lock, so a
+# re-tag upstream cannot change what builds production. (The T1 note said the floating
+# `uv:0.6` could not read lock revision 3; the review found 0.6.9 reads it. The pin stays
+# for reproducibility, not for that reason.)
 UV_IMAGE = re.compile(
     r"^COPY --from=ghcr\.io/astral-sh/uv:(\d+)\.(\d+)\.(\d+)@sha256:[0-9a-f]{64}"
     r" /uv /usr/local/bin/uv$",
