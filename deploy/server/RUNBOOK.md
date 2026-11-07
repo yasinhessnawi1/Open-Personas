@@ -273,9 +273,11 @@ Edit the files in `~/op-env`:
 - `__MISSING_FROM_DOTENV__`: supply the value, or **delete the line** if production never
   set it (the code default then applies, exactly as on Fly).
 - Every name marked `[d]`: replace the copied dev value with production's.
-- `__OWNER_CLERK_PROD__`: every Clerk-derived value, from the **production** instance
-  (Frontend API `clerk.openpersonas.si`; Clerk ties a production instance to its domain,
-  so it must be the instance set up for openpersonas.si):
+- `__OWNER_CLERK_PROD__`: every Clerk-derived value, from the **production** instance,
+  whose Frontend API becomes `clerk.openpersonas.si`. **Change the domain of the EXISTING production Clerk instance in the Clerk dashboard;
+  never create a new instance, or the restored users' ids stop matching.** A new instance issues new user
+  ids, the api takes each user's identity from the token's `sub`, and every restored user
+  would sign in as a stranger with their data unreachable. Then:
   - `PERSONA_API_JWT_PUBLIC_KEY` and `PERSONA_CONNECTORS_JWT_PUBLIC_KEY`: Configure > API
     keys > the JWT public key, PEM format. The same PEM in both.
   - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersonas.si/.well-known/jwks.json`.
@@ -514,7 +516,7 @@ check each of these in the rendered files.
 | Twilio SMS and WhatsApp webhooks and status callbacks | `https://connectors.openpersonas.si/{sms,whatsapp}/{webhook,status}` |
 | Postmark inbound webhook | `https://connectors.openpersonas.si/email/webhook` |
 | GitHub OAuth app for MCP (`PERSONA_MCP_OAUTH_REDIRECT_BASE_URL`) | on `https://api.openpersonas.si` |
-| Clerk production instance | its domain `openpersonas.si` (Frontend API `clerk.openpersonas.si`), the `persona-api` JWT template |
+| Clerk production instance | its domain `openpersonas.si` (Frontend API `clerk.openpersonas.si`), the `persona-api` JWT template. Change the domain of the EXISTING production Clerk instance in the Clerk dashboard; never create a new instance, or the restored users' ids stop matching. |
 | Vercel (the web's env) | the api base URL `https://api.openpersonas.si`; the voice base URL `https://voice.openpersonas.si` (Phase B) |
 
 ## Seam: per-tenant MCP
