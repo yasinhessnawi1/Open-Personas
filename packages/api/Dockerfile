@@ -4,6 +4,11 @@
 # and the in-memory rate limiter require it. Migrations run once per deploy via
 # the fly.toml release_command (packages/api/release.py) — NOT on container
 # start (Spec 07 §7) and not by hand; a release failure aborts the deploy.
+# On the server deploy kit, its one-shot `migrate` service runs release.py (bin/deploy.sh).
+#
+# Builds natively on linux/amd64 and linux/arm64 (the Oracle server is arm64):
+# torch comes from PyTorch's CPU index on Linux (uv.lock), and nothing installed here
+# lacks an arm64 wheel (scripts/tests/test_api_image.py).
 
 # ---------- builder ----------
 FROM python:3.12-slim AS builder
@@ -28,9 +33,15 @@ COPY packages/core/pyproject.toml packages/core/pyproject.toml
 COPY packages/runtime/pyproject.toml packages/runtime/pyproject.toml
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/voice/pyproject.toml packages/voice/pyproject.toml
-# Provision the venv with all workspace members (frozen install).
+COPY packages/connectors/pyproject.toml packages/connectors/pyproject.toml
 COPY packages/ packages/
-RUN uv sync --frozen --all-packages --no-dev
+# Only the api process's closure (frozen): persona-connectors depends on persona-api
+# (C1-D-1) and runs inside it (the I1 fold), so this installs connectors, api, runtime
+# and core[postgres], and NOT persona-voice, whose silero-vad-lite has no Linux arm64
+# wheel. That keeps the image buildable on arm64 (the Oracle box) and amd64 alike.
+# The cache mount keeps uv's download cache out of the image layer.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --package persona-connectors
 
 # ---------- runtime ----------
 FROM python:3.12-slim AS runtime
