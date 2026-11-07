@@ -1,0 +1,48 @@
+# Open Persona: the TLS edge on the VOICE host (Azure, Phase B; owner ruling 2026-11-07).
+#
+# The voice host's Caddy loads this file (docker-compose.voice.yml); the core host's loads
+# Caddyfile. Same edge rules: Let's Encrypt over HTTP-01 (each name's DNS must point at
+# the voice host; ACME_CA starts on STAGING), the admin API OFF, no access logs, and an
+# error log without the request URI (LiveKit signaling carries its access token in the
+# query string) or the Authorization and Cookie headers.
+
+{
+	admin off
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+	log default {
+		output stderr
+		format filter {
+			request>uri delete
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+		}
+	}
+}
+
+(edge) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
+voice.openpersonasai.com {
+	import edge
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy 127.0.0.1:8001
+}
+
+# Self-hosted LiveKit signaling (WebSocket). Media does NOT pass through Caddy: it goes
+# straight to UDP 7882 (or TCP 7881) on the box. With LiveKit Cloud this site answers
+# 502, which is harmless; keep the DNS record so switching modes needs no DNS change.
+livekit.openpersonasai.com {
+	import edge
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy 127.0.0.1:7880
+}

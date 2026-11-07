@@ -1,21 +1,25 @@
-# Open Persona: the TLS edge on the Hetzner box (replaces Fly's proxy and cert manager).
+# Open Persona: the TLS edge on the CORE host (replaces Fly's proxy and cert manager).
 #
 # Caddy runs on the host network and obtains a Let's Encrypt certificate per hostname
 # with the HTTP-01 challenge, so each name's DNS A/AAAA record must already point at this
-# box. ACME_CA starts on Let's Encrypt STAGING (caddy.env); RUNBOOK.md switches it to
+# host. ACME_CA starts on Let's Encrypt STAGING (caddy.env); RUNBOOK.md switches it to
 # production once every name answers. HTTP is redirected to HTTPS automatically, which
 # is what Fly's force_https did.
 #
-# The admin API is OFF: nothing on the box can reconfigure Caddy at runtime. A config
+# The admin API is OFF: nothing on the host can reconfigure Caddy at runtime. A config
 # change is a container restart (`docker compose ... up -d --force-recreate caddy`), and
 # bin/deploy.sh validates this file before every start.
 #
-# No access logs. The error log drops the request URI (LiveKit signaling carries its
-# access token in the query string) and the Authorization and Cookie headers.
+# No access logs. The error log drops the request URI (tokens can ride in query strings)
+# and the Authorization and Cookie headers.
 #
 # The hostnames are the ones production used on Fly. Keeping them is what keeps every
 # provider registration valid unchanged: the Stripe webhook, the Discord, Slack and GitHub
 # OAuth redirects, and the Twilio and Postmark webhooks.
+#
+# voice.openpersonasai.com and livekit.openpersonasai.com are NOT served here: they point
+# at the voice host (Azure), whose Caddy loads Caddyfile.voice. Asking Let's Encrypt for a
+# name whose DNS points elsewhere fails on every attempt and spends the rate limit.
 
 {
 	admin off
@@ -69,24 +73,4 @@ connectors.openpersonasai.com {
 	handle {
 		respond 404
 	}
-}
-
-# persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
-voice.openpersonasai.com {
-	import edge
-	request_body {
-		max_size 1MB
-	}
-	reverse_proxy 127.0.0.1:8001
-}
-
-# Self-hosted LiveKit signaling (WebSocket). Media does NOT pass through Caddy: it goes
-# straight to UDP 7882 (or TCP 7881) on the box. With LiveKit Cloud this site answers
-# 502, which is harmless; keep the DNS record so switching modes needs no DNS change.
-livekit.openpersonasai.com {
-	import edge
-	request_body {
-		max_size 1MB
-	}
-	reverse_proxy 127.0.0.1:7880
 }

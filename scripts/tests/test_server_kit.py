@@ -319,7 +319,7 @@ def test_host_network_only_for_caddy_and_livekit() -> None:
     host = {n for n, s in _compose()["services"].items() if s.get("network_mode") == "host"}
     assert host == {"caddy"}
     voice = _voice_compose()["services"]
-    assert {n for n, s in voice.items() if s.get("network_mode") == "host"} == {"livekit"}
+    assert {n for n, s in voice.items() if s.get("network_mode") == "host"} == {"caddy", "livekit"}
 
 
 def test_livekit_and_migrate_only_run_when_asked() -> None:
@@ -380,21 +380,32 @@ def test_voice_audit_goes_to_postgres_in_cloud() -> None:
 
 # --- Caddy and preflight agree on the hostnames ----------------------------------------------
 
-HOSTS = {
+#: Served by the core host (Oracle): the api under both domains and the connector host.
+CORE_HOSTS = {
     "api.openpersonasai.com",
     "api.openpersona.online",
     "connectors.openpersonasai.com",
-    "voice.openpersonasai.com",
-    "livekit.openpersonasai.com",
 }
+#: Served by the voice host (Azure, Phase B). Their DNS records point there, so the core
+#: host's Caddy must not ask Let's Encrypt for them: every attempt would fail.
+VOICE_HOSTS = {"voice.openpersonasai.com", "livekit.openpersonasai.com"}
+CADDYFILES = {"Caddyfile": CORE_HOSTS, "Caddyfile.voice": VOICE_HOSTS}
 
 
-def test_caddy_admin_api_is_off_and_bodies_are_capped() -> None:
-    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
+def _served(caddyfile: str) -> set[str]:
+    sites = set(re.findall(r"^([a-z0-9.,\s-]+\.(?:com|online))\s*\{", caddyfile, re.M))
+    return {h.strip() for site in sites for h in site.split(",")}
+
+
+@pytest.mark.parametrize("name", sorted(CADDYFILES))
+def test_caddy_admin_api_is_off_and_bodies_are_capped(name: str) -> None:
+    caddyfile = (KIT / name).read_text(encoding="utf-8")
     assert re.search(r"^\tadmin off$", caddyfile, re.M)
     sites = caddyfile.count("reverse_proxy 127.0.0.1")
+    assert sites >= 1
     assert caddyfile.count("max_size") == sites
     assert "request>uri delete" in caddyfile
+    assert "request>headers>Authorization delete" in caddyfile
 
 
 def test_the_connector_host_serves_exactly_the_provider_paths() -> None:
@@ -428,17 +439,30 @@ def test_the_connector_host_serves_exactly_the_provider_paths() -> None:
     assert set(matcher.group(1).split()) == expected
 
 
-def test_caddy_serves_every_production_hostname() -> None:
-    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
-    sites = set(re.findall(r"^([a-z0-9.,\s-]+\.(?:com|online))\s*\{", caddyfile, re.M))
-    served = {h.strip() for site in sites for h in site.split(",")}
-    assert served == HOSTS
+@pytest.mark.parametrize(("name", "hosts"), sorted(CADDYFILES.items()))
+def test_each_host_serves_exactly_its_hostnames(name: str, hosts: set[str]) -> None:
+    assert _served((KIT / name).read_text(encoding="utf-8")) == hosts
 
 
-def test_preflight_checks_dns_for_every_hostname() -> None:
+def test_the_split_is_not_vacuous() -> None:
+    both = "a.openpersonasai.com, b.openpersona.online {\n}\nvoice.openpersonasai.com {\n}\n"
+    expected = {"a.openpersonasai.com", "b.openpersona.online", "voice.openpersonasai.com"}
+    assert _served(both) == expected
+
+
+def test_each_caddy_loads_its_own_caddyfile() -> None:
+    core = _compose()["services"]["caddy"]["volumes"]
+    voice = _voice_compose()["services"]["caddy"]["volumes"]
+    assert "./Caddyfile:/etc/caddy/Caddyfile:ro" in core
+    assert "./Caddyfile.voice:/etc/caddy/Caddyfile:ro" in voice
+
+
+def test_preflight_checks_dns_for_exactly_the_core_hostnames() -> None:
     preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
-    for host in HOSTS:
+    for host in CORE_HOSTS:
         assert host in preflight, host
+    for host in VOICE_HOSTS:
+        assert host not in preflight, host
 
 
 # --- scripts ---------------------------------------------------------------------------------
