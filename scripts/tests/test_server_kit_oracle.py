@@ -397,10 +397,10 @@ def test_the_data_directories_belong_to_the_data_uid_and_voice_has_none() -> Non
 
 def test_containers_lose_the_whole_link_local_range() -> None:
     """The whole range is dropped; the only way back is DNS (test_server_kit_dns.py)."""
-    unit = _text("systemd/open-persona-metadata-block.service")
-    assert "-d 169.254.0.0/16 -j DROP" in unit
-    for line in unit.splitlines():
-        if "169.254.169.254/32" in line and line.startswith("Exec"):
+    script = _text("bin/metadata_block.sh")
+    assert "iptables -I DOCKER-USER 1 -d 169.254.0.0/16 -j DROP" in script
+    for line in script.splitlines():
+        if "169.254.169.254/32" in line and line.startswith("iptables"):
             assert "--dport 53 -j RETURN" in line, line
 
 
