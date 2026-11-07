@@ -3,7 +3,7 @@
 #
 # PRIMARY PATH (no cloud-init needed): the server is created with only the owner's SSH key
 # on root. Log in as root once and run, from the checkout:
-#     /opt/open-persona/repo/deploy/hetzner/bin/provision.sh
+#     /opt/open-persona/repo/deploy/server/bin/provision.sh
 # It creates `deploy` (uid 2000) with root's key, then closes root login. Every later run
 # is `sudo .../provision.sh` as deploy. cloud-init.yaml is the alternative path.
 #

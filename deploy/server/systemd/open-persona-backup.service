@@ -14,6 +14,6 @@ Environment=OP_ENV_DIR=/opt/open-persona/env
 Environment=OP_DATA_DIR=/srv/open-persona
 # Optional off-site copy, the owner's target (RUNBOOK.md, "Backups off the box"):
 # Environment="OFFSITE_CMD=/opt/open-persona/bin/offsite-copy"
-ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/backup.sh
+ExecStart=/opt/open-persona/repo/deploy/server/bin/backup.sh
 Nice=10
 IOSchedulingClass=idle

@@ -53,7 +53,7 @@ service holds. The same goes for `pg_restore` error output, which can echo row d
 | `bin/alert.sh`, `bin/diskcheck.sh` | a failed backup or a full disk raises an alert (marker, login banner, optional notifier) |
 | `sql/verify.sql` | the post-restore facts (counts and schema facts only) |
 
-Tests: `scripts/tests/test_hetzner_kit.py` (runs in CI with every other script test).
+Tests: `scripts/tests/test_server_kit.py` (runs in CI with every other script test).
 
 ## Rulings already made
 
@@ -165,7 +165,7 @@ rm /tmp/open-persona.bundle
 ## Step 3: provision (as root, once)
 
 ```bash
-ssh root@<ipv4> /opt/open-persona/repo/deploy/hetzner/bin/provision.sh
+ssh root@<ipv4> /opt/open-persona/repo/deploy/server/bin/provision.sh
 ```
 
 It creates `deploy` (uid 2000) with root's SSH key, writes the SSH lockdown (no root
@@ -174,7 +174,7 @@ fail2ban, unattended upgrades, Docker (signing key fingerprint checked), the dir
 the backup, disk-check and alert units. The root session that ran it stays open: **before
 closing it, check from a second terminal** that `ssh deploy@<ipv4>` works and
 `sudo -n true` succeeds. From then on everything runs as `deploy`; a later re-run is
-`sudo /opt/open-persona/repo/deploy/hetzner/bin/provision.sh`.
+`sudo /opt/open-persona/repo/deploy/server/bin/provision.sh`.
 
 Point the checkout at GitHub for later pulls (its `origin` is the deleted bundle):
 
@@ -198,13 +198,13 @@ production values for only some names, so mark each line `[p]` or `[d]` and have
 production value ready for every `[d]` before rendering:
 
 ```bash
-uv run python -I deploy/hetzner/render_env.py --dotenv .env --inventory > ~/op-inventory.txt
+uv run python -I deploy/server/render_env.py --dotenv .env --inventory > ~/op-inventory.txt
 ```
 
 Then render, into a directory OUTSIDE the repo:
 
 ```bash
-uv run python -I deploy/hetzner/render_env.py --dotenv .env --out ~/op-env
+uv run python -I deploy/server/render_env.py --dotenv .env --out ~/op-env
 # LiveKit defaults to selfhosted (owner ruling); add --livekit cloud only for the fallback
 # (step 9). Add --chains-from-dotenv only after confirming .env holds the production chains.
 ```
@@ -237,7 +237,7 @@ them there:
 ```bash
 scp ~/op-env/*.env deploy@<ipv4>:/opt/open-persona/env/
 ssh deploy@<ipv4>
-cd /opt/open-persona/repo/deploy/hetzner
+cd /opt/open-persona/repo/deploy/server
 bin/fill_generated.sh          # new DB passwords (3 roles), LiveKit key pair, node IP
 bin/preflight.sh --env-only    # must pass: roles separated, no dev Clerk instance
 ```
@@ -263,7 +263,7 @@ rm -rf ~/op-restore
 On the box:
 
 ```bash
-cd /opt/open-persona/repo/deploy/hetzner
+cd /opt/open-persona/repo/deploy/server
 bin/restore.sh --backup-dir /srv/open-persona/restore
 ```
 
@@ -286,7 +286,7 @@ Anything else stops the script. `pg_restore` runs in one transaction, so a faile
 leaves no tables behind, and the role and extension steps are idempotent: fix the cause
 and run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification
 check), the tables are there and the script refuses to restore over them; start clean with
-`docker compose -f docker-compose.yml down` then `docker volume rm open-persona-hetzner_pgdata`.
+`docker compose -f docker-compose.yml down` then `docker volume rm open-persona_pgdata`.
 **Only before go-live:** once real users write to this database, that command destroys
 production. After go-live a failed step is fixed in place, never by dropping the volume.
 
@@ -317,7 +317,7 @@ SQL
 - **Any rows** mean two saves of one memory ran at the same moment before this index existed,
   or an older bug left two current versions. Nothing is lost: both versions are on disk. The
   migration will refuse, changing nothing, until this is settled. See what is there, from the
-  `deploy/hetzner` directory, as the migrate service (it holds the superuser connection):
+  `deploy/server` directory, as the migrate service (it holds the superuser connection):
 
   ```bash
   docker compose -f docker-compose.yml run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL"'
@@ -376,7 +376,7 @@ Before DNS, check through an SSH tunnel from the PC:
 ```bash
 ssh -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 deploy@<ipv4>
 curl -fsS http://127.0.0.1:8000/healthz
-docker compose -f /opt/open-persona/repo/deploy/hetzner/docker-compose.yml logs api | grep -iE "model chain|mcp runtime|connectors"
+docker compose -f /opt/open-persona/repo/deploy/server/docker-compose.yml logs api | grep -iE "model chain|mcp runtime|connectors"
 ```
 
 The api boot log should show the model chains, the MCP startup summary with the
@@ -492,7 +492,7 @@ no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtim
   plus its own), added to the templates, `render_env.py` and preflight in the same change.
 - **The api never gets the Docker socket**, `/run` or `/var/run` mounts, `privileged` or
   `DOCKER_HOST`. The api holds every tenant's data and credentials.
-  `scripts/tests/test_hetzner_kit.py` fails on any of these, for every service.
+  `scripts/tests/test_server_kit.py` fails on any of these, for every service.
 - If it ever needs an endpoint WE host for providers to call, that is a new public route
   through Caddy with its own auth and request limits, and a firewall review. None is
   planned.
@@ -553,7 +553,7 @@ shape against that night's own facts and warns on any table whose row count move
 
 ## Routine operations
 
-| on Fly | here (from `/opt/open-persona/repo/deploy/hetzner`) |
+| on Fly | here (from `/opt/open-persona/repo/deploy/server`) |
 |---|---|
 | `flyctl ssh console -a open-persona-api` | `docker compose -f docker-compose.yml exec api bash` |
 | `flyctl ssh console -C "printenv NAME"` | `docker compose -f docker-compose.yml exec api printenv NAME` (prints a secret: never paste it) |
@@ -569,7 +569,7 @@ shape against that night's own facts and warns on any table whose row count move
 - **Disk:** `docker system df`; old images: `docker image prune` (keeps `:current` and
   `:previous` because they are tagged).
 - **A new release:** `cd /opt/open-persona/repo && git pull` (or a new bundle), then
-  `deploy/hetzner/bin/deploy.sh`.
+  `deploy/server/bin/deploy.sh`.
 
 ## Later: CI/CD to this box (sketch, not wired)
 

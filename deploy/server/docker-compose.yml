@@ -1,7 +1,7 @@
 # Open Persona production on ONE Hetzner box (replaces the deleted Fly apps).
 #
 # Run from the checkout on the box, always through bin/deploy.sh or with this file named:
-#   docker compose -f deploy/hetzner/docker-compose.yml ...
+#   docker compose -f deploy/server/docker-compose.yml ...
 # The build contexts are the repo root (../..), the same as the Fly builds.
 #
 # Networking (the part that keeps the firewall honest):
@@ -34,7 +34,7 @@
 #   cloud (the fallback): voice.env points at the LiveKit Cloud free-plan project;
 #                     `livekit` never runs.
 
-name: open-persona-hetzner
+name: open-persona
 
 x-logging: &logging
   driver: json-file
@@ -228,7 +228,7 @@ services:
   #   * it reaches the api only through settings in api.env (the switch above plus its
   #     own), added to the templates, render_env.py and preflight in the same change;
   #   * no service ever mounts the Docker socket, /run or /var/run, runs privileged or
-  #     sets DOCKER_HOST (scripts/tests/test_hetzner_kit.py fails if one does);
+  #     sets DOCKER_HOST (scripts/tests/test_server_kit.py fails if one does);
   #   * an endpoint WE would host for providers to call is a new public Caddy route with
   #     its own auth and request limits, and a firewall review. None is planned.
   # RUNBOOK.md, "Seam: per-tenant MCP", carries the same contract.

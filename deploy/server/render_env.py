@@ -5,17 +5,17 @@ Runs on the OWNER'S PC, never on the box and never in CI. First, the inventory, 
 writes nothing and lists every name the render would take from .env, whether .env has a
 value for it, and where it goes, so the owner can mark which values are dev:
 
-    uv run python -I deploy/hetzner/render_env.py --dotenv .env --inventory
+    uv run python -I deploy/server/render_env.py --dotenv .env --inventory
 
 Then the render:
 
-    uv run python -I deploy/hetzner/render_env.py --dotenv .env --out <dir outside the repo> \\
+    uv run python -I deploy/server/render_env.py --dotenv .env --out <dir outside the repo> \\
         [--livekit selfhosted|cloud] [--chains-from-dotenv]
 
 ``--livekit`` defaults to ``selfhosted`` (owner ruling 2026-10-23: LiveKit runs on the box;
 LiveKit Cloud's free plan is the one-setting fallback, ``--livekit cloud``).
 
-For every ``deploy/hetzner/env/<name>.env.example`` it writes ``<out>/<name>.env`` (mode
+For every ``deploy/server/env/<name>.env.example`` it writes ``<out>/<name>.env`` (mode
 0600 where the OS supports it). Values are resolved by the template tokens documented in
 ``env/common.env.example``. Tokens it cannot resolve stay in the file, and
 ``bin/preflight.sh`` on the box refuses to start while any remain:
@@ -178,7 +178,7 @@ def render(
     out.mkdir(parents=True, exist_ok=True)
     for template in sorted(TEMPLATE_DIR.glob(f"*{TEMPLATE_SUFFIX}")):
         target = out / template.name.removesuffix(".example")
-        lines = [f"# Rendered from deploy/hetzner/env/{template.name}. Secret: mode 0600."]
+        lines = [f"# Rendered from deploy/server/env/{template.name}. Secret: mode 0600."]
         for name, template_value in parse_template(template):
             value, state = resolve(
                 name, template_value, dotenv, livekit=livekit, chains_from_dotenv=chains_from_dotenv

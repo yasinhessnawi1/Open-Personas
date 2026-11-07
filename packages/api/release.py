@@ -83,7 +83,7 @@ def _grant_persona_platform(dsn: str) -> None:
     ``DATABASE_URL`` (the admin, dispatch and JIT-provisioning engines) is the
     ``persona_platform`` role, which bypasses RLS but is NOT a superuser and runs no DDL,
     so a compromised api cannot ``COPY ... TO PROGRAM``, alter roles or read server files.
-    Only this release step keeps the superuser DSN. ``deploy/hetzner/bin/restore.sh``
+    Only this release step keeps the superuser DSN. ``deploy/server/bin/restore.sh``
     creates the role; this step keeps its DML grants complete after every migration and
     sets the default privileges, so a table a future migration creates (as the superuser
     running this step) is reachable at once. No-op when the role is absent: the Fly-era

@@ -30,7 +30,7 @@
 # `migrate` service, so the restored data meets the code exactly the way every deploy
 # does.
 #
-# Usage on the box (from the checkout's deploy/hetzner directory):
+# Usage on the box (from the checkout's deploy/server directory):
 #   bin/restore.sh --backup-dir /srv/open-persona/restore
 #   bin/restore.sh --roles-only     (re)apply step 3 and 6 to an existing database, e.g.
 #                                   after a password rotation; touches no data

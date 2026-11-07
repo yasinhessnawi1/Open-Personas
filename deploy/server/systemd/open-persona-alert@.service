@@ -7,4 +7,4 @@ Description=Open Persona alert for %i
 [Service]
 Type=oneshot
 Environment=OP_ENV_DIR=/opt/open-persona/env
-ExecStart=/opt/open-persona/repo/deploy/hetzner/bin/alert.sh %i "systemd unit %i failed; see: journalctl -u %i"
+ExecStart=/opt/open-persona/repo/deploy/server/bin/alert.sh %i "systemd unit %i failed; see: journalctl -u %i"
