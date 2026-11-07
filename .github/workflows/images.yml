@@ -1,0 +1,71 @@
+name: Images
+
+# Builds the api image natively for linux/amd64 and linux/arm64 and smoke-tests it.
+# Production's core host (Oracle) is arm64; the image must build there and stay
+# buildable on amd64. A BUILD CHECK ONLY: no registry is decided (GHCR by digest is a
+# follow-up after go-live), so this workflow holds no secret, logs in nowhere and pushes
+# nothing. It is not the Deploy workflow. scripts/tests/test_images_workflow.py is its gate.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - uv.lock
+      - pyproject.toml
+      - .dockerignore
+      - packages/api/**
+      - packages/connectors/**
+      - packages/core/**
+      - packages/runtime/**
+      - .github/workflows/images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-image:
+    name: api image (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      # actions/checkout tag v4.4.0 (= v4), the commit deploy.yml pins.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Build the api image
+        run: |
+          docker build -t open-persona/api:ci -f packages/api/Dockerfile .
+
+      - name: Smoke-test the image
+        run: |
+          echo "architecture: $(docker image inspect -f '{{.Architecture}}' open-persona/api:ci)"
+          docker run --rm open-persona/api:ci python -c "
+          import importlib.util
+          import torch
+          import persona_api.app
+          import persona_connectors.service
+          assert not torch.cuda.is_available(), 'CUDA torch in the image'
+          assert torch.__version__.endswith('+cpu'), torch.__version__
+          assert importlib.util.find_spec('persona_voice') is None, 'voice is in the api image'
+          print('smoke ok, torch', torch.__version__)
+          "
+
+      - name: Check the image size
+        run: |
+          MAX_IMAGE_BYTES=3221225472
+          size="$(docker image inspect -f '{{.Size}}' open-persona/api:ci)"
+          echo "image size: $((size / 1048576)) MiB (ceiling $((MAX_IMAGE_BYTES / 1048576)) MiB)"
+          if [ "${size}" -gt "${MAX_IMAGE_BYTES}" ]; then
+            echo "::error::the api image is larger than the 3 GiB ceiling"
+            exit 1
+          fi
