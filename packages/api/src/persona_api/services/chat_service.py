@@ -1344,13 +1344,22 @@ def _resolve_turn_documents(
             )
             continue
         # Stage at a predictable, model-readable ``uploads/<filename>`` path so a
-        # sandbox ``file_read("uploads/<filename>")`` finds THIS document.
+        # sandbox ``file_read("uploads/<filename>")`` finds THIS document. The stored name
+        # is reduced to its last part again here: a document recorded before uploads did
+        # that can still carry a path, which would stage it somewhere else in the persona.
+        name = document_service.upload_name(ref.filename)
+        if name is None:
+            _log.warning(
+                "uploaded document has no usable file name; not staged",
+                doc_ref=ref.doc_ref,
+            )
+            continue
         resolved.append(
             SandboxFile(
-                path=f"uploads/{ref.filename}",
+                path=f"uploads/{name}",
                 content_bytes=file_bytes,
                 size_bytes=len(file_bytes),
-                media_type=guess_media_type(ref.filename),
+                media_type=guess_media_type(name),
             )
         )
     return resolved

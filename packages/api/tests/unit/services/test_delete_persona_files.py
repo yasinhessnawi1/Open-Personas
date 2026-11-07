@@ -15,10 +15,11 @@ from pathlib import Path
 
 import pytest
 from persona_api.db.community import create_community_schema, ensure_owner, make_community_engine
+from persona_api.db.models import connector_channels as channels_t
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import PersonaNotFoundError
 from persona_api.services import persona_service
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 from sqlalchemy.engine import Engine
 
 _ALICE = "user_alice"
@@ -128,7 +129,7 @@ def test_your_own_persona_goes_with_exactly_its_folder(engine: Engine, workspace
 def test_a_folder_that_cannot_be_removed_stops_the_delete_and_keeps_the_row(
     engine: Engine, workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Files go before the row (D-13-4), so a failure leaves a row the user can delete again."""
+    """The folder goes inside the row's transaction, so a failure rolls the row back."""
 
     def _refuse(*_args: object, ignore_errors: bool = False, **_kwargs: object) -> None:
         # Behaves like the real call: asked to ignore errors, it swallows the failure.
@@ -141,4 +142,51 @@ def test_a_folder_that_cannot_be_removed_stops_the_delete_and_keeps_the_row(
         persona_service.delete_persona(
             rls_engine=engine, persona_id=_MINE, workspace_root=workspace, owner_id=_ALICE
         )
+    assert _persona_ids(engine) == {_MINE, _THEIRS}
+
+
+def test_a_persona_that_is_a_channels_active_persona_can_be_deleted(
+    engine: Engine, workspace: Path
+) -> None:
+    """The channel forgets its active persona; the channel itself and its owner stay.
+
+    The foreign key is composite, ``(active_persona_id, owner_id)``, so a plain ``SET NULL``
+    on delete nulls ``owner_id`` too, which is NOT NULL: the delete used to fail there, after
+    the files were already gone, and every retry failed the same way.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            insert(channels_t).values(
+                id="ch1",
+                owner_id=_ALICE,
+                platform="telegram",
+                channel_key="42",
+                active_persona_id=_MINE,
+            )
+        )
+    persona_service.delete_persona(
+        rls_engine=engine, persona_id=_MINE, workspace_root=workspace, owner_id=_ALICE
+    )
+    assert _persona_ids(engine) == {_THEIRS}
+    with engine.connect() as conn:
+        row = conn.execute(select(channels_t.c.owner_id, channels_t.c.active_persona_id)).one()
+    assert (row.owner_id, row.active_persona_id) == (_ALICE, None)
+    assert not (workspace / _ALICE / _MINE).exists()
+
+
+def test_a_database_failure_leaves_every_file_in_place(engine: Engine, workspace: Path) -> None:
+    """The row is deleted first, inside the transaction; files go only once the database agreed."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TRIGGER refuse_persona_delete BEFORE DELETE ON personas "
+                "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+            )
+        )
+    before = _files(workspace)
+    with pytest.raises(Exception, match="refused"):
+        persona_service.delete_persona(
+            rls_engine=engine, persona_id=_MINE, workspace_root=workspace, owner_id=_ALICE
+        )
+    assert _files(workspace) == before
     assert _persona_ids(engine) == {_MINE, _THEIRS}

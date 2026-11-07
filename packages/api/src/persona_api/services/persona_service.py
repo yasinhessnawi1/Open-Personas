@@ -35,6 +35,7 @@ from persona.stores.embedder import SentenceTransformerEmbedder
 from persona.stores.postgres import PostgresBackend
 from sqlalchemy import delete, func, insert, select, update
 
+from persona_api.db.models import connector_channels as connector_channels_t
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
@@ -610,39 +611,57 @@ def conversation_count_for(*, rls_engine: Engine, persona_id: str) -> int:
 def delete_persona(
     *, rls_engine: Engine, persona_id: str, workspace_root: Path | None = None, owner_id: str
 ) -> None:
-    """Delete a persona: its workspace folder, then its row (the row cascades conversations).
+    """Delete a persona: its row (which cascades conversations) and its workspace folder.
 
     The persona's memory rows are NOT removed by this (``memory_chunks`` has had no foreign
     key since migration 007); that is R9-284, still open.
 
-    Order, and why (R9-284 audit, 2026-11-07):
+    Order, and why (R9-284 audit and its review, 2026-11-07). Everything runs in ONE
+    transaction, and the files go last inside it:
 
-    1. The id must be a minted persona id, and the persona must be the caller's. Both are
-       known before anything is removed: an id of ``..`` used to remove the whole workspace
-       and only then learn there was no such persona. The lookup names the owner explicitly,
-       so the community engine (no row level security) cannot reach another owner's persona.
-    2. The folder goes before the row (Spec 13 D-13-4), resolved through
-       :func:`persona_api.workspace_paths.persona_root`, which refuses anything but exactly
-       one persona folder below the owner's. A failure to remove it propagates and the row
-       stays, so the user sees the delete fail and can run it again. It used to be ignored.
-    3. The row, again scoped to the owner.
+    1. The id must be a minted persona id. An id of ``..`` used to remove the whole workspace
+       and only then learn there was no such persona; now it never reaches the database.
+    2. The persona must be the caller's: the lookup names the owner explicitly, so the
+       community engine (no row level security) cannot reach another owner's persona.
+    3. Channels that have this persona foregrounded forget it. The channel's foreign key is
+       composite, ``(active_persona_id, owner_id)``, and its plain ``ON DELETE SET NULL``
+       nulls the NOT NULL ``owner_id`` too, so the row delete below used to fail there
+       (migration 060 narrows the action on Postgres 15 and later; SQLite cannot, so this
+       stays).
+    4. The row delete, scoped to the owner. Every constraint here is checked immediately, so
+       a database refusal surfaces now, before a single file is touched.
+    5. The folder, resolved through :func:`persona_api.workspace_paths.persona_root`, which
+       refuses anything but exactly one persona folder below the owner's. If it cannot be
+       removed the error propagates and the transaction rolls back, so the row is still
+       there and the user can delete again. Errors used to be ignored.
+
+    The trade, against Spec 13 D-13-4's files-before-row: the files now go after the
+    database has accepted the delete and before it commits. The one case that loses files
+    and keeps the row is a commit that fails after every statement succeeded (a dropped
+    connection at that instant), where the old order lost files on any database refusal,
+    and the composite foreign key refused every time. Removing a partly removed folder again
+    is harmless, so a retry finishes the job. The erase work (R9-284) replaces this with a
+    ledger and a resumable job.
     """
     not_found = PersonaNotFoundError("persona not found", context={"id": persona_id[:80]})
     if not is_persona_id(persona_id):
         raise not_found
     with rls_engine.begin() as conn:
         owned = conn.execute(
-            select(personas_t.c.id).where(
-                personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id
-            )
+            select(personas_t.c.id)
+            .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
+            .with_for_update()
         ).first()
-    if owned is None:
-        raise not_found
-    if workspace_root is not None:
-        folder = persona_root(workspace_root, owner_id, persona_id)
-        if folder.exists():
-            shutil.rmtree(folder)
-    with rls_engine.begin() as conn:
+        if owned is None:
+            raise not_found
+        conn.execute(
+            update(connector_channels_t)
+            .where(
+                connector_channels_t.c.active_persona_id == persona_id,
+                connector_channels_t.c.owner_id == owner_id,
+            )
+            .values(active_persona_id=None)
+        )
         result = conn.execute(
             delete(personas_t)
             .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
@@ -650,6 +669,10 @@ def delete_persona(
         )
         if result.first() is None:
             raise not_found
+        if workspace_root is not None:
+            folder = persona_root(workspace_root, owner_id, persona_id)
+            if folder.exists():
+                shutil.rmtree(folder)
 
 
 def default_embedder(model_name: str) -> SentenceTransformerEmbedder:

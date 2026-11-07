@@ -92,8 +92,23 @@ Per-spec entries are added by the close-out phase of each spec.
 - **A restore now reports personas with an id the app would refuse.** `sql/verify.sql`
   counts them as `personas_unexpected_ids` and `bin/restore.sh` warns when the count
   is not 0, since such a persona could no longer be opened or deleted.
+- **An uploaded document's name can no longer point somewhere else.** The name a
+  document was uploaded with is where its copy is put for the persona's file tools,
+  and a name such as `../conversations/<another chat>/documents/x.md` put it in that
+  other place inside the persona's folder. Only the last part of the name is kept now,
+  for new uploads and for documents uploaded before, and a name that is no name
+  (empty, `.` or `..`) is refused.
 
 ### Fixed
+- **A persona that a chat channel had in front can be deleted again.** A Telegram,
+  Slack or other channel remembers which persona you last talked to there, and
+  deleting that persona failed: the database tried to forget the channel's owner
+  along with the persona and refused. Worse, the persona's files were already gone by
+  then, so every retry failed the same way with nothing left to show. The delete now
+  clears the channel's memory of that persona first, and the files are removed only
+  after the database has accepted the delete, so a refusal leaves everything as it
+  was. Migration 060 makes the database itself clear only the channel's pointer when a
+  persona row goes, on PostgreSQL 15 and later.
 - **Forgetting something now also forgets the summary written from it.** A persona
   keeps a short summary of what it knows about you, rebuilt in the background from
   its memories. When you deleted a conversation and asked it to forget, the

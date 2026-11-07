@@ -100,6 +100,7 @@ __all__ = [
     "remove_all_for_conversation",
     "remove_document",
     "upload",
+    "upload_name",
 ]
 
 _log = get_logger("api.documents")
@@ -216,8 +217,10 @@ def upload(
         MissingDependencyError: A parser library isn't installed
             (for the ``[documents]`` extra interim state).
     """
-    extension = Path(filename).suffix.lower()
-    if extension not in SUPPORTED_EXTENSIONS:
+    # The name is a name, never a path: only its last part is kept (``upload_name``).
+    name = upload_name(filename)
+    extension = Path(name).suffix.lower() if name is not None else ""
+    if name is None or extension not in SUPPORTED_EXTENSIONS:
         from persona.documents.errors import UnsupportedFormatError  # noqa: PLC0415
 
         raise UnsupportedFormatError(
@@ -227,6 +230,7 @@ def upload(
                 "filename": _safe_filename(filename),
             },
         )
+    filename = name
 
     doc_ref = _make_doc_ref(filename)
     prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
@@ -784,6 +788,22 @@ def _make_doc_ref(filename: str) -> str:
     safe = _DOC_REF_SAFE_RE.sub("-", stem).strip("-") or "doc"
     suffix = uuid.uuid4().hex[:8]
     return f"{safe}-{suffix}"
+
+
+def upload_name(filename: str) -> str | None:
+    """The name an uploaded file is recorded and staged under, or ``None`` if it has none.
+
+    Only the last part of what the client sent is kept, with either slash as a separator, so
+    ``../../conversations/c2/documents/x.md`` is ``x.md``: the name is staged at
+    ``uploads/<name>`` (chat_service), where a path would land somewhere else inside the
+    persona's folder. Control characters are stripped and the result is truncated like
+    :func:`_safe_filename`. Empty, ``.`` and ``..`` are not names.
+    """
+    last = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = _safe_filename(last)
+    if cleaned in ("", ".", ".."):
+        return None
+    return cleaned
 
 
 def _safe_filename(filename: str) -> str:

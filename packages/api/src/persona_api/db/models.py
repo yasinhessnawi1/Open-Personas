@@ -1518,6 +1518,10 @@ connector_channels = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     # Tenant-consistent persona reference (matches the conversations table pattern).
     # NULL active_persona_id ⇒ MATCH SIMPLE skips the check (no active persona yet).
+    # A plain SET NULL on this composite key would null owner_id too (NOT NULL), so on
+    # Postgres 15+ migration 060 narrows it to SET NULL (active_persona_id); SQLite (legacy
+    # community) has no column list, which is why the plain form stays declared here and
+    # persona_service.delete_persona clears the pointer itself before the row goes.
     ForeignKeyConstraint(
         ["active_persona_id", "owner_id"],
         ["personas.id", "personas.owner_id"],

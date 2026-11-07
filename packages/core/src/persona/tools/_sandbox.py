@@ -529,6 +529,8 @@ def require_path_segment(value: str, *, what: str) -> str:
         or len(value) > _MAX_SEGMENT_LENGTH
         or value[0] == " "
         or any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in value)
+        # Refuses ":" and "|" too, so an owner id from an identity provider whose subjects
+        # carry them (Auth0's "auth0|abc", URN-style "a:b") cannot name a folder or key here.
         or windows_path_violation(value) is not None
         or windows_component_violation(value) is not None
     )
