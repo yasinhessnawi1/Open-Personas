@@ -116,6 +116,17 @@ def test_jsonl_backend_with_an_explicit_root_writes_there() -> None:
     assert sink.voice_log_path("ada") == root / "ada.voice-turns.jsonl"
 
 
+@pytest.mark.parametrize("bad", ["..", "../ada", "a/b", ""])
+def test_the_voicelog_file_is_never_named_outside_its_folder(bad: str) -> None:
+    from persona.errors import SandboxViolationError
+
+    config = VoiceConfig(edition="cloud", audit_backend="jsonl", audit_root=str(_PERSISTENT_ROOT))
+    sink = build_voice_audit_sink(config=config, engine=_engine())
+
+    with pytest.raises(SandboxViolationError):
+        sink.voice_log_path(bad)
+
+
 def test_postgres_requested_without_an_engine_degrades_to_jsonl() -> None:
     config = VoiceConfig(
         edition="cloud", audit_backend="postgres", audit_root=str(_PERSISTENT_ROOT)

@@ -14,6 +14,7 @@ from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.mcp import store as mcp_store
 from persona_api.mcp.oauth import service as oauth_service
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.schemas import (
     AdoptCatalogAppRequest,
     CreateMCPServerRequest,
@@ -230,7 +231,7 @@ async def check_mcp_server_connection(
     response_model=list[MCPServerDetail],
 )
 async def list_persona_mcp_servers(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     _user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[MCPServerDetail]:
@@ -248,7 +249,7 @@ async def list_persona_mcp_servers(
     response_model=list[MCPConnectionStatus],
 )
 async def list_persona_mcp_connections(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[MCPConnectionStatus]:
@@ -274,7 +275,7 @@ async def list_persona_mcp_connections(
     dependencies=[Depends(rate_limit("default"))],
 )
 async def assign_mcp_server(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     server_id: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -300,7 +301,7 @@ async def assign_mcp_server(
     dependencies=[Depends(rate_limit("default"))],
 )
 async def adopt_catalog_app(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: AdoptCatalogAppRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -336,7 +337,7 @@ async def adopt_catalog_app(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def unassign_mcp_server(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     server_id: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

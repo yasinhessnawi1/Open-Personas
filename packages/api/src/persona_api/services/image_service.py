@@ -321,8 +321,13 @@ def fetch(
             resolves outside the sandbox (cross-tenant / traversal).
     """
     relative = ref if "/" in ref else f"{_UPLOAD_DIR_NAME}/{ref}"
-    key = artifact_key(owner_id, persona_id, relative)
     not_found = PersonaError("image not found", context={"reason": "not_found", "ref": ref[:120]})
+    try:
+        # A ref that would leave this persona (``../../<other owner>/...``) is refused by the
+        # key door, and reads exactly like a missing file: existence-disclosure-safe.
+        key = artifact_key(owner_id, persona_id, relative)
+    except SandboxViolationError as exc:
+        raise not_found from exc
 
     media_type = _media_type_for_ext(PurePosixPath(relative).suffix.lower())
     if media_type is None:

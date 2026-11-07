@@ -34,6 +34,10 @@ _DB_URLS: dict[str, str] = {
 
 _VOICE_URL = "http://voice.test"
 
+#: A persona of the caller's, and one that is not, in the minted id format the route accepts.
+_TTS_URL = "/v1/personas/persona_1111111111111111111111111111111a/tts"
+_OTHER_TENANT_TTS_URL = "/v1/personas/persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e/tts"
+
 _PERSONA_YAML_WITH_VOICE = """\
 schema_version: "1.0"
 identity:
@@ -112,7 +116,7 @@ def _stub_persona_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_tts_proxy_requires_bearer(client: TestClient) -> None:
-    resp = client.post("/v1/personas/p1/tts", json={"text": "hi"})
+    resp = client.post(_TTS_URL, json={"text": "hi"})
     assert resp.status_code == 401
 
 
@@ -127,7 +131,7 @@ def test_tts_proxy_503_when_voice_service_unconfigured(
         raise AssertionError("persona lookup must not run when unconfigured")
 
     monkeypatch.setattr(voice_routes.persona_service, "get_persona", _boom)
-    resp = c.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = c.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 503
     assert resp.json()["error"] == "voice_unavailable"
 
@@ -136,7 +140,7 @@ def test_tts_proxy_404_on_cross_tenant_persona(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_persona_not_found(monkeypatch)
-    resp = client.post("/v1/personas/other_tenant/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_OTHER_TENANT_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 404
 
 
@@ -156,7 +160,7 @@ def test_tts_proxy_voiceless_persona_forwards_null_voice_id(
         )
 
     _install_mock_httpx(monkeypatch, handler)
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 200, resp.text
     assert resp.content == b"RIFF....WAVEfmt "
     # No persona-supplied voice — the proxy sends an explicit null id AND a null
@@ -180,7 +184,7 @@ def test_tts_proxy_voiced_persona_forwards_stored_provider(
         )
 
     _install_mock_httpx(monkeypatch, handler)
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 200, resp.text
     assert captured["body"] == {"text": "hi", "voice_id": "v_astrid", "provider": "cartesia"}
 
@@ -206,7 +210,7 @@ def test_tts_proxy_503_when_voice_service_has_no_default_either(
             },
         ),
     )
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 503
     assert resp.json()["error"] == "voice_unavailable"
 
@@ -226,7 +230,7 @@ def test_tts_proxy_resolves_voice_and_forwards_bearer(
         )
 
     _install_mock_httpx(monkeypatch, handler)
-    resp = client.post("/v1/personas/p1/tts", headers=_auth("user_x"), json={"text": "hello there"})
+    resp = client.post(_TTS_URL, headers=_auth("user_x"), json={"text": "hello there"})
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "audio/wav"
     assert resp.content == b"RIFF....WAVEfmt "
@@ -252,7 +256,7 @@ def test_tts_proxy_413_passes_through_the_clean_body(
             json={"detail": {"error": "tts_text_too_long", "detail": "text too long"}},
         ),
     )
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "x" * 5000})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "x" * 5000})
     assert resp.status_code == 413
     assert resp.json()["detail"]["error"] == "tts_text_too_long"
 
@@ -265,7 +269,7 @@ def test_tts_proxy_503_on_upstream_5xx_never_leaks_upstream_status(
         monkeypatch,
         lambda _r: httpx.Response(502, json={"detail": {"error": "tts_provider_error"}}),
     )
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 503
     assert resp.json()["error"] == "voice_unavailable"
 
@@ -279,7 +283,7 @@ def test_tts_proxy_503_on_connection_error(
         raise httpx.ConnectError("connection refused")
 
     _install_mock_httpx(monkeypatch, handler)
-    resp = client.post("/v1/personas/p1/tts", headers=_auth(), json={"text": "hi"})
+    resp = client.post(_TTS_URL, headers=_auth(), json={"text": "hi"})
     assert resp.status_code == 503
     assert resp.json()["error"] == "voice_unavailable"
 
@@ -290,7 +294,7 @@ def test_tts_proxy_rejects_body_with_extra_fields(
     """``voice_id`` is resolved server-side — a client cannot smuggle one in."""
     _stub_persona(monkeypatch, yaml_str=_PERSONA_YAML_WITH_VOICE)
     resp = client.post(
-        "/v1/personas/p1/tts",
+        _TTS_URL,
         headers=_auth(),
         json={"text": "hi", "voice_id": "sneaky-spoofed-id"},
     )

@@ -295,6 +295,11 @@ two_heads="$(fact memory_chains_two_heads)"
 if [ "${two_heads}" != "0" ]; then
   say "WARNING: ${two_heads} memory chains have two current versions; settle them before bin/deploy.sh (RUNBOOK.md step 5)"
 fi
+unexpected_ids="$(fact personas_unexpected_ids)"
+[ -n "${unexpected_ids}" ] || die "sql/verify.sql did not report personas_unexpected_ids"
+if [ "${unexpected_ids}" != "0" ]; then
+  say "WARNING: ${unexpected_ids} personas have an id the api will not accept in a URL; they cannot be opened or deleted until that is settled"
+fi
 if [ -f "${FACTS_FILE}" ]; then
   # facts.txt is taken moments before the dump while the box keeps writing, so small
   # drift is normal and only warned about; read the diff, an emptied table is not drift.

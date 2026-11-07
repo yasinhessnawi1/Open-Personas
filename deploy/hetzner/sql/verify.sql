@@ -59,6 +59,12 @@ SELECT 'memory_chains_two_heads', count(*)::text FROM (
    WHERE logical_id IS NOT NULL AND superseded_by IS NULL
    GROUP BY persona_id, kind, logical_id HAVING count(*) > 1) AS two_heads;
 
+-- Personas whose id is not in the minted format (persona_ and 32 lower-case hex). Must be 0:
+-- the api refuses every other shape in a URL, so such a persona could never be opened or
+-- deleted again. A count, never an id.
+SELECT 'personas_unexpected_ids', count(*)::text
+  FROM personas WHERE id !~ '^persona_[0-9a-f]{32}$';
+
 SELECT 'server_version', current_setting('server_version');
 
 -- Per-table row counts (counts only).

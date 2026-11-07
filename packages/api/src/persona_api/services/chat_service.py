@@ -1418,7 +1418,9 @@ def _stage_documents_for_file_read(
     # The EXACT root the file_read provider resolves at dispatch time
     # (runtime_factory._build_file_sandbox_root_provider). Keeping the two in
     # lockstep is the contract that makes ``file_read("uploads/<name>")`` work.
-    file_read_root = workspace_root / owner_id / persona_id
+    from persona_api.workspace_paths import persona_root  # noqa: PLC0415
+
+    file_read_root = persona_root(workspace_root, owner_id, persona_id)
     for sf in documents:
         if sf.content_bytes is None:
             continue

@@ -200,7 +200,12 @@ class JSONLAuditLogger:
         self._lock = threading.Lock()
 
     def _path(self, persona_id: str) -> Path:
-        return self._root / f"{persona_id}.jsonl"
+        # The id becomes a file name, so it must be one name: ``../x`` would write and read
+        # beside the audit folder instead of in it. Imported here because ``persona.tools``
+        # imports this module.
+        from persona.tools._sandbox import require_path_segment  # noqa: PLC0415
+
+        return self._root / f"{require_path_segment(persona_id, what='persona id')}.jsonl"
 
     def emit(self, event: AuditEvent) -> None:
         """Append ``event`` to its persona's log file.

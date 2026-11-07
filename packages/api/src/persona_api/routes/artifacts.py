@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.schemas import (
     ArtifactItem,
     ArtifactListResponse,
@@ -37,8 +38,9 @@ from persona_api.services.artifact_metadata import (
     WorkspaceArtifactMetadata,
     is_any_sidecar,
 )
-from persona_api.services.artifact_storage import read_sidecar
+from persona_api.services.artifact_storage import artifact_key, read_sidecar
 from persona_api.services.provenance import ai_generated_from_source
+from persona_api.workspace_paths import persona_prefix
 
 if TYPE_CHECKING:
     from persona_api.storage import FileStorage
@@ -158,7 +160,7 @@ def _sort_key(item: tuple[str, WorkspaceArtifactMetadata | None, int]) -> tuple[
     dependencies=[Depends(rate_limit("default"))],
 )
 async def list_artifacts(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — RLS via contextvar
     limit: int = Query(50, ge=1, le=200),
@@ -186,11 +188,11 @@ async def list_artifacts(
     # so the Files view works on S3 too. Keys come back as ``{owner}/{persona}/…``;
     # ``ref`` strips that prefix to match the pre-R5 persona-root-relative form.
     file_storage: FileStorage = request.app.state.file_storage
-    prefix = f"{user.id}/{persona_id}"
-    strip = f"{prefix}/"
+    # Built through the one door for persona keys, ending at the persona's folder.
+    strip = persona_prefix(user.id, persona_id)
 
     candidates: list[tuple[str, WorkspaceArtifactMetadata | None, int]] = []
-    for obj in file_storage.list(prefix):
+    for obj in file_storage.list(strip):
         if is_any_sidecar(Path(obj.key)):
             continue
         try:
@@ -249,7 +251,7 @@ async def list_artifacts(
     dependencies=[Depends(rate_limit("default"))],
 )
 async def delete_artifact(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     ref: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -265,12 +267,14 @@ async def delete_artifact(
     _ensure_persona_visible(request, persona_id)
 
     file_storage: FileStorage = request.app.state.file_storage
-    key = f"{user.id}/{persona_id}/{ref}"
 
-    # Existence + traversal-safety through the backend: LocalFileStorage.exists
-    # runs resolve_sandbox_path (traversal → SandboxViolationError) +
-    # is_regular_file_nofollow (swapped symlink / missing → False); S3 head_object.
+    # The key is built through the one door that keeps it inside this persona
+    # (``../../<other owner>/...`` stays inside the workspace root, so the backend's own
+    # check alone let it through). Then existence through the backend: LocalFileStorage.exists
+    # runs resolve_sandbox_path + is_regular_file_nofollow (swapped symlink / missing is
+    # False); S3 head_object. A refused ref is a 404, like a missing one.
     try:
+        key = artifact_key(user.id, persona_id, ref)
         present = file_storage.exists(key)
     except SandboxViolationError as exc:
         raise PersonaNotFoundError(

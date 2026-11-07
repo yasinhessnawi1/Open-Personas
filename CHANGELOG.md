@@ -72,6 +72,26 @@ Per-spec entries are added by the close-out phase of each spec.
   (`xox`), JSON Web Tokens, and PEM and PGP private key headers. A key that contains a
   `.`, `+`, `/` or `=` is now masked whole instead of losing only its first part.
   Public keys and certificates are left alone, since they are not secrets.
+- **Deleting a persona can no longer remove anyone else's files.** A delete request
+  for the persona id `%2E%2E` reached the server as `..`, and the server removed
+  the folder that name pointed at, which was the whole workspace holding every
+  account's uploads, documents and generated images, before it checked whether
+  such a persona existed. `%2e` did the same to all of the caller's own personas.
+  Every address with a persona id in it now accepts only the format persona ids
+  have always had (`persona_` and 32 lower-case hex digits), the delete checks
+  that the persona is yours before it touches a file, and a folder that cannot be
+  removed now stops the delete instead of being skipped in silence.
+- **A file address under one persona can no longer reach another persona's files.**
+  Reading an upload or deleting a file with an address such as
+  `../../<another account>/<their persona>/uploads/x.png` stayed inside the shared
+  workspace, which was all that was checked, so it served or removed that file.
+  Every storage key and folder for a persona is now built in one place that refuses
+  anything but a plain path inside that persona, and such an address is a 404, the
+  same answer a missing file gets. The audit and voice log files, which are named
+  after the persona, refuse a name that is not a single plain name for the same reason.
+- **A restore now reports personas with an id the app would refuse.** `sql/verify.sql`
+  counts them as `personas_unexpected_ids` and `bin/restore.sh` warns when the count
+  is not 0, since such a persona could no longer be opened or deleted.
 
 ### Fixed
 - **Forgetting something now also forgets the summary written from it.** A persona

@@ -24,6 +24,10 @@ from persona_api.services.artifact_metadata import (
 )
 from persona_api.storage import LocalFileStorage
 
+#: The persona the stubbed lookup shows the caller, and one it does not (minted id format).
+_PID = "persona_a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+_OTHER_PID = "persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
 
 @pytest.fixture
 def workspace_root(tmp_path: Path) -> Path:
@@ -35,7 +39,7 @@ def workspace_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def persona_root(workspace_root: Path) -> Path:
     """Per-tenant persona scope: workspace_root/<owner_id>/<persona_id>/."""
-    root = workspace_root / "u1" / "astrid"
+    root = workspace_root / "u1" / _PID
     root.mkdir(parents=True)
     return root
 
@@ -69,7 +73,7 @@ def client(
     )
 
     def _fake_get_persona(*, rls_engine: Any, persona_id: str) -> dict[str, Any]:  # noqa: ANN401, ARG001
-        if persona_id == "astrid":
+        if persona_id == _PID:
             return {"id": persona_id, "owner_id": "u1", "yaml": ""}
         raise PersonaNotFoundError("persona not found", context={"persona_id": persona_id})
 
@@ -111,7 +115,7 @@ def _seed(persona_root: Path, rel: str, content: bytes = b"X") -> Path:
 
 
 def test_empty_workspace_returns_empty_list(client: TestClient) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"total": 0, "limit": 50, "offset": 0, "items": []}
@@ -123,7 +127,7 @@ def test_lists_files_with_metadata_when_sidecars_present(
     image = _seed(persona_root, "uploads/abc.png", b"PNGDATA")
     write_artifact_sidecar(image, _make_meta(original_name="photo.png"), root=persona_root)
 
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -139,7 +143,7 @@ def test_skips_sidecar_files_themselves(client: TestClient, persona_root: Path) 
     image = _seed(persona_root, "uploads/abc.png")
     write_artifact_sidecar(image, _make_meta(), root=persona_root)
 
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     body = resp.json()
     # Only the bytes file; the .f5.json sidecar does NOT appear as an item.
     assert body["total"] == 1
@@ -157,7 +161,7 @@ def test_skips_spec_14_meta_json_sidecars(client: TestClient, persona_root: Path
         ' "strategy": "rasterise", "token_count": 1234}',
         encoding="utf-8",
     )
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     body = resp.json()
     refs = {item["ref"] for item in body["items"]}
     assert refs == {"uploads/report.pdf"}  # Spec 14 sidecar absent.
@@ -167,7 +171,7 @@ def test_legacy_files_without_sidecars_surface_with_null_metadata(
     client: TestClient, persona_root: Path
 ) -> None:
     _seed(persona_root, "uploads/legacy.png")
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["metadata"] is None
@@ -178,7 +182,7 @@ def test_media_type_derives_from_extension(client: TestClient, persona_root: Pat
     _seed(persona_root, "uploads/data.parquet")
     _seed(persona_root, "uploads/unknown.xyz")
 
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     body = resp.json()
     by_ref = {item["ref"]: item["media_type"] for item in body["items"]}
     assert by_ref["uploads/doc.pdf"] == "application/pdf"
@@ -252,7 +256,7 @@ def test_filter_by_source_upload(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?source=upload", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?source=upload", headers=_auth())
     body = resp.json()
     assert body["total"] == 2
     sources = {item["metadata"]["source"] for item in body["items"]}
@@ -265,7 +269,7 @@ def test_filter_by_source_excludes_metadata_less_legacy_files(
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
     """Filters that need metadata skip rows without sidecars."""
-    resp = client.get("/v1/personas/astrid/artifacts?source=upload", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?source=upload", headers=_auth())
     body = resp.json()
     refs = {item["ref"] for item in body["items"]}
     assert "uploads/legacy.png" not in refs
@@ -276,7 +280,7 @@ def test_filter_by_type_chart(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?type=chart", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?type=chart", headers=_auth())
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["ref"] == "charts/q3.png"
@@ -287,7 +291,7 @@ def test_filter_by_conversation_id(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?conversation_id=conv-2", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?conversation_id=conv-2", headers=_auth())
     body = resp.json()
     assert body["total"] == 2
     convs = {item["metadata"]["conversation_id"] for item in body["items"]}
@@ -299,7 +303,7 @@ def test_filter_by_q_matches_original_name(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?q=cat", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?q=cat", headers=_auth())
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["metadata"]["original_name"] == "cat.png"
@@ -311,7 +315,7 @@ def test_filter_by_q_matches_ref_path(
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
     """q falls back to the workspace-relative path when no original_name match."""
-    resp = client.get("/v1/personas/astrid/artifacts?q=charts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?q=charts", headers=_auth())
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["ref"].startswith("charts/")
@@ -322,7 +326,7 @@ def test_filter_by_q_is_case_insensitive(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?q=CAT", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?q=CAT", headers=_auth())
     body = resp.json()
     assert body["total"] == 1
 
@@ -333,7 +337,7 @@ def test_filters_combine(
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
     resp = client.get(
-        "/v1/personas/astrid/artifacts?source=generated&type=image",
+        f"/v1/personas/{_PID}/artifacts?source=generated&type=image",
         headers=_auth(),
     )
     body = resp.json()
@@ -346,7 +350,7 @@ def test_invalid_source_value_is_422(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?source=invalid", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?source=invalid", headers=_auth())
     assert resp.status_code == 422
 
 
@@ -355,7 +359,7 @@ def test_invalid_type_value_is_422(
     persona_root: Path,  # noqa: ARG001 — fixture chain only
     populated: None,  # noqa: ARG001 — fixture chain only
 ) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?type=video", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?type=video", headers=_auth())
     assert resp.status_code == 422
 
 
@@ -372,7 +376,7 @@ def test_pagination_window(client: TestClient, persona_root: Path) -> None:
             ),
             root=persona_root,
         )
-    resp = client.get("/v1/personas/astrid/artifacts?limit=3&offset=4", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?limit=3&offset=4", headers=_auth())
     body = resp.json()
     assert body["total"] == 10
     assert body["limit"] == 3
@@ -381,7 +385,7 @@ def test_pagination_window(client: TestClient, persona_root: Path) -> None:
 
 
 def test_limit_max_200_accepted(client: TestClient) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?limit=200", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?limit=200", headers=_auth())
     assert resp.status_code == 200
     assert resp.json()["limit"] == 200
 
@@ -391,7 +395,7 @@ def test_limit_over_200_returns_structured_422(
 ) -> None:
     """D-F5-X-artifact-list-pagination: limit overflow returns structured 422,
     NOT silent truncation."""
-    resp = client.get("/v1/personas/astrid/artifacts?limit=10000", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?limit=10000", headers=_auth())
     assert resp.status_code == 422
     body = resp.json()
     # FastAPI's structured-error shape carries 'detail' as a list of errors.
@@ -399,12 +403,12 @@ def test_limit_over_200_returns_structured_422(
 
 
 def test_limit_zero_is_422(client: TestClient) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?limit=0", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?limit=0", headers=_auth())
     assert resp.status_code == 422
 
 
 def test_negative_offset_is_422(client: TestClient) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts?offset=-1", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts?offset=-1", headers=_auth())
     assert resp.status_code == 422
 
 
@@ -425,7 +429,7 @@ def test_sorted_by_created_at_descending(client: TestClient, persona_root: Path)
         middle, _make_meta(created_at=datetime(2026, 6, 1, tzinfo=UTC)), root=persona_root
     )
 
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     refs = [item["ref"] for item in resp.json()["items"]]
     assert refs == ["uploads/new.png", "uploads/mid.png", "uploads/old.png"]
 
@@ -434,12 +438,12 @@ def test_sorted_by_created_at_descending(client: TestClient, persona_root: Path)
 
 
 def test_cross_tenant_persona_returns_404(client: TestClient) -> None:
-    resp = client.get("/v1/personas/someone_elses_persona/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_OTHER_PID}/artifacts", headers=_auth())
     assert resp.status_code == 404
 
 
 def test_unauthenticated_returns_401(client: TestClient) -> None:
-    resp = client.get("/v1/personas/astrid/artifacts")
+    resp = client.get(f"/v1/personas/{_PID}/artifacts")
     assert resp.status_code in (401, 403)
 
 
@@ -450,7 +454,7 @@ def test_delete_artifact_removes_bytes_and_sidecar(client: TestClient, persona_r
     bytes_path = _seed(persona_root, "uploads/abc.png")
     write_artifact_sidecar(bytes_path, _make_meta(), root=persona_root)
 
-    resp = client.delete("/v1/personas/astrid/artifacts/uploads/abc.png", headers=_auth())
+    resp = client.delete(f"/v1/personas/{_PID}/artifacts/uploads/abc.png", headers=_auth())
     assert resp.status_code == 204
     assert not bytes_path.is_file()
     sidecar = bytes_path.parent / f"{bytes_path.name}.f5.json"
@@ -458,13 +462,13 @@ def test_delete_artifact_removes_bytes_and_sidecar(client: TestClient, persona_r
 
 
 def test_delete_artifact_missing_returns_404(client: TestClient) -> None:
-    resp = client.delete("/v1/personas/astrid/artifacts/uploads/nope.png", headers=_auth())
+    resp = client.delete(f"/v1/personas/{_PID}/artifacts/uploads/nope.png", headers=_auth())
     assert resp.status_code == 404
 
 
 def test_delete_artifact_cross_tenant_returns_404(client: TestClient) -> None:
     resp = client.delete(
-        "/v1/personas/someone_elses_persona/artifacts/uploads/x.png",
+        f"/v1/personas/{_OTHER_PID}/artifacts/uploads/x.png",
         headers=_auth(),
     )
     assert resp.status_code == 404
@@ -480,7 +484,7 @@ def test_walks_nested_subdirectories(client: TestClient, persona_root: Path) -> 
     )
     _seed(persona_root, "intermediate/data.parquet")
     # No sidecar for intermediate (per D-F4-X-bare-ref-resolution policy).
-    resp = client.get("/v1/personas/astrid/artifacts", headers=_auth())
+    resp = client.get(f"/v1/personas/{_PID}/artifacts", headers=_auth())
     body = resp.json()
     refs = {item["ref"] for item in body["items"]}
     assert "charts/abc.png" in refs

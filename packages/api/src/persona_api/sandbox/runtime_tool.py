@@ -46,6 +46,7 @@ from persona.tools._sandbox import (
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.sandbox.context import get_sandbox_request_context
+from persona_api.workspace_paths import persona_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -219,7 +220,8 @@ def make_pool_code_execution_tool(
         ctx = get_sandbox_request_context()
         if ctx is None:
             return None
-        return workspace_root / ctx.owner_id / persona_id
+        # One persona folder below the owner's, or a refusal (fail closed).
+        return persona_root(workspace_root, ctx.owner_id, persona_id)
 
     def _augmented_input_files_provider() -> list[SandboxFile]:
         """Compose Spec 16 M1a supplements + Spec 17 cross-turn intermediate.

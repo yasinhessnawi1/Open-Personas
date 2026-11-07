@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 
 from persona.errors import SandboxViolationError
-from persona.tools._winpath import windows_path_violation
+from persona.tools._winpath import windows_component_violation, windows_path_violation
 
 if sys.platform == "win32":
     # Windows has no O_NOFOLLOW; its no-follow opener lives in a Windows-only module
@@ -64,6 +64,7 @@ __all__ = [
     "open_nofollow",
     "read_file_under_root",
     "read_nofollow_bytes",
+    "require_path_segment",
     "resolve_request_sandbox_root",
     "resolve_sandbox_path",
     "write_file_under_root",
@@ -499,6 +500,48 @@ def _violation_message(summary: str, reason: str) -> str:
         repeated escaping attempt.
     """
     return f"{summary} [reason={reason}]; {_correction_for(reason)}"
+
+
+#: The longest single name accepted by :func:`require_path_segment`. Well under every file
+#: system's component limit (255), with room for the suffixes callers add (``.jsonl``).
+_MAX_SEGMENT_LENGTH = 200
+
+
+def require_path_segment(value: str, *, what: str) -> str:
+    """Return ``value`` if it names exactly one entry below a directory, else refuse it.
+
+    For ids that become one folder or file name (an owner id, a persona id, a conversation
+    id). The resolver does not protect such a join: ``owner/..`` resolves to the root it is
+    checked against, and the root is inside itself. So the name is checked on its own, and the
+    same way on every host, so an id that works on Linux cannot mean something else on Windows:
+
+    - not empty, not ``.`` or ``..``, at most 200 characters;
+    - no forward slash or backslash, no control character, no leading space;
+    - nothing Windows reads differently: a reserved character such as ``:``, a trailing dot or
+      space, or a device name such as ``NUL``.
+
+    Raises:
+        SandboxViolationError: ``reason="not_one_name"``. The context names ``what`` and a
+            short preview, never the whole value.
+    """
+    refused = (
+        value in ("", ".", "..")
+        or len(value) > _MAX_SEGMENT_LENGTH
+        or value[0] == " "
+        or any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in value)
+        or windows_path_violation(value) is not None
+        or windows_component_violation(value) is not None
+    )
+    if refused:
+        raise SandboxViolationError(
+            f"{what} is not a single plain name",
+            context={
+                "reason": "not_one_name",
+                "what": what,
+                "preview": _preview(value, max_len=40),
+            },
+        )
+    return value
 
 
 def resolve_sandbox_path(root: Path, requested: str) -> Path:

@@ -61,6 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import VoiceServiceUnavailableError
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.services import persona_service
 
 if TYPE_CHECKING:
@@ -203,7 +204,7 @@ def _extract_persona_voice(persona_row: dict[str, object]) -> CatalogueVoice | N
     dependencies=[Depends(rate_limit("default"))],
 )
 async def post_persona_tts(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: PersonaTTSRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),  # noqa: ARG001 — RLS via contextvar

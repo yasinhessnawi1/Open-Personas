@@ -14,7 +14,6 @@ Postgres (D-08-8). Episodic starts empty (runtime-written).
 from __future__ import annotations
 
 import shutil
-import uuid
 from typing import TYPE_CHECKING, Literal
 
 import yaml
@@ -40,6 +39,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
 from persona_api.services import notifications_service
+from persona_api.workspace_paths import is_persona_id, new_persona_id, persona_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -374,7 +374,7 @@ def create_persona(
     uncommitted row; verified in research). Both transactions carry the tenant
     GUC, so RLS holds throughout.
     """
-    persona_id = f"persona_{uuid.uuid4().hex}"
+    persona_id = new_persona_id()
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
     persona, yaml_str = _guard_safety(persona, yaml_str)
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
@@ -610,25 +610,46 @@ def conversation_count_for(*, rls_engine: Engine, persona_id: str) -> int:
 def delete_persona(
     *, rls_engine: Engine, persona_id: str, workspace_root: Path | None = None, owner_id: str
 ) -> None:
-    """Delete a persona (cascades conversations + memory via FK + workspace files).
+    """Delete a persona: its workspace folder, then its row (the row cascades conversations).
 
-    Spec 13 D-13-4 cascade-before-DB: rmtree the persona's workspace subtree
-    BEFORE the DB DELETE fires, so a partial failure leaves orphan DB rows
-    (recoverable by re-running the delete) rather than orphan files (silently
-    leaking storage). Per D-13-4-v0.1-coarse-cascade, this is the only
-    workspace cleanup point in v0.1 — per-conversation cleanup defers to the
-    ``messages.images`` JSONB column migration.
+    The persona's memory rows are NOT removed by this (``memory_chunks`` has had no foreign
+    key since migration 007); that is R9-284, still open.
+
+    Order, and why (R9-284 audit, 2026-11-07):
+
+    1. The id must be a minted persona id, and the persona must be the caller's. Both are
+       known before anything is removed: an id of ``..`` used to remove the whole workspace
+       and only then learn there was no such persona. The lookup names the owner explicitly,
+       so the community engine (no row level security) cannot reach another owner's persona.
+    2. The folder goes before the row (Spec 13 D-13-4), resolved through
+       :func:`persona_api.workspace_paths.persona_root`, which refuses anything but exactly
+       one persona folder below the owner's. A failure to remove it propagates and the row
+       stays, so the user sees the delete fail and can run it again. It used to be ignored.
+    3. The row, again scoped to the owner.
     """
+    not_found = PersonaNotFoundError("persona not found", context={"id": persona_id[:80]})
+    if not is_persona_id(persona_id):
+        raise not_found
+    with rls_engine.begin() as conn:
+        owned = conn.execute(
+            select(personas_t.c.id).where(
+                personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id
+            )
+        ).first()
+    if owned is None:
+        raise not_found
     if workspace_root is not None:
-        persona_root = workspace_root / owner_id / persona_id
-        if persona_root.exists():
-            shutil.rmtree(persona_root, ignore_errors=True)
+        folder = persona_root(workspace_root, owner_id, persona_id)
+        if folder.exists():
+            shutil.rmtree(folder)
     with rls_engine.begin() as conn:
         result = conn.execute(
-            delete(personas_t).where(personas_t.c.id == persona_id).returning(personas_t.c.id)
+            delete(personas_t)
+            .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
+            .returning(personas_t.c.id)
         )
         if result.first() is None:
-            raise PersonaNotFoundError("persona not found", context={"id": persona_id})
+            raise not_found
 
 
 def default_embedder(model_name: str) -> SentenceTransformerEmbedder:

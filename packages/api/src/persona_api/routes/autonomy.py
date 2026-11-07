@@ -29,6 +29,7 @@ from persona_api.initiative.handler import read_initiative_dial, set_initiative_
 from persona_api.initiative.pipeline_wiring import ApiWellbeingSubjectCheck
 from persona_api.initiative.store import DeclineSource, DeclineStore, InitiativeLedger
 from persona_api.jobs.queue import JobQueue
+from persona_api.routes._params import PersonaIdPath
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schemas.requests import InitiativeDialRequest
 from persona_api.schemas.responses import (
@@ -152,7 +153,7 @@ async def resume_autonomy(
 
 @router.get("/personas/{persona_id}/state", response_model=PersonaSuspensionOut)
 async def get_persona_suspension(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaSuspensionOut:
@@ -165,7 +166,7 @@ async def get_persona_suspension(
 
 @router.post("/personas/{persona_id}/suspend", response_model=PersonaSuspensionOut)
 async def suspend_persona(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaSuspensionOut:
@@ -191,7 +192,7 @@ async def suspend_persona(
 
 @router.post("/personas/{persona_id}/resume", response_model=PersonaSuspensionOut)
 async def resume_persona(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaSuspensionOut:
@@ -222,7 +223,7 @@ def _initiative_enabled() -> bool:
 
 @router.get("/personas/{persona_id}/initiative", response_model=InitiativeDialOut)
 async def get_initiative_dial(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> InitiativeDialOut:
@@ -237,7 +238,7 @@ async def get_initiative_dial(
 
 @router.put("/personas/{persona_id}/initiative", response_model=InitiativeDialOut)
 async def set_persona_initiative_dial(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: InitiativeDialRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

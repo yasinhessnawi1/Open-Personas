@@ -72,6 +72,7 @@ from persona.documents.ingest import IngestStrategy, ingest_document
 from persona.documents.parsers import SUPPORTED_EXTENSIONS, parse_document
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
+from persona.tools._sandbox import require_path_segment
 from pydantic import BaseModel, ConfigDict, Field
 
 from persona_api.errors import DocumentReadError
@@ -81,6 +82,7 @@ from persona_api.services.artifact_metadata import (
     utcnow,
 )
 from persona_api.services.artifact_storage import write_sidecar
+from persona_api.workspace_paths import persona_key
 
 if TYPE_CHECKING:
     from persona.stores.document_store import DocumentStore
@@ -92,6 +94,7 @@ __all__ = [
     "DOCUMENT_DIR_NAME",
     "DocumentRef",
     "build_document_context",
+    "conversation_documents_prefix",
     "get_document_text",
     "list_for_conversation",
     "remove_all_for_conversation",
@@ -226,10 +229,8 @@ def upload(
         )
 
     doc_ref = _make_doc_ref(filename)
-    key = (
-        f"{owner_id}/{persona_id}/conversations/{conversation_id}"
-        f"/{DOCUMENT_DIR_NAME}/{doc_ref}{extension}"
-    )
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    key = f"{prefix}/{doc_ref}{extension}"
     document_format = _format_for_extension(extension)
 
     # R5-D-4: parse + rasterise need a real local path (pypdfium2 + the parsers
@@ -325,7 +326,7 @@ def list_for_conversation(
     Returns an empty list if the conversation directory doesn't exist
     (no documents uploaded yet).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     refs: list[DocumentRef] = []
     for obj in sorted(file_storage.list(prefix), key=lambda o: o.key):
         if not obj.key.endswith(".meta.json"):
@@ -498,7 +499,7 @@ def get_document_text(
             no longer parses (Spec WIN T2: never an empty string that would look, to
             the model, like an empty document).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         if not _is_original_name(name, doc_ref):
@@ -592,7 +593,7 @@ def read_document_bytes(
         The raw file bytes, or ``None`` when the document is missing/unreadable
         (the caller skips it — a partial staging beats a hard turn failure).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         if not _is_original_name(name, doc_ref):
@@ -629,7 +630,7 @@ def remove_document(
             this ``doc_ref`` are removed via the 4-component
             chunk-ID prefix-match (D-14-X-document-chunk-id).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         # Matches the original ``{doc_ref}.pdf``, both sidecars
@@ -659,7 +660,7 @@ def remove_all_for_conversation(
 
     Idempotent: removing an empty / non-existent set is a no-op.
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         file_storage.delete(obj.key)
     document_store.delete(conversation_id)
@@ -717,7 +718,7 @@ def _rasterise_and_persist_pages(
     dpi = _resolve_raster_dpi()
     scale = dpi / 72.0
 
-    base_relative = f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
+    base_relative = conversation_documents_prefix(owner_id, persona_id, conversation_id)
 
     images: list[ImageContent] = []
     pdf = pypdfium2.PdfDocument(str(pdf_path))
@@ -752,14 +753,23 @@ def _rasterise_and_persist_pages(
 # ----- helpers (private) -----------------------------------------------------
 
 
-def _conversation_documents_prefix(owner_id: str, persona_id: str, conversation_id: str) -> str:
+def conversation_documents_prefix(owner_id: str, persona_id: str, conversation_id: str) -> str:
     """The FileStorage key prefix for a conversation's documents (R5-D-4).
 
     Owner-scoped layout (matches image_service + the F5 artifacts walk:
     ``<owner_id>/<persona_id>/...``). This is the ``list`` prefix + the stem every
     document/sidecar/page key is built under. Backend-agnostic (the local backend
-    still resolves it under the workspace root via ``resolve_sandbox_path``)."""
-    return f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
+    still resolves it under the workspace root via ``resolve_sandbox_path``).
+
+    Built through :func:`persona_api.workspace_paths.persona_key`, with the conversation id
+    held to one name: the routes look the conversation up before any of this, but a key
+    is only as safe as the door that builds it.
+
+    Raises:
+        SandboxViolationError: an owner, persona or conversation id that is not one name.
+    """
+    conversation = require_path_segment(conversation_id, what="conversation id")
+    return persona_key(owner_id, persona_id, f"conversations/{conversation}/{DOCUMENT_DIR_NAME}")
 
 
 def _make_doc_ref(filename: str) -> str:
