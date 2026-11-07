@@ -10,6 +10,7 @@ the exact model, the window sizes, input validation, one ONNX thread, and reset.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -113,3 +114,6 @@ def test_the_model_carries_state_between_windows() -> None:
     after_noise.process(_noise(512, seed=4))
     assert after_silence.process(window) != after_noise.process(window)
 
+
+def test_voice_needs_no_silero_vad_lite() -> None:
+    assert importlib.util.find_spec("silero_vad_lite") is None

@@ -8,7 +8,8 @@ requires-python = ">=3.11"
 # commercial. The application layer (persona-api / persona-web) is separately
 # licensed PolyForm-Noncommercial-1.0.0 (source-available, noncommercial).
 license = "MIT"
-license-files = ["LICENSE"]
+# The bundled Silero model is MIT too (Silero Team); its notice ships with the wheel.
+license-files = ["LICENSE", "src/persona_voice/stt/data/SILERO_VAD_LICENSE"]
 authors = [
     { name = "Yasin Hessnawi", email = "yasinhessnawi1@gmail.com" },
 ]
@@ -71,19 +72,16 @@ dependencies = [
     # adapter-boundary discipline.
     "deepgram-sdk>=4.0,<5",
     # Silero VAD ONNX-only path per Spec V2 D-V2-X-silero-implementation-shape
-    # LOCK (3 pillars: ONNX-only + SileroFramer mandatory + lazy-construct +
-    # explicit prewarm). `silero-vad-lite` is the preferred path — MIT-licensed,
-    # bundles the v5 `silero_vad.onnx` model weights + a C++ ONNX runtime
-    # wrapper, single transitive (pytest dev-only), no torch (avoids the 200-500
-    # MB transitive that the official `silero-vad` PyPI brings). 32 ms / 512-
-    # sample window pinned at 16 kHz. Used only inside
-    # `persona_voice.stt.vad_silero` per the Spec 02 ChatBackend adapter-
-    # boundary discipline.
-    # 0.3 is the floor: 0.2.x ships a Linux .so that asks for an executable stack,
-    # which glibc 2.41+ refuses to load (the voice image's Debian base and the
-    # ubuntu-latest runner). The ceiling holds the Silero v5.1 weights; 0.4 swaps in
-    # the v6.2 model, whose different scores need the thresholds rechecked first.
-    "silero-vad-lite>=0.3,<0.4",
+    # LOCK (ONNX-only + SileroFramer mandatory + lazy-construct + explicit prewarm),
+    # no torch. The Silero v5.1 model ships inside this package
+    # (src/persona_voice/stt/data/silero_vad.onnx, MIT, Silero Team, sha256-pinned)
+    # and runs on onnxruntime (persona_voice.stt.silero_onnx), which publishes wheels
+    # for Linux x86_64 and aarch64, macOS arm64 and Windows. It replaced
+    # silero-vad-lite 0.3.0, which wrapped the same model in C++ but had no Linux
+    # aarch64 wheel and whose source build downloads an x86_64 ONNX Runtime; the
+    # equivalence test holds the scores to it. onnxruntime was already in the tree
+    # (chromadb), so this adds no new package. MIT.
+    "onnxruntime>=1.19,<2",
     "cartesia[websockets]>=3,<4",
 ]
 

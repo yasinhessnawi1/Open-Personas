@@ -263,24 +263,10 @@ ignore_missing_imports = true
 module = ["deepgram", "deepgram.*"]
 ignore_missing_imports = true
 
-# silero-vad-lite (persona-voice [packages/voice], spec V2 T05) — D-V2-X-silero-
-# implementation-shape LOCK primary path. The PyPI `silero-vad-lite` package is
-# MIT-licensed and bundles the v5 ONNX weights + a C++ ONNX runtime wrapper as
-# a `ctypes` shim — no py.typed marker, no inline type hints on the
-# `SileroVAD(sample_rate)` / `.process(data) -> float` surface. Mirror the
-# livekit / deepgram / docker / pgvector / jose / e2b / openpyxl / pypdfium2 /
-# regex discipline — ignore missing imports at the boundary so the VAD adapter
-# implementation stays untouched by partial third-party stubs.
-[[tool.mypy.overrides]]
-module = ["silero_vad_lite", "silero_vad_lite.*"]
-ignore_missing_imports = true
-
-# onnxruntime fallback path (persona-voice [packages/voice], spec V2 T05). The
-# PyPI `onnxruntime` package is MIT-licensed and ships a partial py.typed marker
-# but the `InferenceSession` constructor + run() surface is dynamically typed
-# at the boundary mypy sees. Documented even though the T05 implementation
-# defaults to silero-vad-lite — the override covers the v0.2 fallback path
-# where an operator bundles the ONNX file directly.
+# onnxruntime (persona-voice [packages/voice]): the Silero VAD runs on it
+# (persona_voice.stt.silero_onnx), replacing silero-vad-lite, which had no Linux aarch64
+# wheel. onnxruntime ships no py.typed marker, so the InferenceSession and run() surface
+# is untyped at the boundary mypy sees; ignore missing imports, as for livekit and deepgram.
 [[tool.mypy.overrides]]
 module = ["onnxruntime", "onnxruntime.*"]
 ignore_missing_imports = true
