@@ -3089,9 +3089,9 @@ dependencies = [
     { name = "deepgram-sdk" },
     { name = "livekit" },
     { name = "livekit-api" },
+    { name = "onnxruntime" },
     { name = "persona-core", extra = ["postgres"] },
     { name = "persona-runtime" },
-    { name = "silero-vad-lite" },
 ]
 
 [package.metadata]
@@ -3100,9 +3100,9 @@ requires-dist = [
     { name = "deepgram-sdk", specifier = ">=4.0,<5" },
     { name = "livekit", specifier = ">=1.1,<2" },
     { name = "livekit-api", specifier = ">=1.1,<2" },
+    { name = "onnxruntime", specifier = ">=1.19,<2" },
     { name = "persona-core", extras = ["postgres"], editable = "packages/core" },
     { name = "persona-runtime", editable = "packages/runtime" },
-    { name = "silero-vad-lite", specifier = ">=0.3,<0.4" },
 ]
 
 [[package]]
@@ -4643,30 +4643,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b27b655beb4b4e9c62313a4e8da8c676e142cc210d58e/shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de", size = 10310, upload-time = "2023-10-24T04:13:40.426Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
-]
-
-[[package]]
-name = "silero-vad-lite"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e1/ad/4ab155d35641116706897b82fde03d100add30f4919a8970634332f48d89/silero_vad_lite-0.3.0.tar.gz", hash = "sha256:1afea680ff016d23b757d61ef1294a60470ae1cecfeb3b7124d96ab293d56ccf", size = 1998540, upload-time = "2026-10-02T11:53:02.566Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/45/f4abe44f443d468c415a11e25a1c76223167dc6f27ee687712fee5510ad4/silero_vad_lite-0.3.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:509c8858820a4c0756c5be142e534fd6f18c3b44663cd3daa913d0db56307f34", size = 30756073, upload-time = "2026-10-02T11:52:09.901Z" },
-    { url = "https://files.pythonhosted.org/packages/38/55/61e14cc4e09a989a38cc3d933b359f551032a062f305a74ed2a29138b376/silero_vad_lite-0.3.0-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:6c4f043b90f2470fff21de19ebd343752dcae73d6692e5b8951c6f7f51a94270", size = 30756696, upload-time = "2026-10-02T11:52:14.556Z" },
-    { url = "https://files.pythonhosted.org/packages/74/d6/550f423d6f745d456eba6c821c1c1003566f86403912503b80031f5e9469/silero_vad_lite-0.3.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:952ac08680eee94a32e8e087069f8e59550e647c09162360cb46cac0a05051bd", size = 10128149, upload-time = "2026-10-02T11:52:17.805Z" },
-    { url = "https://files.pythonhosted.org/packages/80/40/21619aaaf4140823d099e9e5778d94747b664ad70737c790b141228708c6/silero_vad_lite-0.3.0-cp311-cp311-win_amd64.whl", hash = "sha256:49962986ac950dfab8a139c981ba1d188881a8ed69f311ba3e7bce5c5be842b4", size = 6632408, upload-time = "2026-10-02T11:52:20.467Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/f7/e4a49e0a07e0647a77a163e21a611bd1636e7201d7d59e696548fba77667/silero_vad_lite-0.3.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:984cedb0f720284f3f81b02238353097b69b62d9171e252cae225592a45f2ec2", size = 30756072, upload-time = "2026-10-02T11:52:24.193Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/32/9b179dfb6506d922e9a25a0e0f63b7f8ea4e905eb7b59066fbbf85052d33/silero_vad_lite-0.3.0-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:54fa326ae4974aff0377d85cd206cd84f0d923207624daf3ab399c23cbc9e928", size = 30756696, upload-time = "2026-10-02T11:52:28.748Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/e8/a21424477f1a82a1b447feeb12b35c87b60f32b50cbd20a79b8c7843bf07/silero_vad_lite-0.3.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:da7798f61ea453b3880d7002d45ab8745a6850697c68ac71e880f81f4e42fe8a", size = 10128149, upload-time = "2026-10-02T11:52:31.768Z" },
-    { url = "https://files.pythonhosted.org/packages/df/89/f3a1c0d5fc423f3e28b95aec6dcf76e61903c312c29d907a4ab936db6aad/silero_vad_lite-0.3.0-cp312-cp312-win_amd64.whl", hash = "sha256:24df720ebd8b0b90ae8b9edaa67c7764a4a234e97b9feb6965e07e73a611ad8c", size = 6632409, upload-time = "2026-10-02T11:52:34.333Z" },
-    { url = "https://files.pythonhosted.org/packages/fb/aa/05510190a86f7aebb9b8ba3e3be2f83cae04cbe7af8fb35f5c287e8f019b/silero_vad_lite-0.3.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:07734c532adf9edb87761a8f18c580bd8a61a20025ec341022aeaa27f677f429", size = 30756071, upload-time = "2026-10-02T11:52:37.851Z" },
-    { url = "https://files.pythonhosted.org/packages/15/3a/ce5e1fd90659c2938f58a37628372636e7cab72aca1fb29eaf6cec8d260a/silero_vad_lite-0.3.0-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:b8cafe0774484838a8068870392187d3bcedc121f435b52fea1cfedd9b802309", size = 30756696, upload-time = "2026-10-02T11:52:42.402Z" },
-    { url = "https://files.pythonhosted.org/packages/a5/81/25ea3ad7979c0300beab4d132bb10f41b60c8e061c5fcc201d0559fad72d/silero_vad_lite-0.3.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:91ff6bc81af63ea99b51aae46271a5c3187b8efd410d9c27437233b4e6b0446b", size = 10128151, upload-time = "2026-10-02T11:52:45.306Z" },
-    { url = "https://files.pythonhosted.org/packages/59/8d/7a015171a7b751dbdf9565bc01993266698dd8e48ec293958a4452b4b11f/silero_vad_lite-0.3.0-cp313-cp313-win_amd64.whl", hash = "sha256:b3d58703f23c9ec58606800dba3f87e209f54c011c12d5245661e951e14a7d23", size = 6632409, upload-time = "2026-10-02T11:52:47.697Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/8e/1379d44b087a3870f12a8a5b10dd237143dfb035a4165511b14283bf736a/silero_vad_lite-0.3.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:2e052898759927bffbd3d8689a491f776bc2a9da00cf8ef9cfb3b89451bb4e98", size = 30756071, upload-time = "2026-10-02T11:52:50.902Z" },
-    { url = "https://files.pythonhosted.org/packages/bd/c3/733ae90a51207fcdadb58f32ee497e11da3b4ce3d32e7d88d7eaf15daa67/silero_vad_lite-0.3.0-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:11dd3fdd1de6e356e9e7cd9d5af8edb2de59c44505fb3741734e9bad7bcc1121", size = 30756688, upload-time = "2026-10-02T11:52:54.644Z" },
-    { url = "https://files.pythonhosted.org/packages/fc/48/174cff18c031990c7d87d81d1479ede2ac50a3eeccb945bc8570564b6432/silero_vad_lite-0.3.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:c6a84a1cdb622a5b9e04c2a3a168d47dd928e876fb01f8db0e2e7e8d40ef78af", size = 10128150, upload-time = "2026-10-02T11:52:57.646Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/38/cf9399fcbc9cb804d8431380f23ca2b384543c8b377447704c9b65a8c2b4/silero_vad_lite-0.3.0-cp314-cp314-win_amd64.whl", hash = "sha256:873cca77b2ab5c02a6434345b998de081e9a03ce5b64b1e2f235d1af11716b84", size = 6768936, upload-time = "2026-10-02T11:53:00.463Z" },
 ]
 
 [[package]]

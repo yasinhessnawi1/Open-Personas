@@ -2,9 +2,12 @@
 
 Three pillars per Phase-4 decisions.md:
 
-1. **ONNX-only path.** Uses ``silero-vad-lite`` (MIT; bundles `silero_vad.onnx` v5
-   weights + C++ ONNX runtime wrapper; single transitive surface, no torch).
-   The official ``silero-vad`` PyPI pulls torch (200-500 MB) — rejected here.
+1. **ONNX-only path.** Runs the Silero v5.1 ``silero_vad.onnx`` (MIT, shipped in
+   this package) on the ``onnxruntime`` package via
+   :mod:`persona_voice.stt.silero_onnx`, no torch. It replaced ``silero-vad-lite``
+   0.3.0 (same model, C++ wrapper) because that has no Linux aarch64 wheel; the
+   equivalence test holds the scores to it. The official ``silero-vad`` PyPI pulls
+   torch (200-500 MB) and is rejected here.
 2. **`SileroFramer` mandatory.** V1's variable PCM16 frame cadence (room.py
    delivers whatever the LiveKit substrate produces) does NOT align with
    Silero's strict 512-sample / 32 ms windows. The framer buffers raw PCM16
@@ -13,7 +16,7 @@ Three pillars per Phase-4 decisions.md:
    D-V2-2 wall-clock framing this lands the WORST-CASE onset at 116-121 ms;
    typical at 85-90 ms. T05 benchmark harness records the measurement.
 3. **Lazy-construct + explicit prewarm.** ``__init__`` validates Pydantic
-   config + framer + state; the C++ ONNX session materialises only when
+   config + framer + state; the ONNX Runtime session materialises only when
    ``load()`` is called (typically at agent-worker process init). First-frame
    lazy-load is REJECTED because LiveKit issue #4761 documents an
    "inference slower than realtime" cold-start spike on the first 1-2 s of
@@ -73,8 +76,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
-from silero_vad_lite import SileroVAD
 
+from persona_voice.stt.silero_onnx import SileroVAD
 from persona_voice.stt.types import SpeechEndedEvent, SpeechStartedEvent
 
 if TYPE_CHECKING:
@@ -95,7 +98,7 @@ __all__ = [
 
 
 # D-V2-X-silero-implementation-shape pillar #2 — strict frame contract.
-# 512 samples at 16 kHz = exactly 32 ms. ``silero-vad-lite``'s SileroVAD
+# 512 samples at 16 kHz = exactly 32 ms. The Silero runner's SileroVAD
 # enforces this at runtime via ``window_size_samples`` introspection;
 # encoded here as a module constant so callers (T06 seam adapter, T11
 # integration spine) can pin the invariant in tests + assertions without
@@ -242,18 +245,16 @@ class SileroVADAdapter:
         """
         if self._vad is not None:
             return
-        # SileroVAD(sample_rate) loads the bundled v5 ONNX weights via the
-        # ``silero-vad-lite`` shared library. window_size_samples is
-        # constant 512 at 16 kHz; verified at __init__ in the wheel.
+        # SileroVAD(sample_rate) verifies and loads the bundled Silero v5.1 model
+        # into an onnxruntime session. window_size_samples is 512 at 16 kHz.
         self._vad = SileroVAD(SILERO_SAMPLE_RATE_HZ)
-        # Sanity-pin the frame contract — protects against any future
-        # silero-vad-lite version that changes window_size_samples.
+        # Sanity-pin the frame contract against any change to the runner.
         if self._vad.window_size_samples != SILERO_FRAME_SAMPLES:
             msg = (
                 f"SileroVAD window_size_samples={self._vad.window_size_samples} "
                 f"does not match expected {SILERO_FRAME_SAMPLES}; the "
                 f"D-V2-X-silero-implementation-shape pillar #2 frame contract is "
-                f"violated — silero-vad-lite version drift"
+                f"violated by the Silero runner"
             )
             raise RuntimeError(msg)
 
@@ -293,7 +294,7 @@ class SileroVADAdapter:
         # Per-frame state-machine advance. ms_per_frame is a module constant
         # (32 ms at 16 kHz) computed once.
         ms_per_frame = (SILERO_FRAME_SAMPLES / SILERO_SAMPLE_RATE_HZ) * 1000.0
-        # ``SileroVAD.process`` is synchronous C++ ONNX inference, invoked per
+        # ``SileroVAD.process`` is synchronous ONNX Runtime inference, invoked per
         # 512-sample frame at high frequency for the whole call. Running it inline
         # starves the asyncio loop so LiveKit heartbeats + the Deepgram/Cartesia
         # WebSocket handshakes time out — the live voice incident's root cause.
@@ -333,7 +334,7 @@ class SileroVADAdapter:
         """Run the blocking ONNX inference for a batch of frames (off-loop).
 
         Called via :func:`asyncio.to_thread` from :meth:`push_audio`. Touches only
-        the ``vad`` argument (the C++ ONNX session) — never adapter state — so it is
+        the ``vad`` argument (the ONNX Runtime session) — never adapter state — so it is
         safe to run off the event-loop thread. The state machine advances on the
         loop thread once the scores return. ``vad`` is passed explicitly (rather
         than read from ``self`` in the thread) so the live-session reference cannot
@@ -346,7 +347,7 @@ class SileroVADAdapter:
         Returns:
             One activation score per frame, in order.
         """
-        return [vad.process(frame.tobytes()) for frame in frames]
+        return [vad.process(frame) for frame in frames]
 
     def _emit_speech_started(self, score: float) -> None:
         """Emit speech_started unless TTS-mute-window is active."""
@@ -399,9 +400,8 @@ class SileroVADAdapter:
     async def close(self) -> None:
         """Stop draining the event bridge; release the ONNX session.
 
-        Idempotent: second call is a no-op. The ``silero-vad-lite``
-        ``SileroVAD`` C++ wrapper releases via ``__del__``; we drop our
-        reference so the next GC cycle frees the native handle.
+        Idempotent: second call is a no-op. Dropping the reference frees the
+        onnxruntime session once nothing else holds it.
         """
         if self._closed:
             return
@@ -432,7 +432,7 @@ async def benchmark_onset_latency(
     percentiles.
 
     The burst must be speech the model scores as speech at the adapter's
-    threshold. A pure tone is not: silero-vad-lite 0.3 scores a 440 Hz sine
+    threshold. A pure tone is not: Silero v5.1 scores a 440 Hz sine
     near 0.002, which is why this harness takes recorded or rendered speech
     from the caller instead of synthesising one (the tests pass a slice of the
     committed V8 corpus, ``tests/_speech_audio.py``).
