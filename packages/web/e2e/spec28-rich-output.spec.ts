@@ -250,7 +250,7 @@ test.describe("Spec 28 — Rich Tool Output Delivery (live operator-pass)", () =
     await page.goto("/personas");
     const token = await clerkToken(page);
 
-    const probe = await page.request.post(`${API}/v1/personas/probe/imagegen`, {
+    const probe = await page.request.post(`${API}/v1/personas/persona_00000000000000000000000000000000/imagegen`, {
       headers: { Authorization: `Bearer ${token}` },
       data: { prompt: "test" },
       failOnStatusCode: false,

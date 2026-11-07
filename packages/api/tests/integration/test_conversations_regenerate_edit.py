@@ -599,7 +599,7 @@ async def test_regenerate_409_when_a_turn_is_active_supersedes_nothing(
 ) -> None:
     engine = migrated_engine
     owner_id = "user_r9025c_409"
-    persona_id = "persona_r9025c_409"
+    persona_id = "persona_9025c4090000000000000000000000aa"
     conv_id = "conv_r9025c_409"
     with engine.begin() as conn:
         conn.execute(
@@ -673,7 +673,7 @@ async def test_edit_409_when_a_turn_is_active_supersedes_nothing(
 ) -> None:
     engine = migrated_engine
     owner_id = "user_r9025c_409b"
-    persona_id = "persona_r9025c_409b"
+    persona_id = "persona_9025c409b000000000000000000000bb"
     conv_id = "conv_r9025c_409b"
     with engine.begin() as conn:
         conn.execute(

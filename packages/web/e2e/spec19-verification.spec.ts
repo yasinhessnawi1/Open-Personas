@@ -411,7 +411,7 @@ test.describe("Spec 19 — Phase 2 integration hardening (16-journey live pass)"
   // ─── J07 — rich-output: generate_image (verbatim F4 Journey 1) ─────────
   /**
    * Ops checklist (T25 operator pass):
-   *   - Pre-flight: probe /v1/personas/probe/imagegen.
+   *   - Pre-flight: probe /v1/personas/persona_00000000000000000000000000000000/imagegen.
    *   - 🟦 PARTIAL (deployment-honest) if PERSONA_IMAGEGEN_API_KEY unset.
    *   - Expected: ✅ PASS post-key configuration.
    */
@@ -420,7 +420,7 @@ test.describe("Spec 19 — Phase 2 integration hardening (16-journey live pass)"
     await page.goto("/personas");
     const token = await clerkToken(page);
 
-    const probe = await page.request.post(`${API}/v1/personas/probe/imagegen`, {
+    const probe = await page.request.post(`${API}/v1/personas/persona_00000000000000000000000000000000/imagegen`, {
       headers: { Authorization: `Bearer ${token}` },
       data: { prompt: "test" },
       failOnStatusCode: false,

@@ -10,6 +10,7 @@ failing the mutation.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import TYPE_CHECKING
 
@@ -72,12 +73,17 @@ def client(
         su.dispose()
 
 
+def _persona_id(uid: str) -> str:
+    """One persona per owner, in the minted id format the routes accept."""
+    return f"persona_{hashlib.md5(uid.encode(), usedforsecurity=False).hexdigest()}"
+
+
 def _seed_persona(uid: str) -> None:
     su = make_rls_engine(os.environ["DATABASE_URL"])
     with su.begin() as conn:
         conn.execute(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:pid, :uid, 'name: P')"),
-            {"pid": f"{uid}_p1", "uid": uid},
+            {"pid": _persona_id(uid), "uid": uid},
         )
     su.dispose()
 
@@ -98,7 +104,7 @@ def test_conversation_create_and_delete_emit_sidebar_changed(client: TestClient)
     client.app.state.event_channel = channel  # type: ignore[attr-defined]
     try:
         r = client.post(
-            f"/v1/personas/{uid}_p1/conversations",
+            f"/v1/personas/{_persona_id(uid)}/conversations",
             json={"title": "t", "origin": "chat"},
             headers=_auth(uid),
         )
@@ -123,7 +129,7 @@ def test_missing_channel_degrades_to_noop_not_failure(client: TestClient) -> Non
 
     client.app.state.event_channel = None  # type: ignore[attr-defined]
     r = client.post(
-        f"/v1/personas/{uid}_p1/conversations",
+        f"/v1/personas/{_persona_id(uid)}/conversations",
         json={"title": "t", "origin": "chat"},
         headers=_auth(uid),
     )
