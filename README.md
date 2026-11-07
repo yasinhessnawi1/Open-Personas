@@ -7,7 +7,7 @@
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
   <img alt="Engine license: MIT" src="https://img.shields.io/badge/engine-MIT-2ba193">
   <img alt="App license: PolyForm NC" src="https://img.shields.io/badge/app-PolyForm--NC-8283e0">
-  <a href="https://app.openpersonasai.com"><img alt="Hosted app" src="https://img.shields.io/badge/hosted-app.openpersonasai.com-d879ae"></a>
+  <a href="https://app.openpersonas.si"><img alt="Hosted app" src="https://img.shields.io/badge/hosted-app.openpersonas.si-d879ae"></a>
 </p>
 
 <p align="center">
@@ -196,7 +196,7 @@ python -m persona_api.db.community_import \
 <summary><b>☁️ Cloud edition: hosting for many tenants</b></summary>
 <br>
 
-`PERSONA_EDITION=cloud` reproduces the hosted product: Clerk auth, a shared Postgres with row level isolation (RLS), and metered credits. It needs `DATABASE_URL` / `APP_DATABASE_URL`, the Clerk/JWT vars, and `docker compose up -d postgres`. Both the API process and the web build must set `PERSONA_EDITION=cloud`. (Or skip all of it and use [app.openpersonasai.com](https://app.openpersonasai.com).)
+`PERSONA_EDITION=cloud` reproduces the hosted product: Clerk auth, a shared Postgres with row level isolation (RLS), and metered credits. It needs `DATABASE_URL` / `APP_DATABASE_URL`, the Clerk/JWT vars, and `docker compose up -d postgres`. Both the API process and the web build must set `PERSONA_EDITION=cloud`. (Or skip all of it and use [app.openpersonas.si](https://app.openpersonas.si).)
 
 </details>
 

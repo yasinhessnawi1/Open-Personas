@@ -69,7 +69,7 @@ GENERATED = re.compile(r"__GEN_[A-Z0-9_]+__")
 LIVEKIT_TOKENS = ("__LIVEKIT_URL__", "__LIVEKIT_API_KEY__", "__LIVEKIT_API_SECRET__")
 
 SELFHOSTED_LIVEKIT = {
-    "__LIVEKIT_URL__": "wss://livekit.openpersonasai.com",
+    "__LIVEKIT_URL__": "wss://livekit.openpersonas.si",
     "__LIVEKIT_API_KEY__": "__GEN_LIVEKIT_API_KEY__",
     "__LIVEKIT_API_SECRET__": "__GEN_LIVEKIT_API_SECRET__",
 }

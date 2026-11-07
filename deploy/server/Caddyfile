@@ -13,13 +13,15 @@
 # No access logs. The error log drops the request URI (tokens can ride in query strings)
 # and the Authorization and Cookie headers.
 #
-# The hostnames are the ones production used on Fly. Keeping them is what keeps every
-# provider registration valid unchanged: the Stripe webhook, the Discord, Slack and GitHub
-# OAuth redirects, and the Twilio and Postmark webhooks.
+# The hostnames come from the host profile (hosts/oracle.env: OP_API_HOST and
+# OP_CONNECTORS_HOST, api.openpersonas.si and connectors.openpersonas.si), handed to this
+# container by compose and read here as {$...} placeholders. Every provider registration
+# (the Stripe webhook, the Discord, Slack and GitHub OAuth redirects, the Twilio and
+# Postmark webhooks) must name them.
 #
-# voice.openpersonasai.com and livekit.openpersonasai.com are NOT served here: they point
-# at the voice host (Azure), whose Caddy loads Caddyfile.voice. Asking Let's Encrypt for a
-# name whose DNS points elsewhere fails on every attempt and spends the rate limit.
+# voice.openpersonas.si and livekit.openpersonas.si are NOT served here: they point at the
+# voice host (Azure), whose Caddy loads Caddyfile.voice. Asking Let's Encrypt for a name
+# whose DNS points elsewhere fails on every attempt and spends the rate limit.
 
 {
 	admin off
@@ -42,11 +44,11 @@
 	}
 }
 
-# The api, under both domains. flush_interval -1 streams SSE (chat and agentic runs)
+# The api. flush_interval -1 streams SSE (chat and agentic runs)
 # without buffering. Request bodies are capped above the app's own 20 MB upload limit
 # (image_service.MAX_UPLOAD_BYTES, chat_service.MAX_STAGED_DOCUMENT_BYTES) plus
 # multipart overhead.
-api.openpersonasai.com, api.openpersona.online {
+{$OP_API_HOST} {
 	import edge
 	request_body {
 		max_size 32MB
@@ -61,7 +63,7 @@ api.openpersonasai.com, api.openpersona.online {
 # URL, the Telegram and Postmark webhooks, and Twilio's webhook and status callback for
 # sms and whatsapp). Everything else on this name is a 404, so the api's own routes are
 # not reachable through it. Postmark inbound mail can reach 35 MB with attachments.
-connectors.openpersonasai.com {
+{$OP_CONNECTORS_HOST} {
 	import edge
 	@provider path /discord/oauth/callback /slack/oauth/callback /slack/events /telegram/webhook /email/webhook /sms/webhook /sms/status /whatsapp/webhook /whatsapp/status
 	handle @provider {

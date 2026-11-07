@@ -217,6 +217,10 @@ services:
     pids_limit: 256
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/caddy.env
+    # The hostnames the Caddyfile serves, from the host profile (its one home).
+    environment:
+      OP_API_HOST: ${OP_API_HOST:?the host profile names no api host}
+      OP_CONNECTORS_HOST: ${OP_CONNECTORS_HOST:?the host profile names no connectors host}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

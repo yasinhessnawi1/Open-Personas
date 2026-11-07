@@ -86,7 +86,7 @@ kill_timeout = "30s"
   # voice server-to-server here (routes/voice.py proxies, forwarding the
   # caller's own bearer which voice re-verifies) — this URL is never handed to
   # the browser, so the public hop costs a round trip, not correctness.
-  PERSONA_VOICE_SERVICE_URL = "https://voice.openpersonasai.com"
+  PERSONA_VOICE_SERVICE_URL = "https://voice.openpersonas.si"
   # JSONL audit + turnlog roots; written to the mounted volume below.
   # PERSONA_API_ prefix — APIConfig.audit_root field reads via Pydantic Settings
   # with env_prefix="PERSONA_API_" (config.py:52). Surfaced at launch when the

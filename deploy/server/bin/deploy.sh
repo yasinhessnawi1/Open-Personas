@@ -122,10 +122,10 @@ wait_for "api /healthz (database)" 120 curl -fsS --max-time 4 http://127.0.0.1:8
 insecure=""
 grep -q 'acme-staging' "${OP_ENV_DIR}/caddy.env" && insecure="-k"
 if wait_for "caddy -> api" 120 curl -fsS ${insecure} --max-time 6 \
-    --resolve api.openpersonasai.com:443:127.0.0.1 https://api.openpersonasai.com/livez; then
+    --resolve "${OP_API_HOST}:443:127.0.0.1" "https://${OP_API_HOST}/livez"; then
   :
 else
-  say "WARNING: Caddy did not serve api.openpersonasai.com yet (DNS or the certificate). The services are up."
+  say "WARNING: Caddy did not serve ${OP_API_HOST} yet (DNS or the certificate). The services are up."
 fi
 
 say "deployed $(git -C "${KIT_DIR}" rev-parse --short HEAD). Rollback: RUNBOOK.md, section 'Rolling back'."

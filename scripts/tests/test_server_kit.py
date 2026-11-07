@@ -98,6 +98,8 @@ FIXED_VALUES = {
     "false",
     "persona",
     "https://acme-staging-v02.api.letsencrypt.org/directory",
+    # The web's origins on Vercel (owner, 2026-11-07): api.env and voice.env CORS.
+    "https://openpersonas.si,https://app.openpersonas.si,https://www.openpersonas.si",
 }
 
 
@@ -380,21 +382,32 @@ def test_voice_audit_goes_to_postgres_in_cloud() -> None:
 
 # --- Caddy and preflight agree on the hostnames ----------------------------------------------
 
-#: Served by the core host (Oracle): the api under both domains and the connector host.
-CORE_HOSTS = {
-    "api.openpersonasai.com",
-    "api.openpersona.online",
-    "connectors.openpersonasai.com",
-}
+#: Served by the core host (Oracle): the api and the connector host. The domain is
+#: openpersonas.si (owner, 2026-11-07); the old names are gone, with no alias.
+CORE_HOSTS = {"api.openpersonas.si", "connectors.openpersonas.si"}
 #: Served by the voice host (Azure, Phase B). Their DNS records point there, so the core
 #: host's Caddy must not ask Let's Encrypt for them: every attempt would fail.
-VOICE_HOSTS = {"voice.openpersonasai.com", "livekit.openpersonasai.com"}
+VOICE_HOSTS = {"voice.openpersonas.si", "livekit.openpersonas.si"}
 CADDYFILES = {"Caddyfile": CORE_HOSTS, "Caddyfile.voice": VOICE_HOSTS}
 
 
-def _served(caddyfile: str) -> set[str]:
-    sites = set(re.findall(r"^([a-z0-9.,\s-]+\.(?:com|online))\s*\{", caddyfile, re.M))
-    return {h.strip() for site in sites for h in site.split(",")}
+def _oracle_profile() -> dict[str, str]:
+    lines = (KIT / "hosts" / "oracle.env").read_text(encoding="utf-8").splitlines()
+    return dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+
+
+def _served(caddyfile: str, values: dict[str, str] | None = None) -> set[str]:
+    """The hostnames a Caddyfile's site blocks serve, `{$VAR}` resolved from the profile."""
+    values = _oracle_profile() if values is None else values
+    # Spaces and tabs only, not \s: a site address never spans lines.
+    sites = re.findall(r"^([a-z0-9., \t${}A-Z_-]+?)[ \t]*\{$", caddyfile, re.M)
+    hosts = set()
+    for site in sites:
+        for host in (h.strip() for h in site.split(",")):
+            host = re.sub(r"\{\$([A-Z0-9_]+)\}", lambda m: values.get(m.group(1), ""), host)
+            if "." in host:
+                hosts.add(host)
+    return hosts
 
 
 @pytest.mark.parametrize("name", sorted(CADDYFILES))
@@ -445,9 +458,26 @@ def test_each_host_serves_exactly_its_hostnames(name: str, hosts: set[str]) -> N
 
 
 def test_the_split_is_not_vacuous() -> None:
-    both = "a.openpersonasai.com, b.openpersona.online {\n}\nvoice.openpersonasai.com {\n}\n"
-    expected = {"a.openpersonasai.com", "b.openpersona.online", "voice.openpersonasai.com"}
-    assert _served(both) == expected
+    both = "{$OP_X}, b.example.org {\n}\nvoice.openpersonas.si {\n}\n(edge) {\n}\n"
+    expected = {"a.example.org", "b.example.org", "voice.openpersonas.si"}
+    assert _served(both, {"OP_X": "a.example.org"}) == expected
+
+
+def test_the_core_hostnames_live_in_the_profile_only() -> None:
+    """One place: hosts/oracle.env. The core Caddyfile names them only as placeholders,
+    and compose hands the profile's values to Caddy."""
+    values = _oracle_profile()
+    assert values["OP_API_HOST"] == "api.openpersonas.si"
+    assert values["OP_CONNECTORS_HOST"] == "connectors.openpersonas.si"
+    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
+    assert re.search(r"^\{\$OP_API_HOST\} \{$", caddyfile, re.M)
+    assert re.search(r"^\{\$OP_CONNECTORS_HOST\} \{$", caddyfile, re.M)
+    assert "openpersonas.si {" not in caddyfile
+    environment = _compose()["services"]["caddy"]["environment"]
+    assert environment["OP_API_HOST"] == "${OP_API_HOST:?the host profile names no api host}"
+    assert environment["OP_CONNECTORS_HOST"] == (
+        "${OP_CONNECTORS_HOST:?the host profile names no connectors host}"
+    )
 
 
 def test_each_caddy_loads_its_own_caddyfile() -> None:
@@ -459,10 +489,15 @@ def test_each_caddy_loads_its_own_caddyfile() -> None:
 
 def test_preflight_checks_dns_for_exactly_the_core_hostnames() -> None:
     preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
-    for host in CORE_HOSTS:
-        assert host in preflight, host
-    for host in VOICE_HOSTS:
-        assert host not in preflight, host
+    loop = r'^for host in "\$\{OP_API_HOST\}" "\$\{OP_CONNECTORS_HOST\}"; do$'
+    assert re.search(loop, preflight, re.M)
+    assert "openpersonas.si" not in preflight
+
+
+def test_deploy_smokes_the_profiles_api_host() -> None:
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    assert '--resolve "${OP_API_HOST}:443:127.0.0.1" "https://${OP_API_HOST}/livez"' in deploy
+    assert "openpersonas.si" not in deploy
 
 
 # --- scripts ---------------------------------------------------------------------------------
@@ -594,7 +629,9 @@ def test_render_copies_resolves_and_never_prints_a_value(
     assert all("PERSONA_DEV_CHEAP_TIERS" not in _rendered(out, n) for n in APP_TEMPLATES)
     # Chains wait for the owner unless the owner confirmed .env holds production.
     assert common["PERSONA_FRONTIER_MODELS"] == "__GITHUB_PRODUCTION__"
-    assert api["PERSONA_API_CORS_ORIGINS"] == "__OWNER__"
+    # The web's origins are fixed in the template (owner, 2026-11-07), not owner input.
+    assert api["PERSONA_API_CORS_ORIGINS"].startswith("https://openpersonas.si,")
+    assert _rendered(out, "caddy")["ACME_EMAIL"] == "__OWNER__"
     assert api["E2B_API_KEY"] == "__MISSING_FROM_DOTENV__"
     assert "__GEN_APP_DB_PASSWORD__" in api["APP_DATABASE_URL"]
     assert voice["PERSONA_VOICE_LIVEKIT_URL"] == values["PERSONA_LIVEKIT_URL"]
@@ -617,7 +654,7 @@ def test_render_selfhosted_livekit_and_confirmed_chains(tmp_path: Path) -> None:
     ]
     assert render.main(argv) == 0
     voice = _rendered(out, "voice")
-    assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonasai.com"
+    assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonas.si"
     assert voice["PERSONA_VOICE_LIVEKIT_API_KEY"] == "__GEN_LIVEKIT_API_KEY__"
     assert _rendered(out, "common")["PERSONA_FRONTIER_MODELS"] == values["PERSONA_FRONTIER_MODELS"]
 
@@ -753,7 +790,7 @@ def test_livekit_defaults_to_selfhosted(tmp_path: Path) -> None:
     argv = ["--dotenv", str(dotenv), "--out", str(tmp_path / "o"), "--host", "all"]
     assert render.main(argv) == 0
     voice = _rendered(tmp_path / "o", "voice")
-    assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonasai.com"
+    assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonas.si"
 
 
 def test_provision_gives_deploy_the_invoking_users_key() -> None:

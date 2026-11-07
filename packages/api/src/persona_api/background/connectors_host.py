@@ -237,7 +237,7 @@ def mount_connector_routes(app: FastAPI, routes_app: FastAPI) -> int:
 
     The five provider registrations (Discord and Slack OAuth redirects, the Slack events
     URL, the Postmark inbound webhook, the Twilio webhooks) pin
-    ``https://connectors.openpersonasai.com/...`` paths. Mounting the routes UNCHANGED is
+    ``https://connectors.openpersonas.si/...`` paths. Mounting the routes UNCHANGED is
     what lets the cutover be a DNS record instead of five re-registrations, so the paths
     are appended verbatim rather than re-prefixed.
 

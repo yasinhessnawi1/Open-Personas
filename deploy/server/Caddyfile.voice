@@ -28,7 +28,7 @@
 }
 
 # persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
-voice.openpersonasai.com {
+voice.openpersonas.si {
 	import edge
 	request_body {
 		max_size 1MB
@@ -39,7 +39,7 @@ voice.openpersonasai.com {
 # Self-hosted LiveKit signaling (WebSocket). Media does NOT pass through Caddy: it goes
 # straight to UDP 7882 (or TCP 7881) on the box. With LiveKit Cloud this site answers
 # 502, which is harmless; keep the DNS record so switching modes needs no DNS change.
-livekit.openpersonasai.com {
+livekit.openpersonas.si {
 	import edge
 	request_body {
 		max_size 1MB

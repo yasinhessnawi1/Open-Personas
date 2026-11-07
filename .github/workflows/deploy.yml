@@ -270,7 +270,7 @@ jobs:
         run: |
           # Give the new machine a moment to settle, then verify the public URL.
           for i in 1 2 3 4 5 6; do
-            if curl -fsS --max-time 10 https://api.openpersona.online/healthz | grep -q '"status":"ok"'; then
+            if curl -fsS --max-time 10 https://api.openpersonas.si/healthz | grep -q '"status":"ok"'; then
               echo "healthz ok"
               exit 0
             fi
