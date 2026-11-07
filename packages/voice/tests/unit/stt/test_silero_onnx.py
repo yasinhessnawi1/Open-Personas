@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import re
+import tomllib
 from importlib.resources import files
 from pathlib import Path
 
@@ -131,3 +133,15 @@ def test_the_model_carries_state_between_windows() -> None:
 
 def test_voice_needs_no_silero_vad_lite() -> None:
     assert importlib.util.find_spec("silero_vad_lite") is None
+
+
+def test_the_onnxruntime_floor_is_the_version_the_equivalence_gate_measured() -> None:
+    # The gate ran on onnxruntime 1.26. An older runtime is unmeasured, so the dependency
+    # does not admit one. 1.26 has wheels for every platform voice supports (Linux x86_64
+    # and aarch64 on glibc 2.27+, macOS 14+ arm64, Windows; CPython 3.11 to 3.14).
+    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+    (spec,) = [d for d in declared if d.startswith("onnxruntime")]
+    floor = re.search(r">=\s*(\d+)\.(\d+)", spec)
+    assert floor is not None, spec
+    assert (int(floor.group(1)), int(floor.group(2))) >= (1, 26), spec

@@ -3321,7 +3321,7 @@ requires-dist = [
     { name = "deepgram-sdk", specifier = ">=4.0,<5" },
     { name = "livekit", specifier = ">=1.1,<2" },
     { name = "livekit-api", specifier = ">=1.1,<2" },
-    { name = "onnxruntime", specifier = ">=1.19,<2" },
+    { name = "onnxruntime", specifier = ">=1.26,<2" },
     { name = "persona-core", extras = ["postgres"], editable = "packages/core" },
     { name = "persona-runtime", editable = "packages/runtime" },
 ]
