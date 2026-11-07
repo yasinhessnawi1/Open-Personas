@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ from persona_voice.stt.silero_onnx import (
     SILERO_MODEL_SHA256,
     SileroModelError,
     SileroVAD,
-    bundled_model_path,
+    bundled_model_bytes,
 )
 
 #: Silero v5.1, snakers4/silero-vad tag v5.1, ``src/silero_vad/data/silero_vad.onnx``
@@ -34,18 +35,18 @@ def _noise(samples: int, seed: int) -> np.ndarray:
 
 def test_the_shipped_model_is_silero_v5_1_byte_for_byte() -> None:
     assert SILERO_MODEL_SHA256 == _UPSTREAM_V5_1_SHA256
-    digest = hashlib.sha256(bundled_model_path().read_bytes()).hexdigest()
+    digest = hashlib.sha256(bundled_model_bytes()).hexdigest()
     assert digest == _UPSTREAM_V5_1_SHA256
 
 
 def test_the_model_ships_with_its_mit_licence() -> None:
-    notice = (bundled_model_path().parent / "SILERO_VAD_LICENSE").read_text(encoding="utf-8")
+    notice = files("persona_voice.stt").joinpath("data", "SILERO_VAD_LICENSE").read_text("utf-8")
     assert notice.startswith("MIT License")
     assert "Copyright (c) 2020-present Silero Team" in notice
 
 
 def test_a_model_that_is_not_the_pinned_one_is_refused(tmp_path: Path) -> None:
-    tampered = bytearray(bundled_model_path().read_bytes())
+    tampered = bytearray(bundled_model_bytes())
     tampered[len(tampered) // 2] ^= 0xFF
     path = tmp_path / "silero_vad.onnx"
     path.write_bytes(bytes(tampered))
@@ -71,6 +72,19 @@ def test_a_window_of_the_wrong_length_is_refused() -> None:
         vad.process(np.zeros(511, dtype=np.float32))
     with pytest.raises(ValueError, match="512"):
         vad.process(np.zeros(513, dtype=np.float32).tobytes())
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.int32, np.uint8, np.bool_])
+def test_a_window_that_is_not_floating_point_is_refused(dtype: type) -> None:
+    # PCM16 handed over unnormalised would score as noise at 32768 times the level; the
+    # window must already be float in [-1, 1] (SileroFramer does the conversion).
+    with pytest.raises(ValueError, match="floating"):
+        SileroVAD(16_000).process(np.zeros(512, dtype=dtype))
+
+
+def test_a_float64_window_is_accepted() -> None:
+    frame = _noise(512, seed=2)
+    assert SileroVAD(16_000).process(frame.astype(np.float64)) == SileroVAD(16_000).process(frame)
 
 
 def test_bytes_and_arrays_score_the_same() -> None:

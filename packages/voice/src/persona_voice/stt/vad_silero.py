@@ -245,9 +245,11 @@ class SileroVADAdapter:
         """
         if self._vad is not None:
             return
-        # SileroVAD(sample_rate) verifies and loads the bundled Silero v5.1 model
-        # into an onnxruntime session. window_size_samples is 512 at 16 kHz.
-        self._vad = SileroVAD(SILERO_SAMPLE_RATE_HZ)
+        # SileroVAD(sample_rate) reads and hashes the bundled Silero v5.1 model and
+        # builds an onnxruntime session: blocking work, so it runs on a worker thread
+        # and the event loop (LiveKit heartbeats, STT and TTS sockets) keeps turning
+        # while a call comes up (R9-216). window_size_samples is 512 at 16 kHz.
+        self._vad = await asyncio.to_thread(SileroVAD, SILERO_SAMPLE_RATE_HZ)
         # Sanity-pin the frame contract against any change to the runner.
         if self._vad.window_size_samples != SILERO_FRAME_SAMPLES:
             msg = (
