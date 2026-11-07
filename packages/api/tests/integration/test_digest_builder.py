@@ -307,7 +307,7 @@ def _hold(
     app_engine: Engine,
     *,
     ref: str = "u::node::n1",
-    version: str = "a5-scan-v11",
+    version: str = "a5-scan-v12",
     at: datetime = _NOW,
     why_now: str | None = None,
     scanned_at: datetime = _NOW,

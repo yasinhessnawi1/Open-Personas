@@ -18,6 +18,8 @@ Real Postgres under the ``persona_app`` non-superuser role. Proves:
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -94,7 +96,7 @@ def _candidate(
         source=CandidateSource.SCAN,
         owner_id=owner,
         persona_id=persona,
-        prompt_version="a5-scan-v11",
+        prompt_version="a5-scan-v12",
         scanned_at=_NOW,
     )
 
@@ -558,3 +560,162 @@ class TestWhatTheAnchorBinds:
         )
         assert tail is not None
         assert self._claim(ledger, "user_tail", "n-tail", InitiativeTrigger.CONFLICT) is not None
+
+
+class TestAnExpiredNoticeFreesItsSlot:
+    """R9-267: an expired notice kept its exact key forever (``superseded_at`` stays NULL),
+    though it never reached the user. A new claim now takes the slot over, except within the
+    cooldown after an expiry of a notice from a prompt still in force, so a judge that
+    flips cannot re-raise and re-expire on every scan. A notice expired because its prompt
+    was superseded says nothing about the prompt in force, so it frees at once. No
+    migration: the holder is read at the claim, so rows expired before this fix free too."""
+
+    _LATER = _NOW + timedelta(days=8)
+
+    @staticmethod
+    def _claim(
+        ledger: InitiativeLedger, owner: str, ref: str, now: datetime, version: str = ""
+    ) -> object:
+        candidate = _candidate(owner, ref=ref)
+        if version:
+            candidate = candidate.model_copy(update={"prompt_version": version})
+        return ledger.try_claim(
+            candidate,
+            voicer_persona_id="persona_a",
+            disposition=NoticeDisposition.HELD,
+            envelope_action=None,
+            held_until=None,
+            now=now,
+        )
+
+    def test_the_cooldown_refuses_then_the_slot_frees(
+        self, migrated_engine: Engine, app_engine: Engine
+    ) -> None:
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, "user_cool")
+        first = self._claim(ledger, "user_cool", "n-cool", _NOW)
+        assert first is not None
+        assert ledger.expire_stale("user_cool", first.id, reason="grounding_dissolved", now=_NOW)
+        before = _audit_actions(migrated_engine, "user_cool", "initiative.duplicate_suppressed")
+        inside = _NOW + timedelta(days=6, hours=23)
+        assert self._claim(ledger, "user_cool", "n-cool", inside) is None
+        after = _audit_actions(migrated_engine, "user_cool", "initiative.duplicate_suppressed")
+        assert after == before + 1
+        taken = "initiative.expired_slot_taken_over"
+        assert _audit_actions(migrated_engine, "user_cool", taken) == 0
+        second = self._claim(ledger, "user_cool", "n-cool", self._LATER)
+        assert second is not None
+        assert _audit_actions(migrated_engine, "user_cool", taken) == 1
+        assert second.id != first.id
+        assert ledger.get_notice("user_cool", first.id).superseded_at == self._LATER
+        assert [n.id for n in ledger.held_for_owner("user_cool")] == [second.id]
+
+    def test_a_flipping_judge_is_bounded_by_the_cooldown(
+        self, migrated_engine: Engine, app_engine: Engine
+    ) -> None:
+        """Daily scans over 21 days: raised and expired once per cooldown, never daily."""
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, "user_flip")
+        raised = 0
+        for day in range(21):
+            now = _NOW + timedelta(days=day)
+            claim = self._claim(ledger, "user_flip", "n-flip", now)
+            if claim is not None:
+                raised += 1
+                ledger.expire_stale("user_flip", claim.id, reason="grounding_dissolved", now=now)
+        assert raised == 3  # days 0, 7 and 14
+
+    def test_a_notice_expired_for_its_prompt_frees_at_once(
+        self, migrated_engine: Engine, app_engine: Engine
+    ) -> None:
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, "user_floor")
+        old = self._claim(ledger, "user_floor", "n-floor", _NOW, version="a5-scan-v1")
+        assert old is not None
+        assert ledger.expire_stale("user_floor", old.id, reason="prompt_superseded", now=_NOW)
+        assert self._claim(ledger, "user_floor", "n-floor", _NOW + timedelta(hours=1)) is not None
+
+    def test_two_triggers_race_for_one_node(
+        self, migrated_engine: Engine, app_engine: Engine
+    ) -> None:
+        """Re-review LOW-3: two keys on one node anchor never meet the partial unique, so
+        only the advisory lock stops both claims; this fails if the lock is removed."""
+        owner = "user_race_triggers"
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, owner)
+        triggers = (InitiativeTrigger.STALE_OPEN_LOOP, InitiativeTrigger.APPROACHING_COMMITMENT)
+        claims: list[object] = []
+        for round_number in range(5):  # repeated, so a lucky interleaving cannot pass it
+            barrier = threading.Barrier(2)
+            ref = f"n-two-{round_number}"
+
+            def _racer(
+                trigger: InitiativeTrigger, ref: str = ref, barrier: threading.Barrier = barrier
+            ) -> object:
+                barrier.wait(timeout=30)
+                return ledger.try_claim(
+                    _candidate(owner, ref=ref, trigger=trigger),
+                    voicer_persona_id="persona_a",
+                    disposition=NoticeDisposition.HELD,
+                    envelope_action=None,
+                    held_until=None,
+                    now=_NOW,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                won = [c for c in pool.map(_racer, triggers) if c is not None]
+            assert len(won) == 1, ref
+            claims.extend(won)
+        assert len(ledger.held_for_owner(owner)) == 5
+
+    @pytest.mark.parametrize("kind", [CitationKind.NODE, CitationKind.CONVERSATION])
+    def test_two_claims_race_for_one_expired_row(
+        self, migrated_engine: Engine, app_engine: Engine, kind: CitationKind
+    ) -> None:
+        """Review LOW-11: exactly one takes the slot over. A node anchor serialises on the
+        advisory lock; any other anchor on the row lock and the partial unique."""
+        owner = f"user_race_{kind.value}"
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, owner)
+
+        def _claim(now: datetime) -> object:
+            return ledger.try_claim(
+                _candidate(owner, ref="n-race", kind=kind),
+                voicer_persona_id="persona_a",
+                disposition=NoticeDisposition.HELD,
+                envelope_action=None,
+                held_until=None,
+                now=now,
+            )
+
+        first = _claim(_NOW)
+        assert first is not None
+        assert ledger.expire_stale(owner, first.id, reason="grounding_dissolved", now=_NOW)
+        before = _audit_actions(migrated_engine, owner, "initiative.duplicate_suppressed")
+        barrier = threading.Barrier(2)
+
+        def _racer(_: int) -> object:
+            barrier.wait(timeout=30)
+            return _claim(self._LATER)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(_racer, range(2)))
+        assert sum(claim is not None for claim in claims) == 1
+        assert (
+            _audit_actions(migrated_engine, owner, "initiative.duplicate_suppressed") == before + 1
+        )
+        assert _audit_actions(migrated_engine, owner, "initiative.expired_slot_taken_over") == 1
+        assert [n.superseded_at for n in ledger.held_for_owner(owner)] == [None]
+
+    def test_a_held_or_delivered_notice_still_owns_its_slot(
+        self, migrated_engine: Engine, app_engine: Engine
+    ) -> None:
+        ledger = InitiativeLedger(app_engine)
+        _seed_user(migrated_engine, "user_owns")
+        held = self._claim(ledger, "user_owns", "n-held", _NOW)
+        assert held is not None
+        assert self._claim(ledger, "user_owns", "n-held", self._LATER) is None
+        sent = self._claim(ledger, "user_owns", "n-sent", _NOW)
+        assert sent is not None
+        assert ledger.mark_delivered("user_owns", sent.id, envelope_action="propose", now=_NOW)
+        assert self._claim(ledger, "user_owns", "n-sent", self._LATER) is None

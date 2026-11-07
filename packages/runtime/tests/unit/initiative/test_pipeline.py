@@ -51,7 +51,7 @@ def _candidate(**overrides: Any) -> InitiativeCandidate:  # noqa: ANN401 — fix
         "source": CandidateSource.SCAN,
         "owner_id": "u1",
         "persona_id": "p1",
-        "prompt_version": "a5-scan-v11",
+        "prompt_version": "a5-scan-v12",
         "scanned_at": _NOW,
     }
     fields.update(overrides)
@@ -771,6 +771,7 @@ class TestFlushReappliesTheSubjectRule:
             "a5-scan-v8",
             "a5-scan-v9",
             "a5-scan-v10",
+            "a5-scan-v11",
             "a7-event-candidate-v1",
             "a7-event-candidate-v2",
             "a7-event-candidate-v3",
@@ -778,6 +779,7 @@ class TestFlushReappliesTheSubjectRule:
             "a7-event-candidate-v5",
             "a7-event-candidate-v6",
             "a7-event-candidate-v7",
+            "a7-event-candidate-v8",
             "v1",
             "scripted",
             "",
@@ -793,7 +795,7 @@ class TestFlushReappliesTheSubjectRule:
         assert h.ledger.expired == [("n-held", "prompt_superseded")]
         assert delivery.calls == []
 
-    @pytest.mark.parametrize("version", ["a5-scan-v11", "a5-scan-v12", "a7-event-candidate-v8"])
+    @pytest.mark.parametrize("version", ["a5-scan-v12", "a5-scan-v13", "a7-event-candidate-v9"])
     @pytest.mark.asyncio
     async def test_a_notice_from_a_current_prompt_flushes(self, version: str) -> None:
         current = _candidate().model_copy(update={"prompt_version": version})
@@ -950,14 +952,14 @@ class TestThirdReviewFlushOrderAndLocalDay:
 
 
 def test_the_scan_floor_is_the_version_in_force() -> None:
-    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v11)."""
+    """Third review LOW 5: the deliverable floor is the scan prompt in force (a5-scan-v12)."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
     from persona_runtime.initiative import INITIATIVE_SCAN_PROMPT_VERSION
 
-    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v11"
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 11
+    assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v12"
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a5-scan"] == 12
     assert prompt_version_deliverable(INITIATIVE_SCAN_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a5-scan-v10")
+    assert not prompt_version_deliverable("a5-scan-v11")
 
 
 class _FingerprintGrounding:
@@ -1349,3 +1351,109 @@ class TestTheRelativeDayIsNormalised:
         ]
         normalised = [e for e in h.auditor.events if e[0] == "initiative.relative_day_normalised"]
         assert [e[2] for e in normalised] == ["tomorrow"]
+
+
+class TestTheDashesAreNormalised:
+    """Owner ruling 2026-11-05: an em or en dash the model still wrote is replaced before
+    the judge, so the judged, stored and delivered text carry none; each replacement is
+    audited by its kind, never its content. It runs before the "tomorrow" normalisation."""
+
+    _EM = chr(0x2014)
+    _EN = chr(0x2013)
+
+    async def _submit(
+        self,
+        **fields: Any,  # noqa: ANN401 (fixture override bag)
+    ) -> tuple[_Harness, TestTheRelativeDayIsNormalised._SeeingGrounding]:
+        trace = _Trace()
+        grounding = TestTheRelativeDayIsNormalised._SeeingGrounding(trace)
+        h = _Harness(
+            grounding=grounding,
+            ledger=TestTheRelativeDayIsNormalised._StoringLedger(trace),
+            users=_FakeUsers(trace, _Context(timezone="UTC")),
+            clock=lambda: datetime(2027, 3, 11, 6, 0, tzinfo=UTC),
+        )
+        await h.pipeline.submit((_candidate(**fields),))
+        return h, grounding
+
+    @staticmethod
+    def _audited(h: _Harness, event: str) -> list[str]:
+        return [e[2] for e in h.auditor.events if e[0] == event]
+
+    @pytest.mark.asyncio
+    async def test_the_message_and_the_offer_reach_the_judge_without_dashes(self) -> None:
+        h, grounding = await self._submit(
+            why_now=f"Rehearsal is at the hall {self._EM} it runs 19:30{self._EN}21:00.",
+            next_step=f"book the Tromso{self._EN}Narvik coach for you",
+        )
+        seen = grounding.seen[0]
+        assert seen.why_now == "Rehearsal is at the hall, it runs 19:30 to 21:00."
+        assert seen.next_step == "book the Tromso-Narvik coach for you"
+        assert h.ledger.stored[0].why_now == seen.why_now  # type: ignore[attr-defined]
+        assert self._audited(h, "initiative.dash_normalised") == ["comma", "to", "hyphen"]
+
+    @pytest.mark.asyncio
+    async def test_a_dash_before_tomorrow_reaches_the_relative_day_rule(self) -> None:
+        h, grounding = await self._submit(
+            why_now=f"Your concert is tomorrow {self._EM} Friday 12 March 2027."
+        )
+        assert grounding.seen[0].why_now == "Your concert is on Friday 12 March 2027."
+        assert self._audited(h, "initiative.dash_normalised") == ["comma"]
+        assert self._audited(h, "initiative.relative_day_normalised") == ["tomorrow"]
+
+    @pytest.mark.asyncio
+    async def test_the_plan_steps_lose_their_dashes_too(self) -> None:
+        """The act route's task goal is built from the plan and shown to the user."""
+        steps = (
+            PlannedStep(
+                description=f"draft the note {self._EM} keep it short",
+                categories=frozenset({ActionCategory.DRAFT}),
+            ),
+            PlannedStep(description="send it", categories=frozenset({ActionCategory.OBSERVE})),
+        )
+        h, grounding = await self._submit(plan=steps)
+        seen = grounding.seen[0].plan
+        assert [step.description for step in seen] == ["draft the note, keep it short", "send it"]
+        assert [step.categories for step in seen] == [step.categories for step in steps]
+        assert h.ledger.stored[0].plan == seen  # type: ignore[attr-defined]
+        assert self._audited(h, "initiative.dash_normalised") == ["comma"]
+
+    @pytest.mark.parametrize(
+        ("field", "text", "reason"),
+        [
+            ("why_now", f"Seats cost 500 kr {chr(0x2013)} 700 kr.", "ambiguous_number"),
+            ("next_step", f"book seats at 500 kr {chr(0x2013)} 700 kr", "ambiguous_number"),
+            ("next_step", chr(0x2014), "emptied"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_dash_that_cannot_be_read_voids_the_candidate(
+        self, field: str, text: str, reason: str
+    ) -> None:
+        h, grounding = await self._submit(**{field: text})
+        assert grounding.seen == []
+        assert self._audited(h, "initiative.discard_dash") == [reason]
+        assert h.ledger.stored == []  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_a_plan_step_that_cannot_be_read_voids_the_candidate(self) -> None:
+        step = PlannedStep(
+            description=f"price it at 500 kr {self._EN} 700 kr",
+            categories=frozenset({ActionCategory.DRAFT}),
+        )
+        h, grounding = await self._submit(plan=(step,))
+        assert grounding.seen == []
+        assert self._audited(h, "initiative.discard_dash") == ["ambiguous_number"]
+
+    @pytest.mark.asyncio
+    async def test_the_dashes_go_before_the_voice_guard(self) -> None:
+        """Review LOW-9: the voice guard reads the text the user would read."""
+        h, _ = await self._submit(why_now=f"Rehearsal is on 12 March {self._EM} the user knows.")
+        events = [e[0] for e in h.auditor.events]
+        assert events.index("initiative.dash_normalised") < events.index("initiative.discard_voice")
+
+    @pytest.mark.asyncio
+    async def test_a_text_without_dashes_is_not_audited(self) -> None:
+        h, grounding = await self._submit(why_now="Rehearsal is on 12 March 2027.")
+        assert grounding.seen[0].why_now == "Rehearsal is on 12 March 2027."
+        assert self._audited(h, "initiative.dash_normalised") == []

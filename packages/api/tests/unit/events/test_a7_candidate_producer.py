@@ -130,7 +130,7 @@ def test_the_event_prompt_version_and_voice_rule() -> None:
     in the pipeline, for events and scans alike (tested there)."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
-    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v8"
+    assert EVENT_CANDIDATE_PROMPT_VERSION == "a7-event-candidate-v9"
     assert 'say "you" and "your", never "the user"' in EVENT_CANDIDATE_SYSTEM_PROMPT.replace(
         "\n", " "
     )
@@ -149,9 +149,9 @@ def test_the_event_floor_is_the_version_in_force() -> None:
     """Third review LOW 5: the deliverable floor is A7's prompt in force."""
     from persona.initiative import MIN_DELIVERABLE_PROMPT_VERSIONS, prompt_version_deliverable
 
-    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 8
+    assert MIN_DELIVERABLE_PROMPT_VERSIONS["a7-event-candidate"] == 9
     assert prompt_version_deliverable(EVENT_CANDIDATE_PROMPT_VERSION)
-    assert not prompt_version_deliverable("a7-event-candidate-v7")
+    assert not prompt_version_deliverable("a7-event-candidate-v8")
 
 
 def test_the_v7_event_prompt_requires_absolute_dates_and_one_advisory_clause() -> None:
@@ -194,7 +194,7 @@ async def test_the_output_cap_is_a_setting(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_the_v8_event_prompt_writes_the_day_after_today_as_its_date() -> None:
-    """B9 (ruling after the second MID set): the same worked example as a5-scan-v11."""
+    """B9 (ruling after the second MID set): the same worked example as a5-scan-v12."""
     from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
 
     flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
@@ -209,4 +209,15 @@ def test_the_v8_event_prompt_writes_the_day_after_today_as_its_date() -> None:
         'A date the material only guesses at (with words like "might", "perhaps", "I think", '
         '"probably", "maybe", "not sure", "unconfirmed") is never grounds to raise anything, '
         "not even an offer to look it up or confirm it."
+    ) in flat
+
+
+def test_the_v9_event_prompt_uses_no_em_or_en_dash() -> None:
+    """Owner ruling 2026-11-05: the same rule as a5-scan-v12."""
+    from persona_api.events.candidate_producer import EVENT_CANDIDATE_SYSTEM_PROMPT
+
+    flat = " ".join(EVENT_CANDIDATE_SYSTEM_PROMPT.split())
+    assert (
+        '7. NO EM OR EN DASHES in "why_now" or "next_step": use a comma, or "to" in a range '
+        '("19:30 to 21:00").'
     ) in flat

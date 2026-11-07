@@ -87,7 +87,7 @@ def _candidate() -> InitiativeCandidate:
         source=CandidateSource.SCAN,
         owner_id=_OWNER,
         persona_id=_PERSONA,
-        prompt_version="a5-scan-v11",
+        prompt_version="a5-scan-v12",
         scanned_at=_NOW,
     )
 
@@ -182,3 +182,33 @@ def test_the_confirm_and_decline_floors_see_the_pending_proposal(
         current_user_id.reset(token)
 
     assert resolved == (expected, notice_id)
+
+
+def test_an_expired_slot_is_read_per_owner_and_naive_on_the_community_engine(
+    engine: Engine,
+) -> None:
+    """R9-267 on the engine with no row security and naive instants: another owner's
+    expired notice on the same key cools nothing here, and the cooldown's arithmetic holds."""
+    other = "owner-other"
+    ensure_owner(engine, owner_id=other, email="bob@example.com")
+    ledger = InitiativeLedger(engine)
+
+    def _claim(owner: str, at: datetime) -> Any:  # noqa: ANN401
+        return ledger.try_claim(
+            _candidate().model_copy(update={"owner_id": owner}),
+            voicer_persona_id=_PERSONA,
+            disposition=NoticeDisposition.HELD,
+            envelope_action=None,
+            held_until=None,
+            now=at,
+        )
+
+    theirs = _claim(other, _NOW)
+    assert ledger.expire_stale(other, theirs.id, reason="grounding_dissolved", now=_NOW)
+    mine = _claim(_OWNER, _NOW)
+    assert mine is not None
+    assert ledger.expire_stale(_OWNER, mine.id, reason="grounding_dissolved", now=_NOW)
+    assert _claim(_OWNER, _NOW + timedelta(days=1)) is None
+    assert (
+        _claim(_OWNER, _NOW + timedelta(days=_SETTINGS.expired_reraise_cooldown_days)) is not None
+    )

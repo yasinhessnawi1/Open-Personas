@@ -65,7 +65,11 @@ from persona.initiative.restraint import (
 from persona.logging import get_logger
 
 from persona_runtime.initiative.grounding import GroundingRejection
-from persona_runtime.initiative.specifics import earliest_upcoming_date, normalise_relative_days
+from persona_runtime.initiative.specifics import (
+    earliest_upcoming_date,
+    normalise_dashes,
+    normalise_relative_days,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -381,11 +385,19 @@ class InitiativePipeline:
         now = self._clock()
         owner = candidate.owner_id
 
+        # (00) owner ruling 2026-11-05: an em or en dash the model still wrote is replaced
+        # here, the one door scans and A7 events share, ahead of the voice guard, of the
+        # "tomorrow" rule (a dash may sit between that word and its date) and of the
+        # specifics check. A dash that cannot be read without guessing a number voids.
+        undashed = self._normalise_dashes(candidate)
+        if undashed is None:
+            return
+
         # (0) the voice (R9-256): why_now and next_step are read BY the user. A safe
         # rewrite ("for the user to review" to "for you to review") is applied here,
         # BEFORE grounding, so the judged text is the delivered text; any other
         # third-person reference voids the candidate, audited so the rate is visible.
-        voiced = _address_user(candidate)
+        voiced = _address_user(undashed)
         if voiced is None:
             self._audit(candidate, "initiative.discard_voice", "third_person")
             return
@@ -666,6 +678,32 @@ class InitiativePipeline:
         except Exception:  # noqa: BLE001 (the judge is then told UTC, and says so)
             _logger.opt(exception=True).warning("user timezone read failed; judging in UTC")
             return now.astimezone(UTC).date(), "UTC"
+
+    def _normalise_dashes(self, candidate: InitiativeCandidate) -> InitiativeCandidate | None:
+        """The candidate with no em or en dash in what the user reads: the message, the
+        offer and the plan's steps (the act route's task goal is built from them). Each
+        replacement is audited by its kind alone (``initiative.dash_normalised``); a text
+        that cannot be read voids the candidate (``initiative.discard_dash``, the reason)."""
+        why_now, from_reason = normalise_dashes(candidate.why_now)
+        next_step, from_offer = normalise_dashes(candidate.next_step)
+        steps = [normalise_dashes(step.description) for step in candidate.plan]
+        results = [(why_now, from_reason), (next_step, from_offer), *steps]
+        voided = next((found[0] for written, found in results if written is None), None)
+        if voided is not None:
+            self._audit(candidate, "initiative.discard_dash", voided)
+            return None
+        kinds = [kind for _, found in results for kind in found]
+        for kind in kinds:
+            self._audit(candidate, "initiative.dash_normalised", kind)
+        if not kinds:
+            return candidate
+        plan = tuple(
+            step.model_copy(update={"description": written})
+            for step, (written, _) in zip(candidate.plan, steps, strict=True)
+        )
+        return candidate.model_copy(
+            update={"why_now": why_now, "next_step": next_step, "plan": plan}
+        )
 
     def _normalise_relative_days(
         self, candidate: InitiativeCandidate, today: date

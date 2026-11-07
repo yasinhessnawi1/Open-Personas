@@ -18,7 +18,8 @@ class TestInitiativeSettings:
         assert s.model_tier == "mid"  # owner ruling 2026-10-30
         # Ruling 3 (2026-10-30 MID set): the judge's 2048 cut a reasoning answer
         # off mid-JSON (A5 lost); the longest scan was 3324 of 4096.
-        assert s.judge_max_output_tokens == 4096
+        assert s.judge_max_output_tokens == 6144  # R9-270: 3861 of 4096 was seen
+        assert s.expired_reraise_cooldown_days == 7  # R9-267
         assert s.scan_max_output_tokens == 6144
         assert s.scan_candidate_cap == 3
         assert s.recent_nodes_limit == 30
@@ -78,3 +79,23 @@ class TestInitiativeDial:
 
     def test_the_three_settings(self) -> None:
         assert {d.value for d in InitiativeDial} == {"off", "propose_only", "act_within_envelope"}
+
+
+def test_the_env_example_states_every_default() -> None:
+    """Review LOW-6: .env.example drifted from the code when the defaults moved."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[5]
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    stated = dict(re.findall(r"^#\s?PERSONA_INITIATIVE_(\w+)=(\S*)$", example, re.MULTILINE))
+    for name, field in InitiativeSettings.model_fields.items():
+        written = stated.get(name.upper())
+        assert written is not None, name
+        default = field.default
+        if isinstance(default, bool):
+            assert written == str(default).lower(), name
+        elif isinstance(default, int | float):
+            assert float(written) == float(default), name
+        else:
+            assert written == default, name

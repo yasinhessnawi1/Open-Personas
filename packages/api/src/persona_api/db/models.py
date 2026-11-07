@@ -2052,7 +2052,8 @@ initiative_notices = Table(
     Column("held_until", DateTime(timezone=True)),
     Column("delivered_at", DateTime(timezone=True)),
     # NULL = this row OWNS its opportunity slot; set = superseded (user revival
-    # re-opened the topic — a future notice may claim the slot; history stays).
+    # re-opened the topic, so a future notice may claim the slot; history stays). An
+    # expired row keeps NULL until a later claim takes the slot over (R9-267).
     Column("superseded_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),

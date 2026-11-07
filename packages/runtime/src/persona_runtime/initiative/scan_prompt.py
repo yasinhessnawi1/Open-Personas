@@ -25,6 +25,9 @@ __all__ = [
     "SCAN_SYSTEM_PROMPT",
 ]
 
+#: v12 (owner rulings 2026-11-05): rule 9, no em or en dashes in what the user reads
+#: (the pipeline replaces any that remain); rule 7 says a state noted earlier is held
+#: lightly, with examples that share nothing with the A5-R-1 fixtures (R9-270 item 3).
 #: v11 (rulings after the third MID set, B7): a note about a role, place or plan the
 #: material shows has ended is not raised, not even as a hand-off; the stale example
 #: shares nothing with the A5-R-1 fixtures (it was a job the user had left).
@@ -62,7 +65,7 @@ __all__ = [
 #: Bumped on any rule/example change; recorded on every candidate
 #: (``InitiativeCandidate.prompt_version``) so behaviour changes are traceable,
 #: re-measured events (the K2 EXTRACTION_PROMPT_VERSION discipline).
-INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v11"
+INITIATIVE_SCAN_PROMPT_VERSION = "a5-scan-v12"
 
 #: The codes the few-shot examples use. The scanner never issues them, so a model that
 #: copies an example's citation cites nothing real and the candidate is dropped.
@@ -136,7 +139,7 @@ Cite only what STATES the observation; hints and vibes are not grounds.
 "external_mutate", "credentialed_access" (will require the user's confirmation).
 - "next_step": the ONE concrete thing you offer to do, worded to follow "Want me to": it \
 starts with a lowercase verb, has no closing punctuation, and addresses the user as "you" \
-(for example "put together a shortlist of offers for you to review"). A candidate with no \
+(for example "put together a packing list for you to review"). A candidate with no \
 concrete next step (a pure FYI) is not worth raising: drop it.
 - "value": 0..1 — how much this matters to the user's LIFE (never to the conversation).
 - "acceptance": 0..1 — honestly, would they welcome being told this NOW? This can only \
@@ -163,9 +166,10 @@ plan the material shows has ended, not even to suggest handing it off or confirm
 is responsible now.
 6. Times and dates come from the material, never from your own guesses.
 7. SPEAK TO THE USER. "why_now" and "next_step" are read by the user: say "you" and "your", \
-never "the user", "they" or "the person". Do not paste or quote the notes. Anything that could \
-have changed since it was said is held lightly ("if you haven't compared offers yet", "if the \
-quote is still open"), never asserted as still true. No pressure ("closing quickly") and no \
+never "the user", "they" or "the person". Do not paste or quote the notes. A state noted \
+earlier could have changed since: hold it lightly ("if you haven't packed the oars yet", "if \
+the regatta is still on"), never assert it as still true ("you still need to pack the oars"). \
+No pressure ("closing quickly") and no \
 presuming what they have decided.
 8. DATES ARE ABSOLUTE. The user may read this a day or more after you write it. In "why_now" \
 and "next_step" state every date exactly as the material gives it: its day and month, and its \
@@ -179,6 +183,8 @@ clause, such as "so you may want to start soon" or "there is still time"; nothin
 stands without the date. Worked example: TODAY is day D and the choir concert is on \
 day D+1. Write "your choir concert on" followed by the weekday and date the material \
 gives, never "tomorrow" and never "tomorrow" next to the date.
+9. NO EM OR EN DASHES in "why_now" or "next_step": use a comma, or "to" in a range \
+("19:30 to 21:00").
 
 EXAMPLES (scenario → correct output):
 - Rich, warm notes about the user's life; nothing dated, nothing pending → \

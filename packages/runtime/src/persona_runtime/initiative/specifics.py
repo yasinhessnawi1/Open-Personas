@@ -84,6 +84,7 @@ from datetime import date, timedelta
 
 __all__ = [
     "earliest_upcoming_date",
+    "normalise_dashes",
     "normalise_relative_days",
     "relative_day_words",
     "states_a_date",
@@ -549,3 +550,140 @@ def normalise_relative_days(text: str, *, today: date) -> tuple[str, list[str]]:
         return f"{lead}on {match['date']}" if lead else match["date"]
 
     return _RELATIVE_BEFORE_DATE_RE.sub(_replace, text), removed
+
+
+#: The dashes the user never reads (owner ruling 2026-11-05), by code point: the source tree
+#: carries none.
+_EM_DASH = chr(0x2014)
+_EN_DASH = chr(0x2013)
+_DASHES = f"{_EM_DASH}{_EN_DASH}"
+_ISO_WITH_DASHES_RE = re.compile(rf"\b(\d{{4}})[{_DASHES}](\d{{2}})[{_DASHES}](\d{{2}})\b")
+_DASH_RE = re.compile(rf"(?P<before>[\s,]*)(?P<dash>[{_DASHES}])(?P<after>\s*)")
+_HANGING_RE = re.compile(r"^[,\s]+|[,\s]+$")
+_NUMBER_END_RE = re.compile(r"\d[\d,.:]*$")
+_NUMBER_START_RE = re.compile(r"\d[\d,.:]*")
+_CLOCK_TOKEN_RE = re.compile(r"\d{1,2}[:.]\d{2}")
+#: A number, a word, then the dash ("500 kr -"), and the mirror after it ("- kr 700").
+_NUMBER_THEN_WORD_RE = re.compile(r"\d[\d,.:]*\s+\S+$")
+_WORD_THEN_NUMBER_RE = re.compile(r"\S+\s+\d")
+_ANY_WEEKDAY = "|".join(_WEEKDAYS)
+_ORDINAL_SUFFIX = r"(?:st|nd|rd|th)?"
+_DAY_AND_MONTH = (
+    rf"(?:\d{{1,2}}{_ORDINAL_SUFFIX}\s+(?:of\s+)?(?:{_MONTH_NAMES})"
+    rf"|(?:{_MONTH_NAMES})(?:\s+\d{{1,2}}{_ORDINAL_SUFFIX})?)"
+)
+_YEAR_ENDS_A_DATE_RE = re.compile(rf"(?<!\w){_DAY_AND_MONTH},?\s+\d{{4}}$", re.I)
+_DATE_END_RE = re.compile(rf"(?<!\w)(?:{_DAY_AND_MONTH}(?:,?\s+\d{{4}})?|{_ANY_WEEKDAY})$", re.I)
+_DATE_START_RE = re.compile(
+    rf"(?:(?:{_ANY_WEEKDAY}),?\s+)?{_DAY_AND_MONTH}\b|(?:{_ANY_WEEKDAY})\b", re.I
+)
+_WRITTEN = {"to": " to ", "hyphen": "-", "comma": ", "}
+#: A bare weekday ending the text before a dash, and a full date starting the text after it.
+_BARE_WEEKDAY_END_RE = re.compile(rf"(?<!\w)(?P<weekday>{_ANY_WEEKDAY})$", re.I)
+_FULL_DATE_START_RE = re.compile(
+    rf"(?:(?P<d1>\d{{1,2}}){_ORDINAL_SUFFIX}\s+(?:of\s+)?(?P<m1>{_MONTH_NAMES})"
+    rf"|(?P<m2>{_MONTH_NAMES})\s+(?P<d2>\d{{1,2}}){_ORDINAL_SUFFIX}),?\s+(?P<year>\d{{4}})\b",
+    re.I,
+)
+
+
+def _weekday_names_its_date(left: str, right: str) -> bool:
+    """Whether a bare weekday before the dash is the weekday of the full date after it
+    ("on Friday, 2 October 2026"): an aside naming one day, not a range."""
+    weekday = _BARE_WEEKDAY_END_RE.search(left)
+    stated = _FULL_DATE_START_RE.match(right)
+    if weekday is None or stated is None:
+        return False
+    month = _month_number(stated["m1"] or stated["m2"])
+    named = (
+        _safe_date(int(stated["year"]), month, int(stated["d1"] or stated["d2"]))
+        if month is not None
+        else None
+    )
+    return named is not None and named.weekday() == _WEEKDAYS.index(weekday["weekday"].lower())
+
+
+def _number_dash_reading(
+    left: str, right: str, *, spaced_left: bool, spaced_right: bool, dash: str
+) -> str:
+    """What a dash with a number on its right or left reads as; "" when no number rule
+    applies. "ambiguous" voids the text: a guess could change what a number means. Only
+    an en dash reads as a minus; an em dash where a minus would be is a comma."""
+    number_left = _NUMBER_END_RE.search(left)
+    number_right = _NUMBER_START_RE.match(right)
+    minus = "minus" if dash == _EN_DASH else "comma"
+    if number_right and not left:
+        return "ambiguous" if spaced_right else minus
+    if number_right and not spaced_right and not number_left and (spaced_left or left[-1] == "("):
+        return minus
+    if _weekday_names_its_date(left.rstrip(), right):
+        return "comma"
+    if _DATE_END_RE.search(left) and _DATE_START_RE.match(right):
+        return "to"
+    if number_right and _YEAR_ENDS_A_DATE_RE.search(left):
+        return "comma"
+    if number_left and number_right:
+        clocks = {
+            bool(_CLOCK_TOKEN_RE.fullmatch(token.rstrip(",.:")))
+            for token in (number_left[0], number_right[0])
+        }
+        return "ambiguous" if spaced_left != spaced_right or len(clocks) == 2 else "to"
+    if (number_right and _NUMBER_THEN_WORD_RE.search(left)) or (
+        number_left and _WORD_THEN_NUMBER_RE.match(right)
+    ):
+        return "ambiguous"
+    return ""
+
+
+def _dash_written(match: re.Match[str], kinds: list[str]) -> str:
+    """What one dash becomes; its kind goes on ``kinds``."""
+    left, right = match.string[: match.start()], match.string[match.end() :]
+    spaced_left, spaced_right = bool(match["before"]), bool(match["after"])
+    kind = _number_dash_reading(
+        left, right, spaced_left=spaced_left, spaced_right=spaced_right, dash=match["dash"]
+    )
+    if not kind:
+        joins_a_name = left[-1:].isalnum() and right[:1].isalnum()
+        unspaced_en = match["dash"] == _EN_DASH and not (spaced_left or spaced_right)
+        kind = "hyphen" if unspaced_en and joins_a_name else "comma"
+    kinds.append(kind)
+    if kind == "minus":
+        return f"{match['before']}-"
+    if kind == "comma" and right[:1] in tuple(",.;:!?"):
+        return ""
+    if kind == "comma" and left[-1:] in tuple(".;:!?"):
+        return " "
+    if kind == "comma" and left[-1:] == "(":
+        return ""
+    return _WRITTEN.get(kind, "")
+
+
+def normalise_dashes(text: str) -> tuple[str | None, list[str]]:
+    """The text with no em or en dash, and what each became, in order of reading.
+
+    An ISO date keeps its hyphens ("hyphen"). A dash at the start of the text, or after a
+    space or "(", with a digit directly after it is a minus sign ("minus"). A range reads
+    " to " ("to"): two clock times, two numbers, or dates and weekdays on both sides. An
+    en dash inside a name is a hyphen ("hyphen"). Any other dash is a comma ("comma"), and
+    one left hanging goes; beside other punctuation it just goes. A year ending a date
+    followed by a number is a comma, not a range.
+
+    ``(None, [reason])`` voids the text: "ambiguous_number" when a guess could change what
+    a number means, "emptied" when nothing is left. Digits are never touched, so the
+    specifics check matches them as before. A plain hyphen is not ours.
+    """
+    if not any(dash in text for dash in _DASHES):
+        return text, []
+    kinds: list[str] = []
+
+    def _iso(match: re.Match[str]) -> str:
+        kinds.append("hyphen")
+        return "-".join(match.groups())
+
+    written = _DASH_RE.sub(
+        lambda match: _dash_written(match, kinds), _ISO_WITH_DASHES_RE.sub(_iso, text)
+    )
+    if "ambiguous" in kinds:
+        return None, ["ambiguous_number"]
+    written = _HANGING_RE.sub("", written)
+    return (written, kinds) if written else (None, ["emptied"])

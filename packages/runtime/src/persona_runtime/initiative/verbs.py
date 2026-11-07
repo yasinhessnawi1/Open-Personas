@@ -62,6 +62,8 @@ class InitiativeVerb(StrEnum):
 _CUE_RE = re.compile(
     r"suggest|suggestion|proactive|initiative|check.?in|unprompted|"
     r"on your own|ask (?:me )?first|ask before|stop (?:doing|bringing)|"
+    r"\b(?:bring|brings|bringing|brought)\s+(?:\w+\s+){0,2}(?:things|stuff)\s+up\b|"
+    r"\b(?:bring|brings|bringing|brought)\s+up\s+(?:\w+\s+)?(?:things|stuff)\b|"
     r"foreslå|forslag|på egen hånd|spør først|slutt å|"  # Norwegian
     r"اقتراح|اقتراحات|من تلقاء نفسك|اسألني أولا",  # Arabic
     re.IGNORECASE | re.UNICODE,

@@ -303,3 +303,35 @@ class TestTheDialVerbsOnTheMidTier:
         backend = _StubBackend("")  # empty content parses to nothing: the dial stays
         assert await ModelInitiativeVerbInterpreter(backend).interpret(message) is None
         assert len(backend.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Bring things up less often, please.",
+        "bring things up more",
+        "Can you bring things up more often?",
+        "Please bring up fewer things.",
+        "Bring up things less often",
+        "You bring stuff up too often.",
+        "stop bringing stuff up",
+        "Don't bring so many things up.",
+        "You brought things up too much this week.",
+    ],
+)
+def test_bringing_things_up_is_a_cue_in_any_form(phrase: str) -> None:
+    """R9-264: the dial model is asked; the cue decides nothing."""
+    assert detect_initiative_cue(phrase) is True
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Can you bring up the report?",
+        "Bring the report up on screen.",
+        "My daughter brought it up at dinner.",
+    ],
+)
+def test_bringing_up_something_else_is_not_a_cue(phrase: str) -> None:
+    """The cue sits in front of the persona's answer, so an ordinary request stays out."""
+    assert detect_initiative_cue(phrase) is False

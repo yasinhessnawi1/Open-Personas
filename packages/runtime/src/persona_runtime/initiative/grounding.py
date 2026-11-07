@@ -80,6 +80,8 @@ _logger = get_logger("runtime.initiative.grounding")
 
 #: Bumped on any rule/prompt change; recorded with every verdict for traceability
 #: (the Spec-10 versioned-artifact discipline; the A5-R-1 suite re-runs per version).
+#: v7 (owner rulings 2026-11-05): the hedged and advisory examples share nothing with
+#: the A5-R-1 fixtures; no rule changes.
 #: v6 (rulings after the third MID set, B7): rule 10, grounds that a cited excerpt or
 #: the CONTEXT shows are superseded support nothing, a hand-off offer included.
 #: v5 (rulings after the second MID set, B11): rule 9, a date the excerpts only
@@ -93,7 +95,7 @@ _logger = get_logger("runtime.initiative.grounding")
 #: timezone) and refuses a relative claim it cannot verify against it; it sees the PLAN.
 #: v2 (R9-249 re-review HIGH-B): one call judges the observation AND the message the user
 #: reads (``why_now``) AND the offer (``next_step``), with a precise rule for hedged clauses.
-ENTAILMENT_PROMPT_VERSION = "a5-entailment-v6"
+ENTAILMENT_PROMPT_VERSION = "a5-entailment-v7"
 
 _SYSTEM_PROMPT = """\
 You verify whether cited excerpts GROUND an observation an assistant wants to raise, \
@@ -113,12 +115,12 @@ claims.
 3. ONE exception to rule 2, a HEDGED CLAUSE: a clause that is introduced by "if", "unless" \
 or "in case", is about the user's CURRENT state that the excerpts cannot settle (whether \
 they have done something yet, whether something is still open or still wanted), and does \
-not state that thing as true. Example: "if you haven't compared offers yet". A hedged \
+not state that thing as true. Example: "if you haven't packed the oars yet". A hedged \
 clause may NOT introduce a date, time, amount, deadline or requirement the excerpts do not \
 state: "if the form is due Friday" is a claim, not a hedge.
 4. A second exception to rule 2, an ADVISORY CLAUSE after a stated deadline or fact: one \
-short clause such as "so you may want to start soon", "there is still time to compare \
-offers", "you still have a few days" or "paying it now avoids the reminder fee". It holds \
+short clause such as "so you may want to start soon", "there is still time to book \
+seats", "you still have a few days" or "paying it now avoids the late charge". It holds \
 when the deadline or consequence it relies on is stated in the excerpts and the clause is \
 TRUE on TODAY. It may NOT add a deadline, amount, consequence or requirement the excerpts do \
 not state, and a date the excerpts only guess at ("perhaps in the spring") stays a claim.

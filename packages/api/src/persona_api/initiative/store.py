@@ -32,7 +32,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from persona.initiative import InitiativeCandidate, binds_across_triggers, opportunity_anchor
+from persona.initiative import (
+    InitiativeCandidate,
+    InitiativeSettings,
+    binds_across_triggers,
+    opportunity_anchor,
+    prompt_version_deliverable,
+)
 from persona.initiative.restraint import CadenceCounts
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
@@ -349,6 +355,7 @@ class InitiativeLedger:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+        self._reraise_cooldown = timedelta(days=InitiativeSettings().expired_reraise_cooldown_days)
 
     # --- reads (CQS: no writes) --------------------------------------------
 
@@ -498,6 +505,8 @@ class InitiativeLedger:
         per opportunity is the invariant, regardless of scan ordering or races.
         The slot binds the anchor: a live notice on the same anchor under another
         trigger also wins (``same_anchor_as`` in the audit; owner ruling 2026-10-30).
+        An expired notice gives its exact key up to a new claim, except within the
+        cooldown (``cooling_since`` in the audit; :meth:`_take_over_expired_slot`).
         """
         record = NoticeRecord(
             id=f"intc_{uuid4().hex}",
@@ -523,6 +532,17 @@ class InitiativeLedger:
                         "initiative.duplicate_suppressed",
                         candidate.opportunity_key,
                         extra={"loser_persona_id": voicer_persona_id, "same_anchor_as": holder},
+                    )
+                    return None
+                cooling, took_over = self._take_over_expired_slot(
+                    conn, candidate.owner_id, record.opportunity_key, now=now
+                )
+                if cooling is not None:
+                    self._audit(
+                        candidate.owner_id,
+                        "initiative.duplicate_suppressed",
+                        candidate.opportunity_key,
+                        extra={"loser_persona_id": voicer_persona_id, "cooling_since": cooling},
                     )
                     return None
                 conn.execute(
@@ -556,6 +576,12 @@ class InitiativeLedger:
                 extra={"loser_persona_id": voicer_persona_id},
             )
             return None
+        if took_over:  # only now: a claim that lost the insert rolled its take-over back
+            self._audit(
+                candidate.owner_id,
+                "initiative.expired_slot_taken_over",
+                candidate.opportunity_key,
+            )
         self._audit(
             candidate.owner_id,
             f"initiative.{disposition.value}",
@@ -563,6 +589,40 @@ class InitiativeLedger:
             extra={"persona_id": voicer_persona_id, "trigger": record.trigger},
         )
         return record
+
+    def _take_over_expired_slot(
+        self, conn: Connection, owner_id: str, opportunity_key: str, *, now: datetime
+    ) -> tuple[str | None, bool]:
+        """Free this exact key from an expired notice (R9-267), or say it is still cooling.
+
+        An expired notice keeps ``superseded_at`` NULL, so it held its key forever though
+        it never reached the user. The claim supersedes it, so rows expired before this fix
+        free the same way and no migration is needed. Within the cooldown of its expiry
+        the row stays and its expiry instant comes back (the claim is refused), so a judge
+        that flips cannot re-raise and re-expire on every scan. A notice whose prompt is
+        no longer deliverable expired for that prompt, not for its grounds: it frees at once.
+        Returns the expiry instant while cooling, and whether a row was taken over.
+        """
+        row = conn.execute(
+            select(notices_t.c.id, notices_t.c.candidate, notices_t.c.updated_at).where(
+                notices_t.c.owner_id == owner_id,
+                notices_t.c.opportunity_key == opportunity_key,
+                notices_t.c.disposition == NoticeDisposition.SUPPRESSED_STALE.value,
+                notices_t.c.superseded_at.is_(None),
+            )
+        ).first()
+        if row is None:
+            return None, False
+        expired_at = cast("datetime", aware_utc(row.updated_at))
+        version = str(row.candidate.get("prompt_version", ""))
+        if prompt_version_deliverable(version) and now - expired_at < self._reraise_cooldown:
+            return expired_at.isoformat(), False
+        conn.execute(
+            update(notices_t)
+            .where(notices_t.c.id == row.id, notices_t.c.superseded_at.is_(None))
+            .values(superseded_at=now, updated_at=now)
+        )
+        return None, True
 
     def mark_delivered(
         self, owner_id: str, notice_id: str, *, envelope_action: str, now: datetime

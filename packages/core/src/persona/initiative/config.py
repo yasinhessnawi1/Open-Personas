@@ -60,7 +60,8 @@ class InitiativeSettings(BaseSettings):
             2026-10-23 re-run's longest small-tier judge reply was 902 of 1024, and
             the judge's prompt grows with its context). 4096 since the MID measuring
             set (2026-10-30): one judge reply used all 2048 and was cut off mid-JSON,
-            losing A5. Both caps are bounded above at 16384.
+            losing A5. 6144 since the fourth MID set (R9-270): one reply used 3861 of
+            4096. Both caps are bounded above at 16384.
         event_candidate_max_output_tokens: A7's event-candidate producer's
             ``max_tokens`` (review LOW-6: a hard-coded 900 before; the mid tier's
             reasoning head reasons inside it), default 2048.
@@ -72,6 +73,11 @@ class InitiativeSettings(BaseSettings):
             persona's answer); the clear turn-off is deterministic and never waits.
             8 s since the MID measuring set (2026-10-30): 4 of 30 dial-verb calls
             took longer than 4 s (the longest 5.8 s), so the old default lost them.
+        expired_reraise_cooldown_days: How long after a notice expired its exact key
+            stays closed (R9-267): a claim inside it is refused, so a judge that keeps
+            flipping cannot re-raise and re-expire on every scan. After it the claim
+            takes the slot over. A notice expired because its prompt was superseded
+            frees at once.
         scan_candidate_cap: Max candidates per scan, rank-ordered (≤3 — the
             research §6 hard cap; Pulse ships 5–10/day, we cap lower).
         recent_nodes_limit: The noticing-pool size read via
@@ -102,10 +108,11 @@ class InitiativeSettings(BaseSettings):
     model_tier: Literal["small", "mid", "frontier"] = "mid"
     scan_max_input_tokens: int = Field(default=8000, gt=0)
     scan_max_output_tokens: int = Field(default=6144, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
-    judge_max_output_tokens: int = Field(default=4096, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    judge_max_output_tokens: int = Field(default=6144, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     verb_max_output_tokens: int = Field(default=1024, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
     verb_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
     event_candidate_max_output_tokens: int = Field(default=2048, gt=0, le=_MAX_OUTPUT_TOKENS_CAP)
+    expired_reraise_cooldown_days: int = Field(default=7, gt=0)
     scan_candidate_cap: int = Field(default=3, gt=0)
     recent_nodes_limit: int = Field(default=30, gt=0)
     value_threshold: float = Field(default=0.6, ge=0.0, le=1.0)

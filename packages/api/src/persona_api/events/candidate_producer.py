@@ -83,7 +83,9 @@ _CONTENT_SNIPPET = 2000  # the citable grounding tail handed to the model (bound
 #: instead", the same rule as a5-scan-v9.
 #: v8 (rulings after the second MID set): the speculated-date rule and the worked
 #: example for the day after TODAY, as a5-scan-v10.
-EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v8"
+#: v9 (owner rulings 2026-11-05): rule 7, no em or en dashes in what the user reads, as
+#: a5-scan-v12.
+EVENT_CANDIDATE_PROMPT_VERSION = "a7-event-candidate-v9"
 
 
 @runtime_checkable
@@ -311,6 +313,8 @@ soon" or "there is still time"; nothing vaguer stands without the date. Worked e
 TODAY is day D and the choir concert is on day D+1. Write "your choir concert on" \
 followed by the weekday and date the material gives, never "tomorrow" and never \
 "tomorrow" next to the date.
+7. NO EM OR EN DASHES in "why_now" or "next_step": use a comma, or "to" in a range \
+("19:30 to 21:00").
 
 EXAMPLE (event → correct output):
 - A message about a self-harm disclosure arrives → {"candidate": null}

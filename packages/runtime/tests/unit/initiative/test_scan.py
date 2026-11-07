@@ -533,7 +533,7 @@ class TestFailSoft:
 
 class TestPromptArtifact:
     def test_version_constant_and_frozen_few_shots(self) -> None:
-        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v11"
+        assert INITIATIVE_SCAN_PROMPT_VERSION == "a5-scan-v12"
         # The empty-scan example and every anti-engagement/stale/speculation
         # negative is an EMPTY output — the frozen spec-by-example of restraint.
         assert EXAMPLE_EMPTY_SCAN_OUTPUT == '{"candidates": []}'
@@ -563,7 +563,7 @@ class TestPromptArtifact:
             assert "you" in example[field].lower().split() or "your" in example[field].lower()
         assert "if the letter isn't drafted yet" in example["why_now"]  # held lightly
         assert 'say "you" and "your", never "the user"' in SCAN_SYSTEM_PROMPT.replace("\n", " ")
-        assert "if you haven't compared offers yet" in SCAN_SYSTEM_PROMPT
+        assert "if you haven't packed the oars yet" in SCAN_SYSTEM_PROMPT
         assert "never shown to the user" in SCAN_SYSTEM_PROMPT
         # v5: a lowercase verb start (the template keeps the case), and the citation rule's
         # example is a never-issued code.
@@ -668,6 +668,11 @@ class TestTheV10Prompt:
             "client review",
             "data analyst",
             "a job",
+            "compared offers",
+            "shortlist of offers",
+            "quote is still open",
+            "online check-in",
+            "13:00",
         ):
             assert fixture_term not in flat, fixture_term
         assert relative_day_words("your choir concert on Friday 12 March", dated=True) == []
@@ -695,4 +700,26 @@ class TestTheV11Prompt:
             "- A note says the user coached at the chess club, and a newer note says they "
             "stepped down in spring; an old note about the club's tournament, even as a "
             "hand-off reminder → " + EXAMPLE_STALE_DECLINE_OUTPUT
+        ) in self._flat()
+
+
+class TestTheV12Prompt:
+    """Owner rulings 2026-11-05: no em or en dashes in what the user reads, and a state noted
+    earlier is held lightly (R9-270 item 3). Examples share nothing with the fixtures."""
+
+    @staticmethod
+    def _flat() -> str:
+        return " ".join(SCAN_SYSTEM_PROMPT.split())
+
+    def test_the_message_and_the_offer_use_no_em_or_en_dash(self) -> None:
+        assert (
+            '9. NO EM OR EN DASHES in "why_now" or "next_step": use a comma, or "to" in a range '
+            '("19:30 to 21:00").'
+        ) in self._flat()
+
+    def test_a_state_noted_earlier_is_held_lightly(self) -> None:
+        assert (
+            "A state noted earlier could have changed since: hold it lightly (\"if you haven't "
+            'packed the oars yet", "if the regatta is still on"), never assert it as still true '
+            '("you still need to pack the oars").'
         ) in self._flat()

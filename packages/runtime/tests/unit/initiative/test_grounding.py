@@ -327,7 +327,7 @@ class TestJudgeOutputCap:
         judge = _StubJudge('{"entailed": false}')
         await GroundingChecker(source=_FakeSource(), backend=judge).check(_candidate())
         assert judge.last_kwargs["max_tokens"] == InitiativeSettings().judge_max_output_tokens
-        assert InitiativeSettings().judge_max_output_tokens == 4096
+        assert InitiativeSettings().judge_max_output_tokens == 6144
 
     @pytest.mark.asyncio
     async def test_the_cap_is_the_injected_value(self) -> None:
@@ -410,7 +410,7 @@ class TestTheJudgeChecksWhatTheUserReads:
     def test_the_judge_prompt_defines_the_hedge_and_the_offer_rules(self) -> None:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT
 
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v6"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v7"
         flat = " ".join(_SYSTEM_PROMPT.split())
         assert 'introduced by "if", "unless" or "in case"' in flat
         assert '"if the form is due Friday" is a claim, not a hedge' in flat
@@ -777,7 +777,7 @@ class TestTheJudgeSeesTheLinkedContext:
         from persona_runtime.initiative.grounding import _SYSTEM_PROMPT, ENTAILMENT_PROMPT_VERSION
 
         flat = " ".join(_SYSTEM_PROMPT.split())
-        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v6"
+        assert ENTAILMENT_PROMPT_VERSION == "a5-entailment-v7"
         assert (
             "8. The CONTEXT is NOT grounds and is never quoted. If it shows the grounds no "
             "longer hold (the person has left that job or role, moved, cancelled it, already "
@@ -860,8 +860,8 @@ class TestTheJudgeRulesOfV4:
         assert (
             "4. A second exception to rule 2, an ADVISORY CLAUSE after a stated deadline or "
             'fact: one short clause such as "so you may want to start soon", "there is still '
-            'time to compare offers", "you still have a few days" or "paying it now avoids the '
-            'reminder fee". It holds when the deadline or consequence it relies on is stated in '
+            'time to book seats", "you still have a few days" or "paying it now avoids the late '
+            'charge". It holds when the deadline or consequence it relies on is stated in '
             "the excerpts and the clause is TRUE on TODAY."
         ) in self._flat()
 
@@ -885,6 +885,9 @@ class TestTheJudgeRulesOfV4:
             "grant",
             "September 2026",
             "has not checked",
+            "compare offers",
+            "compared offers",
+            "reminder fee",
             "Nordlys",
             "Fjord",
             "slides",
