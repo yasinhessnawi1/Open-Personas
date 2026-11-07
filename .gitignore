@@ -77,6 +77,9 @@ deploy/*
 # *.env.example template, and the real env files live on the box outside the checkout.
 !deploy/hetzner/
 deploy/hetzner/**/*.env
+# The Azure voice host's requirements brief is tracked too: requirements only, no secrets.
+!deploy/azure-voice/
+deploy/azure-voice/**/*.env
 CLAUDE.md
 
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.
