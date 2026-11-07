@@ -39,6 +39,14 @@ Per-spec entries are added by the close-out phase of each spec.
   never printed: the line says `withheld` or `malformed` instead.
 
 ### Changed
+- **A clone on Linux now installs the CPU build of PyTorch.** `uv sync` used to pull
+  PyTorch's CUDA build on Linux, about 2.3 GB of NVIDIA libraries on x86 and ARM
+  alike, though production never had a GPU and the api image now has to build on a
+  small ARM server. The lock takes `torch` for Linux from PyTorch's CPU index; Windows
+  and macOS are unchanged, and so is `pip install persona-core` from PyPI. The cost:
+  in a clone, the local Hugging Face backend (the `local` extra) runs on the CPU on
+  Linux. To use an NVIDIA GPU there, install a CUDA build of torch into the
+  environment yourself, and expect the next `uv sync` to put the CPU build back.
 - **The model chains and the OpenRouter subscription mode now come from one place
   and reach the api and voice together.** Each app used to keep its own copy, so
   updating one moved chat and left calls on the old models with nothing saying
