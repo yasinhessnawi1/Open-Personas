@@ -109,3 +109,21 @@ def test_every_script_is_executable_in_git() -> None:
     scripts = [name for name in modes if re.fullmatch(r"deploy/server/bin/[a-z_]+\.sh", name)]
     assert "deploy/server/bin/compose.sh" in scripts
     assert all(modes[name] == "100755" for name in scripts), modes
+
+
+def test_every_command_block_says_which_machine_it_runs_on() -> None:
+    """Second review (LOW): an operator must never guess whether a block is for the PC or
+    the host. Every ```bash block opens with `# on the PC` or `# on the host`."""
+    blocks = re.findall(r"```bash\n(.*?)```", RUNBOOK, re.S)
+    assert blocks
+    for block in blocks:
+        first = block.strip().splitlines()[0]
+        assert re.match(r"# on the (PC|host)\b", first), first
+
+
+def test_the_uid_separation_is_described_honestly() -> None:
+    """Second review (MEDIUM): ubuntu has passwordless sudo, so uid 2001 stops accidents,
+    not anything running as ubuntu."""
+    who = RUNBOOK.split("## Who can do what", 1)[1].split("\n## ", 1)[0]
+    assert "guards against accidents" in who
+    assert "root-equivalent" in who.split("uid 2001", 1)[1]

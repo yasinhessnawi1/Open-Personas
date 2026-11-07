@@ -315,15 +315,59 @@ def test_ssh_allow_list_comes_from_the_profile() -> None:
 
 
 def test_the_block_volume_is_formatted_only_when_blank_and_mounted_by_uuid() -> None:
+    """Second review (LOW): only blkid's exit 2 means blank; any other failure refuses."""
     provision = _text("bin/provision.sh")
-    guard = 'if blkid -p "${dev}" >/dev/null 2>&1; then'
-    assert guard in provision
-    # mkfs only in the branch where blkid found nothing: after the guard's `else`.
-    between = provision[provision.index(guard) : provision.index("mkfs.ext4")]
-    assert "\n  else\n" in between
-    assert "refusing to format or mount it" in between
+    probe = 'blkid -p "${dev}" >/dev/null 2>&1 || blkid_rc=$?'
+    assert probe in provision
+    case = provision[provision.index(probe) : provision.index("esac", provision.index(probe))]
+    # exit 0: a signature, accepted only if it is our own; exit 2: blank, formatted;
+    # anything else: refused, never formatted.
+    assert re.search(r"\n\s+0\)", case)
+    assert re.search(r"\n\s+2\)", case)
+    assert re.search(r"\n\s+\*\) die ", case)
+    assert case.index("mkfs.ext4") > case.index("2)")
+    assert case.index("mkfs.ext4") < case.index("*) die ")
     assert "UUID=" in provision
     assert "nofail" in provision
+
+
+def test_an_existing_mount_must_be_the_op_data_volume() -> None:
+    """Second review (LOW): /srv already mounted is accepted only as our own volume."""
+    provision = _text("bin/provision.sh")
+    start = provision.index('if mountpoint -q "${OP_DATA_MOUNT}"; then')
+    branch = provision[start : provision.index("return 0", start)]
+    assert "LABEL" in branch
+    assert "op-data" in branch
+    assert 'readlink -f "${OP_DATA_DEVICE}"' in branch
+    assert "die " in branch
+
+
+def test_ssh_must_admit_the_user_running_provision() -> None:
+    """Second review (LOW): a missing invoking user is a refusal, not a warning."""
+    provision = _text("bin/provision.sh")
+    start = provision.index('case " ${allow_users} " in\n    *" ${SUDO_USER} "*)')
+    branch = provision[start : provision.index("esac", start)]
+    assert "die " in branch
+    assert "WARNING" not in branch
+
+
+def test_the_ssh_hold_comment_says_when_ufws_limit_takes_effect() -> None:
+    # Comments wrap: compare with the comment markers and line breaks folded away.
+    flat = " ".join(_text("bin/provision.sh").replace("#", " ").split())
+    assert "Oracle's own 22 ACCEPT stays ahead of ufw's chains until the reboot" in flat
+
+
+def test_deploy_creates_the_api_home_as_the_data_uid() -> None:
+    """HOME=/var/lib/persona/home must exist and belong to the data uid before the api starts.
+    Created by deploy, not provision: restore.sh refuses to unpack into a non-empty dir."""
+    deploy = _text("bin/deploy.sh")
+    create = (
+        'sudo install -d -o "${OP_DATA_UID}" -g "${OP_DATA_UID}" -m 0700'
+        ' "${OP_DATA_DIR}/persona/home"'
+    )
+    assert create in deploy
+    assert deploy.index(create) < deploy.index("compose up -d --remove-orphans")
+    assert "persona/home" not in _text("bin/provision.sh")
 
 
 def test_docker_lives_on_the_block_volume_and_waits_for_it() -> None:
@@ -352,9 +396,12 @@ def test_the_data_directories_belong_to_the_data_uid_and_voice_has_none() -> Non
 
 
 def test_containers_lose_the_whole_link_local_range() -> None:
+    """The whole range is dropped; the only way back is DNS (test_server_kit_dns.py)."""
     unit = _text("systemd/open-persona-metadata-block.service")
-    assert "169.254.0.0/16" in unit
-    assert "169.254.169.254/32" not in unit
+    assert "-d 169.254.0.0/16 -j DROP" in unit
+    for line in unit.splitlines():
+        if "169.254.169.254/32" in line and line.startswith("Exec"):
+            assert "--dport 53 -j RETURN" in line, line
 
 
 # --- the data uid in compose and restore -----------------------------------------------------

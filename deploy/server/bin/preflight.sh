@@ -179,6 +179,34 @@ else
   ok "no container publishes on a public address"
 fi
 
+# --- containers: DNS works, the metadata service does not --------------------------------
+# A throwaway container from the api image, on a user network (Docker's embedded DNS only
+# serves those). It must resolve a public name: on Oracle Docker forwards to the host's
+# resolver 169.254.169.254 from the container's namespace, through DOCKER-USER. And it must
+# NOT reach the metadata service on 169.254.169.254:80. Both are
+# open-persona-metadata-block.service's job.
+probe_image="open-persona/api:${OP_IMAGE_TAG:-current}"
+if docker image inspect "${probe_image}" >/dev/null 2>&1; then
+  probe_net="op-preflight-$$"
+  if docker network create "${probe_net}" >/dev/null 2>&1; then
+    probe() {  # probe <python code>: exit 0 means the code exited 0 in the container
+      docker run --rm --network "${probe_net}" --cap-drop ALL --user "${OP_DATA_UID:-2001}" \
+        -e HOME=/tmp "${probe_image}" python -c "$1" >/dev/null 2>&1
+    }
+    probe "import socket; socket.getaddrinfo('github.com', 443)" \
+      && ok "a container resolves public names" \
+      || bad "a container cannot resolve public names (DNS dropped in DOCKER-USER?)"
+    probe "import socket, sys; s = socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('169.254.169.254', 80)) != 0 else 1)" \
+      && ok "a container cannot reach the metadata service" \
+      || bad "a container reaches 169.254.169.254:80 (open-persona-metadata-block.service)"
+    docker network rm "${probe_net}" >/dev/null 2>&1 || warn "could not remove the probe network ${probe_net}"
+  else
+    bad "could not create a probe network"
+  fi
+else
+  warn "no ${probe_image} yet (deploy first): container DNS and the metadata block not checked"
+fi
+
 # --- DNS points here --------------------------------------------------------------------
 # OCI NATs the public address to a private one on the interface, so the routing table
 # cannot give it: provision.sh --public-ipv4 records it in /etc/open-persona/public-ipv4.
