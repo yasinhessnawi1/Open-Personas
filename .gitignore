@@ -79,6 +79,9 @@ deploy/*
 deploy/server/**/*.env
 # Host profiles are plain, non-secret sizes and names (scripts/tests/test_server_kit_hosts.py).
 !deploy/server/hosts/*.env
+# The Azure voice host's requirements brief is tracked too: requirements only, no secrets.
+!deploy/azure-voice/
+deploy/azure-voice/**/*.env
 CLAUDE.md
 
 # Community-edition local persistence (SQLite + Chroma) — dev artifacts, never tracked.
