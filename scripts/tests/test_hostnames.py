@@ -67,3 +67,53 @@ def test_the_dead_fly_smoke_and_its_gate_agree() -> None:
     gate = (ROOT / "scripts" / "check_deploy_wiring.py").read_text(encoding="utf-8")
     assert url in workflow
     assert url in gate
+
+
+#: The one sentence an operator must not miss (final review, MEDIUM): a NEW Clerk instance
+#: issues new user ids, the api takes identity from the JWT `sub`, so every restored user
+#: would sign in as a stranger with their data unreachable.
+CLERK_RULE = (
+    "Change the domain of the EXISTING production Clerk instance in the Clerk dashboard; "
+    "never create a new instance, or the restored users' ids stop matching."
+)
+
+
+def test_the_runbook_says_to_move_the_existing_clerk_instance() -> None:
+    runbook = (KIT / "RUNBOOK.md").read_text(encoding="utf-8")
+    flat = " ".join(runbook.split())
+    step4 = flat.split("## Step 4", 1)[1].split("## Step 5", 1)[0]
+    table = flat.split("## New hostnames: what moves with them", 1)[1].split(" ## ", 1)[0]
+    assert CLERK_RULE in step4
+    assert CLERK_RULE in table
+    assert "new Clerk production instance" not in flat
+    assert "the instance set up for openpersonas.si" not in flat
+
+
+def _profile() -> dict[str, str]:
+    lines = (KIT / "hosts" / "oracle.env").read_text(encoding="utf-8").splitlines()
+    return dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+
+
+#: A plain DNS name: labels of letters, digits and inner hyphens, at least one dot. No
+#: port, list, space or wildcard, which would turn a Caddy site into a catch-all.
+DNS_NAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def test_the_core_hostnames_are_plain_dns_names() -> None:
+    values = _profile()
+    for name in ("OP_API_HOST", "OP_CONNECTORS_HOST"):
+        assert DNS_NAME.match(values[name]), f"{name}={values[name]}"
+
+
+def test_the_dns_name_check_refuses_catch_alls() -> None:
+    for bad in (
+        "*.openpersonas.si",
+        "api.openpersonas.si:443",
+        "a.si,b.si",
+        ":443",
+        "localhost",
+        "api .openpersonas.si",
+        "-api.openpersonas.si",
+    ):
+        assert not DNS_NAME.match(bad), bad
+    assert DNS_NAME.match("api.openpersonas.si")
