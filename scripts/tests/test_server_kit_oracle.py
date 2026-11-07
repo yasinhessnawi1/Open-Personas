@@ -451,3 +451,48 @@ def test_all_templates_render_when_asked(tmp_path: Path) -> None:
     out = tmp_path / "all"
     assert render.main(["--dotenv", str(dotenv), "--out", str(out), "--host", "all"]) == 0
     assert {"voice.env", "livekit.env"} <= {p.name for p in out.iterdir()}
+
+
+# --- the ufw install removes iptables-persistent (seen on the real host, 2026-11-07) -------
+# `apt-get -s install ufw` on the Oracle image: ufw 0.36.2-6 in, iptables-persistent and
+# netfilter-persistent 1.0.20 OUT. So the chain is read before apt runs, nothing after it
+# assumes netfilter-persistent exists, and SSH is held open explicitly across the install.
+
+_HOLD_RULE = "-p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT"
+SSH_HOLD = f"iptables -I INPUT 1 {_HOLD_RULE}"
+SSH_RELEASE = f"iptables -D INPUT {_HOLD_RULE}"
+
+
+def test_the_firewall_steps_run_in_a_safe_order() -> None:
+    provision = _text("bin/provision.sh")
+    steps = [
+        'cp -p "${f}" "${FW_BACKUP}/"',  # 1. keep Oracle's rules
+        'instance_rules="$(instance_services_rules',  # 2. read the chain from the copy
+        SSH_HOLD,  # 3. hold SSH open
+        "apt-get install -y -q ufw",  # 4. the install that removes iptables-persistent
+        'merge_before_rules /etc/ufw/before.rules "${instance_rules}"',  # 5. into ufw
+        "ufw --force enable",  # 6. ufw owns INPUT, 22 limited
+        SSH_RELEASE,  # 7. the hold goes, ufw's limit applies
+    ]
+    positions = [provision.find(step) for step in steps]
+    assert all(p >= 0 for p in positions), [
+        s for s, p in zip(steps, positions, strict=True) if p < 0
+    ]
+    assert positions == sorted(positions), positions
+
+
+def test_the_chain_is_kept_on_disk_before_apt_runs() -> None:
+    provision = _text("bin/provision.sh")
+    saved = provision.find('> "${FW_BACKUP}/instance-services.rules"')
+    assert 0 <= saved < provision.find("apt-get install -y -q ufw")
+
+
+def test_a_removed_netfilter_persistent_does_not_fail_the_script() -> None:
+    provision = _text("bin/provision.sh")
+    check = (
+        "if systemctl list-unit-files --no-legend netfilter-persistent.service | grep -q .; then"
+    )
+    assert check in provision
+    branch = provision[provision.index(check) : provision.index("\n  fi\n", provision.index(check))]
+    assert "systemctl mask netfilter-persistent" in branch
+    assert "else" in branch

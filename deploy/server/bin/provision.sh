@@ -166,9 +166,16 @@ export DEBIAN_FRONTEND=noninteractive
 setup_operator_user
 
 # --- Oracle's firewall, kept before apt touches it ------------------------------------------
-# A copy of the image's rules, taken once: installing ufw may remove iptables-persistent,
-# and the InstanceServices rules are copied from this copy on every run.
+# Installing ufw REMOVES iptables-persistent and netfilter-persistent on Oracle's image
+# (seen on the host, 2026-11-07). So, before apt runs:
+#   1. a copy of the image's rules, taken once and kept;
+#   2. the InstanceServices chain read from that copy and saved beside it, so every later
+#      run (and this one, after apt) merges the same rules whatever apt removed;
+#   3. SSH held open by an explicit ACCEPT at the top of INPUT for the length of the
+#      install, whatever the package scripts do to the live rules. It is removed once ufw
+#      (which limits 22) owns INPUT.
 FW_BACKUP=/root/open-persona-firewall-backup
+instance_rules=""
 if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
   install -d -m 0700 "${FW_BACKUP}"
   for f in /etc/iptables/rules.v4 /etc/iptables/rules.v6; do
@@ -177,6 +184,20 @@ if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
       say "kept Oracle's ${f} in ${FW_BACKUP}"
     fi
   done
+  source_rules="${FW_BACKUP}/rules.v4"
+  [ -f "${source_rules}" ] || source_rules=/etc/iptables/rules.v4
+  instance_rules="$(instance_services_rules "${source_rules}")"
+  if [ -n "${instance_rules}" ]; then
+    printf '%s\n' "${instance_rules}" > "${FW_BACKUP}/instance-services.rules"
+    chmod 0600 "${FW_BACKUP}/instance-services.rules"
+    say "InstanceServices: $(printf '%s\n' "${instance_rules}" | wc -l) rule(s) kept"
+  elif [ -s "${FW_BACKUP}/instance-services.rules" ]; then
+    instance_rules="$(cat "${FW_BACKUP}/instance-services.rules")"
+  else
+    say "WARNING: no InstanceServices chain in ${source_rules}; preflight will report it"
+  fi
+  iptables -C INPUT -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT 2>/dev/null \
+    || iptables -I INPUT 1 -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT
 fi
 
 # --- baseline packages and SSH ----------------------------------------------------------
@@ -318,24 +339,22 @@ EOF
 systemctl restart systemd-journald
 
 # --- firewall -------------------------------------------------------------------------------
-# Oracle's image: ufw takes INPUT over and keeps the InstanceServices OUTPUT chain, copied
-# verbatim from the image's own rules into /etc/ufw/before.rules. netfilter-persistent is
-# masked, not stopped (stopping can flush the live rules mid-session), and its files are
-# moved aside so nothing restores Oracle's INPUT and FORWARD REJECTs at the next boot.
+# Oracle's image: ufw takes INPUT over and keeps the InstanceServices OUTPUT chain (read
+# before apt ran, above) in /etc/ufw/before.rules. Installing ufw normally REMOVED
+# netfilter-persistent; if it is still installed, it is masked, not stopped (stopping can
+# flush the live rules mid-session). The image's rule files are moved aside either way, so
+# nothing restores Oracle's INPUT and FORWARD REJECTs at the next boot.
 if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
-  source_rules="${FW_BACKUP}/rules.v4"
-  [ -f "${source_rules}" ] || source_rules=/etc/iptables/rules.v4
-  instance_rules="$(instance_services_rules "${source_rules}")"
-  [ -n "${instance_rules}" ] \
-    || say "WARNING: no InstanceServices chain in ${source_rules}; preflight will report it"
   [ -f "${FW_BACKUP}/before.rules" ] || cp -p /etc/ufw/before.rules "${FW_BACKUP}/before.rules"
   merge_before_rules /etc/ufw/before.rules "${instance_rules}" > /etc/ufw/before.rules.new
   chmod 0640 /etc/ufw/before.rules.new
   mv /etc/ufw/before.rules.new /etc/ufw/before.rules
   if systemctl list-unit-files --no-legend netfilter-persistent.service | grep -q .; then
     systemctl disable netfilter-persistent >/dev/null 2>&1 || say "WARNING: could not disable netfilter-persistent"
+    systemctl mask netfilter-persistent >/dev/null
+  else
+    say "netfilter-persistent is not installed (the ufw install removed it): nothing to mask"
   fi
-  systemctl mask netfilter-persistent >/dev/null
   for f in rules.v4 rules.v6; do
     [ ! -f "/etc/iptables/${f}" ] || mv "/etc/iptables/${f}" "/etc/iptables/${f}.oracle-disabled"
   done
@@ -351,8 +370,8 @@ ufw reload
 
 if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
   # The image's REJECTs are still loaded in the running kernel, ahead of ufw's chains:
-  # remove them now rather than waiting for a reboot. SSH stays open throughout (ufw
-  # already allows it, and so did Oracle's own rule above the REJECT).
+  # remove them now rather than waiting for a reboot. SSH stays open throughout (the hold,
+  # Oracle's own rule above the REJECT, and now ufw).
   for chain in INPUT FORWARD; do
     while iptables -C "${chain}" -j REJECT --reject-with icmp-host-prohibited 2>/dev/null; do
       iptables -D "${chain}" -j REJECT --reject-with icmp-host-prohibited
@@ -360,6 +379,10 @@ if [ "${OP_ORACLE_FIREWALL:-0}" = 1 ]; then
     while ip6tables -C "${chain}" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do
       ip6tables -D "${chain}" -j REJECT --reject-with icmp6-adm-prohibited
     done
+  done
+  # ufw owns INPUT and allows (limits) 22: the hold taken before apt goes.
+  while iptables -C INPUT -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport 22 -m comment --comment open-persona-ssh-hold -j ACCEPT
   done
 fi
 

@@ -54,7 +54,8 @@ def test_the_core_steps_carry_nothing_of_the_single_box() -> None:
 
 def test_dns_for_the_core_host_names_only_its_three_hostnames() -> None:
     dns = CORE_PART.split("## Step 8", 1)[1].split("\n## ", 1)[0]
-    for host in ("api.openpersonasai.com", "api.openpersona.online", "connectors.openpersonasai.com"):
+    core = ("api.openpersonasai.com", "api.openpersona.online", "connectors.openpersonasai.com")
+    for host in core:
         assert host in dns, host
     for host in ("voice.openpersonasai.com", "livekit.openpersonasai.com"):
         assert f"{host} " not in dns.split("```")[1], f"{host} gets a record in step 8"
