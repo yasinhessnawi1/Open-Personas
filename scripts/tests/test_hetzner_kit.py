@@ -365,6 +365,36 @@ def test_caddy_admin_api_is_off_and_bodies_are_capped() -> None:
     assert "request>uri delete" in caddyfile
 
 
+_CADDY_UNITS = {"KB": 1000, "MB": 1000**2, "KiB": 1024, "MiB": 1024**2}
+
+
+def _site_body_cap(caddyfile: str, host: str) -> int:
+    """The request_body max_size of one Caddy site, in bytes."""
+    site = re.search(rf"^{re.escape(host)} \{{\n(.*?)^\}}", caddyfile, re.M | re.S)
+    assert site, f"no Caddy site for {host}"
+    cap = re.search(r"max_size (\d+)(KB|MB|KiB|MiB)", site.group(1))
+    assert cap, f"{host} has no request_body max_size"
+    return int(cap.group(1)) * _CADDY_UNITS[cap.group(2)]
+
+
+def test_the_voice_edge_accepts_the_largest_dictation_voice_accepts() -> None:
+    """The api's dictation proxy reaches voice through this edge once they are on two hosts.
+
+    On one box the api called voice on the internal network, so the 1 MB cap never saw the
+    up to 10 MiB clips voice accepts on POST /v1/stt (``_STT_AUDIO_MAX_BYTES``). With the
+    api on Oracle and voice on Azure, the call crosses the public edge, and a cap below
+    voice's own limit turns every long dictation into a 413 from Caddy. Allow multipart
+    overhead on top.
+    """
+    app = (ROOT / "packages/voice/src/persona_voice/http/app.py").read_text(encoding="utf-8")
+    limit = re.search(r"^_STT_AUDIO_MAX_BYTES = (\d+) \* 1024 \* 1024$", app, re.M)
+    assert limit, "voice's STT upload limit moved; update this test"
+    voice_limit = int(limit.group(1)) * 1024 * 1024
+    caddyfile = (KIT / "Caddyfile").read_text(encoding="utf-8")
+    cap = _site_body_cap(caddyfile, "voice.openpersonasai.com")
+    assert cap >= voice_limit + 1024 * 1024, (cap, voice_limit)
+
+
 def test_the_connector_host_serves_exactly_the_provider_paths() -> None:
     """connectors.* may reach only the webhooks and OAuth callbacks the code mounts."""
     src = ROOT / "packages" / "connectors" / "src" / "persona_connectors"
