@@ -114,13 +114,27 @@ Like the rest of the stack, it carries an **edition** stance
 
 ## Install and run
 
-`persona-voice` is a `uv` workspace package. It runs on Linux and macOS; on Windows
-the service refuses to start and says that voice is not available on Windows (the
-rest of the community edition runs there). From the repo root:
+`persona-voice` is a `uv` workspace package. From the repo root:
 
 ```bash
 uv sync                       # install the workspace
 ```
+
+Where it runs:
+
+| Platform | Voice | Notes |
+|---|---|---|
+| Linux x86_64 | yes | production runs here |
+| Linux arm64 (aarch64) | yes | Raspberry Pi 5, Ampere, Graviton; tested in CI |
+| macOS on Apple Silicon (arm64) | yes | macOS 14 or later (ONNX Runtime and PyTorch publish macOS wheels for 14+ only); tested in CI |
+| macOS on Intel (x86_64) | no | PyTorch and ONNX Runtime no longer publish Intel macOS wheels, so the engine does not install |
+| Windows | no | the service refuses to start and says so; the rest of the community edition runs there |
+
+Nothing in voice needs a compiler. The voice activity detector is Silero VAD v5.1, shipped
+inside the package (MIT, Silero Team) and run on the `onnxruntime` package, which has
+wheels for every platform above, so `uv sync` or `pip install persona-voice` works on
+arm64 as it does on x86_64. The Docker image (`packages/voice/Dockerfile`) builds for
+`linux/amd64` and `linux/arm64` from the same file.
 
 `persona-voice` is consumed by `persona-api`; there is no standalone CLI. The
 token issuance app boots from `persona_voice.http.app`:

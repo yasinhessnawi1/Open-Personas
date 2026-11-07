@@ -334,7 +334,7 @@ class SileroVADAdapter:
         """Run the blocking ONNX inference for a batch of frames (off-loop).
 
         Called via :func:`asyncio.to_thread` from :meth:`push_audio`. Touches only
-        the ``vad`` argument (the ONNX Runtime session) — never adapter state — so it is
+        the ``vad`` argument (the ONNX Runtime session), never adapter state, so it is
         safe to run off the event-loop thread. The state machine advances on the
         loop thread once the scores return. ``vad`` is passed explicitly (rather
         than read from ``self`` in the thread) so the live-session reference cannot

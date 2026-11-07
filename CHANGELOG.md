@@ -12,6 +12,14 @@ Per-spec entries are added by the close-out phase of each spec.
 ## [Unreleased]
 
 ### Added
+- **Voice runs on Linux arm64 and builds as a linux/arm64 image.** A community edition on a
+  Raspberry Pi 5, an Ampere or a Graviton host can now install voice with `uv sync` or
+  `pip install persona-voice`. The voice activity detector is the same Silero v5.1 model,
+  now shipped in persona-voice (MIT) and run on onnxruntime instead of silero-vad-lite, which
+  had no arm64 build; an equivalence test keeps its scores within 1e-4 of the old library's,
+  so the tuned thresholds keep their meaning. CI runs voice on arm64 Linux and on Apple
+  Silicon. Intel Macs are not supported (PyTorch and ONNX Runtime publish no Intel macOS
+  wheels).
 - **Your personas can start a conversation on Telegram, Slack, Discord, WhatsApp,
   SMS and email, not just answer one.** Until now a persona could reply anywhere
   you wrote to it and could only ever speak first in the web app. So if you handed
@@ -74,6 +82,11 @@ Per-spec entries are added by the close-out phase of each spec.
   Public keys and certificates are left alone, since they are not secrets.
 
 ### Fixed
+- **Long dictation clips reach voice when voice runs on its own host.** The deploy kit's
+  edge capped requests to the voice host at 1 MB, below the 10 MiB voice accepts for
+  speech to text. It never mattered while the api reached voice inside one box; with
+  voice on a separate host the api's dictation proxy goes through that edge, so the cap
+  is now 12 MB.
 - **Forgetting something now also forgets the summary written from it.** A persona
   keeps a short summary of what it knows about you, rebuilt in the background from
   its memories. When you deleted a conversation and asked it to forget, the
