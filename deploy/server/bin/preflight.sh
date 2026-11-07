@@ -138,8 +138,8 @@ fi
 
 # --- DNS points here --------------------------------------------------------------------
 ip4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
-for host in api.openpersonasai.com api.openpersona.online connectors.openpersonasai.com \
-            voice.openpersonasai.com livekit.openpersonasai.com; do
+# The core host's names only: voice.* and livekit.* point at the voice host.
+for host in api.openpersonasai.com api.openpersona.online connectors.openpersonasai.com; do
   resolved="$(getent ahostsv4 "${host}" | awk 'NR==1 {print $1}' || true)"
   if [ "${resolved}" = "${ip4}" ]; then ok "${host} -> this box"
   else warn "${host} resolves to '${resolved:-nothing}', not this box (${ip4})"; fi

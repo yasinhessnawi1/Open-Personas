@@ -6,7 +6,8 @@
 # host needs and this file does not have yet:
 #   * the database link: voice reads and writes Postgres directly (D-V1-4) as an
 #     RLS-enforced role, over a WireGuard tunnel to the core host, never a public port;
-#   * its own Caddy for voice.openpersonasai.com and livekit.openpersonasai.com;
+#   * its own Caddy (below, loading Caddyfile.voice) for voice.openpersonasai.com and
+#     livekit.openpersonasai.com, which the core host's Caddy does not serve;
 #   * its own firewall: 80/443, LiveKit's 7881/tcp and 7882/udp, the tunnel's port.
 #
 # The voice and livekit definitions below are unchanged from the single-box kit: single
@@ -97,5 +98,26 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # The voice host's TLS edge: the same hardening as the core host's Caddy, its own sites.
+  caddy:
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 256
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/caddy.env
+    volumes:
+      - ./Caddyfile.voice:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: ${OP_CADDY_MEM_LIMIT:-256m}
+    restart: unless-stopped
+    logging: *logging
+
 networks:
   backend: {}
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
