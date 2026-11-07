@@ -39,7 +39,8 @@ CORE_SERVICES = {"postgres", "migrate", "api", "caddy"}
 #: Interpolated by the scripts themselves, not by a profile.
 SCRIPT_VARS = {"OP_ENV_DIR", "OP_DATA_DIR", "OP_IMAGE_TAG"}
 _INTERPOLATION = re.compile(r"\$\{(OP_[A-Z0-9_]+)(?::-([^}]*))?\}")
-_PROFILE_LINE = re.compile(r"^(OP_[A-Z0-9_]+)=([A-Za-z0-9._-]*)$")
+#: The same rule bin/lib/profile.sh enforces before it exports a setting into a root shell.
+_PROFILE_LINE = re.compile(r"^(OP_[A-Z0-9_]+)=([A-Za-z0-9._,/:-]*)$")
 _SIZE = re.compile(r"^(\d+(?:\.\d+)?)([kmg]?)b?$", re.I)
 
 
@@ -176,7 +177,7 @@ def test_scripts_reach_compose_only_through_the_helper() -> None:
 
 
 def test_the_helper_applies_the_host_profile() -> None:
-    lib = LIB.read_text(encoding="utf-8")
+    lib = LIB.read_text(encoding="utf-8") + (LIB.parent / "profile.sh").read_text(encoding="utf-8")
     assert '--env-file "${KIT_DIR}/hosts/${OP_HOST_PROFILE}.env"' in lib
     assert "/etc/open-persona/host-profile" in lib
     # A profile name is a file name under hosts/: nothing that could climb out of it.
@@ -201,14 +202,15 @@ def test_preflight_requires_no_voice_file_and_allows_no_media_port() -> None:
         assert needle not in preflight, needle
 
 
-def test_the_helper_is_lf_strict_and_parses() -> None:
-    raw = LIB.read_bytes()
+@pytest.mark.parametrize("lib", sorted(LIB.parent.glob("*.sh")), ids=lambda p: p.name)
+def test_the_helpers_are_lf_strict_and_parse(lib: Path) -> None:
+    raw = lib.read_bytes()
     assert b"\r\n" not in raw, "CRLF line endings break bash on the host"
     assert raw.decode("utf-8").startswith("# shellcheck shell=bash\n")
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash unavailable")
-    result = subprocess.run([bash, "-n", str(LIB)], capture_output=True, text=True, check=False)
+    result = subprocess.run([bash, "-n", str(lib)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
 
 

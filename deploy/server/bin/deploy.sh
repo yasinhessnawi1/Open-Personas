@@ -34,6 +34,8 @@ say() { echo "deploy: $*" >&2; }
 
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
+# The database, the images and the data live on the block volume: never deploy without it.
+require_data_mount
 
 # --- 1 ------------------------------------------------------------------------------
 "${SCRIPT_DIR}/preflight.sh" --env-only || die "preflight"

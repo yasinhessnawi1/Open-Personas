@@ -97,6 +97,10 @@ services:
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/migrate.env
     command: ["python", "packages/api/release.py"]
+    # The data uid, like the api (no data volume here; HOME is somewhere writable).
+    user: "${OP_DATA_UID:-2001}:${OP_DATA_UID:-2001}"
+    environment:
+      HOME: /tmp
     networks: [db]
     cap_drop: [ALL]
     pids_limit: 256
@@ -127,6 +131,12 @@ services:
     container_name: open-persona-api
     deploy:
       replicas: 1
+    # Runs as the host profile's data uid (2001 on Oracle), not the image's `persona` user
+    # (uid 1000): on the Oracle host uid 1000 is `ubuntu`, whose processes (the owner's
+    # other work) must not read tenant files. The data directory is owned by this uid
+    # (provision.sh, restore.sh); HOME points into it because the image's /home/persona
+    # belongs to uid 1000.
+    user: "${OP_DATA_UID:-2001}:${OP_DATA_UID:-2001}"
     env_file:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
       - ${OP_ENV_DIR:-/opt/open-persona/env}/api.env
@@ -143,6 +153,7 @@ services:
       PERSONA_API_WORKSPACE_ROOT: /var/lib/persona/workspace
       PERSONA_TOOLS_SANDBOX_ROOT: /var/lib/persona/tools
       HF_HOME: /var/lib/persona/hf
+      HOME: /var/lib/persona/home
       PERSONA_MCP_MIRROR_PATH: /var/lib/persona/mcp-mirror
       PERSONA_SKILL_MIRROR_PATH: /var/lib/persona/skill-mirror
       # The connector transports run in this process (Spec I1).
@@ -156,8 +167,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     networks: [backend, db]
-    # Runs as the image's non-root `persona` user and needs no capability. The pids limit
-    # leaves room for the built-in MCP children and the worker's threads.
+    # Non-root (the data uid, above) and needs no capability. The pids limit leaves room
+    # for the built-in MCP children and the worker's threads.
     cap_drop: [ALL]
     pids_limit: 1024
     depends_on:

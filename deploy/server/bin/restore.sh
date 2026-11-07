@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open Persona: restore production from the Fly backup set onto the Hetzner box.
+# Open Persona: restore production from a backup set onto the core host.
 #
 # Restore-from-backup, not a live migration: the Fly apps were deleted on 2026-10-02 and
 # the backup set in ~/Backups/fly-2026-10-02 is the only copy of production. This script
@@ -24,13 +24,13 @@
 #   7. Runs sql/verify.sql and compares the facts with this backup set's known shape.
 #   8. Unpacks the api volume tarball into the api's data directory (skipped with
 #      --db-only), after scanning it: regular files and directories only, no absolute or
-#      `..` paths. It extracts as uid 1000, never as root, and takes neither owners nor
-#      modes from the archive.
+#      `..` paths. It extracts as the host profile's data uid (2001 on Oracle), never as
+#      root, and takes neither owners nor modes from the archive.
 # Migrations to the current head are NOT run here. bin/deploy.sh runs them through the
 # `migrate` service, so the restored data meets the code exactly the way every deploy
 # does.
 #
-# Usage on the box (from the checkout's deploy/server directory):
+# Usage on the host (from the checkout's deploy/server directory):
 #   bin/restore.sh --backup-dir /srv/open-persona/restore
 #   bin/restore.sh --roles-only     (re)apply step 3 and 6 to an existing database, e.g.
 #                                   after a password rotation; touches no data
@@ -54,7 +54,6 @@ KIT_DIR="$(dirname "${SCRIPT_DIR}")"
 EXPECT_TABLES="${EXPECT_TABLES:-54}"
 EXPECT_FORCED_RLS="${EXPECT_FORCED_RLS:-45}"
 EXPECT_POLICIES="${EXPECT_POLICIES:-46}"
-DATA_UID=1000   # the images' `persona` user
 
 BACKUP_DIR=""
 CONTAINER=""
@@ -85,6 +84,11 @@ done
 # On the box: the compose `postgres` service. In a rehearsal: a named container.
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
+# The uid the api runs as and owns its data with (the host profile; never 1000, which is
+# `ubuntu` on the Oracle host).
+DATA_UID="${OP_DATA_UID:-2001}"
+# On the host the restore writes to the block volume; a rehearsal (--container) does not.
+[ -n "${CONTAINER}" ] || require_data_mount
 pg_exec() {
   if [ -n "${CONTAINER}" ]; then
     docker exec -i "${CONTAINER}" "$@"

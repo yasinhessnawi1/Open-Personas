@@ -49,7 +49,8 @@ jobs:
       - name: Smoke-test the image
         run: |
           echo "architecture: $(docker image inspect -f '{{.Architecture}}' open-persona/api:ci)"
-          docker run --rm open-persona/api:ci python -c "
+          # As the server kit runs it: the data uid (2001), not the image's uid 1000.
+          docker run --rm --user 2001:2001 -e HOME=/tmp open-persona/api:ci python -c "
           import importlib.util
           import torch
           import persona_api.app

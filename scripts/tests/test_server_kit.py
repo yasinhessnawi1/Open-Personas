@@ -572,7 +572,8 @@ def test_render_copies_resolves_and_never_prints_a_value(
     dotenv, values = _fake_dotenv(tmp_path)
     out = tmp_path / "out"
 
-    assert render.main(["--dotenv", str(dotenv), "--out", str(out), "--livekit", "cloud"]) == 0
+    argv = ["--dotenv", str(dotenv), "--out", str(out), "--livekit", "cloud", "--host", "all"]
+    assert render.main(argv) == 0
     printed = capsys.readouterr()
     # Short flag values ("1", "true") occur in any text; every secret-shaped value is long.
     for value in (v for v in values.values() if len(v) > 8):
@@ -611,6 +612,8 @@ def test_render_selfhosted_livekit_and_confirmed_chains(tmp_path: Path) -> None:
         "--livekit",
         "selfhosted",
         "--chains-from-dotenv",
+        "--host",
+        "all",
     ]
     assert render.main(argv) == 0
     voice = _rendered(out, "voice")
@@ -718,9 +721,12 @@ def test_inventory_lists_presence_and_destination_and_never_a_value(
     assert "-> api.env" in lines["MCP_CREDENTIAL_KEY"]
     # Clerk values never come from .env, so the inventory does not offer them.
     assert not [line for line in printed.splitlines() if "JWT_PUBLIC_KEY" in line]
-    # The chains and the LiveKit Cloud sources are listed: a render could copy them.
+    # The chains are listed: a render could copy them. The LiveKit Cloud sources are not:
+    # the core host (the default --host) reads no voice file.
     assert "PERSONA_FRONTIER_MODELS" in lines
-    assert "PERSONA_LIVEKIT_URL" in printed
+    assert "PERSONA_LIVEKIT_URL" not in printed
+    assert render.main(["--dotenv", str(dotenv), "--inventory", "--host", "all"]) == 0
+    assert "PERSONA_LIVEKIT_URL" in capsys.readouterr().out
     # Fixed and generated values are not .env's business and are not listed.
     assert "PERSONA_INITIATIVE_ENABLED" not in lines
     assert "DATABASE_URL" not in lines
@@ -744,14 +750,17 @@ def test_livekit_defaults_to_selfhosted(tmp_path: Path) -> None:
     """Owner ruling 2026-10-23: LiveKit runs on the box; Cloud is the opt-in fallback."""
     render = _load_render()
     dotenv, _ = _fake_dotenv(tmp_path)
-    assert render.main(["--dotenv", str(dotenv), "--out", str(tmp_path / "o")]) == 0
+    argv = ["--dotenv", str(dotenv), "--out", str(tmp_path / "o"), "--host", "all"]
+    assert render.main(argv) == 0
     voice = _rendered(tmp_path / "o", "voice")
     assert voice["PERSONA_VOICE_LIVEKIT_URL"] == "wss://livekit.openpersonasai.com"
 
 
-def test_provision_gives_deploy_roots_key_on_the_primary_path() -> None:
+def test_provision_gives_deploy_the_invoking_users_key() -> None:
+    """Oracle: run as `sudo` from ubuntu, so ubuntu's keys; as plain root, root's."""
     provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
-    assert 'ROOT_KEYS="${ROOT_KEYS:-/root/.ssh/authorized_keys}"' in provision
+    assert 'ROOT_KEYS="${ROOT_KEYS:-${default_keys}}"' in provision
+    assert "/root/.ssh/authorized_keys" in provision
     assert "--only-operator-user" in provision
     assert "OP_UID=2000" in provision
 
