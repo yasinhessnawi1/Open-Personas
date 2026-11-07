@@ -80,8 +80,9 @@ dependencies = [
     # silero-vad-lite 0.3.0, which wrapped the same model in C++ but had no Linux
     # aarch64 wheel and whose source build downloads an x86_64 ONNX Runtime; the
     # equivalence test holds the scores to it. onnxruntime was already in the tree
-    # (chromadb), so this adds no new package. MIT.
-    "onnxruntime>=1.19,<2",
+    # (chromadb), so this adds no new package. MIT. The floor is the version the
+    # equivalence gate measured (1.26); it has wheels for every platform voice supports.
+    "onnxruntime>=1.26,<2",
     "cartesia[websockets]>=3,<4",
 ]
 
