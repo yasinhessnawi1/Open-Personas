@@ -47,7 +47,7 @@ __all__ = [
     "SILERO_MODEL_SOURCE",
     "SileroModelError",
     "SileroVAD",
-    "bundled_model_path",
+    "bundled_model_bytes",
 ]
 
 #: sha256 of Silero VAD v5.1's ``silero_vad.onnx``. A different file is refused: the voice
@@ -68,27 +68,38 @@ class SileroModelError(PersonaError):
     """The Silero model file is not the pinned v5.1 model, or could not be loaded."""
 
 
-def bundled_model_path() -> Path:
-    """The path of the Silero v5.1 model shipped inside this package."""
+def bundled_model_bytes() -> bytes:
+    """The bytes of the Silero v5.1 model shipped inside this package.
+
+    Read inside the ``as_file`` block: for a package imported from a zip, ``as_file`` hands
+    out a temporary file that is deleted when the block ends, so a path returned from it
+    would point at nothing.
+    """
     resource = files("persona_voice.stt").joinpath("data", "silero_vad.onnx")
     with as_file(resource) as path:
-        return Path(path)
+        return Path(path).read_bytes()
 
 
-def _verified_model_bytes(path: Path) -> bytes:
-    """Read the model and refuse it unless its sha256 is the pinned v5.1 digest."""
+def _read_model(path: Path | None) -> tuple[bytes, str]:
+    """The model bytes and where they came from (the bundled model when ``path`` is None)."""
     try:
-        model = path.read_bytes()
+        if path is None:
+            return bundled_model_bytes(), "the bundled model"
+        return path.read_bytes(), str(path)
     except OSError as exc:
-        raise SileroModelError(
-            f"cannot read the Silero model at {path}", context={"path": str(path)}
-        ) from exc
+        where = "the bundled model" if path is None else str(path)
+        raise SileroModelError(f"cannot read the Silero model ({where})") from exc
+
+
+def _verified_model_bytes(path: Path | None) -> bytes:
+    """Read the model and refuse it unless its sha256 is the pinned v5.1 digest."""
+    model, where = _read_model(path)
     digest = hashlib.sha256(model).hexdigest()
     if digest != SILERO_MODEL_SHA256:
         raise SileroModelError(
-            f"the Silero model at {path} has sha256 {digest}, expected {SILERO_MODEL_SHA256} "
+            f"the Silero model ({where}) has sha256 {digest}, expected {SILERO_MODEL_SHA256} "
             "(Silero VAD v5.1)",
-            context={"path": str(path), "sha256": digest},
+            context={"source": where, "sha256": digest},
         )
     return model
 
@@ -131,7 +142,7 @@ class SileroVAD:
         if sample_rate not in _SUPPORTED_RATES:
             msg = f"Sample rate must be 16000 or 8000, got {sample_rate}"
             raise ValueError(msg)
-        model = _verified_model_bytes(model_path or bundled_model_path())
+        model = _verified_model_bytes(model_path)
         self._options = _session_options()
         try:
             self._session = ort.InferenceSession(
@@ -185,7 +196,14 @@ class SileroVAD:
                 raise ValueError(msg)
             window = np.frombuffer(data, dtype=np.float32)
         else:
-            window = np.asarray(data, dtype=np.float32)
+            array = np.asarray(data)
+            if not np.issubdtype(array.dtype, np.floating):
+                msg = (
+                    f"The window must be floating point PCM in [-1, 1], got {array.dtype} "
+                    "(normalise PCM16 first, as SileroFramer does)"
+                )
+                raise ValueError(msg)
+            window = array.astype(np.float32, copy=False)
         if window.ndim != 1 or window.shape[0] != self._window:
             msg = (
                 f"Data length must be equal to the window size ({self._window}), got {window.shape}"
