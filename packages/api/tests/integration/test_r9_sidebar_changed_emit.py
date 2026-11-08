@@ -75,7 +75,7 @@ def client(
 
 def _persona_id(uid: str) -> str:
     """One persona per owner, in the minted id format the routes accept."""
-    return f"persona_{hashlib.md5(uid.encode(), usedforsecurity=False).hexdigest()}"
+    return f"persona_{hashlib.sha256(uid.encode()).hexdigest()[:32]}"
 
 
 def _seed_persona(uid: str) -> None:
