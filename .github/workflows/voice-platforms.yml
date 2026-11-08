@@ -81,8 +81,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      # The voice image holds torch and its CUDA libraries (until torch moves to the CPU
-      # build) and the builder stage holds a second copy of the venv: make room first.
+      # The builder stage holds a second copy of the venv, torch included: make room first.
       - name: Free disk space
         run: |
           df -h /
