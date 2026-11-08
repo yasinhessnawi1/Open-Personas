@@ -1,0 +1,123 @@
+# Open Persona production: the VOICE host (Phase B, owner ruling 2026-11-07).
+#
+# Voice and its LiveKit SFU run on Azure, apart from the core host (docker-compose.yml on
+# the Oracle server). NO host profile deploys this file yet: it keeps the reviewed voice
+# and LiveKit definitions for the voice host's kit (task T13), which adds what a separate
+# host needs and this file does not have yet:
+#   * the database link: voice reads and writes Postgres directly (D-V1-4) as an
+#     RLS-enforced role, over a WireGuard tunnel to the core host, never a public port;
+#   * its own Caddy (below, loading Caddyfile.voice) for voice.openpersonas.si and
+#     livekit.openpersonas.si, which the core host's Caddy does not serve;
+#   * its own firewall: 80/443, LiveKit's 7881/tcp and 7882/udp, the tunnel's port.
+#
+# The voice and livekit definitions below are unchanged from the single-box kit: single
+# instance, every capability dropped, loopback-only published ports, livekit on the host
+# network as nobody. Never paste `docker compose config` or `printenv` output anywhere.
+#
+# LiveKit: two modes, no edit to this file either way, chosen by voice.env's
+# PERSONA_VOICE_LIVEKIT_URL.
+#   selfhosted (DEFAULT, owner ruling 2026-10-23): the `selfhosted-livekit` profile runs
+#                     and voice.env points at wss://livekit.openpersonas.si.
+#   cloud (the fallback): voice.env points at the LiveKit Cloud free-plan project;
+#                     `livekit` never runs.
+
+name: open-persona-voice
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  voice:
+    build:
+      context: ../..
+      dockerfile: packages/voice/Dockerfile
+    image: open-persona/voice:${OP_IMAGE_TAG:-current}
+    # Single instance: the in-process LiveKit agent owns per-call state.
+    container_name: open-persona-voice
+    deploy:
+      replicas: 1
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/voice.env
+    environment:
+      # Carried over from packages/voice/fly.toml [env].
+      PERSONA_LOG_LEVEL: INFO
+      PERSONA_EDITION: cloud
+      PERSONA_VOICE_JWT_ALGORITHMS: RS256
+      PERSONA_VOICE_JWT_AUDIENCE: persona-api
+      PERSONA_VOICE_AGENT_INPROCESS: "true"
+      # R9-188: cloud refuses to boot with audit records going to the swept temp dir.
+      # Postgres joins them to the api's store_audit_events.
+      PERSONA_VOICE_AUDIT_BACKEND: postgres
+      # R9-027: the model cache gets a persistent home here (on Fly it lived in the
+      # container layer and re-downloaded on every machine replacement).
+      HF_HOME: /var/lib/persona-voice/hf
+    volumes:
+      - ${OP_DATA_DIR:-/srv/open-persona}/voice:/var/lib/persona-voice
+    ports:
+      - "127.0.0.1:8001:8001"
+    networks: [backend]
+    cap_drop: [ALL]
+    pids_limit: 1024
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    mem_limit: ${OP_VOICE_MEM_LIMIT:-4g}
+    restart: unless-stopped
+    # Every HTTP route is auth-gated, so any HTTP answer (a 401) proves the listener.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null --max-time 4 http://127.0.0.1:8001/v1/voices"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    logging: *logging
+
+  # Self-hosted LiveKit SFU, only with --profile selfhosted-livekit.
+  # The packages/livekit image unchanged: its entrypoint takes LIVEKIT_NODE_IP (the box's
+  # public IPv4, livekit.env) instead of the Fly-only `$FLY_APP_NAME.fly.dev` lookup, and
+  # its baked livekit.yaml already has the proven shape: signaling 7880, ICE/TCP 7881,
+  # single-port UDP mux 7882.
+  livekit:
+    build:
+      context: ../../packages/livekit
+    image: open-persona/livekit:${OP_IMAGE_TAG:-current}
+    profiles: [selfhosted-livekit]
+    network_mode: host
+    # Every port it binds is above 1024, so it runs as nobody with no capability.
+    user: "65534:65534"
+    cap_drop: [ALL]
+    pids_limit: 512
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/livekit.env
+    environment:
+      LIVEKIT_CONFIG_PATH: /etc/livekit/livekit.yaml
+    mem_limit: ${OP_LIVEKIT_MEM_LIMIT:-1g}
+    restart: unless-stopped
+    logging: *logging
+
+  # The voice host's TLS edge: the same hardening as the core host's Caddy, its own sites.
+  caddy:
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 256
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/caddy.env
+    volumes:
+      - ./Caddyfile.voice:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: ${OP_CADDY_MEM_LIMIT:-256m}
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  backend: {}
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}

@@ -1,0 +1,241 @@
+# Open Persona production: the CORE host (owner ruling 2026-11-07).
+#
+# Production runs on two hosts. This file is the core host's: an Oracle Cloud Always Free
+# arm64 server (2 OCPU, 12 GB) running postgres, the one-shot migrate step, the api (with
+# its in-process worker and the connector transports) and Caddy. Voice and LiveKit run on
+# the VOICE host (Azure) from docker-compose.voice.yml; nothing here waits for them, and
+# the api reaches voice only through PERSONA_VOICE_SERVICE_URL in api.env.
+#
+# Run it through the kit's scripts, which go through bin/lib/compose.sh: that helper
+# applies the host profile (hosts/<profile>.env, every ${OP_...} size below) the same way
+# for a restore, a backup and a deploy. The build context is the repo root (../..).
+#
+# Networking (the part that keeps the firewall honest):
+#   * Docker-PUBLISHED ports bypass ufw. So nothing is published on a public address:
+#     postgres publishes nothing, the api publishes on 127.0.0.1 only.
+#   * caddy uses the HOST network: its 80/443 listeners are ordinary host sockets that ufw
+#     governs, and it sees real client addresses.
+#
+# Networks: postgres sits ONLY on `db`, an internal network with no route out; api and
+# migrate join `db` to reach it, and the api joins `backend` for outbound calls (model
+# providers, connectors).
+#
+# Hardening on every app container: all Linux capabilities dropped (caddy keeps only
+# NET_BIND_SERVICE), a pids limit, and the daemon-wide no-new-privileges (provision.sh,
+# /etc/docker/daemon.json). Nothing mounts the Docker socket, /run or /var/run.
+#
+# Never paste the output of `docker compose config` or `printenv` anywhere: both print
+# every secret in the env files.
+#
+# Env files live OUTSIDE the checkout in ${OP_ENV_DIR} (default /opt/open-persona/env),
+# rendered by render_env.py and completed by bin/fill_generated.sh. Values that are not
+# secrets and never vary are pinned below in `environment:`, which wins over env_file, so
+# a stale env file cannot move a path or an internal URL. Where voice lives is NOT pinned:
+# it is the one setting that changes when voice comes up on Azure.
+
+name: open-persona
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  postgres:
+    # Pinned by digest: the exact image the 2026-10-23 restore rehearsal ran (16.15). The
+    # digest is a multi-arch index (amd64 and arm64), so the arm64 core host pulls the same
+    # release. The Dockerfiles' bases are not the kit's.
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/postgres.env
+    # Sized by the host profile (hosts/<profile>.env). On the 12 GB Oracle host postgres
+    # gets 1 GB of shared buffers inside a 3 GB limit; the kernel page cache does the rest.
+    # The api's two engines hold 5 connections each (db_pool_size), the voice host adds a
+    # few in Phase B, so 60 connections is ample.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${OP_PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${OP_PG_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - maintenance_work_mem=${OP_PG_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - work_mem=${OP_PG_WORK_MEM:-8MB}
+      - -c
+      - max_connections=${OP_PG_MAX_CONNECTIONS:-60}
+      - -c
+      - max_wal_size=${OP_PG_MAX_WAL_SIZE:-1GB}
+      - -c
+      - wal_compression=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No `ports:`, and only the internal `db` network: no route in, no route out.
+    networks: [db]
+    shm_size: 256mb
+    # memswap_limit equal to mem_limit: the database never swaps (latency), whatever swap
+    # the host has.
+    mem_limit: ${OP_PG_MEM_LIMIT:-3g}
+    memswap_limit: ${OP_PG_MEM_LIMIT:-3g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U persona -d persona"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *logging
+
+  # One-shot: `alembic upgrade head` + the persona_app and persona_platform grants
+  # (packages/api/release.py), the job Fly's release_command did. bin/deploy.sh runs it
+  # before the api starts, once per deploy, never on container start. Profile `tools`
+  # keeps `up` from starting it. It reads ONLY migrate.env, the one file holding the
+  # superuser DSN, and needs no outbound network.
+  migrate:
+    image: open-persona/api:${OP_IMAGE_TAG:-current}
+    profiles: [tools]
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/migrate.env
+    command: ["python", "packages/api/release.py"]
+    # The data uid, like the api (no data volume here; HOME is somewhere writable).
+    user: "${OP_DATA_UID:-2001}:${OP_DATA_UID:-2001}"
+    environment:
+      HOME: /tmp
+    networks: [db]
+    cap_drop: [ALL]
+    pids_limit: 256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *logging
+
+  api:
+    build:
+      context: ../..
+      dockerfile: packages/api/Dockerfile
+    image: open-persona/api:${OP_IMAGE_TAG:-current}
+    # SINGLE INSTANCE. NEVER SCALE THIS SERVICE. `container_name` makes
+    # `docker compose up --scale api=2` fail outright, on purpose. The api process holds:
+    #   * the scheduler and the in-process job worker: two containers double-fire every
+    #     schedule and double-run every job;
+    #   * the connector transports (I1 fold): two Telegram pollers evict each other, two
+    #     Discord gateways double-deliver;
+    #   * the agentic-run / chat SSE event bus, which is process-local (R9-170): it needs
+    #     LISTEN/NOTIFY or pub-sub before a second instance can serve a reconnect.
+    # And three backends still default to single-machine options, set nowhere here:
+    # PERSONA_API_RATE_LIMIT_BACKEND=memory (each instance would multiply every user's
+    # limit), PERSONA_API_AUDIT_BACKEND=jsonl and PERSONA_API_STORAGE_BACKEND=local (both
+    # write to this box's disk). All of these are prerequisites for scaling out, not
+    # follow-ups. The same warning lived in packages/api/fly.toml.
+    container_name: open-persona-api
+    deploy:
+      replicas: 1
+    # Runs as the host profile's data uid (2001 on Oracle), not the image's `persona` user
+    # (uid 1000): on the Oracle host uid 1000 is `ubuntu`, whose processes (the owner's
+    # other work) must not read tenant files. The data directory is owned by this uid
+    # (provision.sh, restore.sh); HOME points into it because the image's /home/persona
+    # belongs to uid 1000.
+    user: "${OP_DATA_UID:-2001}:${OP_DATA_UID:-2001}"
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/api.env
+    environment:
+      # Carried over from packages/api/fly.toml [env].
+      PERSONA_LOG_LEVEL: INFO
+      PERSONA_EDITION: cloud
+      PERSONA_API_JWT_ALGORITHMS: RS256
+      PERSONA_API_JWT_AUDIENCE: persona-api
+      PERSONA_CONNECTORS_JWT_ALGORITHMS: RS256
+      PERSONA_CONNECTORS_JWT_AUDIENCE: persona-api
+      PERSONA_API_AUDIT_ROOT: /var/lib/persona/audit
+      PERSONA_TURNLOG_PATH: /var/lib/persona/turnlogs
+      PERSONA_API_WORKSPACE_ROOT: /var/lib/persona/workspace
+      PERSONA_TOOLS_SANDBOX_ROOT: /var/lib/persona/tools
+      HF_HOME: /var/lib/persona/hf
+      HOME: /var/lib/persona/home
+      PERSONA_MCP_MIRROR_PATH: /var/lib/persona/mcp-mirror
+      PERSONA_SKILL_MIRROR_PATH: /var/lib/persona/skill-mirror
+      # The connector transports run in this process (Spec I1).
+      PERSONA_API_EMBED_CONNECTORS: "true"
+      # The connector service is this same process (the I1 fold). Where VOICE lives is
+      # deliberately not pinned here: PERSONA_VOICE_SERVICE_URL is in api.env, empty until
+      # voice runs on the voice host (the api then answers voice requests with a clean 503).
+      PERSONA_CONNECTOR_SERVICE_URL: http://127.0.0.1:8000
+    volumes:
+      - ${OP_DATA_DIR:-/srv/open-persona}/persona:/var/lib/persona
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [backend, db]
+    # Non-root (the data uid, above) and needs no capability. The pids limit leaves room
+    # for the built-in MCP children and the worker's threads.
+    cap_drop: [ALL]
+    pids_limit: 1024
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    # The resident models (bge embedder, reranker, crisis encoder) and torch take about
+    # 2 to 2.5 GB; the limit leaves room for the worker and the built-in MCP children.
+    mem_limit: ${OP_API_MEM_LIMIT:-4g}
+    restart: unless-stopped
+    # Liveness only, DB-free, as on Fly (/livez). bin/deploy.sh also checks the deep
+    # /healthz. The long start period covers the first boot's model download into HF_HOME.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/livez"]
+      interval: 30s
+      timeout: 5s
+      start_period: 600s
+      retries: 3
+    logging: *logging
+
+  # ---------------------------------------------------------------------------------
+  # SEAM: per-tenant MCP runtime (OFF at launch; owned by the tooling/MCP session)
+  # ---------------------------------------------------------------------------------
+  # The Fly runtime (Spec N6) is gone with Fly, and the api runs with
+  # PERSONA_ALLOW_PER_TENANT_MCP=0. The coming spec uses provider-hosted MCP (the model
+  # providers call remote MCP servers), so NO runtime service is planned here. Whatever
+  # mechanism comes, designed by the session that owns tooling and MCP, is held to:
+  #   * it reaches the api only through settings in api.env (the switch above plus its
+  #     own), added to the templates, render_env.py and preflight in the same change;
+  #   * no service ever mounts the Docker socket, /run or /var/run, runs privileged or
+  #     sets DOCKER_HOST (scripts/tests/test_server_kit.py fails if one does);
+  #   * an endpoint WE would host for providers to call is a new public Caddy route with
+  #     its own auth and request limits, and a firewall review. None is planned.
+  # RUNBOOK.md, "Seam: per-tenant MCP", carries the same contract.
+  # ---------------------------------------------------------------------------------
+
+  caddy:
+    # Pinned by the multi-arch index digest of 2.10.2 (amd64 and arm64 v8), read from
+    # Docker Hub on 2026-11-07.
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    network_mode: host
+    # Binding 80 and 443 is the only privilege it needs.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 256
+    env_file:
+      - ${OP_ENV_DIR:-/opt/open-persona/env}/caddy.env
+    # The hostnames the Caddyfile serves, from the host profile (its one home).
+    environment:
+      OP_API_HOST: ${OP_API_HOST:?the host profile names no api host}
+      OP_CONNECTORS_HOST: ${OP_CONNECTORS_HOST:?the host profile names no connectors host}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: ${OP_CADDY_MEM_LIMIT:-256m}
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  backend: {}
+  # internal: no gateway, so nothing on it reaches the internet or the host's ports.
+  db:
+    internal: true
+
+volumes:
+  pgdata: {}
+  caddy_data: {}
+  caddy_config: {}

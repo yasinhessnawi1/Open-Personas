@@ -1,0 +1,21 @@
+# Open Persona: bridged containers cannot reach the link-local range (cloud metadata, and on
+# Oracle the iSCSI and other instance services, all on 169.254.0.0/16), EXCEPT DNS to
+# 169.254.169.254 (Oracle's resolver). Installed by bin/provision.sh. Re-applied whenever
+# Docker (re)starts, because the rules live in Docker's DOCKER-USER chain, which does not
+# survive a reboot. bin/metadata_block.sh holds the rules and says why.
+#
+# No ExecStop, on purpose: nothing removes the rules, so the block holds while dockerd is
+# stopped or restarting under live-restore. Each start inserts the new set first and then
+# deletes older copies, so there is never a moment without the drop.
+[Unit]
+Description=Drop container traffic to 169.254.0.0/16, DNS to 169.254.169.254 excepted
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/open-persona/repo/deploy/server/bin/metadata_block.sh
+
+[Install]
+WantedBy=docker.service

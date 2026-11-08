@@ -4,9 +4,16 @@
 # and the in-memory rate limiter require it. Migrations run once per deploy via
 # the fly.toml release_command (packages/api/release.py) — NOT on container
 # start (Spec 07 §7) and not by hand; a release failure aborts the deploy.
+# On the server deploy kit, its one-shot `migrate` service runs release.py (bin/deploy.sh).
+#
+# Builds natively on linux/amd64 and linux/arm64 (the Oracle server is arm64):
+# torch comes from PyTorch's CPU index on Linux (uv.lock), and nothing installed here
+# lacks an arm64 wheel (scripts/tests/test_api_image.py).
 
 # ---------- builder ----------
-FROM python:3.12-slim AS builder
+# python:3.12-slim pinned by its multi-arch index digest (amd64, arm64; read 2026-11-07),
+# in both stages: bump it deliberately, for security updates (scripts/tests/test_api_image.py).
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS builder
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
@@ -19,7 +26,7 @@ ENV UV_HTTP_TIMEOUT=300
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.13@sha256:b485bd65cc2cf1c9a93b3554012c9c3778cf7b1b5fd3d3096ce9e1226c97e1e6 /uv /usr/local/bin/uv
 
 WORKDIR /app
 # Copy workspace pyproject + lock first to leverage the layer cache.
@@ -28,12 +35,18 @@ COPY packages/core/pyproject.toml packages/core/pyproject.toml
 COPY packages/runtime/pyproject.toml packages/runtime/pyproject.toml
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/voice/pyproject.toml packages/voice/pyproject.toml
-# Provision the venv with all workspace members (frozen install).
+COPY packages/connectors/pyproject.toml packages/connectors/pyproject.toml
 COPY packages/ packages/
-RUN uv sync --frozen --all-packages --no-dev
+# Only the api process's closure (frozen): persona-connectors depends on persona-api
+# (C1-D-1) and runs inside it (the I1 fold), so this installs connectors, api, runtime
+# and core[postgres], and NOT persona-voice, whose silero-vad-lite has no Linux arm64
+# wheel. That keeps the image buildable on arm64 (the Oracle box) and amd64 alike.
+# The cache mount keeps uv's download cache out of the image layer.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --package persona-connectors
 
 # ---------- runtime ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}"

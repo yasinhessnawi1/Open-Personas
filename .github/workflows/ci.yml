@@ -17,6 +17,10 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
+      # uv.lock must match every pyproject.toml. A stale lock passed every check once
+      # (torch made a direct persona-core dependency without re-locking), and the
+      # Dockerfiles install with --frozen, which trusts the lock as written.
+      - run: uv lock --check
       - run: uv sync --all-packages
       - run: uv run ruff check
       - run: uv run ruff format --check

@@ -1,0 +1,78 @@
+# Open Persona: the TLS edge on the CORE host (replaces Fly's proxy and cert manager).
+#
+# Caddy runs on the host network and obtains a Let's Encrypt certificate per hostname
+# with the HTTP-01 challenge, so each name's DNS A/AAAA record must already point at this
+# host. ACME_CA starts on Let's Encrypt STAGING (caddy.env); RUNBOOK.md switches it to
+# production once every name answers. HTTP is redirected to HTTPS automatically, which
+# is what Fly's force_https did.
+#
+# The admin API is OFF: nothing on the host can reconfigure Caddy at runtime. A config
+# change is a container restart (`docker compose ... up -d --force-recreate caddy`), and
+# bin/deploy.sh validates this file before every start.
+#
+# No access logs. The error log drops the request URI (tokens can ride in query strings)
+# and the Authorization and Cookie headers.
+#
+# The hostnames come from the host profile (hosts/oracle.env: OP_API_HOST and
+# OP_CONNECTORS_HOST, api.openpersonas.si and connectors.openpersonas.si), handed to this
+# container by compose and read here as {$...} placeholders. Every provider registration
+# (the Stripe webhook, the Discord, Slack and GitHub OAuth redirects, the Twilio and
+# Postmark webhooks) must name them.
+#
+# voice.openpersonas.si and livekit.openpersonas.si are NOT served here: they point at the
+# voice host (Azure), whose Caddy loads Caddyfile.voice. Asking Let's Encrypt for a name
+# whose DNS points elsewhere fails on every attempt and spends the rate limit.
+
+{
+	admin off
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+	log default {
+		output stderr
+		format filter {
+			request>uri delete
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+		}
+	}
+}
+
+(edge) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# The api. flush_interval -1 streams SSE (chat and agentic runs)
+# without buffering. Request bodies are capped above the app's own 20 MB upload limit
+# (image_service.MAX_UPLOAD_BYTES, chat_service.MAX_STAGED_DOCUMENT_BYTES) plus
+# multipart overhead.
+{$OP_API_HOST} {
+	import edge
+	request_body {
+		max_size 32MB
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
+}
+
+# The connector host serves ONLY the provider webhooks and OAuth callbacks the I1 fold
+# mounted on the api (persona_connectors: discord/slack OAuth callbacks, the Slack events
+# URL, the Telegram and Postmark webhooks, and Twilio's webhook and status callback for
+# sms and whatsapp). Everything else on this name is a 404, so the api's own routes are
+# not reachable through it. Postmark inbound mail can reach 35 MB with attachments.
+{$OP_CONNECTORS_HOST} {
+	import edge
+	@provider path /discord/oauth/callback /slack/oauth/callback /slack/events /telegram/webhook /email/webhook /sms/webhook /sms/status /whatsapp/webhook /whatsapp/status
+	handle @provider {
+		request_body {
+			max_size 40MB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		respond 404
+	}
+}

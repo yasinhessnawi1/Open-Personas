@@ -200,7 +200,7 @@ ALLOWED_STEPS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "run": _smoke(
-                "curl -fsS --max-time 10 https://api.openpersona.online/healthz | "
+                "curl -fsS --max-time 10 https://api.openpersonas.si/healthz | "
                 'grep -q \'"status":"ok"\'',
                 "healthz ok",
                 "waiting for healthz to flip green",

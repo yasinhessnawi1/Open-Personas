@@ -14,7 +14,9 @@
 # repo root.
 
 # ---------- builder ----------
-FROM python:3.12-slim AS builder
+# python:3.12-slim pinned by its multi-arch index digest (amd64, arm64; read 2026-11-07),
+# in both stages: bump it deliberately, for security updates (scripts/tests/test_api_image.py).
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS builder
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
@@ -27,7 +29,7 @@ ENV UV_HTTP_TIMEOUT=300
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.13@sha256:b485bd65cc2cf1c9a93b3554012c9c3778cf7b1b5fd3d3096ce9e1226c97e1e6 /uv /usr/local/bin/uv
 
 WORKDIR /app
 # Copy workspace pyproject + lock first to leverage the layer cache.
@@ -62,7 +64,7 @@ RUN curl -fsSL -o /tmp/patchelf.tgz \
         | xargs -0 -r -n1 sh -c 'patchelf --clear-execstack "$0" 2>/dev/null || true'
 
 # ---------- runtime ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}"
