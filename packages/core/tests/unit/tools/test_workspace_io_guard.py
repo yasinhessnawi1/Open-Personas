@@ -104,6 +104,12 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
     "them (verified on Windows with a junction, a nested junction, a directory symlink "
     "and a file symlink: every outside file survived)",
     (
+        "packages/api/src/persona_api/storage.py",
+        "delete_prefix",
+        "rmtree",
+    ): "shutil.rmtree on Python 3.12 removes links inside without following them (same "
+    "verification as delete_persona); the folder itself is refused first if it is a link",
+    (
         "packages/api/src/persona_api/app.py",
         "_lifespan",
         "mkdir",

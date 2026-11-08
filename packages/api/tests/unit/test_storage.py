@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.errors import SandboxViolationError
@@ -125,6 +125,8 @@ class _FakeClientError(Exception):
 class _FakeS3Client:
     def __init__(self) -> None:
         self.store: dict[tuple[str, str], bytes] = {}
+        self.delete_batches: list[int] = []
+        self.refuse_deletes = False
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> None:  # noqa: N803 — boto3 kwarg names
         _ = ContentType
@@ -140,6 +142,15 @@ class _FakeS3Client:
 
     def delete_object(self, *, Bucket: str, Key: str) -> None:  # noqa: N803
         self.store.pop((Bucket, Key), None)
+
+    def delete_objects(self, *, Bucket: str, Delete: dict[str, Any]) -> dict[str, object]:  # noqa: N803
+        objects = Delete["Objects"]
+        self.delete_batches.append(len(objects))
+        if self.refuse_deletes:
+            return {"Errors": [{"Key": o["Key"], "Code": "AccessDenied"} for o in objects]}
+        for obj in objects:
+            self.store.pop((Bucket, obj["Key"]), None)
+        return {}
 
     def get_paginator(self, _name: str) -> _FakePaginator:
         return _FakePaginator(self)
@@ -225,6 +236,163 @@ def test_s3_list_uses_the_paginator_and_returns_objects() -> None:
     storage.put("u2/p9/uploads/c.png", b"c")  # different prefix — excluded
     objs = {o.key: o.size for o in storage.list("u1/p1")}
     assert objs == {"u1/p1/uploads/a.png": 3, "u1/p1/uploads/a.png.f5.json": 2}
+
+
+# --------------------------------------------------------------------------- #
+# delete_prefix: everything a persona or an account stored (R9-284)            #
+# --------------------------------------------------------------------------- #
+_REFUSED_PREFIXES = ["", "/", ".", "..", "u1/..", "a/../b", "../u2", "/u1", "u1\\p1"]
+
+
+def _seed_two_tenants(storage: FileStorage) -> None:
+    storage.put("u1/p1/uploads/a.png", b"aaa")
+    storage.put("u1/p1/uploads/a.png.f5.json", b"{}")
+    storage.put("u1/p1/conversations/c1/documents/d.md", b"d")
+    storage.put("u1/p10/uploads/sibling.png", b"s")  # starts with the same characters
+    storage.put("u2/p9/uploads/c.png", b"c")
+
+
+def test_local_delete_prefix_removes_the_folder_and_says_how_many_files_went(
+    tmp_path: Path,
+) -> None:
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+
+    assert storage.delete_prefix("u1/p1/") == 3
+
+    assert not (tmp_path / "u1" / "p1").exists()
+    assert (tmp_path / "u1" / "p10" / "uploads" / "sibling.png").exists()
+    assert (tmp_path / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+def test_local_delete_prefix_is_idempotent(tmp_path: Path) -> None:
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    storage.delete_prefix("u1/p1")
+
+    assert storage.delete_prefix("u1/p1") == 0
+    assert storage.delete_prefix("never/written") == 0
+
+
+@pytest.mark.parametrize("prefix", _REFUSED_PREFIXES)
+def test_local_delete_prefix_refuses_anything_but_a_plain_folder(
+    tmp_path: Path, prefix: str
+) -> None:
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    with pytest.raises(SandboxViolationError):
+        storage.delete_prefix(prefix)
+    assert (tmp_path / "u1" / "p1" / "uploads" / "a.png").exists()
+    assert (tmp_path / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+def test_local_delete_prefix_refuses_a_dotted_path_for_what_it_is(tmp_path: Path) -> None:
+    """``u1/..`` resolves to the root: the plain-path check has to be what stops it."""
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    with pytest.raises(SandboxViolationError) as caught:
+        storage.delete_prefix("u1/..")
+    assert caught.value.context["reason"] == "not_a_plain_path"
+
+
+def test_local_delete_prefix_refuses_a_folder_that_resolves_somewhere_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What POSIX resolution hands back for a link, simulated so every host runs this.
+
+    On Windows the resolver refuses a link itself, so without this the check below it would
+    only ever be exercised on Linux.
+    """
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    target = tmp_path.resolve() / "u2" / "p9"
+    monkeypatch.setattr(storage, "_resolve", lambda _key: target)
+
+    with pytest.raises(SandboxViolationError) as caught:
+        storage.delete_prefix("u1/alias")
+
+    assert caught.value.context["reason"] == "link"
+    assert (tmp_path / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError:
+        pytest.skip("this host cannot create symbolic links")
+
+
+def test_local_delete_prefix_removes_a_link_inside_without_following_it(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    storage = LocalFileStorage(root)
+    _seed_two_tenants(storage)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_bytes(b"keep")
+    _symlink_or_skip(root / "u1" / "p1" / "planted", outside)
+
+    storage.delete_prefix("u1/p1")
+
+    assert not (root / "u1" / "p1").exists()
+    assert (outside / "keep.txt").exists()
+
+
+def test_local_delete_prefix_refuses_a_prefix_that_is_itself_a_link(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    storage = LocalFileStorage(root)
+    _seed_two_tenants(storage)
+    _symlink_or_skip(root / "u1" / "alias", root / "u2" / "p9")
+
+    with pytest.raises(SandboxViolationError):
+        storage.delete_prefix("u1/alias")
+
+    assert (root / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+def test_s3_delete_prefix_removes_only_that_folder_and_says_how_many() -> None:
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+
+    assert storage.delete_prefix("u1/p1/") == 3
+
+    keys = {key for _, key in client.store}
+    assert keys == {"u1/p10/uploads/sibling.png", "u2/p9/uploads/c.png"}
+    assert storage.delete_prefix("u1/p1") == 0
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+def test_s3_delete_prefix_sends_batches_the_api_accepts() -> None:
+    storage, client = _s3_with_fake_client()
+    for i in range(2500):
+        client.store[("bkt", f"u1/p1/uploads/{i}.png")] = b"x"
+
+    assert storage.delete_prefix("u1/p1") == 2500
+
+    assert client.delete_batches == [1000, 1000, 500]
+    assert not client.store
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+def test_s3_delete_prefix_says_so_when_the_store_refused() -> None:
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    client.refuse_deletes = True
+
+    with pytest.raises(OSError, match="3"):
+        storage.delete_prefix("u1/p1")
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+@pytest.mark.parametrize("prefix", _REFUSED_PREFIXES)
+def test_s3_delete_prefix_refuses_anything_but_a_plain_folder(prefix: str) -> None:
+    """An empty prefix on S3 would be the whole bucket."""
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    before = dict(client.store)
+    with pytest.raises(SandboxViolationError):
+        storage.delete_prefix(prefix)
+    assert client.store == before
 
 
 def _import_available(name: str) -> bool:

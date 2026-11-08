@@ -30,9 +30,11 @@ artifacts / uploads / images.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from persona.errors import SandboxViolationError
 from persona.logging import get_logger
 from persona.media_types import media_type_for
 from persona.tools._sandbox import (
@@ -45,6 +47,8 @@ from persona.tools._sandbox import (
     resolve_sandbox_path,
     write_nofollow_bytes,
 )
+
+from persona_api.workspace_paths import require_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -63,6 +67,8 @@ __all__ = [
 ]
 
 _STREAM_CHUNK = 1 << 20  # 1 MiB — matches read_nofollow_bytes' read granularity.
+#: The most keys one S3 ``DeleteObjects`` request accepts.
+_S3_DELETE_BATCH = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +123,17 @@ class FileStorage(Protocol):
         """
         ...
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete everything under the folder ``prefix`` and return how many objects went.
+
+        Sidecars included, and a key that merely starts with the same characters is not
+        under it. Idempotent: a prefix with nothing under it is 0. Anything but a plain
+        folder (empty, ``..``, a backslash) is refused with ``SandboxViolationError``,
+        because on S3 an empty prefix is the whole bucket. If an object cannot be removed
+        this raises ``OSError`` and a re-run finishes the job.
+        """
+        ...
+
 
 class LocalFileStorage:
     """Filesystem-backed storage under a root (the workspace root) — the DEFAULT.
@@ -166,6 +183,25 @@ class LocalFileStorage:
             # (/tmp → /private/tmp) never breaks ``relative_to``.
             key = f"{stem}/{path.relative_to(base).as_posix()}"
             yield StorageObject(key=key, size=size)
+
+    def delete_prefix(self, prefix: str) -> int:
+        stem = require_relative_path(prefix.rstrip("/"))
+        base = self._resolve(stem)
+        # A folder that is itself a link would be the target's contents counted and, on some
+        # hosts, removed. The resolved path must be the path that was named.
+        if base != self._root.resolve(strict=False) / stem:
+            raise SandboxViolationError(
+                "folder to delete goes through a link",
+                context={"reason": "link", "preview": stem[:80]},
+            )
+        count = sum(1 for _ in iter_regular_files_nofollow(base))
+        try:
+            # Python 3.12's rmtree removes links inside without following them.
+            shutil.rmtree(base)
+        except FileNotFoundError:
+            if os.path.lexists(base):
+                raise
+        return count
 
 
 def _iter_file_nofollow(path: Path, root: Path) -> Iterator[bytes]:
@@ -249,6 +285,21 @@ class S3FileStorage:
         for page in paginator.paginate(Bucket=self._bucket, Prefix=normalized):
             for obj in page.get("Contents", []):
                 yield StorageObject(key=obj["Key"], size=int(obj["Size"]))
+
+    def delete_prefix(self, prefix: str) -> int:
+        stem = require_relative_path(prefix.rstrip("/"))
+        keys = [obj.key for obj in self.list(stem)]
+        for start in range(0, len(keys), _S3_DELETE_BATCH):
+            batch = keys[start : start + _S3_DELETE_BATCH]
+            response = self._client.delete_objects(
+                Bucket=self._bucket,
+                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+            )
+            refused = response.get("Errors") or []
+            if refused:
+                # A count: the keys carry file names.
+                raise OSError(f"{len(refused)} objects could not be deleted from the bucket")
+        return len(keys)
 
 
 def build_file_storage(config: APIConfig, workspace_root: Path) -> FileStorage:
