@@ -16,12 +16,16 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from persona.errors import MemoryOwnerMissingError
+from persona.schema.chunks import PersonaChunk
+from persona.stores.postgres import PostgresBackend
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
@@ -30,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from sqlalchemy import Engine
+    from tests.conftest import HashEmbedder384
 
 pytestmark = pytest.mark.integration
 
@@ -266,3 +271,18 @@ def test_a_held_lock_fails_the_migration_fast_instead_of_queueing(database_url: 
     finally:
         holder.dispose()
         _reset_schema(database_url)
+
+
+def test_the_real_transport_turns_a_refusal_into_a_domain_error_without_the_memory(
+    engine: Engine, embedder: HashEmbedder384
+) -> None:
+    """The real database's error, through the real write: what the unit test only models."""
+    secret = "my dog is called Balto"
+    backend = PostgresBackend(engine=engine, embedder=embedder)
+    chunk = PersonaChunk(id="c1", text=secret, created_at=datetime(2026, 11, 8, tzinfo=UTC))
+
+    with pytest.raises(MemoryOwnerMissingError) as caught:
+        backend.upsert(persona_id=_GONE, store_kind="episodic", chunks=[chunk])
+
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
