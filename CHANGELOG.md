@@ -72,8 +72,47 @@ Per-spec entries are added by the close-out phase of each spec.
   (`xox`), JSON Web Tokens, and PEM and PGP private key headers. A key that contains a
   `.`, `+`, `/` or `=` is now masked whole instead of losing only its first part.
   Public keys and certificates are left alone, since they are not secrets.
+- **Deleting a persona can no longer remove anyone else's files.** A delete request
+  for the persona id `%2E%2E` reached the server as `..`, and the server removed
+  the folder that name pointed at, which was the whole workspace holding every
+  account's uploads, documents and generated images, before it checked whether
+  such a persona existed. `%2e` did the same to all of the caller's own personas.
+  Every address with a persona id in it now accepts only the format persona ids
+  have always had (`persona_` and 32 lower-case hex digits), the delete checks
+  that the persona is yours before it touches a file, and a folder that cannot be
+  removed now stops the delete instead of being skipped in silence.
+- **A file address under one persona can no longer reach another persona's files.**
+  Reading an upload or deleting a file with an address such as
+  `../../<another account>/<their persona>/uploads/x.png` stayed inside the shared
+  workspace, which was all that was checked, so it served or removed that file.
+  Every storage key and folder for a persona is now built in one place that refuses
+  anything but a plain path inside that persona, and such an address is a 404, the
+  same answer a missing file gets. The audit and voice log files, which are named
+  after the persona, refuse a name that is not a single plain name for the same reason.
+- **A restore now reports personas with an id the app would refuse.** `sql/verify.sql`
+  counts them as `personas_unexpected_ids` and `bin/restore.sh` warns when the count
+  is not 0, since such a persona could no longer be opened or deleted.
+- **An uploaded document's name can no longer point somewhere else.** The name a
+  document was uploaded with is where its copy is put for the persona's file tools,
+  and a name such as `../conversations/<another chat>/documents/x.md` put it in that
+  other place inside the persona's folder. Only the last part of the name is kept now,
+  for new uploads and for documents uploaded before, and a name that is no name
+  (empty, `.` or `..`) is refused. A name longer than 120 characters is shortened
+  before its extension, so it is still recognised as the format it is.
+- **The local code sandbox writes input files only inside the run's own folder.** A
+  file handed to a run with a path that would leave that folder now stops the run
+  with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **A persona that a chat channel had in front can be deleted again.** A Telegram,
+  Slack or other channel remembers which persona you last talked to there, and
+  deleting that persona failed: the database tried to forget the channel's owner
+  along with the persona and refused. Worse, the persona's files were already gone by
+  then, so every retry failed the same way with nothing left to show. The delete now
+  clears the channel's memory of that persona first, and the files are removed only
+  after the database has accepted the delete, so a refusal leaves everything as it
+  was. Migration 060 makes the database itself clear only the channel's pointer when a
+  persona row goes, on PostgreSQL 15 and later.
 - **Forgetting something now also forgets the summary written from it.** A persona
   keeps a short summary of what it knows about you, rebuilt in the background from
   its memories. When you deleted a conversation and asked it to forget, the

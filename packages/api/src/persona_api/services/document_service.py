@@ -65,13 +65,14 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from persona.documents.ingest import IngestStrategy, ingest_document
 from persona.documents.parsers import SUPPORTED_EXTENSIONS, parse_document
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
+from persona.tools._sandbox import require_path_segment
 from pydantic import BaseModel, ConfigDict, Field
 
 from persona_api.errors import DocumentReadError
@@ -81,6 +82,7 @@ from persona_api.services.artifact_metadata import (
     utcnow,
 )
 from persona_api.services.artifact_storage import write_sidecar
+from persona_api.workspace_paths import persona_key
 
 if TYPE_CHECKING:
     from persona.stores.document_store import DocumentStore
@@ -92,11 +94,13 @@ __all__ = [
     "DOCUMENT_DIR_NAME",
     "DocumentRef",
     "build_document_context",
+    "conversation_documents_prefix",
     "get_document_text",
     "list_for_conversation",
     "remove_all_for_conversation",
     "remove_document",
     "upload",
+    "upload_name",
 ]
 
 _log = get_logger("api.documents")
@@ -213,8 +217,10 @@ def upload(
         MissingDependencyError: A parser library isn't installed
             (for the ``[documents]`` extra interim state).
     """
-    extension = Path(filename).suffix.lower()
-    if extension not in SUPPORTED_EXTENSIONS:
+    # The name is a name, never a path: only its last part is kept (``upload_name``).
+    name = upload_name(filename)
+    extension = Path(name).suffix.lower() if name is not None else ""
+    if name is None or extension not in SUPPORTED_EXTENSIONS:
         from persona.documents.errors import UnsupportedFormatError  # noqa: PLC0415
 
         raise UnsupportedFormatError(
@@ -224,12 +230,11 @@ def upload(
                 "filename": _safe_filename(filename),
             },
         )
+    filename = name
 
     doc_ref = _make_doc_ref(filename)
-    key = (
-        f"{owner_id}/{persona_id}/conversations/{conversation_id}"
-        f"/{DOCUMENT_DIR_NAME}/{doc_ref}{extension}"
-    )
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    key = f"{prefix}/{doc_ref}{extension}"
     document_format = _format_for_extension(extension)
 
     # R5-D-4: parse + rasterise need a real local path (pypdfium2 + the parsers
@@ -325,7 +330,7 @@ def list_for_conversation(
     Returns an empty list if the conversation directory doesn't exist
     (no documents uploaded yet).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     refs: list[DocumentRef] = []
     for obj in sorted(file_storage.list(prefix), key=lambda o: o.key):
         if not obj.key.endswith(".meta.json"):
@@ -498,7 +503,7 @@ def get_document_text(
             no longer parses (Spec WIN T2: never an empty string that would look, to
             the model, like an empty document).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         if not _is_original_name(name, doc_ref):
@@ -592,7 +597,7 @@ def read_document_bytes(
         The raw file bytes, or ``None`` when the document is missing/unreadable
         (the caller skips it — a partial staging beats a hard turn failure).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         if not _is_original_name(name, doc_ref):
@@ -629,7 +634,7 @@ def remove_document(
             this ``doc_ref`` are removed via the 4-component
             chunk-ID prefix-match (D-14-X-document-chunk-id).
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         name = obj.key.rsplit("/", 1)[-1]
         # Matches the original ``{doc_ref}.pdf``, both sidecars
@@ -659,7 +664,7 @@ def remove_all_for_conversation(
 
     Idempotent: removing an empty / non-existent set is a no-op.
     """
-    prefix = _conversation_documents_prefix(owner_id, persona_id, conversation_id)
+    prefix = conversation_documents_prefix(owner_id, persona_id, conversation_id)
     for obj in file_storage.list(prefix):
         file_storage.delete(obj.key)
     document_store.delete(conversation_id)
@@ -717,7 +722,7 @@ def _rasterise_and_persist_pages(
     dpi = _resolve_raster_dpi()
     scale = dpi / 72.0
 
-    base_relative = f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
+    base_relative = conversation_documents_prefix(owner_id, persona_id, conversation_id)
 
     images: list[ImageContent] = []
     pdf = pypdfium2.PdfDocument(str(pdf_path))
@@ -752,14 +757,23 @@ def _rasterise_and_persist_pages(
 # ----- helpers (private) -----------------------------------------------------
 
 
-def _conversation_documents_prefix(owner_id: str, persona_id: str, conversation_id: str) -> str:
+def conversation_documents_prefix(owner_id: str, persona_id: str, conversation_id: str) -> str:
     """The FileStorage key prefix for a conversation's documents (R5-D-4).
 
     Owner-scoped layout (matches image_service + the F5 artifacts walk:
     ``<owner_id>/<persona_id>/...``). This is the ``list`` prefix + the stem every
     document/sidecar/page key is built under. Backend-agnostic (the local backend
-    still resolves it under the workspace root via ``resolve_sandbox_path``)."""
-    return f"{owner_id}/{persona_id}/conversations/{conversation_id}/{DOCUMENT_DIR_NAME}"
+    still resolves it under the workspace root via ``resolve_sandbox_path``).
+
+    Built through :func:`persona_api.workspace_paths.persona_key`, with the conversation id
+    held to one name: the routes look the conversation up before any of this, but a key
+    is only as safe as the door that builds it.
+
+    Raises:
+        SandboxViolationError: an owner, persona or conversation id that is not one name.
+    """
+    conversation = require_path_segment(conversation_id, what="conversation id")
+    return persona_key(owner_id, persona_id, f"conversations/{conversation}/{DOCUMENT_DIR_NAME}")
 
 
 def _make_doc_ref(filename: str) -> str:
@@ -776,10 +790,40 @@ def _make_doc_ref(filename: str) -> str:
     return f"{safe}-{suffix}"
 
 
+def upload_name(filename: str) -> str | None:
+    """The name an uploaded file is recorded and staged under, or ``None`` if it has none.
+
+    Only the last part of what the client sent is kept, with either slash as a separator, so
+    ``../../conversations/c2/documents/x.md`` is ``x.md``: the name is staged at
+    ``uploads/<name>`` (chat_service), where a path would land somewhere else inside the
+    persona's folder. Control characters are stripped, and a name longer than 120 characters
+    is shortened in its stem, so it keeps its extension (the format check reads it). Empty,
+    ``.`` and ``..`` are not names.
+    """
+    last = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = _strip_control(last)
+    if cleaned in ("", ".", ".."):
+        return None
+    if len(cleaned) <= _MAX_NAME_LENGTH:
+        return cleaned
+    extension = PurePosixPath(cleaned).suffix
+    if not extension or len(extension) >= _MAX_NAME_LENGTH // 2:
+        return cleaned[:_MAX_NAME_LENGTH]
+    return cleaned[: _MAX_NAME_LENGTH - len(extension)] + extension
+
+
+#: The longest name an upload is recorded under (also the audit-log preview length).
+_MAX_NAME_LENGTH = 120
+
+
+def _strip_control(text: str) -> str:
+    """``text`` without control characters (a tab is kept)."""
+    return "".join(c for c in text if c == "\t" or ord(c) >= 32)
+
+
 def _safe_filename(filename: str) -> str:
     """Strip control chars + truncate filenames for audit-log + ref safety."""
-    cleaned = "".join(c for c in filename if c == "\t" or ord(c) >= 32)
-    return cleaned[:120]
+    return _strip_control(filename)[:_MAX_NAME_LENGTH]
 
 
 def _format_for_extension(extension: str) -> str:

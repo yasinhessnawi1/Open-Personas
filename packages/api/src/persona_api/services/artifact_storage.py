@@ -25,6 +25,7 @@ from persona_api.services.artifact_metadata import (
     SIDECAR_SUFFIX,
     WorkspaceArtifactMetadata,
 )
+from persona_api.workspace_paths import persona_key
 
 if TYPE_CHECKING:
     from persona_api.storage import FileStorage
@@ -33,8 +34,12 @@ __all__ = ["artifact_key", "read_sidecar", "write_sidecar"]
 
 
 def artifact_key(owner_id: str, persona_id: str, relative: str) -> str:
-    """The logical storage key for a persona-scoped workspace-relative path."""
-    return f"{owner_id}/{persona_id}/{relative}"
+    """The logical storage key for a persona-scoped workspace-relative path.
+
+    Refuses (``SandboxViolationError``) a relative path that would leave the persona, an
+    owner or persona that is not one name: see :func:`persona_api.workspace_paths.persona_key`.
+    """
+    return persona_key(owner_id, persona_id, relative)
 
 
 def write_sidecar(storage: FileStorage, key: str, meta: WorkspaceArtifactMetadata) -> None:

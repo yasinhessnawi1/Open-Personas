@@ -86,6 +86,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.imagegen import service as imagegen_service
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.services import audit_service, persona_service
 
 if TYPE_CHECKING:
@@ -206,7 +207,7 @@ def _maybe_trigger_auto_topup(request: Request, *, user_id: str, balance_before:
     dependencies=[Depends(rate_limit("default"))],
 )
 async def post_imagegen(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: ImageGenRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

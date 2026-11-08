@@ -104,7 +104,11 @@ from persona.logging import get_logger
 from persona.sandbox.errors import SandboxError
 from persona.sandbox.result import NetworkPolicy, ResourceLimits
 from persona.skills import count_tokens
-from persona.tools._sandbox import resolve_sandbox_path, write_file_under_root
+from persona.tools._sandbox import (
+    require_path_segment,
+    resolve_sandbox_path,
+    write_file_under_root,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -116,7 +120,11 @@ from persona_api.services.artifact_metadata import (
     write_artifact_sidecar,
 )
 from persona_api.services.background_billing import bill_background_infra, bill_background_llm
-from persona_api.services.document_service import DOCUMENT_DIR_NAME, DocumentRef
+from persona_api.services.document_service import (
+    DOCUMENT_DIR_NAME,
+    DocumentRef,
+    conversation_documents_prefix,
+)
 from persona_api.services.llm_usage_collector import collect_llm_usage
 
 if TYPE_CHECKING:
@@ -769,11 +777,11 @@ class SandboxFileRenderer:
 
             # Spec WIN T1.5: the destination is resolved like any workspace path and
             # written through the no-follow helpers under the workspace root.
-            target = resolve_sandbox_path(
-                self._workspace_root,
-                f"{owner_id}/{persona_id}/conversations/{conversation_id}"
-                f"/{DOCUMENT_DIR_NAME}/{persisted_name}",
+            workspace_path = (
+                f"{conversation_documents_prefix(owner_id, persona_id, conversation_id)}"
+                f"/{require_path_segment(persisted_name, what='file name')}"
             )
+            target = resolve_sandbox_path(self._workspace_root, workspace_path)
             try:
                 assert handle is not None  # noqa: S101 — set by the acquire() above, never reset
                 await self._pool.sandbox.copy_produced_file_to(
@@ -798,10 +806,6 @@ class SandboxFileRenderer:
             # WHOLE_INJECT, which would auto-inject this generated file's full text
             # into every later turn's prompt — a real behavior change nobody asked
             # for here; wiring real ingestion is a follow-up, not this fix.
-            workspace_path = (
-                f"{owner_id}/{persona_id}/conversations/{conversation_id}"
-                f"/{DOCUMENT_DIR_NAME}/{persisted_name}"
-            )
             doc = DocumentRef(
                 doc_ref=doc_ref,
                 filename=persisted_name,

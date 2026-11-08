@@ -14,6 +14,7 @@ from persona.tasks import ContractAttachment, is_terminal
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.jobs.queue import JobQueue
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.routes._runtime_guard import require_runtime_wired
 from persona_api.schemas import (
     RespondToRunRequest,
@@ -40,7 +41,7 @@ router = APIRouter(prefix="/v1", tags=["runs"])
     dependencies=[Depends(rate_limit("runs"))],
 )
 async def start_run(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: StartRunRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

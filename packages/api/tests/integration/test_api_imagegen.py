@@ -646,7 +646,7 @@ def test_imagegen_auth_missing_returns_401(
     c, _uid_a, _uid_b, _ws, _su = client
     # Even a real persona id is irrelevant — the bearer check fires first.
     resp = c.post(
-        "/v1/personas/p_does_not_matter/imagegen",
+        "/v1/personas/persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e/imagegen",
         json={"prompt": "anything"},
     )
     assert resp.status_code == 401

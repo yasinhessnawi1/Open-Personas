@@ -33,6 +33,9 @@ from persona_api.services import audit_service, chat_service, persona_service
 if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
 
+#: The one persona the stubbed RLS lookup makes visible to u1 (a minted-format id).
+_ASTRID = "persona_a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+
 
 class _InMemoryBackend:
     def __init__(self) -> None:
@@ -108,8 +111,8 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
         rls_engine: Any,  # noqa: ANN401, ARG001
         persona_id: str,
     ) -> dict[str, Any]:
-        if persona_id == "astrid":
-            return {"id": "astrid", "owner_id": "u1", "yaml": ""}
+        if persona_id == _ASTRID:
+            return {"id": _ASTRID, "owner_id": "u1", "yaml": ""}
         raise PersonaNotFoundError("persona not found", context={"persona_id": persona_id})
 
     def _fake_get_conversation(
@@ -121,7 +124,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
             return {
                 "id": "conv_u1",
                 "owner_id": "u1",
-                "persona_id": "astrid",
+                "persona_id": _ASTRID,
                 "title": "test",
                 "messages": [],
                 "created_at": None,
@@ -154,7 +157,7 @@ class TestCriterion13RlsSweep:
     def test_upload_with_cross_tenant_persona_returns_404(self, client: TestClient) -> None:
         """POST /v1/personas/{cross_tenant_persona_id}/uploads → 404."""
         resp = client.post(
-            "/v1/personas/other_tenant_persona/uploads",
+            "/v1/personas/persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e/uploads",
             headers=_auth(),
             files={"file": ("memo.txt", b"hi", "text/plain")},
             data={"conversation_id": "conv_u1"},
@@ -164,7 +167,7 @@ class TestCriterion13RlsSweep:
     def test_upload_with_cross_tenant_conversation_returns_404(self, client: TestClient) -> None:
         """POST upload with cross-tenant conversation_id → 404."""
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_ASTRID}/uploads",
             headers=_auth(),
             files={"file": ("memo.txt", b"hi", "text/plain")},
             data={"conversation_id": "conv_OTHER_TENANT"},

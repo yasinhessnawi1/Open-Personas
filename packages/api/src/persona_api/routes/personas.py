@@ -53,6 +53,7 @@ from persona_api.jobs.handlers.avatar import (
 )
 from persona_api.middleware.rate_limit import rate_limit
 from persona_api.middleware.rls_context import current_user_id
+from persona_api.routes._params import PersonaIdPath
 from persona_api.routes._runtime_guard import require_model_backend
 from persona_api.schemas import (
     AuthoringDraft,
@@ -923,7 +924,7 @@ async def recommend_capabilities(
     dependencies=[Depends(rate_limit("default"))],
 )
 async def grant_tool(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: GrantToolRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -1107,7 +1108,7 @@ async def _remap_voice_after_response(
 
 @router.get("/{persona_id}", response_model=PersonaDetail)
 async def get_persona(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -1150,7 +1151,7 @@ async def get_persona(
 
 @router.get("/{persona_id}/memories", response_model=PersonaMemoriesResponse)
 async def list_persona_memories(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> PersonaMemoriesResponse:
@@ -1211,7 +1212,7 @@ async def list_persona_memories(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def regenerate_avatar(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -1284,7 +1285,7 @@ async def _regenerate_avatar_inline(
 
 @router.patch("/{persona_id}", response_model=PersonaDetail)
 async def update_persona(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: UpdatePersonaRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -1318,7 +1319,7 @@ async def update_persona(
 
 @router.patch("/{persona_id}/consent", response_model=PersonaDetail)
 async def set_consent(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: SetConsentRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -1371,7 +1372,7 @@ def _persona_speciality(spec: SkillSpec, consent_state: str) -> PersonaSpecialit
 
 @router.get("/{persona_id}/specialities", response_model=list[PersonaSpecialitySummary])
 async def list_persona_specialities(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     _user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[PersonaSpecialitySummary]:
@@ -1401,7 +1402,7 @@ async def list_persona_specialities(
 
 @router.post("/{persona_id}/skills/{skill_name}/consent", response_model=PersonaSpecialitySummary)
 async def set_skill_consent(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     skill_name: str,
     body: SetSkillConsentRequest,
     request: Request,
@@ -1463,7 +1464,7 @@ async def set_skill_consent(
 
 @router.delete("/{persona_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_persona(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> None:

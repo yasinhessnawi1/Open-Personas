@@ -1344,13 +1344,22 @@ def _resolve_turn_documents(
             )
             continue
         # Stage at a predictable, model-readable ``uploads/<filename>`` path so a
-        # sandbox ``file_read("uploads/<filename>")`` finds THIS document.
+        # sandbox ``file_read("uploads/<filename>")`` finds THIS document. The stored name
+        # is reduced to its last part again here: a document recorded before uploads did
+        # that can still carry a path, which would stage it somewhere else in the persona.
+        name = document_service.upload_name(ref.filename)
+        if name is None:
+            _log.warning(
+                "uploaded document has no usable file name; not staged",
+                doc_ref=ref.doc_ref,
+            )
+            continue
         resolved.append(
             SandboxFile(
-                path=f"uploads/{ref.filename}",
+                path=f"uploads/{name}",
                 content_bytes=file_bytes,
                 size_bytes=len(file_bytes),
-                media_type=guess_media_type(ref.filename),
+                media_type=guess_media_type(name),
             )
         )
     return resolved
@@ -1418,7 +1427,9 @@ def _stage_documents_for_file_read(
     # The EXACT root the file_read provider resolves at dispatch time
     # (runtime_factory._build_file_sandbox_root_provider). Keeping the two in
     # lockstep is the contract that makes ``file_read("uploads/<name>")`` work.
-    file_read_root = workspace_root / owner_id / persona_id
+    from persona_api.workspace_paths import persona_root  # noqa: PLC0415
+
+    file_read_root = persona_root(workspace_root, owner_id, persona_id)
     for sf in documents:
         if sf.content_bytes is None:
             continue

@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 _OWNER = "u_conv_forget"
-_PERSONA = "p_conv_forget"
+_PERSONA = "persona_c0f0c0f0c0f0c0f0c0f0c0f0c0f0c0f0"
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
 # Byte-identical text pairs are load-bearing under the deterministic HashEmbedder384

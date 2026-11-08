@@ -25,6 +25,7 @@ from persona_api.jobs.handlers.file_extract import (
     file_extract_queue_ready,
 )
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.routes._runtime_guard import require_runtime_wired
 from persona_api.schemas import (
     ActiveTurnResponse,
@@ -61,7 +62,7 @@ router = APIRouter(prefix="/v1", tags=["conversations"])
     response_model=ConversationSummary,
 )
 async def create_conversation(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     body: CreateConversationRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

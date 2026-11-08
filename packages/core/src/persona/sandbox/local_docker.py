@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     from docker.types import LogConfig as _DockerLogConfig
     from docker.types import Ulimit as _DockerUlimit
 
+from persona.errors import SandboxViolationError
 from persona.logging import get_logger
 from persona.sandbox.errors import (
     CodeSandboxError,
@@ -643,14 +644,11 @@ class LocalDockerSandbox:
         code: str,
         input_files: list[SandboxFile],
     ) -> None:
-        """Write the code script + any input files into the read-only mount."""
-        code_path = host_in / "__persona_main__.py"
-        code_path.write_text(code, encoding="utf-8")
-        for f in input_files:
-            target = host_in / f.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if f.content_bytes is not None:
-                target.write_bytes(f.content_bytes)
+        """Write the code script + any input files into the read-only mount.
+
+        Delegates to :func:`_write_inputs`, which keeps every write inside ``host_in``.
+        """
+        _write_inputs(host_in, code, input_files)
 
     def _run_container(
         self,
@@ -1187,3 +1185,40 @@ def is_sandbox_image_available(tag: str = DEFAULT_IMAGE) -> bool:
 
 # Avoid unused-import warning on the timestamp re-export
 _ = _utcnow
+
+
+def _write_inputs(host_in: Path, code: str, input_files: list[SandboxFile]) -> None:
+    """Write the code script and the input files inside ``host_in``, and nowhere else.
+
+    Every input path is resolved like any workspace path before anything is written, and one
+    that would leave ``host_in`` refuses the whole execution: the api builds these paths
+    itself, but a ``SandboxFile`` path is a plain string and this writes to the host. The
+    writes go through the no-follow helpers with ``host_in`` as the root, so a link planted
+    under it is refused rather than followed. A module function, not a method, so the
+    structural guard (test_sandbox_root_call_sites.py) holds exactly this code to the
+    no-follow rule.
+    """
+    # Imported here: ``persona.tools`` builds the toolbox, which imports this package.
+    from persona.tools._sandbox import (  # noqa: PLC0415
+        make_dirs_nofollow,
+        resolve_sandbox_path,
+        write_nofollow_bytes,
+    )
+
+    targets: list[tuple[Path, SandboxFile]] = []
+    for f in input_files:
+        try:
+            targets.append((resolve_sandbox_path(host_in, f.path), f))
+        except SandboxViolationError as exc:
+            raise CodeSandboxError(
+                "input file path refused",
+                context={
+                    "reason": str(exc.context.get("reason", "invalid")),
+                    "path": f.path[:80],
+                },
+            ) from exc
+    write_nofollow_bytes(host_in / "__persona_main__.py", code.encode("utf-8"), root=host_in)
+    for target, f in targets:
+        make_dirs_nofollow(target.parent, root=host_in)
+        if f.content_bytes is not None:
+            write_nofollow_bytes(target, f.content_bytes, root=host_in)

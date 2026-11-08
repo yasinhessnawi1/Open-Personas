@@ -143,7 +143,7 @@ def _revision(database_url: str) -> object:
 
 @pytest.mark.timeout(300)
 def test_a_fresh_chain_reaches_head_with_the_index(clean_db: str) -> None:
-    command.upgrade(_alembic_config(clean_db), "head")
+    command.upgrade(_alembic_config(clean_db), _HEAD)
     assert _revision(clean_db) == _HEAD
     definition = _index_definition(clean_db)
     assert definition is not None
@@ -160,7 +160,7 @@ def test_a_clean_deployed_database_gains_it_and_downgrade_removes_it(
     _seed(deployed_db, embedder, [_chunk("v1", 1, "v2"), _chunk("v2", 2, None)])
     cfg = _alembic_config(deployed_db)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, _HEAD)
     assert _index_definition(deployed_db) is not None
     assert _scalar(
         deployed_db,
@@ -180,7 +180,7 @@ def test_two_heads_refuse_and_the_database_comes_out_exactly_as_it_went_in(
     before = _rows(deployed_db)
 
     with pytest.raises(ChainHeadsConflictError) as caught:
-        command.upgrade(_alembic_config(deployed_db), "head")
+        command.upgrade(_alembic_config(deployed_db), _HEAD)
 
     assert _index_definition(deployed_db) is None, "a refused migration left an index behind"
     assert _revision(deployed_db) == _PRED, "a refused migration moved the revision"
@@ -208,7 +208,7 @@ def test_it_counts_chains_by_kind(deployed_db: str, embedder: HashEmbedder384) -
         ],
     )
     with pytest.raises(ChainHeadsConflictError) as caught:
-        command.upgrade(_alembic_config(deployed_db), "head")
+        command.upgrade(_alembic_config(deployed_db), _HEAD)
     assert caught.value.context["chains"] == "2"
 
 
@@ -220,7 +220,7 @@ def test_a_retry_after_the_repair_goes_through(deployed_db: str, embedder: HashE
     _seed(deployed_db, embedder, [_chunk("v1", 1, "b"), _chunk("a", 2, None), _chunk("b", 2, None)])
     cfg = _alembic_config(deployed_db)
     with pytest.raises(ChainHeadsConflictError):
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, _HEAD)
 
     engine = create_engine(deployed_db)
     try:
@@ -232,7 +232,7 @@ def test_a_retry_after_the_repair_goes_through(deployed_db: str, embedder: HashE
     finally:
         engine.dispose()
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, _HEAD)
     assert _revision(deployed_db) == _HEAD
     assert _index_definition(deployed_db) is not None
 
@@ -251,7 +251,7 @@ def test_chains_that_block_nothing_do_not_block_the_upgrade(
             _chunk("gap-3", 3, None, "two"),
         ],
     )
-    command.upgrade(_alembic_config(deployed_db), "head")
+    command.upgrade(_alembic_config(deployed_db), _HEAD)
     assert _revision(deployed_db) == _HEAD
 
 
@@ -269,7 +269,7 @@ def test_rows_with_no_chain_are_outside_the_index(
         )
     finally:
         engine.dispose()
-    command.upgrade(_alembic_config(deployed_db), "head")
+    command.upgrade(_alembic_config(deployed_db), _HEAD)
     assert _revision(deployed_db) == _HEAD
 
 
@@ -302,13 +302,13 @@ def test_an_invalid_index_of_that_name_refuses_rather_than_passes(
     )
 
     with pytest.raises(ChainHeadIndexInvalidError) as caught:
-        command.upgrade(_alembic_config(deployed_db), "head")
+        command.upgrade(_alembic_config(deployed_db), _HEAD)
 
     assert _revision(deployed_db) == _PRED
     assert f"DROP INDEX {CHAIN_HEAD_INDEX}" in str(caught.value)
 
     _execute(deployed_db, f"DROP INDEX {CHAIN_HEAD_INDEX}")
-    command.upgrade(_alembic_config(deployed_db), "head")
+    command.upgrade(_alembic_config(deployed_db), _HEAD)
     assert (
         _scalar(
             deployed_db,

@@ -24,6 +24,9 @@ from persona_api.config import APIConfig
 from persona_api.errors import ConversationNotFoundError, PersonaNotFoundError
 from persona_api.services import audit_service, chat_service, persona_service
 
+#: The persona the stubbed lookup shows the caller (minted id format).
+_PID = "persona_a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+
 if TYPE_CHECKING:
     from persona.schema.chunks import PersonaChunk
 
@@ -112,7 +115,7 @@ def client(
 
     # Mock persona pre-flight (Spec 13's _ensure_persona_visible path).
     def _fake_get_persona(*, rls_engine: Any, persona_id: str) -> dict[str, Any]:  # noqa: ANN401, ARG001
-        if persona_id in ("astrid", "other_persona"):
+        if persona_id in (_PID, "persona_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"):
             return {"id": persona_id, "owner_id": "u1", "yaml": ""}
         raise PersonaNotFoundError("persona not found", context={"persona_id": persona_id})
 
@@ -124,7 +127,7 @@ def client(
             return {
                 "id": "conv_u1",
                 "owner_id": "u1",
-                "persona_id": "astrid",
+                "persona_id": _PID,
                 "title": "test",
                 "messages": [],
                 "created_at": None,
@@ -150,7 +153,7 @@ class TestDocumentMIMEDispatch:
 
     def test_txt_upload_routes_to_document_service(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("memo.txt", b"The lease runs for twelve months.", "text/plain"),
@@ -167,7 +170,7 @@ class TestDocumentMIMEDispatch:
 
     def test_csv_upload_routes_to_document_service(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv"),
@@ -179,7 +182,7 @@ class TestDocumentMIMEDispatch:
 
     def test_markdown_upload_routes_to_document_service(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("notes.md", b"# Heading\n\nBody.", "text/markdown"),
@@ -201,7 +204,7 @@ class TestDocumentMIMEDispatch:
         ).resolve()
         pdf_bytes = pdf_path.read_bytes()
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={"file": ("tenancy.pdf", pdf_bytes, "application/pdf")},
             data={"conversation_id": "conv_u1"},
@@ -215,7 +218,7 @@ class TestConversationIdRequired:
 
     def test_document_without_conversation_id_returns_422(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={"file": ("memo.txt", b"hi", "text/plain")},
             # NO conversation_id form field
@@ -226,7 +229,7 @@ class TestConversationIdRequired:
 
     def test_document_with_empty_conversation_id_returns_422(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={"file": ("memo.txt", b"hi", "text/plain")},
             data={"conversation_id": "   "},
@@ -238,7 +241,7 @@ class TestConversationIdRequired:
 class TestUnsupportedMediaType:
     def test_unknown_extension_returns_415(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("archive.rar", b"junk-bytes", "application/x-rar"),
@@ -249,7 +252,7 @@ class TestUnsupportedMediaType:
 
     def test_no_extension_no_content_type_returns_415(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("noext", b"some bytes", "application/octet-stream"),
@@ -262,7 +265,7 @@ class TestUnsupportedMediaType:
 class TestCrossTenantConversation:
     def test_unknown_conversation_returns_404(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={"file": ("memo.txt", b"hi", "text/plain")},
             data={"conversation_id": "conv_OTHER_TENANT"},
@@ -273,7 +276,7 @@ class TestCrossTenantConversation:
 class TestCorruptDocument:
     def test_empty_bytes_returns_422_corrupt(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={
                 "file": ("empty.txt", b"   \n\n  \n", "text/plain"),
@@ -302,7 +305,7 @@ class TestVisionHandoffPath:
         ).resolve()
         scanned_bytes = scanned_path.read_bytes()
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             headers=_auth(),
             files={"file": ("scan.pdf", scanned_bytes, "application/pdf")},
             data={"conversation_id": "conv_u1"},
@@ -320,7 +323,7 @@ class TestVisionHandoffPath:
 class TestAuthRequired:
     def test_unauthenticated_returns_401(self, client: TestClient) -> None:
         resp = client.post(
-            "/v1/personas/astrid/uploads",
+            f"/v1/personas/{_PID}/uploads",
             files={"file": ("memo.txt", b"hi", "text/plain")},
             data={"conversation_id": "conv_u1"},
         )

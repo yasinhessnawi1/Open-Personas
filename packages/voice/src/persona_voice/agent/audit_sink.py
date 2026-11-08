@@ -98,7 +98,11 @@ class VoiceAuditSink:
 
     def voice_log_path(self, persona_id: str) -> Path:
         """The per-persona VoiceLog file for this call (R9-185's sink)."""
-        return self.root / f"{persona_id}.voice-turns.jsonl"
+        # One name, or the log would land outside its folder.
+        from persona.tools._sandbox import require_path_segment  # noqa: PLC0415
+
+        name = require_path_segment(persona_id, what="persona id")
+        return self.root / f"{name}.voice-turns.jsonl"
 
 
 def resolve_voice_audit_root(config: VoiceConfig) -> Path:

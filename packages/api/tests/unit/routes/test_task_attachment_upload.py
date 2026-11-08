@@ -25,7 +25,7 @@ from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimite
 from persona_api.services import audit_service, persona_service
 from persona_api.storage import LocalFileStorage
 
-_PERSONA = "astrid"
+_PERSONA = "persona_a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
 
 
 @pytest.fixture
@@ -132,10 +132,10 @@ def test_cross_tenant_persona_is_404_before_any_bytes_are_written(
 ) -> None:
     c, _ = client
     resp = c.post(
-        "/v1/personas/someone_elses/uploads",
+        "/v1/personas/persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e/uploads",
         headers=_auth(),
         files={"file": ("brief.md", b"hi", "text/markdown")},
         data={"scope": "task"},
     )
     assert resp.status_code == 404
-    assert not (workspace / "u1" / "someone_elses").exists()
+    assert not (workspace / "u1" / "persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e").exists()

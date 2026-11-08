@@ -78,6 +78,7 @@ from persona_api.sandbox import make_pool_code_execution_tool
 from persona_api.services.model_tiers import ownerless_background_backend, select_plan_tier_registry
 from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
+from persona_api.workspace_paths import persona_root
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -1193,7 +1194,8 @@ class RuntimeFactory:
             ctx = get_sandbox_request_context()
             if ctx is None:
                 return None
-            return workspace_root / ctx.owner_id / persona_id
+            # One persona folder below the owner's, or a refusal (fail closed).
+            return persona_root(workspace_root, ctx.owner_id, persona_id)
 
         return _resolve
 

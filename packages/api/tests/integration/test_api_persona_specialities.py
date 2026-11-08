@@ -224,13 +224,16 @@ def test_post_consent_unknown_skill_is_404(
     assert resp.status_code == 404
 
 
+_NOT_MINE = "persona_0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+
+
 @pytest.mark.usefixtures("_catalog")
 def test_specialities_on_unowned_persona_is_404(client: tuple[TestClient, str]) -> None:
     c, uid = client
-    resp = c.get("/v1/personas/persona_not_mine/specialities", headers=_auth(uid))
+    resp = c.get(f"/v1/personas/{_NOT_MINE}/specialities", headers=_auth(uid))
     assert resp.status_code == 404
     resp2 = c.post(
-        "/v1/personas/persona_not_mine/skills/legal_research/consent",
+        f"/v1/personas/{_NOT_MINE}/skills/legal_research/consent",
         json={"granted": True},
         headers=_auth(uid),
     )

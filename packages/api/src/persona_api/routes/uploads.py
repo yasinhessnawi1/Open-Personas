@@ -48,6 +48,7 @@ from persona.errors import PersonaError, PersonaNotFoundError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.middleware.rate_limit import rate_limit
+from persona_api.routes._params import PersonaIdPath
 from persona_api.services import (
     audit_service,
     chat_service,
@@ -179,7 +180,7 @@ def _is_document_filename(filename: str) -> bool:
     dependencies=[Depends(rate_limit("default"))],
 )
 async def create_upload(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
     file: UploadFile = File(...),
@@ -481,7 +482,7 @@ def _handle_document_upload(
     dependencies=[Depends(rate_limit("default"))],
 )
 async def get_upload(
-    persona_id: str,
+    persona_id: PersonaIdPath,
     ref: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),

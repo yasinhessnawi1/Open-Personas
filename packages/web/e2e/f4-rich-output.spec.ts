@@ -156,11 +156,14 @@ test.describe("F4 — Rich-Output UI Surface (live operator-pass)", () => {
     // Pre-flight: probe the imagegen endpoint to detect whether the backend
     // is configured. If 503 returns, the deployment doesn't have an image
     // backend key — record as 🟦 PARTIAL and skip.
-    const probe = await page.request.post(`${API}/v1/personas/probe/imagegen`, {
-      headers: { Authorization: `Bearer ${token}` },
-      data: { prompt: "test" },
-      failOnStatusCode: false,
-    });
+    const probe = await page.request.post(
+      `${API}/v1/personas/persona_00000000000000000000000000000000/imagegen`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        data: { prompt: "test" },
+        failOnStatusCode: false,
+      },
+    );
     if (probe.status() === 503 || probe.status() === 404) {
       test.skip(
         true,

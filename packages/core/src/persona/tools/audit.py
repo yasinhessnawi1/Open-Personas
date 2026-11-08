@@ -110,8 +110,12 @@ class JSONLToolAuditLogger:
         self._lock = threading.Lock()
 
     def _path(self, persona_id: str | None) -> Path:
-        name = f"{persona_id}.tools.jsonl" if persona_id else "_cli.tools.jsonl"
-        return self._root / name
+        if not persona_id:
+            return self._root / "_cli.tools.jsonl"
+        # One name, or the log lands outside its folder (see ``JSONLAuditLogger._path``).
+        from persona.tools._sandbox import require_path_segment  # noqa: PLC0415
+
+        return self._root / f"{require_path_segment(persona_id, what='persona id')}.tools.jsonl"
 
     def emit(self, event: ToolAuditEvent) -> None:
         path = self._path(event.persona_id)
