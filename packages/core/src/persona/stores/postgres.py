@@ -55,6 +55,7 @@ from persona.schema.chunks import (
     WriteSource,
     verify_content_hash,
 )
+from persona.stores.orphans import OrphanSweep
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
@@ -366,6 +367,10 @@ class PostgresBackend:
         )
         with self._engine.connect() as conn:
             return [str(row) for row in conn.execute(stmt).scalars().all()]
+
+    def orphan_sweep(self) -> OrphanSweep:
+        """The sweep for rows whose owner is gone, on this database (R9-284)."""
+        return OrphanSweep(self._engine)
 
     def sees_every_tenant(self) -> bool:
         """Whether this connection's role can read past row level security.

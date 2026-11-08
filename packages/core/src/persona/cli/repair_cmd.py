@@ -41,9 +41,18 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger
     from persona.stores.backend import Backend
     from persona.stores.base import StoreDiagnosis, TypedStore
+    from persona.stores.orphans import OrphanSweep
+    from persona.stores.postgres import PostgresBackend
     from persona.stores.versioning import ChainDiagnosis
 
-__all__ = ["VERSIONED_KINDS", "NoEmbedder", "repair", "run_forgotten_sweep", "run_repair"]
+__all__ = [
+    "VERSIONED_KINDS",
+    "NoEmbedder",
+    "repair",
+    "run_forgotten_sweep",
+    "run_orphan_sweep",
+    "run_repair",
+]
 
 #: The kinds that carry version chains. Identity is immutable at runtime and gist rows are
 #: always written as version 1 under a fresh id, so neither can hold a broken chain.
@@ -282,6 +291,36 @@ def run_forgotten_sweep(
     return 0
 
 
+def run_orphan_sweep(
+    sweep: OrphanSweep, *, apply: bool = False, written_by: str = "cli.repair"
+) -> int:
+    """Find what deleted personas and conversations left behind, and remove it with ``apply``.
+
+    For data written before deletes reached these rows (R9-284). Prints ids and counts and
+    never content. Returns the exit code: 0 clean, 1 something still needs attention.
+    """
+    groups = sweep.find()
+    if not groups:
+        typer.echo("Nothing here was left behind by a deleted persona or conversation.")
+        return 0
+
+    total = sum(g.rows for g in groups)
+    typer.echo(f"{total} rows were left behind by deleted personas and conversations.")
+    for group in groups:
+        typer.echo(f"  {group.owner_id}: {group.rows} {group.kind}")
+    if not apply:
+        typer.echo("Nothing has been changed. Run the same command with --apply to delete them.")
+        return 1
+
+    removed = sum(sweep.remove(group, written_by=written_by) for group in groups)
+    typer.echo(f"Deleted {removed} rows.")
+    if sweep.find():
+        typer.echo("Some are still there after the sweep ran. Run it again and read what it lists.")
+        return 1
+    typer.echo("Nothing is left behind now.")
+    return 0
+
+
 def repair(
     persona_path: Path | None = typer.Argument(
         None, help="Path to the persona YAML whose memory should be checked."
@@ -320,6 +359,15 @@ def repair(
             "model."
         ),
     ),
+    orphaned: bool = typer.Option(
+        False,
+        "--orphaned",
+        help=(
+            "Instead of checking version chains, find rows whose persona or conversation has "
+            "been deleted. Needs --all-personas and --database-url. --apply deletes them. Uses "
+            "no model."
+        ),
+    ),
 ) -> None:
     """Check a persona's memory for broken version chains, and repair them with ``--apply``."""
     if all_personas == (persona_path is not None):
@@ -332,11 +380,22 @@ def repair(
         )
     if forgotten_evidence and (resolve_raced or store is not None):
         raise typer.BadParameter("--forgotten-evidence runs on its own, not with chain options")
+    if orphaned and persona_path is not None:
+        raise typer.BadParameter("--orphaned sweeps a whole database: use --all-personas")
+    if orphaned and (resolve_raced or forgotten_evidence or store is not None):
+        raise typer.BadParameter("--orphaned runs on its own, not with the other sweeps")
     kinds = (store,) if store is not None else VERSIONED_KINDS
     if forgotten_evidence:
         kinds = (CORE_MEMORY_KIND,)
 
     target = _build_target(PersonaCoreConfig(), database_url)
+    if orphaned:
+        typer.echo(f"Checking {target.where}.")
+        backend = _sees_every_tenant_or_exit(target)
+        code = run_orphan_sweep(backend.orphan_sweep(), apply=apply)
+        if code != 0:
+            raise typer.Exit(code=code)
+        return
     if persona_path is not None:
         persona = Persona.from_yaml(persona_path)
         persona_ids = [persona.persona_id or persona_path.stem]
@@ -367,6 +426,11 @@ def repair(
 
 def _every_persona(target: _Target, kinds: Sequence[str]) -> list[str]:
     """Every persona id the sweep should visit, refusing a role that would see too few."""
+    return _sees_every_tenant_or_exit(target).persona_ids(tuple(kinds))
+
+
+def _sees_every_tenant_or_exit(target: _Target) -> PostgresBackend:
+    """The Postgres transport, or exit 2 for a role row level security would blind."""
     from persona.stores.postgres import PostgresBackend
 
     backend = target.backend
@@ -378,4 +442,4 @@ def _every_persona(target: _Target, kinds: Sequence[str]) -> list[str]:
             "connection."
         )
         raise typer.Exit(code=2)
-    return backend.persona_ids(tuple(kinds))
+    return backend

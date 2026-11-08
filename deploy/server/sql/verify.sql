@@ -65,6 +65,17 @@ SELECT 'memory_chains_two_heads', count(*)::text FROM (
 SELECT 'personas_unexpected_ids', count(*)::text
   FROM personas WHERE id !~ '^persona_[0-9a-f]{32}$';
 
+-- Persona or conversation owners that no longer exist but still have memory rows: what a
+-- delete used to leave behind (R9-284). Expected above 0 on a dump older than migration 062,
+-- and RUNBOOK.md step 5 says what to do. The same rule as `persona repair --orphaned`, and a
+-- test holds the two equal. A count, never an id.
+SELECT 'memory_orphan_owners', count(*)::text FROM (
+  SELECT DISTINCT m.persona_id, m.kind FROM memory_chunks m
+   WHERE CASE WHEN m.kind = 'document'
+              THEN NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = m.persona_id)
+              ELSE NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = m.persona_id) END
+  ) AS orphans;
+
 SELECT 'server_version', current_setting('server_version');
 
 -- Per-table row counts (counts only).

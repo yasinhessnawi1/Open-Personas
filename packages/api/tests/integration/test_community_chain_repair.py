@@ -242,6 +242,34 @@ def test_the_sweep_for_forgotten_evidence_works_on_the_managed_database(
         manager.stop()
 
 
+def test_the_sweep_for_orphans_works_on_the_managed_database(
+    short_base_dir: Path, embedder: HashEmbedder384, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-284's sweep. This install connects as a superuser, so nothing refused its orphans."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    manager = CommunityDbManager(external_url=None, base_dir=short_base_dir)
+    url = manager.start()
+    engine = create_engine(url)
+    try:
+        run_migrations(url)
+        _seed_persona(engine)
+        backend = PostgresBackend(engine=engine, embedder=embedder)
+        backend.upsert(persona_id=_PERSONA, store_kind="self_facts", chunks=[_chunk("v1", 1, None)])
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+        look = _run_as_the_user_would(repair_command("--orphaned"), short_base_dir)
+        assert look.returncode == 1, look.stdout + look.stderr
+        assert backend.get_all(persona_id=_PERSONA, store_kind="self_facts"), "a dry run changed it"
+
+        fixed = _run_as_the_user_would(repair_command("--orphaned", "--apply"), short_base_dir)
+        assert fixed.returncode == 0, fixed.stdout + fixed.stderr
+        assert backend.get_all(persona_id=_PERSONA, store_kind="self_facts") == []
+    finally:
+        engine.dispose()
+        manager.stop()
+
+
 def test_a_community_install_on_sqlite_is_told_what_to_do_instead(tmp_path: Path) -> None:
     """legacy-sqlite has no managed database, so the command must not pretend it does."""
     env = _environment(tmp_path)
