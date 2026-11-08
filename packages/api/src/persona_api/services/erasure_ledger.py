@@ -196,20 +196,24 @@ class ErasureLedger:
         return claimed
 
     def record_step(self, erasure_id: str, step: str, counts: Mapping[str, int]) -> None:
-        """Record one step's counts, replacing any earlier run of the same step.
+        """Add one run of a step to what that step has recorded so far.
 
-        Replacing is what keeps a resumed erasure honest: the same step run twice is reported
-        once. Marks the erasure running and clears any earlier failure.
+        Adding is what keeps a resumed erasure honest. The doors report rows really removed, so
+        a run that finished part of the work adds its share, and a re-run that finds the rows
+        already gone adds 0 instead of overwriting what the first run recorded. Marks the
+        erasure running and clears any earlier failure.
         """
         _require_name(step, "step_name")
         clean = _require_counts(counts)
         with self._engine.begin() as conn:
             row = self._lock_open(conn, erasure_id)
+            so_far: dict[str, int] = row.counts.get(step, {})
+            added = {name: so_far.get(name, 0) + clean.get(name, 0) for name in {*so_far, *clean}}
             conn.execute(
                 update(erasures_t)
                 .where(erasures_t.c.id == erasure_id)
                 .values(
-                    counts={**row.counts, step: clean},
+                    counts={**row.counts, step: added},
                     state=ErasureState.RUNNING.value,
                     error_code=None,
                     updated_at=func.now(),

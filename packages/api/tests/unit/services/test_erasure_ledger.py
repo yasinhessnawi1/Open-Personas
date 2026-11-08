@@ -102,15 +102,18 @@ def test_a_step_records_its_counts_and_the_erasure_is_running(ledger: ErasureLed
     assert row.counts == {"memory": {"episodic": 3, "episodic_gist": 1}, "files": {"objects": 7}}
 
 
-def test_re_running_a_step_replaces_its_counts_and_never_adds(ledger: ErasureLedger) -> None:
-    """A resumed erasure must report one step once, however many times it ran."""
+def test_a_resumed_step_adds_what_it_removed_and_a_rerun_that_found_nothing_keeps_the_count(
+    ledger: ErasureLedger,
+) -> None:
+    """The doors report rows really removed, so adding is right, and a 0 must not erase a 3."""
     erasure = _claim(ledger)
-    ledger.record_step(erasure, "memory", {"episodic": 3})
-    ledger.record_step(erasure, "memory", {"episodic": 3})
+    ledger.record_step(erasure, "memory", {"episodic": 3, "episodic_gist": 1})
+    ledger.record_step(erasure, "memory", {"episodic": 2, "core_memory": 4})
+    ledger.record_step(erasure, "memory", {"episodic": 0})
 
     row = ledger.get(SubjectKind.PERSONA, _PERSONA)
     assert row is not None
-    assert row.counts == {"memory": {"episodic": 3}}
+    assert row.counts == {"memory": {"episodic": 5, "episodic_gist": 1, "core_memory": 4}}
 
 
 @pytest.mark.parametrize(

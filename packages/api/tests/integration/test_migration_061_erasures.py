@@ -17,10 +17,12 @@ from alembic.config import Config
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from sqlalchemy import Engine
 
 pytestmark = pytest.mark.integration
 
@@ -84,7 +86,9 @@ def test_it_has_no_foreign_key_so_it_can_outlive_what_it_records(clean_db: str) 
     assert keys == 0
 
 
-def test_one_tenant_cannot_see_anothers_erasures(clean_db: str) -> None:
+@pytest.fixture
+def app_role(clean_db: str) -> Iterator[tuple[Engine, Engine]]:
+    """(the superuser engine, the persona_app engine), with one row owned by user_a."""
     app_url = os.environ.get("APP_DATABASE_URL")
     if not app_url:
         pytest.skip("APP_DATABASE_URL not set")
@@ -97,13 +101,59 @@ def test_one_tenant_cannot_see_anothers_erasures(clean_db: str) -> None:
         owner_id="user_a", subject_kind=SubjectKind.PERSONA, subject_id="p_a", captured={}
     )
     rls = make_rls_engine(app_url)
+    yield admin, rls
+    rls.dispose()
+    admin.dispose()
+
+
+def test_a_tenant_sees_its_own_erasure(app_role: tuple[Engine, Engine]) -> None:
+    """The positive half: a policy that matched nothing would pass the test below it."""
+    _admin, rls = app_role
+    token = current_user_id.set("user_a")
+    try:
+        row = ErasureLedger(rls).get(SubjectKind.PERSONA, "p_a")
+    finally:
+        current_user_id.reset(token)
+    assert row is not None
+    assert row.owner_id == "user_a"
+
+
+def test_one_tenant_cannot_see_anothers_erasures(app_role: tuple[Engine, Engine]) -> None:
+    _admin, rls = app_role
     token = current_user_id.set("user_b")
     try:
         assert ErasureLedger(rls).get(SubjectKind.PERSONA, "p_a") is None
     finally:
         current_user_id.reset(token)
-        rls.dispose()
-        admin.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO erasures (id, owner_id, subject_kind, subject_id) "
+        "VALUES ('forged', 'user_a', 'persona', 'p_forged')",
+        "UPDATE erasures SET state = 'complete' WHERE subject_id = 'p_a'",
+        "DELETE FROM erasures WHERE subject_id = 'p_a'",
+    ],
+)
+def test_the_app_role_cannot_write_the_record_of_its_own_erasure(
+    app_role: tuple[Engine, Engine], statement: str
+) -> None:
+    """Only the erase job may write this, or a compromised request could rewrite the proof."""
+    admin, rls = app_role
+    token = current_user_id.set("user_a")
+    try:
+        try:
+            with rls.begin() as conn:
+                changed = conn.execute(text(statement)).rowcount
+        except ProgrammingError:
+            changed = 0  # an INSERT is refused outright; an UPDATE or DELETE matches no row
+    finally:
+        current_user_id.reset(token)
+    assert changed == 0
+    with admin.connect() as conn:
+        rows = conn.execute(text("SELECT subject_id, state FROM erasures")).all()
+    assert [tuple(r) for r in rows] == [("p_a", "pending")]
 
 
 def test_a_subject_has_one_open_row_and_may_be_erased_again_once_finished(clean_db: str) -> None:
