@@ -28,7 +28,7 @@ from persona.schema.chunks import PersonaChunk
 from persona.stores.postgres import PostgresBackend
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -155,8 +155,14 @@ def test_the_guard_holds_for_the_app_role_under_row_level_security(
     try:
         with rls.begin() as conn:
             conn.execute(_INSERT, {"id": "app-ok", "p": _PERSONA, "k": "episodic"})
-        with pytest.raises((IntegrityError, ProgrammingError)), rls.begin() as conn:
+        # IntegrityError only: row level security alone raises a ProgrammingError, so accepting
+        # that would let this pass with no guard at all. The trigger runs first.
+        with pytest.raises(IntegrityError, match="memory_chunks_owner_guard"), rls.begin() as conn:
             conn.execute(_INSERT, {"id": "app-no", "p": _GONE, "k": "episodic"})
+        with rls.begin() as conn:
+            conn.execute(_INSERT, {"id": "app-doc", "p": _CONVERSATION, "k": "document"})
+        with pytest.raises(IntegrityError, match="memory_chunks_owner_guard"), rls.begin() as conn:
+            conn.execute(_INSERT, {"id": "app-doc-no", "p": "conv_gone", "k": "document"})
     finally:
         current_user_id.reset(token)
         rls.dispose()

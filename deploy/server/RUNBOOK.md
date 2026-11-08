@@ -447,8 +447,9 @@ bin/deploy.sh
 
 The first build runs on the host's 2 cores: expect 10 to 20 minutes (the image carries CPU
 torch, no CUDA). It competes with nothing yet; later deploys run off-hours. The migrate step
-takes the restored dump from `058` to head (`060` today: `059` the memory chain index, `060`
-the channel's persona pointer). The first boot downloads the HF models (the bge
+takes the restored dump from `058` to head (`062` today: `059` the memory chain index, `060`
+the channel's persona pointer, `061` the erasure ledger, `062` the memory owner guard). The first
+boot downloads the HF models (the bge
 embedder, the reranker and the crisis encoder, about 1 to 2 GB) into the data volume and
 loads them in 1 to 2 minutes on Ampere, hence the long health timeouts. `deploy.sh` ends with
 `api /livez: ok` and `api /healthz (database): ok`. The Caddy smoke test warns until DNS

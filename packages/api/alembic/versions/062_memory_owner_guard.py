@@ -39,15 +39,16 @@ depends_on = None
 _FUNCTION = "memory_chunks_owner_guard"
 _TRIGGER = "memory_chunks_owner_guard_trigger"
 
-# The message names the kind and never the row: this reaches logs.
+# The message names the kind and never the row: this reaches logs. The tables are schema
+# qualified so the session's search_path cannot change which ones are checked.
 _CREATE_FUNCTION = f"""
 CREATE OR REPLACE FUNCTION {_FUNCTION}() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.kind = 'document' THEN
-        PERFORM 1 FROM conversations WHERE id = NEW.persona_id FOR KEY SHARE;
+        PERFORM 1 FROM public.conversations WHERE id = NEW.persona_id FOR KEY SHARE;
     ELSE
-        PERFORM 1 FROM personas WHERE id = NEW.persona_id FOR KEY SHARE;
+        PERFORM 1 FROM public.personas WHERE id = NEW.persona_id FOR KEY SHARE;
     END IF;
     IF NOT FOUND THEN
         RAISE EXCEPTION '{_FUNCTION}: the owner of this % row does not exist', NEW.kind
