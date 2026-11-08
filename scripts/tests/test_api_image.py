@@ -1,9 +1,9 @@
 """The api image installs only what the api process runs, and builds on arm64.
 
 The Oracle server is aarch64 (2026-11-07). The api image used ``uv sync --all-packages``,
-which also installed persona-voice and with it ``silero-vad-lite``, a package with no
-Linux aarch64 wheel (``uv.lock``: sdist only). The api never imports persona_voice; it
-reaches voice over HTTP. ``persona-connectors`` depends on ``persona-api`` (C1-D-1), and
+which also installed persona-voice, which at the time could not build on aarch64. Voice
+runs on arm64 now, but the api never imports persona_voice (it reaches voice over HTTP),
+so its image still leaves voice out. ``persona-connectors`` depends on ``persona-api`` (C1-D-1), and
 the api hosts the connector transports in process (the I1 fold), so syncing that one
 package installs exactly the api's closure: connectors, api, runtime and core[postgres].
 
@@ -23,7 +23,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "packages" / "api" / "Dockerfile"
 SYNC_PACKAGE = "persona-connectors"
-VOICE_ONLY = {"persona-voice", "silero-vad-lite", "livekit", "livekit-api", "livekit-agents"}
+VOICE_ONLY = {"persona-voice", "livekit", "livekit-api", "livekit-agents"}
 WINDOWS_ONLY = re.compile(r"sys_platform == 'win32'|platform_system == 'Windows'")
 
 
@@ -113,11 +113,14 @@ def test_every_native_package_in_the_closure_has_an_arm64_wheel() -> None:
 
 
 def test_the_checks_are_not_vacuous() -> None:
-    """The whole workspace DOES reach silero-vad-lite, which DOES lack an arm64 wheel."""
+    """Voice's closure DOES reach a voice-only package, and an x86-only wheel set IS caught."""
     lock = _lock()
-    assert "silero-vad-lite" in closure(lock, "persona-voice")
-    silero = next(p for p in lock["package"] if p["name"] == "silero-vad-lite")
-    assert lacks_aarch64_wheel(silero)
+    assert "livekit" in closure(lock, "persona-voice")
+    x86_only = {
+        "source": {"registry": "https://pypi.org/simple"},
+        "wheels": [{"url": "https://example.test/a-1.0-cp312-cp312-manylinux_2_17_x86_64.whl"}],
+    }
+    assert lacks_aarch64_wheel(x86_only)
 
 
 def test_no_env_file_anywhere_reaches_a_build() -> None:

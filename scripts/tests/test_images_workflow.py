@@ -89,7 +89,7 @@ def test_it_builds_the_api_image_and_smoke_tests_it() -> None:
     run = _run_text()
     assert re.search(r"docker build\b.*-f packages/api/Dockerfile", run.replace("\\\n", " "))
     # The image must import the api and the connectors it hosts, carry CPU torch, and
-    # NOT carry voice (its silero-vad-lite has no arm64 wheel).
+    # NOT carry voice (the api never imports it).
     for needle in (
         "persona_api.app",
         "persona_connectors.service",

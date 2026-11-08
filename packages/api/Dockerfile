@@ -39,8 +39,9 @@ COPY packages/connectors/pyproject.toml packages/connectors/pyproject.toml
 COPY packages/ packages/
 # Only the api process's closure (frozen): persona-connectors depends on persona-api
 # (C1-D-1) and runs inside it (the I1 fold), so this installs connectors, api, runtime
-# and core[postgres], and NOT persona-voice, whose silero-vad-lite has no Linux arm64
-# wheel. That keeps the image buildable on arm64 (the Oracle box) and amd64 alike.
+# and core[postgres], and NOT persona-voice, which the api never imports (it reaches voice
+# over HTTP). Every native package here has an arm64 wheel, so the image builds on arm64
+# (the Oracle box) and amd64 alike.
 # The cache mount keeps uv's download cache out of the image layer.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package persona-connectors
