@@ -309,7 +309,7 @@ async def test_an_ordinary_generation_discards_nothing(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("announced")
 async def test_a_failed_discard_does_not_fail_the_job(engine: Engine) -> None:
-    """A retry would find no persona and do nothing; the sweep is what finds the folder."""
+    """A retry would find no persona and do nothing, so failing the job gains nothing."""
     generator = _Generator(
         on_generate=lambda: _delete_persona(engine), discard_raises=PermissionError("in use")
     )

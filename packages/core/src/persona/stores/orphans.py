@@ -26,7 +26,7 @@ from sqlalchemy import text
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
-__all__ = ["OrphanGroup", "OrphanSweep"]
+__all__ = ["OrphanGroup", "OrphanSweep", "role_sees_every_tenant"]
 
 #: Evidence first, then what was derived from it, then what merely referred to the persona.
 _ORDER: tuple[str, ...] = (
@@ -44,51 +44,67 @@ _RANK = {kind: rank for rank, kind in enumerate(_ORDER)}
 
 _MEMORY_ORPHAN = (
     "CASE WHEN m.kind = 'document' "
-    "THEN NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = m.persona_id) "
-    "ELSE NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = m.persona_id) END"
+    "THEN NOT EXISTS (SELECT 1 FROM public.conversations c WHERE c.id = m.persona_id) "
+    "ELSE NOT EXISTS (SELECT 1 FROM public.personas p WHERE p.id = m.persona_id) END"
 )
 _SCHEDULE_PREFIX = "initsched:"
 _SCHEDULE_PERSONA = f"substr(s.id, {len(_SCHEDULE_PREFIX) + 1})"
 _SCHEDULE_ORPHAN = (
     f"s.id LIKE '{_SCHEDULE_PREFIX}%' "
-    f"AND NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = {_SCHEDULE_PERSONA})"
+    f"AND NOT EXISTS (SELECT 1 FROM public.personas p WHERE p.id = {_SCHEDULE_PERSONA})"
 )
-_NOTICE_ORPHAN = "NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = n.persona_id)"
+_NOTICE_ORPHAN = "NOT EXISTS (SELECT 1 FROM public.personas p WHERE p.id = n.persona_id)"
 
 _FIND = (
     text(
         "SELECT 'memory_chunks' AS tbl, m.persona_id AS owner, m.kind AS kind, count(*) AS n "  # noqa: S608
-        f"FROM memory_chunks m WHERE {_MEMORY_ORPHAN} GROUP BY m.persona_id, m.kind"
+        f"FROM public.memory_chunks m WHERE {_MEMORY_ORPHAN} GROUP BY m.persona_id, m.kind"
     ),
     text(
         "SELECT 'initiative_notices' AS tbl, n.persona_id AS owner, "  # noqa: S608
         "'initiative_notice' AS kind, count(*) AS n "
-        f"FROM initiative_notices n WHERE {_NOTICE_ORPHAN} GROUP BY n.persona_id"
+        f"FROM public.initiative_notices n WHERE {_NOTICE_ORPHAN} GROUP BY n.persona_id"
     ),
     text(
         f"SELECT 'schedules' AS tbl, {_SCHEDULE_PERSONA} AS owner, "  # noqa: S608
         "'initiative_schedule' AS kind, count(*) AS n "
-        f"FROM schedules s WHERE {_SCHEDULE_ORPHAN} GROUP BY {_SCHEDULE_PERSONA}"
+        f"FROM public.schedules s WHERE {_SCHEDULE_ORPHAN} GROUP BY {_SCHEDULE_PERSONA}"
     ),
 )
 
 _REMOVE = {
     "memory_chunks": text(
-        f"DELETE FROM memory_chunks m WHERE m.persona_id = :owner AND m.kind = :kind "  # noqa: S608
+        f"DELETE FROM public.memory_chunks m WHERE m.persona_id = :owner AND m.kind = :kind "  # noqa: S608
         f"AND {_MEMORY_ORPHAN}"
     ),
     "initiative_notices": text(
-        f"DELETE FROM initiative_notices n WHERE n.persona_id = :owner AND {_NOTICE_ORPHAN}"  # noqa: S608
+        f"DELETE FROM public.initiative_notices n WHERE n.persona_id = :owner AND {_NOTICE_ORPHAN}"  # noqa: S608
     ),
     "schedules": text(
-        f"DELETE FROM schedules s WHERE {_SCHEDULE_PERSONA} = :owner AND {_SCHEDULE_ORPHAN}"  # noqa: S608
+        f"DELETE FROM public.schedules s WHERE {_SCHEDULE_PERSONA} = :owner AND {_SCHEDULE_ORPHAN}"  # noqa: S608
     ),
 }
 
+_MEMORY_WITHOUT_ANY_PERSONA = text(
+    "SELECT NOT EXISTS (SELECT 1 FROM public.personas) "
+    "AND EXISTS (SELECT 1 FROM public.memory_chunks)"
+)
+
 _AUDIT = text(
-    "INSERT INTO audit_log (user_id, action, target, metadata) "
+    "INSERT INTO public.audit_log (user_id, action, target, metadata) "
     "VALUES (:written_by, 'repair.orphaned', :owner, CAST(:metadata AS jsonb))"
 )
+
+
+def role_sees_every_tenant(engine: Engine) -> bool:
+    """Whether this connection's role can read past row level security.
+
+    A sweep as ``persona_app`` reads zero rows and would report a healthy database, which is the
+    worst possible answer from a check run during a restore.
+    """
+    stmt = text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+    with engine.connect() as conn:
+        return bool(conn.execute(stmt).scalar())
 
 
 @dataclass(frozen=True)
@@ -106,6 +122,15 @@ class OrphanSweep:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def sees_every_tenant(self) -> bool:
+        """Whether this role can see every owner, without which ``find`` reports nothing."""
+        return role_sees_every_tenant(self._engine)
+
+    def memory_without_any_persona(self) -> bool:
+        """Memory rows and not one persona: a partial restore or the wrong database."""
+        with self._engine.connect() as conn:
+            return bool(conn.execute(_MEMORY_WITHOUT_ANY_PERSONA).scalar())
 
     def find(self) -> list[OrphanGroup]:
         """Every group with no owner, evidence before what was derived from it."""

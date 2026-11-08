@@ -55,7 +55,7 @@ from persona.schema.chunks import (
     WriteSource,
     verify_content_hash,
 )
-from persona.stores.orphans import OrphanSweep
+from persona.stores.orphans import OrphanSweep, role_sees_every_tenant
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
@@ -388,9 +388,7 @@ class PostgresBackend:
         A sweep as ``persona_app`` reads zero rows and would report a healthy database, which
         is the worst possible answer from a check run during a restore.
         """
-        stmt = text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
-        with self._engine.connect() as conn:
-            return bool(conn.execute(stmt).scalar())
+        return role_sees_every_tenant(self._engine)
 
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         stmt = delete(_memory_chunks).where(

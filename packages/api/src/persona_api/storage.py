@@ -323,7 +323,10 @@ class S3FileStorage:
         return self._remove_folder(require_path_segment(owner_id, what="owner id"))
 
     def _remove_folder(self, stem: str) -> int:
-        from botocore.exceptions import ClientError  # noqa: PLC0415 - optional dep, guarded
+        from botocore.exceptions import (  # noqa: PLC0415 - optional dep, guarded
+            BotoCoreError,
+            ClientError,
+        )
 
         try:
             keys = [obj.key for obj in self.list(stem)]
@@ -337,8 +340,8 @@ class S3FileStorage:
                 if refused:
                     # A count: the keys carry file names.
                     raise OSError(f"{len(refused)} objects could not be deleted from the bucket")
-        except ClientError:
-            # The protocol's OSError, and from None: the store's message can name a key.
+        except (ClientError, BotoCoreError):
+            # The protocol's OSError, and from None: the store's message can name a key or host.
             raise OSError("the object store refused to list or delete a folder") from None
         return len(keys)
 

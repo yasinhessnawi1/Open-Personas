@@ -256,6 +256,10 @@ def test_the_sweep_for_orphans_works_on_the_managed_database(
         backend = PostgresBackend(engine=engine, embedder=embedder)
         backend.upsert(persona_id=_PERSONA, store_kind="self_facts", chunks=[_chunk("v1", 1, None)])
         with engine.begin() as conn:
+            # Another persona stays: memory with no personas at all stops the sweep.
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES ('p2', 'local-owner', 'x')")
+            )
             conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
 
         look = _run_as_the_user_would(repair_command("--orphaned"), short_base_dir)

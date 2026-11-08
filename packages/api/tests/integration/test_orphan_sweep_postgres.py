@@ -258,6 +258,18 @@ def test_a_removal_only_takes_its_own_owner_and_kind(seeded: Engine) -> None:
     assert {"gone-core", "gone-gist", "gone-episodic-1", "gone-doc"} <= left
 
 
+def test_memory_with_no_personas_at_all_stops_the_sweep(pg_engine: Engine) -> None:
+    """A partial restore or the wrong database looks like this, and --apply cannot be undone."""
+    with pg_engine.begin() as conn:
+        _chunk(conn, "kept", _GONE, "episodic")
+
+    result = _cli("--apply")
+
+    assert result.exit_code == 2, result.output
+    assert "no personas" in result.output
+    assert _ids(pg_engine, "SELECT id FROM memory_chunks") == {"kept"}
+
+
 def test_it_refuses_a_role_that_cannot_see_every_tenant(seeded: Engine) -> None:
     """``persona_app`` reads zero rows, so a sweep would report a healthy database."""
     _ = seeded

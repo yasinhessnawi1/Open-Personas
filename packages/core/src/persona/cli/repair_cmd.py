@@ -58,6 +58,11 @@ __all__ = [
 #: always written as version 1 under a fresh id, so neither can hold a broken chain.
 VERSIONED_KINDS: tuple[str, ...] = ("self_facts", "worldview", "episodic", CORE_MEMORY_KIND)
 
+_CANNOT_SEE_EVERY_TENANT = (
+    "This role is subject to row level security, so it cannot see every persona, and a sweep "
+    "would report a healthy database whatever the truth was. Use the superuser connection."
+)
+
 _RACED_HINT = (
     "{count} were left by two saves racing. Add --resolve-raced to keep every version, in the "
     "order they were saved."
@@ -297,8 +302,21 @@ def run_orphan_sweep(
     """Find what deleted personas and conversations left behind, and remove it with ``apply``.
 
     For data written before deletes reached these rows (R9-284). Prints ids and counts and
-    never content. Returns the exit code: 0 clean, 1 something still needs attention.
+    never content. Returns the exit code: 0 clean, 1 something still needs attention, 2 it
+    could not look, or the database has a shape it will not touch.
     """
+    if not sweep.sees_every_tenant():
+        typer.echo(_CANNOT_SEE_EVERY_TENANT)
+        return 2
+    if sweep.memory_without_any_persona():
+        typer.echo(
+            "This database has memory rows and no personas at all. That looks like a partial "
+            "restore or the wrong database, not deleted personas, and removing the rows could "
+            "not be undone. Nothing has been changed. If every persona really was deleted, "
+            "create one and run this again."
+        )
+        return 2
+
     groups = sweep.find()
     if not groups:
         typer.echo("Nothing here was left behind by a deleted persona or conversation.")
@@ -391,8 +409,7 @@ def repair(
     target = _build_target(PersonaCoreConfig(), database_url)
     if orphaned:
         typer.echo(f"Checking {target.where}.")
-        backend = _sees_every_tenant_or_exit(target)
-        code = run_orphan_sweep(backend.orphan_sweep(), apply=apply)
+        code = run_orphan_sweep(_postgres(target).orphan_sweep(), apply=apply)
         if code != 0:
             raise typer.Exit(code=code)
         return
@@ -429,17 +446,19 @@ def _every_persona(target: _Target, kinds: Sequence[str]) -> list[str]:
     return _sees_every_tenant_or_exit(target).persona_ids(tuple(kinds))
 
 
-def _sees_every_tenant_or_exit(target: _Target) -> PostgresBackend:
-    """The Postgres transport, or exit 2 for a role row level security would blind."""
+def _postgres(target: _Target) -> PostgresBackend:
+    """The Postgres transport, which ``--all-personas`` guarantees by needing a DSN."""
     from persona.stores.postgres import PostgresBackend
 
     backend = target.backend
     assert isinstance(backend, PostgresBackend)  # --all-personas requires --database-url
+    return backend
+
+
+def _sees_every_tenant_or_exit(target: _Target) -> PostgresBackend:
+    """The Postgres transport, or exit 2 for a role row level security would blind."""
+    backend = _postgres(target)
     if not backend.sees_every_tenant():
-        typer.echo(
-            "This role is subject to row level security, so it cannot see every persona, and a "
-            "sweep would report a healthy database whatever the truth was. Use the superuser "
-            "connection."
-        )
+        typer.echo(_CANNOT_SEE_EVERY_TENANT)
         raise typer.Exit(code=2)
     return backend

@@ -122,6 +122,10 @@ class _FakeClientError(Exception):
         self.response = {"Error": {"Code": code}}
 
 
+class _FakeBotoCoreError(Exception):
+    """Like botocore's EndpointConnectionError: not a ClientError, and it can name the host."""
+
+
 class _FakeS3Client:
     def __init__(self) -> None:
         self.store: dict[tuple[str, str], bytes] = {}
@@ -186,6 +190,7 @@ def _fake_botocore(monkeypatch: pytest.MonkeyPatch) -> None:
     without the real (absent) dependency."""
     mod = types.ModuleType("botocore.exceptions")
     mod.ClientError = _FakeClientError  # type: ignore[attr-defined]
+    mod.BotoCoreError = _FakeBotoCoreError  # type: ignore[attr-defined]
     pkg = types.ModuleType("botocore")
     monkeypatch.setitem(sys.modules, "botocore", pkg)
     monkeypatch.setitem(sys.modules, "botocore.exceptions", mod)
@@ -484,6 +489,19 @@ def test_s3_delete_prefix_reports_a_store_failure_as_oserror_without_its_message
 
     assert "private-file-name" not in str(caught.value)
     assert caught.value.__suppress_context__ is True, "a traceback would print the store's message"
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+def test_s3_delete_prefix_reports_an_unreachable_store_as_oserror() -> None:
+    """Network failures are BotoCoreError, not ClientError, and the contract covers them too."""
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    client.delete_error = _FakeBotoCoreError("could not connect to private-host.example")
+
+    with pytest.raises(OSError, match="object store") as caught:
+        storage.delete_prefix("u1/p1")
+
+    assert "private-host" not in str(caught.value)
 
 
 @pytest.mark.usefixtures("_fake_botocore")

@@ -262,8 +262,8 @@ class AvatarGenerationHandler:
         Nothing was updated either because another delivery won, when the files are in use, or
         because the persona is gone and the bytes landed in a folder its delete had already
         removed. Only the second is cleaned up. A failure here is logged and the job still
-        succeeds: a retry would find no persona and do nothing, and the orphan sweep finds the
-        folder.
+        succeeds, because a retry would find no persona and do nothing. The folder then stays on
+        disk: the orphan sweep covers database rows only.
         """
         with context.connection() as conn:
             row = conn.execute(select(personas.c.id).where(personas.c.id == persona_id)).first()
