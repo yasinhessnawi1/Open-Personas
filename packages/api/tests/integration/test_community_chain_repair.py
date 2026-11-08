@@ -72,8 +72,19 @@ def _chunk(chunk_id: str, version: int, superseded_by: str | None) -> PersonaChu
     )
 
 
+def _seed_persona(engine: Engine) -> None:
+    """The persona these rows belong to: a memory row needs an owner that exists (062)."""
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES ('local-owner', 'owner@x.test')"))
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, 'local-owner', 'x: 1')"),
+            {"p": _PERSONA},
+        )
+
+
 def _as_a_database_from_before_the_index(engine: Engine, embedder: HashEmbedder384) -> None:
     """A community install that ran 058 and raced, one version before this app update."""
+    _seed_persona(engine)
     with engine.begin() as conn:
         conn.execute(text(f"DROP INDEX IF EXISTS {CHAIN_HEAD_INDEX}"))
         conn.execute(text("UPDATE alembic_version SET version_num = :v"), {"v": _PRED})
@@ -205,6 +216,7 @@ def test_the_sweep_for_forgotten_evidence_works_on_the_managed_database(
     engine = create_engine(url)
     try:
         run_migrations(url)
+        _seed_persona(engine)
         store = CoreMemoryStore(
             backend=PostgresBackend(engine=engine, embedder=embedder),
             audit_logger=MemoryAuditLogger(),
