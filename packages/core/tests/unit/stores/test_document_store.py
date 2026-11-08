@@ -348,6 +348,14 @@ class TestDelete:
         store.delete("conv-never-written")
         store.delete("conv-never-written")  # twice
 
+    def test_delete_says_how_many_chunks_went(self) -> None:
+        backend = _InMemoryBackend()
+        store = DocumentStore(backend=backend)
+        store.write("conv", [_make_chunk("conv", "a.pdf", 0), _make_chunk("conv", "a.pdf", 1)])
+
+        assert store.delete("conv") == 2
+        assert store.delete("conv") == 0
+
 
 class TestDeleteDocument:
     def test_removes_only_target_document(self) -> None:

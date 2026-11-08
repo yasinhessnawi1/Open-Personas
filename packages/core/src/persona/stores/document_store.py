@@ -158,14 +158,16 @@ class DocumentStore:
 
     # ----- delete ----------------------------------------------------------
 
-    def delete(self, conversation_id: str) -> None:
-        """Remove every document chunk for ``conversation_id``. Idempotent.
+    def delete(self, conversation_id: str) -> int:
+        """Remove every document chunk for ``conversation_id``, returning how many. Idempotent.
 
         The cascade path called by Spec 14 T19 when a conversation is
         deleted (co-landing with Spec 13's T12 image-cascade per
         D-14-X-cascade-coordination).
         """
+        existing = self._backend.get_all(persona_id=conversation_id, store_kind=DOCUMENT_STORE_KIND)
         self._backend.delete_persona(conversation_id, DOCUMENT_STORE_KIND)
+        return len(existing)
 
     def delete_document(self, conversation_id: str, doc_ref: str) -> None:
         """Remove every chunk belonging to one document. Idempotent.

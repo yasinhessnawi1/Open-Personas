@@ -109,8 +109,8 @@ class MemoryStore(Protocol):
         """
         ...
 
-    def delete(self, persona_id: str) -> None:
-        """Remove every chunk for ``persona_id``. Idempotent."""
+    def delete(self, persona_id: str) -> int:
+        """Remove every chunk for ``persona_id`` and return how many went. Idempotent."""
         ...
 
     def remove_documents(self, persona_id: str, doc_ids: list[str]) -> None:

@@ -24,10 +24,10 @@ from typing import Any, ClassVar
 from persona.audit import AuditAction
 from persona.schema.chunks import PersonaChunk, WriteSource
 from persona.stores.base import TypedStore
-from persona.stores.core_memory import CoreMemoryStore
+from persona.stores.core_memory import CORE_MEMORY_KIND, CoreMemoryStore
 from persona.stores.lifecycle import EpisodicSettings, retention
 from persona.stores.policy import PolicyDecision, PolicyRule, PolicyTable
-from persona.stores.pyramid import EpisodicPyramid, resolve_display
+from persona.stores.pyramid import GIST_KIND, EpisodicPyramid, resolve_display
 
 __all__ = ["EpisodicStore"]
 
@@ -139,11 +139,20 @@ class EpisodicStore(TypedStore):
         self._pyramid.remove_gists_for_members(persona_id, doomed)
         self._core.forget_cited(persona_id, doomed)
 
-    def delete(self, persona_id: str) -> None:
-        """Wipe the persona's episodic store, its gist layer and its core block (K8-D-14)."""
-        super().delete(persona_id)
-        self._pyramid.delete_all(persona_id)
-        self._core.retire(persona_id)
+    def delete(self, persona_id: str) -> int:
+        """Wipe the persona's episodic store, gists and core block; return the rows removed."""
+        return sum(self.delete_by_kind(persona_id).values())
+
+    def delete_by_kind(self, persona_id: str) -> dict[str, int]:
+        """Wipe this store and everything derived from it, and say what went, kind by kind.
+
+        Evidence first, then what was written from it (K8-D-14): the raw chunks, the gists, the
+        core block last. The counts are for the erase record, ids and numbers and no content.
+        """
+        episodic = super().delete(persona_id)
+        gists = self._pyramid.delete_all(persona_id)
+        core = self._core.retire(persona_id)
+        return {self.STORE_KIND: episodic, GIST_KIND: gists, CORE_MEMORY_KIND: core}
 
     def reinforce(self, persona_id: str, chunk_ids: list[str]) -> None:
         """Reinforce recalled chunks: ``strength += 1``, decay clock reset (K8-D-5).

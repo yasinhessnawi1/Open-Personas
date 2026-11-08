@@ -629,3 +629,54 @@ def test_a_stale_plan_that_leaves_the_head_alone_replans_too() -> None:
     assert [c.provenance.version for c in chain if c.provenance] == [1, 2, 3, 4]
     assert chain[-1].text == "a newer block"
     assert backend.excisions == 2
+
+
+def test_retire_re_reads_when_a_refresh_lands_first_and_takes_the_whole_chain() -> None:
+    """A whole-persona delete must not fail because a refresh got in (R9-284)."""
+    store, backend, _ = _store()
+    backend.head_index = True
+    _block(store, "first", "kept")
+    _block(store, "second", "kept")
+    _refresh_commits_between(store, backend)
+
+    assert store.retire(_PERSONA) == 3
+
+    assert _chain(backend) == []
+    assert backend.excisions == 2, "the stale plan, then one re-read"
+
+
+def test_a_retire_on_a_chain_that_stays_busy_says_so_and_leaves_it_whole() -> None:
+    store, backend, _ = _store()
+    _block(store, "first", "kept")
+    backend.always_conflict = True
+    before = _chain(backend)
+
+    with pytest.raises(ChainConflictError):
+        store.retire(_PERSONA)
+
+    assert backend.excisions == 3
+    assert _chain(backend) == before
+
+
+def test_a_whole_store_delete_takes_the_evidence_before_what_was_written_from_it() -> None:
+    """Raw, then gists, then the block: K8-D-14's order, the one a refresh in flight relies on."""
+    store, backend, audit = _three_blocks()
+    _evidence(backend, "a", "b", "c")
+    order: list[str] = []
+    real_delete, real_excise = backend.delete_persona, backend.excise_versions
+
+    def delete_persona(persona_id: str, store_kind: str) -> None:
+        order.append(store_kind)
+        real_delete(persona_id, store_kind)
+
+    def excise_versions(**kwargs: Any) -> None:  # noqa: ANN401
+        order.append(str(kwargs["store_kind"]))
+        real_excise(**kwargs)
+
+    backend.delete_persona = delete_persona  # type: ignore[method-assign]
+    backend.excise_versions = excise_versions  # type: ignore[method-assign]
+
+    counts = _episodic(backend, audit).delete_by_kind(_PERSONA)
+
+    assert order == ["episodic", "episodic_gist", CORE_MEMORY_KIND]
+    assert counts == {"episodic": 3, "episodic_gist": 0, CORE_MEMORY_KIND: 3}
