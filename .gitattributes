@@ -15,3 +15,5 @@
 *.webp binary
 *.ico binary
 *.raw binary
+*.onnx binary
+*.wav binary

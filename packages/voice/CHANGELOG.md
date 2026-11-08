@@ -13,6 +13,13 @@ mirrors only the `persona-voice`-touching surface.
 
 ## [Unreleased]
 
+### Changed
+
+- **Voice runs on Linux arm64.** The voice activity detector moved from `silero-vad-lite` to the same Silero v5.1 model run on the `onnxruntime` package (`persona_voice.stt.silero_onnx`). silero-vad-lite has no Linux aarch64 wheel and its source build downloads an x86_64 ONNX Runtime, so voice could not install on arm64. The model ships in the package (MIT, Silero Team, sha256 pinned and verified on load). An equivalence test holds every window of the V8 corpus within 1e-4 of silero-vad-lite 0.3.0's scores with identical decisions at thresholds 0.3, 0.5 and 0.7 (measured: 3.9e-7), on x86_64 and aarch64. `silero-vad-lite` is no longer a dependency; `onnxruntime>=1.19,<2` is.
+- **The voice image builds for `linux/amd64` and `linux/arm64`.** The patchelf step fetches the binary for the build's architecture with a pinned digest each, and the builder now proves the native libraries load and the VAD scores a window before the image ships.
+- **The native-library test checks every library a call loads** (ONNX Runtime, LiveKit's FFI library) for an executable stack and for the wrong architecture.
+- **CI runs the voice suite on arm64 Linux and on macOS arm64, and builds the images for arm64** (`.github/workflows/voice-platforms.yml`).
+
 ### Fixed
 
 - **`silero-vad-lite` raised to `>=0.3,<0.4` (0.3.0 locked).** 0.2.x shipped a Linux library that asks for an executable stack, and glibc 2.41 and later refuse to load it ("cannot enable executable stack as shared object requires"). That is the glibc of the voice image's `python:3.12-slim` base and of the Ubuntu 26 CI runner. 0.3.0 ships a non-executable stack and keeps the Silero v5.1 weights; the ceiling holds off 0.4, which swaps in the v6.2 model. 0.3.0 also restores the model's audio context between windows, as upstream Silero does, so speech scores shift: recheck `PERSONA_STT_SILERO_ACTIVATION_THRESHOLD` and `PERSONA_STT_SILERO_MIN_SPEECH_DURATION_MS` before the next deploy.

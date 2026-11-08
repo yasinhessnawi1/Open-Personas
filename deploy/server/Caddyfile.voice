@@ -27,13 +27,29 @@
 	}
 }
 
-# persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser.
+# persona-voice: POST /v1/voice/token and GET /v1/voices, called by the browser, and the
+# api's read aloud and dictation proxies (POST /v1/tts, POST /v1/stt). On one box the api
+# reached voice on the internal network; with voice on its own host (Azure) the api's calls
+# come through this edge.
+#   * POST /v1/stt carries dictation audio: its cap sits above voice's own 10 MiB upload
+#     limit (_STT_AUDIO_MAX_BYTES in persona_voice/http/app.py) plus multipart overhead.
+#   * Everything else stays at 1 MB. FastAPI reads a body before it checks auth and voice
+#     has no rate limit, so a large anonymous body to any route stalls the one voice event
+#     loop (about 476 ms per 12 MB request); only the audio route needs the room.
 voice.openpersonas.si {
 	import edge
-	request_body {
-		max_size 1MB
+	handle /v1/stt {
+		request_body {
+			max_size 12MB
+		}
+		reverse_proxy 127.0.0.1:8001
 	}
-	reverse_proxy 127.0.0.1:8001
+	handle {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8001
+	}
 }
 
 # Self-hosted LiveKit signaling (WebSocket). Media does NOT pass through Caddy: it goes

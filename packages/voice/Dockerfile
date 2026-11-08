@@ -3,7 +3,11 @@
 # ONE process: uvicorn runs the FastAPI app AND, with
 # PERSONA_VOICE_AGENT_INPROCESS=true, the LiveKit agent worker runs IN-PROCESS
 # inside that same app (build_app → InProcessAgentLauncher). The service
-# connects OUT to LiveKit Cloud — there is no LiveKit server in this image.
+# connects OUT to a LiveKit server (packages/livekit, or LiveKit Cloud as the
+# fallback); there is no LiveKit server in this image.
+#
+# Builds for linux/amd64 and linux/arm64 from this one file (the only
+# architecture-specific step is the patchelf fetch, docker/patchelf.sh).
 #
 # Single uvicorn worker: the in-process agent launcher owns per-session state
 # (one RLS engine + state machine per WebRTC session); never autoscale.
@@ -47,21 +51,23 @@ RUN uv sync --frozen --all-packages --no-dev
 # executable. glibc 2.41 and later (this image's Debian 13 python:3.12-slim base)
 # refuse to dlopen a library that asks for an executable stack:
 #   OSError: ... silero_vad_lite.so: cannot enable executable stack ...
-# silero-vad-lite 0.2.x was one; the locked 0.3 ships a non-executable stack, and
-# its test (tests/unit/stt/test_vad_native_library.py) keeps it that way. The step
-# stays as a guard for any other wheel in the venv: it clears the exec-stack flag
-# on every shared object so the VAD load and the fastembed/onnxruntime warm-up
-# path succeed. --clear-execstack needs patchelf 0.18+ (the apt/pip builds are
-# older), so fetch a static release binary and verify its SHA256 before invoking
-# it against the venv (supply-chain pin).
-RUN curl -fsSL -o /tmp/patchelf.tgz \
-        https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz \
-    && echo 'ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0  /tmp/patchelf.tgz' \
-        | sha256sum -c - \
-    && tar -xzf /tmp/patchelf.tgz -C /usr/local ./bin/patchelf \
-    && rm /tmp/patchelf.tgz \
+# silero-vad-lite 0.2.x was one (the VAD now runs on onnxruntime instead). The
+# libraries a call loads are checked by tests/unit/stt/test_native_libraries.py; this
+# step stays as a guard for every other wheel in the venv: it clears the exec-stack
+# flag on every shared object. --clear-execstack needs patchelf 0.18+ (the apt/pip
+# builds are older), so docker/patchelf.sh fetches the static release binary for the
+# build's architecture (amd64 or arm64) and verifies its pinned SHA256 first.
+# TARGETARCH is set by BuildKit; the dpkg fallback covers the legacy builder.
+ARG TARGETARCH
+RUN sh /app/packages/voice/docker/patchelf.sh "${TARGETARCH:-$(dpkg --print-architecture)}" \
     && find /opt/venv \( -name '*.so' -o -name '*.so.*' \) -print0 \
         | xargs -0 -r -n1 sh -c 'patchelf --clear-execstack "$0" 2>/dev/null || true'
+
+# Prove on the target architecture, before the image ships, that the native code a call
+# needs loads: LiveKit's FFI library through dlopen, then ONNX Runtime with the bundled
+# Silero model scoring one window. A wrong-architecture wheel or a library the loader
+# refuses fails the build here instead of the first call.
+RUN /opt/venv/bin/python -I -c "from livekit.rtc._ffi_client import get_ffi_lib; get_ffi_lib(); import numpy as np; from persona_voice.stt.silero_onnx import SileroVAD; score = SileroVAD(16000).process(np.zeros(512, dtype=np.float32)); assert 0.0 <= score <= 1.0, score; print('voice native libraries load, silence scores', score)"
 
 # ---------- runtime ----------
 FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime

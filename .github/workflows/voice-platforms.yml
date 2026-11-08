@@ -1,0 +1,108 @@
+name: Voice platforms
+
+# Voice must install and run on Linux arm64 (the community edition's Raspberry Pi,
+# Ampere and Graviton hosts) and on Apple Silicon, not only on the x86_64 runner ci.yml
+# uses (owner ruling 2026-11-07: production voice is x86, cross-platform is the goal).
+#
+#   * voice-tests: the voice unit suite on GitHub's free arm64 Linux runner (public repo)
+#     and on macOS arm64. On Linux this includes the native-library test (ELF machine and
+#     executable stack of ONNX Runtime and LiveKit's FFI library) and the Silero
+#     equivalence gate (scores within 1e-4 of silero-vad-lite 0.3.0 on x86_64).
+#   * voice-image-arm64: builds the voice and LiveKit images for linux/arm64 natively and
+#     pushes nothing. The voice Dockerfile's builder loads the native libraries and scores a
+#     VAD window, so a broken arm64 image fails here.
+#
+# Its own workflow on purpose, like windows.yml: Deploy runs on the "CI" workflow's
+# success, so a job inside ci.yml would also gate production deploys. No secrets are used.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/voice/**"
+      - "packages/core/**"
+      - "packages/runtime/**"
+      - "packages/livekit/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/voice-platforms.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/voice/**"
+      - "packages/core/**"
+      - "packages/runtime/**"
+      - "packages/livekit/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/voice-platforms.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  voice-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            machine: aarch64
+          - runner: macos-latest
+            machine: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      # actions/checkout tag v4.4.0 (= v4), commit of 2026-07-16.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # astral-sh/setup-uv tag v10.2.0, commit of 2026-09-21.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.12.19"
+      - name: The runner is the architecture this job claims
+        run: |
+          uname -a
+          test "$(uname -m)" = "${{ matrix.machine }}"
+      # --locked: fail rather than re-resolve if uv.lock is out of date.
+      - run: uv sync --all-packages --locked
+      - run: uv run pytest packages/voice/tests
+
+  voice-image-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # The builder stage holds a second copy of the venv, torch included: make room first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache /usr/share/dotnet /opt/ghc || true
+          docker system prune -af || true
+          df -h /
+      # docker/setup-buildx-action tag v4.4.1, release of 2026-09-16.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      # docker/build-push-action tag v7.4.0, release of 2026-09-15.
+      - name: Build the voice image for linux/arm64 (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: packages/voice/Dockerfile
+          platforms: linux/arm64
+          push: false
+          outputs: type=cacheonly
+      - name: Build the LiveKit image for linux/arm64 (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: packages/livekit
+          platforms: linux/arm64
+          push: false
+          outputs: type=cacheonly

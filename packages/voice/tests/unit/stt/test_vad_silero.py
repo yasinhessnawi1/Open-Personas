@@ -143,6 +143,37 @@ async def test_load_materialises_onnx_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_builds_the_model_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building the model reads and hashes 2.3 MB and builds an ONNX session (R9-216).
+
+    That is blocking work, and the agent loads the VAD while the call is coming up on the one
+    voice event loop, which also carries LiveKit heartbeats and the STT and TTS sockets. A
+    fake records the thread its constructor ran on, asserted distinct from the loop thread.
+    """
+    import threading
+
+    from persona_voice.stt import vad_silero
+
+    loop_thread = threading.get_ident()
+    built_on: list[int] = []
+
+    class _ThreadRecordingVAD:
+        window_size_samples = SILERO_FRAME_SAMPLES
+        sample_rate = SILERO_SAMPLE_RATE_HZ
+
+        def __init__(self, rate: int) -> None:
+            assert rate == SILERO_SAMPLE_RATE_HZ
+            built_on.append(threading.get_ident())
+
+    monkeypatch.setattr(vad_silero, "SileroVAD", _ThreadRecordingVAD)
+    adapter = SileroVADAdapter(_make_config())
+    await adapter.load()
+    assert built_on, "load() did not build the model"
+    assert all(tid != loop_thread for tid in built_on)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_load_is_idempotent() -> None:
     config = _make_config()
     adapter = SileroVADAdapter(config)
