@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 from persona.backends import BackendConfig
@@ -406,8 +407,16 @@ class _SummarizingEngine:
         return SimpleNamespace(windows_formed=1, gists_written=1, candidates_emitted=0, skipped=[])
 
 
+@contextlib.contextmanager
+def _persona_found() -> Iterator[MagicMock]:
+    """A connection on which the persona-exists check finds the persona."""
+    yield MagicMock()
+
+
 def _ctx(owner_id: str) -> object:
-    return SimpleNamespace(owner_id=owner_id, job_id="j1", meter=lambda **_k: None)
+    return SimpleNamespace(
+        owner_id=owner_id, job_id="j1", meter=lambda **_k: None, connection=_persona_found
+    )
 
 
 @pytest.mark.asyncio

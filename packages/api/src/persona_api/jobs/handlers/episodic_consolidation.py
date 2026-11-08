@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.jobs import MEDIUM_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
+from sqlalchemy import select
 
+from persona_api.db.models import personas
 from persona_api.services.background_billing import bill_background_llm
 from persona_api.services.llm_usage_collector import collect_llm_usage
 
@@ -106,7 +108,28 @@ class EpisodicConsolidationHandler:
         self._cost_source = cost_source
         self._floor = floor
 
+    @staticmethod
+    def _persona_exists(context: JobContext, persona_id: str) -> bool:
+        """Whether this owner still has this persona. Named owner: community has no RLS."""
+        with context.connection() as conn:
+            row = conn.execute(
+                select(personas.c.id).where(
+                    personas.c.id == persona_id, personas.c.owner_id == context.owner_id
+                )
+            ).first()
+        return row is not None
+
     async def handle(self, payload: EpisodicConsolidationJobPayload, context: JobContext) -> None:
+        # This job is queued with an idle delay, so a persona deleted soon after a turn always
+        # leaves one to run. Stop before any model call or graph merge (R9-284): the database
+        # refuses its memory writes (migration 062), but not the cost of getting that far.
+        if not self._persona_exists(context, payload.persona_id):
+            _logger.info(
+                "episodic_consolidation skipped: the persona no longer exists",
+                owner_id=context.owner_id,
+                persona_id=payload.persona_id,
+            )
+            return
         # The engine is async end-to-end (summarizer awaits; the sync graph
         # merge is to_thread'd inside) — the RLS contextvar the executor bound
         # propagates through both, so every write stays owner-scoped.
@@ -114,7 +137,9 @@ class EpisodicConsolidationHandler:
             report = await self._engine.run(context.owner_id, payload.persona_id)
             if self._core_refresher is not None:
                 try:
-                    await self._core_refresher(context.owner_id, payload.persona_id)
+                    # Asked again: the pass above takes minutes and this is another model call.
+                    if self._persona_exists(context, payload.persona_id):
+                        await self._core_refresher(context.owner_id, payload.persona_id)
                 except Exception:  # noqa: BLE001 — a core-block refresh must never fail the job
                     _logger.opt(exception=True).warning(
                         "core-block refresh failed; prior block stays "

@@ -10,8 +10,11 @@ the no-LLM-call → no-charge path).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from persona.backends.types import ChatResponse, TokenUsage
@@ -78,8 +81,16 @@ def _handler(engine: object, policy: _RecordingPolicy | None) -> EpisodicConsoli
     )
 
 
+@contextmanager
+def _persona_found() -> Iterator[MagicMock]:
+    """A connection on which the persona-exists check finds the persona."""
+    yield MagicMock()
+
+
 def _ctx() -> object:
-    return SimpleNamespace(owner_id="u1", job_id="j1", meter=lambda **_k: None)
+    return SimpleNamespace(
+        owner_id="u1", job_id="j1", meter=lambda **_k: None, connection=_persona_found
+    )
 
 
 def _payload() -> EpisodicConsolidationJobPayload:

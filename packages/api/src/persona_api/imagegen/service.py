@@ -86,6 +86,7 @@ from persona_api.editions import MeteredCreditsPolicy
 from persona_api.errors import ConcurrencyCappedError
 from persona_api.imagegen.concurrency import acquire_user_concurrency
 from persona_api.services.artifact_storage import artifact_key
+from persona_api.workspace_paths import persona_prefix
 
 if TYPE_CHECKING:
     from persona.imagegen.protocol import ImageBackend
@@ -815,6 +816,10 @@ class ImagegenAvatarGenerator:
         self._rls_engine = rls_engine
         self._cost_source = cost_source
         self._image_credit_floor = image_credit_floor
+
+    def discard(self, *, persona_id: str, owner_id: str) -> None:
+        """Remove everything stored for a persona that was deleted during its generation."""
+        self._file_storage.delete_prefix(persona_prefix(owner_id, persona_id))
 
     async def generate(
         self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
